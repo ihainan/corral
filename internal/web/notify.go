@@ -573,7 +573,7 @@ func titleSays(title, program string) bool {
 	if len([]rune(t)) < 6 {
 		return false
 	}
-	return !strings.EqualFold(t, program) && !strings.EqualFold(t, "Claude Code")
+	return !strings.EqualFold(t, program) && !strings.EqualFold(t, "Claude Code") && !strings.EqualFold(t, "Antigravity") && !strings.EqualFold(t, "Antigravity CLI")
 }
 
 // agentProgram: the program's name as people call it, and in Chinese.
@@ -589,6 +589,8 @@ func agentProgram(a string) (string, string) {
 		return "OpenCode", "OpenCode"
 	case "gemini":
 		return "Gemini CLI", "Gemini CLI"
+	case "agy", "antigravity":
+		return "Antigravity CLI", "Antigravity CLI"
 	}
 	return a, a
 }

@@ -21,6 +21,13 @@ const zhChoices: [RegExp, (m: RegExpExecArray) => string][] = [
   [/^Yes,? allow all edits (?:during|in) this session\b.*$/i, () => '允许，这个会话里改文件都不再问'],
   [/^Yes,? and switch to auto mode\b.*$/i, () => '允许，并切到自动模式'],
   [/^Yes,? and always allow access to (.+?) from this project$/i, (m) => `允许，以后在这个项目里访问 ${m[1]} 不再问`],
+  // (Antigravity CLI's permission & trust prompts.)
+  [/^Yes,? run command$/i, () => '允许运行这条命令'],
+  [/^Yes,? and always allow in this conversation for commands that start with ['`](.+)['`]$/i, (m) => `允许，本次对话中以 ${m[1]} 开头的命令不再问`],
+  [/^Yes,? and always allow for commands that start with ['`](.+)['`]\s*\(Persist to settings\.json\)$/i, (m) => `允许，以后以 ${m[1]} 开头的命令不再问（写入设置）`],
+  [/^No,? cancel$/i, () => '拒绝'],
+  [/^Yes,? I trust this folder$/i, () => '是的，信任此文件夹'],
+  [/^No,? exit$/i, () => '不信任，退出'],
   // (A plan put to the person.)
   [/^Yes,? and use auto mode$/i, () => '批准，并切到自动模式'],
   [/^Yes,? manually approve edits$/i, () => '批准，修改仍逐个确认'],
@@ -55,6 +62,8 @@ const zhQuestions: [RegExp, (m: RegExpExecArray) => string][] = [
   [/^Do you want to create (.+)\?$/i, (m) => `要新建 ${m[1]} 吗？`],
   [/^Do you want to make these changes\?$/i, () => '要做这些修改吗？'],
   [/^Do you want to allow Claude to fetch this content\?$/i, () => '要让 Claude 打开这个网址吗？'],
+  [/^Run this command\?$/i, () => '要运行这条命令吗？'],
+  [/^Do you trust the contents of this project\?$/i, () => '你信任这个项目的内容吗？'],
 ]
 
 export function questionText(q: string): string {
@@ -77,6 +86,9 @@ export function agentName(agent?: string): string {
       return 'OpenCode'
     case 'gemini':
       return 'Gemini'
+    case 'agy':
+    case 'antigravity':
+      return 'Antigravity'
   }
   return t('convo.agentAny')
 }

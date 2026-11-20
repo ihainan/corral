@@ -26,7 +26,7 @@ import { isLogPic, logPic, lookAt, PictureDialog, useDownload } from '../termina
 import { IMAGE_EXT, TextPreview } from '../terminal/textPreview'
 import { attach, ATTACH_LABEL, AttachStrip, PICTURE_PATH, takeOut, type Going } from '../terminal/attach'
 import { answerable, asking, callOut, useConversation, type ConvoEntry } from '../terminal/conversation'
-import { ackBg, answeredHerdr, expectSession, paneWaits, waitingTitle, isCodex, isOpenCode, listAgents, paneName, paneTitle, readSessionsNow, readsLog, useRunningSessions, type AgentRow } from '../terminal/agents'
+import { ackBg, answeredHerdr, expectSession, paneWaits, waitingTitle, isAgy, isCodex, isOpenCode, listAgents, paneName, paneTitle, readSessionsNow, readsLog, useRunningSessions, type AgentRow } from '../terminal/agents'
 import { type RowCmds } from '../terminal/agentOrder'
 import { conversationReadable, prefetchConversation } from '../terminal/conversation'
 import { holdTermMode, tmuxKey } from '../terminal/chatSend'
@@ -741,7 +741,7 @@ function queueRows(queued: { text: string; ts?: string; from?: string; note?: bo
 }
 // (A message refused for what is up in the terminal, or what could not be made out there.)
 // (Whose terminal is shown there, a message refused: Claude Code's, OpenCode's, Codex's.)
-const liveFor = (agent?: string) => (agent ?? 'claude') === 'claude' || agent === 'opencode' || agent === 'codex'
+const liveFor = (agent?: string) => (agent ?? 'claude') === 'claude' || agent === 'opencode' || agent === 'codex' || agent === 'agy'
 // (A Codex's commands that only show something in its terminal, and their menu words.)
 const CODEX_LOOKS: [string, 'ops.codexStatus' | 'ops.codexPs' | 'ops.codexDiff' | 'ops.codexMcp'][] = [
   ['/status', 'ops.codexStatus'],
@@ -1092,7 +1092,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   // checks on the host, right before the keys, that this process still
   // waits for an answer on the screen shown; a Codex in tmux likewise (its
   // title says it waits). Another agent in herdr: herdr's.)
-  const viaConvo = !!convo.bind && (convo.bind.agent === 'claude' ? !herdr || convo.bind.pane === row?.a.pane_id : convo.bind.agent === 'codex' && !herdr)
+  const viaConvo = !!convo.bind && (convo.bind.agent === 'claude' ? !herdr || convo.bind.pane === row?.a.pane_id : (convo.bind.agent === 'codex' || convo.bind.agent === 'agy') && !herdr)
   // What the log says it asks: the agent's last row, where that is a
   // question of Claude Code's or a plan not come back (anything after it,
   // a message of the person's above all: none).
@@ -1126,7 +1126,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       // (OpenCode's in herdr, answered by herdr: where what it asks is not
       // made out, its terminal here as it is — not its screen as words.)
       const b = convo.bind
-      if (to && !to.live && b && b.agent === 'opencode' && b.pane === row?.a.pane_id) {
+      if (to && !to.live && b && (b.agent === 'opencode' || b.agent === 'agy') && b.pane === row?.a.pane_id) {
         to = { ...to, live: { sid, press: () => ({ pane: b.pane, pid: b.pid, start: b.start, session: b.session }) } }
       }
       // (The host it runs on, for the card's offer of Claude Code's question hook
@@ -1270,8 +1270,9 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   // (What Claude Code alone has: its permission modes, its model picker, its "send now".)
   // (Bound, the agent it is bound to says; the list's, of a reading before, only till then.)
   const codex = convo.bind?.agent ? convo.bind.agent === 'codex' : !!row && isCodex(row.a.agent)
-  // (Claude Code's own keys and pickers: not Codex's, nor OpenCode's.)
-  const notClaude = convo.bind?.agent ? convo.bind.agent !== 'claude' : !!row && (isCodex(row.a.agent) || isOpenCode(row.a.agent))
+  const agy = convo.bind?.agent ? convo.bind.agent === 'agy' : !!row && isAgy(row.a.agent)
+  // (Claude Code's own keys and pickers: not Codex's, OpenCode's, nor Antigravity's.)
+  const notClaude = convo.bind?.agent ? convo.bind.agent !== 'claude' : !!row && (isCodex(row.a.agent) || isOpenCode(row.a.agent) || isAgy(row.a.agent))
 
   // The permission mode, switched from here: Shift+Tab pressed in its pane,
   // the mode it went to read off its screen (the log says it only with the
@@ -2176,12 +2177,12 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
           // (A Codex read with no log, which has begun one since — its first
           // message: not typed to the one it began, which the page has not
           // read yet; read now, to be sent again there.)
-          if (e instanceof ApiError && e.code === 'agent_changed' && b.agent === 'codex' && b.session === NO_SESSION) {
+          if (e instanceof ApiError && e.code === 'agent_changed' && (b.agent === 'codex' || b.agent === 'agy') && b.session === NO_SESSION) {
             convo.refresh()
             return toast(t('agents.codexBegun'), true)
           }
           // (Words typed in its terminal input: not sent onto them — what to do, said.)
-          if (e instanceof ApiError && e.code === 'draft' && b.agent === 'codex') return toast(t('agents.codexDraft'), true)
+          if (e instanceof ApiError && e.code === 'draft' && (b.agent === 'codex' || b.agent === 'agy')) return toast(t('agents.codexDraft'), true)
           // (Another agent in the pane now: the page reads it at once — the
           // gateway looks again for it — to be seen before sending there.)
           if (e instanceof ApiError && e.code === 'agent_changed') {
@@ -2420,7 +2421,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
     if (op && op.key !== bindKey) setOp(null)
   }, [op, bindKey])
   // (A Codex's: compact and start anew, as Claude Code's.)
-  const opsOf = codex ? (['compact', 'rename', 'clear'] as const) : notClaude ? ([] as const) : (['compact', 'rename', 'clear'] as const)
+  const opsOf = codex ? (['compact', 'rename', 'clear'] as const) : agy ? (['compact', 'clear'] as const) : notClaude ? ([] as const) : (['compact', 'rename', 'clear'] as const)
   const canOps = canModel || canEffort || (bound && opsOf.length > 0 && convo.status === 'ready' && (agent?.status === 'idle' || agent?.status === 'done') && !agent?.other)
   const runOp = (b: NonNullable<typeof convo.bind>, text: string) => {
     return api('POST', `/api/sessions/${sid}/conversation/command`, { pane: b.pane, pid: b.pid, start: b.start, session: b.session, text }, { timeoutMs: PRESS_MS }).then(
@@ -2504,7 +2505,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       return { s: e.s, kind, source: b.session, at: rewind ? undefined : at, rewind, dir: '~', name: e.s.mux_session || 'tmux', key: e.key } as const
     }
     if (e.s.persistence !== 'herdr' || !r || r.lost) return null
-    const prog = (shown && convo.bind?.agent) || (isCodex(r.a.agent) ? 'codex' : isOpenCode(r.a.agent) ? 'opencode' : /claude/i.test(r.a.agent) ? 'claude' : '')
+    const prog = (shown && convo.bind?.agent) || (isCodex(r.a.agent) ? 'codex' : isOpenCode(r.a.agent) ? 'opencode' : isAgy(r.a.agent) ? 'agy' : /claude/i.test(r.a.agent) ? 'claude' : '')
     const source = (shown && convo.bind?.session) || r.a.session || ''
     if ((prog !== 'claude' && prog !== 'codex') || !source) return null
     // (A Codex's, up to a turn: its whole copy rewound in its own terminal — only the one shown, by its conversation.)

@@ -25,7 +25,7 @@ const SAID: Record<'zh-CN' | 'en', Record<string, string>> = {
   },
 }
 
-export type Agent = 'claude' | 'codex' | 'opencode'
+export type Agent = 'claude' | 'codex' | 'opencode' | 'agy'
 
 export interface Completions {
   cwd: string
@@ -61,6 +61,11 @@ const builtin: Record<Agent, string[]> = {
     '/agents', '/compact', '/connect', '/copy', '/debug', '/diff', '/editor', '/exit', '/export', '/fork', '/help',
     '/init', '/mcps', '/models', '/move', '/new', '/redo', '/rename', '/review', '/sessions', '/share', '/skills',
     '/status', '/themes', '/thinking', '/timeline', '/timestamps', '/undo', '/unshare', '/update',
+  ],
+  agy: [
+    '/agents', '/artifact', '/btw', '/clear', '/compact', '/config', '/context', '/copy', '/diff', '/effort', '/exit',
+    '/fork', '/goal', '/grill-me', '/help', '/learn', '/mcp', '/model', '/new', '/open', '/plan', '/quit', '/schedule',
+    '/teamwork',
   ],
 }
 

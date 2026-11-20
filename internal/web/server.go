@@ -272,6 +272,7 @@ func (s *Server) registerRoutes() {
 	s.handle("POST /api/sessions/{id}/agents", SignedIn, s.apiNewAgent)
 	s.handle("GET /api/sessions/{id}/claude-sessions", SignedIn, s.apiClaudeSessions)
 	s.handle("GET /api/sessions/{id}/codex-sessions", SignedIn, s.apiCodexSessions)
+	s.handle("GET /api/sessions/{id}/agy-sessions", SignedIn, s.apiAgySessions)
 	s.handle("GET /api/sessions/{id}/input-history", SignedIn, s.apiInputHistory)
 	s.handle("GET /api/sessions/{id}/shares", SignedIn, s.apiListShares)
 	s.handle("POST /api/sessions/{id}/shares", SignedIn, s.apiAddShare)

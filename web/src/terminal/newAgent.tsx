@@ -14,7 +14,7 @@ import { AgentGlyph } from './agentIcons'
 
 export const NEW_AGENT = 'corral:new-agent' // (asked from the list: the page opens this)
 
-type Kind = 'claude' | 'codex' | 'opencode'
+type Kind = 'claude' | 'codex' | 'opencode' | 'agy'
 type Old = { id: string; modified: number; title?: string; first?: string }
 
 const RECENT = 'corral.newAgentDirs'
@@ -38,7 +38,7 @@ const keepDir = (d: string) => {
 const KIND = 'corral.newAgentKind'
 const lastKind = (): Kind => {
   const v = local.get(KIND)
-  return v === 'codex' || v === 'opencode' ? v : 'claude'
+  return v === 'codex' || v === 'opencode' || v === 'agy' ? v : 'claude'
 }
 
 const herdrOf = (s: SessionInfo) => (s.persistence === 'herdr' && s.meta?.t === 'herdr' && !s.meta.lost ? s.meta : null)
@@ -68,8 +68,9 @@ export function NewAgentDialog({ sessions, onDone, onOpen, onClose }: { sessions
   const [resume, setResume] = useState('')
   // (Of the one picked, a copy taken up: it goes on as it was, a running one too.)
   const [fork, setFork] = useState(false)
-  const copying = fork && !!resume
-  const inWorktree = worktree && kind !== 'opencode' && !resume
+  const canFork = kind === 'claude' || kind === 'codex'
+  const copying = fork && canFork && !!resume
+  const inWorktree = worktree && kind !== 'opencode' && kind !== 'agy' && !resume
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   // (One key for one thing asked: said again unchanged (its answer not
@@ -106,8 +107,8 @@ export function NewAgentDialog({ sessions, onDone, onOpen, onClose }: { sessions
     setOldsBusy(true)
     setError('')
     try {
-      // (Claude Code's of the folder, from its project's logs; Codex's, from its own database.)
-      const r = await api<{ sessions: Old[]; partial?: boolean }>('GET', `/api/sessions/${sess.id}/${kind === 'codex' ? 'codex' : 'claude'}-sessions?` + new URLSearchParams({ dir }))
+      // (Claude Code's of the folder, from its project's logs; Codex's and Agy's, from their databases.)
+      const r = await api<{ sessions: Old[]; partial?: boolean }>('GET', `/api/sessions/${sess.id}/${kind === 'codex' ? 'codex' : kind === 'agy' ? 'agy' : 'claude'}-sessions?` + new URLSearchParams({ dir }))
       if (n === asked.n) setOlds(r.sessions)
     } catch (e) {
       if (n === asked.n) setError(e instanceof ApiError && e.code === 'bad_folder' ? t('newAgent.badFolder') : errorText(e))
@@ -121,7 +122,7 @@ export function NewAgentDialog({ sessions, onDone, onOpen, onClose }: { sessions
     setBusy(true)
     setError('')
     try {
-      const body = { dir: dir.trim(), kind, label: label.trim(), resume: kind !== 'opencode' ? resume : '', fork: kind !== 'opencode' && copying, worktree: inWorktree }
+      const body = { dir: dir.trim(), kind, label: label.trim(), resume: kind !== 'opencode' ? resume : '', fork: canFork && copying, worktree: inWorktree }
       const r = await api<{ pane?: string; tmux?: string }>('POST', `/api/sessions/${sess.id}/agents`, { ...body, key: keyOf(sess.id + '\n' + JSON.stringify(body)) }, { timeoutMs: 90000 })
       keepDir(dir.trim())
       local.set(KIND, kind)
@@ -202,7 +203,7 @@ export function NewAgentDialog({ sessions, onDone, onOpen, onClose }: { sessions
         <div className="field">
           <span>{t('newAgent.kind')}</span>
           <div className="seg seg-marks" role="radiogroup">
-            {(['claude', 'codex', 'opencode'] as const).map((k) => (
+            {(['claude', 'codex', 'opencode', 'agy'] as const).map((k) => (
               <button key={k} type="button" role="radio" aria-checked={kind === k} aria-pressed={kind === k} onClick={() => (k !== kind && (asked.n++, setOlds(null), setResume(''), setOldsBusy(false)), setKind(k))}>
                 <AgentGlyph program={k} />
                 {t(`newAgent.kind.${k}`)}
@@ -210,7 +211,7 @@ export function NewAgentDialog({ sessions, onDone, onOpen, onClose }: { sessions
             ))}
           </div>
         </div>
-        {kind !== 'opencode' && !resume && (
+        {kind !== 'opencode' && kind !== 'agy' && !resume && (
           <div className="field">
             <label className="check">
               <input type="checkbox" checked={worktree} onChange={(e) => setWorktree(e.target.checked)} />
@@ -256,7 +257,7 @@ export function NewAgentDialog({ sessions, onDone, onOpen, onClose }: { sessions
                 })}
               </div>
             )}
-            {olds !== null && olds.length > 0 && (
+            {olds !== null && olds.length > 0 && canFork && (
               <>
                 <label className="check">
                   <input type="checkbox" checked={fork} onChange={(e) => (setFork(e.target.checked), !e.target.checked && resume && running.has(resume) && setResume(''))} />

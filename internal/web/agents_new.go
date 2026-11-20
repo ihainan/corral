@@ -34,7 +34,7 @@ import (
 // answer, not a second agent.
 
 var (
-	agentKinds = map[string]bool{"claude": true, "codex": true, "opencode": true}
+	agentKinds = map[string]bool{"claude": true, "codex": true, "opencode": true, "agy": true}
 	// worktreeFlag: what starts a kind in a git worktree of its own, which it
 	// makes and manages itself (none for OpenCode).
 	worktreeFlag = map[string]string{"claude": "-w", "codex": "--worktree"}
@@ -85,8 +85,8 @@ func (s *Server) apiNewAgent(w http.ResponseWriter, r *http.Request) {
 		Key      string `json:"key"`
 	}
 	if err := readJSON(r, &b); err != nil || !agentKinds[b.Kind] || !newAgentKey.MatchString(b.Key) ||
-		(b.Resume != "" && (!sessionUUID.MatchString(b.Resume) || b.Kind != "claude" && b.Kind != "codex")) ||
-		(b.Fork && b.Resume == "") || (b.At != "" && (!b.Fork || b.Kind != "claude" || !sessionUUID.MatchString(b.At))) ||
+		(b.Resume != "" && (!sessionUUID.MatchString(b.Resume) || b.Kind != "claude" && b.Kind != "codex" && b.Kind != "agy")) ||
+		(b.Fork && (b.Resume == "" || b.Kind == "agy")) || (b.At != "" && (!b.Fork || b.Kind != "claude" || !sessionUUID.MatchString(b.At))) ||
 		(b.Worktree && (worktreeFlag[b.Kind] == "" || b.Resume != "")) ||
 		(b.Back != 0 && (!b.Fork || b.Kind != "codex" || b.Back < 1 || b.Back > codexRewindMax || strings.TrimSpace(b.AtText) == "" || utf8.RuneCountInString(b.AtText) > 4000)) ||
 		(b.Back == 0 && (b.AtText != "" || b.Clear)) {
@@ -334,6 +334,8 @@ func agentArgs(kind string, how agentStart) []string {
 		args = append(args, "fork", how.resume)
 	case how.resume != "" && kind == "codex":
 		args = append(args, "resume", how.resume) // (taken up: codex resume <id>)
+	case how.resume != "" && kind == "agy":
+		args = append(args, "--conversation", how.resume) // (taken up: agy --conversation <id>)
 	case how.resume != "" && how.fork:
 		args = append(args, "--resume", how.resume, "--fork-session")
 	case how.resume != "":

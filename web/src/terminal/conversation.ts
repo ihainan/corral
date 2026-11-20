@@ -252,7 +252,7 @@ export interface ConvoBind {
   pid: number
   start: number
   session: string
-  agent?: string // "claude", "codex" or "opencode": whose process it is
+  agent?: string // "claude", "codex", "opencode" or "agy": whose process it is
   title?: string
   // via: the host its requests go to, where that is not the model maker's
   // own (so absent for Anthropic's and OpenAI's own, and for an OpenCode,

@@ -240,7 +240,7 @@ printf 'hostnow=%s\0' "$(date +%s 2>/dev/null)"
 nl=$(printf '\nx'); nl=${nl%x}
 btime=$(sed -n 's/^btime \([0-9]*\)$/\1/p' /proc/stat 2>/dev/null); hz=$(getconf CLK_TCK 2>/dev/null)
 case $hz in ''|*[!0-9]*|0) hz=;; esac
-` + codexFdsSh + `
+` + codexFdsSh + agyFdsSh + `
 # Codex's subcommand ($1 its pid): its first word after options and their
 # values ("codex -p exec" is no exec; "codex -c x=1 exec" is), none after
 # "--". Those that do not converse (exec, review, …) are no agent to type to.
@@ -277,7 +277,7 @@ rec() { # pid start fg procstart sid log agent [via]
   # long, to be compared as text.)
   lw= lt=; [ -n "$6" ] && lw=$(stat -c %Y "$6" 2>/dev/null)
   if [ "$times" = times ] && [ -n "$6" ] && [ "${6%.jsonl}" != "$6" ]; then
-    lt=$(tail -c 262144 "$6" 2>/dev/null | grep -ao '"timestamp":"20[0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9:.]*Z"' | cut -d'"' -f4 |
+    lt=$(tail -c 262144 "$6" 2>/dev/null | grep -aEo '"(timestamp|created_at)" *: *"20[0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9:.]*Z"' | cut -d'"' -f4 |
       awk -v now="$(date -u +%Y-%m-%dT%H:%M:%S).999999999" '{ t = $0; sub(/Z$/, "", t); if (t !~ /\./) t = t "."; i = index(t, "."); t = substr(t, 1, i) substr(substr(t, i + 1) "000000000", 1, 9) }
         t <= now && t > k { k = t; m = $0 } END { print m }')
   fi
@@ -375,16 +375,16 @@ for f in "$HOME"/.claude/sessions/*.json; do
   done
   rec "$pid" "$st" "$fg" "$ps" "$sid" "$log" claude
 done
-# The user's codex and opencode processes, in one pass over /proc (by
+# The user's codex, opencode and agy processes, in one pass over /proc (by
 # their names, read with the shell's own read; each kind then as before).
-codexes= opencodes=
+codexes= opencodes= agys=
 for d in /proc/[0-9]*; do
   [ -O "$d" ] || continue
   read_all "$d/comm" "$nl"
   while :; do case $x in *"$nl") x=${x%"$nl"};; *) break;; esac; done # (as $(…) would leave it)
-  case $x in codex) codexes="$codexes $d";; opencode) opencodes="$opencodes $d";; esac
+  case $x in codex) codexes="$codexes $d";; opencode) opencodes="$opencodes $d";; agy) agys="$agys $d";; esac
 done
-[ "$only" = opencode ] && codexes=
+[ "$only" = opencode ] && codexes= agys=
 # What a log says of itself, from its head: where it was begun and when.
 # (What it says of itself is in its first line's payload: the line's own
 # timestamp is of when it was written, which a rewrite moves on.)
@@ -509,6 +509,17 @@ for d in $opencodes; do
   [ -n "$log" ] || [ -n "$svdb" ] || continue
   stat_of "$pid" || continue
   rec "$pid" "$st" "$fg" "$st" 00000000-0000-0000-0000-000000000000 "$log" opencode "$via"
+done
+# Antigravity CLI (agy): interactive processes hold presence/<uuid>.lock for
+# their active conversation (none yet before the first message: zero id).
+for d in $agys; do
+  pid=${d#/proc/}
+  [ -n "$(agy_noninter "$pid")" ] && continue
+  agy_fds "$d"
+  sid=$agysid log=$agylog
+  [ -n "$sid" ] || sid=00000000-0000-0000-0000-000000000000
+  stat_of "$pid" || continue
+  rec "$pid" "$st" "$fg" "$st" "$sid" "$log" agy
 done
 exit 0`
 	return "sh -c " + sshx.QuoteShell(script) + " corral " + sshx.QuoteShell(mode) + " " + sshx.QuoteShell(tmuxName) + " " + sshx.QuoteShell(tmuxPane) + " " + sshx.QuoteShell(times) + " " + sshx.QuoteShell(only)
@@ -937,7 +948,7 @@ func parseConvoLocate(out string) (l convoLocated) {
 			p.started = btime*1000 + p.start*1000/hz
 		}
 		switch p.agent {
-		case "codex":
+		case "codex", "agy":
 		case "opencode":
 			// (Its session is told after: by herdr, or by where it runs.)
 			if p.sid != convoNoSession {
@@ -946,7 +957,7 @@ func parseConvoLocate(out string) (l convoLocated) {
 		default:
 			p.agent = "claude"
 			if p.sid == convoNoSession {
-				continue // (only a Codex goes without its session known)
+				continue // (only a Codex or Agy goes without its session known)
 			}
 		}
 		if !convoLogOf(p.agent, p.log, p.sid) {
@@ -958,7 +969,8 @@ func parseConvoLocate(out string) (l convoLocated) {
 }
 
 // convoLogOf: log is where that agent keeps session sid's (Claude Code:
-// …/.claude/projects/<dir>/<sid>.jsonl; Codex: …/.codex/sessions/…/rollout-…-<sid>.jsonl).
+// …/.claude/projects/<dir>/<sid>.jsonl; Codex: …/.codex/sessions/…/rollout-…-<sid>.jsonl;
+// Agy: …/brain/<sid>/.system_generated/logs/transcript_full.jsonl).
 func convoLogOf(agent, log, sid string) bool {
 	l, ok := cleanRemotePath(log)
 	if !ok {
@@ -969,6 +981,9 @@ func convoLogOf(agent, log, sid string) bool {
 	}
 	if agent == "codex" {
 		return sid != "" && strings.Contains(l, "/.codex/sessions/") && convoSessionOf(l) == sid
+	}
+	if agent == "agy" {
+		return sid != "" && sid != convoNoSession && strings.HasSuffix(l, "/brain/"+sid+"/.system_generated/logs/transcript_full.jsonl")
 	}
 	return strings.HasSuffix(l, "/"+sid+".jsonl")
 }
@@ -2453,7 +2468,7 @@ func (s *Server) readConvo(sess *term.Session, st *convoState) (more bool, err e
 		return false, s.readOpenCode(sess, st)
 	}
 	err = s.withSFTP(context.Background(), sess, convoReadLimit, func(c *sftplite.Client) error {
-		if sess.Persistence == "tmux" && st.agent != "codex" && !st.sub {
+		if sess.Persistence == "tmux" && st.agent == "claude" && !st.sub {
 			st.status = convoProcStatus(c, st)
 		}
 		if sess.Persistence != "tmux" {
@@ -2462,16 +2477,20 @@ func (s *Server) readConvo(sess *term.Session, st *convoState) (more bool, err e
 			// host refusing a message then. Read anew each time: none for
 			// another agent come into the pane since.)
 			st.status = ""
-			if st.agent != "codex" && !st.sub {
+			if st.agent == "claude" && !st.sub {
 				if w := convoProcStatus(c, st); strings.HasPrefix(w, "waiting:") {
 					st.status = w
 				}
 			}
 		}
-		// (Codex's log says whether it works.)
+		// (Codex's and Agy's logs say whether they work.)
 		defer func() {
-			if cx, ok := st.parser.(*convo.Codex); ok && sess.Persistence == "tmux" {
-				st.status = cx.Status()
+			if sess.Persistence == "tmux" {
+				if cx, ok := st.parser.(*convo.Codex); ok {
+					st.status = cx.Status()
+				} else if ag, ok := st.parser.(*convo.Agy); ok {
+					st.status = ag.Status()
+				}
 			}
 		}()
 		fi, err := c.Stat(st.log)
@@ -2504,7 +2523,7 @@ func (s *Server) readConvo(sess *term.Session, st *convoState) (more bool, err e
 				// is read: its latest there, looked for beside (a long log
 				// takes the host a while to go through, and what is read is
 				// shown meanwhile), taken in by a later request.
-				if st.agent != "codex" && !st.sub {
+				if st.agent == "claude" && !st.sub {
 					st.lookEarlierTitle(sess, st.offset+convoTitleSlack)
 				}
 			}
@@ -3042,6 +3061,14 @@ case $gate in preply:*) cx=1 cxplan=1 gate=${gate#p} ;; esac
 # its input as the gateway saw it empty, its digest, the same here.)
 oc=
 case $gate in ofree:*) oc=${gate#ofree:} gate=free ;; esac
+# ("afree:<sha256>": a message or command to agy — input box present and
+# unchanged; "areply:<sha256>": an answer to a tmux agy — input box absent
+# and screen digest unchanged.)
+agy=
+case $gate in
+  afree:*) agy=${gate#afree:} gate=free ;;
+  areply:*) agy=reply gate=reply:${gate#areply:} ;;
+esac
 case $rd in ''|*[!0-9]*) rd=0;; esac
 # (A message to Codex queued after its turn, its length ending "~": Tab in
 # Enter's place — Codex's own "tab to queue message", sent once its turn
@@ -3146,7 +3173,7 @@ if [ -n "$parts" ]; then
     at=$((at + x))
   done
 fi
-` + codexFdsSh + `
+` + codexFdsSh + agyFdsSh + `
 front() {
   stat=$(tr '\n' ' ' <"/proc/$pid/stat" 2>/dev/null) || return 1
   rest=${stat##*) }
@@ -3225,6 +3252,15 @@ front() {
       /^(-[msp]|--(model|session|prompt|agent|port|hostname|log-level|mdns-domain|cors|server|completions))$/ { skip = 1; next }
       /^(run|serve|web|acp|mcp|auth|agent|upgrade|update|uninstall|models|stats|export|import|github|pr|debug|session|completion|generate|attach|api|plugin|service|reload|pair)$/ { print; exit }')
     case $cs in run|serve|web|acp|mcp|auth|agent|upgrade|update|uninstall|models|stats|export|import|github|pr|debug|session|completion|generate|attach|api|plugin|service|reload|pair) return 1;; esac
+  elif [ "$(head -c 16 "/proc/$pid/comm" 2>/dev/null)" = agy ]; then
+    kind=agy
+    [ -n "$(agy_noninter "$pid")" ] && return 1
+    agy_fds "/proc/$pid"
+    if [ "$sid" = 00000000-0000-0000-0000-000000000000 ]; then
+      [ -z "$agysid" ] || return 1
+    else
+      [ "$agysid" = "$sid" ] || return 1
+    fi
   else
     c=$(head -c 65536 "$HOME/.claude/sessions/$pid.json" 2>/dev/null | tr -d '\n')
     [ "$(printf '%s' "$c" | grep -o '"sessionId" *: *"[0-9a-fA-F-]*"' | head -n 1 | sed 's/.*"\([0-9a-fA-F-]*\)"$/\1/')" = "$sid" ] || return 1
@@ -3256,6 +3292,23 @@ waiting() {
     command -v sha256sum >/dev/null 2>&1 || { st=title-unread; return 0; }
     d=$(printf '%s\n' "$ocs" | OCBOXPIPE 2>/dev/null | sha256sum)
     if [ "${d%% *}" = "$oc" ]; then st=idle; else st=draft; fi
+    return 0
+  fi
+  if [ -n "$agy" ]; then
+    st=title-unread wf=
+    if [ "$mode" = tmux ]; then ags=$(tmux -u capture-pane -p -t "$p" 2>/dev/null 9>&-) || return 0
+    else ags=$(HERDR_SOCKET_PATH=$sock herdr pane read "$p" --source visible 2>/dev/null 9>&-) || return 0; fi
+    [ -n "$ags" ] || return 0
+    box=$(printf '%s\n' "$ags" | AGYBOXPIPE 2>/dev/null)
+    if [ "$agy" = reply ]; then
+      if [ -z "$box" ]; then st=waiting wf='permission prompt'; else st=idle; fi
+      return 0
+    fi
+    st=waiting
+    [ -n "$box" ] || return 0
+    command -v sha256sum >/dev/null 2>&1 || { st=title-unread; return 0; }
+    d=$(printf '%s\n' "$box" | sha256sum)
+    if [ "${d%% *}" = "$agy" ]; then st=idle; else st=draft; fi
     return 0
   fi
   if [ -n "$cxplan" ]; then
@@ -3543,6 +3596,7 @@ fi`
 	script = strings.ReplaceAll(script, "LOOKDIGEST", lookDigestPipe)
 	script = strings.ReplaceAll(script, "STEADYSCREEN", steadyPipe)
 	script = strings.ReplaceAll(script, "OCBOXPIPE", ocBoxPipe)     // (see convo_opencode_input.go)
+	script = strings.ReplaceAll(script, "AGYBOXPIPE", agyBoxPipe)   // (see convo_agy_input.go)
 	script = strings.ReplaceAll(script, "OWNERAWK", claudeOwnerAwk) // (see convo_view.go)
 	script = strings.ReplaceAll(script, "PALETTEAWK", claudePaletteAwk)
 	script = strings.ReplaceAll(script, "BOXAWK", claudeBoxAwk)
@@ -4108,8 +4162,10 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 	// (OpenCode's terminal, shown here as it is where a message to it was
 	// refused: its screen, and keys pressed there only on the screen shown —
 	// the "look" gate, whoever's the screen is.)
-	ocLive := (front.agent == "opencode" || front.agent == "codex") && (what == "panel_screen" || (what == "panel" && b.Live)) // (and Codex's: its terminal as it is, a key only on the screen shown)
-	if (front.agent == "codex" || front.agent == "opencode") && what != "send" && what != "interrupt" && !codexAnswer && !codexCommand && !codexModel && !codexLook && !ocLive {
+	agyAnswer := front.agent == "agy" && sess.Persistence == "tmux" && (what == "screen" || what == "reply")
+	agyCommand := front.agent == "agy" && what == "command" && (text == "/compact" || text == "/clear")
+	ocLive := (front.agent == "opencode" || front.agent == "codex" || front.agent == "agy") && (what == "panel_screen" || (what == "panel" && b.Live)) // (and Codex's / Agy's: terminal as it is, a key only on the screen shown)
+	if (front.agent == "codex" || front.agent == "opencode" || front.agent == "agy") && what != "send" && what != "interrupt" && !codexAnswer && !codexCommand && !codexModel && !codexLook && !ocLive && !agyAnswer && !agyCommand {
 		reason = "unsupported"
 		writeError(w, http.StatusConflict, "unsupported", "not for this agent")
 		return
@@ -4244,7 +4300,38 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 			if s.codexPlanAsked(ctx, sess, b.Pane, socket, b.Digest) {
 				gate = "p" + gate[1:] // (but not for "Implement this plan?": its screen does — codexPlanAsked)
 			}
+		} else if front.agent == "agy" {
+			gate = "a" + gate // (its input box is absent while it waits for an answer)
 		}
+	case front.agent == "agy" && (what == "send" || what == "command"):
+		// (Antigravity CLI: verify its input box is present and empty before
+		// typing so messages and slash commands never land on a prompt or draft.)
+		refuse := func(status int, code, msg string) {
+			ended.Done()
+			reason = code
+			writeError(w, status, code, msg)
+		}
+		sctx, scancel := context.WithTimeout(ctx, 10*time.Second)
+		res, err := sshx.Exec(sctx, sess.Client(), convoScreenCommand(sess.Persistence, b.Pane, socket), 512<<10, sshx.ExecOptions{})
+		scancel()
+		if err != nil {
+			refuse(http.StatusBadGateway, "no_screen", "the pane's screen could not be read")
+			return
+		}
+		shown, _, _ := screenOf(res.Out)
+		box, boxed := agyBoxDigest(res.Out)
+		switch err := agyIdleInput(shown); {
+		case errors.Is(err, errAgyAsks):
+			refuse(http.StatusConflict, "agent_waiting", "it asks for an answer: answer it in the terminal first")
+			return
+		case errors.Is(err, errDraft):
+			refuse(http.StatusConflict, "draft", err.Error())
+			return
+		case err != nil || !boxed:
+			refuse(http.StatusConflict, "cannot_verify", "its input is not seen on its screen: send it in the terminal")
+			return
+		}
+		gate = "afree:" + box
 	case front.agent == "claude" && (what == "send" || what == "send_now" || what == "mode"):
 		gate = "free" // (not while it waits: what is typed would go to its question)
 	case front.agent == "claude" && what == "interrupt":

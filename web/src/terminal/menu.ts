@@ -8,7 +8,7 @@
 // (ordinary output), or one followed by anything else (a new question), is
 // no menu.
 const menuLine = /^[\s│|]*([❯›>▶→●◉])?\s*([1-9])[.)]\s+(\S.*?)\s*[│|]?\s*$/
-const hintLine = /^[\s│|╭╮╰╯─━┌┐└┘]*$|\b(esc|cancel|confirm)\b/i
+const hintLine = /^[\s│|╭╮╰╯─━┌┐└┘]*$|\b(esc|cancel|confirm|navigate)\b/i
 const maxLabel = 120
 const maxCodexLabel = 400 // (Codex's: its command's prefix in it, read to the end to be said in Chinese)
 
@@ -72,14 +72,14 @@ function cursorMenu(lines: string[]): { out: Choice[]; top: number } {
   const none = { out: [], top: -1 }
   let end = lines.length
   while (end > 0 && !lines[end - 1].trim()) end--
-  if (end === 0 || !/^\s*Enter to confirm\b/i.test(lines[end - 1])) return none
+  if (end === 0 || !/^\s*(?:Enter to confirm\b|↑\/↓\s+Navigate\s*·\s*enter\s+Confirm\b)/i.test(lines[end - 1])) return none
   let e = end - 1
   while (e > 0 && !lines[e - 1].trim()) e--
   const rows: { text: string; marked: boolean }[] = []
   let col = -1
   let i = e - 1
   for (; i >= 0 && rows.length <= 4; i--) {
-    const m = /^(\s*)(❯\s+)?(\S.*?)\s*$/.exec(lines[i])
+    const m = /^(\s*)([❯>]\s+)?(\S.*?)\s*$/.exec(lines[i])
     if (!m) break
     const at = m[1].length + (m[2]?.length ?? 0)
     if (col < 0) col = at
@@ -96,7 +96,7 @@ function cursorMenu(lines: string[]): { out: Choice[]; top: number } {
 // begins on (told: read as a question of Claude Code's).
 function readMenu(lines: string[], told: boolean, codex = false): { out: Choice[]; top: number } {
   let end = lines.length
-  while (end > 0 && !menuLine.test(lines[end - 1]) && hintLine.test(lines[end - 1]) && !goesOn(lines, end - 1) && lines.length - end < 3) end--
+  while (end > 0 && !menuLine.test(lines[end - 1]) && hintLine.test(lines[end - 1]) && !goesOn(lines, end - 1) && lines.length - end < 4) end--
   const out: Choice[] = []
   let marked = 0
   let top = -1
@@ -223,7 +223,7 @@ const solidRule = /^[\s─━]*[─━]{8,}[\s─━]*$/
 export const dashedRule = /^[\s╌┄┈]*[╌┄┈]{8,}[\s╌┄┈]*$/
 // The heads Claude Code puts on its permission prompts (any other line after
 // a rule may be a command's own).
-const promptHead = /^(?:Bash command|Edit file|Create file|Write file|Overwrite file|Read file|Edit notebook|Fetch|Web fetch|Web search)$/i
+const promptHead = /^(?:Bash command|Edit file|Create file|Write file|Overwrite file|Read file|Edit notebook|Fetch|Web fetch|Web search|Requesting permission for:?)$/i
 export function promptBlock(text: string): { head: string; lines: string[] } | null {
   const lines = text.split('\n')
   const { top } = menuAt(lines)

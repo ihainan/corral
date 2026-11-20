@@ -6,7 +6,7 @@ import type { I18nKey } from '../i18n'
 // sequences as custom keys take them (macro.ts); slash commands are typed and
 // sent.
 
-export type PanelPage = 'ctrl' | 'herdr' | 'tmux' | 'claude' | 'codex' | 'opencode'
+export type PanelPage = 'ctrl' | 'herdr' | 'tmux' | 'claude' | 'codex' | 'opencode' | 'agy'
 export type HerdrAct = 'new_workspace' | 'new_tab' | 'split_right' | 'split_down' | 'zoom_toggle' | 'focus_left' | 'focus_right' | 'focus_up' | 'focus_down' | 'prev_tab' | 'next_tab' | 'close_pane'
 // label: shown as it is ('' for an icon, by the herdr action); desc: an i18n key.
 // again: the keys are sent a second time a moment later (OpenCode stops on a
@@ -125,6 +125,24 @@ export const shortcuts: Record<PanelPage, ShortcutGroup[]> = {
       ],
     },
   ],
+  agy: [
+    {
+      title: 'sc.gKeys',
+      items: [
+        { label: '⇧Tab', desc: 'sc.mode', keys: 'BTab' },
+        { label: 'Esc', desc: 'sc.stop', keys: 'Esc' },
+        { label: '^O', desc: 'sc.expand', keys: 'C-o' },
+        { label: '^G', desc: 'sc.editor', keys: 'C-g' },
+      ],
+    },
+    {
+      title: 'sc.gCommands',
+      items: [
+        slash('clear', 'sc.clearChat'), slash('compact', 'sc.compact'), slash('model', 'sc.model'), slash('effort', 'sc.effort'),
+        slash('context', 'sc.context'), slash('diff', 'sc.diff'), slash('agents', 'sc.agents'), slash('mcp', 'sc.mcp'), slash('config', 'sc.config'),
+      ],
+    },
+  ],
 }
 
 // The row kept at the panel's foot: a page's most used, by label (herdr's
@@ -136,6 +154,7 @@ const common: Record<PanelPage, string[]> = {
   claude: ['⇧Tab', 'Esc', '^O', '^T', '/compact', '/clear'],
   codex: ['⇧Tab', 'Esc', '^T', '/new', '/compact', '/diff'],
   opencode: ['Tab', 'Esc Esc', '^P', '/new', '/undo', '/compact'],
+  agy: ['⇧Tab', 'Esc', '^O', '/clear', '/compact', '/model'],
 }
 
 // herdr's bindings the panel presses, as herdr ships them (config.toml can
@@ -263,14 +282,14 @@ export function pageCommon(groups: ShortcutGroup[], page: PanelPage): Shortcut[]
   return common[page].flatMap((c) => all.filter((s) => (s.id ?? s.label) === c).slice(0, 1))
 }
 
-export const pageTitles: Record<PanelPage, string> = { ctrl: 'Ctrl', herdr: 'herdr', tmux: 'tmux', claude: 'Claude Code', codex: 'Codex', opencode: 'OpenCode' }
+export const pageTitles: Record<PanelPage, string> = { ctrl: 'Ctrl', herdr: 'herdr', tmux: 'tmux', claude: 'Claude Code', codex: 'Codex', opencode: 'OpenCode', agy: 'Antigravity' }
 
 // The pages for a session, and the one to open on: the agent in herdr's
 // focused pane, else the multiplexer, else the page used last.
 export function panelPages(persistence: string | undefined, focusedAgent: string | undefined, last: string | null): { pages: PanelPage[]; open: PanelPage } {
   const mux: PanelPage[] = persistence === 'herdr' ? ['herdr'] : persistence === 'tmux' ? ['tmux'] : []
-  const pages: PanelPage[] = ['ctrl', ...mux, 'claude', 'codex', 'opencode']
+  const pages: PanelPage[] = ['ctrl', ...mux, 'claude', 'codex', 'opencode', 'agy']
   const agent = (focusedAgent ?? '').toLowerCase()
-  const open: PanelPage = agent.includes('claude') ? 'claude' : agent.includes('codex') ? 'codex' : agent.includes('opencode') ? 'opencode' : mux[0] ?? (pages.includes(last as PanelPage) ? (last as PanelPage) : 'ctrl')
+  const open: PanelPage = agent.includes('claude') ? 'claude' : agent.includes('codex') ? 'codex' : agent.includes('opencode') ? 'opencode' : agent.includes('agy') || agent.includes('antigravity') ? 'agy' : mux[0] ?? (pages.includes(last as PanelPage) ? (last as PanelPage) : 'ctrl')
   return { pages, open }
 }
