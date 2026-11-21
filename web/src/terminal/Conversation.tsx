@@ -2604,7 +2604,13 @@ export function rowByLog(list: ModelOpt[], model: string | undefined): string | 
   if (!model || model.includes('[')) return undefined
   const said = modelName(model).toLowerCase()
   const hits = list.filter((o) => named(o)[0].toLowerCase() === said)
-  return hits.length === 1 ? hits[0].label : undefined
+  if (hits.length === 1) return hits[0].label
+  const low = model.toLowerCase()
+  const byDesc = list.filter((o) => {
+    const d = (o.desc ?? '').toLowerCase()
+    return !!d && (d === low || low.startsWith(d + '-'))
+  })
+  return byDesc.length === 1 ? byDesc[0].label : undefined
 }
 
 export function named(o: ModelOpt): [string, string] {

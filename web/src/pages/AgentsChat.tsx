@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState, type ReactNode } from 'react'
 import { ArrowUp, ChevronLeft, Copy, FoldVertical, GitBranch, History, Languages, MessageSquarePlus, Paperclip, Pencil, Pin, PinOff, Power, Square, SquareSlash, SquareTerminal, TextCursorInput, Plus } from 'lucide-react'
-import { api, ApiError, authGen, errorText, uploadFile, type SessionInfo } from '../api'
+import { api, ApiError, authGen, errorText, onAuthChange, uploadFile, type SessionInfo } from '../api'
 import { t, type I18nKey } from '../i18n'
 import { navigate, onNavigate } from '../router'
 import { heldOpen, onHeldOpen, onOpenRequest, takeHeld } from '../notifyopen'
@@ -135,6 +135,9 @@ const suggestAsks = new Map<string, SuggestAsk>()
 const NOTHING_PRESSED = ['bad_request', 'unauthorized', 'unsupported', 'busy', 'host_error', 'agent_changed', 'not_in_front', 'refused', 'no_screen', 'not_found', 'forbidden', 'subagent_view', 'other_view', 'no_input', 'box_draft', 'screen_changed']
 const MODE_MS = 50000 // (to a mode picked: several presses, each read back; the gateway gives up at 45 s)
 const MODEL_MS = 50000 // (the picker, step by step: see convo_model.go)
+const MODEL_CACHE_MS = 10 * 60 * 1000 // (keep fetched model lists across agent switches for instant opens)
+const keptModelCache = new Map<string, { list: ModelOpt[]; at: number; byLog: boolean }>()
+onAuthChange(() => keptModelCache.clear())
 const PASTE_CHARS = 2000
 const isTouch = window.matchMedia('(pointer: coarse)').matches || navigator.maxTouchPoints > 0
 const hasKeyboardPointer = () => !window.matchMedia('(pointer: coarse)').matches
@@ -1393,10 +1396,18 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       .finally(() => setEffortBusy(false))
   }
 
+  const modelCacheKey = agy ? `agy:${cur.s.host_id}` : bindKey
   const openModels = () => {
-    // (Read again after a minute: what it offers and which it has now may have changed.)
-    if (!convo.bind || modelBusy || (models && models.bind === bindKey && models.list && Date.now() - (models.at ?? 0) < 60000)) return
+    if (!convo.bind || modelBusy) return
+    const now = Date.now()
+    if (models && models.bind === bindKey && models.list && now - (models.at ?? 0) < MODEL_CACHE_MS) return
+    const hit = keptModelCache.get(modelCacheKey)
+    if (hit && now - hit.at < MODEL_CACHE_MS) {
+      setModels({ list: hit.list, bind: bindKey, at: hit.at, byLog: hit.byLog || agy })
+      return
+    }
     const bind = bindKey
+    const ckey = modelCacheKey
     setModels({ list: null, bind })
     setModelBusy(true)
     // (kept: the list as the gateway kept it, its picker not opened — which
@@ -1404,7 +1415,9 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
     // conversation's own log as that goes: see rowByLog.)
     own(api<{ models: ModelOpt[]; kept?: boolean; effort?: string }>('POST', `/api/sessions/${sid}/conversation/models`, pressBody(), { timeoutMs: MODEL_MS }))
       .then((r) => {
-        setModels((m) => (m?.bind === bind ? { list: r.models, bind, at: Date.now(), byLog: !!r.kept } : m))
+        const at = Date.now()
+        if (r.models?.length) keptModelCache.set(ckey, { list: r.models, at, byLog: !!r.kept })
+        setModels((m) => (m?.bind === bind ? { list: r.models, bind, at, byLog: !!r.kept } : m))
         if (agy && r.effort !== undefined) setEffortNow({ effort: r.effort, bind, was: convo.meta?.effort })
       })
       .catch((e) => {
@@ -1418,6 +1431,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   const pickModel = (label: string, effort?: string) => {
     if (!convo.bind || modelBusy) return
     const bind = bindKey
+    const ckey = modelCacheKey
     const wasModel = convo.meta?.model
     const wasEffort = convo.meta?.effort
     setModelBusy(true)
@@ -1429,7 +1443,12 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
         // for what was just switched to. Nothing is kept here of what was clicked: the log says it, as it says a
         // /model typed in the terminal.)
         if (!r.unconfirmed) {
-          setModels((m) => m && { ...m, list: m.list && m.list.map((o) => ({ ...o, current: o.label === label })) })
+          setModels((m) => {
+            if (!m) return m
+            const next = m.list && m.list.map((o) => ({ ...o, current: o.label === label }))
+            if (next?.length) keptModelCache.set(ckey, { list: next, at: Date.now(), byLog: !!m.byLog })
+            return { ...m, list: next }
+          })
           if (agy) {
             setModelNow({ model: r.model || label, bind, was: wasModel })
             setEffortNow({ effort: r.effort ?? effort ?? '', bind, was: wasEffort })

@@ -1,12 +1,19 @@
 package web
 
 import (
+	"context"
+	"encoding/json"
 	"errors"
+	"net/http"
 	"regexp"
+	"slices"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ihainan/corral/internal/sshx"
+	"github.com/ihainan/corral/internal/term"
 )
 
 // Switching a Codex's model and reasoning effort from the agents page,
@@ -413,4 +420,109 @@ func codexModelFlow(do, undo codexIO, model, effort string) (opts []modelOpt, er
 func screenRefused(err error) bool {
 	var e *sshx.ExitError
 	return errors.As(err, &e) && (e.Status == 10 || e.Status == 11)
+}
+
+type codexModelFront struct {
+	hostID    int64
+	via, auth string
+	at        time.Time
+}
+
+type codexModelCacheEntry struct {
+	opts []modelOpt
+	at   time.Time
+}
+
+var (
+	codexModelFronts   sync.Map // modelFrontKey → codexModelFront
+	codexModelsCacheMu sync.Mutex
+	codexModelsCache   = map[string]codexModelCacheEntry{}
+)
+
+func codexModelStoreKey(hostID int64, via, auth string) string {
+	return "codex:" + strconv.FormatInt(hostID, 10) + "\x00" + via + "\x00" + auth
+}
+
+func noteCodexModelFront(key string, f codexModelFront) {
+	codexModelFronts.Range(func(k, v any) bool {
+		if f.at.Sub(v.(codexModelFront).at) > lineListFor {
+			codexModelFronts.Delete(k)
+		}
+		return true
+	})
+	codexModelFronts.Store(key, f)
+}
+
+func (s *Server) noteCodexModels(ctx context.Context, hostID int64, via, auth string, opts []modelOpt) {
+	if len(opts) == 0 {
+		return
+	}
+	clean := make([]modelOpt, len(opts))
+	for i, o := range opts {
+		o.Current = false
+		clean[i] = o
+	}
+	key := codexModelStoreKey(hostID, via, auth)
+	now := time.Now()
+	codexModelsCacheMu.Lock()
+	codexModelsCache[key] = codexModelCacheEntry{opts: clean, at: now}
+	codexModelsCacheMu.Unlock()
+	if s.store != nil {
+		if raw, err := json.Marshal(clean); err == nil {
+			_ = s.store.PutModelList(context.WithoutCancel(ctx), key, now.Unix(), raw)
+		}
+	}
+}
+
+func (s *Server) forgetCodexModels(ctx context.Context, hostID int64, via, auth string) {
+	key := codexModelStoreKey(hostID, via, auth)
+	codexModelsCacheMu.Lock()
+	delete(codexModelsCache, key)
+	codexModelsCacheMu.Unlock()
+	if s.store != nil {
+		_ = s.store.DeleteModelList(context.WithoutCancel(ctx), key)
+	}
+}
+
+// keptCodexModels serves a previously read Codex model list immediately
+// without driving Codex's interactive /model picker or running locateScan.
+func (s *Server) keptCodexModels(w http.ResponseWriter, ctx context.Context, sess *term.Session, pane string, pid, start int64, sid string, outcome, reason *string) bool {
+	fk := modelFrontKey(sess.ID, pane, pid, start, sid)
+	v, ok := codexModelFronts.Load(fk)
+	if !ok {
+		return false
+	}
+	f := v.(codexModelFront)
+	if time.Since(f.at) > lineListFor {
+		codexModelFronts.Delete(fk)
+		return false
+	}
+	key := codexModelStoreKey(f.hostID, f.via, f.auth)
+	codexModelsCacheMu.Lock()
+	ent, hit := codexModelsCache[key]
+	codexModelsCacheMu.Unlock()
+	var opts []modelOpt
+	if hit && time.Since(ent.at) < lineListFor && len(ent.opts) > 0 {
+		opts = slices.Clone(ent.opts)
+	} else if s.store != nil {
+		atUnix, raw, found, err := s.store.ModelList(ctx, key)
+		if err == nil && found && time.Since(time.Unix(atUnix, 0)) < lineListFor {
+			var parsed []modelOpt
+			if json.Unmarshal(raw, &parsed) == nil && len(parsed) > 0 {
+				opts = parsed
+				codexModelsCacheMu.Lock()
+				codexModelsCache[key] = codexModelCacheEntry{opts: slices.Clone(parsed), at: time.Unix(atUnix, 0)}
+				codexModelsCacheMu.Unlock()
+			}
+		}
+	}
+	if len(opts) == 0 {
+		return false
+	}
+	for i := range opts {
+		opts[i].Current = false
+	}
+	*outcome, *reason = "kept", "list_kept"
+	writeJSON(w, http.StatusOK, map[string]any{"models": opts, "kept": true})
+	return true
 }

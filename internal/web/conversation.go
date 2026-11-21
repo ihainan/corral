@@ -2120,6 +2120,16 @@ func (s *Server) apiConversation(w http.ResponseWriter, r *http.Request) {
 	}
 	s.codexRunningOnHost(sess, st) // (before its entries are taken: steps it ends are among them)
 	s.agyRunningOnHost(sess, st)
+	if !st.sub && st.bind != nil {
+		fk := modelFrontKey(sess.ID, st.bind.Pane, st.bind.PID, st.bind.Start, st.bind.Session)
+		switch st.agent {
+		case "agy":
+			noteAgyModelFront(fk, time.Now())
+			s.warmAgyModels(sess)
+		case "codex":
+			noteCodexModelFront(fk, codexModelFront{hostID: sess.HostID, via: st.bind.Via, auth: st.bind.Auth, at: time.Now()})
+		}
+	}
 	ans.AgentStatus = shellWord(ans.AgentStatus)
 	ans.OlderCut = st.older && (st.parser.Trimmed() || st.from < 0)
 	if gen != st.gen {
@@ -4090,7 +4100,9 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 	// (A list asked for of a process found here before, and kept: answered
 	// with nothing asked of the host — neither its pane's turn nor the scan
 	// of its processes. Nothing is typed for it.)
-	if what == "models" && s.keptModelsOf(w, ctx, sess, b.Pane, b.PID, b.Start, b.Session, &outcome, &reason) {
+	if what == "models" && (s.keptModelsOf(w, ctx, sess, b.Pane, b.PID, b.Start, b.Session, &outcome, &reason) ||
+		s.keptAgyModels(w, ctx, sess, b.Pane, b.PID, b.Start, b.Session, &outcome, &reason) ||
+		s.keptCodexModels(w, ctx, sess, b.Pane, b.PID, b.Start, b.Session, &outcome, &reason)) {
 		return
 	}
 	turn, ok := convoSending.take(ctx, convoTurnKey(sess.ID, b.Pane))
@@ -4271,13 +4283,15 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 		turn = func() {} // (convoModel gives it back, once its steps have ended on the host)
 		if front.agent == "agy" {
 			if what == "models" {
-				s.convoAgyModels(w, ctx, sess, b.Pane, socket, &outcome, &reason, release)
+				s.convoAgyModels(w, ctx, sess, b.Pane, socket, b.PID, b.Start, b.Session, &outcome, &reason, release)
 			} else {
 				s.convoAgyModel(w, ctx, sess, b.Pane, socket, b.PID, b.Start, b.Session, b.Model, b.Effort, &outcome, &reason, release)
 			}
 			return
 		}
-		if front.agent != "codex" {
+		if front.agent == "codex" {
+			noteCodexModelFront(modelFrontKey(sess.ID, b.Pane, b.PID, b.Start, b.Session), codexModelFront{hostID: sess.HostID, via: front.ep, auth: front.auth, at: time.Now()})
+		} else {
 			noteModelFront(modelFrontKey(sess.ID, b.Pane, b.PID, b.Start, b.Session), modelFront{via: front.ep, auth: front.auth, at: time.Now()})
 		}
 		s.convoModel(w, ctx, sess, b.Pane, socket, b.PID, b.Start, b.Session, b.Model, &outcome, &reason, release, front.agent == "codex", b.Effort, front.log, front.ep, front.auth, false)

@@ -1,10 +1,17 @@
 package web
 
 import (
+	"context"
+	"encoding/json"
+	"net/http/httptest"
 	"os/exec"
 	"slices"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/ihainan/corral/internal/store"
+	"github.com/ihainan/corral/internal/term"
 )
 
 const sampleAgyModelsTSV = `gemini-4-neon-high	Gemini 4 Neon (High)
@@ -147,5 +154,84 @@ func TestAgyModelShellScriptsParse(t *testing.T) {
 		if out, err := cmd.CombinedOutput(); err != nil {
 			t.Fatalf("script %d sh -n failed: %v\n%s", i, err, out)
 		}
+	}
+}
+
+func TestKeptAgyAndCodexModelsCache(t *testing.T) {
+	st, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	srv := &Server{store: st}
+	ctx := context.Background()
+
+	// 1. AGY models persisted to SQLite and served immediately by keptAgyModels without SSH.
+	const agyHost int64 = 9901
+	t.Cleanup(func() {
+		agyModelsCacheMu.Lock()
+		delete(agyModelsCache, agyHost)
+		agyModelsCacheMu.Unlock()
+		agyModelFronts.Delete(modelFrontKey("s-agy", "w1:p1", 10, 20, "sid-agy"))
+	})
+	groups := parseAgyModels("gemini-4-neon-low\tGemini 4 Neon (Low)\ngemini-4-neon-high\tGemini 4 Neon (High)\ngemini-pro-orchestrator-neon\tOrchestrator (Neon)\n")
+	raw, err := marshalAgyGroups(groups)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.PutModelList(ctx, agyModelStoreKey(agyHost), time.Now().Unix(), raw); err != nil {
+		t.Fatal(err)
+	}
+	noteAgyModelFront(modelFrontKey("s-agy", "w1:p1", 10, 20, "sid-agy"), time.Now())
+	sess := &term.Session{ID: "s-agy", HostID: agyHost}
+	rec := httptest.NewRecorder()
+	var outcome, reason string
+	if !srv.keptAgyModels(rec, ctx, sess, "w1:p1", 10, 20, "sid-agy", &outcome, &reason) {
+		t.Fatalf("expected keptAgyModels hit from SQLite store")
+	}
+	if outcome != "kept" || reason != "list_kept" {
+		t.Fatalf("outcome=%q reason=%q", outcome, reason)
+	}
+	var agyResp struct {
+		Kept   bool       `json:"kept"`
+		Models []modelOpt `json:"models"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &agyResp); err != nil || !agyResp.Kept || len(agyResp.Models) != 2 {
+		t.Fatalf("unexpected agy kept response: %v %s", err, rec.Body.String())
+	}
+
+	// 2. Codex models persisted to SQLite, served without SSH, and cleared on forgetCodexModels.
+	const cxHost int64 = 9902
+	t.Cleanup(func() {
+		srv.forgetCodexModels(ctx, cxHost, "", "")
+		codexModelFronts.Delete(modelFrontKey("s-cx", "w2:p1", 30, 40, "sid-cx"))
+	})
+	srv.noteCodexModels(ctx, cxHost, "", "", []modelOpt{
+		{Label: "gpt-5.4", Desc: "Frontier", Current: true},
+		{Label: "gpt-5.4-mini", Desc: "Fast"},
+	})
+	// Clear in-memory cache to verify SQLite fallback hydration too.
+	codexModelsCacheMu.Lock()
+	delete(codexModelsCache, codexModelStoreKey(cxHost, "", ""))
+	codexModelsCacheMu.Unlock()
+
+	noteCodexModelFront(modelFrontKey("s-cx", "w2:p1", 30, 40, "sid-cx"), codexModelFront{hostID: cxHost, at: time.Now()})
+	cxSess := &term.Session{ID: "s-cx", HostID: cxHost}
+	rec2 := httptest.NewRecorder()
+	outcome, reason = "", ""
+	if !srv.keptCodexModels(rec2, ctx, cxSess, "w2:p1", 30, 40, "sid-cx", &outcome, &reason) {
+		t.Fatalf("expected keptCodexModels hit from SQLite store")
+	}
+	var cxResp struct {
+		Kept   bool       `json:"kept"`
+		Models []modelOpt `json:"models"`
+	}
+	if err := json.Unmarshal(rec2.Body.Bytes(), &cxResp); err != nil || !cxResp.Kept || len(cxResp.Models) != 2 || cxResp.Models[0].Current {
+		t.Fatalf("unexpected codex kept response: %v %s", err, rec2.Body.String())
+	}
+	srv.forgetCodexModels(ctx, cxHost, "", "")
+	rec3 := httptest.NewRecorder()
+	if srv.keptCodexModels(rec3, ctx, cxSess, "w2:p1", 30, 40, "sid-cx", &outcome, &reason) {
+		t.Fatalf("expected miss after forgetCodexModels")
 	}
 }

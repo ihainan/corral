@@ -975,6 +975,12 @@ func (s *Server) convoModel(w http.ResponseWriter, ctx context.Context, sess *te
 	var opts []modelOpt
 	if codex {
 		opts, err = codexModelFlow(codexIO{look, press}, undo, target, effort)
+		switch {
+		case err == nil && target == "" && len(opts) > 0:
+			s.noteCodexModels(ctx, sess.HostID, via, auth, opts)
+		case errors.Is(err, errNoModel), errors.Is(err, errUnsure), errors.Is(err, errElsewhere):
+			s.forgetCodexModels(ctx, sess.HostID, via, auth)
+		}
 	} else {
 		opts, err = modelFlow(step, leave, target, effort, func() string { return s.greyedSuggestion(ctx, sess, pane, socket, &running) })
 		// (What is kept of its list, changed while its pane and the account's

@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"regexp"
@@ -37,7 +38,8 @@ if [ -L "$f" ]; then f=$(readlink -f "$f") && [ -n "$f" ] || exit 5; fi
 if [ ! -e "$f" ]; then d=${f%/*}; { [ ! -e "$d" ] || { [ -r "$d" ] && [ -x "$d" ]; }; } && exit 3; exit 5; fi
 head -c 1048577 "$f" || exit 5`
 
-	agyModelCacheTTL = 60 * time.Second
+	agyModelCacheTTL     = 12 * time.Hour
+	agyModelRefreshAfter = 10 * time.Minute
 )
 
 func agySettingsWriteCommand(was, now []byte) string {
@@ -356,13 +358,87 @@ type agyModelCacheEntry struct {
 	at     time.Time
 }
 
+type agyModelFlightCall struct {
+	done   chan struct{}
+	groups []agyModelGroup
+	err    error
+}
+
+type storedAgyVariant struct {
+	ID      string `json:"id"`
+	Display string `json:"display"`
+	Effort  string `json:"effort,omitempty"`
+}
+
+type storedAgyGroup struct {
+	BaseID   string             `json:"base_id"`
+	Display  string             `json:"display"`
+	Variants []storedAgyVariant `json:"variants"`
+}
+
 var (
 	agyModelsCacheMu sync.Mutex
 	agyModelsCache   = map[int64]agyModelCacheEntry{}
+	agyModelsFlight  = map[int64]*agyModelFlightCall{}
+	agyModelFronts   sync.Map // modelFrontKey → time.Time
 
 	agySettingsMu  sync.Mutex
 	agySettingsSem = map[int64]chan struct{}{}
 )
+
+func agyModelStoreKey(hostID int64) string {
+	return "agy:" + strconv.FormatInt(hostID, 10)
+}
+
+func noteAgyModelFront(key string, at time.Time) {
+	agyModelFronts.Range(func(k, v any) bool {
+		if at.Sub(v.(time.Time)) > agyModelCacheTTL {
+			agyModelFronts.Delete(k)
+		}
+		return true
+	})
+	agyModelFronts.Store(key, at)
+}
+
+func isAgyModelFront(key string) bool {
+	v, ok := agyModelFronts.Load(key)
+	if !ok {
+		return false
+	}
+	if time.Since(v.(time.Time)) > agyModelCacheTTL {
+		agyModelFronts.Delete(key)
+		return false
+	}
+	return true
+}
+
+func marshalAgyGroups(groups []agyModelGroup) ([]byte, error) {
+	out := make([]storedAgyGroup, 0, len(groups))
+	for _, g := range groups {
+		vs := make([]storedAgyVariant, 0, len(g.variants))
+		for _, v := range g.variants {
+			vs = append(vs, storedAgyVariant{ID: v.id, Display: v.display, Effort: v.effort})
+		}
+		out = append(out, storedAgyGroup{BaseID: g.baseID, Display: g.display, Variants: vs})
+	}
+	return json.Marshal(out)
+}
+
+func unmarshalAgyGroups(raw []byte) ([]agyModelGroup, bool) {
+	var in []storedAgyGroup
+	if err := json.Unmarshal(raw, &in); err != nil || len(in) == 0 {
+		return nil, false
+	}
+	out := make([]agyModelGroup, 0, len(in))
+	for _, g := range in {
+		vs := make([]agyModelVariant, 0, len(g.Variants))
+		for _, v := range g.Variants {
+			vs = append(vs, agyModelVariant{id: v.ID, display: v.Display, effort: v.Effort})
+		}
+		out = append(out, agyModelGroup{baseID: g.BaseID, display: g.Display, variants: vs})
+	}
+	return out, true
+}
 
 func agySettingsTurn(ctx context.Context, key int64) (func(), bool) {
 	agySettingsMu.Lock()
@@ -381,30 +457,135 @@ func agySettingsTurn(ctx context.Context, key int64) (func(), bool) {
 	}
 }
 
-func fetchAgyModels(ctx context.Context, sess *term.Session, fresh bool) ([]agyModelGroup, error) {
-	key := sess.HostID
-	if !fresh {
-		agyModelsCacheMu.Lock()
-		ent, ok := agyModelsCache[key]
-		agyModelsCacheMu.Unlock()
-		if ok && time.Since(ent.at) < agyModelCacheTTL && len(ent.groups) > 0 {
-			return ent.groups, nil
-		}
+func (s *Server) agyCachedModels(ctx context.Context, hostID int64) ([]agyModelGroup, time.Time, bool) {
+	agyModelsCacheMu.Lock()
+	ent, ok := agyModelsCache[hostID]
+	agyModelsCacheMu.Unlock()
+	if ok && time.Since(ent.at) < agyModelCacheTTL && len(ent.groups) > 0 {
+		return ent.groups, ent.at, true
 	}
-	mctx, cancel := context.WithTimeout(ctx, 15*time.Second)
-	defer cancel()
-	out, err := sshx.Output(mctx, sess.Client(), agyModelsCommand, 128<<10)
-	if err != nil {
-		return nil, err
+	if s.store == nil {
+		return nil, time.Time{}, false
 	}
-	groups := parseAgyModels(string(out))
-	if len(groups) == 0 {
-		return nil, errors.New("agy models returned no models")
+	atUnix, raw, found, err := s.store.ModelList(ctx, agyModelStoreKey(hostID))
+	if err != nil || !found {
+		return nil, time.Time{}, false
+	}
+	at := time.Unix(atUnix, 0)
+	if time.Since(at) >= agyModelCacheTTL {
+		return nil, time.Time{}, false
+	}
+	groups, ok := unmarshalAgyGroups(raw)
+	if !ok {
+		return nil, time.Time{}, false
 	}
 	agyModelsCacheMu.Lock()
-	agyModelsCache[key] = agyModelCacheEntry{groups: groups, at: time.Now()}
+	if cur, exists := agyModelsCache[hostID]; !exists || cur.at.Before(at) {
+		agyModelsCache[hostID] = agyModelCacheEntry{groups: groups, at: at}
+	}
 	agyModelsCacheMu.Unlock()
-	return groups, nil
+	return groups, at, true
+}
+
+func (s *Server) fetchAgyModels(ctx context.Context, sess *term.Session, fresh bool) ([]agyModelGroup, error) {
+	key := sess.HostID
+	if !fresh {
+		if groups, _, ok := s.agyCachedModels(ctx, key); ok {
+			return groups, nil
+		}
+	}
+	// Singleflight per host so warm-up and concurrent UI opens share one `agy models` call.
+	agyModelsCacheMu.Lock()
+	if call, ok := agyModelsFlight[key]; ok {
+		agyModelsCacheMu.Unlock()
+		select {
+		case <-call.done:
+			return call.groups, call.err
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	call := &agyModelFlightCall{done: make(chan struct{})}
+	agyModelsFlight[key] = call
+	agyModelsCacheMu.Unlock()
+
+	go func() {
+		defer func() {
+			agyModelsCacheMu.Lock()
+			if agyModelsFlight[key] == call {
+				delete(agyModelsFlight, key)
+			}
+			agyModelsCacheMu.Unlock()
+			close(call.done)
+		}()
+		mctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+		out, err := sshx.Output(mctx, sess.Client(), agyModelsCommand, 128<<10)
+		if err != nil {
+			call.err = err
+			return
+		}
+		groups := parseAgyModels(string(out))
+		if len(groups) == 0 {
+			call.err = errors.New("agy models returned no models")
+			return
+		}
+		now := time.Now()
+		agyModelsCacheMu.Lock()
+		agyModelsCache[key] = agyModelCacheEntry{groups: groups, at: now}
+		agyModelsCacheMu.Unlock()
+		if s.store != nil {
+			if raw, merr := marshalAgyGroups(groups); merr == nil {
+				_ = s.store.PutModelList(context.Background(), agyModelStoreKey(key), now.Unix(), raw)
+			}
+		}
+		call.groups = groups
+	}()
+
+	select {
+	case <-call.done:
+		return call.groups, call.err
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+// warmAgyModels refreshes the host's Antigravity model list in the background
+// when missing or older than agyModelRefreshAfter, so opening the model picker
+// is instant even right after a gateway restart.
+func (s *Server) warmAgyModels(sess *term.Session) {
+	if sess == nil || sess.Client() == nil {
+		return
+	}
+	if _, at, ok := s.agyCachedModels(context.Background(), sess.HostID); ok && time.Since(at) < agyModelRefreshAfter {
+		return
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+		_, _ = s.fetchAgyModels(ctx, sess, true)
+	}()
+}
+
+// keptAgyModels serves cached Antigravity models immediately without any SSH
+// round-trip (neither locateScan nor `agy models`), mirroring Claude Code's
+// keptModelsOf. If the cached list is older than agyModelRefreshAfter, a
+// background stale-while-revalidate refresh is kicked off.
+func (s *Server) keptAgyModels(w http.ResponseWriter, ctx context.Context, sess *term.Session, pane string, pid, start int64, sid string, outcome, reason *string) bool {
+	if !isAgyModelFront(modelFrontKey(sess.ID, pane, pid, start, sid)) && !s.isAgyHerdrPane(sess.ID, pane) {
+		return false
+	}
+	groups, at, ok := s.agyCachedModels(ctx, sess.HostID)
+	if !ok {
+		return false
+	}
+	opts := agyModelOpts(groups, "")
+	*outcome, *reason = "kept", "list_kept"
+	writeJSON(w, http.StatusOK, map[string]any{"models": opts, "kept": true})
+	if time.Since(at) >= agyModelRefreshAfter {
+		s.warmAgyModels(sess)
+	}
+	return true
 }
 
 func readAgySettings(ctx context.Context, sess *term.Session) (doc []byte, none bool, err error) {
@@ -421,23 +602,40 @@ func readAgySettings(ctx context.Context, sess *term.Session) (doc []byte, none 
 	return out, false, nil
 }
 
-// convoAgyModels handles POST /conversation/models for agy: runs `agy models`
-// (without touching the TUI) and reads the live status bar to mark the current
-// model and effort.
-func (s *Server) convoAgyModels(w http.ResponseWriter, ctx context.Context, sess *term.Session, pane, socket string, outcome, reason *string, release func()) {
+// convoAgyModels handles POST /conversation/models for agy on a cold cache:
+// runs `agy models` (cached per host with singleflight) and reads the live
+// status bar in parallel to mark the current model and effort.
+func (s *Server) convoAgyModels(w http.ResponseWriter, ctx context.Context, sess *term.Session, pane, socket string, pid, start int64, sid string, outcome, reason *string, release func()) {
 	defer release()
-	groups, err := fetchAgyModels(ctx, sess, true)
+	noteAgyModelFront(modelFrontKey(sess.ID, pane, pid, start, sid), time.Now())
+
+	var (
+		groups     []agyModelGroup
+		err        error
+		liveModel  string
+		liveEffort string
+		wg         sync.WaitGroup
+	)
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		groups, err = s.fetchAgyModels(ctx, sess, false)
+	}()
+	go func() {
+		defer wg.Done()
+		sctx, scancel := context.WithTimeout(ctx, 8*time.Second)
+		defer scancel()
+		scr, serr := sshx.Output(sctx, sess.Client(), agyScreenCommand(sess.Persistence, pane, socket), 512<<10)
+		if serr == nil {
+			liveModel, liveEffort = agyStatusModelEffort(string(scr))
+		}
+	}()
+	wg.Wait()
+
 	if err != nil {
 		*reason = "models_failed"
 		writeError(w, http.StatusBadGateway, "models_failed", "could not list Antigravity models")
 		return
-	}
-	var liveModel, liveEffort string
-	sctx, scancel := context.WithTimeout(ctx, 8*time.Second)
-	scr, serr := sshx.Output(sctx, sess.Client(), agyScreenCommand(sess.Persistence, pane, socket), 512<<10)
-	scancel()
-	if serr == nil {
-		liveModel, liveEffort = agyStatusModelEffort(string(scr))
 	}
 	opts := agyModelOpts(groups, liveModel)
 	*outcome = "read"
@@ -461,7 +659,7 @@ func (s *Server) convoAgyModel(w http.ResponseWriter, ctx context.Context, sess 
 	}
 	defer func() { doneLock(); release() }()
 
-	groups, err := fetchAgyModels(ctx, sess, false)
+	groups, err := s.fetchAgyModels(ctx, sess, false)
 	if err != nil {
 		*reason = "models_failed"
 		writeError(w, http.StatusBadGateway, "models_failed", "could not list Antigravity models")
