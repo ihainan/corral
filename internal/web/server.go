@@ -61,6 +61,7 @@ type Server struct {
 	static   fs.FS
 
 	herdrSocks       herdrSockets
+	paneAttaches     paneAttachSlots  // active single-pane PTY attaches per SSH client/terminal (api_pane_ws.go)
 	gitCalls         gitCalls         // the session card's git state, per folder (git_info.go)
 	codexPanes       codexPaneLooks   // what each herdr server's Codex panes run, looked at shortly (codex_panes.go)
 	codexThreadLooks sync.Map         // session id → a look begun for cmdSession (herdr_bgcmd.go)
@@ -245,6 +246,7 @@ func (s *Server) registerRoutes() {
 	s.handle("POST /api/sessions", SignedIn, s.apiOpenSession)
 	s.handle("DELETE /api/sessions/{id}", SignedIn, s.apiCloseSession)
 	s.handle("GET /api/sessions/{id}/ws", SignedIn, s.apiSessionSocket)
+	s.handle("GET /api/sessions/{id}/pane-ws", SignedIn, s.apiPaneSocket)
 	s.handle("PUT /api/sessions/{id}/preview", SignedIn, s.apiPutPreview)
 	s.handle("GET /api/sessions/{id}/preview", SignedIn, s.apiGetPreview)
 	s.handle("POST /api/sessions/{id}/upload", SignedIn, s.apiUpload)

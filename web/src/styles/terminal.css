@@ -2124,6 +2124,13 @@ button.convo-queue-row.is-note:last-child { border-radius: 0 0 var(--r-lg) var(-
 .convo-panelwin-view .convo-panelwin-screen::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.28); border-radius: 6px; border: 2px solid var(--panel-bg); }
 .convo-panelwin-view .convo-panelwin-screen::-webkit-scrollbar-track, .convo-panelwin-view .convo-panelwin-screen::-webkit-scrollbar-corner { background: var(--panel-bg); }
 .convo-panelwin-stat { flex: 1 1 8em; min-width: 0; align-self: center; color: var(--term-fg-2); font-size: 12px; line-height: 1.35; }
+.convo-pty-wrap { position: relative; flex: 1 1 auto; min-height: 220px; height: min(40dvh, 360px); padding: 6px 8px; background: var(--panel-bg); overflow: hidden; display: flex; flex-direction: column; }
+.convo-dock .composer > .convo-panelwin .convo-pty-wrap { height: min(36dvh, 320px); }
+.convo-tray .convo-panelwin .convo-pty-wrap { height: auto; min-height: 0; flex: 1; }
+.convo-pty-term { flex: 1; min-height: 0; overflow: hidden; }
+.convo-pty-term .xterm { height: 100%; }
+.convo-pty-term .xterm-viewport { overscroll-behavior: contain; }
+.convo-pty-bar { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 12px; background: var(--term-chrome); border-top: 1px solid var(--term-line); font-size: var(--fs-note); line-height: var(--lh-note); color: var(--term-fg-2); }
 .convo-panelwin-stat.is-bad { color: var(--term-warn-text); }
 .convo-panelwin-statline { padding-top: 0; padding-bottom: 0; }
 .convo-panelwin-statline:has(.convo-panelwin-stat:empty) { height: 0; overflow: hidden; }

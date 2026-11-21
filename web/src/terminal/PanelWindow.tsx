@@ -4,6 +4,7 @@ import { t, type I18nKey } from '../i18n'
 import { isCoarse } from '../components/ui'
 import { ansiLines, type AnsiRun } from './ansi'
 import { readNoticeDialog, type NoticeAction } from './noticeDialog'
+import { PaneTerminal } from './PaneTerminal'
 
 // A panel of Claude Code's own (/rewind, /resume, /mcp, /config…), which it
 // draws on its screen and tells its log nothing of till it is shut: the
@@ -94,7 +95,13 @@ export function PanelWindow({ sid, active, press, onSettled, toast, live, onFull
   const [noticeDismissed, setNoticeDismissed] = useState(false)
   const [lost, setLost] = useState(false)
   const [said, setSaid] = useState('')
+  const [ptyFailed, setPtyFailed] = useState(false)
   const allowNotice = !live || !!live.canNotice
+  const needNoticeCheck = !!live?.canNotice
+  const paneId = String(press().pane ?? '')
+  useEffect(() => {
+    setPtyFailed(false)
+  }, [sid, paneId])
   const fullAction = live?.onFull ?? onFull
   // What became of the last key, said by the keys (a key sent said for a moment;
   // one not sent, or not taken, till the next) — set only when it changes, so
@@ -253,8 +260,17 @@ export function PanelWindow({ sid, active, press, onSettled, toast, live, onFull
     [pump, sayKey],
   )
 
-  // Read over and over while it is open and seen; the focus on it for its keys.
+  const lines = useMemo(() => ansiLines(screen.text), [screen.text])
+  const notice = useMemo(
+    () => (allowNotice && loaded ? readNoticeDialog(lines.map((runs) => runs.map((r) => r.text).join(''))) : null),
+    [allowNotice, loaded, lines],
+  )
+  const usePty = !!paneId && !ptyFailed && (!needNoticeCheck || rawView || (loaded && !notice))
+
+  // Read over and over while it is open and seen; skipped whenever the live
+  // WebSocket PTY (PaneTerminal) is handling the terminal directly.
   useEffect(() => {
+    if (usePty) return
     const a = at.current
     a.alive = true
     let timer: ReturnType<typeof setTimeout>
@@ -270,13 +286,13 @@ export function PanelWindow({ sid, active, press, onSettled, toast, live, onFull
       a.look?.abort()
       clearTimeout(timer)
     }
-  }, [read])
+  }, [read, usePty])
   useEffect(() => {
     // (A panel opened on purpose takes the keys. The terminal shown by itself
     // does not: what is being typed in the box goes on going there, a key in
     // the terminal only once the person has gone to it.)
-    if (active && !isCoarse() && !isLive.current) box.current?.focus({ preventScroll: true })
-  }, [active, loaded, rawView])
+    if (active && !isCoarse() && !isLive.current && !usePty) box.current?.focus({ preventScroll: true })
+  }, [active, loaded, rawView, usePty])
 
   // Whether what is shown may be old: not read for STALE while it is looked at
   // and no key is going or waiting (the looks wait for those) — counted from
@@ -288,7 +304,7 @@ export function PanelWindow({ sid, active, press, onSettled, toast, live, onFull
   if (active && !wasActive.current) seenSince.current = Date.now() // (back in sight: from now, this very render)
   wasActive.current = active
   useEffect(() => {
-    if (!active) return
+    if (!active || usePty) return
     const back = () => {
       if (!document.hidden) {
         seenSince.current = Date.now()
@@ -301,18 +317,13 @@ export function PanelWindow({ sid, active, press, onSettled, toast, live, onFull
       document.removeEventListener('visibilitychange', back)
       clearInterval(i)
     }
-  }, [active])
+  }, [active, usePty])
   const busy = pumping || at.current.pumping || at.current.queue.length > 0
   if (busy) seenSince.current = Math.max(seenSince.current, Date.now()) // (a key going: counted again from when it has gone)
   const readAt = at.current.readAt
   const oldFor = readAt ? now - Math.max(readAt, seenSince.current) : 0
   const old = !!live && active && !lost && !busy && !!readAt && !document.hidden && oldFor > STALE ? Math.round((now - readAt) / 1000) : 0
 
-  const lines = useMemo(() => ansiLines(screen.text), [screen.text])
-  const notice = useMemo(
-    () => (allowNotice && loaded ? readNoticeDialog(lines.map((runs) => runs.map((r) => r.text).join(''))) : null),
-    [allowNotice, loaded, lines],
-  )
   hasNoticeNow.current = !!notice
   const noticeTitle = notice?.title ?? ''
   useEffect(() => {
@@ -349,6 +360,21 @@ export function PanelWindow({ sid, active, press, onSettled, toast, live, onFull
     const el = box.current
     if (el && pinned.current) el.scrollTop = el.scrollHeight
   }, [lines, loaded, rawView, noticeTitle])
+
+  if (usePty) {
+    return (
+      <PaneTerminal
+        sid={sid}
+        pane={paneId}
+        active={active}
+        live={live}
+        fullAction={fullAction}
+        backToCard={allowNotice && notice && rawView ? () => setRawView(false) : undefined}
+        onSettled={onSettled}
+        onFallback={() => setPtyFailed(true)}
+      />
+    )
+  }
 
   if (allowNotice && noticeDismissed && !notice) {
     return (

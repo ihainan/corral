@@ -327,6 +327,7 @@ func TestRemoteExecCallSitesAreReviewed(t *testing.T) {
 		"term/manager.go: err = sess.Start(TmuxAttachCommand(opt.TmuxSession))":                           true, // fixed script, the validated session name quoted; attaches only (no new session, no shell)
 		"term/manager.go: err = sess.Start(HerdrAttachCommand(opt.HerdrSession))":                         true, // fixed script, the validated session name quoted; no shell where herdr is missing
 		"web/api_sessions.go: sess, err := s.terms.Start(ctx, res, u.ID, h.ID, h.Name, client, opts)":     true,
+		"web/api_pane_ws.go: err = sshSess.Start(herdrTerminalAttachCommand(socket, hp.TerminalID))":      true, // fixed script, discovered herdr socket and validated terminal_id (herdrTermID) quoted; direct single-pane attach only
 		"web/restore.go: sess, err := s.terms.Start(ctx, res, t.OwnerID, t.HostID, h.Name, client, opts)": true, // attach only; the recorded name checked as an open's
 		"herdr/client.go: out, err := sshx.Output(ctx, c, DiscoverCommand, sshx.MaxOutput)":               true,
 		"herdr/keys.go: out, err := sshx.Output(ctx, c, KeysCommand, keysLimit)":                          true, // fixed text, no input
