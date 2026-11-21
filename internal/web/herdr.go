@@ -321,6 +321,9 @@ func summarize(session string, s *herdr.Snapshot, times *agentTimes, old bool) h
 			// bare title, not the state shown as one.)
 			thread, bare = "", true
 		}
+		if !bare && agyTitleBare(p.Agent, p.Title, p.Cwd) {
+			bare = true
+		}
 		out.Workspaces[i].Agents = append(out.Workspaces[i].Agents,
 			herdrAgent{ThreadTitle: truncate(thread, 120), BareTitle: bare, PaneID: p.ID, Agent: p.Agent, Status: p.AgentStatus, Title: truncate(p.Title, 120), Cwd: p.Cwd, Session: agentSession(p), Since: paneSince(p, times, old),
 				Tab: p.TabID, TabLabel: truncate(tabs[p.TabID], 120), Tabs: tabCount[p.WorkspaceID], Label: truncate(named[p.ID], 120), Mark: statusMark(p)})
@@ -728,6 +731,8 @@ func (s *Server) watchHerdr(sess *term.Session, h *store.Host) {
 		return codexNames(panes), nil
 	})
 	go titles.run(ctx)
+	agyTitles := s.newServerAgyTitler(sess, socket)
+	go agyTitles.run(ctx)
 	// When each agent last wrote to its log: what the panes the gateway
 	// never saw change are shown by (see paneSince). Looked for beside the
 	// watch, only while a pane needs it, and at most once a minute: a slow
@@ -808,6 +813,7 @@ func (s *Server) watchHerdr(sess *term.Session, h *store.Host) {
 		cmds.decorate(&told)
 		chimes.decorate(&told)
 		titles.decorate(&told)
+		agyTitles.decorate(&told)
 		if b, err := json.Marshal(told); err == nil {
 			sess.PublishMeta(b)
 		}
@@ -845,6 +851,7 @@ func (s *Server) watchHerdr(sess *term.Session, h *store.Host) {
 			sum := summarize(name, snap, times, false)
 			rounds.number(&sum, false)
 			titles.track(&sum)
+			agyTitles.track(&sum)
 			for _, w := range sum.Workspaces {
 				for _, a := range w.Agents {
 					sid := s.bgSession(sess, a.PaneID, a.Session)
@@ -867,6 +874,9 @@ func (s *Server) watchHerdr(sess *term.Session, h *store.Host) {
 			sid := s.bgSession(sess, tr.Pane.ID, r.session)
 			bg.consider(tr.Pane.ID, tr.Pane.Agent, tr.To, sid, r.n)
 			cmds.consider(tr.Pane.ID, tr.Pane.Agent, tr.To, s.cmdSession(sess, tr.Pane.ID, tr.Pane.Agent, tr.Pane.Title, sid))
+			if isAgyAgent(tr.Pane.Agent) && (tr.To == herdr.StatusWorking || tr.To == herdr.StatusDone || tr.To == herdr.StatusIdle) {
+				agyTitles.nudge(tr.Pane.ID)
+			}
 			s.onAgentTransition(sess, h, tr)
 		},
 	)
@@ -887,6 +897,7 @@ func (s *Server) watchHerdr(sess *term.Session, h *store.Host) {
 	cmds.setPoke(again)
 	chimes.setPoke(again)
 	titles.setPoke(again)
+	agyTitles.setPoke(again)
 	// Subagents found back by the prober's own look, the turn's end that
 	// would have told it not seen (two changes in one snapshot): the
 	// "finished" held back goes, as for a turn ending now, if it is done

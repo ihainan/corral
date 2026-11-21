@@ -963,7 +963,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
     // (A Codex's: its thread's name, as the gateway has it, before its log's
     // first message, which a session imported or compacted begins with what
     // is no name.)
-    const title = (isCodex(row.a.agent) && row.a.thread_title) || (convo.bind?.pane === row.a.pane_id && convoTitle) || paneName(row.a) || dirName(row.a.cwd)
+    const title = ((isCodex(row.a.agent) || isAgy(row.a.agent)) && row.a.thread_title) || (convo.bind?.pane === row.a.pane_id && convoTitle) || paneName(row.a) || dirName(row.a.cwd)
     // (herdr's name for a workspace at home, "~": nothing to tell)
     // (Its turn over, with subagents out or that being read for: the thread
     // is of a turn that ended, whatever the list says of the agent.)
@@ -1174,7 +1174,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       }
       if (e.row) {
         const r = e.row
-        const named = (isCodex(r.a.agent) && r.a.thread_title) || (current && convo.bind?.pane === r.a.pane_id && convoTitle) || keptTitle(titles, e) || paneName(r.a)
+        const named = ((isCodex(r.a.agent) || isAgy(r.a.agent)) && r.a.thread_title) || (current && convo.bind?.pane === r.a.pane_id && convoTitle) || keptTitle(titles, e) || paneName(r.a)
         const said = named || dirName(r.a.cwd) || r.a.agent
         const st = current && agent && !r.bg ? agent.status : r.status
         return { key: e.key, ...labelOf(e, said, hosts, !!named), now: r.lost || r.bg || st !== 'blocked' ? undefined : glanceOf(e.s.id, e.pane, st, r.a.since) || undefined /* (said only of one waiting on the person) */, program: r.a.agent, status: st, bg: r.lost ? undefined : r.bg, cmds: cmdsOf(r), since: r.lost ? undefined : r.bg ? r.a.bg_since : r.a.since, current, pinned: pinAt(e.key), onPick: () => onPick(e), menu: () => rowMenu.current(e) }
@@ -2951,7 +2951,7 @@ function PhoneList({ entries, all, titles, query, onQuery, onPick }: { entries: 
     return entries.map((e): ConvoListRow => {
       if (e.row) {
         const r = e.row
-        const named = (isCodex(r.a.agent) && r.a.thread_title) || keptTitle(titles, e) || paneName(r.a)
+        const named = ((isCodex(r.a.agent) || isAgy(r.a.agent)) && r.a.thread_title) || keptTitle(titles, e) || paneName(r.a)
         const said = named || dirName(r.a.cwd) || r.a.agent
         return { key: e.key, ...labelOf(e, said, hosts, !!named), now: r.lost || r.bg || r.status !== 'blocked' ? undefined : glanceOf(e.s.id, e.pane, r.status, r.a.since) || undefined, program: r.a.agent, status: r.status, bg: r.lost ? undefined : r.bg, cmds: cmdsOf(r), since: r.lost ? undefined : r.bg ? r.a.bg_since : r.a.since, current: false, pinned: pinAt(e.key), onPick: () => onPick(e) }
       }

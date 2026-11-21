@@ -280,21 +280,25 @@ func (s *Server) translateHTTP() *http.Client {
 }
 
 func (s *Server) callTranslateLLM(ctx context.Context, baseURL, model, apiKey, targetLang, text string) (string, error) {
-	out, retryNoReasoning, err := s.callTranslateLLMOnce(ctx, baseURL, model, apiKey, targetLang, text, true)
+	return s.callChatLLM(ctx, baseURL, model, apiKey, translateSystemPrompt(targetLang), text, 0.1)
+}
+
+func (s *Server) callChatLLM(ctx context.Context, baseURL, model, apiKey, systemPrompt, text string, temperature float64) (string, error) {
+	out, retryNoReasoning, err := s.callChatLLMOnce(ctx, baseURL, model, apiKey, systemPrompt, text, temperature, true)
 	if err != nil && retryNoReasoning {
-		out, _, err = s.callTranslateLLMOnce(ctx, baseURL, model, apiKey, targetLang, text, false)
+		out, _, err = s.callChatLLMOnce(ctx, baseURL, model, apiKey, systemPrompt, text, temperature, false)
 	}
 	return out, err
 }
 
-func (s *Server) callTranslateLLMOnce(ctx context.Context, baseURL, model, apiKey, targetLang, text string, withReasoningOff bool) (string, bool, error) {
+func (s *Server) callChatLLMOnce(ctx context.Context, baseURL, model, apiKey, systemPrompt, text string, temperature float64, withReasoningOff bool) (string, bool, error) {
 	payload := map[string]any{
 		"model": model,
 		"messages": []map[string]string{
-			{"role": "system", "content": translateSystemPrompt(targetLang)},
+			{"role": "system", "content": systemPrompt},
 			{"role": "user", "content": text},
 		},
-		"temperature": 0.1,
+		"temperature": temperature,
 	}
 	if withReasoningOff {
 		payload["reasoning_effort"] = "none"

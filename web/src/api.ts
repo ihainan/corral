@@ -341,8 +341,8 @@ export interface HerdrAgent {
   // How many times it finished, came to need the person, as the gateway counts (the page's sound).
   chime_done?: number
   chime_needs?: number
-  // A Codex's: its title names only the folder it runs in (bare_title); its thread's name, out of its title or,
-  // the title bare, as Codex's database has it (thread_title).
+  // A Codex's or Antigravity CLI's: its title names only the folder/command it runs (bare_title);
+  // its thread/session subtitle as resolved by the gateway (thread_title).
   thread_title?: string
   bare_title?: boolean
 }

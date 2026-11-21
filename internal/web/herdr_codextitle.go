@@ -145,7 +145,7 @@ func (c *codexTitler) track(sum *herdrSummary) {
 	want := map[string]bool{}
 	for _, w := range sum.Workspaces {
 		for _, a := range w.Agents {
-			if a.BareTitle {
+			if a.BareTitle && isCodexAgent(a.Agent) {
 				want[a.PaneID] = true
 				if !c.want[a.PaneID] {
 					c.soon = true
@@ -175,7 +175,7 @@ func (c *codexTitler) decorate(sum *herdrSummary) {
 	for i := range sum.Workspaces {
 		for j := range sum.Workspaces[i].Agents {
 			a := &sum.Workspaces[i].Agents[j]
-			if a.BareTitle && a.ThreadTitle == "" {
+			if a.BareTitle && isCodexAgent(a.Agent) && a.ThreadTitle == "" {
 				a.ThreadTitle = c.found[a.PaneID]
 			}
 		}
