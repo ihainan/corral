@@ -8,7 +8,7 @@
 // (ordinary output), or one followed by anything else (a new question), is
 // no menu.
 const menuLine = /^[\s│|]*([❯›>▶→●◉])?\s*([1-9])[.)]\s+(\S.*?)\s*[│|]?\s*$/
-const hintLine = /^[\s│|╭╮╰╯─━┌┐└┘]*$|\b(esc|cancel|confirm|navigate)\b/i
+const hintLine = /^[\s│|╭╮╰╯─━┌┐└┘]*$|\b(esc|cancel|confirm|navigate)\b|^\s*(?:auto|plan|accept-edits)\s*·/i
 const maxLabel = 120
 const maxCodexLabel = 400 // (Codex's: its command's prefix in it, read to the end to be said in Chinese)
 
@@ -224,7 +224,9 @@ export const dashedRule = /^[\s╌┄┈]*[╌┄┈]{8,}[\s╌┄┈]*$/
 // The heads Claude Code puts on its permission prompts (any other line after
 // a rule may be a command's own).
 const promptHead = /^(?:Bash command|Edit file|Create file|Write file|Overwrite file|Read file|Edit notebook|Fetch|Web fetch|Web search|Requesting permission for:?)$/i
-export function promptBlock(text: string): { head: string; lines: string[] } | null {
+const agyReqHead = /^Requesting permission for:?$/i
+const agyReasonHead = /^(?:Reason|Safety check|Warning):/i
+export function promptBlock(text: string): { head: string; lines: string[]; reason?: string } | null {
   const lines = text.split('\n')
   const { top } = menuAt(lines)
   if (top < 0) return null
@@ -238,10 +240,41 @@ export function promptBlock(text: string): { head: string; lines: string[] } | n
       break
     }
   }
+  // (Antigravity CLI's permission prompt may have its top rule scrolled off the
+  // viewport — or escalated by Auto mode with a "Reason: ..." block right above
+  // "Requesting permission for:". Anchor on that line when no rule is above q.)
+  if (start < 0) {
+    for (let i = q - 1; i >= 0 && q - i <= 40; i--) {
+      if (agyReqHead.test(lines[i].trim())) {
+        start = i
+        // Include a contiguous Reason: block directly above "Requesting permission for:".
+        for (let r = i - 1; r >= 0 && i - r <= 12; r--) {
+          if (!lines[r].trim()) break
+          if (agyReasonHead.test(lines[r].trim())) {
+            start = r
+            break
+          }
+        }
+        break
+      }
+    }
+  }
   if (start < 0) return null
   let body = lines.slice(start, q).map((l) => l.replace(/\s+$/, ''))
   while (body.length && !body[0].trim()) body.shift()
   while (body.length && !body[body.length - 1].trim()) body.pop()
+  let reason = ''
+  if (body.length >= 3 && agyReasonHead.test(body[0].trim())) {
+    const reqIdx = body.findIndex((l, i) => i > 0 && i <= 12 && agyReqHead.test(l.trim()))
+    if (reqIdx > 0) {
+      reason = body
+        .slice(0, reqIdx)
+        .map((l) => l.trim())
+        .filter(Boolean)
+        .join(' ')
+      body = body.slice(reqIdx)
+    }
+  }
   if (body.length < 2 || !promptHead.test(body[0].trim())) return null
   const firstRule = body.findIndex((l) => dashedRule.test(l))
   let lastRule = -1
@@ -250,7 +283,7 @@ export function promptBlock(text: string): { head: string; lines: string[] } | n
   const words = body.filter((l) => l.trim() && !dashedRule.test(l))
   const indent = Math.min(...words.map((l) => /^ */.exec(l)![0].length))
   body = body.map((l) => (dashedRule.test(l) ? l.trim() : l.slice(indent)))
-  return { head: body[0].trim(), lines: body.slice(1) }
+  return { head: body[0].trim(), lines: body.slice(1), ...(reason ? { reason } : {}) }
 }
 
 // What Codex (0.164) asks over the menu at the end of the screen: a command

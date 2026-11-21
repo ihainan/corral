@@ -4070,6 +4070,34 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 	defer func() { turn() }()
 
 	socket := s.herdrSocks.get(sess.ID)
+	// Fast path for herdr inline PanelWindow (panel_screen and live panel keys):
+	// talk directly over herdr's Unix socket (~1ms) instead of spawning a full-host
+	// /proc scan + serial SSH shells (~1500ms) on every poll and keypress.
+	if sess.Persistence == "herdr" && socket != "" && (what == "panel_screen" || (what == "panel" && b.Live)) {
+		hp, hasPane := s.herdrSocks.paneOf(sess.ID, b.Pane)
+		agyPane := hasPane && isAgyAgent(hp.Agent)
+		codexPane := hasPane && isCodexAgent(hp.Agent)
+		if what == "panel_screen" {
+			release := turn
+			turn = func() {}
+			if s.convoHerdrPanelScreen(w, ctx, sess, b.Pane, socket, agyPane, &outcome, &reason, release) {
+				return
+			}
+			turn = release
+		} else {
+			if codexPane && panelLetter.MatchString(b.Keys[0]) && !hexDigest.MatchString(b.Digest) {
+				reason = "bad_request"
+				writeError(w, http.StatusBadRequest, "bad_request", "a key to Codex's terminal goes with the screen it was pressed on")
+				return
+			}
+			release := turn
+			turn = func() {}
+			if s.convoHerdrPanelKey(w, ctx, sess, b.Pane, socket, agyPane, codexPane, b.Keys[0], b.Digest, &outcome, &reason, release) {
+				return
+			}
+			turn = release
+		}
+	}
 	// (A message or a stop to a herdr pane's Codex: its process and thread
 	// told by a short look begun now (codexFront), not a scan of every
 	// process on the host — seconds a press. Where that look does not tell
@@ -4610,7 +4638,11 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 		// held till this one ends anyway.)
 		out := map[string]any{"ok": true}
 		sctx, scancel := context.WithTimeout(ctx, 10*time.Second)
-		if r2, err := sshx.Exec(sctx, sess.Client(), convoColorScreenCommand(sess.Persistence, b.Pane, socket), 512<<10, sshx.ExecOptions{}); err == nil {
+		pcmd := convoColorScreenCommand(sess.Persistence, b.Pane, socket)
+		if front.agent == "agy" {
+			pcmd = agyColorScreenCommand(sess.Persistence, b.Pane, socket)
+		}
+		if r2, err := sshx.Exec(sctx, sess.Client(), pcmd, 512<<10, sshx.ExecOptions{}); err == nil {
 			text, _, _ := screenOf(r2.Out)
 			out["text"], out["digest"], out["look"] = text, panelDigest(r2.Out), lookDigest(r2.Out)
 		}

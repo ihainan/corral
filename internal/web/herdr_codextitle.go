@@ -78,6 +78,10 @@ func isCodexAgent(agent string) bool { return strings.Contains(strings.ToLower(a
 
 // isOpenCodeAgent: herdr says the pane runs OpenCode (as the page tells it: agents.ts isOpenCode).
 func isOpenCodeAgent(agent string) bool { return strings.Contains(strings.ToLower(agent), "opencode") }
+func isAgyAgent(agent string) bool {
+	a := strings.ToLower(strings.TrimSpace(agent))
+	return a == "agy" || strings.Contains(a, "antigravity")
+}
 
 // codexName: the name a thread is shown by, of what Codex's database has
 // of it — its name, else its title, else its first message: the first line

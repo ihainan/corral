@@ -1181,7 +1181,18 @@ func paneScreen(ctx context.Context, c *herdr.Client, pane string) (text, digest
 // paneScreenCut is paneScreen, and whether its start was cut (longer than
 // maxScreenBytes): then what is asked may not all be in it.
 func paneScreenCut(ctx context.Context, c *herdr.Client, pane string) (text, digest string, cut bool, err error) {
-	text, err = c.ReadPane(ctx, pane, 0)
+	return paneScreenCutFor(ctx, c, pane, false)
+}
+
+func paneScreenCutFor(ctx context.Context, c *herdr.Client, pane string, agy bool) (text, digest string, cut bool, err error) {
+	if agy {
+		text, err = c.ReadPaneSource(ctx, pane, "recent", 60)
+		if err != nil {
+			text, err = c.ReadPane(ctx, pane, 0)
+		}
+	} else {
+		text, err = c.ReadPane(ctx, pane, 0)
+	}
 	if err != nil {
 		return "", "", false, err
 	}
@@ -1267,7 +1278,9 @@ func (s *Server) apiHerdrScreen(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer c.Close()
-	text, digest, cut, err := paneScreenCut(ctx, c, pane)
+	hp, hasPane := s.herdrSocks.paneOf(sess.ID, pane)
+	agyPane := hasPane && isAgyAgent(hp.Agent)
+	text, digest, cut, err := paneScreenCutFor(ctx, c, pane, agyPane)
 	if err != nil {
 		writeHerdrError(w, err)
 		return
@@ -1469,7 +1482,9 @@ func (s *Server) replyToPane(w http.ResponseWriter, r *http.Request, sess *term.
 		return
 	}
 	defer typer.Close()
-	shown, shownDigest, shownCut, err := paneScreenCut(ctx, reader, pane)
+	hp, hasPane := s.herdrSocks.paneOf(sess.ID, pane)
+	agyPane := hasPane && isAgyAgent(hp.Agent)
+	shown, shownDigest, shownCut, err := paneScreenCutFor(ctx, reader, pane, agyPane)
 	reader.Close()
 	if err != nil {
 		writeHerdrError(w, err)

@@ -297,6 +297,24 @@ func (c *Client) ReadPaneSource(ctx context.Context, paneID, source string, line
 	return res.Read.Text, nil
 }
 
+// ReadPaneANSI returns the pane's text with ANSI colour escape sequences intact
+// (format: "ansi"), directly over the herdr Unix socket without spawning a shell.
+func (c *Client) ReadPaneANSI(ctx context.Context, paneID, source string, lines int) (string, error) {
+	var res struct {
+		Read struct {
+			Text string `json:"text"`
+		} `json:"read"`
+	}
+	params := map[string]any{"pane_id": paneID, "source": source, "format": "ansi"}
+	if lines > 0 {
+		params["lines"] = lines
+	}
+	if err := c.Call(ctx, "pane.read", params, &res); err != nil {
+		return "", err
+	}
+	return res.Read.Text, nil
+}
+
 func (c *Client) SendKeys(ctx context.Context, paneID string, keys []string) error {
 	return c.Call(ctx, "pane.send_keys", map[string]any{"pane_id": paneID, "keys": keys}, nil)
 }

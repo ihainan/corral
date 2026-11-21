@@ -17,6 +17,7 @@ import { readNoticeDialog, type NoticeAction } from './noticeDialog'
 // the last one having gone: the first may have shut it.
 
 const EVERY = 800
+const EVERY_LIVE = 350
 const ESC_AGAIN = 1000
 const QUEUE = 16
 const FAILS = 4
@@ -191,11 +192,13 @@ export function PanelWindow({ sid, active, press, onSettled, toast, live, onFull
           if (a.alive) setSaid('')
           if (a.alive) sayKey(t('panel.sent', { key: keyWord(k) }), false, true)
           if (a.alive && typeof r?.text === 'string' && typeof r.digest === 'string') {
+            const nextDigest = (isLive.current ? r.look : r.digest) ?? r.digest
             a.stale = false
             a.readAt = Date.now()
+            a.shown = nextDigest
             setLoaded(true)
             setLost(false)
-            setScreen({ text: r.text, digest: (isLive.current ? r.look : r.digest) ?? r.digest })
+            setScreen({ text: r.text, digest: nextDigest })
             if (fromNotice) {
               const nextPlain = ansiLines(r.text).map((runs) => runs.map((x) => x.text).join(''))
               if (!readNoticeDialog(nextPlain)) {
@@ -259,7 +262,7 @@ export function PanelWindow({ sid, active, press, onSettled, toast, live, onFull
       // (Not while a key is going or waiting: the host takes one at a time for a
       // pane, and a look under way would hold the key up behind it.)
       if (!document.hidden && activeNow.current && !a.pumping && !a.queue.length) await read()
-      if (a.alive) timer = setTimeout(tick, EVERY)
+      if (a.alive) timer = setTimeout(tick, isLive.current ? EVERY_LIVE : EVERY)
     }
     void tick()
     return () => {

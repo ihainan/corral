@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"time"
 
+	"github.com/ihainan/corral/internal/herdr"
 	"github.com/ihainan/corral/internal/sshx"
 	"github.com/ihainan/corral/internal/term"
 )
@@ -78,6 +79,101 @@ func (s *Server) convoPanelScreen(w http.ResponseWriter, ctx context.Context, se
 	digest := panelDigest(res.Out)
 	w.Header().Set("Cache-Control", "no-store")
 	writeJSON(w, http.StatusOK, map[string]any{"text": text, "digest": digest, "look": lookDigest(res.Out)})
+}
+
+// herdrReadPanelANSI reads the pane with ANSI colours directly over herdr's
+// Unix socket (~1ms on host, zero shell spawn). For agy, prefers "recent"
+// (last 60 lines) so scrolled-up panes still show the live prompt at the bottom.
+func herdrReadPanelANSI(ctx context.Context, c *herdr.Client, pane string, agy bool) ([]byte, error) {
+	if agy {
+		if text, err := c.ReadPaneANSI(ctx, pane, "recent", 60); err == nil {
+			return []byte(text), nil
+		}
+	}
+	text, err := c.ReadPaneANSI(ctx, pane, "visible", 0)
+	if err != nil {
+		return nil, err
+	}
+	return []byte(text), nil
+}
+
+// convoHerdrPanelScreen serves panel_screen directly over herdr's Unix socket,
+// avoiding the full-host /proc scan and SSH shell spawn on every poll.
+// Returns false when the socket cannot be reached so the caller can fall back.
+func (s *Server) convoHerdrPanelScreen(w http.ResponseWriter, ctx context.Context, sess *term.Session, pane, socket string, agy bool, outcome, reason *string, release func()) bool {
+	c, err := herdr.DialWait(ctx, sess.Client(), socket, 2*time.Second)
+	if err != nil {
+		return false
+	}
+	defer c.Close()
+	defer release()
+	raw, err := herdrReadPanelANSI(ctx, c, pane, agy)
+	if err != nil {
+		if ctx.Err() != nil {
+			*outcome, *reason = "unknown", "cancelled"
+			return true
+		}
+		*outcome, *reason = "unknown", "no_screen"
+		writeError(w, http.StatusBadGateway, "no_screen", "the pane's screen could not be read")
+		return true
+	}
+	*outcome = "looked"
+	text, _, _ := screenOf(raw)
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, http.StatusOK, map[string]any{"text": text, "digest": panelDigest(raw), "look": lookDigest(raw)})
+	return true
+}
+
+// convoHerdrPanelKey serves live PanelWindow keypresses directly over a single
+// herdr Unix socket connection: optional lookDigest check, send key, brief
+// repaint pause, and immediate ANSI screen read on the same connection.
+// Returns false if the socket cannot be reached so the caller can fall back.
+func (s *Server) convoHerdrPanelKey(w http.ResponseWriter, ctx context.Context, sess *term.Session, pane, socket string, agy, codex bool, key, digest string, outcome, reason *string, release func()) bool {
+	c, err := herdr.DialWait(ctx, sess.Client(), socket, 2*time.Second)
+	if err != nil {
+		return false
+	}
+	defer c.Close()
+	defer release()
+
+	needDigest := panelSettles(key) || (codex && panelLetter.MatchString(key))
+	if needDigest {
+		raw, err := herdrReadPanelANSI(ctx, c, pane, agy)
+		if err != nil {
+			*reason = "no_screen"
+			writeError(w, http.StatusBadGateway, "no_screen", "the pane's screen could not be read")
+			return true
+		}
+		if lookDigest(raw) != digest {
+			*outcome, *reason = "refused", "screen_changed"
+			writeError(w, http.StatusConflict, "screen_changed", "the screen changed; look again before answering")
+			return true
+		}
+	}
+	var serr error
+	if key == "shift+tab" {
+		serr = c.SendInput(ctx, pane, "\x1b[Z", nil)
+	} else {
+		serr = c.SendKeys(ctx, pane, []string{key})
+	}
+	if serr != nil {
+		*outcome, *reason = "refused", "send_failed"
+		writeError(w, http.StatusBadGateway, "send_failed", "could not send key to pane")
+		return true
+	}
+	*outcome = "typed"
+	// Brief pause so the TUI processes the key before reading the updated screen.
+	select {
+	case <-ctx.Done():
+	case <-time.After(60 * time.Millisecond):
+	}
+	out := map[string]any{"ok": true}
+	if raw, err := herdrReadPanelANSI(ctx, c, pane, agy); err == nil {
+		text, _, _ := screenOf(raw)
+		out["text"], out["digest"], out["look"] = text, panelDigest(raw), lookDigest(raw)
+	}
+	writeJSON(w, http.StatusOK, out)
+	return true
 }
 
 // panelDigest names a screen as read with its colours, without them: a cursor
