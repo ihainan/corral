@@ -401,9 +401,18 @@ html.kb-open .keybar { padding-bottom: 6px; }
 .term-tabs.dragging .term-tab:not(.held):hover:not([aria-current="page"]) { background: none; color: var(--term-fg-3); }
 .term-tab.held { position: relative; z-index: 1; color: var(--term-fg); box-shadow: 0 2px 8px rgb(0 0 0 / 0.28); }
 .term-tab.held:not([aria-current="page"]) { background: var(--term-hover); }
-/* The tab in front: as a pressed button of the bar is, so it stands apart in
-   every scheme (the key colour can be the bar's own in a light one). */
-.term-tab[aria-current="page"] { background: var(--term-key); color: var(--term-fg); } /* (by its ground, neutral: ux1101 T29, 11-05) */
+/* The tab in front: crisp surface pill with subtle hairline ring so it stands
+   out clearly in both light and dark themes; the Agents tab uses a soft accent
+   tint when active. */
+.term-tab[aria-current="page"] {
+  background: var(--term-bg); color: var(--term-fg); font-weight: 600;
+  box-shadow: inset 0 0 0 1px var(--term-line), 0 1px 2px rgb(0 0 0 / 0.06);
+}
+.term-tab-agents[aria-current="page"] {
+  background: var(--term-accent-soft); color: var(--term-accent-text);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--term-accent-text) 28%, var(--term-line));
+}
+.term-tab-agents[aria-current="page"]:hover { background: var(--term-accent-soft); color: var(--term-accent-text); }
 .term-tab-host { font-weight: 600; }
 .term-tab-which { color: var(--term-fg-3); }
 /* Recorded: red words, a plain dot before them — no ground, no halo (11-05). */
@@ -1227,6 +1236,31 @@ button.gch-ut:hover { background: var(--term-hover); }
 .convo-trouble {
   display: flex; align-items: flex-start; gap: 8px; margin: 6px 0; padding: 8px 10px; border-radius: var(--r-lg);
   background: color-mix(in srgb, var(--term-warn-text) 9%, var(--term-bg)); color: var(--term-fg-2); font-size: 13px; line-height: 19px;
+}
+/* Formatted upstream API error card (e.g. Bedrock/Anthropic 4xx/5xx responses). */
+.convo-api-err {
+  display: flex; flex-direction: column; gap: 8px; padding: 12px 14px; border-radius: var(--r-lg);
+  border: 1px solid color-mix(in srgb, var(--term-danger-text) 26%, var(--term-line));
+  background: color-mix(in srgb, var(--term-danger-text) 6%, var(--term-bg));
+  font-family: var(--font-ui);
+}
+.convo-api-err-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; font-size: var(--fs-sub); line-height: var(--lh-sub); color: var(--term-danger-text); font-weight: 600; }
+.convo-api-err-head svg { flex: none; }
+.convo-api-err-code { padding: 1px 6px; border-radius: var(--r-sm); background: color-mix(in srgb, var(--term-danger-text) 14%, transparent); font-family: var(--font-mono); font-size: var(--fs-note); line-height: var(--lh-note); font-weight: 600; }
+.convo-api-err-op { font-weight: 400; color: var(--term-fg-2); font-size: var(--fs-note); line-height: var(--lh-note); }
+.convo-api-err-msg { margin: 0; font-size: var(--fs-ui); line-height: var(--lh-ui); color: var(--term-fg); overflow-wrap: anywhere; }
+.convo-api-err-ids { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: var(--fs-note); line-height: var(--lh-note); color: var(--term-fg-3); }
+.convo-api-err-id {
+  max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  padding: 2px 6px; border: 1px solid var(--term-line); border-radius: var(--r-sm); background: var(--term-chrome);
+  color: var(--term-fg-2); font-family: var(--font-mono); font-size: var(--fs-note); line-height: var(--lh-note); cursor: pointer;
+}
+.convo-api-err-id:hover { background: var(--term-hover); color: var(--term-fg); }
+.convo-api-err-foot { display: flex; align-items: center; gap: 12px; }
+.convo-api-err-raw {
+  margin: 0; padding: 8px 10px; border-radius: var(--r-sm); background: var(--term-chrome); border: 1px solid var(--term-line);
+  font-family: var(--font-mono); font-size: var(--fs-note); line-height: var(--lh-note); color: var(--term-fg-2);
+  white-space: pre-wrap; overflow-wrap: anywhere; max-height: 200px; overflow-y: auto;
 }
 .convo-trouble svg { flex: none; margin-top: 2px; color: var(--term-warn-text); }
 .convo-event.is-scheduled { display: flex; gap: 8px; align-items: flex-start; margin: 0; font-size: var(--fs-sub); line-height: var(--lh-sub); color: var(--term-fg-2); }

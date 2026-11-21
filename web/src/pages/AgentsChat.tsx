@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState, type ReactNode } from 'react'
-import { ArrowDown, ArrowUp, ArrowUpToLine, ChevronLeft, Copy, FoldVertical, GitBranch, History, Languages, MessageSquarePlus, Paperclip, Pencil, Pin, PinOff, Power, Square, SquareSlash, SquareTerminal, TextCursorInput, Plus } from 'lucide-react'
+import { ArrowDown, ArrowUp, ArrowUpToLine, ChevronLeft, CircleStop, Code2, Copy, Eye, FoldVertical, GitBranch, Globe, History, Languages, MessageSquarePlus, Paperclip, Pencil, Pin, PinOff, Plus, Power, Square, SquareSlash, SquareTerminal, TextCursorInput } from 'lucide-react'
 import { api, ApiError, authGen, errorText, onAuthChange, uploadFile, type SessionInfo } from '../api'
+import { useSession } from '../app'
 import { t, type I18nKey } from '../i18n'
 import { navigate, onNavigate } from '../router'
 import { heldOpen, onHeldOpen, onOpenRequest, takeHeld } from '../notifyopen'
@@ -23,6 +24,9 @@ import { agentWho, ChimeCounter, chime, countsOf } from '../terminal/chime'
 import { AgentList, CODEX_EFFORTS, ConversationView, glanceOf, type ConvoAgent, type ConvoListRow, type ConvoPending, type ConvoWent, type FileActs, type ModelOpt } from '../terminal/Conversation'
 import { saveTranslateConfig, useTranslateConfig } from '../terminal/thoughtTranslate'
 import { FilesDialog } from '../terminal/FilesDialog'
+import { PortsDialog } from '../terminal/PortsDialog'
+import { ShareDialog } from '../terminal/ShareDialog'
+import { useCode } from '../terminal/CodeDialog'
 import { isLogPic, logPic, lookAt, PictureDialog, useDownload } from '../terminal/picture'
 import { IMAGE_EXT, TextPreview } from '../terminal/textPreview'
 import { attach, ATTACH_LABEL, AttachStrip, PICTURE_PATH, takeOut, type Going } from '../terminal/attach'
@@ -879,6 +883,15 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   composerEnter: string
 }) {
   const download = useDownload() // (a host file saved, and said so: picture.tsx)
+  const { boot } = useSession()
+  const [portsOpen, setPortsOpen] = useState(false)
+  const [shareOpen, setShareOpen] = useState(false)
+  const code = useCode()
+  const refreshCode = code.refresh
+  const codeHost = boot.code ? cur.s.host_id : undefined
+  useEffect(() => {
+    if (codeHost) refreshCode([codeHost])
+  }, [codeHost, refreshCode])
   const sid = cur.s.id
   const herdr = cur.s.persistence === 'herdr'
   const convo = useConversation(sid, active, cur.pane)
@@ -2652,6 +2665,10 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
     ((f) => f && { ...f, separator: false })(forkItem(cur)),
     renameItem(cur),
     { label: t(translateCfg?.enabled ? 'convo.translate.off' : 'convo.translate.on'), icon: <Languages size={16} />, onSelect: toggleTranslate },
+    boot.forwarding ? { label: t('ports.title'), icon: <Globe size={16} />, separator: true, onSelect: () => setPortsOpen(true) } : null,
+    boot.code ? { label: t('code.open'), icon: <Code2 size={16} />, separator: !boot.forwarding, onSelect: () => code.open(cur.s.host_id, cur.s.host_name) } : null,
+    boot.code && code.running[cur.s.host_id] ? { label: t('code.stop'), icon: <CircleStop size={16} />, onSelect: () => code.stop(cur.s.host_id) } : null,
+    { label: t('share.title'), icon: <Eye size={16} />, separator: !boot.forwarding && !boot.code, onSelect: () => setShareOpen(true) },
     ...opsOf.map((o, i): MenuItem | null =>
       bound ? { label: t(codex && o === 'clear' ? 'ops.clear.itemCodex' : `ops.${o}.item`), icon: OP_ICONS[o], separator: i === 0, group: i === 0 ? t('menu.group.convo') : undefined, disabled: !canOps, title: canOps ? undefined : t('ops.onlyIdle'), hint: canOps || i < opsOf.length - 1 ? undefined : t(opsOf.length > 1 ? 'ops.onlyIdleGroup' : 'ops.onlyIdle'), onSelect: () => convo.bind && setOp({ op: o, bind: convo.bind, key: bindKey }) } : null,
     ),
@@ -2873,6 +2890,9 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       />
     )}
     {renaming && <RenameDialog target={renaming} onClose={() => setRenaming(null)} />}
+    {portsOpen && active && <PortsDialog hostId={cur.s.host_id} onClose={() => setPortsOpen(false)} />}
+    {shareOpen && active && <ShareDialog sessionId={sid} onClose={() => setShareOpen(false)} />}
+    {code.dialog}
     {op && <SessionOpDialog op={op.op} name={convoTitle} codex={op.bind.agent === 'codex'} onSend={(text) => runOp(op.bind, text)} onClose={() => setOp(null)} onShowTerminal={openTerminal} />}
     {closing?.row && (
       <Confirm

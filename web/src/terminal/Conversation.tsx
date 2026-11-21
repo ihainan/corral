@@ -39,6 +39,7 @@ import { agentName } from './askText'
 import { duration, hhmm, when } from './convoTime'
 import { category, isNote, items, ms, partTime, sameEdits, toolName, verbOf, type Category, type Edits, type Item, type Verb } from './convoItems'
 import { useThoughtTranslation } from './thoughtTranslate'
+import { parseApiError, type ParsedApiError } from './apiError'
 
 // The conversation view: the agent's log as turns, over the terminal (which
 // stays mounted under it). Each turn is what the person wrote, then one line
@@ -526,8 +527,11 @@ export function ConversationView({
   useEffect(() => {
     if (!active) return
     const onKey = (e: KeyboardEvent) => {
-      // (In a field its own: a Mac's Ctrl+O opens a line there.)
-      if (!foldAllKey(e, mac) || editable(e.target) || underDialog(e) || subsNow.current) return
+      // Allow Ctrl+O inside the chat composer too (just like Claude Code CLI),
+      // while still leaving search inputs, dialogs, and embedded xterm untouched.
+      if (!foldAllKey(e, mac) || underDialog(e) || subsNow.current) return
+      const target = e.target as HTMLElement | null
+      if (editable(e.target) && !target?.closest('.composer-input')) return
       e.preventDefault()
       e.stopPropagation()
       if (e.repeat) return // (held: once)
@@ -1598,6 +1602,7 @@ export function ConversationView({
     }
   }, [onForkAt, atRest])
   return (
+    <OpenAllOf.Provider value={allOpen}>
     <ForkAtOf.Provider value={forkAt}>
     <FileActsOf.Provider value={files}>
     <CopyOf.Provider value={copy}>
@@ -2074,6 +2079,7 @@ export function ConversationView({
     </CopyOf.Provider>
     </FileActsOf.Provider>
     </ForkAtOf.Provider>
+    </OpenAllOf.Provider>
   )
 }
 
@@ -4657,6 +4663,7 @@ function PathCode({ path, lines, text, copy = text }: { path: string; lines?: Li
 const CopyOf = createContext<((s: string) => void) | undefined>(undefined)
 // (A copy of the conversation up to the end of one of the person's turns, where one can be started.)
 const ForkAtOf = createContext<{ go: (e: ConvoEntry) => void; can: (e: ConvoEntry) => boolean } | undefined>(undefined)
+const OpenAllOf = createContext(false)
 
 // A file a step acted on: its whole path, and what can be done with it.
 // (acts: only what can be done, the path being said beside it already.)
@@ -5285,13 +5292,49 @@ function MetaActs({ copy, fork }: { copy?: () => void; fork?: () => void }) {
 // The agent's answer: its text, what the turn changed, copy and when.
 const CARD_FILES = 6 // files listed on a turn's card; the rest in the panel
 
+function ApiErrorCard({ err, onCopy }: { err: ParsedApiError; onCopy: (s: string) => void }) {
+  const [showRaw, setShowRaw] = useState(false)
+  return (
+    <div className="convo-api-err" role="alert">
+      <div className="convo-api-err-head">
+        <TriangleAlert size={16} aria-hidden="true" />
+        <span>{t('convo.apiErr.title')}</span>
+        {err.status && <span className="convo-api-err-code">{err.status}</span>}
+        {err.operation && <span className="convo-api-err-op">{err.operation}</span>}
+      </div>
+      <p className="convo-api-err-msg">{err.headline}</p>
+      {err.requestIds.length > 0 && (
+        <div className="convo-api-err-ids">
+          <span>{t('convo.apiErr.reqIds')}:</span>
+          {err.requestIds.map((id) => (
+            <button key={id} type="button" className="convo-api-err-id" title={t('convo.apiErr.copyId')} onClick={() => onCopy(id)}>
+              {id}
+            </button>
+          ))}
+        </div>
+      )}
+      <div className="convo-api-err-foot">
+        <button type="button" className="link-btn" aria-expanded={showRaw} onClick={() => setShowRaw((v) => !v)}>
+          {t(showRaw ? 'convo.apiErr.hideRaw' : 'convo.apiErr.raw')}
+        </button>
+      </div>
+      {showRaw && <pre className="convo-api-err-raw">{err.raw}</pre>}
+    </div>
+  )
+}
+
 function Answer({ it, onCopy, onShow }: { it: Extract<Item, { kind: 'answer' }>; onCopy: (s: string) => void; onShow: (key: string, path?: string) => void }) {
+  const apiErr = useMemo(() => parseApiError(it.text), [it.text])
   return (
     <div className="convo-answer">
-      <div className="convo-md">
-        <Markdown text={it.text} onCopyCode={onCopy} copyLabel={t('common.copy')} />
-        {it.truncated && <p className="convo-cut">{t('convo.cut')}</p>}
-      </div>
+      {apiErr ? (
+        <ApiErrorCard err={apiErr} onCopy={onCopy} />
+      ) : (
+        <div className="convo-md">
+          <Markdown text={it.text} onCopyCode={onCopy} copyLabel={t('common.copy')} />
+          {it.truncated && <p className="convo-cut">{t('convo.cut')}</p>}
+        </div>
+      )}
       {it.edits && (
         <div className="convo-changes">
           <div className="convo-changes-head">
@@ -5652,7 +5695,12 @@ function liveText(tool: ConvoTool): string {
 }
 
 function Thinking({ text, live }: { text: string; live?: boolean }) {
-  const [open, setOpen] = useState(false)
+  const openAll = useContext(OpenAllOf)
+  const [manual, setManual] = useState<boolean | null>(null)
+  useEffect(() => {
+    setManual(null)
+  }, [openAll])
+  const open = manual ?? openAll
   const [showOrig, setShowOrig] = useState(false)
   const [el, setEl] = useState<HTMLDivElement | null>(null)
   const seen = useSeen(el)
@@ -5665,7 +5713,7 @@ function Thinking({ text, live }: { text: string; live?: boolean }) {
     <div ref={setEl} className="convo-step is-thought">
       {/* (The mark stands for "thinking": said to a reader by the button's name, not
           by words of its own in the line — copied, or read as its text, the line is its title.) */}
-      <button type="button" className="convo-step-head" aria-expanded={open} aria-label={title ? `${t('convo.thinking')}: ${title}` : undefined} onClick={() => setOpen(!open)}>
+      <button type="button" className="convo-step-head" aria-expanded={open} aria-label={title ? `${t('convo.thinking')}: ${title}` : undefined} onClick={() => setManual(!open)}>
         <ThinkIcon size={16} strokeWidth={1.75} className="convo-step-ic" aria-hidden="true" />
         <span className="convo-step-obj">{open ? t('convo.thinking') : title || t('convo.thinking')}</span>
       </button>
