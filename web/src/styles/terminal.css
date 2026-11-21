@@ -1503,20 +1503,40 @@ button.convo-queue-row.is-note:last-child { border-radius: 0 0 var(--r-lg) var(-
 /* (Beside the thread, a step tighter: rows 2 apart, groups 8 — 11-13, the list read as bigger than it is. The phone's
    own list, the whole screen, keeps its room to touch.) */
 .convo-side .convo-list-group { gap: 2px; margin-bottom: 8px; }
-.convo-list-head { display: flex; gap: 6px; padding: 10px 10px 6px; font-size: var(--fs-note); line-height: var(--lh-note); font-weight: 600; letter-spacing: 0.02em; color: var(--term-fg-2); font-variant-numeric: tabular-nums; }
+.convo-list-head { display: flex; align-items: center; gap: 6px; padding: 10px 10px 6px; font-size: var(--fs-note); line-height: var(--lh-note); font-weight: 600; letter-spacing: 0.02em; color: var(--term-fg-2); font-variant-numeric: tabular-nums; }
 .convo-list-head > span { font-weight: 400; color: var(--term-fg-3); }
-.convo-list-head.is-collapsible {
-  align-items: center; width: 100%; border: 0; border-radius: var(--r-sm); background: none;
-  padding: 6px 8px; text-align: left; cursor: pointer;
+.convo-list-head.is-section, .convo-list-head.is-tree {
+  width: 100%; border: 0; border-radius: var(--r-sm); background: none; text-align: left; cursor: pointer;
 }
-.convo-list-head.is-collapsible:hover { background: var(--term-row-hover); color: var(--term-fg); }
-.convo-list-head.is-collapsible:focus-visible { outline: 2px solid var(--term-accent-text); outline-offset: -2px; }
-.convo-list-chev, .convo-list-gic { flex: none; color: var(--term-fg-3); }
-.convo-list-head.is-collapsible > .convo-list-gname { flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-weight: 600; color: inherit; }
-.convo-list-head.is-collapsible > .convo-list-gcount { flex: none; font-weight: 400; color: var(--term-fg-3); }
+.convo-list-head.is-section { padding: 8px 8px 6px 10px; }
+.convo-list-head.is-section > .convo-list-slabel { font-weight: 600; color: inherit; }
+.convo-list-head.is-section:hover, .convo-list-head.is-tree:hover { background: var(--term-row-hover); color: var(--term-fg); }
+.convo-list-head.is-section:focus-visible, .convo-list-head.is-tree:focus-visible { outline: 2px solid var(--term-accent-text); outline-offset: -2px; }
+.convo-list-head.is-section .convo-list-chev { opacity: 0.55; transition: opacity 0.12s var(--ease); }
+.convo-list-head.is-section:hover .convo-list-chev, .convo-list-head.is-section.is-collapsed .convo-list-chev { opacity: 1; }
+.convo-list-head.is-tree {
+  gap: 8px; padding: 6px 8px 6px 10px; font-size: var(--fs-sub); line-height: var(--lh-sub);
+  font-weight: 600; letter-spacing: 0; color: var(--term-fg);
+}
+.convo-list-group.is-tree { gap: 2px; margin-bottom: 6px; }
+.convo-list-gic { flex: none; color: var(--term-fg-3); }
+.convo-list-head.is-tree > .convo-list-gname { flex: 0 1 auto; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-weight: 600; color: inherit; }
+.convo-list-head > .convo-list-gcount { flex: none; font-size: var(--fs-note); line-height: var(--lh-note); font-weight: 400; color: var(--term-fg-3); }
+.convo-list-head > .convo-list-gend { flex: none; margin-left: auto; display: inline-flex; align-items: center; gap: 6px; }
+.convo-list-chev { flex: none; color: var(--term-fg-3); }
 .convo-list-gdot { flex: none; width: 6px; height: 6px; border-radius: 50%; }
+.convo-list-gdot.is-blocked { background: var(--term-warn-text); }
 .convo-list-gdot.is-working { background: var(--term-accent-text); }
 .convo-list-gdot.is-done { background: var(--term-ok-text); }
+/* Nested sessions under a project/session tree folder: indented with a 1px hairline guide under the folder icon. */
+.convo-list-tree {
+  display: flex; flex-direction: column; gap: 2px;
+  margin-left: 16px; padding-left: 8px; border-left: 1px solid var(--term-line);
+}
+.convo-list-row.is-nested { padding: 6px 8px; gap: 8px; }
+.convo-list-row.is-nested .agent-icon { margin-top: 2px; }
+.convo-list-row.is-nested .convo-list-title { font-size: var(--fs-sub); line-height: var(--lh-sub); font-weight: 500; }
+.convo-list-item.is-nested > .convo-list-dots { top: 4px; right: 4px; }
 .convo-list-row {
   display: flex; align-items: flex-start; gap: 10px; width: 100%; padding: 8px 10px; border: 0; border-radius: var(--r);
   background: none; color: var(--term-fg); font: inherit; text-align: left; cursor: pointer;

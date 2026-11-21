@@ -47,8 +47,22 @@ export interface AgentGroup {
   kind: 'pinned' | 'todo' | 'working' | 'idle' | 'other' | 'project' | 'session'
   rows: ConvoListRow[]
   collapsible?: boolean
+  tree?: boolean
+  blockedCount?: number
   workingCount?: number
   doneCount?: number
+}
+
+function groupCounts(rows: ConvoListRow[]) {
+  let blockedCount = 0
+  let workingCount = 0
+  let doneCount = 0
+  for (const r of rows) {
+    if (r.status === 'blocked') blockedCount++
+    else if (working(r)) workingCount++
+    else if (r.status === 'done') doneCount++
+  }
+  return { blockedCount, workingCount, doneCount }
 }
 
 // What is for the person to do: one waiting for an answer, one done and not
@@ -162,11 +176,11 @@ export function buildAgentGroups(rows: ConvoListRow[], opts: OrderOpts = {}): Ag
       if (g.name === 'convo.group.recent') {
         const idle = of.filter((p) => (p.since ?? 0) > 0)
         const other = of.filter((p) => (p.since ?? 0) <= 0)
-        if (idle.length) out.push({ id: 'convo.group.idle', labelKey: 'convo.group.idle', kind: 'idle', rows: idle })
-        if (other.length) out.push({ id: 'convo.group.other', labelKey: 'convo.group.other', kind: 'other', rows: other })
+        if (idle.length) out.push({ id: 'convo.group.idle', labelKey: 'convo.group.idle', kind: 'idle', rows: idle, collapsible: true, ...groupCounts(idle) })
+        if (other.length) out.push({ id: 'convo.group.other', labelKey: 'convo.group.other', kind: 'other', rows: other, collapsible: true, ...groupCounts(other) })
       } else {
         const kind = g.name === 'convo.group.pinned' ? 'pinned' : g.name === 'convo.group.todo' ? 'todo' : 'working'
-        out.push({ id: g.name, labelKey: g.name, kind, rows: of })
+        out.push({ id: g.name, labelKey: g.name, kind, rows: of, collapsible: kind !== 'todo', ...groupCounts(of) })
       }
     }
     return out
@@ -175,11 +189,14 @@ export function buildAgentGroups(rows: ConvoListRow[], opts: OrderOpts = {}): Ag
   const out: AgentGroup[] = []
   const pinnedRows = rows.filter(pinned)
   if (pinnedRows.length) {
+    const pSorted = pinFixed ? byPinOrder(pinnedRows) : sortRows(pinnedRows, sort)
     out.push({
       id: 'convo.group.pinned',
       labelKey: 'convo.group.pinned',
       kind: 'pinned',
-      rows: pinFixed ? byPinOrder(pinnedRows) : sortRows(pinnedRows, sort),
+      rows: pSorted,
+      collapsible: true,
+      ...groupCounts(pSorted),
     })
   }
 
@@ -187,11 +204,14 @@ export function buildAgentGroups(rows: ConvoListRow[], opts: OrderOpts = {}): Ag
   // Keep unpinned blocked agents visible at the top regardless of project/session folding.
   const blockedRows = unpinned.filter((r) => r.status === 'blocked')
   if (blockedRows.length) {
+    const bSorted = sortRows(blockedRows, sort)
     out.push({
       id: 'convo.group.todo',
       labelKey: 'convo.group.todo',
       kind: 'todo',
-      rows: sortRows(blockedRows, sort),
+      rows: bSorted,
+      collapsible: false,
+      ...groupCounts(bSorted),
     })
   }
 
@@ -222,15 +242,12 @@ export function buildAgentGroups(rows: ConvoListRow[], opts: OrderOpts = {}): Ag
     const sorted = sortRows(b.rows, sort)
     let maxSince = 0
     let bestRank = 99
-    let workingCount = 0
-    let doneCount = 0
     for (const r of sorted) {
       if ((r.since ?? 0) > maxSince) maxSince = r.since ?? 0
       const rank = smartRank(r)
       if (rank < bestRank) bestRank = rank
-      if (working(r)) workingCount++
-      else if (r.status === 'done') doneCount++
     }
+    const counts = groupCounts(sorted)
     return {
       k,
       idx,
@@ -244,8 +261,8 @@ export function buildAgentGroups(rows: ConvoListRow[], opts: OrderOpts = {}): Ag
         kind: (b.isFallback ? 'other' : isProject ? 'project' : 'session') as AgentGroup['kind'],
         rows: sorted,
         collapsible: true,
-        workingCount,
-        doneCount,
+        tree: !b.isFallback,
+        ...counts,
       },
       isFallback: b.isFallback,
     }

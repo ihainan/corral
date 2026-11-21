@@ -60,6 +60,12 @@ assert.equal(labels.get('~'), '~')
 
   const byRecent = buildAgentGroups(rows, { group: 'project', sort: 'recent' })
   assert.deepEqual(byRecent.map((g) => g.label ?? g.labelKey), ['convo.group.pinned', 'convo.group.todo', 'beta', 'alpha', 'convo.group.other'])
+  assert.equal(byRecent[0].collapsible, true)
+  assert.equal(byRecent[0].tree, undefined)
+  assert.equal(byRecent[1].collapsible, false)
+  assert.equal(byRecent[2].collapsible, true)
+  assert.equal(byRecent[2].tree, true)
+  assert.equal(byRecent.find((g) => g.label === 'alpha').workingCount, 1)
   assert.deepEqual(byRecent.find((g) => g.label === 'alpha').rows.map((r) => r.key), ['i2', 'w1'])
 
   const bySmart = buildAgentGroups(rows, { group: 'project', sort: 'smart' })

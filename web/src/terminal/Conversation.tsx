@@ -1,5 +1,5 @@
 import { createContext, Fragment, memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { PanelRight, ArrowDown, ArrowUp, ArrowUpDown, Bot, Check, MessagesSquare, FilePen, Hand, ListChecks, ShieldOff, Sparkles, Copy, Cpu, FileText, Gauge as GaugeIcon, LogOut, Radar, SquarePlus, SquareTerminal, Target, TextCursorInput, FolderOpen, Info, Image as ImageIcon, ImageOff, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, ChevronsDownUp, ChevronsUpDown, Clock, Download, Eye, GitBranch, Keyboard, ListOrdered, Loader, MessageCircleQuestion, MoreHorizontal, MoreVertical, PanelLeft, Pin, RotateCw, Search, TriangleAlert, X, Plus } from 'lucide-react'
+import { PanelRight, ArrowDown, ArrowUp, ArrowUpDown, Bot, Check, MessagesSquare, FilePen, Hand, ListChecks, ShieldOff, Sparkles, Copy, Cpu, FileText, Folder, Gauge as GaugeIcon, LogOut, Radar, SquarePlus, SquareTerminal, Target, TextCursorInput, FolderOpen, Info, Image as ImageIcon, ImageOff, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, ChevronsDownUp, ChevronsUpDown, Clock, Download, Eye, GitBranch, Keyboard, ListOrdered, Loader, MessageCircleQuestion, MoreHorizontal, MoreVertical, PanelLeft, Pin, RotateCw, Search, TriangleAlert, X, Plus } from 'lucide-react'
 import { t, getLang, type I18nKey } from '../i18n'
 import { api } from '../api'
 import { setPrefs, usePrefs } from '../prefs'
@@ -3661,28 +3661,149 @@ export function AgentList({ rows, menus, onPicked, placed, query: given, onQuery
         // and the rest wait behind a tap. The one being read stays shown
         // wherever in the group it is, so going to it never hides it, and
         // the group can still be shut around it.
-        const long = !g.collapsible && g.labelKey !== undefined && FOLDED.includes(g.labelKey) && all.length > foldAt && !query.trim()
+        const long = !g.tree && g.labelKey !== undefined && FOLDED.includes(g.labelKey) && all.length > foldAt && !query.trim()
         const shut = long && !open.includes(g.id)
         const of = isCollapsed ? [] : shut ? all.filter((r, i) => i < foldAt || r.current) : all
         const rest = all.length - of.length
         const folds = !isCollapsed && shut && rest > 0
-        return (
-          <div key={g.id} className="convo-list-group" role="group" aria-label={label}>
-            {g.collapsible ? (
+        const collapsedDot = isCollapsed
+          ? g.blockedCount
+            ? 'blocked'
+            : g.workingCount
+              ? 'working'
+              : g.doneCount
+                ? 'done'
+                : ''
+          : ''
+        const renderRow = (r: ConvoListRow) => {
+          // (At rest, nothing to say of it but when.)
+          const said = r.status === 'blocked' || r.status === 'working' || r.status === 'done'
+          const since = stamp(r, now)
+          // (Its turn over, work of its left going — subagents, commands —: said in
+          // words by its time, as its hollow dot alone did not say it; what goes on,
+          // in its tooltip. As the dot: running, or commands, not while it waits.)
+          const bgSaid = r.bg === 'running' || (r.cmds && r.status !== 'blocked') ? 'bg' : r.bg === 'stale' ? 'stale' : ''
+          const bgHint = !bgSaid
+            ? ''
+            : [r.bg === 'running' ? t('convo.list.bgAgents') : r.bg === 'stale' ? t('convo.status.bgStale') : '', r.cmds?.list.length ? t('convo.list.bgCmds', { list: r.cmds.list.map((c) => c.title || '?').join(t('convo.listSep')) }) : '']
+                .filter(Boolean)
+                .join('\n')
+          const hasMenu = !!(menus && r.menu)
+          return (
+            <div
+              key={r.key}
+              data-flip={'r:' + r.key}
+              className={'convo-list-item' + (hasMenu ? ' has-menu' : '') + (rowMenu?.key === r.key ? ' is-menu' : '') + (g.tree ? ' is-nested' : '')}
+              onContextMenu={
+                hasMenu
+                  ? (e) => {
+                      e.preventDefault()
+                      const k = keyOpened.current
+                      if (k && k.key === r.key && rowMenu?.key === r.key && Date.now() - k.at < 1000) return
+                      openMenu(r.key, { x: e.clientX, y: e.clientY })
+                    }
+                  : undefined
+              }
+            >
+            <button
+              type="button"
+              className={'convo-list-row is-' + r.status + (g.tree ? ' is-nested' : '')}
+              aria-current={r.current || undefined}
+              onClick={() => {
+                onPicked?.()
+                r.onPick() // (of the one shown: nothing, or the end of a switch to another; the list may be of before)
+              }}
+              onKeyDown={hasMenu ? menuKey(r.key) : undefined}
+            >
+              <AgentIcon program={r.program} size={g.tree ? 22 : 30} dot={r.bg === 'running' || r.cmds ? 'bg' : said ? (r.status as 'blocked' | 'working' | 'done') : undefined} />
+              {/* (Two lines a row, always: its name; where it is — the session's title,
+                  which tells alike names apart — and when. A third only for what
+                  waits on the person: what it asks, or messages not seen taken in.
+                  The whole of each in its tooltip and the conversation's bar.) */}
+              <span className="convo-list-text" title={[r.title, r.where, r.now, bgHint].filter(Boolean).join('\n')}>
+                <span className="convo-list-line">
+                  <span className="convo-list-title">{r.title}</span>
+                  {pinned(r) && g.id !== 'convo.group.pinned' && (
+                    <span className="convo-list-pin">
+                      <Pin size={12} aria-hidden="true" />
+                      <span className="sr-only">{t('convo.pinnedRow')}</span>
+                    </span>
+                  )}
+                </span>
+                <span className="convo-list-meta">
+                  <span className="convo-list-where">{r.where || '\u00a0'}</span>
+                  {(since || bgSaid) && (
+                    <span className="convo-list-when">
+                      {bgSaid && <span className={'convo-list-bg' + (bgSaid === 'stale' ? ' is-stale' : '')}>{t(bgSaid === 'bg' ? 'convo.list.bg' : 'convo.list.bgStale')}</span>}
+                      {bgSaid && since && ' · '}
+                      {since}
+                    </span>
+                  )}
+                </span>
+                {/* (Its status by its dot only, and its group: in words for a screen
+                    reader, and shown where the system's colours take the dot's away.) */}
+                {/* (Commands it left running: at work in the background, as its group says — review batch4.) */}
+                {(said || r.bg || r.cmds) && <span className={'convo-list-status is-' + (r.cmds && r.status !== 'blocked' ? 'working' : r.status)}>{t(r.bg === 'running' ? 'convo.status.bg' : r.bg === 'stale' ? 'convo.status.bgStale' : r.cmds && r.status !== 'blocked' ? 'convo.status.bg' : (`convo.status.${r.status}` as I18nKey))}</span>}
+                {r.status === 'blocked' && r.now && <span className="convo-list-now is-blocked">{r.now}</span>}
+              </span>
+            </button>
+            {hasMenu && (
               <button
                 type="button"
-                className="convo-list-head is-collapsible"
+                className="convo-list-dots"
+                data-key={r.key}
+                aria-label={t('convo.rowMenu', { name: r.title })}
+                aria-haspopup="menu"
+                aria-expanded={rowMenu?.key === r.key}
+                title={t('common.more')}
+                onClick={() => (rowMenu?.key === r.key ? closeMenu() : openMenu(r.key))}
+                onKeyDown={menuKey(r.key)}
+              >
+                <MoreHorizontal size={16} aria-hidden="true" />
+              </button>
+            )}
+            </div>
+          )
+        }
+        return (
+          <div key={g.id} className={'convo-list-group' + (g.tree ? ' is-tree' : '')} role="group" aria-label={label}>
+            {g.tree ? (
+              <button
+                type="button"
+                className={'convo-list-head is-tree' + (isCollapsed ? ' is-collapsed' : '')}
                 data-flip={'g:' + g.id}
                 data-flip-fade=""
                 aria-expanded={!isCollapsed}
                 title={g.sub}
                 onClick={() => toggleFolded(g.id)}
               >
-                {isCollapsed ? <ChevronRight size={13} className="convo-list-chev" aria-hidden="true" /> : <ChevronDown size={13} className="convo-list-chev" aria-hidden="true" />}
-                {g.kind === 'project' && <FolderOpen size={13} className="convo-list-gic" aria-hidden="true" />}
+                {g.kind === 'project' ? (
+                  isCollapsed ? <Folder size={15} className="convo-list-gic" aria-hidden="true" /> : <FolderOpen size={15} className="convo-list-gic" aria-hidden="true" />
+                ) : (
+                  <SquareTerminal size={14} className="convo-list-gic" aria-hidden="true" />
+                )}
                 <span className="convo-list-gname">{label}</span>
                 <span className="convo-list-gcount">{all.length}</span>
-                {isCollapsed && (g.workingCount ? <span className="convo-list-gdot is-working" aria-hidden="true" /> : g.doneCount ? <span className="convo-list-gdot is-done" aria-hidden="true" /> : null)}
+                <span className="convo-list-gend">
+                  {collapsedDot && <span className={'convo-list-gdot is-' + collapsedDot} aria-hidden="true" />}
+                  {isCollapsed ? <ChevronRight size={14} className="convo-list-chev" aria-hidden="true" /> : <ChevronDown size={14} className="convo-list-chev" aria-hidden="true" />}
+                </span>
+              </button>
+            ) : g.collapsible ? (
+              <button
+                type="button"
+                className={'convo-list-head is-section' + (isCollapsed ? ' is-collapsed' : '')}
+                data-flip={'g:' + g.id}
+                data-flip-fade=""
+                aria-expanded={!isCollapsed}
+                onClick={() => toggleFolded(g.id)}
+              >
+                <span className="convo-list-slabel">{label}</span>
+                <span className="convo-list-gcount">{all.length}</span>
+                <span className="convo-list-gend">
+                  {collapsedDot && <span className={'convo-list-gdot is-' + collapsedDot} aria-hidden="true" />}
+                  {isCollapsed ? <ChevronRight size={13} className="convo-list-chev" aria-hidden="true" /> : <ChevronDown size={13} className="convo-list-chev" aria-hidden="true" />}
+                </span>
               </button>
             ) : (
               <div className="convo-list-head" data-flip={'g:' + g.id} data-flip-fade="">
@@ -3690,96 +3811,7 @@ export function AgentList({ rows, menus, onPicked, placed, query: given, onQuery
                 <span>{all.length}</span>
               </div>
             )}
-            {of.map((r) => {
-              // (At rest, nothing to say of it but when.)
-              const said = r.status === 'blocked' || r.status === 'working' || r.status === 'done'
-              const since = stamp(r, now)
-              // (Its turn over, work of its left going — subagents, commands —: said in
-              // words by its time, as its hollow dot alone did not say it; what goes on,
-              // in its tooltip. As the dot: running, or commands, not while it waits.)
-              const bgSaid = r.bg === 'running' || (r.cmds && r.status !== 'blocked') ? 'bg' : r.bg === 'stale' ? 'stale' : ''
-              const bgHint = !bgSaid
-                ? ''
-                : [r.bg === 'running' ? t('convo.list.bgAgents') : r.bg === 'stale' ? t('convo.status.bgStale') : '', r.cmds?.list.length ? t('convo.list.bgCmds', { list: r.cmds.list.map((c) => c.title || '?').join(t('convo.listSep')) }) : '']
-                    .filter(Boolean)
-                    .join('\n')
-              const hasMenu = !!(menus && r.menu)
-              return (
-                <div
-                  key={r.key}
-                  data-flip={'r:' + r.key}
-                  className={'convo-list-item' + (hasMenu ? ' has-menu' : '') + (rowMenu?.key === r.key ? ' is-menu' : '')}
-                  onContextMenu={
-                    hasMenu
-                      ? (e) => {
-                          e.preventDefault()
-                          const k = keyOpened.current
-                          if (k && k.key === r.key && rowMenu?.key === r.key && Date.now() - k.at < 1000) return
-                          openMenu(r.key, { x: e.clientX, y: e.clientY })
-                        }
-                      : undefined
-                  }
-                >
-                <button
-                  type="button"
-                  className={'convo-list-row is-' + r.status}
-                  aria-current={r.current || undefined}
-                  onClick={() => {
-                    onPicked?.()
-                    r.onPick() // (of the one shown: nothing, or the end of a switch to another; the list may be of before)
-                  }}
-                  onKeyDown={hasMenu ? menuKey(r.key) : undefined}
-                >
-                  <AgentIcon program={r.program} size={30} dot={r.bg === 'running' || r.cmds ? 'bg' : said ? (r.status as 'blocked' | 'working' | 'done') : undefined} />
-                  {/* (Two lines a row, always: its name; where it is — the session's title,
-                      which tells alike names apart — and when. A third only for what
-                      waits on the person: what it asks, or messages not seen taken in.
-                      The whole of each in its tooltip and the conversation's bar.) */}
-                  <span className="convo-list-text" title={[r.title, r.where, r.now, bgHint].filter(Boolean).join('\n')}>
-                    <span className="convo-list-line">
-                      <span className="convo-list-title">{r.title}</span>
-                      {pinned(r) && g.id !== 'convo.group.pinned' && (
-                        <span className="convo-list-pin">
-                          <Pin size={12} aria-hidden="true" />
-                          <span className="sr-only">{t('convo.pinnedRow')}</span>
-                        </span>
-                      )}
-                    </span>
-                    <span className="convo-list-meta">
-                      <span className="convo-list-where">{r.where || '\u00a0'}</span>
-                      {(since || bgSaid) && (
-                        <span className="convo-list-when">
-                          {bgSaid && <span className={'convo-list-bg' + (bgSaid === 'stale' ? ' is-stale' : '')}>{t(bgSaid === 'bg' ? 'convo.list.bg' : 'convo.list.bgStale')}</span>}
-                          {bgSaid && since && ' · '}
-                          {since}
-                        </span>
-                      )}
-                    </span>
-                    {/* (Its status by its dot only, and its group: in words for a screen
-                        reader, and shown where the system's colours take the dot's away.) */}
-                    {/* (Commands it left running: at work in the background, as its group says — review batch4.) */}
-                    {(said || r.bg || r.cmds) && <span className={'convo-list-status is-' + (r.cmds && r.status !== 'blocked' ? 'working' : r.status)}>{t(r.bg === 'running' ? 'convo.status.bg' : r.bg === 'stale' ? 'convo.status.bgStale' : r.cmds && r.status !== 'blocked' ? 'convo.status.bg' : (`convo.status.${r.status}` as I18nKey))}</span>}
-                    {r.status === 'blocked' && r.now && <span className="convo-list-now is-blocked">{r.now}</span>}
-                  </span>
-                </button>
-                {hasMenu && (
-                  <button
-                    type="button"
-                    className="convo-list-dots"
-                    data-key={r.key}
-                    aria-label={t('convo.rowMenu', { name: r.title })}
-                    aria-haspopup="menu"
-                    aria-expanded={rowMenu?.key === r.key}
-                    title={t('common.more')}
-                    onClick={() => (rowMenu?.key === r.key ? closeMenu() : openMenu(r.key))}
-                    onKeyDown={menuKey(r.key)}
-                  >
-                    <MoreHorizontal size={16} aria-hidden="true" />
-                  </button>
-                )}
-                </div>
-              )
-            })}
+            {g.tree ? (of.length > 0 && <div className="convo-list-tree">{of.map(renderRow)}</div>) : of.map(renderRow)}
             {(folds || (!isCollapsed && long && !shut)) && (
               <button
                 type="button"
