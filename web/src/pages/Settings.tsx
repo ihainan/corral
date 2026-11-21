@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useState, type FormEvent, type ReactNode } from 'react'
-import { ChevronRight, Film, KeyRound, LogOut, Minus, Plus, ScrollText, Users } from 'lucide-react'
+import { Brain, ChevronDown, ChevronRight, Film, KeyRound, Languages, LogOut, Minus, Plus, ScrollText, Users } from 'lucide-react'
 import { disablePush, enablePush, pushState, syncPush, type PushState } from '../push'
 import { api, ApiError, errorText, type Me } from '../api'
 import { getLang, hasKey, setLang, t, type Lang } from '../i18n'
@@ -13,7 +13,8 @@ import { ssoErrorText } from './Auth'
 import { CustomKeysSection } from './CustomKeys'
 import { playChime } from '../terminal/chime'
 import { setScreenReader, useScreenReader } from '../terminal/screenReader'
-import { saveTranslateConfig, testTranslateConfig, TRANSLATE_LANGS, useTranslateConfig } from '../terminal/thoughtTranslate'
+import { saveTranslateConfig, testTranslateConfig, TRANSLATE_LANGS, useTranslateConfig, type TranslateConfig } from '../terminal/thoughtTranslate'
+import { Markdown } from '../terminal/markdown'
 
 // As the terminal's menu sets it (one point at a time).
 const FONT_MIN = 9
@@ -277,38 +278,34 @@ export function SettingsPage() {
   )
 }
 
+const isLocalTranslateUrl = (url: string) => /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(?::\d+)?\b/i.test(url.trim())
+
+const previewSampleFor = (targetLang: string) =>
+  targetLang === 'en'
+    ? '先检查缓存命中情况，再返回结果。\n\n- 确认 `cache.get(key)` 返回的是有效条目。\n- 如果缓存已过期，则回退请求上游接口。'
+    : 'Checking the cache lookup before returning a response.\n\n- Verify `cache.get(key)` returns a fresh entry.\n- Fall back to the upstream API if the entry has expired.'
+
+const previewTitleOf = (text: string) => {
+  const line = text.split('\n').find((l) => l.trim()) ?? ''
+  return line.replace(/^\s*(?:Thinking\s*:?\s*)?/i, '').replace(/^[-*#>\s]+/, '').replace(/`([^`]+)`/g, '$1').trim()
+}
+
 function TranslateSection({ onDirty }: { onDirty: (d: boolean) => void }) {
   const toast = useToast()
-  const { config, loaded } = useTranslateConfig()
-  const [targetLang, setTargetLang] = useState('zh-CN')
-  const [baseUrl, setBaseUrl] = useState('https://api.deepseek.com/v1')
-  const [model, setModel] = useState('deepseek-flash')
-  const [apiKey, setApiKey] = useState('')
-  const [synced, setSynced] = useState(false)
+  const { config } = useTranslateConfig()
+  const [open, setOpen] = useState(false)
   const [saving, setSaving] = useState(false)
-  const [testing, setTesting] = useState(false)
-  const [testNote, setTestNote] = useState<{ ok: boolean; text: string } | null>(null)
 
-  useEffect(() => {
-    if (!loaded || !config || synced) return
-    setTargetLang(config.target_lang || 'zh-CN')
-    setBaseUrl(config.base_url || 'https://api.deepseek.com/v1')
-    setModel(config.model || 'deepseek-flash')
-    setSynced(true)
-  }, [loaded, config, synced])
-
-  const dirty =
-    synced &&
-    !!config &&
-    (targetLang !== config.target_lang || baseUrl.trim() !== config.base_url || model.trim() !== config.model || apiKey.trim() !== '')
-  useEffect(() => onDirty(dirty), [dirty, onDirty])
+  useEffect(() => onDirty(false), [onDirty])
 
   const toggleEnabled = async (next: boolean) => {
+    if (saving) return
     setSaving(true)
     try {
       const saved = await saveTranslateConfig({ enabled: next })
-      if (saved.enabled && !saved.has_key && !/^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(?::\d+)?\b/i.test(saved.base_url)) {
+      if (saved.enabled && !saved.has_key && !isLocalTranslateUrl(saved.base_url)) {
         toast(t('convo.translate.needKey'))
+        setOpen(true)
       } else {
         toast(t(saved.enabled ? 'convo.translate.enabled' : 'convo.translate.disabled'))
       }
@@ -319,11 +316,61 @@ function TranslateSection({ onDirty }: { onDirty: (d: boolean) => void }) {
     }
   }
 
+  const langLabel = TRANSLATE_LANGS.find((l) => l.code === (config?.target_lang || 'zh-CN'))?.label ?? (config?.target_lang || 'zh-CN')
+  const modelName = config?.model || 'deepseek-flash'
+  const keyStatus =
+    !config || config.has_key || isLocalTranslateUrl(config.base_url)
+      ? t('settings.translateKeyReady')
+      : t('settings.translateKeyMissing')
+  const summaryHint = `${langLabel} · ${modelName} · ${keyStatus}`
+
+  return (
+    <section className="section">
+      <h2>{t('settings.translate')}</h2>
+      <div className="settings-group">
+        <Switch
+          label={t('settings.translateEnable')}
+          hint={t('settings.translateEnableHint')}
+          checked={!!config?.enabled}
+          onChange={(v) => void toggleEnabled(v)}
+        />
+        <Setting label={t('settings.translateConfig')} hint={summaryHint} id="tr-cfg-l">
+          <button type="button" className="btn" aria-labelledby="tr-cfg-l" onClick={() => setOpen(true)}>
+            {t('settings.translateConfigure')}
+          </button>
+        </Setting>
+      </div>
+      {open && <TranslateConfigDialog config={config} onClose={() => setOpen(false)} />}
+    </section>
+  )
+}
+
+function TranslateConfigDialog({ config, onClose }: { config: TranslateConfig | null; onClose: () => void }) {
+  const toast = useToast()
+  const [targetLang, setTargetLang] = useState(config?.target_lang || 'zh-CN')
+  const [baseUrl, setBaseUrl] = useState(config?.base_url || 'https://api.deepseek.com/v1')
+  const [model, setModel] = useState(config?.model || 'deepseek-flash')
+  const [apiKey, setApiKey] = useState('')
+  const [saving, setSaving] = useState(false)
+  const [testing, setTesting] = useState(false)
+  const [previewOpen, setPreviewOpen] = useState(true)
+  const [showOrig, setShowOrig] = useState(false)
+  const [testState, setTestState] = useState<{ ok: boolean; latency?: number; original?: string; translated?: string; error?: string } | null>(null)
+
+  const dirty =
+    !!config &&
+    (targetLang !== config.target_lang || baseUrl.trim() !== config.base_url || model.trim() !== config.model || apiKey.trim() !== '')
+
+  const onLangChange = (next: string) => {
+    setTargetLang(next)
+    setTestState(null)
+    setShowOrig(false)
+  }
+
   const save = async (e: FormEvent) => {
     e.preventDefault()
     if (saving) return
     setSaving(true)
-    setTestNote(null)
     try {
       const patch: Parameters<typeof saveTranslateConfig>[0] = {
         target_lang: targetLang,
@@ -331,12 +378,9 @@ function TranslateSection({ onDirty }: { onDirty: (d: boolean) => void }) {
         model: model.trim(),
       }
       if (apiKey.trim()) patch.api_key = apiKey.trim()
-      const saved = await saveTranslateConfig(patch)
-      setTargetLang(saved.target_lang)
-      setBaseUrl(saved.base_url)
-      setModel(saved.model)
-      setApiKey('')
+      await saveTranslateConfig(patch)
       toast(t('settings.saved'))
+      onClose()
     } catch (err) {
       toast(errorText(err), true)
     } finally {
@@ -361,7 +405,8 @@ function TranslateSection({ onDirty }: { onDirty: (d: boolean) => void }) {
   const runTest = async () => {
     if (testing) return
     setTesting(true)
-    setTestNote(null)
+    setPreviewOpen(true)
+    setShowOrig(false)
     try {
       const res = await testTranslateConfig({
         target_lang: targetLang,
@@ -369,64 +414,54 @@ function TranslateSection({ onDirty }: { onDirty: (d: boolean) => void }) {
         model: model.trim(),
         ...(apiKey.trim() ? { api_key: apiKey.trim() } : {}),
       })
-      setTestNote({ ok: true, text: `${t('settings.translateTestOk', { ms: res.latency_ms })} — ${res.sample}` })
+      setTestState({
+        ok: true,
+        latency: res.latency_ms,
+        original: res.original || previewSampleFor(targetLang),
+        translated: res.sample,
+      })
     } catch (err) {
-      setTestNote({ ok: false, text: errorText(err) })
+      setTestState({ ok: false, error: errorText(err) })
     } finally {
       setTesting(false)
     }
   }
 
+  const originalText = testState?.original || previewSampleFor(targetLang)
+  const translatedText = testState?.ok ? testState.translated : undefined
+  const shownText = translatedText && !showOrig ? translatedText : originalText
+  const headTitle = previewTitleOf(shownText)
+
   return (
-    <section className="section">
-      <h2>{t('settings.translate')}</h2>
-      <form className="settings-group" onSubmit={save}>
-        <Switch
-          label={t('settings.translateEnable')}
-          hint={t('settings.translateEnableHint')}
-          checked={!!config?.enabled}
-          onChange={(v) => void toggleEnabled(v)}
-        />
-        <div className="setting">
-          <label className="setting-label" htmlFor="s-tr-lang">{t('settings.translateLang')}</label>
-          <div className="setting-control">
-            <select id="s-tr-lang" className="select" value={targetLang} onChange={(e) => setTargetLang(e.target.value)}>
-              {TRANSLATE_LANGS.map((l) => (
-                <option key={l.code} value={l.code}>{l.label}</option>
-              ))}
-            </select>
-          </div>
-        </div>
-        <div className="setting setting-wide">
-          <div className="setting-label">
-            <label htmlFor="s-tr-url">{t('settings.translateBaseUrl')}</label>
-            <span className="hint" id="s-tr-url-hint">{t('settings.translateBaseUrlHint')}</span>
-          </div>
-          <div className="setting-control">
-            <input id="s-tr-url" className="input" aria-describedby="s-tr-url-hint" value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} placeholder="https://api.deepseek.com/v1" />
-          </div>
-        </div>
-        <div className="setting setting-wide">
-          <div className="setting-label">
-            <label htmlFor="s-tr-model">{t('settings.translateModel')}</label>
-            <span className="hint" id="s-tr-model-hint">{t('settings.translateModelHint')}</span>
-          </div>
-          <div className="setting-control">
-            <input id="s-tr-model" className="input" aria-describedby="s-tr-model-hint" value={model} onChange={(e) => setModel(e.target.value)} placeholder="deepseek-flash" />
-          </div>
-        </div>
-        <div className="setting setting-wide">
-          <div className="setting-label">
-            <label htmlFor="s-tr-key">{t('settings.translateKey')}</label>
-            <span className="hint" id="s-tr-key-hint">{config?.has_key ? t('settings.translateKeySaved') : t('settings.translateKeyPlaceholder')}</span>
-          </div>
-          <div className="setting-control">
+    <Dialog
+      wide
+      title={t('settings.translateDialogTitle')}
+      sub={t('settings.translateDialogSub')}
+      icon={<Languages size={18} />}
+      guard={dirty}
+      busy={saving}
+      onClose={onClose}
+    >
+      <form className="stack" onSubmit={save}>
+        <Field label={t('settings.translateLang')}>
+          <select className="select" value={targetLang} onChange={(e) => onLangChange(e.target.value)}>
+            {TRANSLATE_LANGS.map((l) => (
+              <option key={l.code} value={l.code}>{l.label}</option>
+            ))}
+          </select>
+        </Field>
+        <Field label={t('settings.translateBaseUrl')} hint={t('settings.translateBaseUrlHint')}>
+          <input className="input" value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} placeholder="https://api.deepseek.com/v1" />
+        </Field>
+        <Field label={t('settings.translateModel')} hint={t('settings.translateModelHint')}>
+          <input className="input" value={model} onChange={(e) => setModel(e.target.value)} placeholder="deepseek-flash" />
+        </Field>
+        <Field label={t('settings.translateKey')} hint={config?.has_key ? t('settings.translateKeySaved') : t('settings.translateKeyPlaceholder')}>
+          <div className="tr-key-row">
             <input
-              id="s-tr-key"
               type="password"
               autoComplete="off"
               className="input"
-              aria-describedby="s-tr-key-hint"
               value={apiKey}
               onChange={(e) => setApiKey(e.target.value)}
               placeholder={config?.has_key ? '••••••••' : 'sk-...'}
@@ -437,23 +472,70 @@ function TranslateSection({ onDirty }: { onDirty: (d: boolean) => void }) {
               </button>
             )}
           </div>
+        </Field>
+
+        <div className="tr-preview">
+          <div className="tr-preview-meta">
+            <span className="tr-preview-label">{t('settings.translatePreview')}</span>
+            {testing ? (
+              <span className="tr-preview-status">{t('convo.translate.loading')}</span>
+            ) : testState?.ok ? (
+              <span className="tr-preview-status is-ok">{t('settings.translateTestOk', { ms: testState.latency ?? 0 })}</span>
+            ) : testState && !testState.ok ? (
+              <span className="tr-preview-status is-err">{testState.error}</span>
+            ) : (
+              <span className="tr-preview-status">{t('settings.translatePreviewIdle')}</span>
+            )}
+          </div>
+          <div className="tr-preview-card">
+            <button
+              type="button"
+              className="tr-preview-head"
+              aria-expanded={previewOpen}
+              onClick={() => setPreviewOpen((v) => !v)}
+            >
+              <Brain size={14} className="tr-preview-ic" aria-hidden="true" />
+              <span className="tr-preview-title">{headTitle}</span>
+              {previewOpen ? <ChevronDown size={14} className="tr-preview-chev" aria-hidden="true" /> : <ChevronRight size={14} className="tr-preview-chev" aria-hidden="true" />}
+            </button>
+            {previewOpen && (
+              <div className="tr-preview-body">
+                {(translatedText || testing) && (
+                  <div className="tr-preview-bar">
+                    {testing && <span className="tr-preview-status">{t('convo.translate.loading')}</span>}
+                    {translatedText && (
+                      <button
+                        type="button"
+                        className="tr-preview-toggle"
+                        aria-pressed={showOrig}
+                        onClick={() => setShowOrig((v) => !v)}
+                      >
+                        {t(showOrig ? 'convo.translate.translated' : 'convo.translate.original')}
+                      </button>
+                    )}
+                  </div>
+                )}
+                <Markdown text={shownText} />
+              </div>
+            )}
+            <p className="tr-preview-reply">{t('settings.translatePreviewReply')}</p>
+          </div>
         </div>
-        <div className="setting setting-wide">
-          <div className="setting-label">
-            <span>{t('settings.translateActions')}</span>
-            {testNote && <span className={testNote.ok ? 'hint' : 'hint err'}>{testNote.text}</span>}
-          </div>
-          <div className="setting-control settings-inline">
-            <button type="submit" className="btn btn-primary" disabled={saving || !dirty}>
-              {t('common.save')}
-            </button>
-            <button type="button" className="btn" disabled={testing || saving} onClick={() => void runTest()}>
-              {testing ? t('settings.translateTesting') : t('settings.translateTest')}
-            </button>
-          </div>
+
+        <div className="dialog-actions">
+          <button type="button" className="btn" disabled={testing || saving} onClick={() => void runTest()}>
+            {testing ? t('settings.translateTesting') : t('settings.translateTest')}
+          </button>
+          <span className="tr-actions-spacer" />
+          <button type="button" className="btn" disabled={saving} onClick={onClose}>
+            {t('common.cancel')}
+          </button>
+          <button type="submit" className="btn btn-primary" disabled={saving || !dirty}>
+            {t('common.save')}
+          </button>
         </div>
       </form>
-    </section>
+    </Dialog>
   )
 }
 

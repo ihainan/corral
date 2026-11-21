@@ -522,9 +522,9 @@ func (s *Server) apiTestTranslateConfig(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 	}
-	sampleIn := "All checks passed. Now preparing to commit `convo_agy_input.go`."
+	sampleIn := "Checking the cache lookup before returning a response.\n\n- Verify `cache.get(key)` returns a fresh entry.\n- Fall back to the upstream API if the entry has expired."
 	if targetLang == "en" {
-		sampleIn = "所有检查已通过，准备提交 `convo_agy_input.go`。"
+		sampleIn = "先检查缓存命中情况，再返回结果。\n\n- 确认 `cache.get(key)` 返回的是有效条目。\n- 如果缓存已过期，则回退请求上游接口。"
 	}
 	t0 := time.Now()
 	tctx, cancel := context.WithTimeout(r.Context(), translateUpstreamTime)
@@ -536,6 +536,7 @@ func (s *Server) apiTestTranslateConfig(w http.ResponseWriter, r *http.Request) 
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":         true,
+		"original":   sampleIn,
 		"sample":     out,
 		"latency_ms": time.Since(t0).Milliseconds(),
 	})

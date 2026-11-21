@@ -20,6 +20,7 @@ export interface TranslateConfigPatch {
 
 export interface TranslateTestResult {
   ok: boolean
+  original?: string
   sample: string
   latency_ms: number
 }
