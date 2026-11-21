@@ -227,6 +227,15 @@ func (s *Store) UpsertAgentLineage(ctx context.Context, row AgentLineage) (bool,
 		newPrio := lineagePriority(row.Source)
 
 		if !isManual {
+			// Never rebind an existing confirmed edge onto a different child or parent session.
+			if sameParent {
+				if existing.ChildSession != "" && row.ChildSession != "" && existing.ChildSession != row.ChildSession {
+					return false, nil
+				}
+				if existing.ParentSession != "" && row.ParentSession != "" && existing.ParentSession != row.ParentSession {
+					return false, nil
+				}
+			}
 			if oldPrio > newPrio {
 				if !sameParent {
 					return false, nil
@@ -241,16 +250,17 @@ func (s *Store) UpsertAgentLineage(ctx context.Context, row AgentLineage) (bool,
 		}
 
 		if sameParent {
-			if merged.ChildTermID == "" {
+			// Preserve already-bound non-empty identity fields; only fill missing ones.
+			if existing.ChildTermID != "" {
 				merged.ChildTermID = existing.ChildTermID
 			}
-			if merged.ChildSession == "" {
+			if existing.ChildSession != "" {
 				merged.ChildSession = existing.ChildSession
 			}
-			if merged.ParentTermID == "" {
+			if existing.ParentTermID != "" {
 				merged.ParentTermID = existing.ParentTermID
 			}
-			if merged.ParentSession == "" {
+			if existing.ParentSession != "" {
 				merged.ParentSession = existing.ParentSession
 			}
 			if merged.EvidenceKey == "" {
@@ -338,8 +348,127 @@ func (s *Store) UpsertAgentLineage(ctx context.Context, row AgentLineage) (bool,
 	return true, nil
 }
 
+// UpgradeAgentLineageIdentity safely fills missing terminal/session identity
+// fields on an existing CONFIRMED row inside a transaction. Unlike
+// UpsertAgentLineage(Source: manual), it NEVER resurrects a rejected row, NEVER
+// changes parent or source, and NEVER overwrites already-bound non-empty
+// identity fields.
+func (s *Store) UpgradeAgentLineageIdentity(ctx context.Context, row AgentLineage) (bool, error) {
+	if row.OwnerID <= 0 || row.HostID <= 0 || row.Server == "" || row.ChildPane == "" || row.ParentPane == "" {
+		return false, ErrLineageInvalid
+	}
+	now := row.UpdatedAt
+	if now <= 0 {
+		now = s.now().UnixMilli()
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+
+	all, err := listAgentLineageQ(ctx, tx, row.OwnerID, row.HostID, row.Server)
+	if err != nil {
+		return false, err
+	}
+
+	var existing *AgentLineage
+	for i := range all {
+		cur := &all[i]
+		sameChild := cur.ChildPane == row.ChildPane && cur.ChildTermID == row.ChildTermID
+		sameTerm := row.ChildTermID != "" && cur.ChildTermID == row.ChildTermID
+		emptyTermSamePane := cur.ChildPane == row.ChildPane && cur.ChildTermID == ""
+
+		if cur.State == LineageRejected {
+			if sameChild || sameTerm || emptyTermSamePane {
+				return false, nil
+			}
+			continue
+		}
+		if cur.State != LineageConfirmed {
+			continue
+		}
+		if sameChild || sameTerm {
+			existing = cur
+		} else if row.ChildTermID != "" && emptyTermSamePane && existing == nil {
+			existing = cur
+		}
+	}
+	if existing == nil || existing.ParentPane != row.ParentPane {
+		return false, nil
+	}
+	if existing.ChildTermID != "" && row.ChildTermID != "" && existing.ChildTermID != row.ChildTermID {
+		return false, nil
+	}
+	if existing.ChildSession != "" && row.ChildSession != "" && existing.ChildSession != row.ChildSession {
+		return false, nil
+	}
+	if existing.ParentTermID != "" && row.ParentTermID != "" && existing.ParentTermID != row.ParentTermID {
+		return false, nil
+	}
+	if existing.ParentSession != "" && row.ParentSession != "" && existing.ParentSession != row.ParentSession {
+		return false, nil
+	}
+
+	merged := *existing
+	if merged.ChildTermID == "" {
+		merged.ChildTermID = row.ChildTermID
+	}
+	if merged.ChildSession == "" {
+		merged.ChildSession = row.ChildSession
+	}
+	if merged.ParentTermID == "" {
+		merged.ParentTermID = row.ParentTermID
+	}
+	if merged.ParentSession == "" {
+		merged.ParentSession = row.ParentSession
+	}
+	if merged.ChildTermID == existing.ChildTermID &&
+		merged.ChildSession == existing.ChildSession &&
+		merged.ParentTermID == existing.ParentTermID &&
+		merged.ParentSession == existing.ParentSession {
+		return false, nil
+	}
+	merged.UpdatedAt = now
+
+	if hasLineageCycle(all, existing, merged) {
+		return false, ErrLineageCycle
+	}
+
+	if existing.ChildTermID != merged.ChildTermID {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM agent_lineage
+			WHERE owner_id = ? AND host_id = ? AND server = ? AND child_pane = ? AND child_term_id = ?`,
+			row.OwnerID, row.HostID, row.Server, existing.ChildPane, existing.ChildTermID); err != nil {
+			return false, err
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO agent_lineage (
+		owner_id, host_id, server, child_pane, child_term_id, child_session,
+		parent_pane, parent_term_id, parent_session, source, state, evidence_key,
+		created_at, updated_at
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	ON CONFLICT(owner_id, host_id, server, child_pane, child_term_id) DO UPDATE SET
+		child_session = excluded.child_session,
+		parent_term_id = excluded.parent_term_id,
+		parent_session = excluded.parent_session,
+		updated_at = excluded.updated_at`,
+		merged.OwnerID, merged.HostID, merged.Server,
+		merged.ChildPane, merged.ChildTermID, merged.ChildSession,
+		merged.ParentPane, merged.ParentTermID, merged.ParentSession,
+		merged.Source, merged.State, merged.EvidenceKey,
+		merged.CreatedAt, merged.UpdatedAt); err != nil {
+		return false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 // hasLineageCycle returns true if inserting/updating candidate creates a cycle
-// or an ancestor chain of depth >= lineageMaxDepth.
+// or an ancestor chain of depth >= lineageMaxDepth. Terminal-bound edges never
+// traverse retired historical edges with a different child_term_id.
 func hasLineageCycle(all []AgentLineage, replacing *AgentLineage, candidate AgentLineage) bool {
 	if candidate.ChildPane == candidate.ParentPane {
 		return true
@@ -349,18 +478,22 @@ func hasLineageCycle(all []AgentLineage, replacing *AgentLineage, candidate Agen
 	}
 
 	type edge struct {
+		childTerm  string
 		parentPane string
 		parentTerm string
 	}
-	byPane := map[string]edge{}
 	byTerm := map[string]edge{}
+	byPaneUntyped := map[string]edge{}
+	byPaneAny := map[string]edge{}
 
 	add := func(r AgentLineage) {
-		e := edge{parentPane: r.ParentPane, parentTerm: r.ParentTermID}
-		byPane[r.ChildPane] = e
+		e := edge{childTerm: r.ChildTermID, parentPane: r.ParentPane, parentTerm: r.ParentTermID}
 		if r.ChildTermID != "" {
 			byTerm[r.ChildTermID] = e
+		} else {
+			byPaneUntyped[r.ChildPane] = e
 		}
+		byPaneAny[r.ChildPane] = e
 	}
 	for _, r := range all {
 		if r.State != LineageConfirmed {
@@ -376,16 +509,22 @@ func hasLineageCycle(all []AgentLineage, replacing *AgentLineage, candidate Agen
 	curPane := candidate.ParentPane
 	curTerm := candidate.ParentTermID
 	for depth := 1; depth < lineageMaxDepth; depth++ {
-		if curPane == candidate.ChildPane || (candidate.ChildTermID != "" && curTerm != "" && curTerm == candidate.ChildTermID) {
+		if candidate.ChildTermID != "" && curTerm != "" {
+			if curTerm == candidate.ChildTermID {
+				return true
+			}
+		} else if curPane == candidate.ChildPane {
 			return true
 		}
 		var next edge
 		var ok bool
 		if curTerm != "" {
 			next, ok = byTerm[curTerm]
-		}
-		if !ok && curPane != "" {
-			next, ok = byPane[curPane]
+			if !ok && curPane != "" {
+				next, ok = byPaneUntyped[curPane]
+			}
+		} else if curPane != "" {
+			next, ok = byPaneAny[curPane]
 		}
 		if !ok {
 			return false

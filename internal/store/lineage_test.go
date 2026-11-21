@@ -231,3 +231,101 @@ func TestAgentLineageDepthLimitCycleRejection(t *testing.T) {
 func paneNum(n int) string {
 	return "w1:p" + string(rune('a'+n))
 }
+
+func TestHistoricalTermMustNotCauseLiveCycle(t *testing.T) {
+	st, err := OpenMemory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	ctx := context.Background()
+
+	_, err = st.UpsertAgentLineage(ctx, AgentLineage{
+		OwnerID: 1, HostID: 1, Server: "s",
+		ChildPane: "w1:p2", ChildTermID: "old-2",
+		ParentPane: "w1:p1", ParentTermID: "old-1",
+		Source: LineageToolLog,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// New server incarnation reuses pane IDs, but every terminal identity changed.
+	_, err = st.UpsertAgentLineage(ctx, AgentLineage{
+		OwnerID: 1, HostID: 1, Server: "s",
+		ChildPane: "w1:p1", ChildTermID: "new-1",
+		ParentPane: "w1:p2", ParentTermID: "new-2",
+		Source: LineageManual,
+	})
+	if err != nil {
+		t.Fatalf("retired terminals must not block an acyclic link between new occupants: %v", err)
+	}
+}
+
+func TestMetadataCannotRebindConfirmedIdentity(t *testing.T) {
+	st, err := OpenMemory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	ctx := context.Background()
+
+	_, err = st.UpsertAgentLineage(ctx, AgentLineage{
+		OwnerID: 1, HostID: 1, Server: "s",
+		ChildPane: "w1:p2", ChildTermID: "term-2", ChildSession: "cs1",
+		ParentPane: "w1:p1", ParentTermID: "term-1", ParentSession: "ps1",
+		Source: LineageManual,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	changed, err := st.UpsertAgentLineage(ctx, AgentLineage{
+		OwnerID: 1, HostID: 1, Server: "s",
+		ChildPane: "w1:p2", ChildTermID: "term-2", ChildSession: "cs2",
+		ParentPane: "w1:p1", ParentTermID: "term-1", ParentSession: "ps2",
+		Source: LineageMetadata,
+	})
+	if err != nil || changed {
+		t.Fatalf("metadata must not overwrite bound session identity: changed=%v err=%v", changed, err)
+	}
+
+	rows, _ := st.ListAgentLineage(ctx, 1, 1, "s")
+	if len(rows) != 1 || rows[0].ChildSession != "cs1" || rows[0].ParentSession != "ps1" {
+		t.Fatalf("bound identity was mutated: %+v", rows)
+	}
+}
+
+func TestUpgradeIdentityCannotResurrectUnlink(t *testing.T) {
+	st, err := OpenMemory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	ctx := context.Background()
+
+	_, err = st.UpsertAgentLineage(ctx, AgentLineage{
+		OwnerID: 1, HostID: 1, Server: "s",
+		ChildPane: "w1:p2", ChildTermID: "term-2",
+		ParentPane: "w1:p1", ParentTermID: "term-1",
+		Source: LineageManual,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.RejectAgentLineage(ctx, 1, 1, "s", "w1:p2", "term-2", "", 2000); err != nil {
+		t.Fatal(err)
+	}
+	changed, err := st.UpgradeAgentLineageIdentity(ctx, AgentLineage{
+		OwnerID: 1, HostID: 1, Server: "s",
+		ChildPane: "w1:p2", ChildTermID: "term-2", ChildSession: "cs1",
+		ParentPane: "w1:p1", ParentTermID: "term-1", ParentSession: "ps1",
+		Source: LineageManual,
+	})
+	if err != nil || changed {
+		t.Fatalf("identity upgrade must not resurrect rejected row: changed=%v err=%v", changed, err)
+	}
+	rows, _ := st.ListAgentLineage(ctx, 1, 1, "s")
+	if len(rows) != 1 || rows[0].State != LineageRejected {
+		t.Fatalf("expected row to stay rejected, got %+v", rows)
+	}
+}

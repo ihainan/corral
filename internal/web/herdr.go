@@ -568,6 +568,29 @@ func (h *herdrSockets) lineageOf(id string) *lineageTracker {
 	return h.lineage[id]
 }
 
+// reloadLineageForServer refreshes every other active watcher of the same
+// owner+host+herdr server after a link/unlink mutation so sibling tabs reflect
+// the change immediately.
+func (h *herdrSockets) reloadLineageForServer(ctx context.Context, src *lineageTracker) {
+	if src == nil {
+		return
+	}
+	h.mu.Lock()
+	var peers []*lineageTracker
+	for _, lt := range h.lineage {
+		if lt != nil && lt != src && lt.ownerID == src.ownerID && lt.hostID == src.hostID && lt.server == src.server {
+			peers = append(peers, lt)
+		}
+	}
+	h.mu.Unlock()
+	for _, peer := range peers {
+		peer.mu.Lock()
+		_ = peer.reloadLocked(ctx)
+		peer.mu.Unlock()
+		peer.notify()
+	}
+}
+
 func (h *herdrSockets) set(id, path string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()

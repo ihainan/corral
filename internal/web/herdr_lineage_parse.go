@@ -43,9 +43,10 @@ type lineageExtractor struct {
 	serverSession string
 
 	// Pending tool calls waiting for results.
-	claudePending map[string]herdrCmdIntent // tool_use_id -> intent
-	codexPending  map[string]herdrCmdIntent // call_id -> intent
-	agyPending    []agyPendingIntent        // FIFO aligned with PLANNER_RESPONSE.tool_calls
+	claudePending    map[string]herdrCmdIntent   // tool_use_id -> intent
+	codexPending     map[string]herdrCmdIntent   // call_id -> intent
+	codexCodePending map[string][]herdrCmdIntent // custom_tool_call call_id -> exec_command intents
+	agyPending       []agyPendingIntent          // FIFO aligned with PLANNER_RESPONSE.tool_calls
 
 	// Seen command/call IDs for deduplicating Codex CommandExecution vs function_call_output.
 	seenIDs map[string]bool
@@ -77,6 +78,7 @@ func newLineageExtractor(agent, serverSocket, serverSession string) *lineageExtr
 func (e *lineageExtractor) Reset() {
 	e.claudePending = nil
 	e.codexPending = nil
+	e.codexCodePending = nil
 	e.agyPending = nil
 	e.seenIDs = nil
 	e.createdByPane = nil
@@ -284,7 +286,9 @@ func extractClaudeToolResultText(raw json.RawMessage) string {
 func (e *lineageExtractor) feedCodexLine(line []byte) []lineageDiscovery {
 	if !bytes.Contains(line, []byte(`"CommandExecution"`)) &&
 		!bytes.Contains(line, []byte(`"function_call"`)) &&
-		!bytes.Contains(line, []byte(`"function_call_output"`)) {
+		!bytes.Contains(line, []byte(`"function_call_output"`)) &&
+		!bytes.Contains(line, []byte(`"custom_tool_call"`)) &&
+		!bytes.Contains(line, []byte(`"custom_tool_call_output"`)) {
 		return nil
 	}
 	var row struct {
@@ -335,7 +339,8 @@ func (e *lineageExtractor) feedCodexLine(line []byte) []lineageDiscovery {
 			Name      string          `json:"name"`
 			CallID    string          `json:"call_id"`
 			Arguments json.RawMessage `json:"arguments"`
-			Output    string          `json:"output"`
+			Input     string          `json:"input"`
+			Output    json.RawMessage `json:"output"`
 		}
 		if json.Unmarshal(row.Payload, &p) != nil {
 			return nil
@@ -374,15 +379,160 @@ func (e *lineageExtractor) feedCodexLine(line []byte) []lineageDiscovery {
 			if e.recordSeen(p.CallID) {
 				return nil
 			}
-			if hasNonZeroExit(p.Output, codexExitCodeRe) {
+			outText := extractCodexOutputText(p.Output)
+			if hasNonZeroExit(outText, codexExitCodeRe) {
 				return nil
 			}
-			if d, matched := e.matchResult(intent, p.Output, "codex:"+p.CallID); matched {
+			if d, matched := e.matchResult(intent, outText, "codex:"+p.CallID); matched {
 				return []lineageDiscovery{d}
 			}
+		case "custom_tool_call":
+			if p.CallID == "" || p.Name != "exec" || !strings.Contains(p.Input, "tools.exec_command") {
+				return nil
+			}
+			cmds := extractCodexCodeModeCmds(p.Input)
+			var intents []herdrCmdIntent
+			for _, cmd := range cmds {
+				if intent := e.classifyHerdrCommand(cmd); intent.valid {
+					intents = append(intents, intent)
+				}
+			}
+			if len(intents) == 0 {
+				return nil
+			}
+			if e.codexCodePending == nil {
+				e.codexCodePending = map[string][]herdrCmdIntent{}
+			}
+			if len(e.codexCodePending) >= lineageMaxPending {
+				e.codexCodePending = map[string][]herdrCmdIntent{}
+			}
+			e.codexCodePending[p.CallID] = intents
+		case "custom_tool_call_output":
+			if p.CallID == "" {
+				return nil
+			}
+			intents, ok := e.codexCodePending[p.CallID]
+			if !ok {
+				return nil
+			}
+			delete(e.codexCodePending, p.CallID)
+			if e.recordSeen(p.CallID) {
+				return nil
+			}
+			outText := extractCodexOutputText(p.Output)
+			if strings.HasPrefix(strings.TrimSpace(outText), "Script failed") || hasNonZeroExit(outText, codexExitCodeRe) {
+				return nil
+			}
+			var out []lineageDiscovery
+			for i, intent := range intents {
+				key := "codex:" + p.CallID
+				if len(intents) > 1 {
+					key += ":" + strconv.Itoa(i)
+				}
+				if d, matched := e.matchResult(intent, outText, key); matched {
+					out = append(out, d)
+				}
+			}
+			return out
 		}
 	}
 	return nil
+}
+
+func extractCodexOutputText(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var s string
+	if json.Unmarshal(raw, &s) == nil {
+		return s
+	}
+	var blocks []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	if json.Unmarshal(raw, &blocks) == nil {
+		var b strings.Builder
+		for _, bl := range blocks {
+			if bl.Text != "" {
+				b.WriteString(bl.Text)
+			}
+		}
+		return b.String()
+	}
+	return ""
+}
+
+// extractCodexCodeModeCmds extracts literal `cmd` strings from
+// `tools.exec_command({cmd: "..."})` calls inside a Codex code-mode script.
+func extractCodexCodeModeCmds(script string) []string {
+	var out []string
+	const marker = "tools.exec_command("
+	for off := 0; off < len(script); {
+		idx := strings.Index(script[off:], marker)
+		if idx < 0 {
+			break
+		}
+		pos := off + idx + len(marker)
+		rest := script[pos:]
+		// Locate `cmd` key inside the argument object.
+		cIdx := strings.Index(rest, "cmd")
+		if cIdx < 0 || cIdx > 64 {
+			off = pos
+			continue
+		}
+		after := strings.TrimSpace(rest[cIdx+3:])
+		// Optional quote around key name ("cmd": ...)
+		if strings.HasPrefix(after, `"`) || strings.HasPrefix(after, `'`) {
+			after = strings.TrimSpace(after[1:])
+		}
+		if !strings.HasPrefix(after, ":") {
+			off = pos
+			continue
+		}
+		after = strings.TrimSpace(after[1:])
+		if len(after) == 0 || (after[0] != '"' && after[0] != '\'') {
+			off = pos
+			continue
+		}
+		q := after[0]
+		var buf strings.Builder
+		esc := false
+		end := -1
+		for i := 1; i < len(after); i++ {
+			ch := after[i]
+			if esc {
+				switch ch {
+				case 'n':
+					buf.WriteByte('\n')
+				case 'r':
+					buf.WriteByte('\r')
+				case 't':
+					buf.WriteByte('\t')
+				default:
+					buf.WriteByte(ch)
+				}
+				esc = false
+				continue
+			}
+			if ch == '\\' {
+				esc = true
+				continue
+			}
+			if ch == q {
+				end = i
+				break
+			}
+			buf.WriteByte(ch)
+		}
+		if end > 0 {
+			out = append(out, buf.String())
+			off = pos + cIdx + 3
+		} else {
+			off = pos
+		}
+	}
+	return out
 }
 
 func extractCodexCommand(raw json.RawMessage) string {
@@ -914,6 +1064,20 @@ func (e *lineageExtractor) matchResult(intent herdrCmdIntent, output, evidenceKe
 	}
 }
 
+func herdrResultTypeMatches(want, got string) bool {
+	if got == want {
+		return true
+	}
+	// Real Herdr v0.8.0 `pane.split` returns `result.type = "pane_info"`.
+	if want == "pane_split" && got == "pane_info" {
+		return true
+	}
+	if want == "agent_started" && got == "agent_info" {
+		return true
+	}
+	return false
+}
+
 func sanitizeTermID(s string) string {
 	if s != "" && herdrTermIDRe.MatchString(s) {
 		return s
@@ -952,7 +1116,7 @@ func findMatchingHerdrJSON(output, wantType string) (herdrResultPayload, bool) {
 		if json.Unmarshal(target, &p) != nil {
 			return herdrResultPayload{}, false
 		}
-		if p.Type != wantType {
+		if !herdrResultTypeMatches(wantType, p.Type) {
 			return herdrResultPayload{}, false
 		}
 		return p, true

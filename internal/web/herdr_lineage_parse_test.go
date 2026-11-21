@@ -110,3 +110,26 @@ func TestLineageExtractorRejectsUnsafeAndOutOfScopeCommands(t *testing.T) {
 		t.Fatalf("failed/mismatched results should produce no discoveries, got %+v", got)
 	}
 }
+
+func TestLineageExtractorRealHerdrV080PaneSplit(t *testing.T) {
+	ex := newLineageExtractor("claude", "/run/herdr/s3.sock", "3")
+	// Exact JSON output produced by real Herdr v0.8.0 `herdr pane split`: result.type is "pane_info".
+	raw := "" +
+		`{"type":"assistant","message":{"content":[{"type":"tool_use","id":"tu_split","name":"Bash","input":{"command":"herdr pane split --pane w1:p1 --direction right"}}]}}` + "\n" +
+		`{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tu_split","is_error":false,"content":"{\"id\":\"cli:pane:split\",\"result\":{\"pane\":{\"agent_status\":\"unknown\",\"cwd\":\"/tmp\",\"focused\":false,\"pane_id\":\"w1:p2\",\"tab_id\":\"w1:t1\",\"terminal_id\":\"term_660cbf6c862b42\",\"workspace_id\":\"w1\"},\"type\":\"pane_info\"}}"}]}}` + "\n"
+	got := ex.Feed([]byte(raw))
+	if len(got) != 1 || got[0].ChildPane != "w1:p2" || got[0].ChildTermID != "term_660cbf6c862b42" || got[0].Action != "pane_split" {
+		t.Fatalf("real Herdr v0.8.0 pane.split result was missed: %+v", got)
+	}
+}
+
+func TestLineageExtractorCodexCodeModeCreation(t *testing.T) {
+	ex := newLineageExtractor("codex", "/run/herdr.sock", "default")
+	raw := "" +
+		`{"type":"response_item","payload":{"type":"custom_tool_call","call_id":"call_cm1","name":"exec","input":"const r = await tools.exec_command({cmd:\"herdr workspace create --cwd /repo\"}); text(r.output);"}}` + "\n" +
+		`{"type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"call_cm1","output":[{"type":"input_text","text":"Script completed\nWall time 0 seconds\nOutput:\n{\"result\":{\"type\":\"workspace_created\",\"root_pane\":{\"pane_id\":\"w2:p1\",\"terminal_id\":\"term-2\"}}}"}]}}` + "\n"
+	got := ex.Feed([]byte(raw))
+	if len(got) != 1 || got[0].ChildPane != "w2:p1" || got[0].ChildTermID != "term-2" {
+		t.Fatalf("Codex code-mode workspace creation was missed: %+v", got)
+	}
+}

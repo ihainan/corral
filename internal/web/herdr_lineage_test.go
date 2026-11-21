@@ -152,3 +152,92 @@ func TestLineageTrackerStaleChildTokenIgnored(t *testing.T) {
 		t.Fatalf("stale child session token should not bind: %+v", sum.Workspaces[0].Agents[1])
 	}
 }
+
+func TestLineageMetadataCannotRebindManualIdentity(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+
+	_, err := h.srv.store.UpsertAgentLineage(ctx, store.AgentLineage{
+		OwnerID: 1, HostID: 10, Server: "review",
+		ChildPane: "w1:p2", ChildTermID: "term-2", ChildSession: "cs1",
+		ParentPane: "w1:p1", ParentTermID: "term-1", ParentSession: "ps1",
+		Source: store.LineageManual,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	lt := &lineageTracker{
+		srv: h.srv, ownerID: 1, hostID: 10, server: "review",
+		live: map[string]livePaneInfo{}, termToPane: map[string]string{},
+		knownPanes: map[string]bool{}, paneLogs: map[string]knownPaneLog{},
+		probedSize: map[string]int64{}, retriedPane: map[string]bool{},
+	}
+	snap := &herdr.Snapshot{
+		Version:    "0.8.0",
+		Workspaces: []herdr.Workspace{{ID: "w1", Label: "main", Number: 1}},
+		Agents: []herdr.Pane{
+			{ID: "w1:p1", WorkspaceID: "w1", Agent: "claude", TerminalID: "term-1", AgentSession: &herdr.AgentSessionInfo{Value: "ps2"}},
+			{
+				ID: "w1:p2", WorkspaceID: "w1", Agent: "claude", TerminalID: "term-2",
+				AgentSession: &herdr.AgentSessionInfo{Value: "cs2"},
+				Tokens:       map[string]string{"corral_parent_pane": "w1:p1", "corral_parent_term": "term-1"},
+			},
+		},
+	}
+	lt.OnSnapshot(ctx, snap)
+	sum := summarize("default", snap, &agentTimes{at: map[string]agentTime{}}, false)
+	lt.decorate(&sum)
+	if sum.Workspaces[0].Agents[1].ParentPane != "" {
+		t.Fatalf("stale manual relation rebound onto replacement sessions: %+v", sum.Workspaces[0].Agents[1])
+	}
+}
+
+func TestLineageOtherTrackerObservesUnlink(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+
+	_, err := h.srv.store.UpsertAgentLineage(ctx, store.AgentLineage{
+		OwnerID: 1, HostID: 10, Server: "review-multi",
+		ChildPane: "w1:p2", ChildTermID: "term-2",
+		ParentPane: "w1:p1", ParentTermID: "term-1",
+		Source: store.LineageMetadata,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	makeTracker := func() *lineageTracker {
+		return &lineageTracker{
+			srv: h.srv, ownerID: 1, hostID: 10, server: "review-multi",
+			live: map[string]livePaneInfo{}, termToPane: map[string]string{},
+			knownPanes: map[string]bool{}, paneLogs: map[string]knownPaneLog{},
+			probedSize: map[string]int64{}, retriedPane: map[string]bool{},
+		}
+	}
+	snap := &herdr.Snapshot{
+		Version:    "0.8.0",
+		Workspaces: []herdr.Workspace{{ID: "w1", Label: "main", Number: 1}},
+		Agents: []herdr.Pane{
+			{ID: "w1:p1", WorkspaceID: "w1", Agent: "claude", TerminalID: "term-1"},
+			{ID: "w1:p2", WorkspaceID: "w1", Agent: "claude", TerminalID: "term-2"},
+		},
+	}
+
+	t1, t2 := makeTracker(), makeTracker()
+	t1.OnSnapshot(ctx, snap)
+	t2.OnSnapshot(ctx, snap)
+
+	// Unlink in SQLite (as apiHerdrLineage would on t1).
+	if err := h.srv.store.RejectAgentLineage(ctx, 1, 10, "review-multi", "w1:p2", "term-2", "", 5000); err != nil {
+		t.Fatal(err)
+	}
+
+	// Second watcher receives a fresh snapshot and MUST stop publishing the unlinked edge.
+	t2.OnSnapshot(ctx, snap)
+	sum := summarize("default", snap, &agentTimes{at: map[string]agentTime{}}, false)
+	t2.decorate(&sum)
+	if sum.Workspaces[0].Agents[1].ParentPane != "" {
+		t.Fatalf("second watcher still published unlinked edge after fresh snapshot: %+v", sum.Workspaces[0].Agents[1])
+	}
+}

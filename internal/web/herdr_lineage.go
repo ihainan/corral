@@ -37,6 +37,7 @@ type livePaneInfo struct {
 type knownPaneLog struct {
 	agent   string
 	session string
+	termID  string
 	logPath string
 }
 
@@ -105,9 +106,22 @@ func (t *lineageTracker) notePaneLog(pane, agent, session, logPath string) {
 	if pane == "" || logPath == "" || (agent != "claude" && agent != "codex" && agent != "agy") {
 		return
 	}
+	var trigger []string
 	t.mu.Lock()
-	t.paneLogs[pane] = knownPaneLog{agent: agent, session: session, logPath: logPath}
+	termID := t.live[pane].TerminalID
+	prev, had := t.paneLogs[pane]
+	t.paneLogs[pane] = knownPaneLog{agent: agent, session: session, termID: termID, logPath: logPath}
+	if !had || prev.logPath != logPath {
+		for _, p := range t.live {
+			if p.Agent != "" && p.PaneID != pane && !t.hasRowForLocked(p.PaneID, p.TerminalID) {
+				trigger = append(trigger, p.PaneID)
+			}
+		}
+	}
 	t.mu.Unlock()
+	if len(trigger) > 0 && t.sess != nil {
+		go t.probeCandidateParents(context.Background(), trigger)
+	}
 }
 
 func (t *lineageTracker) liveOf(pane string) (livePaneInfo, bool) {
@@ -228,10 +242,11 @@ func (t *lineageTracker) OnSnapshot(ctx context.Context, snap *herdr.Snapshot) {
 		changed = true
 	}
 
-	// 2. Active-aware TTL pruning (never prunes rows whose terminal is still alive).
+	// 2. Active-aware TTL pruning (never prunes rows whose terminal is still alive),
+	//    and always reload authoritative rows from SQLite so multi-watcher sessions
+	//    immediately observe links/unlinks performed by another tab/watcher.
 	t.mu.Lock()
 	shouldPrune := t.lastPruneAt.IsZero() || now.Sub(t.lastPruneAt) >= lineagePruneInterval
-	needInitialLoad := !t.loaded
 	t.mu.Unlock()
 	if shouldPrune {
 		cutoff := now.Add(-lineageKeptFor).UnixMilli()
@@ -242,18 +257,15 @@ func (t *lineageTracker) OnSnapshot(ctx context.Context, snap *herdr.Snapshot) {
 		}
 	}
 
-	if needInitialLoad || changed {
-		t.mu.Lock()
-		if err := t.reloadLocked(sctx); err != nil && t.srv.log != nil {
-			t.srv.log.Warn("agent lineage load failed", "err", err)
-		}
-		t.mu.Unlock()
-	}
-
-	// 3. Upgrade confirmed rows missing child_term_id / parent_term_id / session from live snapshot.
 	t.mu.Lock()
+	if err := t.reloadLocked(sctx); err != nil && t.srv.log != nil {
+		t.srv.log.Warn("agent lineage load failed", "err", err)
+	}
 	snapshotRows := append([]store.AgentLineage(nil), t.rows...)
 	t.mu.Unlock()
+
+	// 3. Upgrade confirmed rows missing child_term_id / parent_term_id / session from live snapshot.
+	// Uses UpgradeAgentLineageIdentity so concurrent manual unlinks can never be resurrected.
 	for _, r := range snapshotRows {
 		if r.State != store.LineageConfirmed {
 			continue
@@ -299,7 +311,7 @@ func (t *lineageTracker) OnSnapshot(ctx context.Context, snap *herdr.Snapshot) {
 		up.ParentTermID = parentTerm
 		up.ParentSession = parentSess
 		up.UpdatedAt = nowMs
-		if c, err := t.srv.store.UpsertAgentLineage(sctx, up); err == nil && c {
+		if c, err := t.srv.store.UpgradeAgentLineageIdentity(sctx, up); err == nil && c {
 			changed = true
 		}
 	}
@@ -389,10 +401,16 @@ func (t *lineageTracker) OnSnapshot(ctx context.Context, snap *herdr.Snapshot) {
 			}
 		}
 	}
-	// Forget closed panes from knownPanes so if a pane ID is later reused it is evaluated anew.
+	// Forget closed panes (and evict stale paneLogs when a pane disappears or its terminal changes).
 	for pane := range t.knownPanes {
 		if p, ok := live[pane]; !ok || p.Agent == "" {
 			delete(t.knownPanes, pane)
+		}
+	}
+	for pane, kl := range t.paneLogs {
+		p, ok := live[pane]
+		if !ok || p.Agent == "" || (kl.termID != "" && p.TerminalID != "" && kl.termID != p.TerminalID) || (kl.session != "" && p.Session != "" && kl.session != p.Session) {
+			delete(t.paneLogs, pane)
 		}
 	}
 	t.mu.Unlock()
@@ -702,6 +720,12 @@ func (t *lineageTracker) probeCandidateParents(ctx context.Context, newPanes []s
 		if !ok || info.Agent == "" {
 			continue
 		}
+		if kl.termID != "" && info.TerminalID != "" && kl.termID != info.TerminalID {
+			continue
+		}
+		if kl.session != "" && info.Session != "" && kl.session != info.Session {
+			continue
+		}
 		sess := info.Session
 		if sess == "" {
 			sess = kl.session
@@ -967,6 +991,7 @@ func (s *Server) apiHerdrLineage(w http.ResponseWriter, r *http.Request) {
 		_ = lt.reloadLocked(ctx)
 		lt.mu.Unlock()
 		lt.notify()
+		s.herdrSocks.reloadLineageForServer(ctx, lt)
 		s.audit(r, "herdr.lineage.link", sess.HostName, map[string]any{"session": sess.ID, "child_pane": b.ChildPane, "parent_pane": b.ParentPane})
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 
@@ -979,6 +1004,7 @@ func (s *Server) apiHerdrLineage(w http.ResponseWriter, r *http.Request) {
 		_ = lt.reloadLocked(ctx)
 		lt.mu.Unlock()
 		lt.notify()
+		s.herdrSocks.reloadLineageForServer(ctx, lt)
 		s.audit(r, "herdr.lineage.unlink", sess.HostName, map[string]any{"session": sess.ID, "child_pane": b.ChildPane})
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 	}
