@@ -61,6 +61,42 @@ func TestSeenRecheckKept(t *testing.T) {
 	}
 }
 
+// A "done" kept from before this watcher with the EXACT same herdr mark
+// (same terminal_id and state_change_seq) is already proven to be the same
+// done state: it must not be queued for log mtime recheck, and an idle log
+// touch must not drop prior and flip it back to "done" after restart.
+func TestSeenRecheckSameMarkSkipsLogCheck(t *testing.T) {
+	q := newSeenRounds(map[string]store.AgentSeen{
+		"w1:p1": {Session: "s1", At: 1000, Mark: "term_a#2312"},
+	}, nil)
+	s := seenSum(herdr.StatusDone, "s1")
+	s.Workspaces[0].Agents[0].Mark = "term_a#2312"
+	q.number(&s, false)
+	if len(pend(q)) != 0 {
+		t.Fatalf("same mark should not enqueue recheck: %v", pend(q))
+	}
+	if got := q.withSeen(s).Workspaces[0].Agents[0].Status; got != herdr.StatusIdle {
+		t.Fatalf("same mark after restart: got %s, want idle", got)
+	}
+
+	// Also when changed() arrives before the first snapshot fills Mark:
+	q2 := newSeenRounds(map[string]store.AgentSeen{
+		"w1:p1": {Session: "s1", At: 1000, Mark: "term_a#2312"},
+	}, nil)
+	q2.changed("w1:p1", herdr.StatusDone, "s1")
+	s2 := seenSum(herdr.StatusDone, "s1")
+	s2.Workspaces[0].Agents[0].Mark = "term_a#2312"
+	q2.number(&s2, false)
+	if len(pend(q2)) != 0 {
+		t.Fatalf("same mark filled by number should clear pending: %v", pend(q2))
+	}
+	// Even a stale in-flight checked() with newer mtime must not drop prior.
+	chk(q2, s2.Workspaces[0].Agents[0].Round, 5000, gen(q2))
+	if got := q2.withSeen(s2).Workspaces[0].Agents[0].Status; got != herdr.StatusIdle {
+		t.Fatalf("same mark after racing log touch: got %s, want idle", got)
+	}
+}
+
 // Looked at, then away from "done" for a moment and back: "done" till its
 // log is read, the one looked at if not written since. Away long, or
 // another agent session, or a read for a round over: as before.

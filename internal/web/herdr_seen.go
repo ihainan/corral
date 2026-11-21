@@ -126,12 +126,12 @@ func (r *seenRounds) changed(pane, to, session string) {
 		session = was.session
 	}
 	if !ok || was.status != to || was.session != session {
-		r.next(pane, to, session)
+		r.next(pane, to, session, "")
 	}
 }
 
 // (With r.mu held.)
-func (r *seenRounds) next(pane, status, session string) seenRound {
+func (r *seenRounds) next(pane, status, session, mark string) seenRound {
 	if r.at == nil {
 		r.at = map[string]seenRound{}
 	}
@@ -141,16 +141,17 @@ func (r *seenRounds) next(pane, status, session string) seenRound {
 		setMs(&r.left, pane, now)
 	}
 	r.n++
-	x := seenRound{status: status, session: session, n: r.n}
+	x := seenRound{status: status, session: session, n: r.n, mark: mark}
 	r.at[pane] = x
 	delete(r.quiet, pane) // (of a round over)
 	if status == herdr.StatusDone {
 		// (Back to "done" soon, or first seen with a look kept from before
-		// this watcher: its log is read for whether it is the one looked
-		// at. See recheck.)
+		// this watcher whose mark is not the one looked at: its log is read
+		// for whether it is the one looked at. See recheck.)
 		left, away := r.left[pane]
-		_, kept := r.prior[pane]
-		if l, ok := r.last[pane]; ok && l.Session == session && (had && away && now-left <= seenAwayMax.Milliseconds() || !had && kept) {
+		k, kept := r.prior[pane]
+		sameMark := kept && k.Session == session && sameTerminal(k.Mark, mark) && k.Mark == mark
+		if l, ok := r.last[pane]; ok && l.Session == session && (had && away && now-left <= seenAwayMax.Milliseconds() || !had && kept && !sameMark) {
 			setMs(&r.pending, pane, x.n)
 		}
 		delete(r.left, pane)
@@ -220,7 +221,13 @@ func (r *seenRounds) checked(pane string, c seenCheck, lo, hi, gen int64) {
 	}
 	if lo > l.At {
 		// (Written since it was looked at: the look of its round, or kept
-		// from before and told by an older read of its log, is of before.)
+		// from before and told by an older read of its log, is of before —
+		// unless herdr's own terminal+seq mark is still the exact one looked
+		// at, e.g. when an idle agent touches its log file without a new turn.)
+		if k, hasPrior := r.prior[pane]; hasPrior && k.Session == x.session && sameTerminal(k.Mark, x.mark) && k.Mark == x.mark {
+			r.mu.Unlock()
+			return
+		}
 		delete(r.prior, pane)
 		if sn, ok := r.seen[pane]; ok && sn.n == x.n {
 			delete(r.seen, pane)
@@ -267,12 +274,17 @@ func (r *seenRounds) number(sum *herdrSummary, old bool) {
 				if old {
 					continue
 				}
-				x = r.next(a.PaneID, a.Status, a.Session)
+				x = r.next(a.PaneID, a.Status, a.Session, a.Mark)
 			}
 			if !old && a.Mark != "" && x.mark != a.Mark {
 				was := x.mark
 				x.mark = a.Mark // (the latest: a look keeps what it was when looked at)
 				r.at[a.PaneID] = x
+				if was == "" {
+					if k, kept := r.prior[a.PaneID]; kept && k.Session == x.session && sameTerminal(k.Mark, a.Mark) && k.Mark == a.Mark {
+						delete(r.pending, a.PaneID)
+					}
+				}
 				// (Its state changed with no status between told — two
 				// changes in one snapshot, say: what its log said is of
 				// before, and a look stands only till its log is read and
