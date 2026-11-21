@@ -581,7 +581,15 @@ func (c *OpenCode) partsOf(m *ocMsg) []Part {
 			text = e.Name
 		}
 		t, cut := cut(clean(text), maxTrouble)
-		out = append(out, Part{Kind: KindTrouble, Trouble: &Trouble{Kind: TroubleAPI, Text: t, Status: e.Data.StatusCode, Cut: cut}})
+		kind := TroubleAPI
+		low := strings.ToLower(text)
+		switch {
+		case e.Data.StatusCode == 429 || strings.Contains(low, "quota reached") || strings.Contains(low, "quota exceeded") || strings.Contains(low, "usage limit") || strings.Contains(low, "rate limit"):
+			kind = TroubleLimit
+		case strings.Contains(low, "safety filter") || strings.Contains(low, "content policy") || strings.Contains(low, "safeguards"):
+			kind = TroubleRefused
+		}
+		out = append(out, Part{Kind: KindTrouble, Trouble: &Trouble{Kind: kind, Text: t, Status: e.Data.StatusCode, Cut: cut}})
 	} else if m.data.Finish == "length" {
 		out = append(out, Part{Kind: KindTrouble, Trouble: &Trouble{Kind: TroubleCut}})
 	}

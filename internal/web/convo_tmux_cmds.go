@@ -47,7 +47,7 @@ func (s *Server) tmuxCmdsOf(sess *term.Session) *cmdProber {
 // convoProcStatus says it) is told to its prober; what it left running, if
 // that is known.
 func (s *Server) tmuxCmdsTell(sess *term.Session, st *convoState) []bgCmd {
-	if sess.Persistence != "tmux" || (st.agent != "claude" && st.agent != "codex") || st.sub || st.bind == nil {
+	if sess.Persistence != "tmux" || (st.agent != "claude" && st.agent != "codex" && st.agent != "agy") || st.sub || st.bind == nil {
 		return nil
 	}
 	p := s.tmuxCmdsOf(sess)
@@ -56,8 +56,8 @@ func (s *Server) tmuxCmdsTell(sess *term.Session, st *convoState) []bgCmd {
 		status = "idle" // (its turn over, a shell running: what it left in the background, maybe)
 	}
 	session := st.bind.Session
-	if st.agent == "codex" {
-		session = strings.ToLower(session) // (a Codex's commands are found by its thread, as the scan prints it)
+	if st.agent == "codex" || st.agent == "agy" {
+		session = strings.ToLower(session) // (a Codex's/agy's commands are found by its thread/conversation, as the scan prints it)
 	}
 	p.consider(st.bind.Pane, st.agent, status, session)
 	return p.of(st.bind.Pane, session)

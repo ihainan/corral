@@ -370,14 +370,25 @@ func (s *Server) bgSession(sess *term.Session, pane, said string) string {
 // locatedEverywhere notes what a herdr pane runs (sid; "" none) for each
 // of the owner's connections to that herdr server: the pane is one.
 func (s *Server) locatedEverywhere(sess *term.Session, pane, sid string, at time.Time) {
-	s.herdrSocks.setLocated(sess.ID, pane, sid, at)
+	note := func(id string) {
+		s.herdrSocks.setLocated(id, pane, sid, at)
+		if sid == "" {
+			return
+		}
+		if cmds := s.herdrSocks.cmdsOf(id); cmds != nil {
+			if p, ok := s.herdrSocks.paneOf(id, pane); ok {
+				cmds.consider(pane, p.Agent, p.AgentStatus, sid)
+			}
+		}
+	}
+	note(sess.ID)
 	socket := s.herdrSocks.get(sess.ID)
 	if socket == "" {
 		return
 	}
 	for _, o := range s.terms.Running(sess.OwnerID, sess.HostID) {
 		if o.ID != sess.ID && s.herdrSocks.get(o.ID) == socket {
-			s.herdrSocks.setLocated(o.ID, pane, sid, at)
+			note(o.ID)
 		}
 	}
 }

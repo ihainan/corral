@@ -1,0 +1,674 @@
+package web
+
+import (
+	"bytes"
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"net/netip"
+	"net/url"
+	"regexp"
+	"strings"
+	"sync"
+	"time"
+	"unicode"
+
+	"github.com/ihainan/corral/internal/store"
+	"github.com/ihainan/corral/internal/vault"
+)
+
+const (
+	translateMaxItems       = 16
+	translateMaxTextBytes   = 32 << 10
+	translateMaxRespBytes   = 256 << 10
+	translateMaxBaseURLLen  = 512
+	translateMaxModelLen    = 128
+	translateMaxKeyLen      = 4096
+	translateMaxConcurrency = 4
+	translateUpstreamTime   = 30 * time.Second
+)
+
+var translateLangNames = map[string]string{
+	"zh-CN": "Simplified Chinese",
+	"zh-TW": "Traditional Chinese",
+	"en":    "English",
+	"ja":    "Japanese",
+	"ko":    "Korean",
+	"fr":    "French",
+	"de":    "German",
+	"es":    "Spanish",
+}
+
+func translateAAD(userID int64) []byte {
+	return []byte(fmt.Sprintf("translate:%d", userID))
+}
+
+func translateHash(text string) string {
+	sum := sha256.Sum256([]byte(text))
+	return hex.EncodeToString(sum[:])
+}
+
+func normalizeTranslateBaseURL(raw string) (string, error) {
+	s := strings.TrimSpace(raw)
+	if s == "" || len(s) > translateMaxBaseURLLen {
+		return "", errors.New("base URL is required and must be at most 512 characters")
+	}
+	u, err := url.Parse(s)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return "", errors.New("base URL must be a valid http or https URL")
+	}
+	if u.User != nil {
+		return "", errors.New("base URL must not include embedded credentials")
+	}
+	return strings.TrimRight(s, "/"), nil
+}
+
+func translateEndpointURL(baseURL string) string {
+	b := strings.TrimRight(strings.TrimSpace(baseURL), "/")
+	if strings.HasSuffix(b, "/chat/completions") {
+		return b
+	}
+	return b + "/chat/completions"
+}
+
+// blockedTranslatePrefixes: link-local / cloud metadata / unspecified addresses
+// that outbound translation requests must never dial.
+var blockedTranslatePrefixes = []netip.Prefix{
+	netip.MustParsePrefix("0.0.0.0/8"),
+	netip.MustParsePrefix("169.254.0.0/16"),
+	netip.MustParsePrefix("::/128"),
+	netip.MustParsePrefix("fe80::/10"),
+}
+
+func translateAddrBlocked(a netip.Addr) bool {
+	a = a.Unmap()
+	if !a.IsValid() {
+		return true
+	}
+	for _, p := range blockedTranslatePrefixes {
+		if p.Contains(a) {
+			return true
+		}
+	}
+	return false
+}
+
+func newTranslateHTTPClient() *http.Client {
+	dialer := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
+	tr := &http.Transport{
+		Proxy: http.ProxyFromEnvironment,
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			host, port, err := net.SplitHostPort(addr)
+			if err != nil {
+				return nil, err
+			}
+			if ip, err := netip.ParseAddr(host); err == nil {
+				if translateAddrBlocked(ip) {
+					return nil, errors.New("destination address is blocked")
+				}
+				return dialer.DialContext(ctx, network, addr)
+			}
+			ips, err := net.DefaultResolver.LookupNetIP(ctx, "ip", host)
+			if err != nil {
+				return nil, err
+			}
+			for _, ip := range ips {
+				if translateAddrBlocked(ip) {
+					return nil, errors.New("destination resolves to a blocked address")
+				}
+			}
+			var lastErr error
+			for _, ip := range ips {
+				conn, err := dialer.DialContext(ctx, network, net.JoinHostPort(ip.Unmap().String(), port))
+				if err == nil {
+					return conn, nil
+				}
+				lastErr = err
+			}
+			if lastErr == nil {
+				lastErr = errors.New("no addresses resolved")
+			}
+			return nil, lastErr
+		},
+	}
+	return &http.Client{
+		Timeout:   translateUpstreamTime,
+		Transport: tr,
+		// Refuse redirects so Bearer API keys never leak to another host.
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return errors.New("redirects are not allowed for translation requests")
+		},
+	}
+}
+
+var (
+	reFencedCode = regexp.MustCompile("(?s)```.*?```")
+	reInlineCode = regexp.MustCompile("`[^`]*`")
+	reMdLink     = regexp.MustCompile(`\[([^\]]*)\]\([^)]*\)`)
+	reURL        = regexp.MustCompile(`https?://\S+`)
+	reUnixPath   = regexp.MustCompile(`(?:~|\.{1,2})?/(?:[A-Za-z0-9._-]+/)+[A-Za-z0-9._-]*`)
+)
+
+// needsThoughtTranslation performs fast local script detection after stripping
+// code blocks, inline code, URLs, and file paths. Returns false when text is
+// too short or already predominantly in targetLang, saving unnecessary API calls.
+func needsThoughtTranslation(text, targetLang string) bool {
+	if _, ok := translateLangNames[targetLang]; !ok {
+		return false
+	}
+	clean := reFencedCode.ReplaceAllString(text, " ")
+	clean = reInlineCode.ReplaceAllString(clean, " ")
+	clean = reMdLink.ReplaceAllString(clean, "$1")
+	clean = reURL.ReplaceAllString(clean, " ")
+	clean = reUnixPath.ReplaceAllString(clean, " ")
+
+	var han, kana, hangul, latin, total int
+	for _, r := range clean {
+		if !unicode.IsLetter(r) {
+			continue
+		}
+		total++
+		switch {
+		case unicode.Is(unicode.Han, r):
+			han++
+		case unicode.Is(unicode.Hiragana, r) || unicode.Is(unicode.Katakana, r):
+			kana++
+		case unicode.Is(unicode.Hangul, r):
+			hangul++
+		case unicode.Is(unicode.Latin, r):
+			latin++
+		}
+	}
+	if total < 8 {
+		return false
+	}
+	switch targetLang {
+	case "zh-CN", "zh-TW":
+		return float64(han)/float64(total) < 0.30
+	case "en":
+		if han == 0 && kana == 0 && hangul == 0 && float64(latin)/float64(total) >= 0.75 {
+			return false
+		}
+		return true
+	case "ja":
+		if kana > 0 && float64(kana+han)/float64(total) >= 0.30 {
+			return false
+		}
+		return true
+	case "ko":
+		return float64(hangul)/float64(total) < 0.30
+	default:
+		// Latin-script European targets (fr/de/es): let the LLM decide & preserve if already in target.
+		return true
+	}
+}
+
+type translateFlightState struct {
+	mu    sync.Mutex
+	calls map[string]*translateCall
+	sems  map[int64]chan struct{}
+}
+
+type translateCall struct {
+	done chan struct{}
+	text string
+	err  error
+}
+
+func (f *translateFlightState) sem(userID int64) chan struct{} {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.sems == nil {
+		f.sems = map[int64]chan struct{}{}
+	}
+	ch := f.sems[userID]
+	if ch == nil {
+		ch = make(chan struct{}, translateMaxConcurrency)
+		f.sems[userID] = ch
+	}
+	return ch
+}
+
+func (f *translateFlightState) do(key string, fn func() (string, error)) (string, error) {
+	f.mu.Lock()
+	if f.calls == nil {
+		f.calls = map[string]*translateCall{}
+	}
+	if c, ok := f.calls[key]; ok {
+		f.mu.Unlock()
+		<-c.done
+		return c.text, c.err
+	}
+	c := &translateCall{done: make(chan struct{})}
+	f.calls[key] = c
+	f.mu.Unlock()
+
+	c.text, c.err = fn()
+	close(c.done)
+
+	f.mu.Lock()
+	delete(f.calls, key)
+	f.mu.Unlock()
+	return c.text, c.err
+}
+
+func translateSystemPrompt(targetLang string) string {
+	name := translateLangNames[targetLang]
+	return "Translate the following AI coding assistant reasoning trace into " + name + ".\n" +
+		"Rules:\n" +
+		"- If the text is already in " + name + ", return it verbatim.\n" +
+		"- Keep all code identifiers, file paths, symbol names, CLI commands, flags, URLs, and inline/fenced code blocks verbatim.\n" +
+		"- Preserve Markdown structure (headings, lists, bold, code fences) and paragraph breaks.\n" +
+		"- Keep the translation concise, natural, and accurate for software engineering context.\n" +
+		"- Output ONLY the translated text with no preamble, explanations, or extra quotes."
+}
+
+func (s *Server) translateHTTP() *http.Client {
+	if s.translateClient != nil {
+		return s.translateClient
+	}
+	s.translateClientOnce.Do(func() {
+		s.translateDefaultClient = newTranslateHTTPClient()
+	})
+	return s.translateDefaultClient
+}
+
+func (s *Server) callTranslateLLM(ctx context.Context, baseURL, model, apiKey, targetLang, text string) (string, error) {
+	out, retryNoReasoning, err := s.callTranslateLLMOnce(ctx, baseURL, model, apiKey, targetLang, text, true)
+	if err != nil && retryNoReasoning {
+		out, _, err = s.callTranslateLLMOnce(ctx, baseURL, model, apiKey, targetLang, text, false)
+	}
+	return out, err
+}
+
+func (s *Server) callTranslateLLMOnce(ctx context.Context, baseURL, model, apiKey, targetLang, text string, withReasoningOff bool) (string, bool, error) {
+	payload := map[string]any{
+		"model": model,
+		"messages": []map[string]string{
+			{"role": "system", "content": translateSystemPrompt(targetLang)},
+			{"role": "user", "content": text},
+		},
+		"temperature": 0.1,
+	}
+	if withReasoningOff {
+		payload["reasoning_effort"] = "none"
+	}
+	bodyBytes, err := json.Marshal(payload)
+	if err != nil {
+		return "", false, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, translateEndpointURL(baseURL), bytes.NewReader(bodyBytes))
+	if err != nil {
+		return "", false, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+	resp, err := s.translateHTTP().Do(req)
+	if err != nil {
+		return "", false, fmt.Errorf("translation request failed: %w", err)
+	}
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, translateMaxRespBytes))
+	if err != nil {
+		return "", false, fmt.Errorf("reading translation response: %w", err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		msg := strings.TrimSpace(string(raw))
+		if len(msg) > 240 {
+			msg = msg[:240]
+		}
+		// Some OpenAI-compatible proxies reject reasoning_effort with HTTP 400; retry once without it.
+		if withReasoningOff && resp.StatusCode == http.StatusBadRequest && strings.Contains(strings.ToLower(msg), "reasoning_effort") {
+			return "", true, fmt.Errorf("upstream status %d: %s", resp.StatusCode, msg)
+		}
+		return "", false, fmt.Errorf("upstream status %d: %s", resp.StatusCode, msg)
+	}
+	var parsed struct {
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal(raw, &parsed); err != nil || len(parsed.Choices) == 0 {
+		return "", false, errors.New("unexpected translation response format")
+	}
+	out := strings.TrimSpace(parsed.Choices[0].Message.Content)
+	if out == "" {
+		return "", false, errors.New("empty translation response")
+	}
+	return out, false, nil
+}
+
+func (s *Server) openTranslateKey(cfg *store.TranslateConfig) (string, error) {
+	if len(cfg.Ciphertext) == 0 {
+		return "", nil
+	}
+	plain, err := s.vault.Open(vault.Sealed{
+		Ciphertext: cfg.Ciphertext,
+		WrappedKey: cfg.WrappedKey,
+		KeyID:      cfg.KeyID,
+	}, translateAAD(cfg.UserID))
+	if err != nil {
+		return "", err
+	}
+	return string(plain), nil
+}
+
+type translateConfigView struct {
+	Enabled    bool   `json:"enabled"`
+	TargetLang string `json:"target_lang"`
+	BaseURL    string `json:"base_url"`
+	Model      string `json:"model"`
+	HasKey     bool   `json:"has_key"`
+}
+
+func translateView(cfg *store.TranslateConfig) translateConfigView {
+	return translateConfigView{
+		Enabled:    cfg.Enabled,
+		TargetLang: cfg.TargetLang,
+		BaseURL:    cfg.BaseURL,
+		Model:      cfg.Model,
+		HasKey:     len(cfg.Ciphertext) > 0,
+	}
+}
+
+// GET /api/me/translate
+func (s *Server) apiGetTranslateConfig(w http.ResponseWriter, r *http.Request) {
+	cfg, err := s.store.TranslateConfigOf(r.Context(), currentUser(r).ID)
+	if err != nil {
+		s.internalError(w, r, err)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, http.StatusOK, translateView(cfg))
+}
+
+// PUT /api/me/translate
+func (s *Server) apiPutTranslateConfig(w http.ResponseWriter, r *http.Request) {
+	var b struct {
+		Enabled    *bool   `json:"enabled"`
+		TargetLang *string `json:"target_lang"`
+		BaseURL    *string `json:"base_url"`
+		Model      *string `json:"model"`
+		APIKey     *string `json:"api_key"`
+		ClearKey   bool    `json:"clear_key"`
+	}
+	if err := readJSON(r, &b); err != nil {
+		writeError(w, http.StatusBadRequest, "bad_request", err.Error())
+		return
+	}
+	uid := currentUser(r).ID
+	cfg, err := s.store.TranslateConfigOf(r.Context(), uid)
+	if err != nil {
+		s.internalError(w, r, err)
+		return
+	}
+	if b.Enabled != nil {
+		cfg.Enabled = *b.Enabled
+	}
+	if b.TargetLang != nil {
+		lang := strings.TrimSpace(*b.TargetLang)
+		if _, ok := translateLangNames[lang]; !ok {
+			writeError(w, http.StatusBadRequest, "bad_request", "unsupported target language")
+			return
+		}
+		cfg.TargetLang = lang
+	}
+	if b.BaseURL != nil {
+		u, err := normalizeTranslateBaseURL(*b.BaseURL)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "bad_request", err.Error())
+			return
+		}
+		cfg.BaseURL = u
+	}
+	if b.Model != nil {
+		m := strings.TrimSpace(*b.Model)
+		if m == "" || len(m) > translateMaxModelLen {
+			writeError(w, http.StatusBadRequest, "bad_request", "model is required and must be at most 128 characters")
+			return
+		}
+		cfg.Model = m
+	}
+	if b.ClearKey {
+		cfg.Ciphertext, cfg.WrappedKey, cfg.KeyID = nil, nil, ""
+	} else if b.APIKey != nil {
+		key := strings.TrimSpace(*b.APIKey)
+		if len(key) > translateMaxKeyLen {
+			writeError(w, http.StatusBadRequest, "bad_request", "API key is too long")
+			return
+		}
+		if key != "" {
+			sealed, err := s.vault.Seal([]byte(key), translateAAD(uid))
+			if err != nil {
+				s.internalError(w, r, err)
+				return
+			}
+			cfg.Ciphertext = sealed.Ciphertext
+			cfg.WrappedKey = sealed.WrappedKey
+			cfg.KeyID = sealed.KeyID
+		}
+	}
+	if err := s.store.SaveTranslateConfig(r.Context(), cfg); err != nil {
+		s.internalError(w, r, err)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, http.StatusOK, translateView(cfg))
+}
+
+// POST /api/me/translate/test
+func (s *Server) apiTestTranslateConfig(w http.ResponseWriter, r *http.Request) {
+	var b struct {
+		TargetLang string `json:"target_lang"`
+		BaseURL    string `json:"base_url"`
+		Model      string `json:"model"`
+		APIKey     string `json:"api_key"`
+	}
+	if r.ContentLength != 0 {
+		if err := readJSON(r, &b); err != nil {
+			writeError(w, http.StatusBadRequest, "bad_request", err.Error())
+			return
+		}
+	}
+	uid := currentUser(r).ID
+	cfg, err := s.store.TranslateConfigOf(r.Context(), uid)
+	if err != nil {
+		s.internalError(w, r, err)
+		return
+	}
+	targetLang := cfg.TargetLang
+	if strings.TrimSpace(b.TargetLang) != "" {
+		targetLang = strings.TrimSpace(b.TargetLang)
+	}
+	if _, ok := translateLangNames[targetLang]; !ok {
+		writeError(w, http.StatusBadRequest, "bad_request", "unsupported target language")
+		return
+	}
+	baseURL := cfg.BaseURL
+	if strings.TrimSpace(b.BaseURL) != "" {
+		baseURL, err = normalizeTranslateBaseURL(b.BaseURL)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "bad_request", err.Error())
+			return
+		}
+	}
+	model := cfg.Model
+	if strings.TrimSpace(b.Model) != "" {
+		model = strings.TrimSpace(b.Model)
+	}
+	if model == "" || len(model) > translateMaxModelLen {
+		writeError(w, http.StatusBadRequest, "bad_request", "model is required")
+		return
+	}
+	apiKey := strings.TrimSpace(b.APIKey)
+	if apiKey == "" {
+		apiKey, err = s.openTranslateKey(cfg)
+		if err != nil {
+			s.internalError(w, r, err)
+			return
+		}
+	}
+	sampleIn := "All checks passed. Now preparing to commit `convo_agy_input.go`."
+	if targetLang == "en" {
+		sampleIn = "所有检查已通过，准备提交 `convo_agy_input.go`。"
+	}
+	t0 := time.Now()
+	tctx, cancel := context.WithTimeout(r.Context(), translateUpstreamTime)
+	defer cancel()
+	out, err := s.callTranslateLLM(tctx, baseURL, model, apiKey, targetLang, sampleIn)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "translate_failed", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":         true,
+		"sample":     out,
+		"latency_ms": time.Since(t0).Milliseconds(),
+	})
+}
+
+type translateThoughtResult struct {
+	Hash   string `json:"hash"`
+	Status string `json:"status"` // "ok", "skipped", "error"
+	Text   string `json:"text,omitempty"`
+	Cached bool   `json:"cached,omitempty"`
+	Error  string `json:"error,omitempty"`
+}
+
+// POST /api/translate/thoughts
+func (s *Server) apiTranslateThoughts(w http.ResponseWriter, r *http.Request) {
+	var b struct {
+		TargetLang string `json:"target_lang"`
+		Items      []struct {
+			Text string `json:"text"`
+		} `json:"items"`
+	}
+	if err := readJSON(r, &b); err != nil {
+		writeError(w, http.StatusBadRequest, "bad_request", err.Error())
+		return
+	}
+	if len(b.Items) == 0 || len(b.Items) > translateMaxItems {
+		writeError(w, http.StatusBadRequest, "bad_request", "items must have between 1 and 16 entries")
+		return
+	}
+	uid := currentUser(r).ID
+	cfg, err := s.store.TranslateConfigOf(r.Context(), uid)
+	if err != nil {
+		s.internalError(w, r, err)
+		return
+	}
+	if !cfg.Enabled {
+		writeError(w, http.StatusConflict, "translate_disabled", "thought translation is disabled")
+		return
+	}
+	targetLang := cfg.TargetLang
+	if strings.TrimSpace(b.TargetLang) != "" {
+		targetLang = strings.TrimSpace(b.TargetLang)
+	}
+	if _, ok := translateLangNames[targetLang]; !ok {
+		writeError(w, http.StatusBadRequest, "bad_request", "unsupported target language")
+		return
+	}
+
+	results := make([]translateThoughtResult, len(b.Items))
+	needIdx := make([]int, 0, len(b.Items))
+	needHashes := make([]string, 0, len(b.Items))
+	seenHash := map[string]bool{}
+	for i, it := range b.Items {
+		txt := strings.TrimSpace(it.Text)
+		if txt == "" || len(txt) > translateMaxTextBytes {
+			results[i] = translateThoughtResult{Status: "skipped"}
+			continue
+		}
+		h := translateHash(txt)
+		results[i].Hash = h
+		if !needsThoughtTranslation(txt, targetLang) {
+			results[i].Status = "skipped"
+			continue
+		}
+		needIdx = append(needIdx, i)
+		if !seenHash[h] {
+			seenHash[h] = true
+			needHashes = append(needHashes, h)
+		}
+	}
+
+	if len(needHashes) > 0 {
+		cached, err := s.store.CachedThoughtTranslations(r.Context(), uid, targetLang, needHashes)
+		if err != nil {
+			s.internalError(w, r, err)
+			return
+		}
+		var misses []int
+		for _, i := range needIdx {
+			h := results[i].Hash
+			if tr, ok := cached[h]; ok {
+				results[i] = translateThoughtResult{Hash: h, Status: "ok", Text: tr, Cached: true}
+			} else {
+				misses = append(misses, i)
+			}
+		}
+
+		if len(misses) > 0 {
+			apiKey, err := s.openTranslateKey(cfg)
+			if err != nil {
+				s.internalError(w, r, err)
+				return
+			}
+			baseURL, err := normalizeTranslateBaseURL(cfg.BaseURL)
+			if err != nil {
+				writeError(w, http.StatusBadRequest, "bad_request", err.Error())
+				return
+			}
+			sem := s.translateFlight.sem(uid)
+			var wg sync.WaitGroup
+			for _, idx := range misses {
+				wg.Add(1)
+				go func(i int) {
+					defer wg.Done()
+					txt := strings.TrimSpace(b.Items[i].Text)
+					h := results[i].Hash
+					flightKey := fmt.Sprintf("%d\x00%s\x00%s", uid, targetLang, h)
+					tr, err := s.translateFlight.do(flightKey, func() (string, error) {
+						select {
+						case sem <- struct{}{}:
+							defer func() { <-sem }()
+						case <-r.Context().Done():
+							return "", r.Context().Err()
+						}
+						tctx, cancel := context.WithTimeout(r.Context(), translateUpstreamTime)
+						defer cancel()
+						out, err := s.callTranslateLLM(tctx, baseURL, cfg.Model, apiKey, targetLang, txt)
+						if err != nil {
+							return "", err
+						}
+						_ = s.store.PutThoughtTranslation(context.Background(), uid, h, targetLang, out)
+						return out, nil
+					})
+					if err != nil {
+						results[i] = translateThoughtResult{Hash: h, Status: "error", Error: err.Error()}
+					} else {
+						results[i] = translateThoughtResult{Hash: h, Status: "ok", Text: tr}
+					}
+				}(idx)
+			}
+			wg.Wait()
+		}
+	}
+
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, http.StatusOK, map[string]any{
+		"target_lang": targetLang,
+		"results":     results,
+	})
+}

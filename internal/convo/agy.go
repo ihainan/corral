@@ -46,6 +46,11 @@ type Agy struct {
 	runOrder []string
 	ranOut   map[string]bool
 	since    int64
+
+	// maxStep tracks the highest step_index seen so far (JSONL or DB errors),
+	// and seenDBErrs deduplicates step_type = 17 rows merged from conversations/<sid>.db.
+	maxStep    int
+	seenDBErrs map[int]bool
 }
 
 type agyPending struct {
@@ -163,6 +168,9 @@ func (c *Agy) line(raw []byte) {
 		c.Skipped++
 		return
 	}
+	if r.StepIndex > c.maxStep {
+		c.maxStep = r.StepIndex
+	}
 	switch r.Type {
 	case "USER_INPUT":
 		c.userInput(r)
@@ -174,6 +182,8 @@ func (c *Agy) line(raw []byte) {
 		c.systemMessage(r)
 	case "CHECKPOINT":
 		c.checkpoint(r)
+	case "ERROR_MESSAGE":
+		c.errorMessage(r)
 	default:
 		c.Skipped++
 	}
@@ -287,8 +297,13 @@ func (c *Agy) plannerResponse(r agyRow) {
 		if msg == "" {
 			msg = "error"
 		}
-		t, truncated := cut(clean(msg), maxTrouble)
-		parts = append(parts, Part{Kind: KindTrouble, Trouble: &Trouble{Kind: TroubleAPI, Text: t, Cut: truncated}})
+		var atUnix int64
+		if ts, err := time.Parse(time.RFC3339Nano, r.CreatedAt); err == nil {
+			atUnix = ts.Unix()
+		}
+		if tr := agyClassifyTrouble(msg, "", "", "", 0, atUnix, 0); tr != nil {
+			parts = append(parts, Part{Kind: KindTrouble, Trouble: tr})
+		}
 	}
 
 	if len(parts) == 0 {
@@ -300,6 +315,9 @@ func (c *Agy) plannerResponse(r agyRow) {
 
 func (c *Agy) generic(r agyRow) {
 	if len(c.pending) == 0 {
+		for _, id := range agyParseBgCancel(agyStripTimestamps(r.Content)) {
+			c.endRun(id)
+		}
 		// Read from the tail of a long log: keep for Prepend to pair.
 		if len(c.orphans) < maxAgyOrphans {
 			c.orphans = append(c.orphans, r)
@@ -323,6 +341,10 @@ func (c *Agy) applyGeneric(e *Entry, t *Tool, r agyRow) {
 			}
 			c.setGoing(id, "cmd", what, t.Detail, logPath, r.CreatedAt)
 		}
+	}
+	// Background task cancelled/killed via manage_task.
+	for _, id := range agyParseBgCancel(body) {
+		c.endRun(id)
 	}
 
 	// Structured answers for ask_question (mapped to AskUserQuestion).
@@ -434,6 +456,29 @@ func (c *Agy) checkpoint(r agyRow) {
 			Parts: []Part{{Kind: KindText, Text: t, Truncated: truncated}},
 		})
 	}
+}
+
+func (c *Agy) errorMessage(r agyRow) {
+	c.pending = nil
+	c.working, c.known = false, true
+	msg := firstNonEmpty(strings.TrimSpace(r.Error), strings.TrimSpace(r.Content))
+	if msg == "" {
+		msg = "error"
+	}
+	var atUnix int64
+	if ts, err := time.Parse(time.RFC3339Nano, r.CreatedAt); err == nil {
+		atUnix = ts.Unix()
+	}
+	tr := agyClassifyTrouble(msg, "", "", "", 0, atUnix, 0)
+	if tr == nil {
+		return
+	}
+	c.appendEntry(&Entry{
+		ID:    fmt.Sprintf("step-%d", r.StepIndex),
+		Role:  RoleNote,
+		Time:  clip(r.CreatedAt, 64),
+		Parts: []Part{{Kind: KindTrouble, Trouble: tr}},
+	})
 }
 
 func (c *Agy) setGoing(id, kind, what, cmd, outPath, at string) {
@@ -549,6 +594,9 @@ func (c *Agy) Prepend(other Parser) {
 	}
 	if c.meta.Answer == nil {
 		c.meta.Answer = o.meta.Answer
+	}
+	if o.maxStep > c.maxStep {
+		c.maxStep = o.maxStep
 	}
 	if !c.known && o.known {
 		c.known, c.working = true, o.working
@@ -900,9 +948,24 @@ func agyParseBgStart(body string) (id, desc, logPath string) {
 }
 
 var (
-	agyBgDoneRe = regexp.MustCompile(`Task id "([^"]+)" finished with result:`)
-	agyExitRe   = regexp.MustCompile(`Command exited with code (-?\d+)`)
+	agyBgDoneRe   = regexp.MustCompile(`Task (?:id )?"([^"]+)" (?:finished with result:|cancelled|canceled|killed|stopped|failed)`)
+	agyBgCancelRe = regexp.MustCompile(`Task (?:id )?"([^"]+)" (?:cancelled|canceled|killed|stopped)`)
+	agyExitRe     = regexp.MustCompile(`Command exited with code (-?\d+)`)
 )
+
+func agyParseBgCancel(body string) []string {
+	matches := agyBgCancelRe.FindAllStringSubmatch(body, -1)
+	if len(matches) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(matches))
+	for _, m := range matches {
+		if m[1] != "" {
+			out = append(out, m[1])
+		}
+	}
+	return out
+}
 
 func agyParseBgDone(raw string) (id, status string, code *int, summary string) {
 	m := agyBgDoneRe.FindStringSubmatch(raw)
@@ -911,6 +974,13 @@ func agyParseBgDone(raw string) (id, status string, code *int, summary string) {
 	}
 	id = m[1]
 	status = "done"
+	lower := strings.ToLower(m[0])
+	switch {
+	case strings.Contains(lower, "cancel"), strings.Contains(lower, "kill"), strings.Contains(lower, "stop"):
+		status = "stopped"
+	case strings.Contains(lower, "fail"):
+		status = "failed"
+	}
 	if em := agyExitRe.FindStringSubmatch(raw); em != nil {
 		if n, err := strconv.Atoi(em[1]); err == nil {
 			code = &n

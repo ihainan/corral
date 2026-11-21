@@ -764,11 +764,15 @@ func (s *Server) watchHerdr(sess *term.Session, h *store.Host) {
 			if err == nil {
 				at = map[string]int64{}
 				found := parseConvoLocate(string(out))
+				began := time.UnixMilli(got)
 				for _, p := range found.procs {
 					// (Of this herdr server: another on the host names
 					// its panes as this one does.)
 					if p.herdrSocket != socket || !herdrPane.MatchString(p.herdrPane) {
 						continue
+					}
+					if (p.agent == "claude" || p.agent == "agy") && convoUUID.MatchString(p.sid) {
+						s.locatedEverywhere(sess, p.herdrPane, p.sid, began)
 					}
 					if w := procWrote(p, found.cands); w > at[p.herdrPane] {
 						at[p.herdrPane] = w

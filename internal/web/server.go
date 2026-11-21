@@ -82,6 +82,10 @@ type Server struct {
 	vis              visibility
 	looks            paneLooks    // (agents shown on an agents page now: see paneWatched)
 	waitAlerts       waitAlerts   // "needs you" alerts shown, to replace when no longer true
+	translateFlight        translateFlightState
+	translateClient        *http.Client // test hook; nil uses translateDefaultClient
+	translateClientOnce    sync.Once
+	translateDefaultClient *http.Client
 	complete         completions  // the composer's completion listings, per session and folder
 	convos           convoStates  // the conversation view's logs being read, per session
 	subConvos        convoStates  // and the logs of subagents opened from them
@@ -213,6 +217,10 @@ func (s *Server) registerRoutes() {
 	s.handle("DELETE /api/me/oidc", SignedIn, s.apiOIDCUnlink)
 	s.handle("GET /api/me/settings", SignedIn, s.apiGetSettings)
 	s.handle("PATCH /api/me/settings", SignedIn, s.apiPatchSettings)
+	s.handle("GET /api/me/translate", SignedIn, s.apiGetTranslateConfig)
+	s.handle("PUT /api/me/translate", SignedIn, s.apiPutTranslateConfig)
+	s.handle("POST /api/me/translate/test", SignedIn, s.apiTestTranslateConfig)
+	s.handle("POST /api/translate/thoughts", SignedIn, s.apiTranslateThoughts)
 	s.handle("GET /api/me/totp", SignedIn, s.apiTOTPStatus)
 	s.handle("POST /api/me/totp/begin", SignedIn, s.apiTOTPBegin)
 	s.handle("POST /api/me/totp/enable", SignedIn, s.apiTOTPEnable)

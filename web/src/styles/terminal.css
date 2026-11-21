@@ -904,6 +904,10 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 /* Thinking: told apart from calls by its mark and a lighter, smaller line, in a run's line and as a step. */
 .convo-work-text.is-thought, .convo-step.is-thought .convo-step-head { color: var(--term-fg-way); font-size: var(--fs-sub); line-height: var(--lh-sub); }
 .convo-thinking { color: var(--term-fg-3); font-size: var(--fs-sub); line-height: var(--lh-sub); }
+.convo-thinking-bar { display: flex; justify-content: flex-end; align-items: center; gap: 8px; margin-bottom: 4px; }
+.convo-thinking-status { font-size: var(--fs-note); line-height: var(--lh-note); color: var(--term-fg-3); }
+.convo-thinking-toggle { appearance: none; border: 1px solid var(--term-line); border-radius: var(--r); background: transparent; color: var(--term-fg-2); font: inherit; font-size: var(--fs-note); line-height: var(--lh-note); padding: 1px 8px; cursor: pointer; }
+.convo-thinking-toggle:hover, .convo-thinking-toggle:focus-visible { color: var(--term-fg); border-color: var(--term-fg-3); }
 .convo-work-body > .convo-note { margin: 4px 0; }
 /* What a rewind took back: a quiet line; what it was, faded, behind it. */
 .convo-gone { display: flex; flex-direction: column; min-width: 0; }

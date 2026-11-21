@@ -37,6 +37,7 @@ import type { Convo, ConvoAnswer, ConvoCost, ConvoQuota, ConvoQuotaWindow, Convo
 import { agentName } from './askText'
 import { duration, hhmm, when } from './convoTime'
 import { category, isNote, items, ms, partTime, sameEdits, toolName, verbOf, type Category, type Edits, type Item, type Verb } from './convoItems'
+import { useThoughtTranslation } from './thoughtTranslate'
 
 // The conversation view: the agent's log as turns, over the terminal (which
 // stays mounted under it). Each turn is what the person wrote, then one line
@@ -4220,9 +4221,11 @@ function TroubleNote({ t: tr }: { t: ConvoTrouble }) {
     case 'cut':
       head = t('convo.trouble.cut')
       break
-    case 'limit':
-      head = tr.until ? t('convo.trouble.limitUntil', { w: tr.until }) : t('convo.trouble.limit')
+    case 'limit': {
+      const w = tr.resets_at ? resetsAt(tr.resets_at) : tr.until
+      head = w ? t('convo.trouble.limitUntil', { w }) : t('convo.trouble.limit')
       break
+    }
     default: {
       const why = tr.secs ? t('convo.trouble.hookTimedOut', { n: tr.secs }) : tr.status ? t('convo.trouble.hookExit', { n: tr.status }) : ''
       head = tr.name ? t('convo.trouble.hook', { h: tr.name + (why ? ' · ' + why : '') }) : why ? t('convo.trouble.hook', { h: why }) : t('convo.trouble.hookPlain')
@@ -5199,10 +5202,37 @@ function LineCounts({ add, del }: { add: number; del: number }) {
 
 const SENT_SHOWN = 6
 
+// Tracks whether an element has entered (or come near) the viewport, so
+// auto-translation only triggers lazily for visible thinking blocks.
+function useSeen(el: HTMLElement | null): boolean {
+  const [seen, setSeen] = useState(false)
+  useEffect(() => {
+    if (seen || !el) return
+    if (typeof IntersectionObserver === 'undefined') {
+      setSeen(true)
+      return
+    }
+    const io = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((e) => e.isIntersecting)) {
+          setSeen(true)
+          io.disconnect()
+        }
+      },
+      { rootMargin: '200px 0px' },
+    )
+    io.observe(el)
+    return () => io.disconnect()
+  }, [el, seen])
+  return seen
+}
+
 // A run of steps between what the agent wrote: one line (what it did; while
 // it goes on, the step under way and for how long); opened, a line a step,
 // each opened on its own (a call's command, output and changes, a thought).
 function Work({ it, open, onToggle, onCopy }: { it: Extract<Item, { kind: 'work' }>; open: boolean; onToggle: (key: string, open: boolean) => void; onCopy: (s: string) => void }) {
+  const [workEl, setWorkEl] = useState<HTMLDivElement | null>(null)
+  const seen = useSeen(workEl)
   const tools = it.steps.flatMap((s) => (!isNote(s) && s.tool ? [s.tool] : []))
   const counts = new Map<Category, number>()
   for (const tl of tools) counts.set(category(tl.name), (counts.get(category(tl.name)) ?? 0) + 1)
@@ -5239,6 +5269,10 @@ function Work({ it, open, onToggle, onCopy }: { it: Extract<Item, { kind: 'work'
   const lastThought = tools.length
     ? it.steps.findLast((x): x is ConvoPart => !isNote(x) && x.kind === 'thinking' && !!x.text?.trim())
     : undefined
+  const previewThoughtText = !busy ? (thought?.text ?? (!open ? lastThought?.text ?? '' : '')) : ''
+  const previewTr = useThoughtTranslation(previewThoughtText, { active: seen && !!previewThoughtText })
+  const shownThoughtText = thought ? (previewTr.status === 'done' && previewTr.text ? previewTr.text : thought.text ?? '') : ''
+  const shownLastThoughtText = lastThought ? (previewTr.status === 'done' && previewTr.text ? previewTr.text : lastThought.text ?? '') : ''
   // The line's mark, from what its words say: the step under way (or waited
   // on); thinking; else the kind its counts name first.
   const first = order.find((c) => counts.has(c))
@@ -5288,7 +5322,7 @@ function Work({ it, open, onToggle, onCopy }: { it: Extract<Item, { kind: 'work'
       </div>
     )
   return (
-    <div className="convo-work" data-work={it.key}>
+    <div ref={setWorkEl} className="convo-work" data-work={it.key}>
       <button type="button" className={'convo-work-head' + ((busy && !asks) || between ? ' is-live' : '') + (!busy && failed > 0 ? ' is-failed' : '')} aria-expanded={open} onClick={() => onToggle(it.key, !open)} title={isTouchOnly ? undefined : t(open ? (mac ? 'convo.foldHint' : 'convo.foldHintPlain') : mac ? 'convo.openHint' : 'convo.openHintPlain')}>
         <Mark size={16} strokeWidth={1.75} className="convo-step-ic" aria-hidden="true" />
         {busy && asks ? (
@@ -5306,8 +5340,8 @@ function Work({ it, open, onToggle, onCopy }: { it: Extract<Item, { kind: 'work'
         ) : (
           <span className={'convo-work-text' + (thought ? ' is-thought' : '')}>
             {/* (Thinking: the mark says it was; the words are its first line.) */}
-            {thought && thoughtTitle(thought.text ?? '') && <span className="sr-only">{head} </span>}
-            {thought ? thoughtTitle(thought.text ?? '') || head : between ? <span ref={setShine} className="convo-shimmer">{head}</span> : head || sum}
+            {thought && thoughtTitle(shownThoughtText) && <span className="sr-only">{head} </span>}
+            {thought ? thoughtTitle(shownThoughtText) || head : between ? <span ref={setShine} className="convo-shimmer">{head}</span> : head || sum}
             {failed > 0 && (
               <>
                 {t('convo.sep')}
@@ -5318,7 +5352,7 @@ function Work({ it, open, onToggle, onCopy }: { it: Extract<Item, { kind: 'work'
           </span>
         )}
       </button>
-      {!open && lastThought && <p className="convo-work-said" title={lastThought.text}>{thoughtTitle(lastThought.text ?? '')}</p>}
+      {!open && lastThought && <p className="convo-work-said" title={shownLastThoughtText}>{thoughtTitle(shownLastThoughtText)}</p>}
       {!open && sent.length > 0 && (
         <ul className="convo-work-sent">
           {sent.slice(0, SENT_SHOWN).map((tl, i) => (
@@ -5483,17 +5517,43 @@ function liveText(tool: ConvoTool): string {
 
 function Thinking({ text, live }: { text: string; live?: boolean }) {
   const [open, setOpen] = useState(false)
-  const title = thoughtTitle(text)
+  const [showOrig, setShowOrig] = useState(false)
+  const [el, setEl] = useState<HTMLDivElement | null>(null)
+  const seen = useSeen(el)
+  const tr = useThoughtTranslation(text, { active: !live && (seen || open), priority: open })
   if (live) return null // (said under the steps, as the step under way)
+  const translated = tr.status === 'done' && !!tr.text
+  const shown = translated && !showOrig ? tr.text! : text
+  const title = thoughtTitle(shown)
   return (
-    <div className="convo-step is-thought">
+    <div ref={setEl} className="convo-step is-thought">
       {/* (The mark stands for "thinking": said to a reader by the button's name, not
           by words of its own in the line — copied, or read as its text, the line is its title.) */}
       <button type="button" className="convo-step-head" aria-expanded={open} aria-label={title ? `${t('convo.thinking')}: ${title}` : undefined} onClick={() => setOpen(!open)}>
         <ThinkIcon size={16} strokeWidth={1.75} className="convo-step-ic" aria-hidden="true" />
         <span className="convo-step-obj">{title || t('convo.thinking')}</span>
       </button>
-      {open && <div className="convo-thinking"><Markdown text={text} /></div>}
+      {open && (
+        <div className="convo-thinking">
+          {(translated || tr.status === 'loading' || tr.status === 'error') && (
+            <div className="convo-thinking-bar">
+              {tr.status === 'loading' && <span className="convo-thinking-status">{t('convo.translate.loading')}</span>}
+              {tr.status === 'error' && <span className="convo-thinking-status" title={tr.error}>{t('convo.translate.failed')}</span>}
+              {translated && (
+                <button
+                  type="button"
+                  className="convo-thinking-toggle"
+                  aria-pressed={showOrig}
+                  onClick={() => setShowOrig((v) => !v)}
+                >
+                  {t(showOrig ? 'convo.translate.translated' : 'convo.translate.original')}
+                </button>
+              )}
+            </div>
+          )}
+          <Markdown text={shown} />
+        </div>
+      )}
     </div>
   )
 }

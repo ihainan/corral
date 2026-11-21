@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/ihainan/corral/internal/convo"
 )
 
 func TestAgyIdleInputAndBoxPipeParity(t *testing.T) {
@@ -460,5 +462,59 @@ func TestAgyScreenAsksAndWaitCache(t *testing.T) {
 	s.noteAgyPane("s1", "w28:p1", false)
 	if s.isAgyHerdrPane("s1", "w28:p1") {
 		t.Fatalf("expected false after noteAgyPane(false)")
+	}
+}
+
+func TestAgyDBErrorsAndBgCmdScan(t *testing.T) {
+	sid := "6490c7d4-0626-4ed8-a158-da789586d5b1"
+	logPath := "/home/alice/.gemini/antigravity-cli/brain/" + sid + "/.system_generated/logs/transcript_full.jsonl"
+	wantDB := "/home/alice/.gemini/antigravity-cli/conversations/" + sid + ".db"
+	if got := agyDBPathFromLog(logPath, sid); got != wantDB {
+		t.Fatalf("agyDBPathFromLog = %q, want %q", got, wantDB)
+	}
+	if got := agyDBPathFromLog(logPath, "not-a-uuid"); got != "" {
+		t.Fatalf("invalid sid should return empty, got %q", got)
+	}
+
+	// parseCmdScan + cmdProber must detect agy background commands and show them when idle/done.
+	scanOut := strings.Join([]string{
+		"clock\t1700000000\t100",
+		"cmd\t159134\t5000\tagy:" + sid + "\tgh run watch 44857204981",
+	}, "\n")
+	cmds, whole := parseCmdScan(scanOut)
+	if !whole {
+		t.Fatalf("expected whole=true")
+	}
+	got := cmds[sid]
+	if len(got) != 1 || got[0].Task != "agy-159134" || got[0].Title != "gh run watch 44857204981" {
+		t.Fatalf("parsed agy bgCmd = %+v", got)
+	}
+
+	// cmdProber.consider accepts agy when idle/done and decorates herdrSummary.
+	p := newCmdProber(nil)
+	p.consider("w28:p1", "agy", "idle", sid)
+	p.mu.Lock()
+	p.at = time.Now().Add(time.Second)
+	p.cmds = cmds
+	p.mu.Unlock()
+	sum := herdrSummary{Workspaces: []herdrWorkspace{{Agents: []herdrAgent{{PaneID: "w28:p1", Agent: "agy", Status: "idle"}}}}}
+	p.decorate(&sum)
+	if sum.Workspaces[0].Agents[0].BgCmds != 1 {
+		t.Fatalf("expected BgCmds=1 for agy idle pane, got %+v", sum.Workspaces[0].Agents[0])
+	}
+
+	// agyRunGone: matches by Cmd or What, and clears all when live is empty.
+	all := []convo.Running{
+		{ID: "t1", Kind: "cmd", What: "Watch CI", Cmd: "gh run watch 44857204981"},
+		{ID: "t2", Kind: "cmd", What: "Old build", Cmd: "make build"},
+	}
+	if !agyRunGone(all[0], nil, 2, all) {
+		t.Fatalf("expected gone when live is empty")
+	}
+	if agyRunGone(all[0], got, 2, all) {
+		t.Fatalf("live task t1 should not be marked gone")
+	}
+	if !agyRunGone(all[1], got, 2, all) {
+		t.Fatalf("dead task t2 should be marked gone")
 	}
 }

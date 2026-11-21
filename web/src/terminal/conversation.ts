@@ -147,6 +147,7 @@ export interface ConvoTrouble {
   max?: number
   retry_ms?: number
   until?: string // (limit) when it can be used again, as the agent said it (its host's time)
+  resets_at?: number // (limit) Unix seconds when it resets, formatted in browser local time
 }
 
 // Files the turn was given without the conversation saying so: ones that

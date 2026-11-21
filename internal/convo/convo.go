@@ -243,8 +243,10 @@ type Trouble struct {
 	Max     int   `json:"max,omitempty"`
 	RetryMs int64 `json:"retry_ms,omitempty"`
 	// (limit) Until: when it can be used again, as the agent said it (its
-	// host's time: "6:48 PM"); empty when it did not say.
-	Until string `json:"until,omitempty"`
+	// host's time: "6:48 PM"); empty when it did not say. ResetsAt: unix
+	// seconds when known precisely, so the view formats it in local time.
+	Until    string `json:"until,omitempty"`
+	ResetsAt int64  `json:"resets_at,omitempty"`
 }
 
 // Noted is a file the turn was given without it being said in the

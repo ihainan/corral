@@ -122,6 +122,17 @@ func TestAgyAskQuestionBackgroundAndCheckpoint(t *testing.T) {
 		t.Fatalf("task done event = %+v", lastEv)
 	}
 
+	// 3b. Background task cancelled via manage_task must be cleared from Running().
+	ag.Feed([]byte(strings.Join([]string{
+		`{"step_index":6,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":"2026-11-20T09:02:00Z","tool_calls":[{"name":"run_command","args":{"CommandLine":"gh run watch 123","toolSummary":"Watch CI"}}]}`,
+		`{"step_index":7,"source":"SYSTEM","type":"GENERIC","status":"RUNNING","created_at":"2026-11-20T09:02:01Z","content":"Created At: 2026-11-20T17:02:00+08:00\nTool is running as a background task with task id: conv-1/task-7\nTask Description: gh run watch 123"}`,
+		`{"step_index":8,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":"2026-11-20T09:02:10Z","tool_calls":[{"name":"manage_task","args":{"Action":"kill","TaskId":"conv-1/task-7"}}]}`,
+		`{"step_index":9,"source":"SYSTEM","type":"GENERIC","status":"DONE","created_at":"2026-11-20T09:02:11Z","content":"Created At: 2026-11-20T17:02:10+08:00\nTask \"conv-1/task-7\" cancelled."}`,
+	}, "\n") + "\n"))
+	if len(ag.Running()) != 0 {
+		t.Fatalf("running after cancel = %+v, want empty", ag.Running())
+	}
+
 	// 4. Checkpoint compaction
 	ag.Feed([]byte(`{"step_index":6,"source":"SYSTEM","type":"CHECKPOINT","status":"DONE","created_at":"2026-11-20T09:05:00Z","input_tokens":5000,"cache_read_tokens":500000,"content":"# Resuming from a compaction\nSummary body"}` + "\n"))
 	all = ag.Since(0)
@@ -178,5 +189,116 @@ func TestAgySubagentIDAndSetTitle(t *testing.T) {
 	entries := ag.Since(0)
 	if len(entries) != 1 || entries[0].Parts[0].Tool.Name != "Agent" || entries[0].Parts[0].Tool.AgentID != subUUID {
 		t.Fatalf("subagent tool = %+v", entries[0].Parts[0].Tool)
+	}
+}
+
+// pbEncode helpers for synthetic Antigravity step_type=17 payloads in tests.
+func testPBVarint(v uint64) []byte {
+	var out []byte
+	for {
+		b := byte(v & 0x7f)
+		v >>= 7
+		if v != 0 {
+			out = append(out, b|0x80)
+		} else {
+			out = append(out, b)
+			return out
+		}
+	}
+}
+
+func testPBFieldVarint(field uint64, v uint64) []byte {
+	return append(testPBVarint(field<<3|0), testPBVarint(v)...)
+}
+
+func testPBFieldBytes(field uint64, b []byte) []byte {
+	out := append(testPBVarint(field<<3|2), testPBVarint(uint64(len(b)))...)
+	return append(out, b...)
+}
+
+func TestAgyDecodeAndMergeDBErrors(t *testing.T) {
+	// Build a synthetic protobuf payload matching real step_type=17 idx=1597:
+	// f1=17, f4=3, f5.f1.f1=1795232837, f24.f3.{f1,f2,f6,f7,f10,f10}.
+	ts := testPBFieldBytes(1, testPBFieldVarint(1, 1795232837))
+	meta := testPBFieldBytes(5, ts)
+	errInner := append([]byte(nil), testPBFieldBytes(1, []byte("Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 1h37m22s."))...)
+	errInner = append(errInner, testPBFieldBytes(2, []byte("RESOURCE_EXHAUSTED (code 429): Individual quota reached."))...)
+	errInner = append(errInner, testPBFieldBytes(6, []byte("bdd1dc2a-995b-4663-9447-acc165022e79-1601"))...)
+	errInner = append(errInner, testPBFieldVarint(7, 429)...)
+	errInner = append(errInner, testPBFieldBytes(10, []byte(`{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"QUOTA_EXHAUSTED"}`))...)
+	errInner = append(errInner, testPBFieldBytes(10, []byte(`{"@type":"type.googleapis.com/google.rpc.RetryInfo","retryDelay":"5842.65s"}`))...)
+	payload := append(testPBFieldVarint(1, 17), testPBFieldVarint(4, 3)...)
+	payload = append(payload, meta...)
+	payload = append(payload, testPBFieldBytes(24, testPBFieldBytes(3, errInner))...)
+
+	step, ok := DecodeAgyErrorStep(1601, payload)
+	if !ok {
+		t.Fatalf("DecodeAgyErrorStep failed")
+	}
+	if step.CreatedAt != 1795232837 || step.HTTPStatus != 429 || step.Reason != "QUOTA_EXHAUSTED" || step.ErrorID != "bdd1dc2a-995b-4663-9447-acc165022e79-1601" {
+		t.Fatalf("unexpected decoded step: %+v", step)
+	}
+	if step.RetryDelaySec < 5842 || step.RetryDelaySec > 5843 {
+		t.Fatalf("RetryDelaySec = %v", step.RetryDelaySec)
+	}
+
+	// Compact variant (like idx=575): no f7 and no f10, status in f2 text and Resets in f1.
+	compactInner := append([]byte(nil), testPBFieldBytes(1, []byte("Individual quota reached. Resets in 1h16m52s."))...)
+	compactInner = append(compactInner, testPBFieldBytes(2, []byte("RESOURCE_EXHAUSTED (code 429): Individual quota reached."))...)
+	compactPayload := append(testPBFieldBytes(5, testPBFieldBytes(1, testPBFieldVarint(1, 1795176862))), testPBFieldBytes(24, testPBFieldBytes(3, compactInner))...)
+	cStep, ok := DecodeAgyErrorStep(575, compactPayload)
+	if !ok {
+		t.Fatalf("DecodeAgyErrorStep compact failed")
+	}
+	trCompact := agyClassifyTrouble(cStep.Message, cStep.Detail, cStep.Reason, cStep.ErrorID, cStep.HTTPStatus, cStep.CreatedAt, cStep.RetryDelaySec)
+	if trCompact == nil || trCompact.Kind != TroubleLimit || trCompact.Status != 429 || trCompact.ResetsAt != 1795176862+4612 {
+		t.Fatalf("compact trouble = %+v", trCompact)
+	}
+
+	// Safety refusal & generic 503 API errors.
+	if tr := agyClassifyTrouble("Blocked by safety filter", "", "SAFETY", "", 400, 0, 0); tr == nil || tr.Kind != TroubleRefused {
+		t.Fatalf("safety trouble = %+v", tr)
+	}
+	if tr := agyClassifyTrouble("Service temporarily unavailable", "", "UNAVAILABLE", "err-503", 503, 0, 0); tr == nil || tr.Kind != TroubleAPI || tr.Status != 503 || !strings.Contains(tr.Text, "Error ID: err-503") {
+		t.Fatalf("api 503 trouble = %+v", tr)
+	}
+
+	// MergeDBErrors: chronological splice + tail append + status flip busy->idle + dedup + window guard.
+	ag := NewAgy()
+	ag.Feed([]byte(strings.Join([]string{
+		`{"step_index":1596,"source":"USER","type":"USER_INPUT","status":"DONE","created_at":"2026-11-21T03:00:00Z","content":"<USER_REQUEST>first</USER_REQUEST>"}`,
+		`{"step_index":1598,"source":"USER","type":"USER_INPUT","status":"DONE","created_at":"2026-11-21T03:05:00Z","content":"<USER_REQUEST>second</USER_REQUEST>"}`,
+		`{"step_index":1600,"source":"USER","type":"USER_INPUT","status":"DONE","created_at":"2026-11-21T03:20:00Z","content":"<USER_REQUEST>continue</USER_REQUEST>"}`,
+	}, "\n") + "\n"))
+	if ag.Status() != "busy" {
+		t.Fatalf("expected busy after unanswered USER_INPUT, got %q", ag.Status())
+	}
+
+	step1597 := AgyErrorStep{Idx: 1597, CreatedAt: 1795231392, Message: "Individual quota reached. Resets in 2h1m28s.", HTTPStatus: 429, Reason: "QUOTA_EXHAUSTED", RetryDelaySec: 7288}
+	added, spliced := ag.MergeDBErrors([]AgyErrorStep{cStep, step1597, step})
+	if !added || !spliced {
+		t.Fatalf("expected added=true spliced=true, got %v %v", added, spliced)
+	}
+	if ag.Status() != "idle" {
+		t.Fatalf("expected idle after tail error step-1601, got %q", ag.Status())
+	}
+	es := ag.Since(0)
+	// cStep (idx 575) must be skipped because it's older than MinStepIndex (1596).
+	wantIDs := []string{"step-1596", "step-1597", "step-1598", "step-1600", "step-1601"}
+	if len(es) != len(wantIDs) {
+		t.Fatalf("len(es)=%d want %d: %+v", len(es), len(wantIDs), es)
+	}
+	for i, id := range wantIDs {
+		if es[i].ID != id || es[i].Seq != i+1 {
+			t.Fatalf("es[%d] = ID:%q Seq:%d, want ID:%q Seq:%d", i, es[i].ID, es[i].Seq, id, i+1)
+		}
+	}
+	if tr := es[4].Parts[0].Trouble; tr == nil || tr.Kind != TroubleLimit || tr.ResetsAt != 1795232837+5843 {
+		t.Fatalf("tail trouble = %+v", tr)
+	}
+
+	// Second call with same errors is a no-op.
+	if added2, spliced2 := ag.MergeDBErrors([]AgyErrorStep{step1597, step}); added2 || spliced2 {
+		t.Fatalf("expected dedup no-op, got %v %v", added2, spliced2)
 	}
 }

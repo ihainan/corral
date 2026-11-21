@@ -1741,6 +1741,9 @@ type convoState struct {
 	agyWait       bool
 	agyWaitFail   bool
 	agyWaitFailAt time.Time
+	// (An Antigravity CLI conversation: last read of step_type=17 ERROR_MESSAGE rows from conversations/<sid>.db.)
+	agyDBAt     time.Time
+	agyDBMinIdx int
 	offset        int64 // read up to here
 	size          int64 // the log's size when last looked at
 	mtime         time.Time
@@ -2073,6 +2076,10 @@ func (s *Server) apiConversation(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, ans)
 		return
 	}
+	prevRev := 0
+	if st.parser != nil {
+		prevRev = st.parser.Rev()
+	}
 	more, err := s.readConvo(sess, st)
 	if err == nil && older && gen == st.gen {
 		err = s.readOlder(sess, st)
@@ -2086,6 +2093,8 @@ func (s *Server) apiConversation(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, ans)
 		return
 	}
+	grew := st.parser != nil && st.parser.Rev() != prevRev
+	s.agyMergeDBErrors(ctx, sess, st, grew)
 	if sess.Persistence == "tmux" && st.agent == "codex" && st.bind != nil && (st.status == "busy" || st.status == "") {
 		if s.codexWaits(ctx, sess, st) {
 			st.status = "waiting:permission prompt"
@@ -2110,6 +2119,7 @@ func (s *Server) apiConversation(w http.ResponseWriter, r *http.Request) {
 		ans.BgCmds, ans.BgCmdList = len(cmds), cmds[:min(len(cmds), maxCmdsShown)]
 	}
 	s.codexRunningOnHost(sess, st) // (before its entries are taken: steps it ends are among them)
+	s.agyRunningOnHost(sess, st)
 	ans.AgentStatus = shellWord(ans.AgentStatus)
 	ans.OlderCut = st.older && (st.parser.Trimmed() || st.from < 0)
 	if gen != st.gen {
@@ -2419,11 +2429,12 @@ func (s *Server) locateScan(ctx context.Context, sess *term.Session, st *convoSt
 		}
 	}
 	st.guessed = guessed && log != ""
-	// (A herdr pane's Claude Code session, as found: what herdr does not say
-	// of it, in some versions, for what its turns left running, see bgSession.)
+	// (A herdr pane's Claude Code or Antigravity CLI session, as found: what
+	// herdr does not say of it, in some versions, for what its turns left
+	// running, see bgSession.)
 	if sess.Persistence == "herdr" && pane != "" {
 		found := ""
-		if agent == "claude" {
+		if agent == "claude" || agent == "agy" {
 			found = sid // (else none there now, or another: not that one's)
 		}
 		s.locatedEverywhere(sess, pane, found, looked)
@@ -2471,6 +2482,7 @@ func (st *convoState) adopt(sid, log, agent, reason string) {
 		st.offset, st.size, st.mtime, st.older, st.skipping, st.from = 0, -1, time.Time{}, false, false, 0
 		st.olderLog, st.olderChecked, st.hops, st.olderSeen, st.chainStart = "", false, 0, nil, false
 		st.grewAt = time.Time{} // (another log's: its own, from its first look)
+		st.agyDBAt, st.agyDBMinIdx = time.Time{}, 0
 		st.long, st.strip, st.ocCursor, st.ocCursorK, st.ocCursorID = nil, b64Strip{}, 0, 0, ""
 	}
 	st.reason = reason

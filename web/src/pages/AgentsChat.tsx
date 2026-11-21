@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState, type ReactNode } from 'react'
-import { ArrowUp, ChevronLeft, Copy, FoldVertical, GitBranch, History, MessageSquarePlus, Paperclip, Pencil, Pin, PinOff, Power, Square, SquareSlash, SquareTerminal, TextCursorInput, Plus } from 'lucide-react'
+import { ArrowUp, ChevronLeft, Copy, FoldVertical, GitBranch, History, Languages, MessageSquarePlus, Paperclip, Pencil, Pin, PinOff, Power, Square, SquareSlash, SquareTerminal, TextCursorInput, Plus } from 'lucide-react'
 import { api, ApiError, authGen, errorText, uploadFile, type SessionInfo } from '../api'
 import { t, type I18nKey } from '../i18n'
 import { navigate, onNavigate } from '../router'
@@ -21,6 +21,7 @@ import { NEW_AGENT, NewAgentDialog } from '../terminal/newAgent'
 import { type CodexRewind, ForkDialog, RenameDialog, type RenameTarget } from '../terminal/agentOps'
 import { agentWho, ChimeCounter, chime, countsOf } from '../terminal/chime'
 import { AgentList, CODEX_EFFORTS, ConversationView, glanceOf, type ConvoAgent, type ConvoListRow, type ConvoPending, type ConvoWent, type FileActs, type ModelOpt } from '../terminal/Conversation'
+import { saveTranslateConfig, useTranslateConfig } from '../terminal/thoughtTranslate'
 import { FilesDialog } from '../terminal/FilesDialog'
 import { isLogPic, logPic, lookAt, PictureDialog, useDownload } from '../terminal/picture'
 import { IMAGE_EXT, TextPreview } from '../terminal/textPreview'
@@ -2590,12 +2591,27 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
     renameItem(e),
     closable(e) ? { label: t('agents.close'), icon: <Power size={16} />, danger: true, separator: true, onSelect: () => setClosing(e) } : null,
   ]
+  const { config: translateCfg } = useTranslateConfig()
+  const toggleTranslate = () => {
+    const next = !translateCfg?.enabled
+    void saveTranslateConfig({ enabled: next }).then(
+      (saved) => {
+        if (saved.enabled && !saved.has_key && !/^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(?::\d+)?\b/i.test(saved.base_url)) {
+          toast(t('convo.translate.needKey'))
+        } else {
+          toast(t(saved.enabled ? 'convo.translate.enabled' : 'convo.translate.disabled'))
+        }
+      },
+      (e) => toast(errorText(e), true),
+    )
+  }
   const more = (): (MenuItem | null)[] => [
     { label: t('convo.showTerminal'), icon: <SquareTerminal size={16} />, group: t('menu.group.agent'), onSelect: openTerminal },
     pinItem(cur.key),
     // (Within its group here: no rule of its own, as it has in a row's menu.)
     ((f) => f && { ...f, separator: false })(forkItem(cur)),
     renameItem(cur),
+    { label: t(translateCfg?.enabled ? 'convo.translate.off' : 'convo.translate.on'), icon: <Languages size={16} />, onSelect: toggleTranslate },
     ...opsOf.map((o, i): MenuItem | null =>
       bound ? { label: t(codex && o === 'clear' ? 'ops.clear.itemCodex' : `ops.${o}.item`), icon: OP_ICONS[o], separator: i === 0, group: i === 0 ? t('menu.group.convo') : undefined, disabled: !canOps, title: canOps ? undefined : t('ops.onlyIdle'), hint: canOps || i < opsOf.length - 1 ? undefined : t(opsOf.length > 1 ? 'ops.onlyIdleGroup' : 'ops.onlyIdle'), onSelect: () => convo.bind && setOp({ op: o, bind: convo.bind, key: bindKey }) } : null,
     ),
