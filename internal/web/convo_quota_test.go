@@ -181,3 +181,44 @@ func TestQuotaRefreshOnTheHost(t *testing.T) {
 		t.Errorf("after the limit: %q", b)
 	}
 }
+
+func TestQuotaOfAgyUsage(t *testing.T) {
+	raw := []byte(`{"status":"SUCCESS","command":{"name":"usage","data":{"groups":[
+		{"name":"Gemini Models","buckets":[
+			{"id":"gemini-weekly","window":"weekly","remaining_fraction":0.4768,"reset_time":"2026-11-26T12:20:38Z"},
+			{"id":"gemini-5h","window":"5h","remaining_fraction":0.8371,"reset_time":"2026-11-21T05:24:40Z"}
+		]},
+		{"name":"Claude and GPT models","buckets":[
+			{"id":"3p-weekly","window":"weekly","remaining_fraction":1,"reset_time":"2026-11-28T01:04:04Z"},
+			{"id":"3p-5h","window":"5h","remaining_fraction":1,"reset_time":"2026-11-21T06:04:04Z"}
+		]},
+		{"name":"Gemini 4 Argon","buckets":[
+			{"id":"gemini-argon-wtu-weekly","window":"weekly","remaining_fraction":1,"reset_time":"2026-11-28T01:04:04Z"}
+		]}
+	]}}}`)
+	now := time.Date(2026, 11, 21, 1, 5, 0, 0, time.UTC)
+	q, ok := quotaOfAgyUsage(raw, now)
+	if !ok || !q.Known || len(q.Groups) != 3 {
+		t.Fatalf("got ok=%v q=%+v", ok, q)
+	}
+	if q.Groups[0].Name != "Gemini Models" || q.Groups[0].FiveHour == nil || q.Groups[0].Weekly == nil {
+		t.Fatalf("group 0 = %+v", q.Groups[0])
+	}
+	if q.Groups[0].FiveHour.Used < 16 || q.Groups[0].FiveHour.Used > 16.5 {
+		t.Fatalf("5h used = %v, want ~16.3", q.Groups[0].FiveHour.Used)
+	}
+	if q.Groups[0].Weekly.Used < 52 || q.Groups[0].Weekly.Used > 52.5 {
+		t.Fatalf("weekly used = %v, want ~52.3", q.Groups[0].Weekly.Used)
+	}
+	if q.Groups[1].FiveHour.Used != 0 || q.Groups[2].FiveHour != nil || q.Groups[2].Weekly.Used != 0 {
+		t.Fatalf("groups 1/2 = %+v / %+v", q.Groups[1], q.Groups[2])
+	}
+	if _, ok := quotaOfAgyUsage([]byte(`not json`), now); ok {
+		t.Fatal("expected invalid json to fail")
+	}
+	cmd := exec.Command("sh", "-n")
+	cmd.Stdin = strings.NewReader(agyQuotaCommand())
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("agyQuotaCommand sh -n failed: %v\n%s", err, out)
+	}
+}

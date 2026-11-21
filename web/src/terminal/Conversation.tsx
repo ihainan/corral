@@ -1952,14 +1952,16 @@ export function ConversationView({
             quota={
               convo.bind?.agent === 'codex'
                 ? { codex: true as const, said: convo.meta.quota }
-                : // The subscription's use is the account's, which this session
-                  // does not draw on when its requests go elsewhere: not shown
-                  // then, in place of a number that is about something else.
-                  // (A key set is no such case: Claude Code asks whether to use
-                  // one, and goes on with the account where that was refused.)
-                  convo.of && convo.bind?.agent === 'claude' && convo.bind.session && !convo.bind.via && convo.bind.auth !== 'bedrock' && convo.bind.auth !== 'vertex'
-                  ? { sid: convo.of.split(' ')[0], session: convo.bind.session }
-                  : undefined
+                : convo.of && convo.bind?.agent === 'agy' && convo.bind.session
+                  ? { sid: convo.of.split(' ')[0], session: convo.bind.session, agent: 'agy' as const }
+                  : // The subscription's use is the account's, which this session
+                    // does not draw on when its requests go elsewhere: not shown
+                    // then, in place of a number that is about something else.
+                    // (A key set is no such case: Claude Code asks whether to use
+                    // one, and goes on with the account where that was refused.)
+                    convo.of && convo.bind?.agent === 'claude' && convo.bind.session && !convo.bind.via && convo.bind.auth !== 'bedrock' && convo.bind.auth !== 'vertex'
+                    ? { sid: convo.of.split(' ')[0], session: convo.bind.session }
+                    : undefined
             }
             via={convo.bind?.via}
             auth={convo.bind?.auth}
@@ -3148,7 +3150,7 @@ function Runs({ meta, goal, active, mode, model, effort, quota, via, auth, onSid
             )}
             {meta.answer && <AnswerPart answer={meta.answer} />}
           </section>
-          {quota && ('codex' in quota ? <QuotaSaid quota={quota.said} /> : <QuotaPart key={quota.sid + ' ' + quota.session} sid={quota.sid} session={quota.session} />)}
+          {quota && ('codex' in quota ? <QuotaSaid quota={quota.said} /> : <QuotaPart key={quota.sid + ' ' + quota.session + ' ' + (quota.agent ?? '')} sid={quota.sid} session={quota.session} agent={quota.agent} />)}
           {/* The subscription's use, where it is left out because this
               session does not draw on it: said, so that its place is not
               simply empty. */}
@@ -3165,15 +3167,21 @@ function Runs({ meta, goal, active, mode, model, effort, quota, via, auth, onSid
 // the host (plans/3c-quota.md): read when the popover opens and each minute
 // while it is open (that program writes it once a minute), kept a minute
 // across openings. The account's, whichever session says it.
+interface QuotaGroup {
+  name: string
+  five_hour?: { used: number; resets_at: number }
+  weekly?: { used: number; resets_at: number }
+}
 interface Quota {
   known: boolean
   updated_at?: number // (unix seconds)
   five_hour?: { used: number; resets_at: number }
   weekly?: { used: number; resets_at: number }
+  groups?: QuotaGroup[]
 }
-// (Whence it is: a Claude Code session's, read from the host; a Codex
+// (Whence it is: a Claude Code or agy session's, read from the host; a Codex
 // session's, as its log said it: meta.quota.)
-type QuotaOf = { sid: string; session: string } | { codex: true; said?: ConvoQuota }
+type QuotaOf = { sid: string; session: string; agent?: 'agy' } | { codex: true; said?: ConvoQuota }
 const QUOTA_EVERY = 60000
 type QuotaSeen = { at: number; q: Quota | 'failed'; last?: Quota; lastAt?: number; n: number }
 const quotaSeen = new Map<string, QuotaSeen>()
@@ -3181,7 +3189,7 @@ const quotaSeen = new Map<string, QuotaSeen>()
 // one answered late never stands over a later one.)
 const quotaAsked = new Map<string, Promise<QuotaSeen>>()
 let quotaN = 0
-function askQuota(sid: string, session: string, key: string): Promise<QuotaSeen> {
+function askQuota(sid: string, session: string, key: string, agent?: 'agy'): Promise<QuotaSeen> {
   const going = quotaAsked.get(key)
   if (going) return going
   const n = ++quotaN
@@ -3193,7 +3201,8 @@ function askQuota(sid: string, session: string, key: string): Promise<QuotaSeen>
     }
     return quotaSeen.get(key)!
   }
-  const p = api<Quota>('GET', `/api/sessions/${encodeURIComponent(sid)}/conversation/quota?session=${encodeURIComponent(session)}`, undefined, { timeoutMs: 20000 })
+  const qAgent = agent ? '&agent=' + encodeURIComponent(agent) : ''
+  const p = api<Quota>('GET', `/api/sessions/${encodeURIComponent(sid)}/conversation/quota?session=${encodeURIComponent(session)}${qAgent}`, undefined, { timeoutMs: 25000 })
     .then(
       (q) => keep({ at: Date.now(), q, last: q.known ? q : undefined, lastAt: q.known ? Date.now() : undefined }),
       // (Failed: what was read before, as it is now, still shown, said to be of then.)
@@ -3205,9 +3214,9 @@ function askQuota(sid: string, session: string, key: string): Promise<QuotaSeen>
 }
 
 // (Keyed by its session where it is drawn: another session, another one.)
-function QuotaPart({ sid, session }: { sid: string; session: string }) {
+function QuotaPart({ sid, session, agent }: { sid: string; session: string; agent?: 'agy' }) {
   useRedraw(30000)
-  const key = sid + ' ' + session
+  const key = sid + ' ' + session + (agent ? ' ' + agent : '')
   const [seen, setSeen] = useState(() => quotaSeen.get(key))
   useEffect(() => {
     let live = true
@@ -3215,7 +3224,7 @@ function QuotaPart({ sid, session }: { sid: string; session: string }) {
     const look = (opened: boolean) => {
       const was = quotaSeen.get(key)
       if (opened && was && was.q !== 'failed' && Date.now() - was.at < QUOTA_EVERY) return setSeen(was)
-      void askQuota(sid, session, key).then((v) => live && setSeen(v))
+      void askQuota(sid, session, key, agent).then((v) => live && setSeen(v))
     }
     look(true)
     const timer = setInterval(() => look(false), QUOTA_EVERY)
@@ -3223,7 +3232,7 @@ function QuotaPart({ sid, session }: { sid: string; session: string }) {
       live = false
       clearInterval(timer)
     }
-  }, [key, sid, session])
+  }, [key, sid, session, agent])
   const shown = !seen ? undefined : seen.q === 'failed' ? seen.last : seen.q.known ? seen.q : undefined
   const now = Date.now() / 1000
   const stale = shown?.updated_at && now - shown.updated_at > 1200 ? Math.round((now - shown.updated_at) / 60) : 0
@@ -3285,33 +3294,67 @@ function resetClock(sec: number) {
 }
 
 // The two windows' use, bars at 80% and 95% coloured; then what is said of it.
-function QuotaView({ shown, children }: { shown?: { five_hour?: ConvoQuotaWindow; weekly?: ConvoQuotaWindow }; children?: ReactNode }) {
+// For agy (groups), each model family shows its remaining quota percentage and reset time.
+function QuotaView({ shown, children }: { shown?: { five_hour?: ConvoQuotaWindow; weekly?: ConvoQuotaWindow; groups?: QuotaGroup[] }; children?: ReactNode }) {
   const clock = resetClock
   const now = Date.now() / 1000
   return (
     <section className="convo-pop-sec convo-quota">
       <h3 className="convo-pop-head">{t('quota.title')}</h3>
-      {shown &&
-        (
-          [
-            ['quota.fiveHour', shown.five_hour],
-            ['quota.weekly', shown.weekly],
-          ] as const
-        ).map(([name, w]) =>
-          !w ? null : (
-            <div key={name} className="convo-runs-win">
-              <div className="convo-runs-row">
-                <span>{t(name)}</span>
-                <span>{w.resets_at <= now ? t('quota.reset') : t('quota.used', { n: Math.round(w.used), at: clock(w.resets_at) })}</span>
+      {shown?.groups?.length
+        ? shown.groups.map((g) => (
+            <div key={g.name} className="convo-quota-group">
+              <div className="convo-quota-ghead">
+                <ModelGlyph model={g.name} size={12} />
+                <span>{g.name}</span>
               </div>
-              {w.resets_at > now && (
-                <div className={'convo-runs-bar' + (w.used >= 95 ? ' is-danger' : w.used >= 80 ? ' is-warn' : '')}>
-                  <i style={{ width: Math.min(100, w.used) + '%' }} />
-                </div>
-              )}
+              {(
+                [
+                  ['quota.fiveHour', g.five_hour],
+                  ['quota.weekly', g.weekly],
+                ] as const
+              ).map(([name, w]) => {
+                if (!w) return null
+                const left = Math.max(0, Math.min(100, Math.round(100 - w.used)))
+                const full = left >= 100
+                const expired = !full && w.resets_at > 0 && w.resets_at <= now
+                return (
+                  <div key={name} className="convo-runs-win">
+                    <div className="convo-runs-row">
+                      <span>{t(name)}</span>
+                      <span>{full ? t('quota.full') : expired ? t('quota.reset') : t('quota.left', { n: left, at: clock(w.resets_at) })}</span>
+                    </div>
+                    {!expired && (
+                      <div className={'convo-runs-bar' + (left <= 5 ? ' is-danger' : left <= 20 ? ' is-warn' : '')}>
+                        <i style={{ width: left + '%' }} />
+                      </div>
+                    )}
+                  </div>
+                )
+              })}
             </div>
-          ),
-        )}
+          ))
+        : shown &&
+          (
+            [
+              ['quota.fiveHour', shown.five_hour],
+              ['quota.weekly', shown.weekly],
+            ] as const
+          ).map(([name, w]) =>
+            !w ? null : (
+              <div key={name} className="convo-runs-win">
+                <div className="convo-runs-row">
+                  <span>{t(name)}</span>
+                  <span>{w.resets_at <= now ? t('quota.reset') : t('quota.used', { n: Math.round(w.used), at: clock(w.resets_at) })}</span>
+                </div>
+                {w.resets_at > now && (
+                  <div className={'convo-runs-bar' + (w.used >= 95 ? ' is-danger' : w.used >= 80 ? ' is-warn' : '')}>
+                    <i style={{ width: Math.min(100, w.used) + '%' }} />
+                  </div>
+                )}
+              </div>
+            ),
+          )}
       {children}
     </section>
   )

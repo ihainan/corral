@@ -35,8 +35,14 @@ const (
 )
 
 type quotaWindow struct {
-	Used     float64 `json:"used"`      // percent
+	Used     float64 `json:"used"`      // percent (0..100)
 	ResetsAt int64   `json:"resets_at"` // unix seconds
+}
+
+type quotaGroup struct {
+	Name     string       `json:"name"`
+	FiveHour *quotaWindow `json:"five_hour,omitempty"`
+	Weekly   *quotaWindow `json:"weekly,omitempty"`
 }
 
 type quotaInfo struct {
@@ -44,6 +50,7 @@ type quotaInfo struct {
 	UpdatedAt int64        `json:"updated_at,omitempty"` // unix seconds
 	FiveHour  *quotaWindow `json:"five_hour,omitempty"`
 	Weekly    *quotaWindow `json:"weekly,omitempty"`
+	Groups    []quotaGroup `json:"groups,omitempty"` // per-model-group quota (agy)
 }
 
 // quotaOfConfig reads what quotaReadCommand printed: the quota kept (Known false where
@@ -166,7 +173,94 @@ END {
 	return "sh -c " + sshx.QuoteShell(script)
 }
 
-// GET /api/sessions/{id}/conversation/quota?session=<Claude Code session id>
+const agyQuotaCacheTTL = 60 * time.Second
+
+type agyQuotaEntry struct {
+	q  quotaInfo
+	at time.Time
+}
+
+var (
+	agyQuotaMu    sync.Mutex
+	agyQuotaCache = map[string]agyQuotaEntry{}
+)
+
+// agyQuotaCommand runs `agy -p /usage --output-format json`, which prints
+// Antigravity's subscription quota buckets as JSON without starting a turn or
+// spending any tokens. Fixed script.
+func agyQuotaCommand() string {
+	script := `PATH="$HOME/.local/bin:$HOME/bin:$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
+command -v agy >/dev/null 2>&1 || exit 127
+exec agy -p /usage --output-format json </dev/null 2>/dev/null`
+	return "sh -c " + sshx.QuoteShell(script)
+}
+
+// quotaOfAgyUsage parses the JSON output of `agy -p /usage --output-format json`.
+func quotaOfAgyUsage(raw []byte, now time.Time) (quotaInfo, bool) {
+	var doc struct {
+		Status  string `json:"status"`
+		Command *struct {
+			Name string `json:"name"`
+			Data *struct {
+				Groups []struct {
+					Name    string `json:"name"`
+					Buckets []struct {
+						Window            string   `json:"window"`
+						RemainingFraction *float64 `json:"remaining_fraction"`
+						ResetTime         string   `json:"reset_time"`
+					} `json:"buckets"`
+				} `json:"groups"`
+			} `json:"data"`
+		} `json:"command"`
+	}
+	if json.Unmarshal(raw, &doc) != nil || doc.Command == nil || doc.Command.Data == nil {
+		return quotaInfo{}, false
+	}
+	var q quotaInfo
+	for _, g := range doc.Command.Data.Groups {
+		name := g.Name
+		if name == "" {
+			continue
+		}
+		var qg quotaGroup
+		qg.Name = name
+		for _, b := range g.Buckets {
+			if b.RemainingFraction == nil || math.IsNaN(*b.RemainingFraction) {
+				continue
+			}
+			rem := *b.RemainingFraction
+			if rem < 0 {
+				rem = 0
+			} else if rem > 1 {
+				rem = 1
+			}
+			used := math.Round((1-rem)*1000) / 10
+			var resetSec int64
+			if b.ResetTime != "" {
+				if at, err := time.Parse(time.RFC3339Nano, b.ResetTime); err == nil {
+					resetSec = at.Unix()
+				}
+			}
+			w := &quotaWindow{Used: used, ResetsAt: resetSec}
+			switch b.Window {
+			case "5h":
+				qg.FiveHour = w
+			case "weekly":
+				qg.Weekly = w
+			}
+		}
+		if qg.FiveHour != nil || qg.Weekly != nil {
+			q.Groups = append(q.Groups, qg)
+		}
+	}
+	if len(q.Groups) > 0 {
+		q.Known = true
+		q.UpdatedAt = now.Unix()
+	}
+	return q, true
+}
+
+// GET /api/sessions/{id}/conversation/quota?session=<session id>[&agent=agy]
 // → quotaInfo ({"known": false} where the host has no such record).
 func (s *Server) apiConversationQuota(w http.ResponseWriter, r *http.Request) {
 	sess, ok := s.runningSession(w, r)
@@ -175,10 +269,41 @@ func (s *Server) apiConversationQuota(w http.ResponseWriter, r *http.Request) {
 	}
 	sid := r.URL.Query().Get("session")
 	if !convoUUID.MatchString(sid) {
-		writeError(w, http.StatusBadRequest, "bad_request", "a Claude Code session id is required")
+		writeError(w, http.StatusBadRequest, "bad_request", "a session id is required")
 		return
 	}
+	agent := r.URL.Query().Get("agent")
 	now := time.Now()
+	if agent == "agy" {
+		cacheKey := fmt.Sprintf("%d\x00%d", sess.OwnerID, sess.HostID)
+		agyQuotaMu.Lock()
+		ent, hit := agyQuotaCache[cacheKey]
+		agyQuotaMu.Unlock()
+		if hit && now.Sub(ent.at) < agyQuotaCacheTTL {
+			writeJSON(w, http.StatusOK, ent.q)
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
+		defer cancel()
+		res, err := sshx.Exec(ctx, sess.Client(), agyQuotaCommand(), quotaReadMax, sshx.ExecOptions{})
+		if err != nil {
+			if errors.Is(err, context.Canceled) {
+				return
+			}
+			writeError(w, http.StatusBadGateway, "no_quota", "Antigravity's quota could not be read")
+			return
+		}
+		q, ok := quotaOfAgyUsage(res.Out, now)
+		if !ok {
+			writeError(w, http.StatusBadGateway, "no_quota", "Antigravity's quota could not be parsed")
+			return
+		}
+		agyQuotaMu.Lock()
+		agyQuotaCache[cacheKey] = agyQuotaEntry{q: q, at: now}
+		agyQuotaMu.Unlock()
+		writeJSON(w, http.StatusOK, q)
+		return
+	}
 	ctx, cancel := context.WithTimeout(r.Context(), quotaLimit)
 	defer cancel()
 	res, err := sshx.Exec(ctx, sess.Client(), quotaReadCommand(), quotaReadMax, sshx.ExecOptions{})
