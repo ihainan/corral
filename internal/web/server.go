@@ -251,6 +251,7 @@ func (s *Server) registerRoutes() {
 	s.handle("GET /api/sessions/{id}/preview", SignedIn, s.apiGetPreview)
 	s.handle("POST /api/sessions/{id}/upload", SignedIn, s.apiUpload)
 	s.handle("POST /api/sessions/{id}/herdr", SignedIn, s.apiHerdrAction)
+	s.handle("POST /api/sessions/{id}/herdr/lineage", SignedIn, s.apiHerdrLineage)
 	s.handle("GET /api/sessions/{id}/herdr/panes/{pane}/screen", SignedIn, s.apiHerdrScreen)
 	s.handle("POST /api/sessions/{id}/herdr/panes/{pane}/reply", SignedIn, s.apiHerdrReply)
 	s.handle("POST /api/sessions/{id}/herdr/panes/{pane}/seen", SignedIn, s.apiHerdrSeen)

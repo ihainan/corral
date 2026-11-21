@@ -16,26 +16,29 @@ func TestSidebarOrderSettingsValidation(t *testing.T) {
 	}
 
 	mustStatus(t, patch(1, map[string]any{
-		"sidebarGroup":  "project",
-		"sidebarSort":   "smart",
-		"pinFixedOrder": true,
+		"sidebarGroup":        "project",
+		"sidebarSort":         "smart",
+		"pinFixedOrder":       true,
+		"sidebarNestChildren": false,
 	}), 200, "valid sidebar settings")
 
 	got := admin.do("GET", "/api/me/settings", nil).json()
-	if got["sidebarGroup"] != "project" || got["sidebarSort"] != "smart" || got["pinFixedOrder"] != true {
+	if got["sidebarGroup"] != "project" || got["sidebarSort"] != "smart" || got["pinFixedOrder"] != true || got["sidebarNestChildren"] != false {
 		t.Fatalf("unexpected saved sidebar settings: %v", got)
 	}
 
 	mustStatus(t, patch(2, map[string]any{
-		"sidebarGroup":  "session",
-		"sidebarSort":   "name",
-		"pinFixedOrder": false,
+		"sidebarGroup":        "session",
+		"sidebarSort":         "name",
+		"pinFixedOrder":       false,
+		"sidebarNestChildren": true,
 	}), 200, "update sidebar settings")
 
 	for i, bad := range []map[string]any{
 		{"sidebarGroup": "invalid"},
 		{"sidebarSort": "oldest"},
 		{"pinFixedOrder": "yes"},
+		{"sidebarNestChildren": "true"},
 		{"sidebarGroup": nil},
 	} {
 		mustStatus(t, patch(10+i, bad), 400, "invalid sidebar setting")

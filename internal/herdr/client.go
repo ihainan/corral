@@ -94,21 +94,29 @@ type Tab struct {
 	PaneCount   int    `json:"pane_count"`
 }
 
+type AgentSessionInfo struct {
+	Source string `json:"source,omitempty"`
+	Agent  string `json:"agent,omitempty"`
+	Kind   string `json:"kind,omitempty"`
+	Value  string `json:"value"`
+}
+
 type Pane struct {
 	ID          string `json:"pane_id"`
 	TabID       string `json:"tab_id"`
 	WorkspaceID string `json:"workspace_id"`
 	AgentStatus string `json:"agent_status"`
 	Agent       string `json:"agent,omitempty"`
+	Name        string `json:"name,omitempty"`
 	Cwd         string `json:"cwd"`
 	Focused     bool   `json:"focused"`
 	Label       string `json:"label,omitempty"` // (the name given it, if one was: pane.rename)
 	Title       string `json:"terminal_title_stripped,omitempty"`
 	// AgentSession is the agent's own id for what runs there, as herdr's
-	// integration reports it (Claude Code's session id), when it does.
-	AgentSession *struct {
-		Value string `json:"value"`
-	} `json:"agent_session,omitempty"`
+	// integration reports it (Claude Code's session id, Codex's id/path, etc.).
+	AgentSession *AgentSessionInfo `json:"agent_session,omitempty"`
+	// Tokens are pane metadata tokens reported via pane.report_metadata.
+	Tokens map[string]string `json:"tokens,omitempty"`
 	// TerminalID names the terminal the pane runs (a new one when herdr or
 	// the pane starts again); StateSeq is herdr's count of status changes
 	// at its agent's last one. Together they tell one status of the pane's
@@ -361,18 +369,44 @@ func (c *Client) NewWorkspace(ctx context.Context, sourceWS string) error {
 // CreateWorkspace opens a workspace in folder cwd, named label, not
 // focused: its id and its first pane's.
 func (c *Client) CreateWorkspace(ctx context.Context, cwd, label string) (workspace, pane string, err error) {
+	ws, p, _, err := c.CreateWorkspaceWithEnv(ctx, cwd, label, nil)
+	return ws, p, err
+}
+
+// CreateWorkspaceWithEnv opens a workspace in folder cwd, named label, not
+// focused, optionally injecting env vars into its root pane, and returns the
+// workspace id, root pane id, and root pane terminal id.
+func (c *Client) CreateWorkspaceWithEnv(ctx context.Context, cwd, label string, env map[string]string) (workspace, pane, terminalID string, err error) {
 	var res struct {
 		Workspace struct {
 			ID string `json:"workspace_id"`
 		} `json:"workspace"`
 		RootPane struct {
-			ID string `json:"pane_id"`
+			ID         string `json:"pane_id"`
+			TerminalID string `json:"terminal_id"`
 		} `json:"root_pane"`
 	}
-	if err := c.Call(ctx, "workspace.create", map[string]any{"cwd": cwd, "label": label, "focus": false}, &res); err != nil {
-		return "", "", err
+	params := map[string]any{"cwd": cwd, "label": label, "focus": false}
+	if len(env) > 0 {
+		params["env"] = env
 	}
-	return res.Workspace.ID, res.RootPane.ID, nil
+	if err := c.Call(ctx, "workspace.create", params, &res); err != nil {
+		return "", "", "", err
+	}
+	return res.Workspace.ID, res.RootPane.ID, res.RootPane.TerminalID, nil
+}
+
+// ReportMetadata attaches metadata tokens to a pane via pane.report_metadata.
+func (c *Client) ReportMetadata(ctx context.Context, paneID, source string, tokens map[string]string, ttlMs int64) error {
+	params := map[string]any{
+		"pane_id": paneID,
+		"source":  source,
+		"tokens":  tokens,
+	}
+	if ttlMs > 0 {
+		params["ttl_ms"] = ttlMs
+	}
+	return c.Call(ctx, "pane.report_metadata", params, nil)
 }
 
 // CloseWorkspace closes a workspace, ending what runs in its panes.
@@ -429,9 +463,21 @@ func (c *Client) RenamePane(ctx context.Context, paneID, label string) error {
 // drop a slow subscriber, so callers treat any event as "refresh the snapshot"
 // and re-subscribe after the stream ends.
 func (c *Client) Subscribe(ctx context.Context, subs []map[string]any, fn func(event json.RawMessage)) error {
-	if err := c.Call(ctx, "events.subscribe", map[string]any{"subscriptions": subs}, nil); err != nil {
+	if err := c.StartSubscribe(ctx, subs); err != nil {
 		return err
 	}
+	return c.ReadEvents(ctx, fn)
+}
+
+// StartSubscribe sends events.subscribe and waits for its acknowledgement.
+// If it returns an error, herdr closes the connection and callers must Dial a
+// fresh client before retrying.
+func (c *Client) StartSubscribe(ctx context.Context, subs []map[string]any) error {
+	return c.Call(ctx, "events.subscribe", map[string]any{"subscriptions": subs}, nil)
+}
+
+// ReadEvents reads raw event lines after StartSubscribe succeeded.
+func (c *Client) ReadEvents(ctx context.Context, fn func(event json.RawMessage)) error {
 	stop := context.AfterFunc(ctx, func() { c.conn.Close() })
 	defer stop()
 	for {

@@ -1,11 +1,15 @@
 package herdr
 
 import (
+	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net"
 	"strconv"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -156,5 +160,175 @@ func TestDialGivesUpOnSilentHost(t *testing.T) {
 	case <-closed:
 		t.Fatal("stuck herdr traffic closed the terminal's connection")
 	case <-time.After(300 * time.Millisecond):
+	}
+}
+
+func TestSnapshotTokensAndReportMetadata(t *testing.T) {
+	srv := testutil.StartSSHServer(t, "alice", "alice-pass", t.TempDir())
+	var gotEnv map[string]string
+	var gotTokens map[string]string
+	var gotSource string
+	var gotTTL int64
+
+	srv.HandleChannel(func(nc ssh.NewChannel) bool {
+		if nc.ChannelType() != streamLocal {
+			return false
+		}
+		ch, reqs, err := nc.Accept()
+		if err != nil {
+			return true
+		}
+		go ssh.DiscardRequests(reqs)
+		go func() {
+			defer ch.Close()
+			r := bufio.NewReader(ch)
+			line, err := r.ReadBytes('\n')
+			if err != nil {
+				return
+			}
+			var req struct {
+				ID     string          `json:"id"`
+				Method string          `json:"method"`
+				Params json.RawMessage `json:"params"`
+			}
+			if json.Unmarshal(line, &req) != nil {
+				return
+			}
+			switch req.Method {
+			case "session.snapshot":
+				resp := `{"id":"` + req.ID + `","result":{"snapshot":{"version":"0.8.0","panes":[{"pane_id":"w1:p2","workspace_id":"w1","tab_id":"t1","agent":"claude","name":"worker-1","terminal_id":"term-2","agent_session":{"source":"hook","agent":"claude","kind":"id","value":"sess-2"},"tokens":{"corral_parent_pane":"w1:p1"}}],"agents":[{"pane_id":"w1:p2","workspace_id":"w1","tab_id":"t1","agent":"claude","name":"worker-1","terminal_id":"term-2","agent_session":{"source":"hook","agent":"claude","kind":"id","value":"sess-2"},"tokens":{"corral_parent_pane":"w1:p1"}}]}}}` + "\n"
+				_, _ = ch.Write([]byte(resp))
+			case "workspace.create":
+				var p struct {
+					Env map[string]string `json:"env"`
+				}
+				_ = json.Unmarshal(req.Params, &p)
+				gotEnv = p.Env
+				resp := `{"id":"` + req.ID + `","result":{"workspace":{"workspace_id":"w2"},"root_pane":{"pane_id":"w2:p1","terminal_id":"term-9"}}}` + "\n"
+				_, _ = ch.Write([]byte(resp))
+			case "pane.report_metadata":
+				var p struct {
+					Source string            `json:"source"`
+					Tokens map[string]string `json:"tokens"`
+					TTLMs  int64             `json:"ttl_ms"`
+				}
+				_ = json.Unmarshal(req.Params, &p)
+				gotSource, gotTokens, gotTTL = p.Source, p.Tokens, p.TTLMs
+				resp := `{"id":"` + req.ID + `","result":{"ok":true}}` + "\n"
+				_, _ = ch.Write([]byte(resp))
+			}
+		}()
+		return true
+	})
+
+	c := dialTest(t, srv)
+	ctx := context.Background()
+
+	cl, err := Dial(ctx, c, "/run/herdr.sock")
+	if err != nil {
+		t.Fatal(err)
+	}
+	snap, err := cl.Snapshot(ctx)
+	cl.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snap.Agents) != 1 || snap.Agents[0].Name != "worker-1" || snap.Agents[0].Tokens["corral_parent_pane"] != "w1:p1" || snap.Agents[0].AgentSession == nil || snap.Agents[0].AgentSession.Kind != "id" || snap.Agents[0].AgentSession.Value != "sess-2" {
+		t.Fatalf("unexpected snapshot agent: %+v", snap.Agents)
+	}
+
+	cl2, err := Dial(ctx, c, "/run/herdr.sock")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ws, pane, termID, err := cl2.CreateWorkspaceWithEnv(ctx, "/tmp", "child", map[string]string{"CORRAL_PARENT_PANE": "w1:p1"})
+	cl2.Close()
+	if err != nil || ws != "w2" || pane != "w2:p1" || termID != "term-9" || gotEnv["CORRAL_PARENT_PANE"] != "w1:p1" {
+		t.Fatalf("CreateWorkspaceWithEnv: ws=%s pane=%s term=%s env=%v err=%v", ws, pane, termID, gotEnv, err)
+	}
+
+	cl3, err := Dial(ctx, c, "/run/herdr.sock")
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = cl3.ReportMetadata(ctx, "w2:p1", "corral-lineage", map[string]string{"corral_parent_pane": "w1:p1"}, 86400000)
+	cl3.Close()
+	if err != nil || gotSource != "corral-lineage" || gotTokens["corral_parent_pane"] != "w1:p1" || gotTTL != 86400000 {
+		t.Fatalf("ReportMetadata: source=%s tokens=%v ttl=%d err=%v", gotSource, gotTokens, gotTTL, err)
+	}
+}
+
+func TestWatcherLegacySubscribeFallbackAndOnEvent(t *testing.T) {
+	srv := testutil.StartSSHServer(t, "alice", "alice-pass", t.TempDir())
+	var subCalls atomic.Int32
+	eventSent := make(chan struct{})
+
+	srv.HandleChannel(func(nc ssh.NewChannel) bool {
+		if nc.ChannelType() != streamLocal {
+			return false
+		}
+		ch, reqs, err := nc.Accept()
+		if err != nil {
+			return true
+		}
+		go ssh.DiscardRequests(reqs)
+		go func() {
+			defer ch.Close()
+			r := bufio.NewReader(ch)
+			line, err := r.ReadBytes('\n')
+			if err != nil {
+				return
+			}
+			var req struct {
+				ID     string          `json:"id"`
+				Method string          `json:"method"`
+				Params json.RawMessage `json:"params"`
+			}
+			if json.Unmarshal(line, &req) != nil {
+				return
+			}
+			switch req.Method {
+			case "session.snapshot":
+				_, _ = ch.Write([]byte(`{"id":"` + req.ID + `","result":{"snapshot":{"version":"0.7.0","panes":[{"pane_id":"w1:p1","workspace_id":"w1","tab_id":"t1"}]}}}` + "\n"))
+			case "events.subscribe":
+				n := subCalls.Add(1)
+				if n == 1 && strings.Contains(string(req.Params), "pane.moved") {
+					// Simulate older herdr rejecting unknown event type and closing connection.
+					_, _ = ch.Write([]byte(`{"id":"` + req.ID + `","error":{"code":"invalid_params","message":"unknown subscription type pane.moved"}}` + "\n"))
+					return
+				}
+				_, _ = ch.Write([]byte(`{"id":"` + req.ID + `","result":{"ok":true}}` + "\n"))
+				_, _ = ch.Write([]byte(`{"event":"pane_moved","data":{"type":"pane_moved","previous_pane_id":"w1:p1","pane":{"pane_id":"w2:p1","terminal_id":"term-1"}}}` + "\n"))
+				close(eventSent)
+				_, _ = io.Copy(io.Discard, ch)
+			}
+		}()
+		return true
+	})
+
+	c := dialTest(t, srv)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	gotEvent := make(chan string, 1)
+	w := NewWatcher(c, "/run/herdr.sock", nil, nil)
+	w.OnEvent = func(ev string, _ json.RawMessage) {
+		select {
+		case gotEvent <- ev:
+		default:
+		}
+	}
+	go w.Run(ctx)
+
+	select {
+	case ev := <-gotEvent:
+		if ev != "pane_moved" {
+			t.Fatalf("expected pane_moved, got %q", ev)
+		}
+	case <-ctx.Done():
+		t.Fatal("timed out waiting for fallback subscribe and event")
+	}
+	if subCalls.Load() < 2 {
+		t.Fatalf("expected re-Dial fallback subscribe call, got %d", subCalls.Load())
 	}
 }

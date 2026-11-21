@@ -32,6 +32,9 @@ type Watcher struct {
 	// OnLost, if set, is called when the connection to herdr fails: what was
 	// reported last may no longer be so until the next snapshot.
 	OnLost func()
+	// OnEvent, if set, is called for each decoded herdr event envelope
+	// (e.g. "pane_moved") before the watcher refreshes its snapshot.
+	OnEvent func(event string, data json.RawMessage)
 
 	mu     sync.Mutex
 	last   *Snapshot
@@ -98,27 +101,59 @@ func (w *Watcher) once(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	ev, err := Dial(ctx, w.client, w.socketPath)
-	if err != nil {
-		return err
-	}
-	defer ev.Close()
-
-	subs := []map[string]any{
+	baseSubs := []map[string]any{
 		{"type": "workspace.created"}, {"type": "workspace.updated"}, {"type": "workspace.closed"}, {"type": "workspace.renamed"},
 		{"type": "workspace.focused"}, {"type": "tab.created"}, {"type": "tab.closed"}, {"type": "tab.focused"}, {"type": "tab.renamed"},
 		{"type": "pane.created"}, {"type": "pane.closed"}, {"type": "pane.exited"}, {"type": "pane.focused"}, {"type": "pane.agent_detected"},
 	}
+	extSubs := append(append([]map[string]any(nil), baseSubs...),
+		map[string]any{"type": "pane.moved"},
+		map[string]any{"type": "pane.updated"},
+	)
 	for _, p := range snap.Panes {
-		subs = append(subs, map[string]any{"type": "pane.agent_status_changed", "pane_id": p.ID})
+		perPane := map[string]any{"type": "pane.agent_status_changed", "pane_id": p.ID}
+		baseSubs = append(baseSubs, perPane)
+		extSubs = append(extSubs, perPane)
 	}
+
+	ev, err := Dial(ctx, w.client, w.socketPath)
+	if err != nil {
+		return err
+	}
+	if err := ev.StartSubscribe(ctx, extSubs); err != nil {
+		ev.Close()
+		var apiErr *APIError
+		if !errors.As(err, &apiErr) {
+			return err
+		}
+		// Older herdr versions reject newer subscription types (pane.moved / pane.updated)
+		// and close the connection after an error: re-Dial cleanly with legacy subscriptions.
+		ev, err = Dial(ctx, w.client, w.socketPath)
+		if err != nil {
+			return err
+		}
+		if err := ev.StartSubscribe(ctx, baseSubs); err != nil {
+			ev.Close()
+			return err
+		}
+	}
+	defer ev.Close()
 
 	sctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	kick := make(chan struct{}, 1)
 	errc := make(chan error, 1)
 	go func() {
-		errc <- ev.Subscribe(sctx, subs, func(json.RawMessage) {
+		errc <- ev.ReadEvents(sctx, func(raw json.RawMessage) {
+			if w.OnEvent != nil {
+				var env struct {
+					Event string          `json:"event"`
+					Data  json.RawMessage `json:"data"`
+				}
+				if json.Unmarshal(raw, &env) == nil && env.Event != "" {
+					w.OnEvent(env.Event, env.Data)
+				}
+			}
 			select {
 			case kick <- struct{}{}:
 			default:

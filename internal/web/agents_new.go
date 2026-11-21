@@ -80,11 +80,13 @@ func (s *Server) apiNewAgent(w http.ResponseWriter, r *http.Request) {
 		// message back-th from the last, its words at_text — codexRewind.)
 		Back     int    `json:"back"`
 		AtText   string `json:"at_text"`
-		Clear    bool   `json:"clear"`    // (its input emptied after: the message taken to the page's own)
-		Worktree bool   `json:"worktree"` // (not with resume: a session taken up stays where it was)
-		Key      string `json:"key"`
+		Clear      bool   `json:"clear"`       // (its input emptied after: the message taken to the page's own)
+		Worktree   bool   `json:"worktree"`    // (not with resume: a session taken up stays where it was)
+		ParentPane string `json:"parent_pane"` // (optional herdr parent pane to record corral_spawn lineage)
+		Key        string `json:"key"`
 	}
 	if err := readJSON(r, &b); err != nil || !agentKinds[b.Kind] || !newAgentKey.MatchString(b.Key) ||
+		(b.ParentPane != "" && !herdrPaneID.MatchString(b.ParentPane)) ||
 		(b.Resume != "" && (!sessionUUID.MatchString(b.Resume) || b.Kind != "claude" && b.Kind != "codex" && b.Kind != "agy")) ||
 		(b.Fork && (b.Resume == "" || b.Kind == "agy")) || (b.At != "" && (!b.Fork || b.Kind != "claude" || !sessionUUID.MatchString(b.At))) ||
 		(b.Worktree && (worktreeFlag[b.Kind] == "" || b.Resume != "")) ||
@@ -134,7 +136,7 @@ func (s *Server) apiNewAgent(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), newAgentWait+30*time.Second)
 	defer cancel()
 	rec := &recorder{header: http.Header{}}
-	s.newAgent(ctx, rec, sess, socket, dir, b.Kind, b.Label, agentStart{resume: b.Resume, fork: b.Fork, at: b.At, worktree: b.Worktree, back: b.Back, atText: b.AtText, clear: b.Clear})
+	s.newAgent(ctx, rec, sess, socket, dir, b.Kind, b.Label, agentStart{resume: b.Resume, fork: b.Fork, at: b.At, worktree: b.Worktree, back: b.Back, atText: b.AtText, clear: b.Clear, parentPane: b.ParentPane, key: b.Key})
 	s.newAgents.finish(key, who, run, rec.status, rec.body.Bytes())
 	for k, v := range rec.header {
 		w.Header()[k] = v
@@ -154,13 +156,15 @@ func (s *Server) apiNewAgent(w http.ResponseWriter, r *http.Request) {
 // not), taking up a session of before (resume), or a copy of one (fork; of
 // it up to the message at, where at is given).
 type agentStart struct {
-	resume   string
-	fork     bool
-	at       string
-	worktree bool
-	back     int    // (a Codex's copy: rewound to before the person's message back-th from the last — codexRewind)
-	atText   string // (its words)
-	clear    bool   // (its input emptied once seen holding them)
+	resume     string
+	fork       bool
+	at         string
+	worktree   bool
+	back       int    // (a Codex's copy: rewound to before the person's message back-th from the last — codexRewind)
+	atText     string // (its words)
+	clear      bool   // (its input emptied once seen holding them)
+	parentPane string // (optional herdr parent pane for corral_spawn lineage)
+	key        string // (idempotency key, reused as spawn evidence_key)
 }
 
 func (s *Server) newAgent(ctx context.Context, w http.ResponseWriter, sess *term.Session, socket, dir, kind, label string, how agentStart) {
@@ -261,12 +265,32 @@ func (s *Server) newAgent(ctx context.Context, w http.ResponseWriter, sess *term
 		writeJSON(w, http.StatusOK, out2)
 		return
 	}
+	var (
+		spawnEnv    map[string]string
+		parentTerm  string
+		parentSess  string
+		hasParent   bool
+	)
+	if how.parentPane != "" {
+		if p, ok := s.herdrSocks.paneOf(sess.ID, how.parentPane); ok {
+			hasParent = true
+			parentTerm = sanitizeTermID(p.TerminalID)
+			parentSess = agentSession(p)
+			spawnEnv = map[string]string{"CORRAL_PARENT_PANE": how.parentPane}
+			if parentTerm != "" {
+				spawnEnv["CORRAL_PARENT_TERM"] = parentTerm
+			}
+			if parentSess != "" {
+				spawnEnv["CORRAL_PARENT_SESSION"] = parentSess
+			}
+		}
+	}
 	c := herdrDial(w, ctx, sess, socket)
 	if c == nil {
 		keep = false
 		return
 	}
-	ws, pane, err := c.CreateWorkspace(ctx, dir, label)
+	ws, pane, termID, err := c.CreateWorkspaceWithEnv(ctx, dir, label, spawnEnv)
 	c.Close()
 	var apiErr *herdr.APIError
 	switch {
@@ -293,6 +317,28 @@ func (s *Server) newAgent(ctx context.Context, w http.ResponseWriter, sess *term
 		// (Started or not, it cannot be told: left as it is, for the person to see.)
 		writeErrorExtra(w, http.StatusBadGateway, "unknown", why, map[string]any{"workspace": ws, "pane": pane})
 	default:
+		if hasParent && pane != how.parentPane {
+			tokens := map[string]string{"corral_parent_pane": how.parentPane}
+			if parentTerm != "" {
+				tokens["corral_parent_term"] = parentTerm
+			}
+			if parentSess != "" {
+				tokens["corral_parent_session"] = parentSess
+			}
+			if how.key != "" {
+				tokens["corral_spawn_op"] = "spawn:" + how.key
+			}
+			// Best-effort metadata token so other Corral instances/restarts see it immediately.
+			mctx, mcancel := context.WithTimeout(context.Background(), 5*time.Second)
+			if mc, merr := herdr.Dial(mctx, sess.Client(), socket); merr == nil {
+				_ = mc.ReportMetadata(mctx, pane, "corral-lineage", tokens, lineageMetadataTTLMs)
+				mc.Close()
+			}
+			mcancel()
+			if lt := s.herdrSocks.lineageOf(sess.ID); lt != nil {
+				lt.RecordCorralSpawn(ctx, pane, termID, how.parentPane, parentTerm, parentSess, "spawn:"+how.key)
+			}
+		}
 		out := map[string]any{"workspace": ws, "pane": pane}
 		if kind == "codex" && how.fork {
 			hp, found := s.herdrRewindPaneOf(ctx, sess, socket, pane, how.resume)

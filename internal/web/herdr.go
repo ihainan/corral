@@ -74,6 +74,15 @@ type herdrAgent struct {
 	// not known.
 	ThreadTitle string `json:"thread_title,omitempty"`
 	BareTitle   bool   `json:"bare_title,omitempty"`
+	// TerminalID is herdr's terminal instance id for this pane (when reported),
+	// used for occupant-checked lineage actions.
+	TerminalID string `json:"terminal_id,omitempty"`
+	// ParentPane, ParentTermID, ParentSession, LineageSource describe a
+	// confirmed parent-child relation within the same herdr server.
+	ParentPane    string `json:"parent_pane,omitempty"`
+	ParentTermID  string `json:"parent_term_id,omitempty"`
+	ParentSession string `json:"parent_session,omitempty"`
+	LineageSource string `json:"lineage_source,omitempty"`
 }
 
 // statusMark names a pane's status as herdr counts them: its terminal and
@@ -377,6 +386,8 @@ type herdrSockets struct {
 	// server: terminal session → the herdr server it watches (its key, see
 	// herdrServerKey) and whose session it is.
 	server map[string]watchedServer
+	// lineage: terminal session → parent-child lineage tracker for its herdr server.
+	lineage map[string]*lineageTracker
 }
 
 type watchedServer struct {
@@ -542,6 +553,21 @@ func (h *herdrSockets) roundsOf(id string) *seenRounds {
 	return h.rounds[id]
 }
 
+func (h *herdrSockets) setLineage(id string, lt *lineageTracker) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.lineage == nil {
+		h.lineage = map[string]*lineageTracker{}
+	}
+	h.lineage[id] = lt
+}
+
+func (h *herdrSockets) lineageOf(id string) *lineageTracker {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.lineage[id]
+}
+
 func (h *herdrSockets) set(id, path string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -555,6 +581,7 @@ func (h *herdrSockets) set(id, path string) {
 		delete(h.located, id)
 		delete(h.inView, id)
 		delete(h.server, id)
+		delete(h.lineage, id)
 	} else {
 		h.path[id] = path
 	}
@@ -712,6 +739,8 @@ func (s *Server) watchHerdr(sess *term.Session, h *store.Host) {
 	s.herdrSocks.setBg(sess.ID, bg)
 	chimes := newChimeCounts()
 	s.herdrSocks.setChimes(sess.ID, chimes)
+	lineage := s.newLineageTracker(sess, server, socket, name)
+	s.herdrSocks.setLineage(sess.ID, lineage)
 	go bg.run(ctx)
 	cmds := newCmdProber(func(ctx context.Context) (map[string][]bgCmd, bool, error) {
 		out, err := sshx.Output(ctx, sess.Client(), cmdScanCommand(), cmdScanMax)
@@ -779,6 +808,9 @@ func (s *Server) watchHerdr(sess *term.Session, h *store.Host) {
 					if (p.agent == "claude" || p.agent == "agy") && convoUUID.MatchString(p.sid) {
 						s.locatedEverywhere(sess, p.herdrPane, p.sid, began)
 					}
+					if p.log != "" {
+						lineage.notePaneLog(p.herdrPane, p.agent, p.sid, p.log)
+					}
 					if w := procWrote(p, found.cands); w > at[p.herdrPane] {
 						at[p.herdrPane] = w
 					}
@@ -814,6 +846,7 @@ func (s *Server) watchHerdr(sess *term.Session, h *store.Host) {
 		chimes.decorate(&told)
 		titles.decorate(&told)
 		agyTitles.decorate(&told)
+		lineage.decorate(&told)
 		if b, err := json.Marshal(told); err == nil {
 			sess.PublishMeta(b)
 		}
@@ -848,6 +881,7 @@ func (s *Server) watchHerdr(sess *term.Session, h *store.Host) {
 		func(snap *herdr.Snapshot) {
 			s.herdrSocks.setSids(sess.ID, snap)
 			s.herdrSocks.setView(sess.ID, snap)
+			lineage.OnSnapshot(ctx, snap)
 			sum := summarize(name, snap, times, false)
 			rounds.number(&sum, false)
 			titles.track(&sum)
@@ -898,6 +932,10 @@ func (s *Server) watchHerdr(sess *term.Session, h *store.Host) {
 	chimes.setPoke(again)
 	titles.setPoke(again)
 	agyTitles.setPoke(again)
+	lineage.setPoke(again)
+	w.OnEvent = func(event string, data json.RawMessage) {
+		lineage.OnEvent(ctx, event, data)
+	}
 	// Subagents found back by the prober's own look, the turn's end that
 	// would have told it not seen (two changes in one snapshot): the
 	// "finished" held back goes, as for a turn ending now, if it is done

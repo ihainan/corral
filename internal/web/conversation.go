@@ -1726,8 +1726,11 @@ type convoState struct {
 	sid, log    string
 	gen         int64      // changes when another log is read: what was shown does not apply
 	bind        *convoBind // the process the log is of, while there is one
-	parser      convo.Parser
-	early       earlyTitle // (see lookEarlierTitle)
+	parser        convo.Parser
+	lineage       *lineageExtractor // raw JSONL herdr child-creation extractor (reset on adopt/truncation)
+	lineageAgent  string
+	lineageSocket string
+	early         earlyTitle // (see lookEarlierTitle)
 	agent       string     // whose log: "claude", "codex" or "opencode"
 	// (A Codex in tmux: whether its title said it waits, for whom, when.)
 	cxTitleAt     time.Time
@@ -2469,6 +2472,11 @@ func (s *Server) locateScan(ctx context.Context, sess *term.Session, st *convoSt
 	// alone, it is shown, weak — no word on where keys go.)
 	st.weak = st.guessed && !(st.screenSID != "" && st.screenSID == sid)
 	st.adopt(sid, log, agent, reason)
+	if sess.Persistence == "herdr" && pane != "" && log != "" && !st.sub {
+		if lt := s.herdrSocks.lineageOf(sess.ID); lt != nil {
+			lt.notePaneLog(pane, agent, sid, log)
+		}
+	}
 	return nil
 }
 
@@ -2489,6 +2497,7 @@ func (st *convoState) adopt(sid, log, agent, reason string) {
 		st.gen = convoGens.Add(1)
 		st.sid, st.log, st.agent = sid, log, agent
 		st.parser = convo.New(agent)
+		st.lineage, st.lineageAgent, st.lineageSocket = nil, "", ""
 		st.offset, st.size, st.mtime, st.older, st.skipping, st.from = 0, -1, time.Time{}, false, false, 0
 		st.olderLog, st.olderChecked, st.hops, st.olderSeen, st.chainStart = "", false, 0, nil, false
 		st.grewAt = time.Time{} // (another log's: its own, from its first look)
@@ -2546,6 +2555,9 @@ func (s *Server) readConvo(sess *term.Session, st *convoState) (more bool, err e
 		if size < st.offset || size < st.size {
 			st.gen = convoGens.Add(1)
 			st.parser = st.newParser()
+			if st.lineage != nil {
+				st.lineage.Reset()
+			}
 			st.offset, st.older, st.skipping, st.from = 0, codexChains(st), false, 0
 			st.olderLog, st.olderChecked, st.hops, st.olderSeen, st.chainStart = "", false, 0, nil, false
 			st.long, st.strip = nil, b64Strip{}
@@ -2623,13 +2635,16 @@ func (s *Server) readConvo(sess *term.Session, st *convoState) (more bool, err e
 			st.long, st.strip = nil, b64Strip{}
 			if len(line) <= convoLongMax {
 				st.parser.Feed(line)
+				s.feedConvoLineage(sess, st, line)
 			}
 			pos += i + 1
 		}
 		end := bytes.LastIndexByte(data[pos:], '\n')
 		switch {
 		case end >= 0:
-			st.parser.Feed(data[pos : pos+end+1])
+			chunk := data[pos : pos+end+1]
+			st.parser.Feed(chunk)
+			s.feedConvoLineage(sess, st, chunk)
 			st.offset += int64(pos + end + 1)
 		case int64(len(data)-pos) >= limit:
 			st.long = st.strip.write(make([]byte, 0, 64<<10), data[pos:])

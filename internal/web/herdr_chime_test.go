@@ -20,9 +20,7 @@ func TestChimeCounts(t *testing.T) {
 	s.herdrSocks.setChimes("s1", c)
 	sess := &term.Session{ID: "s1"}
 	p := herdr.Pane{ID: "w1:p1"}
-	p.AgentSession = &struct {
-		Value string `json:"value"`
-	}{"0b5d3f0e-1c1a-4f7e-9d1e-2a3b4c5d6e7f"} // (as herdr tells it: the gateway does not look for it)
+	p.AgentSession = &herdr.AgentSessionInfo{Value: "0b5d3f0e-1c1a-4f7e-9d1e-2a3b4c5d6e7f"} // (as herdr tells it: the gateway does not look for it)
 	s.chimeOn(sess, herdr.Transition{Pane: p, From: herdr.StatusWorking, To: herdr.StatusBlocked})
 	s.chimeOn(sess, herdr.Transition{Pane: p, From: herdr.StatusBlocked, To: herdr.StatusBlocked})
 	s.chimeOn(sess, herdr.Transition{Pane: p, From: herdr.StatusIdle, To: herdr.StatusDone}) // (not from work: not a finish)
@@ -85,9 +83,7 @@ func TestChimeAfterAsking(t *testing.T) {
 	s.herdrSocks.setChimes("s1", c)
 	sess := &term.Session{ID: "s1"}
 	p := herdr.Pane{ID: "w1:p1"}
-	p.AgentSession = &struct {
-		Value string `json:"value"`
-	}{"0b5d3f0e-1c1a-4f7e-9d1e-2a3b4c5d6e7f"} // (as herdr tells it: the gateway does not look for it)
+	p.AgentSession = &herdr.AgentSessionInfo{Value: "0b5d3f0e-1c1a-4f7e-9d1e-2a3b4c5d6e7f"} // (as herdr tells it: the gateway does not look for it)
 	wait := func(n int64) chimeN {
 		var got chimeN
 		for i := 0; i < 100; i++ {
