@@ -31,6 +31,23 @@ function goesOn(lines: string[], i: number): boolean {
   return false
 }
 
+// Whether line i is a column-0 (or lightly indented) wrapped continuation line
+// strictly sandwiched between numbered choice (nextKey - 1) above it and
+// choice nextKey below it (e.g. Antigravity CLI wrapping long "always allow
+// for commands that start with '...'" options onto column 0).
+function goesBetween(lines: string[], i: number, nextKey: number): boolean {
+  if (nextKey <= 1) return false
+  const trimmed = lines[i].trim()
+  if (!trimmed || keyHint.test(lines[i]) || between.test(lines[i]) || /[?？]$/.test(trimmed)) return false
+  for (let j = i - 1; j >= 0 && i - j <= 4; j--) {
+    const m = menuLine.exec(lines[j])
+    if (m) return Number(m[2]) === nextKey - 1
+    const t = lines[j].trim()
+    if (!t || keyHint.test(lines[j]) || between.test(lines[j]) || /[?？]$/.test(t)) return false
+  }
+  return false
+}
+
 // A choice of Codex's wrapped: rejoined with the space the line broke at,
 // unless it broke after a hyphen within a word, as Codex wraps ("made-by-"
 // "codex.txt": a file's name). (A break at a space before "-C" is a space.
@@ -53,12 +70,12 @@ export type Choice = { key: string; label: string; desc?: string; keys?: string[
 // The menu at the end of the screen's lines, read as a question of Claude
 // Code's when it is one (its hint there, and one of its own choices an
 // answer of one's own), else as any other menu.
-function menuAt(lines: string[], codex = false): { out: Choice[]; top: number; asks: boolean } {
+function menuAt(lines: string[], codex = false, wideLabel = false): { out: Choice[]; top: number; asks: boolean } {
   if (lines.slice(-6).some((l) => describes.test(l))) {
     const q = readMenu(lines, true)
     if (q.out.some((c) => ownAnswer.test(c.label))) return { ...q, asks: true }
   }
-  const m = readMenu(lines, false, codex)
+  const m = readMenu(lines, false, codex, wideLabel)
   return { ...(m.out.length || codex ? m : cursorMenu(lines)), asks: false }
 }
 
@@ -94,7 +111,7 @@ function cursorMenu(lines: string[]): { out: Choice[]; top: number } {
 
 // The menu at the end of the screen's lines: its choices and the line it
 // begins on (told: read as a question of Claude Code's).
-function readMenu(lines: string[], told: boolean, codex = false): { out: Choice[]; top: number } {
+function readMenu(lines: string[], told: boolean, codex = false, wideLabel = false): { out: Choice[]; top: number } {
   let end = lines.length
   while (end > 0 && !menuLine.test(lines[end - 1]) && hintLine.test(lines[end - 1]) && !goesOn(lines, end - 1) && lines.length - end < 4) end--
   const out: Choice[] = []
@@ -108,6 +125,10 @@ function readMenu(lines: string[], told: boolean, codex = false): { out: Choice[
         more.unshift(moreLine.exec(lines[i])![1])
         continue
       }
+      if (!told && out.length > 0 && goesBetween(lines, i, Number(out[0].key))) {
+        more.unshift(lines[i].trim())
+        continue
+      }
       // (A blank or a rule with more choices above it: still the menu.)
       if (told && out.length && !more.length && between.test(lines[i])) {
         let j = i - 1
@@ -119,7 +140,7 @@ function readMenu(lines: string[], told: boolean, codex = false): { out: Choice[
       }
       break
     }
-    const most = codex ? maxCodexLabel : maxLabel
+    const most = codex || wideLabel ? maxCodexLabel : maxLabel
     const clipped = (s: string) => (s.length > most ? s.slice(0, most - 1) + '…' : s)
     const label = told ? m[3] : codex ? [m[3], ...more].reduce(joinWrapped) : [m[3], ...more].join(' ')
     const desc = told && more.length ? clipped(more.join(' ')) : undefined
@@ -142,7 +163,7 @@ export function asksQuestion(text: string): boolean {
 // choices: the menu's, as the agent whose screen it is draws it (agent:
 // claude, codex…; Codex's own hint lines and wrapping known).
 export function choices(text: string, agent?: string): Choice[] {
-  if (agent !== 'codex') return menuAt(text.split('\n')).out
+  if (agent !== 'codex') return menuAt(text.split('\n'), false, agent === 'agy').out
   const lines = codexLines(text)
   return lines ? menuAt(lines, true).out : []
 }

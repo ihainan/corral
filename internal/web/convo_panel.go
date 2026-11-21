@@ -82,32 +82,45 @@ func (s *Server) convoPanelScreen(w http.ResponseWriter, ctx context.Context, se
 }
 
 // herdrReadPanelANSI reads the pane with ANSI colours directly over herdr's
-// Unix socket (~1ms on host, zero shell spawn). For agy, prefers "recent"
-// (last 60 lines) so scrolled-up panes still show the live prompt at the bottom.
-func herdrReadPanelANSI(ctx context.Context, c *herdr.Client, pane string, agy bool) ([]byte, error) {
+// Unix socket (~1ms on host, zero shell spawn). Each herdr RPC uses its own
+// short-lived connection because herdr closes a Unix socket connection after
+// answering one request. For agy, prefers "recent" (last 60 lines) so
+// scrolled-up panes still show the live prompt at the bottom.
+func herdrReadPanelANSI(ctx context.Context, sess *term.Session, socket, pane string, agy bool) (raw []byte, dialed bool, err error) {
+	read := func(source string, lines int) (string, bool, error) {
+		c, derr := herdr.DialWait(ctx, sess.Client(), socket, 2*time.Second)
+		if derr != nil {
+			return "", false, derr
+		}
+		defer c.Close()
+		text, rerr := c.ReadPaneANSI(ctx, pane, source, lines)
+		return text, true, rerr
+	}
 	if agy {
-		if text, err := c.ReadPaneANSI(ctx, pane, "recent", 60); err == nil {
-			return []byte(text), nil
+		text, ok, rerr := read("recent", 60)
+		if rerr == nil {
+			return []byte(text), true, nil
+		}
+		if !ok {
+			return nil, false, rerr
 		}
 	}
-	text, err := c.ReadPaneANSI(ctx, pane, "visible", 0)
-	if err != nil {
-		return nil, err
+	text, ok, rerr := read("visible", 0)
+	if rerr != nil {
+		return nil, ok, rerr
 	}
-	return []byte(text), nil
+	return []byte(text), true, nil
 }
 
 // convoHerdrPanelScreen serves panel_screen directly over herdr's Unix socket,
 // avoiding the full-host /proc scan and SSH shell spawn on every poll.
 // Returns false when the socket cannot be reached so the caller can fall back.
 func (s *Server) convoHerdrPanelScreen(w http.ResponseWriter, ctx context.Context, sess *term.Session, pane, socket string, agy bool, outcome, reason *string, release func()) bool {
-	c, err := herdr.DialWait(ctx, sess.Client(), socket, 2*time.Second)
-	if err != nil {
+	raw, dialed, err := herdrReadPanelANSI(ctx, sess, socket, pane, agy)
+	if !dialed {
 		return false
 	}
-	defer c.Close()
 	defer release()
-	raw, err := herdrReadPanelANSI(ctx, c, pane, agy)
 	if err != nil {
 		if ctx.Err() != nil {
 			*outcome, *reason = "unknown", "cancelled"
@@ -124,38 +137,49 @@ func (s *Server) convoHerdrPanelScreen(w http.ResponseWriter, ctx context.Contex
 	return true
 }
 
-// convoHerdrPanelKey serves live PanelWindow keypresses directly over a single
-// herdr Unix socket connection: optional lookDigest check, send key, brief
-// repaint pause, and immediate ANSI screen read on the same connection.
+// convoHerdrPanelKey serves live PanelWindow keypresses directly over herdr's
+// Unix socket: optional lookDigest check, send key, brief repaint pause, and
+// immediate ANSI screen read (each RPC on its own short-lived connection
+// because herdr closes a connection after one request).
 // Returns false if the socket cannot be reached so the caller can fall back.
 func (s *Server) convoHerdrPanelKey(w http.ResponseWriter, ctx context.Context, sess *term.Session, pane, socket string, agy, codex bool, key, digest string, outcome, reason *string, release func()) bool {
-	c, err := herdr.DialWait(ctx, sess.Client(), socket, 2*time.Second)
-	if err != nil {
-		return false
-	}
-	defer c.Close()
-	defer release()
-
 	needDigest := panelSettles(key) || (codex && panelLetter.MatchString(key))
 	if needDigest {
-		raw, err := herdrReadPanelANSI(ctx, c, pane, agy)
+		raw, dialed, err := herdrReadPanelANSI(ctx, sess, socket, pane, agy)
+		if !dialed {
+			return false
+		}
 		if err != nil {
+			release()
 			*reason = "no_screen"
 			writeError(w, http.StatusBadGateway, "no_screen", "the pane's screen could not be read")
 			return true
 		}
 		if lookDigest(raw) != digest {
+			release()
 			*outcome, *reason = "refused", "screen_changed"
 			writeError(w, http.StatusConflict, "screen_changed", "the screen changed; look again before answering")
 			return true
 		}
 	}
+	c, err := herdr.DialWait(ctx, sess.Client(), socket, 2*time.Second)
+	if err != nil {
+		if needDigest {
+			release()
+			*outcome, *reason = "refused", "send_failed"
+			writeError(w, http.StatusBadGateway, "send_failed", "could not send key to pane")
+			return true
+		}
+		return false
+	}
+	defer release()
 	var serr error
 	if key == "shift+tab" {
 		serr = c.SendInput(ctx, pane, "\x1b[Z", nil)
 	} else {
 		serr = c.SendKeys(ctx, pane, []string{key})
 	}
+	c.Close()
 	if serr != nil {
 		*outcome, *reason = "refused", "send_failed"
 		writeError(w, http.StatusBadGateway, "send_failed", "could not send key to pane")
@@ -168,7 +192,7 @@ func (s *Server) convoHerdrPanelKey(w http.ResponseWriter, ctx context.Context, 
 	case <-time.After(60 * time.Millisecond):
 	}
 	out := map[string]any{"ok": true}
-	if raw, err := herdrReadPanelANSI(ctx, c, pane, agy); err == nil {
+	if raw, _, err := herdrReadPanelANSI(ctx, sess, socket, pane, agy); err == nil {
 		text, _, _ := screenOf(raw)
 		out["text"], out["digest"], out["look"] = text, panelDigest(raw), lookDigest(raw)
 	}

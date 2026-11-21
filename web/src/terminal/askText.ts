@@ -23,8 +23,8 @@ const zhChoices: [RegExp, (m: RegExpExecArray) => string][] = [
   [/^Yes,? and always allow access to (.+?) from this project$/i, (m) => `允许，以后在这个项目里访问 ${m[1]} 不再问`],
   // (Antigravity CLI's permission & trust prompts.)
   [/^Yes,? run command$/i, () => '允许运行这条命令'],
-  [/^Yes,? and always allow in this conversation for commands that start with ['`](.+)['`]$/i, (m) => `允许，本次对话中以 ${m[1]} 开头的命令不再问`],
-  [/^Yes,? and always allow for commands that start with ['`](.+)['`]\s*\(Persist to settings\.json\)$/i, (m) => `允许，以后以 ${m[1]} 开头的命令不再问（写入设置）`],
+  [/^Yes,? and always allow in this conversation for commands that start with ['`](.+?)['`]?$/i, (m) => `允许，本次对话中以 ${m[1]} 开头的命令不再问`],
+  [/^Yes,? and always allow for commands that start with ['`](.+?)['`]?\s*\(Persist to settings\.json\)$/i, (m) => `允许，以后以 ${m[1]} 开头的命令不再问（写入设置）`],
   [/^No,? cancel$/i, () => '拒绝'],
   [/^Yes,? I trust this folder$/i, () => '是的，信任此文件夹'],
   [/^No,? exit$/i, () => '不信任，退出'],

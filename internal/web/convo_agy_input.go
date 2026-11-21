@@ -493,10 +493,13 @@ func (s *Server) agyWaits(ctx context.Context, sess *term.Session, st *convoStat
 			c, err = herdr.DialWait(rctx, sess.Client(), socket, 2*time.Second)
 			if err == nil {
 				screen, err = c.ReadPaneSource(rctx, b.Pane, "recent", 60)
-				if err != nil {
-					screen, err = c.ReadPane(rctx, b.Pane, 0)
-				}
 				c.Close()
+				if err != nil {
+					if c2, derr := herdr.DialWait(rctx, sess.Client(), socket, 2*time.Second); derr == nil {
+						screen, err = c2.ReadPane(rctx, b.Pane, 0)
+						c2.Close()
+					}
+				}
 			}
 		} else {
 			err = errors.New("no herdr socket")
