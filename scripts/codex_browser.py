@@ -109,6 +109,8 @@ def main():
                                         route.fulfill(status=200, content_type="image/png", body=png())
                                     elif "/conversation/unlook" in url:
                                         route.fulfill(status=200, json={"ok": True})
+                                    elif url.endswith("/api/me/translate"):
+                                        route.fulfill(status=200, json={"enabled": False, "target_lang": "zh-CN", "base_url": "https://api.deepseek.com/v1", "model": "deepseek-flash", "has_key": False})
                                     elif "/conversation?" in url:
                                         calls.append(url)
                                         route.fulfill(status=200, json={"available": True, "gen": 1, "rev": 1,
