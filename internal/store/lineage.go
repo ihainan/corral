@@ -227,14 +227,13 @@ func (s *Store) UpsertAgentLineage(ctx context.Context, row AgentLineage) (bool,
 		newPrio := lineagePriority(row.Source)
 
 		if !isManual {
-			// Never rebind an existing confirmed edge onto a different child or parent session.
-			if sameParent {
-				if existing.ChildSession != "" && row.ChildSession != "" && existing.ChildSession != row.ChildSession {
-					return false, nil
-				}
-				if existing.ParentSession != "" && row.ParentSession != "" && existing.ParentSession != row.ParentSession {
-					return false, nil
-				}
+			// Never rebind an existing confirmed edge onto a different child session,
+			// even if a higher-priority automatic source proposes another parent.
+			if existing.ChildSession != "" && row.ChildSession != "" && existing.ChildSession != row.ChildSession {
+				return false, nil
+			}
+			if sameParent && existing.ParentSession != "" && row.ParentSession != "" && existing.ParentSession != row.ParentSession {
+				return false, nil
 			}
 			if oldPrio > newPrio {
 				if !sameParent {
@@ -269,10 +268,14 @@ func (s *Store) UpsertAgentLineage(ctx context.Context, row AgentLineage) (bool,
 			merged.CreatedAt = existing.CreatedAt
 		} else {
 			// Manual or strictly higher-priority source replacing parent.
-			if merged.ChildTermID == "" {
+			if existing.ChildTermID != "" && !isManual {
+				merged.ChildTermID = existing.ChildTermID
+			} else if merged.ChildTermID == "" {
 				merged.ChildTermID = existing.ChildTermID
 			}
-			if merged.ChildSession == "" {
+			if existing.ChildSession != "" && !isManual {
+				merged.ChildSession = existing.ChildSession
+			} else if merged.ChildSession == "" {
 				merged.ChildSession = existing.ChildSession
 			}
 			merged.CreatedAt = existing.CreatedAt

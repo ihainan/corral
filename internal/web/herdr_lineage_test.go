@@ -241,3 +241,52 @@ func TestLineageOtherTrackerObservesUnlink(t *testing.T) {
 		t.Fatalf("second watcher still published unlinked edge after fresh snapshot: %+v", sum.Workspaces[0].Agents[1])
 	}
 }
+
+func TestLineageAgentStartedEnrichmentCannotResurrectUnlink(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+
+	_, err := h.srv.store.UpsertAgentLineage(ctx, store.AgentLineage{
+		OwnerID: 1, HostID: 10, Server: "review-enrich",
+		ChildPane: "w1:p2", ChildTermID: "term-2",
+		ParentPane: "w1:p1", ParentTermID: "term-1",
+		Source: store.LineageManual,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	lt := &lineageTracker{
+		srv: h.srv, ownerID: 1, hostID: 10, server: "review-enrich",
+		live: map[string]livePaneInfo{}, termToPane: map[string]string{},
+		knownPanes: map[string]bool{}, paneLogs: map[string]knownPaneLog{},
+		probedSize: map[string]int64{}, retriedPane: map[string]bool{},
+	}
+	snap := &herdr.Snapshot{
+		Version:    "0.8.0",
+		Workspaces: []herdr.Workspace{{ID: "w1", Label: "main", Number: 1}},
+		Agents: []herdr.Pane{
+			{ID: "w1:p1", WorkspaceID: "w1", Agent: "claude", TerminalID: "term-1"},
+			{ID: "w1:p2", WorkspaceID: "w1", Agent: "claude", TerminalID: "term-2"},
+		},
+	}
+	lt.OnSnapshot(ctx, snap)
+
+	// User unlinks concurrently in SQLite while lt.rows still caches the manual row.
+	if err := h.srv.store.RejectAgentLineage(ctx, 1, 10, "review-enrich", "w1:p2", "term-2", "", 5000); err != nil {
+		t.Fatal(err)
+	}
+
+	// agent_started enrichment runs with stale cached manual row and MUST NOT resurrect unlink.
+	lt.RecordToolLog(ctx, "w1:p1", "term-1", "", lineageDiscovery{
+		ChildPane:    "w1:p2",
+		ChildTermID:  "term-2",
+		ChildSession: "cs1",
+		Action:       "agent_started",
+	})
+
+	rows, _ := h.srv.store.ListAgentLineage(ctx, 1, 10, "review-enrich")
+	if len(rows) != 1 || rows[0].State != store.LineageRejected {
+		t.Fatalf("agent_started enrichment resurrected manual unlink: %+v", rows)
+	}
+}

@@ -466,6 +466,7 @@ func (t *lineageTracker) RecordCorralSpawn(ctx context.Context, childPane, child
 		_ = t.reloadLocked(sctx)
 		t.mu.Unlock()
 		t.notify()
+		t.srv.herdrSocks.reloadLineageForServer(sctx, t)
 	}
 }
 
@@ -550,11 +551,14 @@ func (t *lineageTracker) RecordToolLog(ctx context.Context, parentPane, expected
 		}
 		match.ChildSession = childSess
 		match.UpdatedAt = nowMs
-		if changed, err := t.srv.store.UpsertAgentLineage(sctx, *match); err == nil && changed {
+		// Use UpgradeAgentLineageIdentity (never UpsertAgentLineage) so a cached
+		// manual row can never resurrect a concurrent manual unlink.
+		if changed, err := t.srv.store.UpgradeAgentLineageIdentity(sctx, *match); err == nil && changed {
 			t.mu.Lock()
 			_ = t.reloadLocked(sctx)
 			t.mu.Unlock()
 			t.notify()
+			t.srv.herdrSocks.reloadLineageForServer(sctx, t)
 		}
 		return
 	}
@@ -583,6 +587,7 @@ func (t *lineageTracker) RecordToolLog(ctx context.Context, parentPane, expected
 		_ = t.reloadLocked(sctx)
 		t.mu.Unlock()
 		t.notify()
+		t.srv.herdrSocks.reloadLineageForServer(sctx, t)
 	}
 }
 

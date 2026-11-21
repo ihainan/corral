@@ -423,17 +423,7 @@ func (e *lineageExtractor) feedCodexLine(line []byte) []lineageDiscovery {
 			if strings.HasPrefix(strings.TrimSpace(outText), "Script failed") || hasNonZeroExit(outText, codexExitCodeRe) {
 				return nil
 			}
-			var out []lineageDiscovery
-			for i, intent := range intents {
-				key := "codex:" + p.CallID
-				if len(intents) > 1 {
-					key += ":" + strconv.Itoa(i)
-				}
-				if d, matched := e.matchResult(intent, outText, key); matched {
-					out = append(out, d)
-				}
-			}
-			return out
+			return e.matchMultiResults(intents, outText, "codex:"+p.CallID)
 		}
 	}
 	return nil
@@ -1013,11 +1003,56 @@ func (e *lineageExtractor) matchResult(intent herdrCmdIntent, output, evidenceKe
 	if !intent.valid || strings.TrimSpace(output) == "" {
 		return lineageDiscovery{}, false
 	}
-	payload, ok := findMatchingHerdrJSON(output, intent.action)
-	if !ok {
-		return lineageDiscovery{}, false
+	payloads := extractHerdrJSONPayloads(output, 0)
+	for _, payload := range payloads {
+		if !herdrResultTypeMatches(intent.action, payload.Type) {
+			continue
+		}
+		if d, ok := e.discoveryFromPayload(intent.action, payload, evidenceKey); ok {
+			return d, true
+		}
 	}
-	switch intent.action {
+	return lineageDiscovery{}, false
+}
+
+// matchMultiResults pairs an ordered list of intents from a single code-mode
+// script against extracted Herdr JSON results in order, consuming each result
+// at most once so multi-spawn scripts never duplicate the first child or miss
+// subsequent children.
+func (e *lineageExtractor) matchMultiResults(intents []herdrCmdIntent, output, baseKey string) []lineageDiscovery {
+	if len(intents) == 0 || strings.TrimSpace(output) == "" {
+		return nil
+	}
+	payloads := extractHerdrJSONPayloads(output, 0)
+	if len(payloads) == 0 {
+		return nil
+	}
+	used := make([]bool, len(payloads))
+	var out []lineageDiscovery
+	for i, intent := range intents {
+		if !intent.valid {
+			continue
+		}
+		key := baseKey
+		if len(intents) > 1 {
+			key += ":" + strconv.Itoa(i)
+		}
+		for pi, payload := range payloads {
+			if used[pi] || !herdrResultTypeMatches(intent.action, payload.Type) {
+				continue
+			}
+			if d, ok := e.discoveryFromPayload(intent.action, payload, key); ok {
+				used[pi] = true
+				out = append(out, d)
+				break
+			}
+		}
+	}
+	return out
+}
+
+func (e *lineageExtractor) discoveryFromPayload(action string, payload herdrResultPayload, evidenceKey string) (lineageDiscovery, bool) {
+	switch action {
 	case "workspace_created", "tab_created":
 		if payload.RootPane == nil || !herdrPaneID.MatchString(payload.RootPane.PaneID) {
 			return lineageDiscovery{}, false
@@ -1027,7 +1062,7 @@ func (e *lineageExtractor) matchResult(intent herdrCmdIntent, output, evidenceKe
 			ChildPane:   payload.RootPane.PaneID,
 			ChildTermID: termID,
 			EvidenceKey: evidenceKey,
-			Action:      intent.action,
+			Action:      action,
 		}
 		e.rememberCreated(d)
 		return d, true
@@ -1040,7 +1075,7 @@ func (e *lineageExtractor) matchResult(intent herdrCmdIntent, output, evidenceKe
 			ChildPane:   payload.Pane.PaneID,
 			ChildTermID: termID,
 			EvidenceKey: evidenceKey,
-			Action:      intent.action,
+			Action:      action,
 		}
 		e.rememberCreated(d)
 		return d, true
@@ -1085,48 +1120,57 @@ func sanitizeTermID(s string) string {
 	return ""
 }
 
-func findMatchingHerdrJSON(output, wantType string) (herdrResultPayload, bool) {
-	// Try whole output first (handles pretty-printed multi-line JSON),
-	// then individual JSON objects / lines (handles leading stdout/stderr chatter).
-	tryDecode := func(raw []byte) (herdrResultPayload, bool) {
+// extractHerdrJSONPayloads scans output in order for all successful Herdr JSON
+// result objects. It also unwraps Codex code-mode exec wrapper objects of the
+// form {"exit_code":0,"output":"..."} (skipping any wrapper with non-zero
+// exit_code).
+func extractHerdrJSONPayloads(output string, depth int) []herdrResultPayload {
+	if depth > 2 || strings.TrimSpace(output) == "" {
+		return nil
+	}
+	var out []herdrResultPayload
+	decodeObj := func(raw []byte) {
 		raw = bytes.TrimSpace(raw)
 		if len(raw) < 2 || raw[0] != '{' {
-			return herdrResultPayload{}, false
+			return
 		}
 		var env struct {
-			OK     *bool           `json:"ok"`
-			Error  json.RawMessage `json:"error"`
-			Result json.RawMessage `json:"result"`
-			Type   string          `json:"type"`
+			OK       *bool           `json:"ok"`
+			Error    json.RawMessage `json:"error"`
+			Result   json.RawMessage `json:"result"`
+			Type     string          `json:"type"`
+			ExitCode *int            `json:"exit_code"`
+			Output   *string         `json:"output"`
 		}
 		if json.Unmarshal(raw, &env) != nil {
-			return herdrResultPayload{}, false
+			return
+		}
+		// Unwrap Codex code-mode `tools.exec_command` result wrapper:
+		// {"chunk_id":"...","exit_code":0,"output":"{\"result\":...}"}
+		if env.Output != nil && env.Result == nil && env.Type == "" {
+			if env.ExitCode != nil && *env.ExitCode != 0 {
+				return
+			}
+			out = append(out, extractHerdrJSONPayloads(*env.Output, depth+1)...)
+			return
 		}
 		if env.OK != nil && !*env.OK {
-			return herdrResultPayload{}, false
+			return
 		}
 		if len(env.Error) > 0 && string(bytes.TrimSpace(env.Error)) != "null" {
-			return herdrResultPayload{}, false
+			return
 		}
 		target := raw
 		if len(env.Result) > 0 && bytes.TrimSpace(env.Result)[0] == '{' {
 			target = env.Result
 		}
 		var p herdrResultPayload
-		if json.Unmarshal(target, &p) != nil {
-			return herdrResultPayload{}, false
+		if json.Unmarshal(target, &p) != nil || p.Type == "" {
+			return
 		}
-		if !herdrResultTypeMatches(wantType, p.Type) {
-			return herdrResultPayload{}, false
-		}
-		return p, true
+		out = append(out, p)
 	}
 
-	if p, ok := tryDecode([]byte(output)); ok {
-		return p, true
-	}
-
-	// Scan for JSON objects starting at '{' in the output using json.Decoder.
 	b := []byte(output)
 	for off := 0; off < len(b); {
 		idx := bytes.IndexByte(b[off:], '{')
@@ -1137,13 +1181,11 @@ func findMatchingHerdrJSON(output, wantType string) (herdrResultPayload, bool) {
 		dec := json.NewDecoder(bytes.NewReader(b[off:]))
 		var raw json.RawMessage
 		if err := dec.Decode(&raw); err == nil {
-			if p, ok := tryDecode(raw); ok {
-				return p, true
-			}
+			decodeObj(raw)
 			off += int(dec.InputOffset())
 		} else {
 			off++
 		}
 	}
-	return herdrResultPayload{}, false
+	return out
 }

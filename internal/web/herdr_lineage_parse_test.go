@@ -132,4 +132,21 @@ func TestLineageExtractorCodexCodeModeCreation(t *testing.T) {
 	if len(got) != 1 || got[0].ChildPane != "w2:p1" || got[0].ChildTermID != "term-2" {
 		t.Fatalf("Codex code-mode workspace creation was missed: %+v", got)
 	}
+
+	// Wrapped text(r) output + two child spawns in a single code-mode script.
+	rawMulti := "" +
+		`{"type":"response_item","payload":{"type":"custom_tool_call","call_id":"call_cm2","name":"exec","input":"const a = await tools.exec_command({cmd:\"herdr pane split --direction right\"}); const b = await tools.exec_command({cmd:\"herdr pane split --direction down\"}); text(a); text(b);"}}` + "\n" +
+		`{"type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"call_cm2","output":[{"type":"input_text","text":"Script completed\nWall time 0 seconds\nOutput:\n{\"chunk_id\":\"c1\",\"exit_code\":0,\"output\":\"{\\\"result\\\":{\\\"type\\\":\\\"pane_info\\\",\\\"pane\\\":{\\\"pane_id\\\":\\\"w1:p2\\\",\\\"terminal_id\\\":\\\"term-2\\\"}}}\"}\n{\"chunk_id\":\"c2\",\"exit_code\":0,\"output\":\"{\\\"result\\\":{\\\"type\\\":\\\"pane_info\\\",\\\"pane\\\":{\\\"pane_id\\\":\\\"w1:p3\\\",\\\"terminal_id\\\":\\\"term-3\\\"}}}\"}"}]}}` + "\n"
+	got2 := ex.Feed([]byte(rawMulti))
+	if len(got2) != 2 || got2[0].ChildPane != "w1:p2" || got2[1].ChildPane != "w1:p3" || got2[0].EvidenceKey == got2[1].EvidenceKey {
+		t.Fatalf("expected 2 distinct wrapped code-mode discoveries, got %+v", got2)
+	}
+
+	// Wrapped result with non-zero exit_code must be rejected.
+	rawFail := "" +
+		`{"type":"response_item","payload":{"type":"custom_tool_call","call_id":"call_cm3","name":"exec","input":"text(await tools.exec_command({cmd:\"herdr pane split --direction right\"}));"}}` + "\n" +
+		`{"type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"call_cm3","output":[{"type":"input_text","text":"Script completed\nOutput:\n{\"chunk_id\":\"c3\",\"exit_code\":1,\"output\":\"{\\\"result\\\":{\\\"type\\\":\\\"pane_info\\\",\\\"pane\\\":{\\\"pane_id\\\":\\\"w1:p9\\\",\\\"terminal_id\\\":\\\"term-9\\\"}}}\"}"}]}}` + "\n"
+	if got3 := ex.Feed([]byte(rawFail)); len(got3) != 0 {
+		t.Fatalf("non-zero exit_code wrapper must be rejected, got %+v", got3)
+	}
 }

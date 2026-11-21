@@ -293,6 +293,31 @@ func TestMetadataCannotRebindConfirmedIdentity(t *testing.T) {
 	if len(rows) != 1 || rows[0].ChildSession != "cs1" || rows[0].ParentSession != "ps1" {
 		t.Fatalf("bound identity was mutated: %+v", rows)
 	}
+
+	// Higher-priority automatic metadata with a DIFFERENT parent AND DIFFERENT child session
+	// must also NOT overwrite an already-bound child session.
+	_, err = st.UpsertAgentLineage(ctx, AgentLineage{
+		OwnerID: 1, HostID: 1, Server: "s2",
+		ChildPane: "w1:p2", ChildTermID: "term-2", ChildSession: "S1",
+		ParentPane: "w1:p1", ParentTermID: "term-1",
+		Source: LineageToolLog,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	changed, err = st.UpsertAgentLineage(ctx, AgentLineage{
+		OwnerID: 1, HostID: 1, Server: "s2",
+		ChildPane: "w1:p2", ChildTermID: "term-2", ChildSession: "S2",
+		ParentPane: "w1:p9", ParentTermID: "term-9",
+		Source: LineageMetadata,
+	})
+	if err != nil || changed {
+		t.Fatalf("metadata with different parent must not rebind child session S1->S2: changed=%v err=%v", changed, err)
+	}
+	rows2, _ := st.ListAgentLineage(ctx, 1, 1, "s2")
+	if len(rows2) != 1 || rows2[0].ChildSession != "S1" || rows2[0].ParentPane != "w1:p1" {
+		t.Fatalf("expected original S1/w1:p1 to remain intact, got %+v", rows2)
+	}
 }
 
 func TestUpgradeIdentityCannotResurrectUnlink(t *testing.T) {
