@@ -1,9 +1,9 @@
 import { createContext, Fragment, memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { Activity, ArrowDown, ArrowDownAZ, ArrowUp, ArrowUpDown, Bot, Check, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, ChevronsDownUp, ChevronsUpDown, Clock, Copy, Cpu, Download, Eye, FilePen, FileText, Folder, FolderOpen, Gauge as GaugeIcon, GitBranch, Hand, Image as ImageIcon, ImageOff, Info, Keyboard, ListChecks, ListOrdered, Loader, LogOut, MessageCircleQuestion, MessagesSquare, MoreHorizontal, MoreVertical, PanelLeft, PanelRight, Pin, Plus, Radar, RotateCw, Search, Server, ShieldOff, Sparkles, SquarePlus, SquareTerminal, Target, TextCursorInput, TriangleAlert, X } from 'lucide-react'
+import { Activity, ArrowDown, ArrowDownAZ, ArrowUp, ArrowUpDown, Bot, Check, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, ChevronsDownUp, ChevronsUpDown, Clock, Copy, Cpu, Download, Eye, FilePen, FileText, Folder, FolderOpen, Gauge as GaugeIcon, GitBranch, GitFork, Hand, Image as ImageIcon, ImageOff, Info, Keyboard, ListChecks, ListOrdered, Loader, LogOut, MessageCircleQuestion, MessagesSquare, MoreHorizontal, MoreVertical, PanelLeft, PanelRight, Pin, Plus, Radar, RotateCw, Search, Server, ShieldOff, Sparkles, SquarePlus, SquareTerminal, Target, TextCursorInput, TriangleAlert, X } from 'lucide-react'
 import { t, getLang, type I18nKey } from '../i18n'
 import { api } from '../api'
 import { setPrefs, usePrefs } from '../prefs'
-import { asHeld, buildAgentGroups, dayStart, FOLDED, foldAt, listOrder, pinned, type ConvoListRow, type OrderOpts, type RowCmds } from './agentOrder'
+import { asHeld, buildAgentGroups, dayStart, FOLDED, foldAt, isLiveBlocked, listOrder, pinned, type ConvoListRow, type OrderOpts, type RowCmds } from './agentOrder'
 import { copyText, Dialog, DialogHead, isCoarse, Menu, MenuLayer, useToast, type MenuItem } from '../components/ui'
 import { saveFile } from '../saveFile'
 import { composing, foldAllKey, helpKey, jumpKey, onMac, sideKey, switchKey } from './pageKeys'
@@ -388,8 +388,8 @@ export function ConversationView({
   const sideRef = useRef(side)
   sideRef.current = side
   const prefsForKeys = usePrefs()
-  const orderRef = useRef<OrderOpts>({ group: prefsForKeys.sidebarGroup, sort: prefsForKeys.sidebarSort, pinFixed: prefsForKeys.pinFixedOrder })
-  orderRef.current = { group: prefsForKeys.sidebarGroup, sort: prefsForKeys.sidebarSort, pinFixed: prefsForKeys.pinFixedOrder }
+  const orderRef = useRef<OrderOpts>({ group: prefsForKeys.sidebarGroup, sort: prefsForKeys.sidebarSort, pinFixed: prefsForKeys.pinFixedOrder, nestChildren: prefsForKeys.sidebarNestChildren })
+  orderRef.current = { group: prefsForKeys.sidebarGroup, sort: prefsForKeys.sidebarSort, pinFixed: prefsForKeys.pinFixedOrder, nestChildren: prefsForKeys.sidebarNestChildren }
   useEffect(() => {
     if (!active) return
     const onKey = (e: KeyboardEvent) => {
@@ -400,7 +400,7 @@ export function ConversationView({
       const q = shownQuery.current
       const list = listOrder(
         (sideRef.current?.rows ?? []).filter((r) => !q.trim() || matchQuery(q, r.title, r.where, r.program, r.projectKey, r.sessionGroup)),
-        orderRef.current,
+        { ...orderRef.current, collapsedParents: q.trim() ? undefined : keptNames(SIDE_PARENT_FOLD_KEY) },
       )
       // (Searched, the one shown may not be among them: one found is gone to.)
       if (!list.length || (list.length === 1 && list[0].current)) return
@@ -1788,6 +1788,51 @@ export function ConversationView({
           )}
         </div>
       )}
+      {(() => {
+        const curRow = rows.find((r) => r.current)
+        if (!curRow) return null
+        const parentRow = curRow.parentKey ? rows.find((r) => r.key === curRow.parentKey) : undefined
+        const childRows = rows.filter((r) => r.parentKey === curRow.key)
+        if (!parentRow && !childRows.length) return null
+        return (
+          <div className="convo-lineage-bar" aria-label={t('convo.lineage.childrenLabel')}>
+            {parentRow && (
+              <button
+                type="button"
+                className="convo-lineage-chip is-parent"
+                title={t('convo.lineage.parentChip', { name: parentRow.title })}
+                onClick={() => parentRow.onPick()}
+              >
+                <ArrowUp size={12} aria-hidden="true" />
+                <span className="convo-lineage-chip-text">{parentRow.title}</span>
+              </button>
+            )}
+            {childRows.length > 0 && (
+              <>
+                <span className="convo-lineage-label">
+                  <GitFork size={12} aria-hidden="true" />
+                  <span>{t('convo.lineage.childrenLabel')}</span>
+                </span>
+                {childRows.map((c) => {
+                  const st = c.liveStatus ?? c.status
+                  return (
+                    <button
+                      key={c.key}
+                      type="button"
+                      className={'convo-lineage-chip is-' + st}
+                      title={[c.title, c.where].filter(Boolean).join('\n')}
+                      onClick={() => c.onPick()}
+                    >
+                      <span className={'convo-lineage-dot is-' + st} aria-hidden="true" />
+                      <span className="convo-lineage-chip-text">{c.title}</span>
+                    </button>
+                  )
+                })}
+              </>
+            )}
+          </div>
+        )
+      })()}
       {card && convo.of && (
         <SessionCard
           data={cardData(convo, list, mode, effort, hostCmds)}
@@ -3508,10 +3553,11 @@ function stamp(r: ConvoListRow, now: number): string {
 // reload keeps them so.
 const SIDE_OPEN_KEY = 'corral.convo.sideOpen'
 const SIDE_FOLD_KEY = 'corral.convo.sideFold'
+const SIDE_PARENT_FOLD_KEY = 'corral.convo.parentFold'
 
 function ListOrderMenu() {
   const prefs = usePrefs()
-  const active = prefs.sidebarGroup !== 'status' || prefs.sidebarSort !== 'recent' || prefs.pinFixedOrder
+  const active = prefs.sidebarGroup !== 'status' || prefs.sidebarSort !== 'recent' || prefs.pinFixedOrder || !prefs.sidebarNestChildren
   const tick = (on: boolean) => (on ? <Check size={15} /> : undefined)
   return (
     <Menu
@@ -3524,6 +3570,7 @@ function ListOrderMenu() {
         { label: t('convo.order.sortSmart'), icon: <Sparkles size={16} />, trail: tick(prefs.sidebarSort === 'smart'), checked: prefs.sidebarSort === 'smart', onSelect: () => setPrefs({ sidebarSort: 'smart' }) },
         { label: t('convo.order.sortName'), icon: <ArrowDownAZ size={16} />, trail: tick(prefs.sidebarSort === 'name'), checked: prefs.sidebarSort === 'name', onSelect: () => setPrefs({ sidebarSort: 'name' }) },
         { label: t('convo.order.pinFixed'), group: t('convo.group.pinned'), separator: true, icon: <Pin size={16} />, trail: tick(prefs.pinFixedOrder), checked: prefs.pinFixedOrder, keepOpen: true, onSelect: () => setPrefs({ pinFixedOrder: !prefs.pinFixedOrder }) },
+        { label: t('convo.order.nestChildren'), group: t('convo.lineage.childrenLabel'), separator: true, icon: <GitFork size={16} />, trail: tick(prefs.sidebarNestChildren), checked: prefs.sidebarNestChildren, keepOpen: true, onSelect: () => setPrefs({ sidebarNestChildren: !prefs.sidebarNestChildren }) },
       ]}
       button={(open, toggle) => (
         <button
@@ -3619,13 +3666,15 @@ export function AgentList({ rows, menus, onPicked, placed, query: given, onQuery
     return () => clearInterval(timer)
   }, [])
   const prefs = usePrefs()
-  const orderOpts: OrderOpts = { group: prefs.sidebarGroup, sort: prefs.sidebarSort, pinFixed: prefs.pinFixedOrder }
+  const orderOpts: OrderOpts = { group: prefs.sidebarGroup, sort: prefs.sidebarSort, pinFixed: prefs.pinFixedOrder, nestChildren: prefs.sidebarNestChildren }
   // Which of the long groups are opened out (by their name; shut again at
   // a tap).
   // (Groups opened out stay so as another agent is gone to, and across a reload: SIDE_OPEN_KEY.)
   const [open, setOpenNow] = useState<string[]>(() => keptNames(SIDE_OPEN_KEY))
   // Which dynamic (project/session) groups the user folded shut.
   const [folded, setFoldedNow] = useState<string[]>(() => keptNames(SIDE_FOLD_KEY))
+  // Which parent rows have their nested children folded shut.
+  const [parentFolded, setParentFoldedNow] = useState<string[]>(() => keptNames(SIDE_PARENT_FOLD_KEY))
   // (Rows regrouped by a poll slide to their place; a search's are its own — useFlip.)
   const groupsEl = useRef<HTMLDivElement>(null)
   const setOpen = (f: (o: string[]) => string[]) =>
@@ -3640,23 +3689,32 @@ export function AgentList({ rows, menus, onPicked, placed, query: given, onQuery
       keepNames(SIDE_FOLD_KEY, next)
       return next
     })
+  const toggleParentFolded = (key: string) =>
+    setParentFoldedNow((f) => {
+      const next = f.includes(key) ? f.filter((x) => x !== key) : [...f, key]
+      keepNames(SIDE_PARENT_FOLD_KEY, next)
+      return next
+    })
   // What it is searched for (by its title, where it is, its program, project or session): the
   // rest goes, and no group is folded.
   const [own, setOwn] = useState('')
   const query = given ?? own
   const setQuery = onQuery ?? setOwn
   // (Not a group opened or shut by a tap, nor a search typed or order switched: the change is the person's own.)
-  useFlip(groupsEl, query.trim() + '|' + open.join() + '|' + folded.join() + '|' + prefs.sidebarGroup + '|' + prefs.sidebarSort + '|' + (prefs.pinFixedOrder ? '1' : '0'))
+  useFlip(groupsEl, query.trim() + '|' + open.join() + '|' + folded.join() + '|' + parentFolded.join() + '|' + prefs.sidebarGroup + '|' + prefs.sidebarSort + '|' + (prefs.pinFixedOrder ? '1' : '0') + '|' + (prefs.sidebarNestChildren ? '1' : '0'))
   // (Held as it was when the switcher opened: its status and time; whether it
-  // is pinned, as it is now, another tab or device may change it meanwhile.)
-  const at = (r: ConvoListRow) => {
+  // is pinned, as it is now; liveStatus stays real-time so approvals always surface.)
+  const at = (r: ConvoListRow): ConvoListRow => {
     const p = placed?.get(r.key)
-    return p ? { ...p, pinned: r.pinned } : asHeld(r)
+    return p ? { ...p, liveStatus: r.liveStatus ?? r.status, pinned: r.pinned, parentKey: r.parentKey, lineageSource: r.lineageSource } : asHeld(r)
   }
   // (Placed: in their order then, ties too; new ones after.)
   const first = placed ? [...placed.keys()] : []
   const place = (r: ConvoListRow) => (first.includes(r.key) ? first.indexOf(r.key) : first.length)
   const found = query.trim() ? rows.filter((r) => matchQuery(query, r.title, r.where, r.program, r.projectKey, r.sessionGroup)) : rows
+  const foundKeys = new Set(found.map((r) => r.key))
+  // Global approval protection: blocked agents filtered out by search remain 1 click away.
+  const hiddenBlocked = query.trim() ? rows.filter((r) => isLiveBlocked(r) && !foundKeys.has(r.key)) : []
   const inOrder = placed ? [...found].sort((a, b) => place(a) - place(b)) : found
   const groups = buildAgentGroups(inOrder.map(at), orderOpts)
   const showBar = rows.length > SEARCH_FROM || !!query || !!search || !!showSearch
@@ -3669,10 +3727,48 @@ export function AgentList({ rows, menus, onPicked, placed, query: given, onQuery
           {showOrder && <ListOrderMenu />}
         </div>
       )}
+      {hiddenBlocked.length > 0 && (
+        <div className="convo-outside-blocked" role="region" aria-label={t('convo.lineage.outsideBlocked', { n: hiddenBlocked.length })}>
+          <div className="convo-outside-blocked-head">
+            <span className="convo-list-gdot is-blocked" aria-hidden="true" />
+            <span>{t('convo.lineage.outsideBlocked', { n: hiddenBlocked.length })}</span>
+          </div>
+          <div className="convo-outside-blocked-list">
+            {hiddenBlocked.map((r) => (
+              <button
+                key={r.key}
+                type="button"
+                className="convo-outside-blocked-chip"
+                title={[r.title, r.where, r.now].filter(Boolean).join('\n')}
+                onClick={() => {
+                  onPicked?.()
+                  r.onPick()
+                }}
+              >
+                {r.title}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
       {query.trim() && !found.length && <p className="list-search-none">{t('convo.searchNone')}</p>}
       <div className="convo-list-groups" ref={groupsEl}>
       {groups.map((g) => {
-        const all = g.rows.map((p) => rows.find((r) => r.key === p.key)!)
+        const all: ConvoListRow[] = g.rows
+          .map((p): ConvoListRow | undefined => {
+            const live = rows.find((r) => r.key === p.key)
+            return live
+              ? {
+                  ...live,
+                  nestDepth: p.nestDepth,
+                  nestedParentKey: p.nestedParentKey,
+                  viaParentTitle: p.viaParentTitle,
+                  crossParentTitle: p.crossParentTitle,
+                  childKeys: p.childKeys,
+                }
+              : undefined
+          })
+          .filter((r): r is ConvoListRow => !!r)
         if (!all.length) return null
         const label = g.labelKey ? t(g.labelKey) : (g.label ?? g.id)
         const isCollapsed = !!g.collapsible && !query.trim() && folded.includes(g.id)
@@ -3682,7 +3778,31 @@ export function AgentList({ rows, menus, onPicked, placed, query: given, onQuery
         // the group can still be shut around it.
         const long = !g.tree && g.labelKey !== undefined && FOLDED.includes(g.labelKey) && all.length > foldAt && !query.trim()
         const shut = long && !open.includes(g.id)
-        const of = isCollapsed ? [] : shut ? all.filter((r, i) => i < foldAt || r.current) : all
+        let of: ConvoListRow[]
+        if (isCollapsed) {
+          // Never hide live-blocked rows even when a collapsible group (e.g. Pinned) is folded.
+          of = all.filter(isLiveBlocked)
+        } else if (shut) {
+          const kept = new Set<string>()
+          let topCount = 0
+          for (const r of all) {
+            if (r.nestDepth !== 1) {
+              if (topCount < foldAt) {
+                kept.add(r.key)
+                topCount++
+              }
+            } else if (r.nestedParentKey && kept.has(r.nestedParentKey)) {
+              kept.add(r.key)
+            }
+            if (r.current || isLiveBlocked(r)) {
+              kept.add(r.key)
+              if (r.nestedParentKey) kept.add(r.nestedParentKey)
+            }
+          }
+          of = all.filter((r) => kept.has(r.key))
+        } else {
+          of = all
+        }
         const rest = all.length - of.length
         const folds = !isCollapsed && shut && rest > 0
         const collapsedDot = isCollapsed
@@ -3694,7 +3814,17 @@ export function AgentList({ rows, menus, onPicked, placed, query: given, onQuery
                 ? 'done'
                 : ''
           : ''
+        const childMap = new Map<string, ConvoListRow[]>()
+        for (const r of all) {
+          if (r.nestDepth === 1 && r.nestedParentKey) {
+            const list = childMap.get(r.nestedParentKey) ?? []
+            list.push(r)
+            childMap.set(r.nestedParentKey, list)
+          }
+        }
         const renderRow = (r: ConvoListRow) => {
+          const isChild = r.nestDepth === 1
+          const isNestedVisual = !!g.tree || isChild
           // (At rest, nothing to say of it but when.)
           const said = r.status === 'blocked' || r.status === 'working' || r.status === 'done'
           const since = stamp(r, now)
@@ -3708,11 +3838,16 @@ export function AgentList({ rows, menus, onPicked, placed, query: given, onQuery
                 .filter(Boolean)
                 .join('\n')
           const hasMenu = !!(menus && r.menu)
+          const parentRef = r.viaParentTitle
+            ? r.viaParentTitle
+            : r.crossParentTitle
+              ? t('convo.lineage.fromParent', { name: r.crossParentTitle })
+              : ''
           return (
             <div
               key={r.key}
               data-flip={'r:' + r.key}
-              className={'convo-list-item' + (hasMenu ? ' has-menu' : '') + (rowMenu?.key === r.key ? ' is-menu' : '') + (g.tree ? ' is-nested' : '')}
+              className={'convo-list-item' + (hasMenu ? ' has-menu' : '') + (rowMenu?.key === r.key ? ' is-menu' : '') + (isNestedVisual ? ' is-nested' : '') + (isChild ? ' is-child' : '')}
               onContextMenu={
                 hasMenu
                   ? (e) => {
@@ -3726,7 +3861,7 @@ export function AgentList({ rows, menus, onPicked, placed, query: given, onQuery
             >
             <button
               type="button"
-              className={'convo-list-row is-' + r.status + (g.tree ? ' is-nested' : '')}
+              className={'convo-list-row is-' + r.status + (isNestedVisual ? ' is-nested' : '') + (isChild ? ' is-child' : '')}
               aria-current={r.current || undefined}
               onClick={() => {
                 onPicked?.()
@@ -3734,14 +3869,14 @@ export function AgentList({ rows, menus, onPicked, placed, query: given, onQuery
               }}
               onKeyDown={hasMenu ? menuKey(r.key) : undefined}
             >
-              <AgentIcon program={r.program} size={g.tree ? 22 : 30} dot={r.bg === 'running' || r.cmds ? 'bg' : said ? (r.status as 'blocked' | 'working' | 'done') : undefined} />
+              <AgentIcon program={r.program} size={isNestedVisual ? 22 : 30} dot={r.bg === 'running' || r.cmds ? 'bg' : said ? (r.status as 'blocked' | 'working' | 'done') : undefined} />
               {/* (Two lines a row, always: its name; where it is — the session's title,
                   which tells alike names apart — and when. A third only for what
                   waits on the person: what it asks, or messages not seen taken in.
                   The whole of each in its tooltip and the conversation's bar.) */}
               <span
                 className="convo-list-text"
-                title={[r.title, r.where, r.sessionGroup, r.projectKey, r.now, bgHint]
+                title={[r.title, parentRef ? '↳ ' + parentRef : '', r.where, r.sessionGroup, r.projectKey, r.now, bgHint]
                   .filter(Boolean)
                   .filter((v, i, arr) => arr.indexOf(v) === i)
                   .join('\n')}
@@ -3765,6 +3900,7 @@ export function AgentList({ rows, menus, onPicked, placed, query: given, onQuery
                     </span>
                   )}
                 </span>
+                {parentRef && <span className="convo-list-parent-ref">↳ {parentRef}</span>}
                 {/* (Its status by its dot only, and its group: in words for a screen
                     reader, and shown where the system's colours take the dot's away.) */}
                 {/* (Commands it left running: at work in the background, as its group says — review batch4.) */}
@@ -3789,6 +3925,57 @@ export function AgentList({ rows, menus, onPicked, placed, query: given, onQuery
             )}
             </div>
           )
+        }
+        const renderEntries = (list: ConvoListRow[]) => {
+          const items: ReactNode[] = []
+          for (let i = 0; i < list.length; i++) {
+            const r = list[i]
+            if (r.nestDepth === 1) {
+              // Orphaned child in a collapsed-group blocked slice: render directly.
+              items.push(renderRow(r))
+              continue
+            }
+            const kidsInList: ConvoListRow[] = []
+            while (i + 1 < list.length && list[i + 1].nestDepth === 1 && list[i + 1].nestedParentKey === r.key) {
+              kidsInList.push(list[i + 1])
+              i++
+            }
+            const allKids = childMap.get(r.key) ?? kidsInList
+            const isParentCollapsed = !query.trim() && parentFolded.includes(r.key)
+            const visibleKids = isParentCollapsed ? kidsInList.filter((k) => k.current || isLiveBlocked(k)) : kidsInList
+            const subDot = isParentCollapsed
+              ? allKids.some(isLiveBlocked)
+                ? 'blocked'
+                : allKids.some((k) => k.status === 'working' || !!k.cmds)
+                  ? 'working'
+                  : allKids.some((k) => k.status === 'done')
+                    ? 'done'
+                    : ''
+              : ''
+            items.push(
+              <Fragment key={r.key}>
+                {renderRow(r)}
+                {kidsInList.length > 0 && (
+                  <div className="convo-list-children">
+                    <button
+                      type="button"
+                      className={'convo-list-subtoggle' + (isParentCollapsed ? ' is-collapsed' : '')}
+                      aria-expanded={!isParentCollapsed}
+                      aria-label={t('convo.lineage.toggleChildren')}
+                      onClick={() => toggleParentFolded(r.key)}
+                    >
+                      {isParentCollapsed ? <ChevronRight size={12} aria-hidden="true" /> : <ChevronDown size={12} aria-hidden="true" />}
+                      <GitFork size={11} aria-hidden="true" />
+                      <span>{t('convo.lineage.subCount', { n: kidsInList.length })}</span>
+                      {subDot && <span className={'convo-list-gdot is-' + subDot} aria-hidden="true" />}
+                    </button>
+                    {visibleKids.map(renderRow)}
+                  </div>
+                )}
+              </Fragment>,
+            )
+          }
+          return items
         }
         return (
           <div key={g.id} className={'convo-list-group' + (g.tree ? ' is-tree' : '')} role="group" aria-label={label}>
@@ -3836,7 +4023,7 @@ export function AgentList({ rows, menus, onPicked, placed, query: given, onQuery
                 <span>{all.length}</span>
               </div>
             )}
-            {g.tree ? (of.length > 0 && <div className="convo-list-tree">{of.map(renderRow)}</div>) : of.map(renderRow)}
+            {g.tree ? (of.length > 0 && <div className="convo-list-tree">{renderEntries(of)}</div>) : renderEntries(of)}
             {(folds || (!isCollapsed && long && !shut)) && (
               <button
                 type="button"

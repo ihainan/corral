@@ -1571,6 +1571,68 @@ button.convo-queue-row.is-note:last-child { border-radius: 0 0 var(--r-lg) var(-
 .convo-list-row.is-nested .agent-icon { margin-top: 2px; }
 .convo-list-row.is-nested .convo-list-title { font-size: var(--fs-sub); line-height: var(--lh-sub); font-weight: 500; }
 .convo-list-item.is-nested > .convo-list-dots { top: 4px; right: 4px; }
+/* Nested child agents under a parent row: single-level 1px hairline tree guide. */
+.convo-list-children {
+  display: flex; flex-direction: column; gap: 2px;
+  margin-left: 16px; padding-left: 8px; border-left: 1px solid var(--term-line);
+}
+.convo-list-subtoggle {
+  display: inline-flex; align-items: center; gap: 4px; align-self: flex-start;
+  padding: 2px 6px; margin: 1px 0; border: 0; border-radius: var(--r-xs);
+  background: none; color: var(--term-fg-3); font: 500 var(--fs-note)/var(--lh-note) var(--font-ui);
+  cursor: pointer; font-variant-numeric: tabular-nums;
+}
+.convo-list-subtoggle:hover { background: var(--term-row-hover); color: var(--term-fg-2); }
+.convo-list-subtoggle:focus-visible { outline: 2px solid var(--term-accent-text); outline-offset: -2px; }
+.convo-list-parent-ref {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: var(--fs-note); line-height: var(--lh-note); color: var(--term-fg-3);
+}
+/* Uncollapsible approval strip when search filters out waiting agents. */
+.convo-outside-blocked {
+  display: flex; flex-direction: column; gap: 6px; margin: 4px 8px 8px; padding: 8px 10px;
+  border-radius: var(--r); border: 1px solid color-mix(in srgb, var(--term-warn-text) 35%, transparent);
+  background: color-mix(in srgb, var(--term-warn-text) 10%, var(--term-bg));
+}
+.convo-outside-blocked-head {
+  display: flex; align-items: center; gap: 6px;
+  font: 600 var(--fs-note)/var(--lh-note) var(--font-ui); color: var(--term-warn-text);
+}
+.convo-outside-blocked-list { display: flex; flex-wrap: wrap; gap: 4px; }
+.convo-outside-blocked-chip {
+  max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  padding: 2px 8px; border-radius: var(--r-xs);
+  border: 1px solid color-mix(in srgb, var(--term-warn-text) 35%, transparent);
+  background: var(--term-bg); color: var(--term-fg); font: 500 var(--fs-note)/var(--lh-note) var(--font-ui);
+  cursor: pointer;
+}
+.convo-outside-blocked-chip:hover { background: var(--term-row-hover); }
+.convo-outside-blocked-chip:focus-visible { outline: 2px solid var(--term-accent-text); outline-offset: 1px; }
+/* Parent / child quick-jump bar below the conversation top bar. */
+.convo-lineage-bar {
+  flex: none; display: flex; align-items: center; gap: 6px; overflow-x: auto; scrollbar-width: none;
+  padding: 6px max(16px, env(safe-area-inset-right, 0px)) 6px max(16px, env(safe-area-inset-left, 0px));
+  border-bottom: 1px solid var(--term-line); background: var(--term-bg);
+}
+.convo-lineage-bar::-webkit-scrollbar { display: none; }
+.convo-lineage-label {
+  flex: none; display: inline-flex; align-items: center; gap: 4px;
+  font: 500 var(--fs-note)/var(--lh-note) var(--font-ui); color: var(--term-fg-3);
+}
+.convo-lineage-chip {
+  flex: none; display: inline-flex; align-items: center; gap: 6px; max-width: 200px;
+  padding: 2px 8px; border-radius: var(--r-pill); border: 1px solid var(--term-line);
+  background: var(--term-surface); color: var(--term-fg-2); font: 500 var(--fs-note)/var(--lh-note) var(--font-ui);
+  cursor: pointer;
+}
+.convo-lineage-chip:hover { background: var(--term-row-hover); color: var(--term-fg); }
+.convo-lineage-chip:focus-visible { outline: 2px solid var(--term-accent-text); outline-offset: 1px; }
+.convo-lineage-chip.is-blocked { border-color: color-mix(in srgb, var(--term-warn-text) 45%, transparent); color: var(--term-warn-text); }
+.convo-lineage-chip-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.convo-lineage-dot { flex: none; width: 6px; height: 6px; border-radius: 50%; background: var(--term-fg-3); }
+.convo-lineage-dot.is-blocked { background: var(--term-warn-text); }
+.convo-lineage-dot.is-working { background: var(--term-accent-text); }
+.convo-lineage-dot.is-done { background: var(--term-ok-text); }
 .convo-list-row {
   display: flex; align-items: flex-start; gap: 10px; width: 100%; padding: 8px 10px; border: 0; border-radius: var(--r);
   background: none; color: var(--term-fg); font: inherit; text-align: left; cursor: pointer;

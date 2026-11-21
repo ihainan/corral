@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState, type ReactNode } from 'react'
-import { ArrowDown, ArrowUp, ArrowUpToLine, ChevronLeft, CircleStop, Code2, Copy, Eye, FoldVertical, GitBranch, Globe, History, Languages, MessageSquarePlus, Paperclip, Pencil, Pin, PinOff, Plus, Power, Square, SquareSlash, SquareTerminal, TextCursorInput } from 'lucide-react'
+import { ArrowDown, ArrowUp, ArrowUpToLine, ChevronLeft, CircleStop, Code2, Copy, Eye, FoldVertical, GitBranch, Globe, History, Languages, MessageSquarePlus, Paperclip, Pencil, Pin, PinOff, Plus, Power, Square, SquareSlash, SquareTerminal, TextCursorInput, Unlink } from 'lucide-react'
 import { api, ApiError, authGen, errorText, onAuthChange, uploadFile, type SessionInfo } from '../api'
 import { useSession } from '../app'
 import { t, type I18nKey } from '../i18n'
@@ -1191,7 +1191,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
         const named = ((isCodex(r.a.agent) || isAgy(r.a.agent)) && r.a.thread_title) || (current && convo.bind?.pane === r.a.pane_id && convoTitle) || keptTitle(titles, e) || paneName(r.a)
         const said = named || dirName(r.a.cwd) || r.a.agent
         const st = current && agent && !r.bg ? agent.status : r.status
-        return { key: e.key, ...labelOf(e, said, hosts, !!named), now: r.lost || r.bg || st !== 'blocked' ? undefined : glanceOf(e.s.id, e.pane, st, r.a.since) || undefined /* (said only of one waiting on the person) */, program: r.a.agent, status: st, bg: r.lost ? undefined : r.bg, cmds: cmdsOf(r), since: r.lost ? undefined : r.bg ? r.a.bg_since : r.a.since, current, pinned: pinAt(e.key), projectKey: normalizeProjectPath(r.a.cwd), sessionGroup: sessionGroupOf(e, all), onPick: () => onPick(e), menu: () => rowMenu.current(e) }
+        return { key: e.key, ...labelOf(e, said, hosts, !!named), now: r.lost || r.bg || st !== 'blocked' ? undefined : glanceOf(e.s.id, e.pane, st, r.a.since) || undefined /* (said only of one waiting on the person) */, program: r.a.agent, status: st, liveStatus: st, bg: r.lost ? undefined : r.bg, cmds: cmdsOf(r), since: r.lost ? undefined : r.bg ? r.a.bg_since : r.a.since, current, pinned: pinAt(e.key), projectKey: normalizeProjectPath(r.a.cwd), sessionGroup: sessionGroupOf(e, all), parentKey: r.lost || !r.a.parent_pane ? undefined : agentKey(e.s, r.a.parent_pane), lineageSource: r.lost ? undefined : r.a.lineage_source, onPick: () => onPick(e), menu: () => rowMenu.current(e) }
       }
       const title = (current && agent?.title) || keptTitle(titles, e) || `${e.s.host_name} · ${sessionWhich(e.s, all)}`
       return { key: e.key, title, where: whereOf(e, hosts), program: current ? agent?.program : undefined, status: current && agent ? agent.status : 'unknown', cmds: current ? agent?.cmds : tmuxCmdsOf(e), current, pinned: pinAt(e.key), sessionGroup: sessionGroupOf(e, all), onPick: () => onPick(e), menu: () => rowMenu.current(e) }
@@ -2634,6 +2634,28 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       pos < visible.length - 1 ? { label: t('agents.pinDown'), icon: <ArrowDown size={16} />, onSelect: move('down') } : null,
     ]
   }
+  const unlinkItem = (e: Entry): MenuItem | null => {
+    const r = e.row
+    if (e.s.persistence !== 'herdr' || !r || r.lost || !r.a.parent_pane) return null
+    return {
+      label: t('convo.lineage.unlink'),
+      icon: <Unlink size={16} />,
+      onSelect: () => {
+        void api('POST', `/api/sessions/${encodeURIComponent(e.s.id)}/herdr/lineage`, {
+          action: 'unlink',
+          child_pane: r.a.pane_id,
+          child_term_id: r.a.terminal_id ?? '',
+          child_session: r.a.session ?? '',
+        }).then(
+          () => {
+            toast(t('convo.lineage.unlinked'))
+            readSessionsNow()
+          },
+          (err) => toast(errorText(err), true),
+        )
+      },
+    }
+  }
   // (Claude Code's own commands on it are not there: they are of the one
   // shown, its process known.)
   rowMenu.current = (e) => [
@@ -2642,6 +2664,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
     ...pinReorderItems(e.key),
     forkItem(e),
     renameItem(e),
+    unlinkItem(e),
     closable(e) ? { label: t('agents.close'), icon: <Power size={16} />, danger: true, separator: true, onSelect: () => setClosing(e) } : null,
   ]
   const { config: translateCfg } = useTranslateConfig()
@@ -2664,6 +2687,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
     // (Within its group here: no rule of its own, as it has in a row's menu.)
     ((f) => f && { ...f, separator: false })(forkItem(cur)),
     renameItem(cur),
+    unlinkItem(cur),
     { label: t(translateCfg?.enabled ? 'convo.translate.off' : 'convo.translate.on'), icon: <Languages size={16} />, onSelect: toggleTranslate },
     boot.forwarding ? { label: t('ports.title'), icon: <Globe size={16} />, separator: true, onSelect: () => setPortsOpen(true) } : null,
     boot.code ? { label: t('code.open'), icon: <Code2 size={16} />, separator: !boot.forwarding, onSelect: () => code.open(cur.s.host_id, cur.s.host_name) } : null,
@@ -2994,7 +3018,7 @@ function PhoneList({ entries, all, titles, query, onQuery, onPick }: { entries: 
         const r = e.row
         const named = ((isCodex(r.a.agent) || isAgy(r.a.agent)) && r.a.thread_title) || keptTitle(titles, e) || paneName(r.a)
         const said = named || dirName(r.a.cwd) || r.a.agent
-        return { key: e.key, ...labelOf(e, said, hosts, !!named), now: r.lost || r.bg || r.status !== 'blocked' ? undefined : glanceOf(e.s.id, e.pane, r.status, r.a.since) || undefined, program: r.a.agent, status: r.status, bg: r.lost ? undefined : r.bg, cmds: cmdsOf(r), since: r.lost ? undefined : r.bg ? r.a.bg_since : r.a.since, current: false, pinned: pinAt(e.key), projectKey: normalizeProjectPath(r.a.cwd), sessionGroup: sessionGroupOf(e, all), onPick: () => onPick(e) }
+        return { key: e.key, ...labelOf(e, said, hosts, !!named), now: r.lost || r.bg || r.status !== 'blocked' ? undefined : glanceOf(e.s.id, e.pane, r.status, r.a.since) || undefined, program: r.a.agent, status: r.status, liveStatus: r.status, bg: r.lost ? undefined : r.bg, cmds: cmdsOf(r), since: r.lost ? undefined : r.bg ? r.a.bg_since : r.a.since, current: false, pinned: pinAt(e.key), projectKey: normalizeProjectPath(r.a.cwd), sessionGroup: sessionGroupOf(e, all), parentKey: r.lost || !r.a.parent_pane ? undefined : agentKey(e.s, r.a.parent_pane), lineageSource: r.lost ? undefined : r.a.lineage_source, onPick: () => onPick(e) }
       }
       const title = keptTitle(titles, e) || `${e.s.host_name} · ${sessionWhich(e.s, all)}`
       return { key: e.key, title, where: whereOf(e, hosts), status: 'unknown', cmds: tmuxCmdsOf(e), current: false, pinned: pinAt(e.key), sessionGroup: sessionGroupOf(e, all), onPick: () => onPick(e) }

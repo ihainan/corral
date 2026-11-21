@@ -11,6 +11,10 @@ export interface OrderOpts {
   group?: SidebarGroup
   sort?: SidebarSort
   pinFixed?: boolean
+  nestChildren?: boolean
+  // Optional collapsed parent keys: used by listOrder so Alt+Up/Down follows
+  // the exact visible projection (keeping current and live-blocked rows visible).
+  collapsedParents?: Set<string> | string[]
 }
 
 export interface ConvoListRow {
@@ -20,6 +24,9 @@ export interface ConvoListRow {
   now?: string // what it is about now, where known: waits to be allowed, the step under way, how its answer begins
   program?: string // the program in it, for its icon
   status: 'working' | 'blocked' | 'done' | 'idle' | 'unknown'
+  // Real-time status distinct from frozen placeAs.status so approval alerts
+  // ("blocked") always surface immediately in the uncollapsible attention group.
+  liveStatus?: 'working' | 'blocked' | 'done' | 'idle' | 'unknown'
   bg?: 'running' | 'stale' // (its turn over, subagents still out)
   cmds?: RowCmds // (its turn over: commands it left running in the background)
   since?: number // (unix ms) when its status last changed
@@ -28,8 +35,17 @@ export interface ConvoListRow {
   pinned?: number // pinned at the top: its place among the pinned (the order they were pinned)
   projectKey?: string // normalized working directory path (for "Group by project")
   sessionGroup?: string // host + session label (for "Group by session")
+  parentKey?: string // agentKey of confirmed herdr parent within the same server
+  lineageSource?: string
   onPick: () => void
   menu?: () => (MenuItem | null)[] // what else is done with it, from its row's menu (the side list's)
+
+  // Projection metadata populated by buildAgentGroups on shallow row copies:
+  nestDepth?: 0 | 1
+  nestedParentKey?: string
+  viaParentTitle?: string
+  crossParentTitle?: string
+  childKeys?: string[]
 }
 
 // Commands an agent left running in the background: how many, the first of
@@ -53,12 +69,15 @@ export interface AgentGroup {
   doneCount?: number
 }
 
+// Live blocked check: always evaluates real-time status (never frozen placeAs).
+export const isLiveBlocked = (r: ConvoListRow) => (r.liveStatus ?? r.status) === 'blocked'
+
 function groupCounts(rows: ConvoListRow[]) {
   let blockedCount = 0
   let workingCount = 0
   let doneCount = 0
   for (const r of rows) {
-    if (r.status === 'blocked') blockedCount++
+    if (isLiveBlocked(r)) blockedCount++
     else if (working(r)) workingCount++
     else if (r.status === 'done') doneCount++
   }
@@ -71,8 +90,8 @@ function groupCounts(rows: ConvoListRow[]) {
 // (A turn over with commands it left running in the background — a build, a
 // server — counts as at work, as the person asked (11-04): even a server
 // that runs on keeps it there, and not "done, not looked at".)
-const working = (r: ConvoListRow) => r.status === 'working' || (!!r.cmds && r.status !== 'blocked')
-const forYou = (r: ConvoListRow) => (r.status === 'blocked' || r.status === 'done') && !working(r)
+const working = (r: ConvoListRow) => !isLiveBlocked(r) && (r.status === 'working' || !!r.cmds)
+const forYou = (r: ConvoListRow) => isLiveBlocked(r) || (r.status === 'done' && !working(r))
 // (Those pinned first, whatever their status; in no other group.)
 export const pinned = (r: ConvoListRow) => r.pinned !== undefined
 export const GROUPS: { name: I18nKey; of: (r: ConvoListRow) => boolean }[] = [
@@ -85,7 +104,7 @@ export const GROUPS: { name: I18nKey; of: (r: ConvoListRow) => boolean }[] = [
 // Priority rank for "Smart" sort: waiting for approval first, then actively
 // working / background tasks, then finished (unseen), then idle, then unknown.
 function smartRank(r: ConvoListRow): number {
-  if (r.status === 'blocked') return 0
+  if (isLiveBlocked(r)) return 0
   if (working(r)) return 1
   if (r.status === 'done') return 2
   if (r.status === 'idle') return 3
@@ -126,7 +145,7 @@ export const inGroup = (g: (typeof GROUPS)[number], rows: ConvoListRow[], opts?:
   const filtered = rows.filter(g.of)
   if (g.name === 'convo.group.pinned' && opts?.pinFixed) return byPinOrder(filtered)
   const of = sortRows(filtered, sort)
-  return g.name === 'convo.group.todo' ? [...of.filter((r) => r.status === 'blocked'), ...of.filter((r) => r.status !== 'blocked')] : of
+  return g.name === 'convo.group.todo' ? [...of.filter(isLiveBlocked), ...of.filter((r) => !isLiveBlocked(r))] : of
 }
 
 // Normalize a working directory path for grouping (trim trailing slashes; collapse home dirs to "~").
@@ -160,36 +179,177 @@ export function projectLabels(paths: string[]): Map<string, string> {
   return out
 }
 
+// Flatten a bucket's eligible parent-child edges to visual depth 1.
+// Non-nestable edges (missing parent in this bucket, self-loops, cycles) are
+// already cut because only edges whose parent exists inside `bucketRows` are
+// kept before tree flattening (e.g. A(proj X) -> B(proj Y) -> C(proj Y) cuts
+// A->B so C nests cleanly under B inside proj Y, while B carries a subtle
+// `crossParentTitle: A.title` hint).
+interface NestedForest {
+  rows: ConvoListRow[]
+  trees: { root: ConvoListRow; children: ConvoListRow[]; maxSince: number; bestRank: number }[]
+}
+
+function projectNestedBucket(
+  bucketRows: ConvoListRow[],
+  allByKey: Map<string, ConvoListRow>,
+  sort: SidebarSort,
+  nestChildren: boolean,
+): NestedForest {
+  if (!nestChildren || !bucketRows.length) {
+    const sorted = sortRows(bucketRows, sort).map((r) => stripNestMeta(r, allByKey, false))
+    return {
+      rows: sorted,
+      trees: sorted.map((r) => ({ root: r, children: [], maxSince: r.since ?? 0, bestRank: smartRank(r) })),
+    }
+  }
+
+  const inBucket = new Map<string, ConvoListRow>()
+  for (const r of bucketRows) inBucket.set(r.key, r)
+
+  // Step 1: Build clean parent pointers ONLY for edges strictly inside this bucket.
+  const localParent = new Map<string, string>()
+  for (const r of bucketRows) {
+    if (r.parentKey && r.parentKey !== r.key && inBucket.has(r.parentKey)) {
+      localParent.set(r.key, r.parentKey)
+    }
+  }
+
+  // Step 2: Resolve each node to its cycle-free root inside this bucket.
+  const rootOf = new Map<string, string>()
+  const directParentOf = new Map<string, string>()
+  for (const r of bucketRows) {
+    let cur = r.key
+    const seen = new Set<string>([cur])
+    let root = cur
+    let steps = 0
+    while (localParent.has(cur) && steps < 16) {
+      const next = localParent.get(cur)!
+      if (seen.has(next)) {
+        // Cycle: break by treating r as a root.
+        root = r.key
+        break
+      }
+      seen.add(next)
+      root = next
+      cur = next
+      steps++
+    }
+    if (root !== r.key) {
+      rootOf.set(r.key, root)
+      directParentOf.set(r.key, localParent.get(r.key)!)
+    }
+  }
+
+  const childrenByRoot = new Map<string, ConvoListRow[]>()
+  const roots: ConvoListRow[] = []
+  for (const r of bucketRows) {
+    const root = rootOf.get(r.key)
+    if (root) {
+      const list = childrenByRoot.get(root) ?? []
+      list.push(r)
+      childrenByRoot.set(root, list)
+    } else {
+      roots.push(r)
+    }
+  }
+
+  // Build tree entries with aggregated sort keys (so an idle parent with an active
+  // child stays ordered near recent/smart activity).
+  const trees = roots.map((root, idx) => {
+    const rawKids = sortRows(childrenByRoot.get(root.key) ?? [], sort)
+    const kids = rawKids.map((kid): ConvoListRow => {
+      const directKey = directParentOf.get(kid.key)
+      const viaParentTitle = directKey && directKey !== root.key ? inBucket.get(directKey)?.title : undefined
+      return {
+        ...kid,
+        nestDepth: 1,
+        nestedParentKey: root.key,
+        viaParentTitle,
+        crossParentTitle: undefined,
+        childKeys: undefined,
+      }
+    })
+    const crossParent = root.parentKey && !localParent.has(root.key) ? allByKey.get(root.parentKey)?.title : undefined
+    const rootProj: ConvoListRow = {
+      ...root,
+      nestDepth: 0,
+      nestedParentKey: undefined,
+      viaParentTitle: undefined,
+      crossParentTitle: crossParent,
+      childKeys: kids.length ? kids.map((k) => k.key) : undefined,
+    }
+    let maxSince = rootProj.since ?? 0
+    let bestRank = smartRank(rootProj)
+    for (const k of kids) {
+      if ((k.since ?? 0) > maxSince) maxSince = k.since ?? 0
+      const rank = smartRank(k)
+      if (rank < bestRank) bestRank = rank
+    }
+    return { root: rootProj, children: kids, maxSince, bestRank, idx }
+  })
+
+  trees.sort((a, b) => {
+    if (sort === 'name') {
+      return (
+        a.root.title.localeCompare(b.root.title, undefined, { numeric: true, sensitivity: 'base' }) ||
+        a.root.where.localeCompare(b.root.where, undefined, { numeric: true, sensitivity: 'base' }) ||
+        a.idx - b.idx
+      )
+    }
+    if (sort === 'smart') {
+      return a.bestRank - b.bestRank || b.maxSince - a.maxSince || a.idx - b.idx
+    }
+    return b.maxSince - a.maxSince || a.idx - b.idx
+  })
+
+  const flat: ConvoListRow[] = []
+  for (const t of trees) {
+    flat.push(t.root, ...t.children)
+  }
+  return { rows: flat, trees }
+}
+
+function stripNestMeta(r: ConvoListRow, allByKey: Map<string, ConvoListRow>, showCross: boolean): ConvoListRow {
+  const crossParentTitle = showCross && r.parentKey ? allByKey.get(r.parentKey)?.title : undefined
+  if (
+    r.nestDepth === undefined &&
+    r.nestedParentKey === undefined &&
+    r.viaParentTitle === undefined &&
+    r.crossParentTitle === crossParentTitle &&
+    r.childKeys === undefined
+  ) {
+    return r
+  }
+  return {
+    ...r,
+    nestDepth: undefined,
+    nestedParentKey: undefined,
+    viaParentTitle: undefined,
+    crossParentTitle,
+    childKeys: undefined,
+  }
+}
+
 // Build the ordered list of groups for the sidebar / phone list / keyboard switcher.
-// In "project" and "session" modes, unpinned blocked agents always surface in a top
-// "Waiting for you" group so approval prompts are never hidden inside a collapsed folder.
+// Real-time blocked agents (liveStatus ?? status === 'blocked') always surface in
+// an uncollapsible top "Needs you" group (or stay unhidden inside Pinned), never
+// buried inside collapsed parents or folders.
 export function buildAgentGroups(rows: ConvoListRow[], opts: OrderOpts = {}): AgentGroup[] {
   const groupMode = opts.group ?? 'status'
   const sort = opts.sort ?? 'recent'
   const pinFixed = !!opts.pinFixed
+  const nestChildren = opts.nestChildren ?? true
 
-  if (groupMode === 'status') {
-    const out: AgentGroup[] = []
-    for (const g of GROUPS) {
-      const of = inGroup(g, rows, opts)
-      if (!of.length) continue
-      if (g.name === 'convo.group.recent') {
-        const idle = of.filter((p) => (p.since ?? 0) > 0)
-        const other = of.filter((p) => (p.since ?? 0) <= 0)
-        if (idle.length) out.push({ id: 'convo.group.idle', labelKey: 'convo.group.idle', kind: 'idle', rows: idle, collapsible: true, ...groupCounts(idle) })
-        if (other.length) out.push({ id: 'convo.group.other', labelKey: 'convo.group.other', kind: 'other', rows: other, collapsible: true, ...groupCounts(other) })
-      } else {
-        const kind = g.name === 'convo.group.pinned' ? 'pinned' : g.name === 'convo.group.todo' ? 'todo' : 'working'
-        out.push({ id: g.name, labelKey: g.name, kind, rows: of, collapsible: kind !== 'todo', ...groupCounts(of) })
-      }
-    }
-    return out
-  }
+  const allByKey = new Map<string, ConvoListRow>()
+  for (const r of rows) allByKey.set(r.key, r)
 
   const out: AgentGroup[] = []
+
+  // 1. Pinned group (independent manual order; blocked pinned rows are protected in UI).
   const pinnedRows = rows.filter(pinned)
   if (pinnedRows.length) {
-    const pSorted = pinFixed ? byPinOrder(pinnedRows) : sortRows(pinnedRows, sort)
+    const pSorted = (pinFixed ? byPinOrder(pinnedRows) : sortRows(pinnedRows, sort)).map((r) => stripNestMeta(r, allByKey, nestChildren))
     out.push({
       id: 'convo.group.pinned',
       labelKey: 'convo.group.pinned',
@@ -201,28 +361,86 @@ export function buildAgentGroups(rows: ConvoListRow[], opts: OrderOpts = {}): Ag
   }
 
   const unpinned = rows.filter((r) => !pinned(r))
-  // Keep unpinned blocked agents visible at the top regardless of project/session folding.
-  const blockedRows = unpinned.filter((r) => r.status === 'blocked')
+
+  // 2. Unpinned live-blocked agents ALWAYS surface at top of uncollapsible "Needs you"
+  //    (never nested under a parent, even if the parent is idle or collapsed).
+  const blockedRows = sortRows(unpinned.filter(isLiveBlocked), sort).map((r) => stripNestMeta(r, allByKey, nestChildren))
+  const nonBlocked = unpinned.filter((r) => !isLiveBlocked(r))
+
+  if (groupMode === 'status') {
+    if (!nestChildren) {
+      // Exact flat Status-mode behavior.
+      const doneRows = sortRows(nonBlocked.filter((r) => r.status === 'done' && !working(r)), sort).map((r) => stripNestMeta(r, allByKey, false))
+      const todoRows = [...blockedRows, ...doneRows]
+      if (todoRows.length) {
+        out.push({ id: 'convo.group.todo', labelKey: 'convo.group.todo', kind: 'todo', rows: todoRows, collapsible: false, ...groupCounts(todoRows) })
+      }
+      const workRows = sortRows(nonBlocked.filter(working), sort).map((r) => stripNestMeta(r, allByKey, false))
+      if (workRows.length) {
+        out.push({ id: 'convo.group.working', labelKey: 'convo.group.working', kind: 'working', rows: workRows, collapsible: true, ...groupCounts(workRows) })
+      }
+      const recentRows = sortRows(nonBlocked.filter((r) => !forYou(r) && !working(r)), sort).map((r) => stripNestMeta(r, allByKey, false))
+      const idle = recentRows.filter((p) => (p.since ?? 0) > 0)
+      const other = recentRows.filter((p) => (p.since ?? 0) <= 0)
+      if (idle.length) out.push({ id: 'convo.group.idle', labelKey: 'convo.group.idle', kind: 'idle', rows: idle, collapsible: true, ...groupCounts(idle) })
+      if (other.length) out.push({ id: 'convo.group.other', labelKey: 'convo.group.other', kind: 'other', rows: other, collapsible: true, ...groupCounts(other) })
+      return out
+    }
+
+    // Nested Status mode: build parent-child trees among unpinned non-blocked rows,
+    // placing each tree into the highest active status group of its members so an
+    // idle parent with a working/done child stays prominently visible alongside its child.
+    const forest = projectNestedBucket(nonBlocked, allByKey, sort, true)
+    const doneTrees: ConvoListRow[] = []
+    const workTrees: ConvoListRow[] = []
+    const idleTrees: ConvoListRow[] = []
+    const otherTrees: ConvoListRow[] = []
+
+    for (const t of forest.trees) {
+      const members = [t.root, ...t.children]
+      const hasDone = members.some((m) => m.status === 'done' && !working(m))
+      const hasWorking = members.some(working)
+      if (hasDone) doneTrees.push(...members)
+      else if (hasWorking) workTrees.push(...members)
+      else if (t.maxSince > 0) idleTrees.push(...members)
+      else otherTrees.push(...members)
+    }
+
+    const todoRows = [...blockedRows, ...doneTrees]
+    if (todoRows.length) {
+      out.push({ id: 'convo.group.todo', labelKey: 'convo.group.todo', kind: 'todo', rows: todoRows, collapsible: false, ...groupCounts(todoRows) })
+    }
+    if (workTrees.length) {
+      out.push({ id: 'convo.group.working', labelKey: 'convo.group.working', kind: 'working', rows: workTrees, collapsible: true, ...groupCounts(workTrees) })
+    }
+    if (idleTrees.length) {
+      out.push({ id: 'convo.group.idle', labelKey: 'convo.group.idle', kind: 'idle', rows: idleTrees, collapsible: true, ...groupCounts(idleTrees) })
+    }
+    if (otherTrees.length) {
+      out.push({ id: 'convo.group.other', labelKey: 'convo.group.other', kind: 'other', rows: otherTrees, collapsible: true, ...groupCounts(otherTrees) })
+    }
+    return out
+  }
+
+  // Project / Session modes:
   if (blockedRows.length) {
-    const bSorted = sortRows(blockedRows, sort)
     out.push({
       id: 'convo.group.todo',
       labelKey: 'convo.group.todo',
       kind: 'todo',
-      rows: bSorted,
+      rows: blockedRows,
       collapsible: false,
-      ...groupCounts(bSorted),
+      ...groupCounts(blockedRows),
     })
   }
 
-  const rest = unpinned.filter((r) => r.status !== 'blocked')
-  if (!rest.length) return out
+  if (!nonBlocked.length) return out
 
   const isProject = groupMode === 'project'
-  const labels = isProject ? projectLabels(rest.map((r) => r.projectKey ?? '')) : null
+  const labels = isProject ? projectLabels(nonBlocked.map((r) => r.projectKey ?? '')) : null
   const buckets = new Map<string, { label?: string; labelKey?: I18nKey; sub?: string; rows: ConvoListRow[]; isFallback: boolean }>()
 
-  for (const r of rest) {
+  for (const r of nonBlocked) {
     const rawKey = isProject ? (r.projectKey ?? '') : (r.sessionGroup ?? '')
     const isFallback = !rawKey
     const mapKey = isFallback ? '__other__' : rawKey
@@ -238,8 +456,10 @@ export function buildAgentGroups(rows: ConvoListRow[], opts: OrderOpts = {}): Ag
     b.rows.push(r)
   }
 
+  // Cut cross-bucket edges BEFORE flattening each bucket's forest!
   const entries = [...buckets.entries()].map(([k, b], idx) => {
-    const sorted = sortRows(b.rows, sort)
+    const forest = projectNestedBucket(b.rows, allByKey, sort, nestChildren)
+    const sorted = forest.rows
     let maxSince = 0
     let bestRank = 99
     for (const r of sorted) {
@@ -285,9 +505,28 @@ export function buildAgentGroups(rows: ConvoListRow[], opts: OrderOpts = {}): Ag
   return out
 }
 
-// The agents in their order on the list (for the list, the switcher and Alt+Up/Down alike).
+// The agents in their visible order on the list (for the list, the switcher and
+// Alt+Up/Down alike), deduplicated by key and respecting collapsedParents while
+// always keeping current and live-blocked rows reachable.
 export function listOrder(rows: ConvoListRow[], opts?: OrderOpts): ConvoListRow[] {
-  return buildAgentGroups(rows.map(asHeld), opts).flatMap((g) => g.rows)
+  const collapsed = opts?.collapsedParents
+    ? opts.collapsedParents instanceof Set
+      ? opts.collapsedParents
+      : new Set(opts.collapsedParents)
+    : null
+  const seen = new Set<string>()
+  const out: ConvoListRow[] = []
+  for (const g of buildAgentGroups(rows.map(asHeld), opts)) {
+    for (const r of g.rows) {
+      if (seen.has(r.key)) continue
+      if (collapsed && r.nestDepth === 1 && r.nestedParentKey && collapsed.has(r.nestedParentKey) && !r.current && !isLiveBlocked(r)) {
+        continue
+      }
+      seen.add(r.key)
+      out.push(r)
+    }
+  }
+  return out
 }
 
 // Reorder a pinned agent among the currently visible pinned keys while preserving
@@ -317,8 +556,12 @@ export function reorderPinned(pins: string[], key: string, visibleKeys: Set<stri
 // is (else it would move from under the pointer as it is read). Placed so
 // by the lists and by Alt+Up/Down alike (placeAs, which its page sets);
 // what its row says is as it is.
-// (Its commands in the background too, as they place it among those at work — review batch4.)
-export const asHeld = (r: ConvoListRow): ConvoListRow => (r.placeAs && r.current ? { ...r, status: r.placeAs.status, since: r.placeAs.since, cmds: r.placeAs.cmds } : r)
+// liveStatus preserves the real-time status so a live "blocked" transition
+// is never suppressed by a frozen placeAs.
+export const asHeld = (r: ConvoListRow): ConvoListRow =>
+  r.placeAs && r.current
+    ? { ...r, liveStatus: r.liveStatus ?? r.status, status: r.placeAs.status, since: r.placeAs.since, cmds: r.placeAs.cmds }
+    : r
 
 // The rest, as the list shows them: by the day their status last changed;
 // those of no known time (a tmux session, the gateway restarted) last.
