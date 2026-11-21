@@ -1735,6 +1735,12 @@ type convoState struct {
 	cxTitleWait   bool
 	cxTitleFail   bool // (the read failed: not read again for convoTitleBackoff, from cxTitleFailAt)
 	cxTitleFailAt time.Time
+	// (An Antigravity CLI pane: whether its live screen showed a permission/question dialog.)
+	agyWaitAt     time.Time
+	agyWaitFor    string
+	agyWait       bool
+	agyWaitFail   bool
+	agyWaitFailAt time.Time
 	offset        int64 // read up to here
 	size          int64 // the log's size when last looked at
 	mtime         time.Time
@@ -2059,6 +2065,11 @@ func (s *Server) apiConversation(w http.ResponseWriter, r *http.Request) {
 				ans.AgentStatus, ans.WaitingFor = "waiting", w
 			}
 		}
+		if st.reason == convoNoLog && st.bind != nil && st.agent == "agy" && !st.sub {
+			if s.agyWaits(ctx, sess, st) {
+				ans.AgentStatus, ans.WaitingFor = "waiting", "permission prompt"
+			}
+		}
 		writeJSON(w, http.StatusOK, ans)
 		return
 	}
@@ -2080,6 +2091,14 @@ func (s *Server) apiConversation(w http.ResponseWriter, r *http.Request) {
 			st.status = "waiting:permission prompt"
 		} else if st.cxTitleFail {
 			st.status = "" // (whether it waits not known: not said to work either)
+		}
+	}
+	// Antigravity CLI: herdr may miss or drop "waiting" to "idle" while a tool
+	// confirmation sits on screen; check the live pane over herdr's Unix socket
+	// (or tmux capture) whenever a turn/tool call is still pending and quiet.
+	if st.agent == "agy" && st.bind != nil && !st.sub && (st.status == "busy" || st.status == "") && (st.agyWait || st.grewAt.IsZero() || time.Since(st.grewAt) >= 1500*time.Millisecond) {
+		if s.agyWaits(ctx, sess, st) {
+			st.status = "waiting:permission prompt"
 		}
 	}
 	ans.Available, ans.Gen, ans.Rev, ans.Older, ans.More, ans.AgentStatus = true, st.gen, st.parser.Rev(), st.older, more, st.status
@@ -2408,6 +2427,7 @@ func (s *Server) locateScan(ctx context.Context, sess *term.Session, st *convoSt
 			found = sid // (else none there now, or another: not that one's)
 		}
 		s.locatedEverywhere(sess, pane, found, looked)
+		s.noteAgyPane(sess.ID, pane, agent == "agy")
 	}
 	// (No python3 to read OpenCode's with, found reading: said a minute,
 	// then tried again.)
@@ -4075,7 +4095,7 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 	// /proc scan + serial SSH shells (~1500ms) on every poll and keypress.
 	if sess.Persistence == "herdr" && socket != "" && (what == "panel_screen" || (what == "panel" && b.Live)) {
 		hp, hasPane := s.herdrSocks.paneOf(sess.ID, b.Pane)
-		agyPane := hasPane && isAgyAgent(hp.Agent)
+		agyPane := s.isAgyHerdrPane(sess.ID, b.Pane)
 		codexPane := hasPane && isCodexAgent(hp.Agent)
 		if what == "panel_screen" {
 			release := turn
@@ -4089,6 +4109,10 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 				reason = "bad_request"
 				writeError(w, http.StatusBadRequest, "bad_request", "a key to Codex's terminal goes with the screen it was pressed on")
 				return
+			}
+			if agyPane {
+				s.agyPressed(sess, b.Pane)
+				defer s.agyPressed(sess, b.Pane)
 			}
 			release := turn
 			turn = func() {}
@@ -4376,7 +4400,7 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 			refuse(http.StatusBadGateway, "no_screen", "the pane's screen could not be read")
 			return
 		}
-		plain := sgr.ReplaceAllString(string(res.Out), "")
+		plain := panelSGR.ReplaceAllString(string(res.Out), "")
 		box, boxed := agyBoxDigest([]byte(plain))
 		switch err := agyIdleInputColor(string(res.Out)); {
 		case errors.Is(err, errAgyAsks):
@@ -4540,6 +4564,15 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 		done = func() {
 			s.codexPressed(sess, b.Pane)
 			ended.Done()
+		}
+	}
+	if front.agent == "agy" {
+		s.agyPressed(sess, b.Pane)
+		defer s.agyPressed(sess, b.Pane)
+		prevDone := done
+		done = func() {
+			s.agyPressed(sess, b.Pane)
+			prevDone()
 		}
 	}
 	cmd := convoGatedCommand(gate, sess.Persistence, sess.TmuxSession, b.Pane, socket, b.PID, b.Start, b.Session, len(text), press, modeLines(what))

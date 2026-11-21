@@ -1,14 +1,19 @@
 package web
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"regexp"
+	"strconv"
 	"strings"
+	"time"
 	"unicode"
 
+	"github.com/ihainan/corral/internal/herdr"
 	"github.com/ihainan/corral/internal/sshx"
+	"github.com/ihainan/corral/internal/term"
 )
 
 // agyScreenCommand prints the live bottom of an agy pane (plain text). In
@@ -86,6 +91,10 @@ var agyAsking = []string{
 	"Run this command?",
 	"Do you trust the contents of this project?",
 	"↑/↓ Navigate",
+	"esc to cancel",
+	"tab Amend",
+	"ctrl+g edit/expand",
+	"ctrl+r Review",
 	"Question ",
 }
 
@@ -128,7 +137,7 @@ func agyIdleInput(screen string) error {
 // dynamic prompt suggestions) counts as empty, not a user draft.
 func agyIdleInputColor(ansiScreen string) error {
 	cleanANSI := strings.NewReplacer("\x00", "", "\r", "").Replace(ansiScreen)
-	plain := sgr.ReplaceAllString(cleanANSI, "")
+	plain := panelSGR.ReplaceAllString(cleanANSI, "")
 	rawLines := strings.Split(strings.TrimRight(cleanANSI, "\n"), "\n")
 	plainLines := strings.Split(strings.TrimRight(plain, "\n"), "\n")
 	if len(rawLines) != len(plainLines) {
@@ -165,13 +174,33 @@ func agyIdleInputColor(ansiScreen string) error {
 }
 
 func agyNotBoxedErr(lines []string) error {
-	foot := strings.Join(lines[max(0, len(lines)-30):], "\n")
+	// Inspect the last 45 non-blank lines so trailing empty rows or tall
+	// multi-line commands with a Reason: prefix never push the prompt out.
+	var tail []string
+	for i := len(lines) - 1; i >= 0 && len(tail) < 45; i-- {
+		if strings.TrimSpace(lines[i]) == "" {
+			continue
+		}
+		tail = append(tail, lines[i])
+	}
+	foot := strings.Join(tail, "\n")
 	for _, w := range agyAsking {
 		if strings.Contains(foot, w) {
 			return errAgyAsks
 		}
 	}
 	return errScreen
+}
+
+// agyScreenAsks reports whether an Antigravity CLI screen is currently showing
+// a permission confirmation, question, or trust dialog in place of its input box.
+func agyScreenAsks(screen string) bool {
+	plain := panelSGR.ReplaceAllString(strings.NewReplacer("\x00", "", "\r", "").Replace(screen), "")
+	lines := strings.Split(strings.TrimRight(plain, "\n"), "\n")
+	if _, _, ok := agyBoxBounds(lines); ok {
+		return false
+	}
+	return errors.Is(agyNotBoxedErr(lines), errAgyAsks)
 }
 
 // agyLineAllGrey reports whether every visible non-whitespace character in
@@ -313,7 +342,7 @@ func agyBoxDigest(raw []byte) (string, bool) {
 var agyModeRe = regexp.MustCompile(`(?:^|\s{2,})(auto|plan|accept-edits)\s+·`)
 
 func agyModeOnScreen(screen string) string {
-	plain := sgr.ReplaceAllString(strings.NewReplacer("\x00", "", "\r", "").Replace(screen), "")
+	plain := panelSGR.ReplaceAllString(strings.NewReplacer("\x00", "", "\r", "").Replace(screen), "")
 	lines := strings.Split(strings.TrimRight(plain, "\n"), "\n")
 	_, bot, ok := agyBoxBounds(lines)
 	if !ok {
@@ -337,7 +366,7 @@ func agyModeOnScreen(screen string) string {
 // agyInputText returns the trimmed text inside agy's input box (without its
 // leading ">"), or ok=false when the input box is not visible.
 func agyInputText(screen string) (string, bool) {
-	plain := sgr.ReplaceAllString(screen, "")
+	plain := panelSGR.ReplaceAllString(screen, "")
 	box, ok := agyBox([]byte(plain))
 	if !ok || len(box) < 3 {
 		return "", false
@@ -438,3 +467,87 @@ END {
     }
   }
 }'`
+
+// agyWaits checks whether an Antigravity CLI pane is currently waiting on a
+// permission prompt, question, or trust dialog (e.g. when herdr reports idle
+// or working while a confirmation sits on screen, or in tmux). Cached on st
+// for convoTitleTTL (2s) and invalidated immediately on any press/reply.
+// In herdr mode, reads directly over herdr's Unix socket (~1ms, no shell spawn).
+func (s *Server) agyWaits(ctx context.Context, sess *term.Session, st *convoState) bool {
+	b := st.bind
+	who := strings.Join([]string{b.Pane, strconv.FormatInt(b.PID, 10), strconv.FormatInt(b.Start, 10), b.Session}, "\x00")
+	pressed, _ := s.agyPressedMap.Load(s.convoReplyKey(sess, b.Pane))
+	at, _ := pressed.(time.Time)
+	if waits, ok := st.agyWaitKept(who, at, time.Now()); ok {
+		return waits
+	}
+	began := time.Now()
+	rctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	var screen string
+	var err error
+	if sess.Persistence == "herdr" {
+		socket := s.herdrSocks.get(sess.ID)
+		if socket != "" {
+			var c *herdr.Client
+			c, err = herdr.DialWait(rctx, sess.Client(), socket, 2*time.Second)
+			if err == nil {
+				screen, err = c.ReadPaneSource(rctx, b.Pane, "recent", 60)
+				if err != nil {
+					screen, err = c.ReadPane(rctx, b.Pane, 0)
+				}
+				c.Close()
+			}
+		} else {
+			err = errors.New("no herdr socket")
+		}
+	} else {
+		var res sshx.ExecResult
+		res, err = sshx.Exec(rctx, sess.Client(), agyScreenCommand(sess.Persistence, b.Pane, ""), 256<<10, sshx.ExecOptions{})
+		if err == nil {
+			screen = string(res.Out)
+		}
+	}
+	waits := err == nil && agyScreenAsks(screen)
+	st.agyWaitAt, st.agyWaitFor, st.agyWait, st.agyWaitFail, st.agyWaitFailAt = began, who, waits, err != nil, time.Now()
+	return waits
+}
+
+// agyPressed marks keys/text/replies sent to an agy pane so the next poll
+// re-checks its screen immediately instead of serving a cached wait result.
+func (s *Server) agyPressed(sess *term.Session, pane string) {
+	s.agyPressedMap.Store(s.convoReplyKey(sess, pane), time.Now())
+}
+
+func (st *convoState) agyWaitKept(who string, pressed, now time.Time) (waits, ok bool) {
+	fresh := now.Sub(st.agyWaitAt) < convoTitleTTL
+	if st.agyWaitFail {
+		fresh = now.Sub(st.agyWaitFailAt) < convoTitleBackoff
+	}
+	if st.agyWaitFor != who || !fresh || !st.agyWaitAt.After(pressed) {
+		return false, false
+	}
+	return st.agyWait, true
+}
+
+// isAgyHerdrPane reports whether a herdr pane is known to run Antigravity CLI,
+// checking both herdr's reported agent name and Corral's own bound conversation.
+func (s *Server) isAgyHerdrPane(sessID, pane string) bool {
+	if hp, ok := s.herdrSocks.paneOf(sessID, pane); ok && isAgyAgent(hp.Agent) {
+		return true
+	}
+	v, ok := s.agyPanes.Load(sessID + "\x00" + pane)
+	return ok && v.(bool)
+}
+
+func (s *Server) noteAgyPane(sessID, pane string, isAgy bool) {
+	if pane == "" {
+		return
+	}
+	key := sessID + "\x00" + pane
+	if isAgy {
+		s.agyPanes.Store(key, true)
+	} else {
+		s.agyPanes.Delete(key)
+	}
+}

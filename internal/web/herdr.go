@@ -1278,8 +1278,7 @@ func (s *Server) apiHerdrScreen(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer c.Close()
-	hp, hasPane := s.herdrSocks.paneOf(sess.ID, pane)
-	agyPane := hasPane && isAgyAgent(hp.Agent)
+	agyPane := s.isAgyHerdrPane(sess.ID, pane)
 	text, digest, cut, err := paneScreenCutFor(ctx, c, pane, agyPane)
 	if err != nil {
 		writeHerdrError(w, err)
@@ -1482,8 +1481,7 @@ func (s *Server) replyToPane(w http.ResponseWriter, r *http.Request, sess *term.
 		return
 	}
 	defer typer.Close()
-	hp, hasPane := s.herdrSocks.paneOf(sess.ID, pane)
-	agyPane := hasPane && isAgyAgent(hp.Agent)
+	agyPane := s.isAgyHerdrPane(sess.ID, pane)
 	shown, shownDigest, shownCut, err := paneScreenCutFor(ctx, reader, pane, agyPane)
 	reader.Close()
 	if err != nil {
@@ -1511,6 +1509,9 @@ func (s *Server) replyToPane(w http.ResponseWriter, r *http.Request, sess *term.
 		err = typer.SendInput(ctx, pane, text, []string{"enter"})
 	} else {
 		err = typer.SendKeys(ctx, pane, keys)
+	}
+	if agyPane {
+		s.agyPressed(sess, pane)
 	}
 	// Whether it was typed: herdr said so, herdr refused, or the answer was
 	// lost on the way (then it may have been typed). Every attempt is

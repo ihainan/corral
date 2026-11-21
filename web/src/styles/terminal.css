@@ -550,7 +550,11 @@ html:not(.kb-open) .convo-scroll-wrap { min-height: min(30vh, 240px); }
 /* (The keyboard up covers the home indicator's strip: none kept for it) */
 html.kb-open .convo-dock { padding-bottom: 6px; }
 .convo-dock:empty { display: none; }
-.convo-dock .composer { padding: 0; background: none; border-top: 0; }
+.convo-dock .composer { padding: 0; background: none; border-top: 0; flex: 0 1 auto; min-height: 0; display: flex; flex-direction: column; }
+.convo-dock .composer > .composer-box { flex: none; }
+.convo-dock .composer > .convo-panelwin { flex: 0 1 auto; min-height: 0; margin-bottom: 8px; }
+.convo-dock .composer > .convo-panelwin .convo-panelwin-view { flex: 1 1 auto; min-height: 0; }
+.convo-dock .composer > .convo-panelwin .convo-panelwin-screen { max-height: min(36vh, 340px); }
 .convo-dock .composer-box { border: 1px solid var(--term-line); }
 .term-root.dark .convo-dock .composer-box { background: #1d222a; border-color: #343b46; }
 .term-root.dark .convo-dock .composer-box:focus-within { border-color: color-mix(in srgb, var(--term-accent-text) 70%, var(--term-line)); }

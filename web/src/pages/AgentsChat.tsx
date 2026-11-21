@@ -966,14 +966,12 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
     const ended = !row.lost && (row.a.bg === 'running' || row.a.bg === 'checking') && (row.a.status === 'done' || row.a.status === 'idle')
     const herdrSays = row.lost ? 'unknown' : ended && row.bg !== 'stale' ? (row.a.status as 'done' | 'idle') : row.status
     const bg = row.lost ? undefined : row.bg
-    // (This pane's Claude Code, its process's file read: of it, and of no other agent.)
+    // (This pane's Claude Code or Antigravity CLI, its process/screen read: of it, and of no other agent.)
     const ownCC = !row.lost && convo.bind?.pane === row.a.pane_id && (convo.bind.agent ?? 'claude') === 'claude' && !convo.failing
-    // (Asking, as Claude Code's own file says — "input needed" for a question,
-    // a permission: herdr, which reads its screen, may call it idle then.
-    // 11-19: a question with long Chinese choices, herdr said idle, and the
-    // chat page showed nothing to answer while the terminal waited on it.
-    // The file only: the gateway reads it for a herdr pane only to say it waits.)
-    const ccAsks = ownCC && convo.agentStatus === 'waiting' && answerable(convo.waitingFor)
+    const ownAgy = !row.lost && convo.bind?.pane === row.a.pane_id && convo.bind.agent === 'agy' && !convo.failing
+    // (Asking, as Claude Code's session file or Antigravity CLI's live screen says:
+    // herdr may call it idle while a permission prompt or question sits on screen.)
+    const ccAsks = (ownCC || ownAgy) && convo.agentStatus === 'waiting' && answerable(convo.waitingFor)
     const status = ccAsks && herdrSays !== 'unknown' ? 'blocked' : herdrSays
     // (A dialog of Claude Code's own open, /usage say: herdr calls it idle,
     // its session file says it waits. Of this pane's process only, and of
@@ -1207,8 +1205,11 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   }, [said])
   const refusal = (e: unknown) => {
     if (!(e instanceof ApiError)) return errorText(e)
-    // (What stopped it is up there, or could not be made out: the terminal, here, to deal with it.)
-    if (LIVE_ON.has(e.code) && liveFor(convo.bind?.agent) && convo.bind) setLiveOf(bindKey)
+    // (What stopped it is up there, or could not be made out: the terminal, here, to deal with it.
+    // For Antigravity CLI waiting on a prompt, refresh immediately so the native AskCard opens
+    // instead of popping up the raw terminal window.)
+    if (e.code === 'agent_waiting' && convo.bind?.agent === 'agy') convo.refresh()
+    else if (LIVE_ON.has(e.code) && liveFor(convo.bind?.agent) && convo.bind) setLiveOf(bindKey)
     // (Claude Code's input box not this conversation's: said what to do in the terminal.)
     const v = viewRefusal(e.code)
     if (v) return v
@@ -1987,6 +1988,9 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   }, [lookPlan, bindKey, sid])
   const waits = waitsFor || (lookPlan && planAsked)
   useEffect(() => {
+    if (waits && liveOf === bindKey) setLiveOf(null)
+  }, [waits, liveOf, bindKey])
+  useEffect(() => {
     if (!askKey) return
     let a = suggestAsks.get(askKey)
     if (!a) {
@@ -2165,8 +2169,10 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
           drop()
           return
         }
-        // (What stopped it is up there, or could not be made out: the terminal, here, to deal with it.)
-        if (e instanceof ApiError && LIVE_ON.has(e.code) && liveFor(b.agent)) setLiveOf(bindKey)
+        // (What stopped it is up there, or could not be made out: the terminal, here, to deal with it.
+        // For Antigravity CLI waiting on a prompt, refresh immediately so the native AskCard opens.)
+        if (e instanceof ApiError && e.code === 'agent_waiting' && b.agent === 'agy') convo.refresh()
+        else if (e instanceof ApiError && LIVE_ON.has(e.code) && liveFor(b.agent)) setLiveOf(bindKey)
         // Whether it went is not known (the gateway lost the host on the way,
         // or the answer was lost on its way here): it is looked for as one
         // sent, the draft staying until it is seen.
@@ -2448,7 +2454,8 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
         // (Another agent in the pane: read at once, as for a send — the dialog says why.)
         if (e instanceof ApiError && e.code === 'agent_changed') convo.refresh()
         // (Refused for what is up in its terminal: the terminal, here, as for a message.)
-        if (e instanceof ApiError && LIVE_ON.has(e.code) && liveFor(b.agent)) setLiveOf(bindKey)
+        if (e instanceof ApiError && e.code === 'agent_waiting' && b.agent === 'agy') convo.refresh()
+        else if (e instanceof ApiError && LIVE_ON.has(e.code) && liveFor(b.agent)) setLiveOf(bindKey)
         throw e
       },
     )

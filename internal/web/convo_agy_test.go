@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestAgyIdleInputAndBoxPipeParity(t *testing.T) {
@@ -374,5 +375,90 @@ func TestAgyColorDraftModeAndSentHelpers(t *testing.T) {
 	}
 	if turnLine("agy", []byte(`{"step_index":1,"type":"PLANNER_RESPONSE","content":"hi"}`)) {
 		t.Fatalf("turnLine should skip agy PLANNER_RESPONSE")
+	}
+}
+
+func TestAgyScreenAsksAndWaitCache(t *testing.T) {
+	rule := strings.Repeat("─", 80)
+
+	// Permission prompt with Reason:, tall wrapped command, ANSI colon SGR, and
+	// 35 trailing blank lines must be detected as asking (not errScreen).
+	perm := strings.Join([]string{
+		"\x1b[38:2:200:200:200mReason: The command restarts docker compose in a shared directory.\x1b[0m",
+		"Requesting permission for:",
+		"  mkdir -p /home/ihainan/tmp/backup && sqlite3 corral.db && docker compose up -d",
+		"Run this command?",
+		"> 1. Yes, run command",
+		"  2. Yes, and always allow",
+		"  3. No, cancel",
+		"  ↑/↓ Navigate · tab Amend · ctrl+g edit/expand command · ctrl+r Review",
+		"esc to cancel",
+	}, "\n") + strings.Repeat("\n", 35)
+	if !agyScreenAsks(perm) {
+		t.Fatalf("agyScreenAsks(perm) = false, want true")
+	}
+	if err := agyIdleInputColor(perm); !errors.Is(err, errAgyAsks) {
+		t.Fatalf("agyIdleInputColor(perm) = %v, want errAgyAsks", err)
+	}
+
+	// Footer-only confirmation cue (e.g. long command pushed top header out of 60 lines).
+	footOnly := strings.Join([]string{
+		"  some very long command tail",
+		"> 1. Yes, allow",
+		"  2. No, cancel",
+		"esc to cancel",
+	}, "\n")
+	if !agyScreenAsks(footOnly) {
+		t.Fatalf("agyScreenAsks(footOnly) = false, want true")
+	}
+
+	// Idle input box must NOT report asking even if older scrollback mentions permission text.
+	idleAfterPerm := strings.Join([]string{
+		"Requesting permission for:",
+		"Run this command?",
+		"● Done.",
+		rule,
+		">",
+		rule,
+	}, "\n")
+	if agyScreenAsks(idleAfterPerm) {
+		t.Fatalf("agyScreenAsks(idleAfterPerm) = true, want false")
+	}
+
+	// Wait cache: fresh within convoTitleTTL, invalidated by pressed >= agyWaitAt,
+	// backed off on failure for convoTitleBackoff.
+	now := time.Now()
+	st := &convoState{
+		agyWaitAt:  now.Add(-time.Second),
+		agyWaitFor: "w28:p1\x001\x002\x00sid",
+		agyWait:    true,
+	}
+	if w, ok := st.agyWaitKept(st.agyWaitFor, now.Add(-2*time.Second), now); !ok || !w {
+		t.Fatalf("fresh cache = (%v, %v), want (true, true)", w, ok)
+	}
+	if _, ok := st.agyWaitKept(st.agyWaitFor, now.Add(-500*time.Millisecond), now); ok {
+		t.Fatalf("cache should invalidate when pressed after agyWaitAt")
+	}
+	if _, ok := st.agyWaitKept(st.agyWaitFor, time.Time{}, now.Add(convoTitleTTL)); ok {
+		t.Fatalf("cache should expire after convoTitleTTL")
+	}
+	st.agyWaitFail = true
+	st.agyWaitFailAt = now.Add(-2 * time.Second)
+	if w, ok := st.agyWaitKept(st.agyWaitFor, time.Time{}, now); !ok || !w {
+		t.Fatalf("failed read should honor backoff: (%v, %v)", w, ok)
+	}
+
+	// isAgyHerdrPane fallback via noteAgyPane when herdrSocks has no hp.Agent.
+	s := &Server{}
+	if s.isAgyHerdrPane("s1", "w28:p1") {
+		t.Fatalf("expected false before noteAgyPane")
+	}
+	s.noteAgyPane("s1", "w28:p1", true)
+	if !s.isAgyHerdrPane("s1", "w28:p1") {
+		t.Fatalf("expected true after noteAgyPane(true)")
+	}
+	s.noteAgyPane("s1", "w28:p1", false)
+	if s.isAgyHerdrPane("s1", "w28:p1") {
+		t.Fatalf("expected false after noteAgyPane(false)")
 	}
 }
