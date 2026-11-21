@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState, type ReactNode } from 'react'
-import { ArrowUp, ChevronLeft, Copy, FoldVertical, GitBranch, History, Languages, MessageSquarePlus, Paperclip, Pencil, Pin, PinOff, Power, Square, SquareSlash, SquareTerminal, TextCursorInput, Plus } from 'lucide-react'
+import { ArrowDown, ArrowUp, ArrowUpToLine, ChevronLeft, Copy, FoldVertical, GitBranch, History, Languages, MessageSquarePlus, Paperclip, Pencil, Pin, PinOff, Power, Square, SquareSlash, SquareTerminal, TextCursorInput, Plus } from 'lucide-react'
 import { api, ApiError, authGen, errorText, onAuthChange, uploadFile, type SessionInfo } from '../api'
 import { t, type I18nKey } from '../i18n'
 import { navigate, onNavigate } from '../router'
@@ -28,7 +28,7 @@ import { IMAGE_EXT, TextPreview } from '../terminal/textPreview'
 import { attach, ATTACH_LABEL, AttachStrip, PICTURE_PATH, takeOut, type Going } from '../terminal/attach'
 import { answerable, asking, callOut, useConversation, type ConvoEntry } from '../terminal/conversation'
 import { ackBg, answeredHerdr, expectSession, paneWaits, waitingTitle, isAgy, isCodex, isOpenCode, listAgents, paneName, paneTitle, readSessionsNow, readsLog, useRunningSessions, type AgentRow } from '../terminal/agents'
-import { type RowCmds } from '../terminal/agentOrder'
+import { normalizeProjectPath, reorderPinned, type RowCmds } from '../terminal/agentOrder'
 import { conversationReadable, prefetchConversation } from '../terminal/conversation'
 import { holdTermMode, tmuxKey } from '../terminal/chatSend'
 import { isCommand, pairSent, sameMessage, squeezed, type Submission } from '../terminal/sentSeen'
@@ -191,6 +191,7 @@ const whereOf = (e: Entry, hosts: number) => {
 // Its tab's name, where its workspace has more than one (one alone says nothing).
 const tabOf = (r: AgentRow) => ((r.a.tabs ?? 0) > 1 ? (r.a.tab_label ?? '') : '')
 const hostCount = (entries: Entry[]) => new Set(entries.map((e) => e.s.host_name)).size
+const sessionGroupOf = (e: Entry, all: SessionInfo[]) => `${e.s.host_name} · ${sessionWhich(e.s, all)}`
 
 // An agent not named yet (no title from its log or its pane): by the folder
 // it runs in, before its program's name — several "claude" are not told
@@ -1177,10 +1178,10 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
         const named = ((isCodex(r.a.agent) || isAgy(r.a.agent)) && r.a.thread_title) || (current && convo.bind?.pane === r.a.pane_id && convoTitle) || keptTitle(titles, e) || paneName(r.a)
         const said = named || dirName(r.a.cwd) || r.a.agent
         const st = current && agent && !r.bg ? agent.status : r.status
-        return { key: e.key, ...labelOf(e, said, hosts, !!named), now: r.lost || r.bg || st !== 'blocked' ? undefined : glanceOf(e.s.id, e.pane, st, r.a.since) || undefined /* (said only of one waiting on the person) */, program: r.a.agent, status: st, bg: r.lost ? undefined : r.bg, cmds: cmdsOf(r), since: r.lost ? undefined : r.bg ? r.a.bg_since : r.a.since, current, pinned: pinAt(e.key), onPick: () => onPick(e), menu: () => rowMenu.current(e) }
+        return { key: e.key, ...labelOf(e, said, hosts, !!named), now: r.lost || r.bg || st !== 'blocked' ? undefined : glanceOf(e.s.id, e.pane, st, r.a.since) || undefined /* (said only of one waiting on the person) */, program: r.a.agent, status: st, bg: r.lost ? undefined : r.bg, cmds: cmdsOf(r), since: r.lost ? undefined : r.bg ? r.a.bg_since : r.a.since, current, pinned: pinAt(e.key), projectKey: normalizeProjectPath(r.a.cwd), sessionGroup: sessionGroupOf(e, all), onPick: () => onPick(e), menu: () => rowMenu.current(e) }
       }
       const title = (current && agent?.title) || keptTitle(titles, e) || `${e.s.host_name} · ${sessionWhich(e.s, all)}`
-      return { key: e.key, title, where: whereOf(e, hosts), program: current ? agent?.program : undefined, status: current && agent ? agent.status : 'unknown', cmds: current ? agent?.cmds : tmuxCmdsOf(e), current, pinned: pinAt(e.key), onPick: () => onPick(e), menu: () => rowMenu.current(e) }
+      return { key: e.key, title, where: whereOf(e, hosts), program: current ? agent?.program : undefined, status: current && agent ? agent.status : 'unknown', cmds: current ? agent?.cmds : tmuxCmdsOf(e), current, pinned: pinAt(e.key), sessionGroup: sessionGroupOf(e, all), onPick: () => onPick(e), menu: () => rowMenu.current(e) }
     })
     return placedAs ? out.map((r) => (r.current ? { ...r, placeAs: placedAs } : r)) : out
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -2601,11 +2602,31 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       },
     }
   }
+  const prefsNow = usePrefs()
+  const pinReorderItems = (key: string): (MenuItem | null)[] => {
+    const here = new Set(entries.map((e) => e.key))
+    const visible = pins.filter((k) => here.has(k))
+    const pos = visible.indexOf(key)
+    if (pos < 0 || visible.length < 2) return []
+    const move = (dir: 'top' | 'up' | 'down') => () => {
+      const next = reorderPinned(pins, key, here, dir)
+      if (!next) return
+      const autoFixed = !prefsNow.pinFixedOrder
+      setPrefs({ pinnedAgents: next, pinFixedOrder: true })
+      if (autoFixed) toast(t('agents.pinFixedAuto'))
+    }
+    return [
+      pos > 0 ? { label: t('agents.pinTop'), icon: <ArrowUpToLine size={16} />, onSelect: move('top') } : null,
+      pos > 0 ? { label: t('agents.pinUp'), icon: <ArrowUp size={16} />, onSelect: move('up') } : null,
+      pos < visible.length - 1 ? { label: t('agents.pinDown'), icon: <ArrowDown size={16} />, onSelect: move('down') } : null,
+    ]
+  }
   // (Claude Code's own commands on it are not there: they are of the one
   // shown, its process known.)
   rowMenu.current = (e) => [
     { label: t('convo.showTerminal'), icon: <SquareTerminal size={16} />, onSelect: terminalOf(e) },
     pinItem(e.key),
+    ...pinReorderItems(e.key),
     forkItem(e),
     renameItem(e),
     closable(e) ? { label: t('agents.close'), icon: <Power size={16} />, danger: true, separator: true, onSelect: () => setClosing(e) } : null,
@@ -2953,10 +2974,10 @@ function PhoneList({ entries, all, titles, query, onQuery, onPick }: { entries: 
         const r = e.row
         const named = ((isCodex(r.a.agent) || isAgy(r.a.agent)) && r.a.thread_title) || keptTitle(titles, e) || paneName(r.a)
         const said = named || dirName(r.a.cwd) || r.a.agent
-        return { key: e.key, ...labelOf(e, said, hosts, !!named), now: r.lost || r.bg || r.status !== 'blocked' ? undefined : glanceOf(e.s.id, e.pane, r.status, r.a.since) || undefined, program: r.a.agent, status: r.status, bg: r.lost ? undefined : r.bg, cmds: cmdsOf(r), since: r.lost ? undefined : r.bg ? r.a.bg_since : r.a.since, current: false, pinned: pinAt(e.key), onPick: () => onPick(e) }
+        return { key: e.key, ...labelOf(e, said, hosts, !!named), now: r.lost || r.bg || r.status !== 'blocked' ? undefined : glanceOf(e.s.id, e.pane, r.status, r.a.since) || undefined, program: r.a.agent, status: r.status, bg: r.lost ? undefined : r.bg, cmds: cmdsOf(r), since: r.lost ? undefined : r.bg ? r.a.bg_since : r.a.since, current: false, pinned: pinAt(e.key), projectKey: normalizeProjectPath(r.a.cwd), sessionGroup: sessionGroupOf(e, all), onPick: () => onPick(e) }
       }
       const title = keptTitle(titles, e) || `${e.s.host_name} · ${sessionWhich(e.s, all)}`
-      return { key: e.key, title, where: whereOf(e, hosts), status: 'unknown', cmds: tmuxCmdsOf(e), current: false, pinned: pinAt(e.key), onPick: () => onPick(e) }
+      return { key: e.key, title, where: whereOf(e, hosts), status: 'unknown', cmds: tmuxCmdsOf(e), current: false, pinned: pinAt(e.key), sessionGroup: sessionGroupOf(e, all), onPick: () => onPick(e) }
     })
   }, [entries, titles, all, pins, onPick])
   const shown = mine ? rows.filter((r) => r.status === 'blocked' || r.status === 'done') : rows

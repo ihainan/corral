@@ -1487,6 +1487,17 @@ button.convo-queue-row.is-note:last-child { border-radius: 0 0 var(--r-lg) var(-
 .list-search-hint { flex: none; padding-right: 6px; font-size: var(--fs-note); line-height: var(--lh-note); color: var(--term-fg-3); white-space: nowrap; }
 @media (pointer: coarse) { .list-search input { font-size: 16px; } }
 .list-search-none { margin: 4px 10px 12px; font-size: var(--fs-sub); line-height: var(--lh-sub); color: var(--term-fg-3); }
+.list-toolbar { display: flex; align-items: center; gap: 6px; margin: 0 0 8px; }
+.list-toolbar.is-compact { justify-content: flex-end; margin-bottom: 2px; }
+.list-toolbar > .list-search { flex: 1; min-width: 0; margin: 0; }
+.list-order-btn {
+  flex: none; width: 36px; height: 36px; border: 1px solid transparent; border-radius: var(--r);
+  background: color-mix(in srgb, var(--term-fg) 5%, transparent); color: var(--term-fg-2);
+}
+.list-order-btn:hover { background: var(--term-row-hover); color: var(--term-fg); }
+.list-order-btn:focus-visible { outline: 2px solid var(--term-accent-text); outline-offset: -2px; }
+.list-order-btn.is-active { color: var(--term-accent-text); background: color-mix(in srgb, var(--term-accent-text) 12%, transparent); }
+.agents-phone .list-order-btn { width: 40px; height: 40px; }
 .agents-list > .list-search { margin: 10px max(16px, env(safe-area-inset-right, 0px)) 4px max(16px, env(safe-area-inset-left, 0px)); height: 40px; }
 .convo-list-group { display: flex; flex-direction: column; gap: 4px; margin-bottom: 12px; }
 /* (Beside the thread, a step tighter: rows 2 apart, groups 8 — 11-13, the list read as bigger than it is. The phone's
@@ -1494,6 +1505,18 @@ button.convo-queue-row.is-note:last-child { border-radius: 0 0 var(--r-lg) var(-
 .convo-side .convo-list-group { gap: 2px; margin-bottom: 8px; }
 .convo-list-head { display: flex; gap: 6px; padding: 10px 10px 6px; font-size: var(--fs-note); line-height: var(--lh-note); font-weight: 600; letter-spacing: 0.02em; color: var(--term-fg-2); font-variant-numeric: tabular-nums; }
 .convo-list-head > span { font-weight: 400; color: var(--term-fg-3); }
+.convo-list-head.is-collapsible {
+  align-items: center; width: 100%; border: 0; border-radius: var(--r-sm); background: none;
+  padding: 6px 8px; text-align: left; cursor: pointer;
+}
+.convo-list-head.is-collapsible:hover { background: var(--term-row-hover); color: var(--term-fg); }
+.convo-list-head.is-collapsible:focus-visible { outline: 2px solid var(--term-accent-text); outline-offset: -2px; }
+.convo-list-chev, .convo-list-gic { flex: none; color: var(--term-fg-3); }
+.convo-list-head.is-collapsible > .convo-list-gname { flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-weight: 600; color: inherit; }
+.convo-list-head.is-collapsible > .convo-list-gcount { flex: none; font-weight: 400; color: var(--term-fg-3); }
+.convo-list-gdot { flex: none; width: 6px; height: 6px; border-radius: 50%; }
+.convo-list-gdot.is-working { background: var(--term-accent-text); }
+.convo-list-gdot.is-done { background: var(--term-ok-text); }
 .convo-list-row {
   display: flex; align-items: flex-start; gap: 10px; width: 100%; padding: 8px 10px; border: 0; border-radius: var(--r);
   background: none; color: var(--term-fg); font: inherit; text-align: left; cursor: pointer;
@@ -1903,6 +1926,7 @@ button.convo-queue-row.is-note:last-child { border-radius: 0 0 var(--r-lg) var(-
 .convo-side-new:hover .convo-side-new-icon { color: var(--term-fg); }
 .convo-side-new:focus-visible { outline: 2px solid var(--term-accent-text); outline-offset: -2px; }
 .convo-side .list-search, .convo-picker .list-search, .agents-phone .list-search { margin: 0 0 8px; height: 36px; padding: 0 4px 0 9px; gap: 10px; }
+.convo-side .list-toolbar > .list-search, .convo-picker .list-toolbar > .list-search, .agents-phone .list-toolbar > .list-search { margin: 0; }
 /* (The side list's search: a faint field at rest, framed once in it — under the button, not a second frame beside it.) */
 .convo-side .list-search, .agents-phone .list-search { border-color: transparent; background: color-mix(in srgb, var(--term-fg) 5%, transparent); }
 .convo-side .list-search:focus-within, .agents-phone .list-search:focus-within { border-color: var(--term-accent-text); background: var(--term-bg); }

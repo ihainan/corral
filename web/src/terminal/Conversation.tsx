@@ -1,8 +1,9 @@
 import { createContext, Fragment, memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { PanelRight, ArrowDown, ArrowUp, Bot, Check, MessagesSquare, FilePen, Hand, ListChecks, ShieldOff, Sparkles, Copy, Cpu, FileText, Gauge as GaugeIcon, LogOut, Radar, SquarePlus, SquareTerminal, Target, TextCursorInput, FolderOpen, Info, Image as ImageIcon, ImageOff, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, ChevronsDownUp, ChevronsUpDown, Clock, Download, Eye, GitBranch, Keyboard, ListOrdered, Loader, MessageCircleQuestion, MoreHorizontal, MoreVertical, PanelLeft, Pin, RotateCw, Search, TriangleAlert, X, Plus } from 'lucide-react'
+import { PanelRight, ArrowDown, ArrowUp, ArrowUpDown, Bot, Check, MessagesSquare, FilePen, Hand, ListChecks, ShieldOff, Sparkles, Copy, Cpu, FileText, Gauge as GaugeIcon, LogOut, Radar, SquarePlus, SquareTerminal, Target, TextCursorInput, FolderOpen, Info, Image as ImageIcon, ImageOff, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, ChevronsDownUp, ChevronsUpDown, Clock, Download, Eye, GitBranch, Keyboard, ListOrdered, Loader, MessageCircleQuestion, MoreHorizontal, MoreVertical, PanelLeft, Pin, RotateCw, Search, TriangleAlert, X, Plus } from 'lucide-react'
 import { t, getLang, type I18nKey } from '../i18n'
 import { api } from '../api'
-import { asHeld, dayStart, FOLDED, foldAt, GROUPS, inGroup, listOrder, pinned, type ConvoListRow, type RowCmds } from './agentOrder'
+import { setPrefs, usePrefs } from '../prefs'
+import { asHeld, buildAgentGroups, dayStart, FOLDED, foldAt, listOrder, pinned, type ConvoListRow, type OrderOpts, type RowCmds } from './agentOrder'
 import { copyText, Dialog, DialogHead, isCoarse, Menu, MenuLayer, useToast, type MenuItem } from '../components/ui'
 import { saveFile } from '../saveFile'
 import { composing, foldAllKey, helpKey, jumpKey, onMac, sideKey, switchKey } from './pageKeys'
@@ -385,6 +386,9 @@ export function ConversationView({
   // but for its search box).
   const sideRef = useRef(side)
   sideRef.current = side
+  const prefsForKeys = usePrefs()
+  const orderRef = useRef<OrderOpts>({ group: prefsForKeys.sidebarGroup, sort: prefsForKeys.sidebarSort, pinFixed: prefsForKeys.pinFixedOrder })
+  orderRef.current = { group: prefsForKeys.sidebarGroup, sort: prefsForKeys.sidebarSort, pinFixed: prefsForKeys.pinFixedOrder }
   useEffect(() => {
     if (!active) return
     const onKey = (e: KeyboardEvent) => {
@@ -393,7 +397,10 @@ export function ConversationView({
       const el = e.target as HTMLInputElement | null
       if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') && !el.classList.contains('xterm-helper-textarea') && el.value && !el.closest('.list-search')) return
       const q = shownQuery.current
-      const list = listOrder((sideRef.current?.rows ?? []).filter((r) => !q.trim() || matchQuery(q, r.title, r.where, r.program)))
+      const list = listOrder(
+        (sideRef.current?.rows ?? []).filter((r) => !q.trim() || matchQuery(q, r.title, r.where, r.program, r.projectKey, r.sessionGroup)),
+        orderRef.current,
+      )
       // (Searched, the one shown may not be among them: one found is gone to.)
       if (!list.length || (list.length === 1 && list[0].current)) return
       e.preventDefault()
@@ -3481,6 +3488,39 @@ function stamp(r: ConvoListRow, now: number): string {
 // The side list's groups of old ones opened out: kept on this device, so a
 // reload keeps them so.
 const SIDE_OPEN_KEY = 'corral.convo.sideOpen'
+const SIDE_FOLD_KEY = 'corral.convo.sideFold'
+
+function ListOrderMenu() {
+  const prefs = usePrefs()
+  const active = prefs.sidebarGroup !== 'status' || prefs.sidebarSort !== 'recent' || prefs.pinFixedOrder
+  const mark = (on: boolean) => (on ? <Check size={16} /> : <span className="menu-icon-space" />)
+  return (
+    <Menu
+      label={t('convo.order.menu')}
+      items={() => [
+        { label: t('convo.order.groupStatus'), group: t('convo.order.groupBy'), icon: mark(prefs.sidebarGroup === 'status'), checked: prefs.sidebarGroup === 'status', onSelect: () => setPrefs({ sidebarGroup: 'status' }) },
+        { label: t('convo.order.groupProject'), icon: mark(prefs.sidebarGroup === 'project'), checked: prefs.sidebarGroup === 'project', onSelect: () => setPrefs({ sidebarGroup: 'project' }) },
+        { label: t('convo.order.groupSession'), icon: mark(prefs.sidebarGroup === 'session'), checked: prefs.sidebarGroup === 'session', onSelect: () => setPrefs({ sidebarGroup: 'session' }) },
+        { label: t('convo.order.sortRecent'), group: t('convo.order.sortBy'), separator: true, icon: mark(prefs.sidebarSort === 'recent'), checked: prefs.sidebarSort === 'recent', onSelect: () => setPrefs({ sidebarSort: 'recent' }) },
+        { label: t('convo.order.sortSmart'), icon: mark(prefs.sidebarSort === 'smart'), checked: prefs.sidebarSort === 'smart', onSelect: () => setPrefs({ sidebarSort: 'smart' }) },
+        { label: t('convo.order.sortName'), icon: mark(prefs.sidebarSort === 'name'), checked: prefs.sidebarSort === 'name', onSelect: () => setPrefs({ sidebarSort: 'name' }) },
+        { label: t('convo.order.pinFixed'), group: t('convo.group.pinned'), separator: true, icon: mark(prefs.pinFixedOrder), checked: prefs.pinFixedOrder, keepOpen: true, onSelect: () => setPrefs({ pinFixedOrder: !prefs.pinFixedOrder }) },
+      ]}
+      button={(open, toggle) => (
+        <button
+          type="button"
+          className={'icon-btn list-order-btn' + (active ? ' is-active' : '')}
+          aria-expanded={open}
+          aria-label={t('convo.order.menu')}
+          title={t('convo.order.menu')}
+          onClick={toggle}
+        >
+          <ArrowUpDown size={15} aria-hidden="true" />
+        </button>
+      )}
+    />
+  )
+}
 
 export function AgentList({ rows, menus, onPicked, placed, query: given, onQuery, search, showSearch, onSearchLeft, hint }: { rows: ConvoListRow[]; menus?: boolean; onPicked?: () => void; placed?: Map<string, ConvoListRow>; query?: string; onQuery?: (q: string) => void; search?: number; showSearch?: boolean; onSearchLeft?: () => void; hint?: boolean }) {
   // Its rows' menu (menus: the side list's; the switcher's rows have none):
@@ -3559,10 +3599,14 @@ export function AgentList({ rows, menus, onPicked, placed, query: given, onQuery
     const timer = setInterval(() => setNow(Date.now()), 30000)
     return () => clearInterval(timer)
   }, [])
+  const prefs = usePrefs()
+  const orderOpts: OrderOpts = { group: prefs.sidebarGroup, sort: prefs.sidebarSort, pinFixed: prefs.pinFixedOrder }
   // Which of the long groups are opened out (by their name; shut again at
   // a tap).
   // (Groups opened out stay so as another agent is gone to, and across a reload: SIDE_OPEN_KEY.)
   const [open, setOpenNow] = useState<string[]>(() => keptNames(SIDE_OPEN_KEY))
+  // Which dynamic (project/session) groups the user folded shut.
+  const [folded, setFoldedNow] = useState<string[]>(() => keptNames(SIDE_FOLD_KEY))
   // (Rows regrouped by a poll slide to their place; a search's are its own — useFlip.)
   const groupsEl = useRef<HTMLDivElement>(null)
   const setOpen = (f: (o: string[]) => string[]) =>
@@ -3571,13 +3615,19 @@ export function AgentList({ rows, menus, onPicked, placed, query: given, onQuery
       keepNames(SIDE_OPEN_KEY, now)
       return now
     })
-  // What it is searched for (by its title, where it is, its program): the
+  const toggleFolded = (id: string) =>
+    setFoldedNow((f) => {
+      const next = f.includes(id) ? f.filter((x) => x !== id) : [...f, id]
+      keepNames(SIDE_FOLD_KEY, next)
+      return next
+    })
+  // What it is searched for (by its title, where it is, its program, project or session): the
   // rest goes, and no group is folded.
   const [own, setOwn] = useState('')
   const query = given ?? own
   const setQuery = onQuery ?? setOwn
-  // (Not a group opened or shut by a tap, nor a search typed: the change is the person's own.)
-  useFlip(groupsEl, query.trim() + '|' + open.join())
+  // (Not a group opened or shut by a tap, nor a search typed or order switched: the change is the person's own.)
+  useFlip(groupsEl, query.trim() + '|' + open.join() + '|' + folded.join() + '|' + prefs.sidebarGroup + '|' + prefs.sidebarSort + '|' + (prefs.pinFixedOrder ? '1' : '0'))
   // (Held as it was when the switcher opened: its status and time; whether it
   // is pinned, as it is now, another tab or device may change it meanwhile.)
   const at = (r: ConvoListRow) => {
@@ -3587,41 +3637,59 @@ export function AgentList({ rows, menus, onPicked, placed, query: given, onQuery
   // (Placed: in their order then, ties too; new ones after.)
   const first = placed ? [...placed.keys()] : []
   const place = (r: ConvoListRow) => (first.includes(r.key) ? first.indexOf(r.key) : first.length)
-  const found = query.trim() ? rows.filter((r) => matchQuery(query, r.title, r.where, r.program)) : rows
+  const found = query.trim() ? rows.filter((r) => matchQuery(query, r.title, r.where, r.program, r.projectKey, r.sessionGroup)) : rows
   const inOrder = placed ? [...found].sort((a, b) => place(a) - place(b)) : found
-  const groups = GROUPS.flatMap((g) => {
-    const of = inGroup(g, inOrder.map(at))
-    if (g.name !== 'convo.group.recent') return [{ name: g.name, of }]
-    // (At rest: one group, latest first — its time says which day — not a
-    // heading a day for a row or two; those of no known time last.)
-    return [
-      { name: 'convo.group.idle' as I18nKey, of: of.filter((p) => (p.since ?? 0) > 0) },
-      { name: 'convo.group.other' as I18nKey, of: of.filter((p) => (p.since ?? 0) <= 0) },
-    ]
-  })
+  const groups = buildAgentGroups(inOrder.map(at), orderOpts)
+  const showBar = rows.length > SEARCH_FROM || !!query || !!search || !!showSearch
+  const showOrder = rows.length > 1
   return (
     <>
-      {(rows.length > SEARCH_FROM || query || !!search || showSearch) && <ListSearch value={query} onChange={setQuery} focus={search} onLeft={onSearchLeft} hint={hint ? KEY_SEARCH : undefined} />}
+      {(showBar || showOrder) && (
+        <div className={'list-toolbar' + (showBar ? '' : ' is-compact')}>
+          {showBar && <ListSearch value={query} onChange={setQuery} focus={search} onLeft={onSearchLeft} hint={hint ? KEY_SEARCH : undefined} />}
+          {showOrder && <ListOrderMenu />}
+        </div>
+      )}
       {query.trim() && !found.length && <p className="list-search-none">{t('convo.searchNone')}</p>}
       <div className="convo-list-groups" ref={groupsEl}>
       {groups.map((g) => {
-        const all = g.of.map((p) => rows.find((r) => r.key === p.key)!)
+        const all = g.rows.map((p) => rows.find((r) => r.key === p.key)!)
         if (!all.length) return null
+        const label = g.labelKey ? t(g.labelKey) : (g.label ?? g.id)
+        const isCollapsed = !!g.collapsible && !query.trim() && folded.includes(g.id)
         // The old ones are many and seldom wanted: a few of them are shown
         // and the rest wait behind a tap. The one being read stays shown
         // wherever in the group it is, so going to it never hides it, and
         // the group can still be shut around it.
-        const long = FOLDED.includes(g.name) && all.length > foldAt && !query.trim()
-        const shut = long && !open.includes(g.name)
-        const of = shut ? all.filter((r, i) => i < foldAt || r.current) : all
+        const long = !g.collapsible && g.labelKey !== undefined && FOLDED.includes(g.labelKey) && all.length > foldAt && !query.trim()
+        const shut = long && !open.includes(g.id)
+        const of = isCollapsed ? [] : shut ? all.filter((r, i) => i < foldAt || r.current) : all
         const rest = all.length - of.length
-        const folds = shut && rest > 0
+        const folds = !isCollapsed && shut && rest > 0
         return (
-          <div key={g.name} className="convo-list-group" role="group" aria-label={t(g.name)}>
-            <div className="convo-list-head" data-flip={'g:' + g.name} data-flip-fade="">
-              {t(g.name)}
-              <span>{all.length}</span>
-            </div>
+          <div key={g.id} className="convo-list-group" role="group" aria-label={label}>
+            {g.collapsible ? (
+              <button
+                type="button"
+                className="convo-list-head is-collapsible"
+                data-flip={'g:' + g.id}
+                data-flip-fade=""
+                aria-expanded={!isCollapsed}
+                title={g.sub}
+                onClick={() => toggleFolded(g.id)}
+              >
+                {isCollapsed ? <ChevronRight size={13} className="convo-list-chev" aria-hidden="true" /> : <ChevronDown size={13} className="convo-list-chev" aria-hidden="true" />}
+                {g.kind === 'project' && <FolderOpen size={13} className="convo-list-gic" aria-hidden="true" />}
+                <span className="convo-list-gname">{label}</span>
+                <span className="convo-list-gcount">{all.length}</span>
+                {isCollapsed && (g.workingCount ? <span className="convo-list-gdot is-working" aria-hidden="true" /> : g.doneCount ? <span className="convo-list-gdot is-done" aria-hidden="true" /> : null)}
+              </button>
+            ) : (
+              <div className="convo-list-head" data-flip={'g:' + g.id} data-flip-fade="">
+                {label}
+                <span>{all.length}</span>
+              </div>
+            )}
             {of.map((r) => {
               // (At rest, nothing to say of it but when.)
               const said = r.status === 'blocked' || r.status === 'working' || r.status === 'done'
@@ -3670,7 +3738,7 @@ export function AgentList({ rows, menus, onPicked, placed, query: given, onQuery
                   <span className="convo-list-text" title={[r.title, r.where, r.now, bgHint].filter(Boolean).join('\n')}>
                     <span className="convo-list-line">
                       <span className="convo-list-title">{r.title}</span>
-                      {pinned(r) && g.name !== 'convo.group.pinned' && (
+                      {pinned(r) && g.id !== 'convo.group.pinned' && (
                         <span className="convo-list-pin">
                           <Pin size={12} aria-hidden="true" />
                           <span className="sr-only">{t('convo.pinnedRow')}</span>
@@ -3712,13 +3780,13 @@ export function AgentList({ rows, menus, onPicked, placed, query: given, onQuery
                 </div>
               )
             })}
-            {(folds || (long && !shut)) && (
+            {(folds || (!isCollapsed && long && !shut)) && (
               <button
                 type="button"
                 className="convo-list-more"
-                data-flip={'m:' + g.name}
+                data-flip={'m:' + g.id}
                 aria-expanded={!folds}
-                onClick={() => setOpen((o) => (folds ? [...o, g.name] : o.filter((n) => n !== g.name)))}
+                onClick={() => setOpen((o) => (folds ? [...o, g.id] : o.filter((n) => n !== g.id)))}
               >
                 {folds ? t('convo.group.more', { n: rest }) : t('convo.group.less')}
               </button>
