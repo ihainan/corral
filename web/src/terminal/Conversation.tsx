@@ -1,5 +1,5 @@
 import { createContext, Fragment, memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { PanelRight, ArrowDown, ArrowUp, ArrowUpDown, Bot, Check, MessagesSquare, FilePen, Hand, ListChecks, ShieldOff, Sparkles, Copy, Cpu, FileText, Folder, Gauge as GaugeIcon, LogOut, Radar, SquarePlus, SquareTerminal, Target, TextCursorInput, FolderOpen, Info, Image as ImageIcon, ImageOff, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, ChevronsDownUp, ChevronsUpDown, Clock, Download, Eye, GitBranch, Keyboard, ListOrdered, Loader, MessageCircleQuestion, MoreHorizontal, MoreVertical, PanelLeft, Pin, RotateCw, Search, TriangleAlert, X, Plus } from 'lucide-react'
+import { Activity, ArrowDown, ArrowDownAZ, ArrowUp, ArrowUpDown, Bot, Check, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, ChevronsDownUp, ChevronsUpDown, Clock, Copy, Cpu, Download, Eye, FilePen, FileText, Folder, FolderOpen, Gauge as GaugeIcon, GitBranch, Hand, Image as ImageIcon, ImageOff, Info, Keyboard, ListChecks, ListOrdered, Loader, LogOut, MessageCircleQuestion, MessagesSquare, MoreHorizontal, MoreVertical, PanelLeft, PanelRight, Pin, Plus, Radar, RotateCw, Search, Server, ShieldOff, Sparkles, SquarePlus, SquareTerminal, Target, TextCursorInput, TriangleAlert, X } from 'lucide-react'
 import { t, getLang, type I18nKey } from '../i18n'
 import { api } from '../api'
 import { setPrefs, usePrefs } from '../prefs'
@@ -513,7 +513,16 @@ export function ConversationView({
   // by a tap, or all with Ctrl+O on a Mac, as in Claude Code (see pageKeys).
   const [opened, setOpened] = useState<Record<string, boolean>>({})
   const toggle = useCallback((key: string, open: boolean) => setOpened((o) => ({ ...o, [key]: open })), [])
-  const [allOpen, setAllOpen] = useState(false)
+  const [allOpen, setAllOpen] = useState(() => isAllOpenKept(convo.of))
+  const toggleAllOpen = useCallback(() => {
+    setOpened({})
+    setUnfolded({})
+    setAllOpen((v) => {
+      const next = !v
+      keepAllOpen(ofNow.current.of, next)
+      return next
+    })
+  }, [])
   useEffect(() => {
     if (!active) return
     const onKey = (e: KeyboardEvent) => {
@@ -522,13 +531,11 @@ export function ConversationView({
       e.preventDefault()
       e.stopPropagation()
       if (e.repeat) return // (held: once)
-      setOpened({})
-      setUnfolded({})
-      setAllOpen((v) => !v)
+      toggleAllOpen()
     }
     window.addEventListener('keydown', onKey, true)
     return () => window.removeEventListener('keydown', onKey, true)
-  }, [active])
+  }, [active, toggleAllOpen])
   // (Of turns no longer kept, nothing is.)
   useEffect(() => {
     const keys = new Set(list.flatMap((it) => (it.kind === 'work' ? [it.key] : [])))
@@ -711,8 +718,9 @@ export function ConversationView({
     const after = seen && seen.gen === convo.gen ? seen.seq : null
     setUnreadAfter(after)
     const p = convo.of ? places.get(convo.of) : undefined
-    const back = !!p && p.gen === convo.gen && !p.stuck && p.anchors.length > 0 && convo.entries.length > 0
-    if (back) {
+    const sameGen = !!p && p.gen === convo.gen && convo.entries.length > 0
+    const back = sameGen && !p.stuck && p.anchors.length > 0
+    if (sameGen) {
       // (Of its runs opened, those still there: as the list keeps them, so
       // what is put back is what will be drawn.)
       const keys = new Set(list.flatMap((it) => (it.kind === 'work' ? [it.key] : [])))
@@ -720,9 +728,9 @@ export function ConversationView({
     }
     stuck.current = !back
     setAway(back)
-    setOpened(back ? p.opened : {})
-    setAllOpen(back ? p.allOpen : false)
-    setUnfolded(back ? p.unfolded : {}) // (keys are of one conversation: never another's)
+    setOpened(sameGen ? p.opened : {})
+    setAllOpen(isAllOpenKept(convo.of))
+    setUnfolded(sameGen ? p.unfolded : {}) // (keys are of one conversation: never another's)
     setChanges(null)
     setSubs(null)
     anchors.current = back ? p.anchors : []
@@ -1541,6 +1549,11 @@ export function ConversationView({
     )
   }
   const rows = side?.rows ?? []
+  const currentRow = rows.find((r) => r.current)
+  const barTip = [currentRow?.title ?? name[0], currentRow?.where ?? name[1], currentRow?.sessionGroup, currentRow?.projectKey]
+    .filter(Boolean)
+    .filter((v, i, arr) => arr.indexOf(v) === i)
+    .join('\n')
   const others = rows.filter((r) => r.status === 'blocked' && !r.current)
   const label = (
     <>
@@ -1674,11 +1687,11 @@ export function ConversationView({
             </button>
           )}
           {side && !sideShown ? (
-            <button type="button" className="convo-bar-pick" aria-haspopup="dialog" aria-expanded={!!picking} aria-label={t('convo.pick')} onClick={() => setPicking(true)}>
+            <button type="button" className="convo-bar-pick" aria-haspopup="dialog" aria-expanded={!!picking} aria-label={t('convo.pick')} title={barTip || undefined} onClick={() => setPicking(true)}>
               {label}
             </button>
           ) : (
-            <span className="convo-bar-pick is-static">{label}</span>
+            <span className="convo-bar-pick is-static" title={barTip || undefined}>{label}</span>
           )}
           {(() => {
             const cls = 'convo-bar-status' + (agent && !convo.failing && !stop ? ' is-' + (agent.bg === 'running' || agent.bg === 'checking' ? 'working' : answered && waits ? 'answered' : agent.status) : '')
@@ -1754,7 +1767,7 @@ export function ConversationView({
                 ...(convo.of && (convo.bind?.agent === 'claude' || convo.bind?.agent === 'codex' || convo.bind?.agent === 'agy') ? [{ label: t('turns.item'), icon: <ListOrdered size={16} />, onSelect: () => (setSearching(false), setTurnsShown(true)) }] : []),
                 ...(sideBind ? [{ label: t('side.item'), icon: <MessageCircleQuestion size={16} />, onSelect: () => setBtwShown(sideIdent) }] : []),
                 // (All steps opened or folded: the menu's, as Ctrl+O is a Mac's only.)
-                { label: t(allOpen ? 'pageKeys.foldAll' : 'pageKeys.openAll'), icon: allOpen ? <ChevronsDownUp size={16} /> : <ChevronsUpDown size={16} />, keys: mac ? ['Ctrl+O'] : undefined, disabled: !list.length, onSelect: () => (setOpened({}), setUnfolded({}), setAllOpen((v) => !v)) },
+                { label: t(allOpen ? 'pageKeys.foldAll' : 'pageKeys.openAll'), icon: allOpen ? <ChevronsDownUp size={16} /> : <ChevronsUpDown size={16} />, keys: mac ? ['Ctrl+O'] : undefined, disabled: !list.length, onSelect: toggleAllOpen },
                 ...(convo.of && convo.status === 'ready' ? [{ label: t('card.open'), icon: <Info size={16} />, onSelect: () => setCard(cardMode()) }] : []),
                 { label: t('convoExport.item'), icon: <Download size={16} />, disabled: !list.length, onSelect: () => doExport() },
                 // (On every device: a tablet's keyboard has these keys too.)
@@ -3493,18 +3506,18 @@ const SIDE_FOLD_KEY = 'corral.convo.sideFold'
 function ListOrderMenu() {
   const prefs = usePrefs()
   const active = prefs.sidebarGroup !== 'status' || prefs.sidebarSort !== 'recent' || prefs.pinFixedOrder
-  const mark = (on: boolean) => (on ? <Check size={16} /> : <span className="menu-icon-space" />)
+  const tick = (on: boolean) => (on ? <Check size={15} /> : undefined)
   return (
     <Menu
       label={t('convo.order.menu')}
       items={() => [
-        { label: t('convo.order.groupStatus'), group: t('convo.order.groupBy'), icon: mark(prefs.sidebarGroup === 'status'), checked: prefs.sidebarGroup === 'status', onSelect: () => setPrefs({ sidebarGroup: 'status' }) },
-        { label: t('convo.order.groupProject'), icon: mark(prefs.sidebarGroup === 'project'), checked: prefs.sidebarGroup === 'project', onSelect: () => setPrefs({ sidebarGroup: 'project' }) },
-        { label: t('convo.order.groupSession'), icon: mark(prefs.sidebarGroup === 'session'), checked: prefs.sidebarGroup === 'session', onSelect: () => setPrefs({ sidebarGroup: 'session' }) },
-        { label: t('convo.order.sortRecent'), group: t('convo.order.sortBy'), separator: true, icon: mark(prefs.sidebarSort === 'recent'), checked: prefs.sidebarSort === 'recent', onSelect: () => setPrefs({ sidebarSort: 'recent' }) },
-        { label: t('convo.order.sortSmart'), icon: mark(prefs.sidebarSort === 'smart'), checked: prefs.sidebarSort === 'smart', onSelect: () => setPrefs({ sidebarSort: 'smart' }) },
-        { label: t('convo.order.sortName'), icon: mark(prefs.sidebarSort === 'name'), checked: prefs.sidebarSort === 'name', onSelect: () => setPrefs({ sidebarSort: 'name' }) },
-        { label: t('convo.order.pinFixed'), group: t('convo.group.pinned'), separator: true, icon: mark(prefs.pinFixedOrder), checked: prefs.pinFixedOrder, keepOpen: true, onSelect: () => setPrefs({ pinFixedOrder: !prefs.pinFixedOrder }) },
+        { label: t('convo.order.groupStatus'), group: t('convo.order.groupBy'), icon: <Activity size={16} />, trail: tick(prefs.sidebarGroup === 'status'), checked: prefs.sidebarGroup === 'status', onSelect: () => setPrefs({ sidebarGroup: 'status' }) },
+        { label: t('convo.order.groupProject'), icon: <Folder size={16} />, trail: tick(prefs.sidebarGroup === 'project'), checked: prefs.sidebarGroup === 'project', onSelect: () => setPrefs({ sidebarGroup: 'project' }) },
+        { label: t('convo.order.groupSession'), icon: <Server size={16} />, trail: tick(prefs.sidebarGroup === 'session'), checked: prefs.sidebarGroup === 'session', onSelect: () => setPrefs({ sidebarGroup: 'session' }) },
+        { label: t('convo.order.sortRecent'), group: t('convo.order.sortBy'), separator: true, icon: <Clock size={16} />, trail: tick(prefs.sidebarSort === 'recent'), checked: prefs.sidebarSort === 'recent', onSelect: () => setPrefs({ sidebarSort: 'recent' }) },
+        { label: t('convo.order.sortSmart'), icon: <Sparkles size={16} />, trail: tick(prefs.sidebarSort === 'smart'), checked: prefs.sidebarSort === 'smart', onSelect: () => setPrefs({ sidebarSort: 'smart' }) },
+        { label: t('convo.order.sortName'), icon: <ArrowDownAZ size={16} />, trail: tick(prefs.sidebarSort === 'name'), checked: prefs.sidebarSort === 'name', onSelect: () => setPrefs({ sidebarSort: 'name' }) },
+        { label: t('convo.order.pinFixed'), group: t('convo.group.pinned'), separator: true, icon: <Pin size={16} />, trail: tick(prefs.pinFixedOrder), checked: prefs.pinFixedOrder, keepOpen: true, onSelect: () => setPrefs({ pinFixedOrder: !prefs.pinFixedOrder }) },
       ]}
       button={(open, toggle) => (
         <button
@@ -3720,7 +3733,13 @@ export function AgentList({ rows, menus, onPicked, placed, query: given, onQuery
                   which tells alike names apart — and when. A third only for what
                   waits on the person: what it asks, or messages not seen taken in.
                   The whole of each in its tooltip and the conversation's bar.) */}
-              <span className="convo-list-text" title={[r.title, r.where, r.now, bgHint].filter(Boolean).join('\n')}>
+              <span
+                className="convo-list-text"
+                title={[r.title, r.where, r.sessionGroup, r.projectKey, r.now, bgHint]
+                  .filter(Boolean)
+                  .filter((v, i, arr) => arr.indexOf(v) === i)
+                  .join('\n')}
+              >
                 <span className="convo-list-line">
                   <span className="convo-list-title">{r.title}</span>
                   {pinned(r) && g.id !== 'convo.group.pinned' && (
@@ -4929,6 +4948,17 @@ type Anchor = { key: string; top: number; fromEnd: number; last: string }
 // Where each conversation was left, for this page's life: as many as are
 // kept to be shown at once (conversation.ts), the latest last.
 type Place = { gen: number; stuck: boolean; anchors: Anchor[]; noted: Item[]; opened: Record<string, boolean>; allOpen: boolean; unfolded: Record<string, boolean> }
+const CONVO_OPEN_ALL_KEY = 'corral.convo.allOpen'
+function isAllOpenKept(of?: string): boolean {
+  return !!of && keptNames(CONVO_OPEN_ALL_KEY).includes(of)
+}
+function keepAllOpen(of: string | undefined, open: boolean) {
+  if (!of) return
+  const prev = keptNames(CONVO_OPEN_ALL_KEY).filter((x) => x !== of)
+  if (open) prev.push(of)
+  keepNames(CONVO_OPEN_ALL_KEY, prev.slice(-100))
+}
+
 const places = new Map<string, Place>()
 function keepAt(of: string, p: Place) {
   places.delete(of)
@@ -5637,7 +5667,7 @@ function Thinking({ text, live }: { text: string; live?: boolean }) {
           by words of its own in the line — copied, or read as its text, the line is its title.) */}
       <button type="button" className="convo-step-head" aria-expanded={open} aria-label={title ? `${t('convo.thinking')}: ${title}` : undefined} onClick={() => setOpen(!open)}>
         <ThinkIcon size={16} strokeWidth={1.75} className="convo-step-ic" aria-hidden="true" />
-        <span className="convo-step-obj">{title || t('convo.thinking')}</span>
+        <span className="convo-step-obj">{open ? t('convo.thinking') : title || t('convo.thinking')}</span>
       </button>
       {open && (
         <div className="convo-thinking">

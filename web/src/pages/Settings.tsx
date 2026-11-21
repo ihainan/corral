@@ -495,7 +495,7 @@ function TranslateConfigDialog({ config, onClose }: { config: TranslateConfig | 
               onClick={() => setPreviewOpen((v) => !v)}
             >
               <Brain size={14} className="tr-preview-ic" aria-hidden="true" />
-              <span className="tr-preview-title">{headTitle}</span>
+              <span className="tr-preview-title">{previewOpen ? t('convo.thinking') : headTitle}</span>
               {previewOpen ? <ChevronDown size={14} className="tr-preview-chev" aria-hidden="true" /> : <ChevronRight size={14} className="tr-preview-chev" aria-hidden="true" />}
             </button>
             {previewOpen && (

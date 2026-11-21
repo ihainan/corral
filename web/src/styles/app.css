@@ -558,6 +558,8 @@ a.setting:hover { text-decoration: none; background: var(--bg-hover); }
 /* A menu item's key, as the page's list of keys draws one (terminal.css .page-keys kbd): at its end; none where there are no keys. */
 .menu-keys { margin-left: auto; padding-left: 12px; display: inline-flex; gap: 4px; }
 .menu-keys kbd { min-width: 20px; padding: 0 6px; border: 1px solid var(--line-strong); border-bottom-width: 2px; border-radius: var(--r-sm); background: var(--bg-subtle); color: var(--fg-3); font-family: var(--font-mono); font-size: var(--fs-note); line-height: var(--lh-note); text-align: center; }
+.menu-trail { margin-left: auto; padding-left: 12px; display: inline-flex; align-items: center; color: var(--accent-text); flex: none; }
+.menu-trail svg { color: var(--accent-text); }
 @media (pointer: coarse) { .menu-keys { display: none; } }
 .sheet-list .menu-item:has(.menu-hint) { padding-top: 6px; padding-bottom: 6px; }
 .menu-item:disabled:hover { background: none; }
