@@ -609,6 +609,15 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 .convo-models-item.is-mode > .convo-mode-check { grid-column: 3; grid-row: 1 / span 2; align-self: center; }
 .convo-models-item.is-mode[aria-checked='true'] > .convo-mode-ic { color: var(--term-accent-text); }
 .convo-models-item.is-mode.is-risky > .convo-mode-ic { color: var(--term-warn-text); }
+/* A model row: maker mark (or fallback Cpu) on the left, name + id/desc, tick on the right. */
+.convo-models-item.is-model { grid-template-columns: 18px minmax(0, 1fr) auto; align-items: start; }
+.convo-models-item.is-model > .convo-model-ic { grid-column: 1; grid-row: 1 / span 2; margin-top: 2px; }
+.convo-models-item.is-model > .convo-models-label, .convo-models-item.is-model > .convo-models-desc { grid-column: 2; }
+.convo-models-item.is-model > .convo-model-check { grid-column: 3; grid-row: 1 / span 2; align-self: center; }
+.convo-model-ic { flex: none; display: inline-block; }
+.convo-model-ic.is-fallback { color: var(--term-fg-3); }
+.convo-runs-model { display: inline-flex; align-items: center; gap: 3px; }
+.convo-runs-model > .convo-model-ic { opacity: 1; margin-right: 1px; }
 .convo-models-item {
   display: grid; grid-template-columns: 1fr auto; align-items: center; column-gap: 8px; width: 100%; padding: 6px 8px;
   border: 0; border-radius: var(--r-sm); background: none; color: var(--term-fg); font: inherit; text-align: left; cursor: pointer;

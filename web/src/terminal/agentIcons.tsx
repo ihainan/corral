@@ -7,7 +7,7 @@
 // MIT License, Copyright (c) 2023 LobeHub. The marks themselves are their
 // owners' trademarks, shown here only to say which program runs.
 import { useId } from 'react'
-import { SquareTerminal } from 'lucide-react'
+import { Cpu, SquareTerminal } from 'lucide-react'
 
 // grad: the mark is painted in its maker's colours down its height (their
 // colour icon, where the mono one would be a black blob); color is then
@@ -46,6 +46,44 @@ export function AgentGlyph({ program, size = 16 }: { program: string; size?: num
   if (!m) return null
   return (
     <svg className="agent-glyph" viewBox="0 0 24 24" width={size} height={size} fill={m.grad ? `url(#${grad})` : m.color ?? 'currentColor'} fillRule={m.even ? 'evenodd' : undefined} clipRule={m.even ? 'evenodd' : undefined} aria-hidden="true">
+      {m.grad && (
+        <defs>
+          <linearGradient id={grad} x1="0" y1="0" x2="0" y2="1">
+            {m.grad.map((c, i) => (
+              <stop key={c + i} offset={m.grad!.length < 2 ? 0 : i / (m.grad!.length - 1)} stopColor={c} />
+            ))}
+          </linearGradient>
+        </defs>
+      )}
+      <path d={m.d} />
+    </svg>
+  )
+}
+
+const OPENAI_MARK: Mark = {
+  name: 'OpenAI',
+  d: 'M22.282 9.821a5.985 5.985 0 00-.516-4.911 6.046 6.046 0 00-6.51-2.9A6.065 6.065 0 004.981 4.182a5.985 5.985 0 00-3.998 2.9 6.046 6.046 0 00.743 7.097 5.98 5.98 0 00.511 4.911 6.051 6.051 0 006.515 2.9A5.985 5.985 0 0013.26 24a6.056 6.056 0 005.772-4.206 5.989 5.989 0 003.998-2.9 6.056 6.056 0 00-.748-7.073zm-9.022 12.608a4.476 4.476 0 01-2.876-1.041l.142-.08 4.778-2.758a.795.795 0 00.393-.681v-6.737l2.02 1.169a.071.071 0 01.038.052v5.583a4.504 4.504 0 01-4.495 4.494zm-9.661-4.125a4.471 4.471 0 01-.535-3.014l.142.085 4.783 2.758a.771.771 0 00.781 0l5.843-3.368v2.332a.08.08 0 01-.033.062L9.74 19.95a4.499 4.499 0 01-6.141-1.646zM2.341 7.896a4.485 4.485 0 012.365-1.973V11.6a.766.766 0 00.388.677l5.814 3.354-2.02 1.169a.076.076 0 01-.071 0l-4.83-2.787a4.504 4.504 0 01-1.646-6.141zm16.596 3.856l-5.833-3.388L15.119 7.2a.076.076 0 01.071 0l4.83 2.791a4.494 4.494 0 01-.676 8.104v-5.677a.79.79 0 00-.407-.667zm2.011-3.023l-.142-.085-4.774-2.782a.776.776 0 00-.785 0L9.409 9.23V6.897a.066.066 0 01.028-.061l4.83-2.787a4.499 4.499 0 016.68 4.66zM8.307 12.863l-2.02-1.164a.08.08 0 01-.038-.057V6.074a4.499 4.499 0 017.376-3.454l-.142.081L8.704 5.459a.795.795 0 00-.393.681zm1.097-2.365l2.602-1.5 2.607 1.5v2.999l-2.597 1.5-2.607-1.5z',
+}
+
+// Which maker's mark a model belongs to, by its display label or id (e.g.
+// "Gemini 4 Neon", "Claude Opus 5.5", "GPT-OSS 120B", "gpt-5.4").
+export function modelMark(model?: string, desc?: string): Mark | undefined {
+  const s = `${model ?? ''} ${desc ?? ''}`.toLowerCase()
+  if (/\b(gemini|orchestrator|gemma)\b/.test(s)) return MARKS.gemini
+  if (/\b(claude|opus|sonnet|haiku|fable)\b/.test(s)) return MARKS.claude
+  if (/\b(gpt|openai|o[134](?:-mini|-pro|-preview)?|codex)\b/.test(s)) return OPENAI_MARK
+  if (/\bqwen\b/.test(s)) return MARKS.qwen
+  return undefined
+}
+
+// A model's maker mark beside its name, or a plain Cpu mark when the model's
+// family is not one of the known ones.
+export function ModelGlyph({ model, desc, size = 14, className = 'convo-model-ic' }: { model?: string; desc?: string; size?: number; className?: string }) {
+  const m = modelMark(model, desc)
+  const grad = useId()
+  if (!m) return <Cpu size={size} className={className + ' is-fallback'} aria-hidden="true" />
+  return (
+    <svg className={className} viewBox="0 0 24 24" width={size} height={size} fill={m.grad ? `url(#${grad})` : m.color ?? 'currentColor'} fillRule={m.even ? 'evenodd' : undefined} clipRule={m.even ? 'evenodd' : undefined} aria-hidden="true">
       {m.grad && (
         <defs>
           <linearGradient id={grad} x1="0" y1="0" x2="0" y2="1">

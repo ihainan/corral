@@ -26,7 +26,7 @@ import { useObjectURL } from './picture'
 import { previewOf } from './convoTurns'
 import { itemKey } from './convoSearch'
 import { exportMarkdown } from './convoExport'
-import { AgentIcon } from './agentIcons'
+import { AgentIcon, ModelGlyph } from './agentIcons'
 import { matchQuery } from './agents'
 import { callOut, keptEntries } from './conversation'
 import { ShowTerminal } from './showTerminal'
@@ -2874,6 +2874,7 @@ function Runs({ meta, goal, active, mode, model, effort, quota, via, auth, onSid
           >
             {/* Merged: the model and how hard it thinks are the one choice,
                 so they are the one chip — the menu behind them is one. */}
+            {!(going && model.busy) && <ModelGlyph model={shownModel!} size={13} />}
             {going && model.busy
               ? t('convo.modelGoing', { what: going })
               : merged && shownEffort
@@ -2882,7 +2883,10 @@ function Runs({ meta, goal, active, mode, model, effort, quota, via, auth, onSid
             {going && model.busy ? <Loader size={12} className="convo-running-spin" aria-hidden="true" /> : <ChevronsUpDown size={12} aria-hidden="true" />}
           </button>
         ) : (
-          <span className="convo-runs-item convo-runs-model" title={shownModel}>{modelName(shownModel!)}</span>
+          <span className="convo-runs-item convo-runs-model" title={shownModel}>
+            <ModelGlyph model={shownModel!} size={13} />
+            {modelName(shownModel!)}
+          </span>
         ))}
       {shownEffort && !(merged && shownModel && model) &&
         (() => {
@@ -2973,16 +2977,17 @@ function Runs({ meta, goal, active, mode, model, effort, quota, via, auth, onSid
                     role="menuitemradio"
                     aria-checked={chosen}
                     aria-expanded={model.efforts ? effortsOf === o.label : undefined}
-                    className={'convo-models-item' + (now ? ' is-now' : '')}
+                    className={'convo-models-item is-model' + (now ? ' is-now' : '')}
                     title={o.label}
                     onClick={() => (model.efforts ? (setEffortsOf(o.label), setStage({ model: o.label })) : pick())}
                   >
+                    <ModelGlyph model={o.label} desc={o.desc} size={15} />
                     <span className="convo-models-label">
                       {name}
                       {now && !chosen && <span className="convo-models-now">{t('convo.modelNowTag')}</span>}
                     </span>
                     {says && <span className="convo-models-desc">{says}</span>}
-                    {chosen && <Check size={14} aria-hidden="true" />}
+                    {chosen && <Check size={14} className="convo-model-check" aria-hidden="true" />}
                   </button>
                   {model.efforts && effortsOf === o.label && (
                     <div className="convo-models-efforts" role="group" aria-label={t('convo.effort')}>
