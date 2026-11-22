@@ -6522,14 +6522,33 @@ function Thinking({ text, live }: { text: string; live?: boolean }) {
   const isSummary = tr.mode === 'summarize'
   const shown = translated && !showOrig ? tr.text! : text
   const title = thoughtTitle(isSummary ? (translated ? tr.text! : text) : shown)
+  const showInlineBar = open && !isSummary && (translated || tr.status === 'loading' || tr.status === 'error')
   return (
     <div ref={setEl} className="convo-step is-thought">
       {/* (The mark stands for "thinking": said to a reader by the button's name, not
           by words of its own in the line — copied, or read as its text, the line is its title.) */}
-      <button type="button" className="convo-step-head" aria-expanded={open} aria-label={title ? `${t('convo.thinking')}: ${title}` : undefined} onClick={() => setManual(!open)}>
-        <ThinkIcon size={16} strokeWidth={1.75} className="convo-step-ic" aria-hidden="true" />
-        <span className="convo-step-obj">{open ? t('convo.thinking') : title || t('convo.thinking')}</span>
-      </button>
+      <div className="convo-thought-head">
+        <button type="button" className="convo-step-head" aria-expanded={open} aria-label={title ? `${t('convo.thinking')}: ${title}` : undefined} onClick={() => setManual(!open)}>
+          <ThinkIcon size={16} strokeWidth={1.75} className="convo-step-ic" aria-hidden="true" />
+          <span className="convo-step-obj">{open ? t('convo.thinking') : title || t('convo.thinking')}</span>
+        </button>
+        {showInlineBar && (
+          <div className="convo-thinking-bar">
+            {tr.status === 'loading' && <span className="convo-thinking-status">{t('convo.translate.loading')}</span>}
+            {tr.status === 'error' && <span className="convo-thinking-status" title={tr.error}>{t('convo.translate.failed')}</span>}
+            {translated && (
+              <button
+                type="button"
+                className="convo-thinking-toggle"
+                aria-pressed={showOrig}
+                onClick={() => setShowOrig((v) => !v)}
+              >
+                {t(showOrig ? 'convo.translate.translated' : 'convo.translate.original')}
+              </button>
+            )}
+          </div>
+        )}
+      </div>
       {open && (
         <div className="convo-thinking">
           {isSummary ? (
@@ -6548,25 +6567,7 @@ function Thinking({ text, live }: { text: string; live?: boolean }) {
               )}
             </>
           ) : (
-            <>
-              {(translated || tr.status === 'loading' || tr.status === 'error') && (
-                <div className="convo-thinking-bar">
-                  {tr.status === 'loading' && <span className="convo-thinking-status">{t('convo.translate.loading')}</span>}
-                  {tr.status === 'error' && <span className="convo-thinking-status" title={tr.error}>{t('convo.translate.failed')}</span>}
-                  {translated && (
-                    <button
-                      type="button"
-                      className="convo-thinking-toggle"
-                      aria-pressed={showOrig}
-                      onClick={() => setShowOrig((v) => !v)}
-                    >
-                      {t(showOrig ? 'convo.translate.translated' : 'convo.translate.original')}
-                    </button>
-                  )}
-                </div>
-              )}
-              <Markdown text={shown} />
-            </>
+            <Markdown text={shown} />
           )}
         </div>
       )}
