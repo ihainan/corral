@@ -1738,45 +1738,6 @@ export function ConversationView({
         <nav className="convo-side" aria-label={t('convo.agents')} style={{ width: sideWidth }} ref={sideEl}>
           {isTouchOnly && <NewAgentRow />}
           <AgentList rows={rows} menus query={sideQuery} onQuery={setSideQuery} search={searchAsked} onSearchLeft={() => setSearchAsked(0)} hint={!isTouchOnly} compact={!isTouchOnly} showNew={!isTouchOnly} />
-          {!isTouchOnly && (
-            <div className="convo-side-foot">
-              <button type="button" className="convo-side-foot-btn" onClick={() => navigate('/settings')} title={t('nav.settings')}>
-                <Settings size={14} aria-hidden="true" />
-                <span>{t('nav.settings')}</span>
-              </button>
-              <div className="convo-side-foot-acts">
-                <button
-                  type="button"
-                  className="icon-btn convo-side-foot-ic"
-                  onClick={() => setPrefs({ theme: darkNow ? 'light' : 'dark' })}
-                  aria-label={t(darkNow ? 'convo.side.themeToLight' : 'convo.side.themeToDark')}
-                  title={t(darkNow ? 'convo.side.themeToLight' : 'convo.side.themeToDark')}
-                >
-                  {darkNow ? <Sun size={14} aria-hidden="true" /> : <Moon size={14} aria-hidden="true" />}
-                </button>
-                {list.length > 0 && (
-                  <button
-                    type="button"
-                    className="icon-btn convo-side-foot-ic"
-                    onClick={toggleAllOpen}
-                    aria-label={t(allOpen === 0 ? 'pageKeys.openAll' : allOpen === 1 ? 'pageKeys.openFull' : 'pageKeys.foldAll')}
-                    title={t(allOpen === 0 ? 'pageKeys.openAll' : allOpen === 1 ? 'pageKeys.openFull' : 'pageKeys.foldAll') + (mac ? ' (Ctrl+O)' : '')}
-                  >
-                    {allOpen === 2 ? <ChevronsDownUp size={14} aria-hidden="true" /> : <ChevronsUpDown size={14} aria-hidden="true" />}
-                  </button>
-                )}
-                <button
-                  type="button"
-                  className="icon-btn convo-side-foot-ic"
-                  onClick={() => setKeysShown('side')}
-                  aria-label={t('convo.side.shortcuts')}
-                  title={t('convo.side.shortcuts')}
-                >
-                  <Keyboard size={14} aria-hidden="true" />
-                </button>
-              </div>
-            </div>
-          )}
         </nav>
       )}
       {sideShown && (
@@ -2392,12 +2353,13 @@ export function ConversationView({
           rows={rows}
           quota={quotaOf}
           active={active}
-          branch={convo.status === 'ready' ? convo.meta?.branch : undefined}
-          ctx={convo.status === 'ready' && convo.meta?.context ? { used: convo.meta.context, window: convo.meta.window } : undefined}
-          bgCount={(hostCmds?.n ?? 0) + (convo.running?.length ?? 0)}
-          dock={dockHere ? { open: dockOpen, tab: dockTab, onToggle: () => setDockOpen(!dockOpen), onOpenTab: (tb) => { setChanges(null); setSubs(null); setBgCmd(null); setDockTab(tb); setDockOpen(true) } } : undefined}
+          dark={darkNow}
+          onToggleTheme={() => setPrefs({ theme: darkNow ? 'light' : 'dark' })}
+          foldSteps={list.length > 0 ? { level: allOpen, mac, onToggle: toggleAllOpen } : undefined}
+          dock={dockHere ? { open: dockOpen, tab: dockTab, onToggle: () => setDockOpen(!dockOpen) } : undefined}
           onOpenQuota={() => root.current?.querySelector<HTMLButtonElement>('.convo-runs-ctx')?.click()}
           onOpenKeys={() => setKeysShown('status')}
+          onOpenSettings={() => navigate('/settings')}
         />
       )}
       {picking && side && <Picker rows={rows} onClose={unpick} searchFirst={picking === 'search'} />}
@@ -3764,30 +3726,30 @@ function WorkbenchStatusBar({
   rows,
   quota,
   active,
-  branch,
-  ctx,
-  bgCount,
+  dark,
+  onToggleTheme,
+  foldSteps,
   dock,
   onOpenQuota,
   onOpenKeys,
+  onOpenSettings,
 }: {
   rows: ConvoListRow[]
   quota?: QuotaOf
   active: boolean
-  branch?: string
-  ctx?: { used: number; window?: number }
-  bgCount: number
-  dock?: { open: boolean; tab: DockTab; onToggle: () => void; onOpenTab: (tb: DockTab) => void }
+  dark: boolean
+  onToggleTheme: () => void
+  foldSteps?: { level: number; mac: boolean; onToggle: () => void }
+  dock?: { open: boolean; tab: DockTab; onToggle: () => void }
   onOpenQuota: () => void
   onOpenKeys: () => void
+  onOpenSettings: () => void
 }) {
   const shown = useStatusQuota(quota, active)
   const blocked = rows.filter(isLiveBlocked)
   const working = rows.filter((r) => !isLiveBlocked(r) && (r.status === 'working' || r.bg === 'running'))
   const now = Date.now() / 1000
   const dockTabWord: Record<DockTab, I18nKey> = { info: 'dock.info', changes: 'dock.changes', files: 'dock.files', terminal: 'dock.terminal' }
-  const ctxLabel = ctx ? (ctx.window ? `${Math.min(100, Math.round((ctx.used / ctx.window) * 100))}%` : tokens(ctx.used)) : ''
-  const ctxPct = ctx?.window ? Math.round((ctx.used / ctx.window) * 100) : 0
   return (
     <footer className="convo-statusbar" aria-label={t('convo.statusBar.label')}>
       <div className="convo-sb-group">
@@ -3854,31 +3816,6 @@ function WorkbenchStatusBar({
         )}
       </div>
       <div className="convo-sb-group is-right">
-        {branch && (
-          dock ? (
-            <button type="button" className="convo-sb-btn convo-sb-branch" onClick={() => dock.onOpenTab('changes')} title={t('convo.branch', { b: branch })}>
-              <GitBranch size={12} aria-hidden="true" />
-              <span className="convo-sb-trunc">{branch}</span>
-            </button>
-          ) : (
-            <span className="convo-sb-item convo-sb-branch" title={t('convo.branch', { b: branch })}>
-              <GitBranch size={12} aria-hidden="true" />
-              <span className="convo-sb-trunc">{branch}</span>
-            </span>
-          )
-        )}
-        {bgCount > 0 && dock && (
-          <button type="button" className="convo-sb-btn is-accent" onClick={() => dock.onOpenTab('info')}>
-            <span className="convo-sb-dot is-working" aria-hidden="true" />
-            <span>{t('convo.statusBar.bg', { n: bgCount })}</span>
-          </button>
-        )}
-        {ctxLabel && (
-          <button type="button" className={'convo-sb-btn' + (ctxPct >= 90 ? ' is-danger' : ctxPct >= 80 ? ' is-warn' : '')} onClick={onOpenQuota} title={t('convo.statusBar.quotaTip')}>
-            <GaugeIcon size={12} aria-hidden="true" />
-            <span>{ctxLabel}</span>
-          </button>
-        )}
         {dock && (
           <button
             type="button"
@@ -3891,8 +3828,33 @@ function WorkbenchStatusBar({
             <span>{t(dockTabWord[dock.tab])}</span>
           </button>
         )}
+        {foldSteps && (
+          <button
+            type="button"
+            className="convo-sb-btn"
+            onClick={foldSteps.onToggle}
+            aria-label={t(foldSteps.level === 0 ? 'pageKeys.openAll' : foldSteps.level === 1 ? 'pageKeys.openFull' : 'pageKeys.foldAll')}
+            title={t(foldSteps.level === 0 ? 'pageKeys.openAll' : foldSteps.level === 1 ? 'pageKeys.openFull' : 'pageKeys.foldAll') + (foldSteps.mac ? ' (Ctrl+O)' : '')}
+          >
+            {foldSteps.level === 2 ? <ChevronsDownUp size={12} aria-hidden="true" /> : <ChevronsUpDown size={12} aria-hidden="true" />}
+          </button>
+        )}
+        <span className="convo-sb-sep" aria-hidden="true" />
+        <button
+          type="button"
+          className="convo-sb-btn"
+          onClick={onToggleTheme}
+          aria-label={t(dark ? 'convo.side.themeToLight' : 'convo.side.themeToDark')}
+          title={t(dark ? 'convo.side.themeToLight' : 'convo.side.themeToDark')}
+        >
+          {dark ? <Sun size={12} aria-hidden="true" /> : <Moon size={12} aria-hidden="true" />}
+        </button>
         <button type="button" className="convo-sb-btn" onClick={onOpenKeys} aria-label={t('convo.side.shortcuts')} title={t('convo.side.shortcuts')}>
           <Keyboard size={12} aria-hidden="true" />
+        </button>
+        <button type="button" className="convo-sb-btn" onClick={onOpenSettings} title={t('nav.settings')}>
+          <Settings size={12} aria-hidden="true" />
+          <span>{t('nav.settings')}</span>
         </button>
       </div>
     </footer>
