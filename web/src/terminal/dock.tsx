@@ -8,7 +8,7 @@
 // in this browser); what each tab shows is per conversation, kept while the
 // page is.
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react'
-import { FolderOpen, GitCompareArrows, Maximize2, Minimize2, SquareTerminal, X } from 'lucide-react'
+import { FolderOpen, GitCompareArrows, Info, Maximize2, Minimize2, SquareTerminal, X } from 'lucide-react'
 import { api } from '../api'
 import { t } from '../i18n'
 import { usePrefs } from '../prefs'
@@ -16,11 +16,12 @@ import { ChangesBody, useChanges, type ChangesActs, type ChangesAgainst } from '
 import { PanelWindow } from './PanelWindow'
 import { FilesBrowser } from './FilesDialog'
 import { TextPreview } from './textPreview'
+import { CardBody, type CardActs, type CardData } from './sessionCard'
 import type { LineSpan } from './paths'
 
-export type DockTab = 'changes' | 'files' | 'terminal'
-const TABS: DockTab[] = ['changes', 'files', 'terminal']
-const TAB_WORD = { changes: 'dock.changes', files: 'dock.files', terminal: 'dock.terminal' } as const
+export type DockTab = 'info' | 'changes' | 'files' | 'terminal'
+const TABS: DockTab[] = ['info', 'changes', 'files', 'terminal']
+const TAB_WORD = { info: 'dock.info', changes: 'dock.changes', files: 'dock.files', terminal: 'dock.terminal' } as const
 
 // What the page asks of the Files tab (AgentsChat's file acts, where there is
 // a dock): a text file looked at (at its lines), a folder opened, a file shown
@@ -37,17 +38,17 @@ export type DockTerminal = { can: boolean; press: () => Record<string, unknown>;
 // The person's: kept in this browser (none there — private, blocked: as at first).
 const KEY = 'corral.dock'
 type Kept = { open: boolean; tab: DockTab; width: number }
-export const DOCK_W = { min: 400, max: 720, at: 480 }
+export const DOCK_W = { min: 320, max: 720, at: 420 }
 export function dockKept(): Kept {
   try {
     const v = JSON.parse(localStorage.getItem(KEY) ?? 'null') as Partial<Kept> | null
     return {
       open: v?.open === true,
-      tab: v?.tab && TABS.includes(v.tab) ? v.tab : 'changes',
+      tab: v?.tab && TABS.includes(v.tab) ? v.tab : 'info',
       width: typeof v?.width === 'number' ? Math.min(DOCK_W.max, Math.max(DOCK_W.min, v.width)) : DOCK_W.at,
     }
   } catch {
-    return { open: false, tab: 'changes', width: DOCK_W.at }
+    return { open: false, tab: 'info', width: DOCK_W.at }
   }
 }
 export function keepDock(k: Partial<Kept>) {
@@ -90,6 +91,7 @@ export function Dock({
   pane,
   tab,
   onTab,
+  info,
   start,
   ask,
   onInsert,
@@ -111,6 +113,7 @@ export function Dock({
   ident: string // (the agent there now — its process and session: another, /resume or a new one in the pane, is shown anew, no key of the last one's screen going to it)
   tab: DockTab
   onTab: (t: DockTab) => void
+  info?: { data: CardData; acts: CardActs }
   start?: { against: ChangesAgainst; base?: string; n: number } // (the card's counts tapped: that reading, n each time)
   ask?: FilesAsk // (the Files tab asked for a file or a folder)
   onInsert: (path: string) => void // (a path put in the composer, from the Files tab)
@@ -205,18 +208,18 @@ export function Dock({
               tabIndex={tab === k ? 0 : -1}
               onClick={() => onTab(k)}
             >
-              {k === 'changes' ? <GitCompareArrows size={15} /> : k === 'files' ? <FolderOpen size={15} /> : <SquareTerminal size={15} />}
+              {k === 'info' ? <Info size={14} strokeWidth={1.75} /> : k === 'changes' ? <GitCompareArrows size={14} strokeWidth={1.75} /> : k === 'files' ? <FolderOpen size={14} strokeWidth={1.75} /> : <SquareTerminal size={14} strokeWidth={1.75} />}
               {t(TAB_WORD[k])}
             </button>
           ))}
         </div>
         {(canExpand || !!expanded) && (
           <button type="button" className="icon-btn convo-tray-expand" aria-pressed={!!expanded} onClick={() => onExpand(!expanded)} aria-label={t(expanded ? 'dock.collapse' : 'dock.expand')} title={t(expanded ? 'dock.collapse' : 'dock.expand')}>
-            {expanded ? <Minimize2 size={16} /> : <Maximize2 size={16} />}
+            {expanded ? <Minimize2 size={16} strokeWidth={1.75} /> : <Maximize2 size={16} strokeWidth={1.75} />}
           </button>
         )}
         <button type="button" className="icon-btn convo-tray-close" onClick={onClose} aria-label={t('dock.close')} title={t('dock.close')}>
-          <X size={18} />
+          <X size={16} strokeWidth={1.75} />
         </button>
       </div>
       {/* (Files kept once shown — its folder, an upload going — while another tab is: hidden, not gone.) */}
@@ -226,7 +229,15 @@ export function Dock({
         </div>
       )}
       <div className="convo-tray-body" role="tabpanel" id={'dock-panel-' + tab} aria-labelledby={'dock-tab-' + tab} hidden={tab === 'files'}>
-        {tab === 'files' ? null : tab === 'changes' ? (
+        {tab === 'files' ? null : tab === 'info' ? (
+          info ? (
+            <div className="convo-tray-info">
+              <div className="scard">
+                <CardBody key={of + ' ' + ident} data={info.data} acts={info.acts} close={() => {}} />
+              </div>
+            </div>
+          ) : null
+        ) : tab === 'changes' ? (
           <DockChanges key={of + ' ' + ident} of={of} sid={sid} pane={pane} start={start} acts={acts} />
         ) : terminal?.can ? (
           <PanelWindow key={of + ' ' + ident} sid={sid} active={active} press={terminal.press} onSettled={onSettled} toast={toast} live={{ onFull: terminal.onFull, letters: terminal.letters, who: terminal.who, onComposer: terminal.onComposer, onLeave: () => root.current?.querySelector<HTMLElement>('.convo-tray-tab[aria-selected="true"]')?.focus() }} />

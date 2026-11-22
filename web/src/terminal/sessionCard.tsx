@@ -177,7 +177,7 @@ function Counts({ add, del }: { add: number; del: number }) {
   )
 }
 
-function CardBody({ data, acts, close }: { data: CardData; acts: CardActs; close: () => void }) {
+export function CardBody({ data, acts, close }: { data: CardData; acts: CardActs; close: () => void }) {
   const { git, pr, error, retry } = useGit(data.sid, data.pane)
   const [inspectOpen, setInspectOpen] = useState(false)
   const { inspect, loading: inspectLoading } = usePaneInspect(data.sid, data.pane, inspectOpen)

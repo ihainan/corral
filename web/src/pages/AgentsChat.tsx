@@ -638,7 +638,8 @@ export function AgentsChat({ bar, active = true }: { bar?: ReactNode; active?: b
   }, [active])
   useEffect(() => {
     if (!active) return
-    setChromeColor(scheme.theme.background ?? null)
+    const desktopBar = !isTouch && window.matchMedia('(pointer: fine)').matches
+    setChromeColor(desktopBar ? (scheme.dark ? '#15181d' : '#f6f7f9') : (scheme.theme.background ?? null))
     document.documentElement.classList.toggle('term-dark', scheme.dark)
   }, [active, scheme])
   useEffect(() => {

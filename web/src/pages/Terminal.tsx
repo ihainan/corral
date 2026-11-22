@@ -1574,7 +1574,8 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
     // tab's only while it is the one in front: one in the back, its prefs
     // changed from the agents page, made that page's dialogs dark (11-14).
     if (activeRef.current) {
-      setChromeColor(scheme.theme.background ?? null)
+      const desktopBar = !isTouch && window.matchMedia('(pointer: fine)').matches
+      setChromeColor(desktopBar ? (scheme.dark ? '#15181d' : '#f6f7f9') : (scheme.theme.background ?? null))
       document.documentElement.classList.toggle('term-dark', scheme.dark)
     }
     // Through the follow check: while another viewer's size is shown the grid
@@ -1604,7 +1605,8 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
       return
     }
     const scheme = termScheme()
-    setChromeColor(scheme.theme.background ?? null)
+    const desktopBar = !isTouch && window.matchMedia('(pointer: fine)').matches
+    setChromeColor(desktopBar ? (scheme.dark ? '#15181d' : '#f6f7f9') : (scheme.theme.background ?? null))
     document.documentElement.classList.toggle('term-dark', scheme.dark)
     safeFitRef.current()
     // (Not under a dialog of this tab's, drawn again and focused just before.)

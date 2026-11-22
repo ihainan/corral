@@ -23,6 +23,7 @@ html.term-mode body { position: fixed; inset: 0; }
   --term-syn-keyword: #ff7b72; --term-syn-string: #7ee787; --term-syn-number: #79c0ff; --term-syn-title: #d2a8ff;
   --term-syn-type: #ffa657; --term-syn-attr: #79c0ff; --term-syn-comment: #8b949e;
   --term-line-strong: #3b4350; --term-pop: #1b1f26; --term-row-hover: rgba(255, 255, 255, 0.04); --term-row-current: rgba(255, 255, 255, 0.09); --term-add-bg: #17271f; --term-del-bg: #2a1b1d;
+  --term-input: #1d222a; --term-input-line: #343b46;
   color-scheme: dark;
 }
 .term-root.light, .term-vars.light {
@@ -34,6 +35,7 @@ html.term-mode body { position: fixed; inset: 0; }
   --term-syn-keyword: #cf222e; --term-syn-string: #116329; --term-syn-number: #0550ae; --term-syn-title: #8250df;
   --term-syn-type: #953800; --term-syn-attr: #0550ae; --term-syn-comment: #6e7781;
   --term-line-strong: #c7ced8; --term-pop: #ffffff; --term-row-hover: #f1f3f6; --term-row-current: #edf0f4; --term-add-bg: #e6f4ea; --term-del-bg: #fdecea; --term-user: #f1f3f6;
+  --term-input: #ffffff; --term-input-line: #e7e9ed;
   color-scheme: light;
 }
 .term-root .icon-btn { color: var(--term-fg-2); }
@@ -50,7 +52,9 @@ html.term-mode body { position: fixed; inset: 0; }
   padding: env(safe-area-inset-top, 0px) max(4px, env(safe-area-inset-right, 0px)) 0 max(4px, env(safe-area-inset-left, 0px));
   background: var(--term-bg); border-bottom: 1px solid var(--term-line);
 }
-@media (pointer: fine) { .term-bar { height: calc(40px + env(safe-area-inset-top, 0px)); } }
+@media (pointer: fine) {
+  .term-bar { height: calc(36px + env(safe-area-inset-top, 0px)); background: var(--term-chrome); }
+}
 /* A phone with its keyboard up, in a terminal: the top bar folds away, its
    rows go to the terminal (a TUI's input box needs them: Claude Code in ten
    rows shows two lines of what is typed). The agents page keeps its own. */
@@ -416,6 +420,16 @@ html.kb-open .keybar { padding-bottom: 6px; }
   box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--term-accent-text) 28%, var(--term-line));
 }
 .term-tab-agents[aria-current="page"]:hover { background: var(--term-accent-soft); color: var(--term-accent-text); }
+@media (pointer: fine) {
+  .term-tab { height: 26px; padding: 0 10px; border-radius: var(--r-sm); font-size: var(--fs-sub); line-height: var(--lh-sub); }
+  .term-tab-main { padding: 0 2px 0 10px; border-radius: var(--r-sm); }
+  .term-tab[aria-current="page"],
+  .term-tab-agents[aria-current="page"],
+  .term-tab-agents[aria-current="page"]:hover {
+    background: var(--term-bg); color: var(--term-fg); font-weight: 500;
+    box-shadow: inset 0 0 0 1px var(--term-line);
+  }
+}
 .term-tab-host { font-weight: 600; }
 .term-tab-which { color: var(--term-fg-3); }
 /* Recorded: red words, a plain dot before them — no ground, no halo (11-05). */
@@ -543,7 +557,8 @@ html.term-dark .overlay, html.term-dark .menu, html.term-dark .toast {
 .term-title.term-title-static:hover { background: none; }
 
 /* Conversation view: over the terminal, in the terminal's colours */
-.convo { position: absolute; inset: 0; z-index: 5; display: flex; background: var(--term-bg); color: var(--term-fg); container-type: inline-size; }
+.convo { position: absolute; inset: 0; z-index: 5; display: flex; flex-direction: column; background: var(--term-bg); color: var(--term-fg); container-type: inline-size; }
+.convo-workspace { flex: 1; min-height: 0; display: flex; position: relative; }
 /* (In the terminal's colours whatever the app's are) */
 .term-root .convo .btn-ghost { color: var(--term-fg); }
 .term-root .convo .btn-ghost:hover { background: var(--term-hover); }
@@ -624,12 +639,12 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 .convo-dock .composer { padding: 0; background: none; border-top: 0; }
 .convo-dock .composer > .convo-panelwin { margin-bottom: 8px; }
 .convo-dock .composer > .convo-panelwin .convo-panelwin-screen { max-height: min(32dvh, 300px); }
-.convo-dock .composer-box { border: 1px solid var(--term-line); }
-.term-root.dark .convo-dock .composer-box { background: #1d222a; border-color: #343b46; }
+.convo-dock .composer-box { background: var(--term-input, var(--term-bg)); border: 1px solid var(--term-input-line, var(--term-line)); }
 .term-root.dark .convo-dock .composer-box:focus-within { border-color: color-mix(in srgb, var(--term-accent-text) 70%, var(--term-line)); }
 .term-root.light .convo-dock .composer-box { box-shadow: none; }
 .convo-dock .composer-box:focus-within,
 .term-root.light .convo-dock .composer-box:focus-within { border-color: color-mix(in srgb, var(--term-accent-text) 70%, var(--term-line)); box-shadow: 0 0 0 2px color-mix(in srgb, var(--term-accent-text) 12%, transparent); }
+@media (pointer: fine) { .convo-dock { padding-bottom: 12px; } }
 @media (max-width: 640px) { .convo-dock { padding-left: max(12px, env(safe-area-inset-left, 0px)); padding-right: max(12px, env(safe-area-inset-right, 0px)); } }
 .convo-runs { position: relative; display: flex; align-items: center; gap: 4px; min-width: 0; overflow: visible; min-height: 24px; margin-top: -4px; font-size: var(--fs-sub); line-height: var(--lh-sub); color: var(--term-fg-3); font-variant-numeric: tabular-nums; }
 .convo-runs-item {
@@ -664,8 +679,11 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 .convo-dock .composer-keys { opacity: 0; transition: opacity 0.15s; }
 .convo-dock .composer-box:focus-within .composer-keys { opacity: 1; }
 .convo-runs-item.is-switch { display: inline-flex; gap: 3px; cursor: pointer; }
-/* (Those that switch: a thin chip, so they read as something to press; the branch stays plain words.) */
-@media (pointer: fine) { .convo-runs-item.is-switch, .convo-runs-ctx { box-shadow: inset 0 0 0 1px var(--term-line); border-radius: 999px; padding: 1px 9px; } }
+/* (Those that switch: quiet borderless controls at rest on desktop, tinted on hover/open.) */
+@media (pointer: fine) {
+  .convo-runs-item.is-switch, .convo-runs-ctx { border-radius: var(--r-sm); padding: 2px 6px; box-shadow: none; }
+  .convo-runs-ctx:hover, .convo-runs-ctx[aria-expanded='true'] { background: var(--term-hover); color: var(--term-fg); }
+}
 .convo-runs-item.is-switch svg { flex: none; opacity: 0.7; }
 .convo-runs-item.is-switch:hover:not(:disabled):not([aria-disabled='true']), .convo-runs-item.is-switch[aria-expanded='true'] { background: var(--term-hover); color: var(--term-fg); }
 .convo-runs-item.is-switch:focus-visible { outline: 2px solid var(--term-accent-text); outline-offset: 1px; }
@@ -1200,7 +1218,7 @@ button.gch-ut:hover { background: var(--term-hover); }
    it and the list: else over the thread, from the right — as on a tablet held
    either way, where side by side left the thread a sliver.) */
 @container (max-width: 1300px) {
-  .convo-panel { position: absolute; inset: 0 0 0 auto; z-index: 6; width: min(100%, 620px); box-shadow: -8px 0 28px rgba(0, 0, 0, 0.25); }
+  .convo-panel:not(.convo-tray) { position: absolute; inset: 0 0 0 auto; z-index: 6; width: min(100%, 620px); box-shadow: -8px 0 28px rgba(0, 0, 0, 0.25); }
 }
 /* The dock (dock.tsx): in the panels' slot, its width the person's (inline);
    over the thread, from the right, where the thread would keep too little
@@ -1209,13 +1227,22 @@ button.gch-ut:hover { background: var(--term-hover); }
 .convo-tray.is-over { position: absolute; inset: 0 0 0 auto; z-index: 6; box-shadow: -8px 0 28px rgba(0, 0, 0, 0.25); }
 .convo-tray-grip { position: absolute; top: 0; bottom: 0; left: -4px; z-index: 1; width: 8px; cursor: col-resize; touch-action: none; }
 .convo-tray-grip:hover, .convo-tray-grip:focus-visible { background: var(--term-accent-soft); outline: none; }
-.convo-tray-head { flex: none; display: flex; align-items: center; gap: 8px; padding: 8px 8px 8px 12px; border-bottom: 1px solid var(--term-line); }
-.convo-tray-tabs { flex: 1; min-width: 0; display: flex; gap: 4px; }
-.convo-tray-tab { display: inline-flex; align-items: center; gap: 6px; padding: 6px 10px; border: 0; border-radius: var(--r-sm); background: none; color: var(--term-fg-2); font: inherit; font-size: var(--fs-sub); line-height: var(--lh-sub); white-space: nowrap; cursor: pointer; }
+.convo-tray-head { flex: none; display: flex; align-items: center; gap: 4px; height: 40px; box-sizing: border-box; padding: 0 8px; border-bottom: 1px solid var(--term-line); background: var(--term-bg); }
+.convo-tray-tabs { flex: 1; min-width: 0; display: flex; gap: 2px; overflow-x: auto; scrollbar-width: none; }
+.convo-tray-tabs::-webkit-scrollbar { display: none; }
+.convo-tray-tab { display: inline-flex; align-items: center; gap: 4px; height: 28px; padding: 0 8px; border: 0; border-radius: var(--r-sm); background: none; color: var(--term-fg-2); font: inherit; font-size: var(--fs-sub); line-height: var(--lh-sub); white-space: nowrap; cursor: pointer; }
 .convo-tray-tab:hover { color: var(--term-fg); background: var(--term-hover); }
-.convo-tray-tab[aria-selected='true'] { background: var(--term-accent-soft); color: var(--term-accent-text); font-weight: 500; }
+.convo-tray-tab[aria-selected='true'] { background: var(--term-bg); color: var(--term-fg); font-weight: 500; box-shadow: inset 0 0 0 1px var(--term-line); }
 .convo-tray-tab:focus-visible { outline: 2px solid var(--term-accent-text); outline-offset: -2px; }
 .convo-tray-body { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.convo-tray-info {
+  flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 6px 8px 24px;
+  --fg: var(--term-fg); --fg-2: var(--term-fg-2); --fg-3: var(--term-fg-3);
+  --line: var(--term-line); --line-strong: var(--term-line-strong);
+  --surface: var(--term-bg); --bg-subtle: var(--term-chrome); --bg-hover: var(--term-hover);
+  --accent: var(--term-accent-text); --accent-text: var(--term-accent-text);
+  --ok: var(--term-ok-text); --danger: var(--term-danger-text);
+}
 .convo-tray-files { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 /* (A tab's body hidden, kept: its display above would show it.) */
 .convo-tray-body[hidden], .convo-tray-files[hidden] { display: none; }
@@ -1305,6 +1332,13 @@ button.gch-ut:hover { background: var(--term-hover); }
   flex: none; display: flex; align-items: center; gap: 12px; min-width: 0;
   padding: 8px max(16px, env(safe-area-inset-right, 0px)) 8px max(16px, env(safe-area-inset-left, 0px));
   border-bottom: 1px solid var(--term-line); background: var(--term-bg); font-size: var(--fs-sub); line-height: var(--lh-sub);
+}
+@media (pointer: fine) {
+  .convo-bar { gap: 6px; height: 40px; box-sizing: border-box; padding: 0 12px; }
+  .convo-bar > .icon-btn, .convo-tray-head > .icon-btn { width: 28px; height: 28px; border-radius: var(--r-sm); }
+  .convo-bar-status { padding: 2px 6px; border-radius: var(--r-sm); background: none; color: var(--term-fg-2); }
+  .convo-bar-status.is-working, .convo-bar-status.is-done { color: var(--term-fg-2); }
+  .convo-bar-status.is-act:hover { background: var(--term-hover); color: var(--term-fg); }
 }
 .convo-bar-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--term-fg); font-weight: 600; font-size: var(--fs-ui); line-height: var(--lh-ui); }
 .convo-bar-status {
@@ -1605,7 +1639,7 @@ button.convo-queue-row.is-note:last-child { border-radius: 0 0 var(--r-lg) var(-
 }
 /* (Its rows on its own surface: the one read lifted off it, as a card; a
    hover a shade of it.) */
-.term-root.light .convo-side { --term-side: #f3f4f6; --term-row-hover: rgba(16, 24, 40, 0.045); --term-row-current: #ffffff; --row-lift: 0 0 0 1px rgba(16, 24, 40, 0.07); } /* (11-13: a hairline, no drop shadow — shadows are for what floats) */
+.term-root.light .convo-side { --term-side: var(--term-chrome); --term-row-hover: rgba(16, 24, 40, 0.045); --term-row-current: var(--term-bg); --row-lift: 0 0 0 1px rgba(16, 24, 40, 0.07); } /* (11-13: a hairline, no drop shadow — shadows are for what floats) */
 .term-root.dark .convo-side { --term-row-hover: rgba(255, 255, 255, 0.04); --term-row-current: rgba(255, 255, 255, 0.075); --row-lift: inset 0 0 0 1px rgba(255, 255, 255, 0.05); }
 /* (+ New agent and Search toolbar stay pinned at the top; only the agent list scrolls.) */
 .convo-side > * { flex-shrink: 0; }
@@ -1622,13 +1656,42 @@ button.convo-queue-row.is-note:last-child { border-radius: 0 0 var(--r-lg) var(-
 @media (pointer: coarse) { .convo-side-grip { width: 17px; margin: 0 -9px 0 -8px; } .convo-side-grip::after { left: 7px; } }
 @media (prefers-reduced-motion: reduce) { .convo-side-grip::after { transition: none; } }
 @media (forced-colors: active) { .convo-side-grip:focus-visible { outline: 2px solid Highlight; outline-offset: -2px; } }
-/* The keys to it, under the list: held at the bottom as a long list scrolls
-   (else seen only at its very end), over the list's edge padding, on its
-   surface, so rows pass under it. */
-.convo-side-keys {
-  position: sticky; bottom: -8px; z-index: 1; margin: auto -8px -8px; padding: 8px 16px 12px;
-  font-size: var(--fs-note); line-height: var(--lh-note); color: var(--term-fg-3); background: var(--term-side, var(--term-chrome));
+/* Minimal 32px icon-only sidebar footer (Settings left, Shortcuts right) */
+.convo-side-foot {
+  flex: none; height: 32px; box-sizing: border-box;
+  display: flex; align-items: center; justify-content: space-between;
+  margin: 4px -8px 0; padding: 0 8px;
+  border-top: 1px solid var(--term-line);
 }
+.convo-side-foot-ic { width: 24px; height: 24px; border-radius: var(--r-sm); color: var(--term-fg-3); }
+.convo-side-foot-ic:hover { background: var(--term-hover); color: var(--term-fg); }
+
+/* Pure 24px desktop global status bar (left: active fleet states, right: account quota) */
+.convo-statusbar {
+  flex: none; height: 24px; box-sizing: border-box;
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 0 10px; border-top: 1px solid var(--term-line); background: var(--term-chrome);
+  color: var(--term-fg-3); font-family: var(--font-ui); font-size: var(--fs-note); line-height: var(--lh-note);
+  font-variant-numeric: tabular-nums; user-select: none; overflow: hidden;
+}
+.convo-sb-group { display: flex; align-items: center; gap: 4px; min-width: 0; }
+.convo-sb-group.is-right { flex: 0 1 auto; justify-content: flex-end; }
+.convo-sb-btn {
+  flex: none; display: inline-flex; align-items: center; gap: 4px; height: 20px; padding: 0 6px;
+  border: 0; border-radius: var(--r-xs); background: none; color: var(--term-fg-2);
+  font: inherit; white-space: nowrap; cursor: pointer;
+}
+.convo-sb-btn:hover { background: var(--term-hover); color: var(--term-fg); }
+.convo-sb-btn:focus-visible { outline: 2px solid var(--term-accent-text); outline-offset: -2px; }
+.convo-sb-dot { flex: none; width: 6px; height: 6px; border-radius: 50%; }
+.convo-sb-dot.is-blocked { background: var(--term-warn-text); }
+.convo-sb-dot.is-working { background: var(--term-accent-text); }
+.convo-sb-quota { gap: 4px; color: var(--term-fg-3); min-width: 0; overflow: hidden; }
+.convo-sb-qpart { display: inline-flex; align-items: center; gap: 3px; white-space: nowrap; }
+.convo-sb-qpart strong { font-weight: 500; color: var(--term-fg-2); }
+.convo-sb-qpart.is-warn strong, .convo-sb-qpart.is-warn { color: var(--term-warn-text); }
+.convo-sb-qpart.is-danger strong, .convo-sb-qpart.is-danger { color: var(--term-danger-text); }
+.convo-sb-qdot { color: var(--term-fg-3); margin-right: 1px; }
 /* An agents' list's search box (side, picker, a phone's list). 16px on a
    touch screen: iOS zooms into a smaller field. */
 .list-search {
@@ -2281,20 +2344,35 @@ button.convo-queue-row.is-note:last-child { border-radius: 0 0 var(--r-lg) var(-
 .convo-side .list-search, .agents-phone .list-search { border-color: transparent; background: color-mix(in srgb, var(--term-fg) 5%, transparent); }
 .convo-side .list-search:focus-within, .agents-phone .list-search:focus-within { border-color: var(--term-accent-text); background: var(--term-bg); }
 .convo-side .list-search-icon, .convo-picker .list-search-icon, .agents-phone .list-search-icon { width: 30px; }
-/* Desktop sidebar scale: step down one rung from mobile chat-list sizing
-   (24px icons, 13px titles, 32px top controls) so the sidebar sits quietly
-   beside the 14px conversation bar and 15px thread body. Touch/mobile untouched. */
+/* Desktop workbench sidebar: 40px aligned top toolbar (borderless filled search +
+   two borderless 28px icon buttons), 24px icons, 13px titles, neutral colors.
+   Touch/mobile untouched. */
 @media (pointer: fine) {
-  .convo-side .convo-side-new { height: 32px; margin: 2px 2px 8px; font-size: var(--fs-sub); line-height: var(--lh-sub); }
-  .convo-side .list-search { height: 32px; padding: 0 4px 0 8px; gap: 6px; }
-  .convo-side .list-search-icon { width: 24px; }
+  .convo-side { padding: 0 8px; }
+  .convo-side > .list-toolbar {
+    height: 40px; box-sizing: border-box; margin: 0 -8px 4px; padding: 0 8px; gap: 4px;
+    border-bottom: 1px solid var(--term-line);
+  }
+  .convo-side .list-search {
+    height: 28px; border-radius: var(--r-sm); padding: 0 4px 0 8px; gap: 6px;
+    border-color: transparent; background: color-mix(in srgb, var(--term-fg) 5%, transparent);
+  }
+  .convo-side .list-search:focus-within { border-color: var(--term-accent-text); background: var(--term-bg); }
+  .convo-side .list-search-icon { width: 16px; }
   .convo-side .list-search input { font-size: var(--fs-sub); line-height: var(--lh-sub); }
-  .convo-side .list-order-btn { width: 32px; height: 32px; }
-  .convo-side .convo-list-row { padding: 6px 8px; gap: 8px; }
+  .convo-side .list-order-btn, .convo-side .list-new-btn {
+    flex: none; width: 28px; height: 28px; border: 0; border-radius: var(--r-sm);
+    background: none; color: var(--term-fg-2);
+  }
+  .convo-side .list-order-btn:hover, .convo-side .list-new-btn:hover { background: var(--term-hover); color: var(--term-fg); }
+  .convo-side .list-order-btn.is-active { background: var(--term-hover); color: var(--term-fg); }
+  .convo-side .list-new-btn:focus-visible { outline: 2px solid var(--term-accent-text); outline-offset: -2px; }
+  .convo-side .convo-list-row { padding: 6px 8px; gap: 8px; border-radius: var(--r-sm); }
   .convo-side .convo-list-row .agent-icon { margin-top: 2px; }
   .convo-side .convo-list-row.is-child .agent-icon { margin-top: 0; }
   .convo-side .convo-list-text { gap: 2px; }
   .convo-side .convo-list-title { font-size: var(--fs-sub); line-height: var(--lh-sub); }
+  .convo-side .convo-list-bg { color: var(--term-fg-2); font-weight: 400; }
   .convo-side .convo-list-item > .convo-list-actions { top: 4px; right: 4px; }
   .convo-side .convo-list-head.is-section { padding: 6px 8px 4px; }
   .convo-side .convo-list-head.is-tree { padding: 4px 8px; }
