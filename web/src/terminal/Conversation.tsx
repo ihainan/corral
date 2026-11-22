@@ -4,7 +4,7 @@ import { t, getLang, type I18nKey } from '../i18n'
 import { api } from '../api'
 import { setPrefs, usePrefs } from '../prefs'
 import { asHeld, buildAgentGroups, dayStart, FOLDED, foldAt, isLiveBlocked, listOrder, pinned, type ConvoListRow, type OrderOpts, type RowCmds } from './agentOrder'
-import { copyText, Dialog, DialogHead, isCoarse, Menu, MenuLayer, useToast, type MenuItem } from '../components/ui'
+import { copyText, Dialog, DialogHead, isCoarse, Menu, MenuLayer, swallowNextClick, useToast, type MenuItem } from '../components/ui'
 import { saveFile } from '../saveFile'
 import { composing, foldAllKey, helpKey, jumpKey, onMac, sideKey, switchKey } from './pageKeys'
 import { keepNames, keptNames, local } from '../storage'
@@ -2996,10 +2996,13 @@ function Runs({ meta, goal, active, mode, model, effort, quota, via, auth, agent
     if (!listed || !box.current?.contains(document.activeElement)) return
     ;(menu.current?.querySelector<HTMLElement>('[aria-checked="true"]') ?? menu.current?.querySelector<HTMLElement>('button'))?.focus()
   }, [open, listed])
+  const backDown = useRef(false)
   useEffect(() => {
     if (!open) return
     const away = (e: PointerEvent) => {
-      if (!box.current?.contains(e.target as Node)) setOpen(false)
+      if (box.current?.contains(e.target as Node)) return
+      swallowNextClick()
+      setOpen(false)
     }
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
@@ -3274,7 +3277,24 @@ function Runs({ meta, goal, active, mode, model, effort, quota, via, auth, agent
           {tokens(used)}
         </button>
       )}
-      {open && sheet && <div className="convo-runs-back" aria-hidden="true" onPointerDown={() => setOpen(false)} />}
+      {open && sheet && (
+        <div
+          className="convo-runs-back"
+          aria-hidden="true"
+          tabIndex={-1}
+          onPointerDown={(e) => {
+            e.stopPropagation()
+            backDown.current = true
+          }}
+          onClick={(e) => {
+            e.preventDefault()
+            e.stopPropagation()
+            if (!backDown.current) return
+            backDown.current = false
+            setOpen(false)
+          }}
+        />
+      )}
       {open === 'model' && model && (
         <div
           className={"convo-runs-pop convo-models" + (sheet ? " is-sheet" : "")}
@@ -4713,7 +4733,14 @@ function Picker({ rows, onClose, searchFirst }: { rows: ConvoListRow[]; onClose:
   }, [onClose])
   return (
     <>
-      <div className="convo-picker-back" onClick={onClose} />
+      <div
+        className="convo-picker-back"
+        onClick={(e) => {
+          e.preventDefault()
+          e.stopPropagation()
+          onClose()
+        }}
+      />
       <div className="convo-picker" role="dialog" aria-modal="true" aria-label={t('convo.pick')} ref={box}>
         <div className="convo-picker-title">
           <span>{t('convo.pick')}</span>

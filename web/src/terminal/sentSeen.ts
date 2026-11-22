@@ -30,6 +30,27 @@ export function sameMessage(logged: string, sent: string): boolean {
   return rest.length === (logged.match(IMAGE_TOKEN)?.length ?? 0)
 }
 
+// Whether a sent message was merged into a combined user turn (for example,
+// when an agent dequeues multiple queued messages into one turn separated by
+// newlines). Matches either the message's words + pictures, or exact picture
+// paths when a message has no text.
+export function containedInMessage(logged: string, sent: string): boolean {
+  const w = wordsOf(sent)
+  const sentPics = picturesIn(sent)
+  const loggedPics = picturesIn(logged)
+  const loggedTokens = logged.match(IMAGE_TOKEN)?.length ?? 0
+  if (!w) {
+    if (!sentPics.length) return false
+    return sentPics.every((k) => loggedPics.includes(k))
+  }
+  if (!wordsOf(logged).includes(w)) return false
+  let unmatchedPics = 0
+  for (const k of sentPics) {
+    if (!loggedPics.includes(k)) unmatchedPics++
+  }
+  return unmatchedPics <= loggedTokens
+}
+
 // A row the log has of something submitted: its place, its time, its words.
 export interface Submission {
   key: number

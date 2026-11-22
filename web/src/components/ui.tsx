@@ -125,12 +125,42 @@ export function useFocusTrap<T extends HTMLElement>(onClose: () => void) {
 // icon, tone, sub: its head (11-14) — what it is for, on a tinted square (red
 // for what cannot be undone, amber for a warning), a line under the title.
 // The close in its corner is its cancel: off while busy, as its cancel is.
+// Prevent a pointerdown that closes a floating popover/sheet from letting the
+// synthesized click land on whatever interactive element sat underneath it.
+export function swallowNextClick() {
+  const stop = (e: MouseEvent) => {
+    e.preventDefault()
+    e.stopPropagation()
+    cleanup()
+  }
+  const timer = window.setTimeout(cleanup, 400)
+  function cleanup() {
+    window.clearTimeout(timer)
+    document.removeEventListener('click', stop, true)
+  }
+  document.addEventListener('click', stop, true)
+}
+
 export function Dialog(props: { title: string; onClose: () => void; children: ReactNode; sheet?: boolean; hideTitle?: boolean; wide?: boolean; seeThrough?: boolean; guard?: boolean; busy?: boolean; icon?: ReactNode; tone?: 'danger' | 'warn'; sub?: ReactNode; className?: string; dialogProps?: React.HTMLAttributes<HTMLDivElement> }) {
   const dismiss = () => !props.guard && !props.busy && props.onClose()
   const ref = useFocusTrap<HTMLDivElement>(dismiss)
+  const backDown = useRef(false)
   useSheetDrag(ref, props.sheet !== false && !props.guard && !props.busy, props.onClose)
   return createPortal(
-    <div className={'overlay' + (props.sheet !== false ? ' sheet-mode' : '') + (props.seeThrough ? ' see-through' : '')} onMouseDown={(e) => e.target === e.currentTarget && dismiss()}>
+    <div
+      className={'overlay' + (props.sheet !== false ? ' sheet-mode' : '') + (props.seeThrough ? ' see-through' : '')}
+      onPointerDown={(e) => {
+        backDown.current = e.target === e.currentTarget
+      }}
+      onClick={(e) => {
+        const hit = backDown.current && e.target === e.currentTarget
+        backDown.current = false
+        if (!hit) return
+        e.preventDefault()
+        e.stopPropagation()
+        dismiss()
+      }}
+    >
       <div {...props.dialogProps} className={'dialog' + (props.wide ? ' dialog-wide' : '') + (props.className ? ' ' + props.className : '')} role="dialog" aria-modal="true" aria-label={props.title} ref={ref}>
         {props.hideTitle ? null : (
           <>
@@ -501,7 +531,11 @@ function Popover({ anchor, at, trigger, onClose, label, children }: { anchor: DO
     // The trigger toggles the menu itself; treating it as "outside" would
     // close on pointerdown and reopen on click.
     const outside = (t: EventTarget | null) => !ref.current?.contains(t as Node) && !trigger()?.contains(t as Node)
-    const onDown = (e: PointerEvent) => outside(e.target) && onClose()
+    const onDown = (e: PointerEvent) => {
+      if (!outside(e.target)) return
+      swallowNextClick()
+      onClose()
+    }
     const onKey = (e: KeyboardEvent) => {
       if (!isTop()) return
       if (e.key === 'Escape') {

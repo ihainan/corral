@@ -465,11 +465,11 @@ a.setting:hover { text-decoration: none; background: var(--bg-hover); }
 
 /* Floating layers ------------------------------------------------------------ */
 
-.overlay { position: fixed; inset: 0; z-index: 100; background: var(--overlay); display: grid; place-items: center; padding: 16px; animation: fade 0.12s var(--ease); }
+.overlay { position: fixed; inset: 0; z-index: 100; background: var(--overlay); display: grid; place-items: center; padding: 16px; animation: fade 0.12s var(--ease); cursor: pointer; touch-action: manipulation; -webkit-tap-highlight-color: transparent; }
 .dialog {
   width: 100%; max-width: 440px; max-height: calc(100dvh - 32px); overflow: auto;
   background: var(--surface); border-radius: var(--r-lg); box-shadow: var(--shadow-pop); padding: 20px;
-  display: flex; flex-direction: column; gap: 16px;
+  display: flex; flex-direction: column; gap: 16px; cursor: default;
 }
 .dialog h2 { font-size: var(--fs-title); line-height: var(--lh-title); font-weight: 600; }
 .dialog-actions { display: flex; gap: 8px; justify-content: flex-end; flex-wrap: wrap; }

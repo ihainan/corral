@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState, type ReactNode } from 'react'
-import { ArrowDown, ArrowLeftRight, ArrowUp, ArrowUpDown, ArrowUpToLine, ChevronLeft, CircleStop, Code2, Columns2, Copy, Eye, FoldVertical, GitBranch, GitFork, Globe, History, Languages, Maximize2, MessageSquarePlus, Paperclip, Pencil, Pin, PinOff, Plus, Power, Rows2, Sparkles, Square, SquareSlash, SquareTerminal, TextCursorInput, Unlink, X } from 'lucide-react'
+import { ArrowDown, ArrowLeftRight, ArrowUp, ArrowUpDown, ArrowUpToLine, ChevronLeft, CircleStop, Code2, Columns2, Copy, Eye, FoldVertical, GitBranch, GitFork, Globe, History, Languages, ListPlus, Maximize2, MessageSquarePlus, Paperclip, Pencil, Pin, PinOff, Plus, Power, Rows2, Sparkles, Square, SquareSlash, SquareTerminal, TextCursorInput, Unlink, X, Zap } from 'lucide-react'
 import { api, ApiError, authGen, errorText, onAuthChange, uploadFile, type SessionInfo } from '../api'
 import { useSession } from '../app'
 import { t, type I18nKey } from '../i18n'
@@ -35,7 +35,7 @@ import { ackBg, answeredHerdr, expectSession, paneWaits, waitingTitle, isAgy, is
 import { normalizeProjectPath, reorderPinned, type RowCmds } from '../terminal/agentOrder'
 import { conversationReadable, prefetchConversation } from '../terminal/conversation'
 import { holdTermMode, tmuxKey } from '../terminal/chatSend'
-import { isCommand, pairSent, sameMessage, squeezed, type Submission } from '../terminal/sentSeen'
+import { camesAfter, containedInMessage, isCommand, pairSent, sameMessage, squeezed, type Submission } from '../terminal/sentSeen'
 import { viewRefusal } from '../terminal/sendView'
 import { agentKey, sessionWhich } from '../terminal/sessionName'
 import { agentMark } from '../terminal/agentIcons'
@@ -1707,7 +1707,23 @@ function AgentChat({ cur, entries, all, titles, onPick, active, keysActive, isSe
           }
         }
     }
-    if (found.length || changed) {
+    // (When an agent — e.g. Antigravity CLI — combines multiple queued messages
+    // into a single logged user turn, pairSent only pairs the first pending row
+    // with that submission; clear any remaining pending rows whose content is
+    // already included in a newer logged user turn.)
+    const loggedSubs = subs.filter((s) => s.seq !== undefined)
+    for (const q of mine) {
+      if (!ofThis(q.bind) || gone.has(q.id) || isCommand(q.text)) continue
+      const merged = loggedSubs.find((s) => camesAfter(s, q) && containedInMessage(s.text, q.text))
+      if (!merged) continue
+      gone.add(q.id)
+      arrived.current.add(q.id)
+      if (q.was !== undefined && getDraft(draftKey) === q.was) {
+        keepDraft(draftKey, '')
+        setDraftShown((d) => (d === undefined || d === q.was ? '' : d))
+      }
+    }
+    if (gone.size || changed) {
       setSent(() => mine.filter((p) => !gone.has(p.id)))
     }
   }, [convo.entries, convo.queued, convo.gen, convo.status, sent, bindKey, queueShown])
@@ -2630,14 +2646,14 @@ function AgentChat({ cur, entries, all, titles, onPick, active, keysActive, isSe
             <>
               {/* (A Codex at work: a message queued after its turn, besides one into it.) */}
               {codex && working && !!draft.trim() && !sending && !blocked && !up && (
-                <button type="button" className="btn btn-ghost convo-queue-now" onClick={() => send(true)} title={t('convo.queueAfterHint')}>
-                  {t('convo.queueAfter')}
+                <button type="button" className="composer-send is-alt" onClick={() => send(true)} aria-label={t('convo.queueAfter')} title={t('convo.queueAfterHint')}>
+                  <ListPlus size={16} strokeWidth={2} aria-hidden="true" />
                 </button>
               )}
               {/* (An Antigravity CLI at work: Alt+M sends immediately into the current turn instead of queuing.) */}
               {agy && working && !!draft.trim() && !sending && !blocked && !up && (
-                <button type="button" className="btn btn-ghost convo-queue-now" onClick={() => send(true)} title={t('convo.agySendNowHint')}>
-                  {t('convo.agySendNow')}
+                <button type="button" className="composer-send is-alt" onClick={() => send(true)} aria-label={t('convo.agySendNow')} title={t('convo.agySendNowHint')}>
+                  <Zap size={16} strokeWidth={2} aria-hidden="true" />
                 </button>
               )}
             <button type="button" className="composer-send" onClick={() => send()} disabled={sending || !!blocked || (!draft.trim() && !up)} aria-label={t('term.send')} title={t('term.send') + (isTouch ? '' : ' (' + sendKey + ')')}>
