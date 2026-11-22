@@ -173,4 +173,38 @@ func TestLineageExtractorRealWorldCompoundScripts(t *testing.T) {
 	if len(gotMulti) != 2 || gotMulti[0].ChildPane != "w1:p2" || gotMulti[1].ChildPane != "w1:p3" {
 		t.Fatalf("multi-line VAR=$(herdr pane split) missed: %+v", gotMulti)
 	}
+
+	// 3. Real Claude idiom (#26): capture pane split into $out, grep/cut pane_id, echo "pane $pid",
+	// and filter `herdr agent start` through `grep -oE` so no full JSON object appears in output.
+	rawFiltered := "" +
+		`{"type":"assistant","message":{"content":[{"type":"tool_use","id":"tu_filt","name":"Bash","input":{"command":"out=$(herdr pane split w33:p4 --direction down --cwd /repo 2>&1); pid=$(echo \"$out\" | grep -oE '\"pane_id\":\"[^\"]+\"' | head -1 | cut -d'\"' -f4); echo \"pane $pid\"; sleep 1; herdr agent start ag-hub --kind agy --pane \"$pid\" --timeout 60000 2>&1 | grep -oE '\"(type|agent_status|name)\":\"[^\"]+\"' | tr '\\n' ' '"}}]}}` + "\n" +
+		`{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tu_filt","is_error":false,"content":"pane w33:p5\n\"agent_status\":\"idle\" \"name\":\"ag-hub\" \"type\":\"agent_started\""}]}}` + "\n"
+	gotFiltered := ex.Feed([]byte(rawFiltered))
+	if len(gotFiltered) != 1 || gotFiltered[0].ChildPane != "w33:p5" || gotFiltered[0].Action != "pane_split" {
+		t.Fatalf("filtered-output pane split (#26) missed: %+v", gotFiltered)
+	}
+
+	// 4. Truncated JSON via `head -c 160` (incomplete closing braces, retains pane_id & terminal_id).
+	rawTrunc := "" +
+		`{"type":"assistant","message":{"content":[{"type":"tool_use","id":"tu_trunc","name":"Bash","input":{"command":"herdr workspace create --cwd /repo 2>&1 | head -c 160"}}]}}` + "\n" +
+		`{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tu_trunc","is_error":false,"content":"{\"id\":\"cli:workspace:create\",\"result\":{\"root_pane\":{\"pane_id\":\"w35:p1\",\"terminal_id\":\"term_trunc35\",\"cwd\":\"/repo\"}"}]}}` + "\n"
+	gotTrunc := ex.Feed([]byte(rawTrunc))
+	if len(gotTrunc) != 1 || gotTrunc[0].ChildPane != "w35:p1" || gotTrunc[0].ChildTermID != "term_trunc35" {
+		t.Fatalf("truncated JSON workspace create missed: %+v", gotTrunc)
+	}
+
+	// 5. Safety: target pane echoed back, spoofed pane in command text, Herdr error,
+	// list command in same script, or ambiguous multi-pane output must all be rejected.
+	rawBad := "" +
+		`{"type":"assistant","message":{"content":[{"type":"tool_use","id":"tu_bad1","name":"Bash","input":{"command":"herdr pane split w33:p4; echo w99:p9"}}]}}` + "\n" +
+		`{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tu_bad1","is_error":false,"content":"w33:p4\nw99:p9"}]}}` + "\n" +
+		`{"type":"assistant","message":{"content":[{"type":"tool_use","id":"tu_bad2","name":"Bash","input":{"command":"herdr pane split w33:p4 2>&1 | head -c 160"}}]}}` + "\n" +
+		`{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tu_bad2","is_error":false,"content":"{\"error\":{\"code\":\"not_found\",\"message\":\"w33:p5 missing\"}}"}]}}` + "\n" +
+		`{"type":"assistant","message":{"content":[{"type":"tool_use","id":"tu_bad3","name":"Bash","input":{"command":"herdr pane split w33:p4; herdr agent list"}}]}}` + "\n" +
+		`{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tu_bad3","is_error":false,"content":"pane w33:p6"}]}}` + "\n" +
+		`{"type":"assistant","message":{"content":[{"type":"tool_use","id":"tu_bad4","name":"Bash","input":{"command":"herdr pane split w33:p4"}}]}}` + "\n" +
+		`{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tu_bad4","is_error":false,"content":"w33:p7 w33:p8"}]}}` + "\n"
+	if gotBad := ex.Feed([]byte(rawBad)); len(gotBad) != 0 {
+		t.Fatalf("unsafe filtered fallback cases must be rejected, got %+v", gotBad)
+	}
 }

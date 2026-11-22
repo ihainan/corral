@@ -21,8 +21,8 @@ const (
 	lineageProbeCooldown = 10 * time.Second
 	lineageProbeTimeout  = 10 * time.Second
 	lineageProbeMaxFiles = 6
-	lineageProbePerFile  = 384 << 10 // 384 KiB tail per candidate parent log
-	lineageProbeMaxBytes = 2 << 20   // 2 MiB total budget per probe run
+	lineageProbePerFile  = 4 << 20  // 4 MiB tail per candidate parent log (covers heavy Claude/Codex logs)
+	lineageProbeMaxBytes = 12 << 20 // 12 MiB total budget per probe run
 	lineageMetadataTTLMs = 86400000  // 24h (herdr max ttl_ms)
 )
 

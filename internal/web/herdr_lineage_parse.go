@@ -21,6 +21,8 @@ type lineageDiscovery struct {
 
 var (
 	herdrTermIDRe     = regexp.MustCompile(`^[A-Za-z0-9:_.-]{1,100}$`)
+	herdrPaneTokenRe  = regexp.MustCompile(`\b(w[A-Za-z0-9]+:p\d+)\b`)
+	herdrTermTokenRe  = regexp.MustCompile(`"terminal_id"\s*:\s*"([A-Za-z0-9:_.-]{1,100})"`)
 	agyTimestampRe    = regexp.MustCompile(`(?m)^\[\d{2}:\d{2}:\d{2}\]\s*`)
 	codexExitCodeRe   = regexp.MustCompile(`(?i)(?:process exited with code|exit code:?)\s+(-?\d+)`)
 	agyExitCodeRe     = regexp.MustCompile(`(?i)command exited with code\s+(-?\d+)`)
@@ -63,8 +65,10 @@ type agyPendingIntent struct {
 }
 
 type herdrCmdIntent struct {
-	action string // "workspace_created" | "tab_created" | "pane_split" | "agent_started"
-	valid  bool
+	action     string // "workspace_created" | "tab_created" | "pane_split" | "agent_started"
+	valid      bool
+	cmdPanes   map[string]bool // pane IDs literally mentioned in the command text (excluded from filtered-output fallback)
+	hasListing bool            // true if script also ran herdr list/snapshot (disables filtered-output fallback)
 }
 
 func newLineageExtractor(agent, serverSocket, serverSession string) *lineageExtractor {
@@ -691,9 +695,13 @@ func (e *lineageExtractor) classifyHerdrCommands(rawCmd string) []herdrCmdIntent
 
 	// Reject entire script if any statement invokes a remote host or container.
 	envOverrides := map[string]string{}
+	hasListing := false
 	for _, st := range stmts {
 		if stmtHasRemoteExec(st) {
 			return nil
+		}
+		if stmtHasHerdrListing(st) {
+			hasListing = true
 		}
 		if words, ok := splitSimpleShellWords(st); ok && len(words) >= 2 && words[0] == "export" {
 			for _, w := range words[1:] {
@@ -710,6 +718,14 @@ func (e *lineageExtractor) classifyHerdrCommands(rawCmd string) []herdrCmdIntent
 		}
 	}
 
+	var cmdPanes map[string]bool
+	if matches := herdrPaneTokenRe.FindAllStringSubmatch(cmd, -1); len(matches) > 0 {
+		cmdPanes = make(map[string]bool, len(matches))
+		for _, m := range matches {
+			cmdPanes[m[1]] = true
+		}
+	}
+
 	var out []herdrCmdIntent
 	for _, st := range stmts {
 		// Unwrap simple variable capture: VAR=$(herdr ...) or export VAR=$(herdr ...)
@@ -719,11 +735,20 @@ func (e *lineageExtractor) classifyHerdrCommands(rawCmd string) []herdrCmdIntent
 		}
 		for _, cand := range candidates {
 			if intent, ok := e.classifyPipeline(cand, envOverrides); ok {
+				intent.cmdPanes = cmdPanes
+				intent.hasListing = hasListing
 				out = append(out, intent)
 			}
 		}
 	}
 	return out
+}
+
+func stmtHasHerdrListing(stmt string) bool {
+	if !strings.Contains(stmt, "herdr") {
+		return false
+	}
+	return strings.Contains(stmt, " list") || strings.Contains(stmt, " snapshot")
 }
 
 func stmtHasRemoteExec(stmt string) bool {
@@ -1256,7 +1281,7 @@ func (e *lineageExtractor) matchMultiResults(intents []herdrCmdIntent, output, b
 	}
 	payloads := extractHerdrJSONPayloads(output, 0)
 	if len(payloads) == 0 {
-		return nil
+		return e.matchFilteredCreationFallback(intents, output, baseKey)
 	}
 	used := make([]bool, len(payloads))
 	var out []lineageDiscovery
@@ -1280,6 +1305,132 @@ func (e *lineageExtractor) matchMultiResults(intents []herdrCmdIntent, output, b
 		}
 	}
 	return out
+}
+
+// matchFilteredCreationFallback handles real-world agent shell idioms where the
+// parent ran a verified herdr creation command (workspace create / tab create /
+// pane split) and filtered or truncated its JSON output (e.g. `jq -r .result.pane.pane_id`,
+// `grep -oE '"pane_id":"[^"]+"'`, `echo "pane $pid"`, or `head -c 200`), so no
+// complete JSON envelope remains in output. Safety guards:
+//   - Only runs when extractHerdrJSONPayloads found zero complete Herdr JSON payloads.
+//   - Rejects outputs containing Herdr error markers or multi-pane list dumps.
+//   - Rejects scripts that also invoked `herdr ... list` or `herdr api snapshot`.
+//   - Excludes every pane ID literally present in the command text (blocking
+//     target-pane confusion like `pane split w33:p4` and `echo w9:p9` spoofing).
+//   - Confirms only when the count of distinct new pane IDs does not exceed the
+//     number of creation intents (never guesses from noisy multi-pane output).
+func (e *lineageExtractor) matchFilteredCreationFallback(intents []herdrCmdIntent, output, baseKey string) []lineageDiscovery {
+	type creationSlot struct {
+		idx    int
+		intent herdrCmdIntent
+	}
+	var creations []creationSlot
+	for i, intent := range intents {
+		if !intent.valid || intent.hasListing {
+			continue
+		}
+		switch intent.action {
+		case "workspace_created", "tab_created", "pane_split":
+			creations = append(creations, creationSlot{idx: i, intent: intent})
+		}
+	}
+	if len(creations) == 0 || outputHasHerdrErrorOrList(output) {
+		return nil
+	}
+	text := unwrapCodexExecText(output)
+	if text == "" || outputHasHerdrErrorOrList(text) {
+		return nil
+	}
+	cmdPanes := creations[0].intent.cmdPanes
+	var panes []string
+	seen := map[string]bool{}
+	for _, m := range herdrPaneTokenRe.FindAllStringSubmatch(text, -1) {
+		p := m[1]
+		if !herdrPaneID.MatchString(p) || cmdPanes[p] || seen[p] {
+			continue
+		}
+		seen[p] = true
+		panes = append(panes, p)
+	}
+	if len(panes) == 0 || len(panes) > len(creations) {
+		return nil
+	}
+	// If truncated JSON still retained terminal_id for a single creation, capture it too.
+	termID := ""
+	if len(panes) == 1 {
+		if tm := herdrTermTokenRe.FindStringSubmatch(text); len(tm) == 2 {
+			termID = sanitizeTermID(tm[1])
+		}
+	}
+	var out []lineageDiscovery
+	for i, paneID := range panes {
+		slot := creations[i]
+		key := baseKey
+		if len(intents) > 1 {
+			key += ":" + strconv.Itoa(slot.idx)
+		}
+		d := lineageDiscovery{
+			ChildPane:   paneID,
+			ChildTermID: termID,
+			EvidenceKey: key,
+			Action:      slot.intent.action,
+		}
+		e.rememberCreated(d)
+		out = append(out, d)
+	}
+	return out
+}
+
+func outputHasHerdrErrorOrList(s string) bool {
+	if strings.Contains(s, `"error":`) && !strings.Contains(s, `"error":null`) && !strings.Contains(s, `"error": null`) {
+		return true
+	}
+	if strings.Contains(s, `"ok":false`) || strings.Contains(s, `"ok": false`) {
+		return true
+	}
+	if strings.Contains(s, `"agents":[`) || strings.Contains(s, `"panes":[`) || strings.Contains(s, `"workspaces":[`) {
+		return true
+	}
+	return false
+}
+
+// unwrapCodexExecText extracts inner output strings from Codex code-mode
+// {"exit_code":0,"output":"..."} wrappers when present, rejecting non-zero exits.
+func unwrapCodexExecText(s string) string {
+	if !strings.Contains(s, `"output"`) || !strings.Contains(s, `"exit_code"`) {
+		return s
+	}
+	var b strings.Builder
+	found := false
+	raw := []byte(s)
+	for off := 0; off < len(raw); {
+		idx := bytes.IndexByte(raw[off:], '{')
+		if idx < 0 {
+			break
+		}
+		off += idx
+		dec := json.NewDecoder(bytes.NewReader(raw[off:]))
+		var obj struct {
+			ExitCode *int    `json:"exit_code"`
+			Output   *string `json:"output"`
+		}
+		if err := dec.Decode(&obj); err == nil && obj.Output != nil {
+			found = true
+			if obj.ExitCode == nil || *obj.ExitCode == 0 {
+				if b.Len() > 0 {
+					b.WriteByte('\n')
+				}
+				b.WriteString(*obj.Output)
+			}
+			off += int(dec.InputOffset())
+		} else {
+			off++
+		}
+	}
+	if found {
+		return b.String()
+	}
+	return s
 }
 
 func (e *lineageExtractor) discoveryFromPayload(action string, payload herdrResultPayload, evidenceKey string) (lineageDiscovery, bool) {
