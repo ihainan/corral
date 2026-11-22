@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState, type ReactNode } from 'react'
-import { ArrowDown, ArrowLeftRight, ArrowUp, ArrowUpToLine, ChevronLeft, CircleStop, Code2, Columns2, Copy, Eye, FoldVertical, GitBranch, GitFork, Globe, History, Languages, Maximize2, MessageSquarePlus, Paperclip, Pencil, Pin, PinOff, Plus, Power, Square, SquareSlash, SquareTerminal, TextCursorInput, Unlink, X } from 'lucide-react'
+import { ArrowDown, ArrowLeftRight, ArrowUp, ArrowUpDown, ArrowUpToLine, ChevronLeft, CircleStop, Code2, Columns2, Copy, Eye, FoldVertical, GitBranch, GitFork, Globe, History, Languages, Maximize2, MessageSquarePlus, Paperclip, Pencil, Pin, PinOff, Plus, Power, Square, SquareSlash, SquareTerminal, TextCursorInput, Unlink, X } from 'lucide-react'
 import { api, ApiError, authGen, errorText, onAuthChange, uploadFile, type SessionInfo } from '../api'
 import { useSession } from '../app'
 import { t, type I18nKey } from '../i18n'
@@ -2351,7 +2351,20 @@ function AgentChat({ cur, entries, all, titles, onPick, active, keysActive, isSe
       if (draftKeyNow.current === key) setDraftShown((d) => (d === undefined || !d.trim() ? was : d))
     }
 
-    api<{ in_box?: boolean }>('POST', `/api/sessions/${sid}/conversation/send`, { pane: b.pane, pid: b.pid, start: b.start, session: b.session, text, ...(queue && b.agent === 'codex' ? { queue: true } : {}) }, { timeoutMs: SEND_MS })
+    api<{ in_box?: boolean }>(
+      'POST',
+      `/api/sessions/${sid}/conversation/send`,
+      {
+        pane: b.pane,
+        pid: b.pid,
+        start: b.start,
+        session: b.session,
+        text,
+        ...(queue && b.agent === 'codex' ? { queue: true } : {}),
+        ...(queue && b.agent === 'agy' ? { immediate: true } : {}),
+      },
+      { timeoutMs: SEND_MS },
+    )
       .then((r) => {
         if (authGen() !== account) return drop()
         // (The same words were in its box already — put back there by a stop: Enter only.)
@@ -2515,6 +2528,9 @@ function AgentChat({ cur, entries, all, titles, onPick, active, keysActive, isSe
             } else if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
               e.preventDefault()
               send()
+            } else if (agy && working && e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey && e.key.toLowerCase() === 'm' && draft.trim()) {
+              e.preventDefault()
+              send(true)
             } else if (e.key === 'Enter' && hasKeyboardPointer() && composerEnter === 'send' && !e.shiftKey && !e.altKey) {
               e.preventDefault()
               send()
@@ -2609,6 +2625,12 @@ function AgentChat({ cur, entries, all, titles, onPick, active, keysActive, isSe
               {codex && working && !!draft.trim() && !sending && !blocked && !up && (
                 <button type="button" className="btn btn-ghost convo-queue-now" onClick={() => send(true)} title={t('convo.queueAfterHint')}>
                   {t('convo.queueAfter')}
+                </button>
+              )}
+              {/* (An Antigravity CLI at work: Alt+M sends immediately into the current turn instead of queuing.) */}
+              {agy && working && !!draft.trim() && !sending && !blocked && !up && (
+                <button type="button" className="btn btn-ghost convo-queue-now" onClick={() => send(true)} title={t('convo.agySendNowHint')}>
+                  {t('convo.agySendNow')}
                 </button>
               )}
             <button type="button" className="composer-send" onClick={() => send()} disabled={sending || !!blocked || (!draft.trim() && !up)} aria-label={t('term.send')} title={t('term.send') + (isTouch ? '' : ' (' + sendKey + ')')}>
@@ -2792,9 +2814,15 @@ function AgentChat({ cur, entries, all, titles, onPick, active, keysActive, isSe
       if (autoFixed) toast(t('agents.pinFixedAuto'))
     }
     return [
-      pos > 0 ? { label: t('agents.pinTop'), icon: <ArrowUpToLine size={16} />, onSelect: move('top') } : null,
-      pos > 0 ? { label: t('agents.pinUp'), icon: <ArrowUp size={16} />, onSelect: move('up') } : null,
-      pos < visible.length - 1 ? { label: t('agents.pinDown'), icon: <ArrowDown size={16} />, onSelect: move('down') } : null,
+      {
+        label: t('agents.pinOrder'),
+        icon: <ArrowUpDown size={16} />,
+        actions: [
+          { label: t('agents.pinTop'), icon: <ArrowUpToLine size={15} />, disabled: pos === 0, onSelect: move('top') },
+          { label: t('agents.pinUp'), icon: <ArrowUp size={15} />, disabled: pos === 0, onSelect: move('up') },
+          { label: t('agents.pinDown'), icon: <ArrowDown size={15} />, disabled: pos === visible.length - 1, onSelect: move('down') },
+        ],
+      },
     ]
   }
   const unlinkItem = (e: Entry): MenuItem | null => {

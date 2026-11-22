@@ -398,17 +398,37 @@ type watchedServer struct {
 	again  func()                              // (its watcher's: read it again soon)
 }
 
-// paneOf: a pane as its watcher's last snapshot has it (its agent's entry
-// before the pane's own); none where it has none.
-func (h *herdrSockets) paneOf(id, pane string) (herdr.Pane, bool) {
+// snapshotOf returns the watcher's latest snapshot for session id.
+func (h *herdrSockets) snapshotOf(id string) (*herdr.Snapshot, bool) {
 	h.mu.Lock()
 	w, ok := h.server[id]
 	h.mu.Unlock()
 	if !ok || w.latest == nil {
-		return herdr.Pane{}, false
+		return nil, false
 	}
 	snap, _ := w.latest()
 	if snap == nil {
+		return nil, false
+	}
+	return snap, true
+}
+
+// serverKeyOf returns the herdr server key for session id (or id as fallback).
+func (h *herdrSockets) serverKeyOf(id string) string {
+	h.mu.Lock()
+	w, ok := h.server[id]
+	h.mu.Unlock()
+	if ok && w.key != "" {
+		return w.key
+	}
+	return id
+}
+
+// paneOf: a pane as its watcher's last snapshot has it (its agent's entry
+// before the pane's own); none where it has none.
+func (h *herdrSockets) paneOf(id, pane string) (herdr.Pane, bool) {
+	snap, ok := h.snapshotOf(id)
+	if !ok {
 		return herdr.Pane{}, false
 	}
 	for _, list := range [][]herdr.Pane{snap.Agents, snap.Panes} {
@@ -1421,7 +1441,7 @@ func (s *Server) apiHerdrSeen(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "bad_request", "pane and round are required")
 		return
 	}
-	sess, _ := s.herdrSession(w, r)
+	sess, socket := s.herdrSession(w, r)
 	if sess == nil {
 		return
 	}
@@ -1435,7 +1455,127 @@ func (s *Server) apiHerdrSeen(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "not_kept", "it could not be noted")
 		return
 	}
+	if ok {
+		go s.syncHerdrSeen(sess, socket, pane)
+	}
 	writeJSON(w, http.StatusOK, map[string]bool{"seen": ok})
+}
+
+// syncHerdrSeen mirrors a Chat Mode "seen" acknowledgment to Herdr CLI so the
+// green "done" dot also clears in CLI Mode. Herdr only exposes tab-seen via
+// focus commands (no headless mark_seen RPC), so when pane is currently "done"
+// and not focused we briefly focus pane and immediately restore the previously
+// focused pane under a per-server mutex.
+func (s *Server) syncHerdrSeen(sess *term.Session, socket, pane string) {
+	if sess == nil || socket == "" || !herdrPaneID.MatchString(pane) || sess.State() != term.StateRunning {
+		return
+	}
+	// Fast-path skip if cached snapshot already shows pane is not "done" or is focused.
+	if snap, ok := s.herdrSocks.snapshotOf(sess.ID); ok && snap != nil {
+		if snap.FocusedPane == pane {
+			return
+		}
+		isDone := false
+		for _, list := range [][]herdr.Pane{snap.Agents, snap.Panes} {
+			for _, p := range list {
+				if p.ID == pane && p.AgentStatus == herdr.StatusDone {
+					isDone = true
+					break
+				}
+			}
+			if isDone {
+				break
+			}
+		}
+		if !isDone {
+			return
+		}
+	}
+
+	key := s.herdrSocks.serverKeyOf(sess.ID)
+	v, _ := s.herdrSeenSync.LoadOrStore(key, &sync.Mutex{})
+	mu := v.(*sync.Mutex)
+	mu.Lock()
+	defer mu.Unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel()
+
+	// Helper to run one RPC on a fresh connection when needed (herdr closes
+	// connections after some errors or single-request modes).
+	callOn := func(c *herdr.Client, fn func(*herdr.Client) error) (*herdr.Client, error) {
+		if c != nil {
+			if err := fn(c); err == nil {
+				return c, nil
+			}
+			_ = c.Close()
+		}
+		c2, err := herdr.Dial(ctx, sess.Client(), socket)
+		if err != nil {
+			return nil, err
+		}
+		if err := fn(c2); err != nil {
+			_ = c2.Close()
+			return nil, err
+		}
+		return c2, nil
+	}
+
+	c, err := herdr.Dial(ctx, sess.Client(), socket)
+	if err != nil {
+		return
+	}
+	defer func() {
+		if c != nil {
+			_ = c.Close()
+		}
+	}()
+
+	var liveSnap *herdr.Snapshot
+	c, err = callOn(c, func(cl *herdr.Client) error {
+		var e error
+		liveSnap, e = cl.Snapshot(ctx)
+		return e
+	})
+	if err != nil || liveSnap == nil {
+		return
+	}
+	prevPane := liveSnap.FocusedPane
+	prevWS := liveSnap.FocusedWorkspace
+	if prevPane == pane {
+		return
+	}
+	stillDone := false
+	for _, list := range [][]herdr.Pane{liveSnap.Agents, liveSnap.Panes} {
+		for _, p := range list {
+			if p.ID == pane && p.AgentStatus == herdr.StatusDone {
+				stillDone = true
+				break
+			}
+		}
+		if stillDone {
+			break
+		}
+	}
+	if !stillDone {
+		return
+	}
+
+	c, err = callOn(c, func(cl *herdr.Client) error {
+		return cl.FocusPane(ctx, pane)
+	})
+	if err != nil {
+		return
+	}
+	if prevPane != "" {
+		c, _ = callOn(c, func(cl *herdr.Client) error {
+			return cl.FocusPane(ctx, prevPane)
+		})
+	} else if prevWS != "" {
+		c, _ = callOn(c, func(cl *herdr.Client) error {
+			return cl.FocusWorkspace(ctx, prevWS)
+		})
+	}
 }
 
 // hostNowCommand prints the host's time (unix ms; seconds where its date

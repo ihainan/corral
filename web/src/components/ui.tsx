@@ -327,6 +327,8 @@ export interface MenuItem {
   keys?: string[] // the page's keys that do the same, each in a box at its end (not on a touch screen: no keys there)
   trail?: ReactNode // trailing adornment at the right edge (e.g. active checkmark alongside a leading icon)
   group?: string // a small heading over it: the first of a group of items of one kind
+  // Inline action buttons on the right of a single menu row (e.g. pinned order: top / up / down).
+  actions?: { label: string; icon: ReactNode; disabled?: boolean; onSelect: () => void }[]
 }
 
 // Sent on the window to close every open menu (a terminal tab sent to the back).
@@ -416,7 +418,31 @@ function MenuEntry({ item, close }: { item: MenuItem; close: () => void }) {
     <>
       {item.separator && <hr />}
       {item.group && <div className="menu-group" role="presentation">{item.group}</div>}
-      {item.href ? (
+      {item.actions?.length ? (
+        <div className="menu-item menu-item-actions" role="group" aria-label={item.label}>
+          {item.icon}
+          <span className="menu-item-actions-label">{item.label}</span>
+          <span className="menu-act-group">
+            {item.actions.map((a, idx) => (
+              <button
+                key={idx}
+                type="button"
+                className="menu-act-btn"
+                role="menuitem"
+                disabled={a.disabled}
+                aria-label={a.label}
+                title={a.label}
+                onClick={() => {
+                  if (!item.keepOpen) close()
+                  a.onSelect()
+                }}
+              >
+                {a.icon}
+              </button>
+            ))}
+          </span>
+        </div>
+      ) : item.href ? (
         <a className={cls} role="menuitem" href={item.href} onClick={(e) => { close(); if (item.onSelect) { e.preventDefault(); item.onSelect() } }}>{body}</a>
       ) : (
         <button className={cls} role={item.checked === undefined ? 'menuitem' : 'menuitemcheckbox'} aria-checked={item.checked} disabled={item.disabled} title={item.title} onClick={() => { if (!item.keepOpen) close(); item.onSelect?.() }}>{body}</button>
@@ -428,7 +454,7 @@ function MenuEntry({ item, close }: { item: MenuItem; close: () => void }) {
 // Arrow keys, Home and End move between menu items (the ARIA menu pattern);
 // Tab leaves the menu and closes it.
 // (Only items that can be chosen: a greyed one is passed over — pages-1105 4.4.)
-const PICKABLE = '.menu-item:not(:disabled):not([aria-disabled="true"])'
+const PICKABLE = 'button.menu-item:not(:disabled):not([aria-disabled="true"]), a.menu-item:not([aria-disabled="true"]), .menu-act-btn:not(:disabled)'
 function menuKeys(e: React.KeyboardEvent<HTMLElement>) {
   const items = [...e.currentTarget.querySelectorAll<HTMLElement>(PICKABLE)]
   if (items.length === 0) return

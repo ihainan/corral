@@ -532,7 +532,7 @@ export function ConversationView({
     return { at, of }
   }, [list])
   // (As a run's line: opened or shut by hand, else as all are — Ctrl+O.)
-  const foldShut = (key: string | undefined) => !!key && !(unfolded[key] ?? allOpen)
+  const foldShut = (key: string | undefined) => !!key && !(unfolded[key] ?? (allOpen >= 2))
   const heldNow = useRef({ compactSum, folds })
   heldNow.current = { compactSum, folds }
   // The rail's turns, and where each is in the list: of the same turns as
@@ -580,13 +580,13 @@ export function ConversationView({
   // by a tap, or all with Ctrl+O on a Mac, as in Claude Code (see pageKeys).
   const [opened, setOpened] = useState<Record<string, boolean>>({})
   const toggle = useCallback((key: string, open: boolean) => setOpened((o) => ({ ...o, [key]: open })), [])
-  const [allOpen, setAllOpen] = useState(() => isAllOpenKept(convo.of))
+  const [allOpen, setAllOpen] = useState<ExpandLevel>(() => keptExpandLevel(convo.of))
   const toggleAllOpen = useCallback(() => {
     setOpened({})
     setUnfolded({})
     setAllOpen((v) => {
-      const next = !v
-      keepAllOpen(ofNow.current.of, next)
+      const next = ((v + 1) % 3) as ExpandLevel
+      keepExpandLevel(ofNow.current.of, next)
       return next
     })
   }, [])
@@ -799,7 +799,7 @@ export function ConversationView({
     stuck.current = !back
     setAway(back)
     setOpened(sameGen ? p.opened : {})
-    setAllOpen(isAllOpenKept(convo.of))
+    setAllOpen(keptExpandLevel(convo.of))
     setUnfolded(sameGen ? p.unfolded : {}) // (keys are of one conversation: never another's)
     setChanges(null)
     setSubs(null)
@@ -1526,7 +1526,7 @@ export function ConversationView({
             {compactSum.taken.has(it) || foldShut(folds.of.get(it)) ? (
               <div className="convo-held" aria-hidden="true" />
             ) : (
-              <ListItem it={it} sum={compactSum.sum.get(it)} copy={copy} open={it.kind === 'work' ? (opened[it.key] ?? allOpen) : false} onToggle={toggle} onShow={show} />
+              <ListItem it={it} sum={compactSum.sum.get(it)} copy={copy} open={it.kind === 'work' ? (opened[it.key] ?? (allOpen >= 1)) : false} onToggle={toggle} onShow={show} />
             )}
           </Fragment>
         ))}
@@ -1685,7 +1685,7 @@ export function ConversationView({
               {mac && (
                 <>
                   <br />
-                  {t(allOpen ? 'convo.foldKeys' : 'convo.openKeys')}
+                  {t(allOpen === 0 ? 'convo.openKeys' : allOpen === 1 ? 'convo.openFullKeys' : 'convo.foldKeys')}
                 </>
               )}
             </p>
@@ -1846,7 +1846,7 @@ export function ConversationView({
                 ...(convo.of && (convo.bind?.agent === 'claude' || convo.bind?.agent === 'codex' || convo.bind?.agent === 'agy') ? [{ label: t('turns.item'), icon: <ListOrdered size={16} />, onSelect: () => (setSearching(false), setTurnsShown(true)) }] : []),
                 ...(sideBind ? [{ label: t('side.item'), icon: <MessageCircleQuestion size={16} />, onSelect: () => setBtwShown(sideIdent) }] : []),
                 // (All steps opened or folded: the menu's, as Ctrl+O is a Mac's only.)
-                { label: t(allOpen ? 'pageKeys.foldAll' : 'pageKeys.openAll'), icon: allOpen ? <ChevronsDownUp size={16} /> : <ChevronsUpDown size={16} />, keys: mac ? ['Ctrl+O'] : undefined, disabled: !list.length, onSelect: toggleAllOpen },
+                { label: t(allOpen === 0 ? 'pageKeys.openAll' : allOpen === 1 ? 'pageKeys.openFull' : 'pageKeys.foldAll'), icon: allOpen === 2 ? <ChevronsDownUp size={16} /> : <ChevronsUpDown size={16} />, keys: mac ? ['Ctrl+O'] : undefined, disabled: !list.length, onSelect: toggleAllOpen },
                 ...(convo.of && convo.status === 'ready' ? [{ label: t('card.open'), icon: <Info size={16} />, onSelect: () => setCard(cardMode()) }] : []),
                 { label: t('convoExport.item'), icon: <Download size={16} />, disabled: !list.length, onSelect: () => doExport() },
                 // (On every device: a tablet's keyboard has these keys too.)
@@ -3150,17 +3150,19 @@ function Runs({ meta, goal, active, mode, model, effort, quota, via, auth, onSid
             {/* Merged: the model and how hard it thinks are the one choice,
                 so they are the one chip — the menu behind them is one. */}
             {!(going && model.busy) && <ModelGlyph model={shownModel!} size={13} />}
-            {going && model.busy
-              ? t('convo.modelGoing', { what: going })
-              : merged && shownEffort
-                ? t('convo.modelEffortChip', { m: modelName(shownModel!), e: effortName(shownEffort) })
-                : modelName(shownModel!)}
+            <span className="convo-runs-model-name">
+              {going && model.busy
+                ? t('convo.modelGoing', { what: going })
+                : merged && shownEffort
+                  ? t('convo.modelEffortChip', { m: modelName(shownModel!), e: effortName(shownEffort) })
+                  : modelName(shownModel!)}
+            </span>
             {going && model.busy ? <Loader size={12} className="convo-running-spin" aria-hidden="true" /> : <ChevronsUpDown size={12} aria-hidden="true" />}
           </button>
         ) : (
           <span className="convo-runs-item convo-runs-model" title={shownModel}>
             <ModelGlyph model={shownModel!} size={13} />
-            {modelName(shownModel!)}
+            <span className="convo-runs-model-name">{modelName(shownModel!)}</span>
           </span>
         ))}
       {shownEffort && !(merged && shownModel && model) &&
@@ -3410,13 +3412,13 @@ function Runs({ meta, goal, active, mode, model, effort, quota, via, auth, onSid
             {/* (On a phone the row under the box leaves out the branch and where the
                 requests go — 11-18, it was cut to "H" and "走 127.0.0": said here.) */}
             {meta.branch && (
-              <div className="convo-runs-row is-narrow-only">
+              <div className="convo-runs-row is-narrow-only is-narrow-branch">
                 <span>{t('convo.branchRow')}</span>
                 <span>{meta.branch}</span>
               </div>
             )}
             {where && (
-              <div className="convo-runs-row is-narrow-only">
+              <div className="convo-runs-row is-narrow-only is-narrow-via">
                 <span>{t('convo.viaRow')}</span>
                 <span>{where}</span>
               </div>
@@ -3843,17 +3845,20 @@ export function AgentList({ rows, menus, onPicked, placed, query: given, onQuery
   }
   useEffect(settle)
   useEffect(() => forget, [])
-  const menuItems = (r: ConvoListRow) =>
-    (r.menu!().filter(Boolean) as MenuItem[]).map((it): MenuItem => ({
+  const menuItems = (r: ConvoListRow) => {
+    const wrap = (fn: () => void) => () => {
+      const el = dotsOf(r.key)
+      el?.focus({ preventScroll: true })
+      forget()
+      refocus.current = { key: r.key, el, timer: window.setInterval(settle, 150) }
+      fn()
+    }
+    return (r.menu!().filter(Boolean) as MenuItem[]).map((it): MenuItem => ({
       ...it,
-      onSelect: it.onSelect && (() => {
-        const el = dotsOf(r.key)
-        el?.focus({ preventScroll: true })
-        forget()
-        refocus.current = { key: r.key, el, timer: window.setInterval(settle, 150) }
-        it.onSelect!()
-      }),
+      onSelect: it.onSelect && wrap(it.onSelect),
+      actions: it.actions?.map((a) => ({ ...a, onSelect: wrap(a.onSelect) })),
     }))
+  }
   // (The times move on: drawn again every half minute.)
   const [now, setNow] = useState(Date.now())
   useEffect(() => {
@@ -5075,7 +5080,8 @@ function PathCode({ path, lines, text, copy = text }: { path: string; lines?: Li
 const CopyOf = createContext<((s: string) => void) | undefined>(undefined)
 // (A copy of the conversation up to the end of one of the person's turns, where one can be started.)
 const ForkAtOf = createContext<{ go: (e: ConvoEntry) => void; can: (e: ConvoEntry) => boolean } | undefined>(undefined)
-const OpenAllOf = createContext(false)
+type ExpandLevel = 0 | 1 | 2
+const OpenAllOf = createContext<ExpandLevel>(0)
 
 // A file a step acted on: its whole path, and what can be done with it.
 // (acts: only what can be done, the path being said beside it already.)
@@ -5366,15 +5372,38 @@ type Anchor = { key: string; top: number; fromEnd: number; last: string }
 
 // Where each conversation was left, for this page's life: as many as are
 // kept to be shown at once (conversation.ts), the latest last.
-type Place = { gen: number; stuck: boolean; anchors: Anchor[]; noted: Item[]; opened: Record<string, boolean>; allOpen: boolean; unfolded: Record<string, boolean> }
+type Place = { gen: number; stuck: boolean; anchors: Anchor[]; noted: Item[]; opened: Record<string, boolean>; allOpen: ExpandLevel; unfolded: Record<string, boolean> }
 const CONVO_OPEN_ALL_KEY = 'corral.convo.allOpen'
-function isAllOpenKept(of?: string): boolean {
-  return !!of && keptNames(CONVO_OPEN_ALL_KEY).includes(of)
+const CONVO_EXPAND_LEVEL_KEY = 'corral.convo.expandLevel'
+function readExpandMap(): Record<string, ExpandLevel> {
+  try {
+    const raw = local.get(CONVO_EXPAND_LEVEL_KEY)
+    if (!raw) return {}
+    const parsed = JSON.parse(raw) as Record<string, unknown>
+    const out: Record<string, ExpandLevel> = {}
+    for (const [k, v] of Object.entries(parsed)) {
+      if (v === 1 || v === 2) out[k] = v
+    }
+    return out
+  } catch {
+    return {}
+  }
 }
-function keepAllOpen(of: string | undefined, open: boolean) {
+function keptExpandLevel(of?: string): ExpandLevel {
+  if (!of) return 0
+  const m = readExpandMap()
+  if (m[of] === 1 || m[of] === 2) return m[of]
+  return keptNames(CONVO_OPEN_ALL_KEY).includes(of) ? 1 : 0
+}
+function keepExpandLevel(of: string | undefined, level: ExpandLevel) {
   if (!of) return
+  const m = readExpandMap()
+  delete m[of]
+  if (level === 1 || level === 2) m[of] = level
+  const entries = Object.entries(m).slice(-100)
+  local.set(CONVO_EXPAND_LEVEL_KEY, JSON.stringify(Object.fromEntries(entries)))
+  // Keep legacy key clear for this conversation so level 0 overrides old true.
   const prev = keptNames(CONVO_OPEN_ALL_KEY).filter((x) => x !== of)
-  if (open) prev.push(of)
   keepNames(CONVO_OPEN_ALL_KEY, prev.slice(-100))
 }
 
@@ -6108,11 +6137,16 @@ function liveText(tool: ConvoTool): string {
 
 function Thinking({ text, live }: { text: string; live?: boolean }) {
   const openAll = useContext(OpenAllOf)
+  const wantOpen = openAll >= 1
   const [manual, setManual] = useState<boolean | null>(null)
+  const prevWant = useRef(wantOpen)
   useEffect(() => {
-    setManual(null)
-  }, [openAll])
-  const open = manual ?? openAll
+    if (prevWant.current !== wantOpen) {
+      prevWant.current = wantOpen
+      setManual(null)
+    }
+  }, [wantOpen])
+  const open = manual ?? wantOpen
   const [showOrig, setShowOrig] = useState(false)
   const [el, setEl] = useState<HTMLDivElement | null>(null)
   const seen = useSeen(el)
@@ -6163,16 +6197,35 @@ const exitCode = (tool: ConvoTool) => (tool.error ? /^Exit code (\d{1,3})\b/.exe
 
 function ToolRow({ tool, onCopy, live }: { tool: ConvoTool; onCopy: (s: string) => void; live?: boolean }) {
   const openSub = useContext(OpenSub)
+  const openAll = useContext(OpenAllOf)
+  const wantFull = openAll >= 2
   // (Opened or shown in full: kept by the call, so it is so when its
-  // conversation is shown again, as where it was read is.)
-  const [open, setOpenNow] = useState(() => toolShown.get(tool.id ?? '')?.open ?? false)
-  const [full, setFullNow] = useState(() => toolShown.get(tool.id ?? '')?.full ?? false)
+  // conversation is shown again, as where it was read is; Ctrl+O level 2
+  // overrides to open+full and cycling resets manual overrides.)
+  const [openManual, setOpenManual] = useState<boolean | null>(() => {
+    const kept = toolShown.get(tool.id ?? '')
+    return kept ? kept.open : null
+  })
+  const [fullManual, setFullManual] = useState<boolean | null>(() => {
+    const kept = toolShown.get(tool.id ?? '')
+    return kept ? kept.full : null
+  })
+  const prevOpenAll = useRef(openAll)
+  useEffect(() => {
+    if (prevOpenAll.current !== openAll) {
+      prevOpenAll.current = openAll
+      setOpenManual(null)
+      setFullManual(null)
+    }
+  }, [openAll])
+  const open = openManual ?? wantFull
+  const full = fullManual ?? wantFull
   const setOpen = (v: boolean) => {
-    setOpenNow(v)
+    setOpenManual(v)
     keepShown(tool.id, { open: v, full })
   }
   const setFull = (v: boolean) => {
-    setFullNow(v)
+    setFullManual(v)
     keepShown(tool.id, { open, full: v })
   }
   const objRef = useRef<HTMLSpanElement>(null)

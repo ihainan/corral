@@ -3096,6 +3096,13 @@ func convoGatedQueueCommand(gate, mode, session, pane, socket string, pid, start
 	return convoGated(gate, mode, session, pane, socket, pid, start, sid, n+"~", nil, read)
 }
 
+// convoGatedImmediateCommand: convoGatedCommand for a message to Antigravity
+// CLI (agy) submitted with Alt+M ("opposite of Queued Messages setting", i.e.
+// Send Immediately while in default Queue mode) instead of Enter.
+func convoGatedImmediateCommand(gate, mode, session, pane, socket string, pid, start int64, sid string, length int, read int) string {
+	return convoGated(gate, mode, session, pane, socket, pid, start, sid, strconv.Itoa(length)+"!", nil, read)
+}
+
 // convoGatedFillCommand: convoGatedCommand for a text only pasted, no Enter
 // after it (a prompt's row to write in: see Fill).
 func convoGatedFillCommand(gate, mode, session, pane, socket string, pid, start int64, sid string, length int, read int) string {
@@ -3142,6 +3149,13 @@ tabsend=
 case $len in *~)
   tabsend=1 len=${len%"~"} # (quoted: a bare ~ there is the home folder)
   case $len in ''|*[!0-9+]*) exit 4;; esac ;;
+esac
+# (A message to Antigravity CLI submitted immediately, its length ending "!":
+# Alt+M in Enter's place — agy 1.4.0's "opposite of Queued Messages setting".)
+altmsend=
+case $len in *!)
+  altmsend=1 len=${len%!}
+  case $len in ''|*[!0-9]*) exit 4;; esac ;;
 esac
 # (A message in parts, its length "12+5+30": each part pasted on its own,
 # in turn — a picture's path alone, so that Codex takes it for a picture.
@@ -3609,6 +3623,7 @@ if [ "$mode" = tmux ]; then
   pasted
   gate_enter
   if [ -n "$tabsend" ]; then tmux send-keys -t "$p" Tab 9>&- || exit 5
+  elif [ -n "$altmsend" ]; then tmux send-keys -t "$p" M-m 9>&- || exit 5
   else tmux send-keys -t "$p" Enter 9>&- || exit 5; fi
   taken
   screen
@@ -3655,9 +3670,13 @@ else
   if [ -n "$noenter" ]; then screen; exit 0; fi
   pasted
   gate_enter
-  k=enter
-  [ -n "$tabsend" ] && k=tab
-  HERDR_SOCKET_PATH=$sock herdr pane send-keys "$p" "$k" >/dev/null 2>&1 9>&- || exit 5
+  if [ -n "$altmsend" ]; then
+    HERDR_SOCKET_PATH=$sock herdr pane send-keys "$p" alt+m >/dev/null 2>&1 9>&- || HERDR_SOCKET_PATH=$sock herdr pane send-text "$p" "${e}m" >/dev/null 2>&1 9>&- || exit 5
+  else
+    k=enter
+    [ -n "$tabsend" ] && k=tab
+    HERDR_SOCKET_PATH=$sock herdr pane send-keys "$p" "$k" >/dev/null 2>&1 9>&- || exit 5
+  fi
   taken
   screen
 fi`
@@ -3953,7 +3972,10 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 		Fill bool `json:"fill"`
 		// Queue: (a message to Codex) queued after its turn, not into it.
 		Queue bool `json:"queue"`
-		Live  bool `json:"live"` // (panel: the terminal shown as it is, not a panel of its own)
+		// Immediate: (a message to Antigravity CLI) submitted with Alt+M to
+		// bypass queuing and join the current turn right away.
+		Immediate bool `json:"immediate"`
+		Live      bool `json:"live"` // (panel: the terminal shown as it is, not a panel of its own)
 		// (card: its key, and the card as the page shows it.)
 		Key  string     `json:"key"`
 		Card *convoCard `json:"card"`
@@ -4619,6 +4641,11 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 	cmd := convoGatedCommand(gate, sess.Persistence, sess.TmuxSession, b.Pane, socket, b.PID, b.Start, b.Session, len(text), press, modeLines(what))
 	if what == "reply" && b.Fill {
 		cmd = convoGatedFillCommand(gate, sess.Persistence, sess.TmuxSession, b.Pane, socket, b.PID, b.Start, b.Session, len(text), modeLines(what))
+	}
+	if what == "send" && front.agent == "agy" && b.Immediate {
+		// (Antigravity CLI 1.4.0+: Alt+M submits using the opposite of Queued
+		// Messages — Send Immediately while in default Queue mode.)
+		cmd = convoGatedImmediateCommand(gate, sess.Persistence, sess.TmuxSession, b.Pane, socket, b.PID, b.Start, b.Session, len(text), modeLines(what))
 	}
 	if what == "send" && front.agent == "codex" {
 		// (Its pictures' paths each pasted on its own: Codex takes them for pictures — plans/4-codex-images.md.)

@@ -229,6 +229,56 @@ func TestOpenCode2Find(t *testing.T) {
 	}
 }
 
+// Disambiguating contested OpenCode 2 panes in the same directory via exact
+// OSC terminal title ("OC | <title>"): unique title resolves, duplicate or
+// generic titles stay empty (ambiguous).
+func TestOpenCode2FindByTitle(t *testing.T) {
+	db := filepath.Join(t.TempDir(), "opencode.db")
+	py := `import sqlite3, sys
+c = sqlite3.connect(sys.argv[1])
+c.execute('create table session_v2 (id text primary key, parent_id text, directory text, title text, revert text, time_created int, time_updated int, time_busy int, time_idle int)')
+c.executemany('insert into session_v2 values (?, ?, ?, ?, null, 1, 2, 0, 1)', [
+    ('ses_unique1111', None, '/proj', '询问模型身份'),
+    ('ses_unique2222', None, '/proj', '问候'),
+    ('ses_dup1111111', None, '/proj', 'Greeting'),
+    ('ses_dup2222222', None, '/proj', 'Greeting'),
+    ('ses_child11111', 'ses_unique1111', '/proj', 'SubOnly'),
+])
+c.commit()`
+	if out, err := exec.Command("python3", "-c", py, db).CombinedOutput(); err != nil {
+		t.Fatalf("seed db: %v: %s", err, out)
+	}
+	check := func(title, want string) {
+		t.Helper()
+		out, err := exec.Command("sh", "-c", ocQueryCommand(db, "find_title", "/proj", title)).Output()
+		if err != nil {
+			t.Fatalf("find_title %q: %v", title, err)
+		}
+		var r struct {
+			K  string `json:"k"`
+			ID string `json:"id"`
+		}
+		if err := json.Unmarshal(out, &r); err != nil || r.K != "sid" || r.ID != want {
+			t.Fatalf("find_title %q: got %s, want id=%q", title, out, want)
+		}
+	}
+	check("询问模型身份", "ses_unique1111")
+	check("问候", "ses_unique2222")
+	check("Greeting", "") // duplicate title must stay ambiguous
+	check("SubOnly", "")  // subagent session (parent_id != null) must not match
+	check("Missing", "")
+
+	// Pane title parser rejects generic placeholders and non-OC titles.
+	if got, ok := ocTitleFromPane("OC | 询问模型身份"); !ok || got != "询问模型身份" {
+		t.Fatalf("ocTitleFromPane valid: got %q %v", got, ok)
+	}
+	for _, bad := range []string{"", "OpenCode", "OC | ", "OC | OpenCode", "OC | New session", "✳ Claude"} {
+		if got, ok := ocTitleFromPane(bad); ok {
+			t.Fatalf("ocTitleFromPane(%q): expected false, got %q", bad, got)
+		}
+	}
+}
+
 // OpenCode 2's input on its screen (as 2.2.6 draws it, 11-08): there and
 // empty; words in it; a permission or a question in its place; neither.
 func TestOcIdleInput(t *testing.T) {

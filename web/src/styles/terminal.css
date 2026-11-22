@@ -595,6 +595,7 @@ html:not(.kb-open) .convo-scroll-wrap { min-height: min(30vh, 240px); }
 .convo-dock {
   flex: 0 1 auto; min-height: 0; width: 100%; max-width: 780px; margin: 0 auto; display: flex; flex-direction: column; gap: 8px;
   padding: 0 max(16px, env(safe-area-inset-right, 0px)) calc(6px + env(safe-area-inset-bottom, 0px)) max(16px, env(safe-area-inset-left, 0px)); font-family: var(--font-ui);
+  container-type: inline-size; container-name: convo-dock;
 }
 /* (The keyboard up covers the home indicator's strip: none kept for it) */
 html.kb-open .convo-dock { padding-bottom: 6px; }
@@ -609,23 +610,25 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 .convo-dock .composer-box:focus-within,
 .term-root.light .convo-dock .composer-box:focus-within { border-color: color-mix(in srgb, var(--term-accent-text) 70%, var(--term-line)); box-shadow: 0 0 0 2px color-mix(in srgb, var(--term-accent-text) 12%, transparent); }
 @media (max-width: 640px) { .convo-dock { padding-left: max(12px, env(safe-area-inset-left, 0px)); padding-right: max(12px, env(safe-area-inset-right, 0px)); } }
-.convo-runs { position: relative; display: flex; align-items: center; gap: 2px; min-width: 0; overflow: visible; min-height: 24px; margin-top: -4px; font-size: var(--fs-sub); line-height: var(--lh-sub); color: var(--term-fg-3); font-variant-numeric: tabular-nums; }
+.convo-runs { position: relative; display: flex; align-items: center; gap: 4px; min-width: 0; overflow: visible; min-height: 24px; margin-top: -4px; font-size: var(--fs-sub); line-height: var(--lh-sub); color: var(--term-fg-3); font-variant-numeric: tabular-nums; }
 .convo-runs-item {
   flex: none; display: inline-flex; align-items: center; gap: 5px; padding: 2px 6px; border: 0; border-radius: var(--r-sm);
   background: none; color: inherit; font: inherit; white-space: nowrap;
 }
-.convo-runs-branch { flex: 0 1 auto; min-width: 0; overflow: hidden; }
-.convo-runs-model, .convo-runs-mode { flex: 0 1 auto; min-width: 2em; display: block; overflow: hidden; text-overflow: ellipsis; }
+.convo-runs-mode { flex: 0 0 auto; }
+.convo-runs-branch { flex: 0 1 auto; min-width: 0; max-width: 148px; overflow: hidden; }
+.convo-runs-model { flex: 0 1 auto; min-width: 0; max-width: 220px; overflow: hidden; }
+.convo-runs-model-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* How hard it thinks, beside the model as Claude Code's own line has it */
-.convo-runs-effort { flex: none; }
+.convo-runs-effort { flex: 0 0 auto; }
 .convo-runs-branch svg { flex: none; }
 .convo-runs-branch-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 /* Where its requests go (11-09), where that is not the model maker's own
    door: before the context, whose pop-up says there what the subscription's
    use would have stood in. A host's name can be long, so it is cut as the
    branch's name is. */
-.convo-runs-via { flex: 0 1 auto; min-width: 2em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.convo-runs-ctx { cursor: pointer; }
+.convo-runs-via { flex: 0 1 auto; min-width: 0; max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.convo-runs-ctx { flex: 0 0 auto; cursor: pointer; }
 /* (A touch screen: each 44 high to touch, the row as low as it looks, into the gaps around it) */
 @media (pointer: coarse) {
   .convo-runs { gap: 6px; margin: -8px 0 -6px; } /* (up to the box, not into it; down to the safe area) */
@@ -713,11 +716,30 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 .convo-runs-bar.is-warn i { background: var(--term-warn-text); }
 .convo-runs-bar.is-danger i { background: var(--term-danger-text); }
 .convo-runs-note { margin: 4px 0 0; font-size: var(--fs-note); line-height: var(--lh-note); color: var(--term-fg-3); }
-/* (A phone, 11-18: seven things on a line cut to "自动模", "H", "Op…", "走 127.0.0".
-   The branch and where the requests go give way, said in the context's pop-up
-   instead; what is left is whole.) */
-/* (Only where the context's pop-up is there to say them in: has-ctx.) */
+/* Progressive container-query degradation for the composer footer bar so pills
+   never clip mid-word in narrow windows, split panes, side panels, or phones.
+   Hidden items (via / branch) move cleanly into the Context popover. */
 .convo-runs-row.is-narrow-only { display: none; }
+@container convo-dock (max-width: 680px) {
+  .convo-runs-side-name { display: none; }
+  .convo-runs-effort-word { display: none; }
+  .convo-runs-effort::before { content: "·"; margin-right: 1px; }
+}
+@container convo-dock (max-width: 560px) {
+  .convo-runs.has-ctx .convo-runs-via { display: none; }
+  .convo-runs-row.is-narrow-via { display: flex; }
+}
+@container convo-dock (max-width: 470px) {
+  .convo-runs.has-ctx .convo-runs-branch { display: none; }
+  .convo-runs-row.is-narrow-branch { display: flex; }
+  .convo-runs { gap: 3px; }
+  .convo-runs-item.is-switch, .convo-runs-ctx { padding-left: 7px; padding-right: 7px; }
+}
+@container convo-dock (max-width: 380px) {
+  .convo-runs-branch, .convo-runs-via { display: none; }
+  .convo-runs-row.is-narrow-only { display: flex; }
+  .convo-runs-model { max-width: 140px; }
+}
 @media (max-width: 520px) {
   .convo-runs.has-ctx .convo-runs-branch, .convo-runs.has-ctx .convo-runs-via { display: none; }
   .convo-runs-row.is-narrow-only { display: flex; }
@@ -1515,16 +1537,17 @@ button.convo-queue-row.is-note:last-child { border-radius: 0 0 var(--r-lg) var(-
 
 /* The agents to go to: beside the thread (wide), over it (narrow, or folded away) */
 .convo-side {
-  flex: none; width: 288px; /* (as dragged: its style) */ display: flex; flex-direction: column; overflow-y: auto; overscroll-behavior: contain;
-  padding: 8px; border-right: 1px solid var(--term-line); background: var(--term-side, var(--term-chrome)); font-family: var(--font-ui);
+  flex: none; width: 288px; /* (as dragged: its style) */ display: flex; flex-direction: column; overflow: hidden;
+  padding: 8px 8px 6px; border-right: 1px solid var(--term-line); background: var(--term-side, var(--term-chrome)); font-family: var(--font-ui);
 }
 /* (Its rows on its own surface: the one read lifted off it, as a card; a
    hover a shade of it.) */
 .term-root.light .convo-side { --term-side: #f3f4f6; --term-row-hover: rgba(16, 24, 40, 0.045); --term-row-current: #ffffff; --row-lift: 0 0 0 1px rgba(16, 24, 40, 0.07); } /* (11-13: a hairline, no drop shadow — shadows are for what floats) */
 .term-root.dark .convo-side { --term-row-hover: rgba(255, 255, 255, 0.04); --term-row-current: rgba(255, 255, 255, 0.075); --row-lift: inset 0 0 0 1px rgba(255, 255, 255, 0.05); }
-/* (Longer than the window, it scrolls: what is in it keeps its height, not
-   squeezed to fit, the search box to a line of its text.) */
+/* (+ New agent and Search toolbar stay pinned at the top; only the agent list scrolls.) */
 .convo-side > * { flex-shrink: 0; }
+.convo-side > .convo-list-groups { flex: 1 1 0; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 2px 2px 4px 0; margin-right: -2px; }
+.convo-side > .list-toolbar { margin-bottom: 6px; padding-bottom: 6px; border-bottom: 1px solid color-mix(in srgb, var(--term-line) 65%, transparent); }
 /* Its edge, dragged to size it: over the line between, taking no room */
 .convo-side-grip {
   flex: none; position: relative; z-index: 2; width: 9px; margin: 0 -5px 0 -4px; cursor: col-resize; touch-action: none;
@@ -1831,10 +1854,13 @@ button.convo-queue-row.is-note:last-child { border-radius: 0 0 var(--r-lg) var(-
 .convo-nudge-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .convo-picker-back { position: absolute; inset: 0; z-index: 6; background: rgba(0, 0, 0, 0.28); }
 .convo-picker {
-  position: absolute; z-index: 7; top: 40px; left: 12px; width: min(360px, calc(100% - 24px)); max-height: 72%; overflow-y: auto;
+  position: absolute; z-index: 7; top: 40px; left: 12px; width: min(360px, calc(100% - 24px)); max-height: 72%;
+  display: flex; flex-direction: column; overflow: hidden;
   padding: 8px; border: 1px solid var(--term-line); border-radius: var(--r-lg); background: var(--term-bg);
-  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.22); font-family: var(--font-ui); overscroll-behavior: contain;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.22); font-family: var(--font-ui);
 }
+.convo-picker > * { flex-shrink: 0; }
+.convo-picker > .convo-list-groups { flex: 1 1 0; min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
 .convo-picker-title { padding: 4px 4px 8px 10px; font-weight: 600; font-size: var(--fs-h3); line-height: var(--lh-h3); display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 @media (max-width: 640px) {
   .convo-picker {
@@ -1881,7 +1907,9 @@ button.convo-queue-row.is-note:last-child { border-radius: 0 0 var(--r-lg) var(-
 .agents-list { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 0 0 calc(16px + env(safe-area-inset-bottom, 0px)); }
 /* A phone's list of the agents: the side list's (AgentList), the whole screen (11-13). Over it, a new
    agent and "waiting on me" side by side; then its search, its groups. */
-.agents-list.agents-phone { padding: 8px max(12px, env(safe-area-inset-right, 0px)) calc(16px + env(safe-area-inset-bottom, 0px)) max(12px, env(safe-area-inset-left, 0px)); }
+.agents-list.agents-phone { display: flex; flex-direction: column; overflow: hidden; padding: 8px max(12px, env(safe-area-inset-right, 0px)) 0 max(12px, env(safe-area-inset-left, 0px)); }
+.agents-list.agents-phone > * { flex-shrink: 0; }
+.agents-list.agents-phone > .convo-list-groups { flex: 1 1 0; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding-bottom: calc(16px + env(safe-area-inset-bottom, 0px)); }
 .agents-phone-top { display: flex; gap: 8px; margin: 0 0 8px; }
 .convo-side-new.agents-phone-new { flex: 1; width: auto; min-width: 0; margin: 0; height: 40px; }
 .agents-phone-mine { flex: none; height: 40px; padding: 0 12px; border: 1px solid transparent; border-radius: var(--r); background: color-mix(in srgb, var(--term-fg) 5%, transparent); color: var(--term-fg-2); font: inherit; font-size: var(--fs-sub); line-height: var(--lh-sub); cursor: pointer; }

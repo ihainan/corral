@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/ihainan/corral/internal/convo"
+	"github.com/ihainan/corral/internal/herdr"
 	"github.com/ihainan/corral/internal/sshx"
 	"github.com/ihainan/corral/internal/term"
 )
@@ -127,6 +128,20 @@ if mode == 'find':
         if r and (best is None or (r[1] or 0) > (best[1] or 0)):
             best = r
     out.write(line({'k': 'sid', 'id': best[0] if best else '', 'now': int(time.time() * 1000)}))
+    sys.exit()
+if mode == 'find_title':
+    # (Disambiguate an OpenCode pane by its exact OSC terminal title "OC | <title>"
+    # when multiple OpenCodes share a directory: only returns a session id when
+    # exactly one distinct top-level session in that directory has that title.)
+    seen = set()
+    for t in ('session_v2', 'session'):
+        try:
+            for r in c.execute('select id from ' + t + ' where directory = ? and parent_id is null and title = ? limit 2', (sys.argv[3], sys.argv[4])):
+                if r and r[0]:
+                    seen.add(r[0])
+        except sqlite3.OperationalError:
+            continue
+    out.write(line({'k': 'sid', 'id': next(iter(seen)) if len(seen) == 1 else '', 'n': len(seen), 'now': int(time.time() * 1000)}))
     sys.exit()
 sid = sys.argv[3]
 # OpenCode 2 keeps its sessions apart (session_v2, session_message: a row
@@ -352,12 +367,84 @@ exec python3 -c ` + sshx.QuoteShell(ocQueryScript) + ` "$@"`
 	return cmd
 }
 
+// ocTitleFromPane extracts the session title OpenCode writes to its terminal
+// title ("OC | <title>"). Generic placeholder titles and control characters
+// are rejected so ambiguous or brand-new sessions fall through safely.
+func ocTitleFromPane(raw string) (string, bool) {
+	if !strings.HasPrefix(raw, "OC | ") {
+		return "", false
+	}
+	title := strings.TrimSpace(strings.TrimPrefix(raw, "OC | "))
+	if title == "" || strings.ContainsAny(title, "\r\n\x00") || len(title) > 256 {
+		return "", false
+	}
+	switch title {
+	case "OpenCode", "New session":
+		return "", false
+	}
+	return title, true
+}
+
+// ocPaneTitle returns pane's OpenCode session title when it can be read from
+// herdr/tmux and does not collide with another live OpenCode pane in the same
+// directory.
+func (s *Server) ocPaneTitle(sess *term.Session, pane, cwd string, l convoLocated) (string, bool) {
+	if sess.Persistence == "herdr" {
+		snap, ok := s.herdrSocks.snapshotOf(sess.ID)
+		if !ok || snap == nil {
+			return "", false
+		}
+		var target herdr.Pane
+		found := false
+		for _, list := range [][]herdr.Pane{snap.Agents, snap.Panes} {
+			for _, hp := range list {
+				if hp.ID == pane {
+					target, found = hp, true
+					break
+				}
+			}
+			if found {
+				break
+			}
+		}
+		if !found {
+			return "", false
+		}
+		title, ok := ocTitleFromPane(target.Title)
+		if !ok {
+			return "", false
+		}
+		// Reject if another OpenCode pane in the same folder displays the exact same title.
+		seenPanes := map[string]bool{pane: true}
+		for _, list := range [][]herdr.Pane{snap.Agents, snap.Panes} {
+			for _, hp := range list {
+				if hp.ID == "" || seenPanes[hp.ID] {
+					continue
+				}
+				seenPanes[hp.ID] = true
+				if hp.Cwd != cwd && hp.Cwd != "" {
+					continue
+				}
+				if other, ok := ocTitleFromPane(hp.Title); ok && other == title {
+					return "", false
+				}
+			}
+		}
+		return title, true
+	}
+	if sess.Persistence == "tmux" && pane == l.tmuxActive {
+		return ocTitleFromPane(l.tmuxTitle)
+	}
+	return "", false
+}
+
 // ocSessionOf is the session the OpenCode p runs in pane is at: what
-// herdr says of the pane, else the latest begun where it runs since it
-// started; convoNoSession while it has none (a new one, nothing sent yet).
+// herdr says of the pane, else an unambiguous "OC | <title>" match in its
+// database, else the latest begun where it runs since it started;
+// convoNoSession while it has none (a new one, nothing sent yet).
 // why, where it cannot be told: convoNoReader (no python3 on the host), or
 // convoNotTold (another OpenCode of the user's runs in the same place, and
-// herdr does not say: which of the sessions there is whose cannot be told).
+// neither herdr nor a unique pane title disambiguates them).
 // l is what locating found of the host's processes.
 func (s *Server) ocSessionOf(ctx context.Context, sess *term.Session, p *convoProc, pane string, l convoLocated) (sid, why string) {
 	// (OpenCode 2's: herdr is told by its background service, as the pane
@@ -376,13 +463,38 @@ func (s *Server) ocSessionOf(ctx context.Context, sess *term.Session, p *convoPr
 		return convoNoSession, convoNotTold
 	}
 	key := strconv.FormatInt(sess.HostID, 10) + "\x00" + p.cwd
+	contested := false
 	for _, q := range l.procs {
 		// (Another where it runs, of the same database or of one not told:
 		// a database of its own, its sessions are not these.)
 		if q.agent == "opencode" && q.pid != p.pid && q.cwd == p.cwd && (q.log == "" || q.log == p.log) {
+			contested = true
 			s.ocContested.note(key, true)
-			return convoNoSession, convoNotTold
+			break
 		}
+	}
+	// Try exact terminal title ("OC | <title>") disambiguation first: works
+	// both when two OpenCode 2 panes share a directory and when a single pane
+	// resumed an older session whose time_updated predates p.started.
+	if title, ok := s.ocPaneTitle(sess, pane, p.cwd, l); ok {
+		out, err := sshx.Output(ctx, sess.Client(), ocQueryCommand(p.log, "find_title", p.cwd, title), 4096)
+		if err == nil {
+			var r struct {
+				K  string `json:"k"`
+				ID string `json:"id"`
+			}
+			if json.Unmarshal(bytes.TrimSpace(out), &r) == nil {
+				if r.K == "nopy" {
+					return convoNoSession, convoNoReader
+				}
+				if r.K == "sid" && ocSessionID.MatchString(r.ID) {
+					return r.ID, ""
+				}
+			}
+		}
+	}
+	if contested {
+		return convoNoSession, convoNotTold
 	}
 	since := p.started - 2000 // (the host's clock, read twice)
 	if p.started <= 0 {

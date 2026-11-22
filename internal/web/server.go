@@ -61,6 +61,7 @@ type Server struct {
 	static   fs.FS
 
 	herdrSocks       herdrSockets
+	herdrSeenSync    sync.Map         // herdr server key → *sync.Mutex (serializes Chat→CLI seen focus sync)
 	paneAttaches     paneAttachSlots  // active single-pane PTY attaches per SSH client/terminal (api_pane_ws.go)
 	gitCalls         gitCalls         // the session card's git state, per folder (git_info.go)
 	codexPanes       codexPaneLooks   // what each herdr server's Codex panes run, looked at shortly (codex_panes.go)

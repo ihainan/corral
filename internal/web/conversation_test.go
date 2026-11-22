@@ -236,6 +236,16 @@ func TestConvoKeysCommandQuotes(t *testing.T) {
 	}
 }
 
+func TestConvoImmediateCommand(t *testing.T) {
+	cmd := convoGatedImmediateCommand("afree:abc", "herdr", "", "w1:p2", "/run/herdr.sock", 7, 9, sidA, 12, 60)
+	if !strings.HasSuffix(cmd, ` corral 'herdr' '' 'w1:p2' 7 9 12! '/run/herdr.sock' '`+sidA+`' 60 'afree:abc'`) {
+		t.Fatalf("unexpected immediate command args: %s", cmd[len(cmd)-120:])
+	}
+	if !strings.Contains(cmd, "herdr pane send-keys \"$p\" alt+m") || !strings.Contains(cmd, "tmux send-keys -t \"$p\" M-m") {
+		t.Fatalf("immediate command missing alt+m / M-m submit keys")
+	}
+}
+
 func TestConvoStatesComeBackUnderTheLimit(t *testing.T) {
 	var c convoStates
 	var held []*convoState

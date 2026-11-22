@@ -564,6 +564,25 @@ a.setting:hover { text-decoration: none; background: var(--bg-hover); }
 .sheet-list .menu-item:has(.menu-hint) { padding-top: 6px; padding-bottom: 6px; }
 .menu-item:disabled:hover { background: none; }
 .menu-item:hover { background: var(--bg-hover); text-decoration: none; }
+.menu-item-actions { cursor: default; gap: 10px; }
+.menu-item-actions:hover { background: none; }
+.menu-item-actions-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.menu-act-group {
+  display: inline-flex; align-items: center; gap: 2px; padding: 2px; margin-left: auto; flex: none;
+  border-radius: var(--r-sm); background: var(--bg-subtle); border: 1px solid var(--line);
+}
+.menu-act-btn {
+  display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 26px; padding: 0;
+  border: 0; border-radius: var(--r-xs, 4px); background: transparent; color: var(--fg-2); cursor: pointer;
+  transition: background-color 0.12s var(--ease), color 0.12s var(--ease);
+}
+.menu-act-btn svg { color: inherit; }
+.menu-act-btn:hover:not(:disabled) { background: var(--bg-hover); color: var(--fg); }
+.menu-act-btn:focus-visible { outline: 2px solid var(--accent-text); outline-offset: -1px; }
+.menu-act-btn:disabled { opacity: 0.35; cursor: default; }
+.sheet-list .menu-act-btn { width: 38px; height: 34px; }
+.sheet-list .menu-act-btn svg { width: 17px; height: 17px; }
+@media (pointer: coarse) { .menu-act-btn { width: 36px; height: 34px; } }
 .menu-item.danger, .menu-item.danger svg { color: var(--danger); }
 .menu hr, .sheet-list hr { border: 0; border-top: 1px solid var(--line); margin: 4px 6px; }
 .menu-note { padding: 6px 10px 8px; color: var(--fg-3); font-size: var(--fs-note); line-height: var(--lh-note); }
