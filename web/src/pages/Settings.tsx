@@ -23,8 +23,8 @@ const DESKTOP_SETTINGS_MQ = '(min-width: 820px) and (pointer: fine)'
 export function isDesktopSettings(): boolean {
   return !isCoarse() && window.matchMedia(DESKTOP_SETTINGS_MQ).matches
 }
-export function openSettingsModal() {
-  if (isDesktopSettings()) window.dispatchEvent(new Event(OPEN_SETTINGS))
+export function openSettingsModal(cat?: SettingsCatId) {
+  if (isDesktopSettings()) window.dispatchEvent(new CustomEvent(OPEN_SETTINGS, { detail: { cat } }))
   else navigate('/settings')
 }
 
@@ -39,10 +39,10 @@ function useDesktopSettings(): boolean {
   return ok
 }
 
-type SettingsCatId = 'general' | 'terminal' | 'keyboard' | 'agents' | 'translate' | 'account'
+export type SettingsCatId = 'general' | 'chat' | 'terminal' | 'touch' | 'account'
 interface SettingsCatDef {
   id: SettingsCatId
-  group: 'general' | 'agents' | 'account'
+  group: 'general' | 'terminal' | 'account'
   labelKey: I18nKey
   keywords: string
   icon: (p: { size: number; strokeWidth: number; 'aria-hidden': true }) => ReactNode
@@ -50,15 +50,14 @@ interface SettingsCatDef {
 
 const SETTINGS_CATS: SettingsCatDef[] = [
   { id: 'general', group: 'general', labelKey: 'settings.cat.general', keywords: 'appearance theme dark light system language 中文 english 外观 主题 深色 浅色 语言', icon: (p) => <SlidersHorizontal {...p} /> },
-  { id: 'terminal', group: 'general', labelKey: 'settings.cat.terminal', keywords: 'terminal theme scheme color font size webgl screen reader clipboard 终端 配色 字体 剪贴板 读屏', icon: (p) => <SquareTerminal {...p} /> },
-  { id: 'keyboard', group: 'general', labelKey: 'settings.cat.keyboard', keywords: 'keyboard enter send newline option meta touch keybar custom keys macro 键盘 回车 换行 快捷键 触控 按键 自定义', icon: (p) => <Keyboard {...p} /> },
-  { id: 'agents', group: 'agents', labelKey: 'settings.cat.agents', keywords: 'agents pinned chime sound bell tone notification push alert 智能体 置顶 提示音 铃声 推送 通知', icon: (p) => <Bot {...p} /> },
-  { id: 'translate', group: 'agents', labelKey: 'settings.cat.translate', keywords: 'thought thinking translate summarize model api key base url deepseek 思考 翻译 总结 模型 密钥', icon: (p) => <Languages {...p} /> },
+  { id: 'chat', group: 'general', labelKey: 'settings.cat.chat', keywords: 'chat mode agents composer enter send newline pinned thought thinking translate summarize model api key chime sound bell tone notification push alert 对话 智能体 回车 换行 置顶 思考 翻译 总结 模型 密钥 提示音 铃声 推送 通知', icon: (p) => <Bot {...p} /> },
+  { id: 'terminal', group: 'terminal', labelKey: 'settings.cat.terminal', keywords: 'terminal theme scheme color font size webgl screen reader clipboard option meta alt 终端 配色 字体 剪贴板 读屏', icon: (p) => <SquareTerminal {...p} /> },
+  { id: 'touch', group: 'terminal', labelKey: 'settings.cat.touch', keywords: 'touch keybar keyboard custom keys macro 触控 键栏 按键 自定义 快捷键', icon: (p) => <Keyboard {...p} /> },
   { id: 'account', group: 'account', labelKey: 'settings.cat.account', keywords: 'account profile display name password sso oidc 2fa totp two step sign out logout notices 账户 密码 登录 两步验证 退出 声明', icon: (p) => <User {...p} /> },
 ]
-const SETTINGS_GROUPS: { id: 'general' | 'agents' | 'account'; labelKey: I18nKey }[] = [
+const SETTINGS_GROUPS: { id: 'general' | 'terminal' | 'account'; labelKey: I18nKey }[] = [
   { id: 'general', labelKey: 'settings.group.general' },
-  { id: 'agents', labelKey: 'settings.group.agents' },
+  { id: 'terminal', labelKey: 'settings.group.terminal' },
   { id: 'account', labelKey: 'settings.group.account' },
 ]
 
@@ -105,7 +104,212 @@ function Seg<T extends string>(props: { labelledBy: string; value: T; options: [
   )
 }
 
-function SettingsWorkbench({ modal, onClose }: { modal?: boolean; onClose?: () => void }) {
+function InlineTranslateCard({ onDirty }: { onDirty: (d: boolean) => void }) {
+  const toast = useToast()
+  const { config } = useTranslateConfig()
+  const [mode, setMode] = useState<TranslateMode>(config?.mode === 'summarize' ? 'summarize' : 'translate')
+  const [targetLang, setTargetLang] = useState(config?.target_lang || 'zh-CN')
+  const [baseUrl, setBaseUrl] = useState(config?.base_url || 'https://api.deepseek.com/v1')
+  const [model, setModel] = useState(config?.model || 'deepseek-flash')
+  const [apiKey, setApiKey] = useState('')
+  const [toggling, setToggling] = useState(false)
+  const [saving, setSaving] = useState(false)
+  const [testing, setTesting] = useState(false)
+  const [testState, setTestState] = useState<{ ok: boolean; latency?: number; sample?: string; error?: string } | null>(null)
+  const synced = useRef(false)
+
+  useEffect(() => {
+    if (!config || synced.current) return
+    synced.current = true
+    setMode(config.mode === 'summarize' ? 'summarize' : 'translate')
+    setTargetLang(config.target_lang || 'zh-CN')
+    setBaseUrl(config.base_url || 'https://api.deepseek.com/v1')
+    setModel(config.model || 'deepseek-flash')
+  }, [config])
+
+  const dirty =
+    !!config &&
+    (mode !== (config.mode === 'summarize' ? 'summarize' : 'translate') ||
+      targetLang !== config.target_lang ||
+      baseUrl.trim() !== config.base_url ||
+      model.trim() !== config.model ||
+      apiKey.trim() !== '')
+
+  useEffect(() => onDirty(dirty), [dirty, onDirty])
+
+  const toggleEnabled = async (next: boolean) => {
+    if (toggling) return
+    setToggling(true)
+    try {
+      const saved = await saveTranslateConfig({ enabled: next })
+      if (saved.enabled && !saved.has_key && !isLocalTranslateUrl(saved.base_url)) {
+        toast(t('convo.translate.needKey'))
+      } else {
+        toast(t(saved.enabled ? 'convo.translate.enabled' : 'convo.translate.disabled'))
+      }
+    } catch (err) {
+      toast(errorText(err), true)
+    } finally {
+      setToggling(false)
+    }
+  }
+
+  const save = async (e: FormEvent) => {
+    e.preventDefault()
+    if (saving) return
+    setSaving(true)
+    try {
+      const patch: Parameters<typeof saveTranslateConfig>[0] = {
+        mode,
+        target_lang: targetLang,
+        base_url: baseUrl.trim(),
+        model: model.trim(),
+      }
+      if (apiKey.trim()) patch.api_key = apiKey.trim()
+      await saveTranslateConfig(patch)
+      setApiKey('')
+      toast(t('settings.saved'))
+    } catch (err) {
+      toast(errorText(err), true)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const clearKey = async () => {
+    if (saving) return
+    setSaving(true)
+    try {
+      await saveTranslateConfig({ clear_key: true })
+      setApiKey('')
+      toast(t('settings.saved'))
+    } catch (err) {
+      toast(errorText(err), true)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const runTest = async () => {
+    if (testing) return
+    setTesting(true)
+    try {
+      const res = await testTranslateConfig({
+        mode,
+        target_lang: targetLang,
+        base_url: baseUrl.trim(),
+        model: model.trim(),
+        ...(apiKey.trim() ? { api_key: apiKey.trim() } : {}),
+      })
+      setTestState({ ok: true, latency: res.latency_ms, sample: res.sample })
+    } catch (err) {
+      setTestState({ ok: false, error: errorText(err) })
+    } finally {
+      setTesting(false)
+    }
+  }
+
+  const missingKey = !!config?.enabled && !config.has_key && !isLocalTranslateUrl(baseUrl)
+
+  return (
+    <section className="section">
+      <div className="sm-sec-head">
+        <h2>{t('settings.translate')}</h2>
+        {missingKey && <span className="sm-badge is-warn">{t('settings.translateKeyMissing')}</span>}
+      </div>
+      <form className="settings-group" onSubmit={save}>
+        <Switch
+          label={t('settings.translateEnable')}
+          hint={t('settings.translateEnableHint')}
+          checked={!!config?.enabled}
+          onChange={(v) => void toggleEnabled(v)}
+        />
+        <Setting label={t('settings.translateMode')} hint={t(mode === 'summarize' ? 'settings.translateModeSummarizeHint' : 'settings.translateModeTranslateHint')} id="sm-tr-mode">
+          <Seg
+            labelledBy="sm-tr-mode"
+            value={mode}
+            options={[['translate', t('settings.translateModeTranslate')], ['summarize', t('settings.translateModeSummarize')]]}
+            onChange={(v) => { setMode(v); setTestState(null) }}
+          />
+        </Setting>
+        <Setting label={t('settings.translateLang')} id="sm-tr-lang">
+          <select className="input sm-select" aria-labelledby="sm-tr-lang" value={targetLang} onChange={(e) => { setTargetLang(e.target.value); setTestState(null) }}>
+            {TRANSLATE_LANGS.map((l) => (
+              <option key={l.code} value={l.code}>{l.label}</option>
+            ))}
+          </select>
+        </Setting>
+        <Setting label={t('settings.translateBaseUrl')} id="sm-tr-url">
+          <input
+            className="input sm-field-input mono"
+            aria-labelledby="sm-tr-url"
+            value={baseUrl}
+            onChange={(e) => setBaseUrl(e.target.value)}
+            placeholder="https://api.deepseek.com/v1"
+            autoCapitalize="none"
+            autoCorrect="off"
+            spellCheck={false}
+          />
+        </Setting>
+        <Setting label={t('settings.translateModel')} id="sm-tr-model">
+          <input
+            className="input sm-field-input mono"
+            aria-labelledby="sm-tr-model"
+            value={model}
+            onChange={(e) => setModel(e.target.value)}
+            placeholder="deepseek-chat"
+            autoCapitalize="none"
+            autoCorrect="off"
+            spellCheck={false}
+          />
+        </Setting>
+        <Setting
+          label={t('settings.translateKey')}
+          hint={config?.has_key ? t('settings.translateKeySaved') : t('settings.translateKeyPlaceholder')}
+          id="sm-tr-key"
+        >
+          <div className="sm-key-inline">
+            <input
+              type="password"
+              className="input sm-field-input"
+              aria-labelledby="sm-tr-key"
+              value={apiKey}
+              onChange={(e) => setApiKey(e.target.value)}
+              placeholder={config?.has_key ? '••••••••' : 'sk-...'}
+              autoComplete="new-password"
+            />
+            {config?.has_key && (
+              <button type="button" className="btn" disabled={saving} onClick={() => void clearKey()}>
+                {t('settings.translateClearKey')}
+              </button>
+            )}
+          </div>
+        </Setting>
+        <div className="sm-card-foot">
+          <div className="sm-card-foot-msg">
+            {testState && (
+              <span className={testState.ok ? 'sm-test-ok' : 'sm-test-err'} title={testState.ok ? testState.sample : testState.error}>
+                {testState.ok
+                  ? t('settings.translateTestOk', { ms: testState.latency ?? 0 }) + (testState.sample ? ` · ${previewTitleOf(testState.sample)}` : '')
+                  : testState.error}
+              </span>
+            )}
+          </div>
+          <div className="sm-card-foot-acts">
+            <button type="button" className="btn" disabled={testing || saving || !baseUrl.trim() || !model.trim()} onClick={() => void runTest()}>
+              {t(testing ? 'settings.translateTesting' : 'settings.translateTest')}
+            </button>
+            <button type="submit" className="btn btn-primary" disabled={saving || !dirty || !baseUrl.trim() || !model.trim()}>
+              {t(saving ? 'common.saving' : 'common.save')}
+            </button>
+          </div>
+        </div>
+      </form>
+    </section>
+  )
+}
+
+function SettingsWorkbench({ modal, initialCat, onClose }: { modal?: boolean; initialCat?: SettingsCatId; onClose?: () => void }) {
   const { me, setMe, boot } = useSession()
   const prefs = usePrefs()
   const reader = useScreenReader()
@@ -115,10 +319,13 @@ function SettingsWorkbench({ modal, onClose }: { modal?: boolean; onClose?: () =
   const [translateDirty, setTranslateDirty] = useState(false)
   const [schemesOpen, setSchemesOpen] = useState(false)
   const [langAsk, setLangAsk] = useState<Lang | null>(null)
-  const [cat, setCat] = useState<SettingsCatId>('general')
+  const [cat, setCat] = useState<SettingsCatId>(initialCat ?? 'general')
   const [query, setQuery] = useState('')
   const searchRef = useRef<HTMLInputElement>(null)
   const bodyRef = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    if (initialCat) setCat(initialCat)
+  }, [initialCat])
 
   const switchLang = (v: Lang) => {
     setLang(v)
@@ -157,64 +364,59 @@ function SettingsWorkbench({ modal, onClose }: { modal?: boolean; onClose?: () =
     switch (id) {
       case 'general':
         return (
-          <section className="section">
-            <h2>{t('settings.appearance')}</h2>
-            <div className="settings-group">
-              <Setting label={t('settings.theme')} id="sm-theme-l">
-                <Seg
-                  labelledBy="sm-theme-l"
-                  value={prefs.theme}
-                  options={[['system', t('settings.themeSystem')], ['light', t('settings.themeLight')], ['dark', t('settings.themeDark')]]}
-                  onChange={(v) => setPrefs({ theme: v })}
-                />
-              </Setting>
-              <Setting label={t('settings.language')} id="sm-lang-l">
-                <Seg
-                  labelledBy="sm-lang-l"
-                  value={lang}
-                  options={[['zh-CN', '简体中文'], ['en', 'English']]}
-                  onChange={(v) => {
-                    if (v !== lang && (profileDirty || translateDirty)) setLangAsk(v)
-                    else if (v !== lang) switchLang(v)
-                  }}
-                />
-              </Setting>
-            </div>
-          </section>
+          <>
+            <section className="section">
+              <h2>{t('settings.appearance')}</h2>
+              <div className="settings-group">
+                <Setting label={t('settings.theme')} id="sm-theme-l">
+                  <Seg
+                    labelledBy="sm-theme-l"
+                    value={prefs.theme}
+                    options={[['system', t('settings.themeSystem')], ['light', t('settings.themeLight')], ['dark', t('settings.themeDark')]]}
+                    onChange={(v) => setPrefs({ theme: v })}
+                  />
+                </Setting>
+                <Setting label={t('settings.language')} id="sm-lang-l">
+                  <Seg
+                    labelledBy="sm-lang-l"
+                    value={lang}
+                    options={[['zh-CN', '简体中文'], ['en', 'English']]}
+                    onChange={(v) => {
+                      if (v !== lang && (profileDirty || translateDirty)) setLangAsk(v)
+                      else if (v !== lang) switchLang(v)
+                    }}
+                  />
+                </Setting>
+              </div>
+            </section>
+            <section className="section">
+              <h2>{t('settings.general.shortcuts')}</h2>
+              <div className="settings-group">
+                <Setting label={t('settings.general.scSettings')}>
+                  <span className="sm-kbd">{isMac ? '⌘,' : 'Ctrl+,'}</span>
+                </Setting>
+                <Setting label={t('settings.general.scSearch')}>
+                  <span className="sm-kbd">{isMac ? '⌘K' : 'Ctrl+K'}</span>
+                </Setting>
+                <Setting label={t('settings.general.scSidebar')}>
+                  <span className="sm-kbd">{isMac ? '⌘B' : 'Ctrl+B'}</span>
+                </Setting>
+                <Setting label={t('settings.general.scSwitch')}>
+                  <span className="sm-kbd">{isMac ? '⌥↑↓' : 'Alt+↑↓'}</span>
+                </Setting>
+                <a className="setting setting-link" href="/THIRD-PARTY-NOTICES.txt" target="_blank" rel="noopener">
+                  <span className="setting-label"><span>{t('settings.notices')}</span></span>
+                  <ChevronRight size={15} className="chev" aria-hidden="true" />
+                </a>
+              </div>
+            </section>
+          </>
         )
-      case 'terminal':
-        return (
-          <section className="section">
-            <h2>{t('settings.terminal')}</h2>
-            <div className="settings-group">
-              <Setting label={t('settings.termTheme')} id="sm-tt-l">
-                <button type="button" className="btn scheme-btn" aria-labelledby="sm-tt-l sm-tt-v" onClick={() => setSchemesOpen(true)}>
-                  <span id="sm-tt-v"><CurrentScheme /></span>
-                  <ChevronRight size={16} />
-                </button>
-              </Setting>
-              <Setting label={t('settings.fontSize')} id="sm-fs-l">
-                <div className="stepper" role="group" aria-labelledby="sm-fs-l">
-                  <button type="button" className="icon-btn" aria-label={t('settings.fontSmaller')} disabled={prefs.fontSize <= FONT_MIN} onClick={() => stepFont(-1)}>
-                    <Minus size={16} />
-                  </button>
-                  <span className="value" aria-live="polite">{prefs.fontSize}</span>
-                  <button type="button" className="icon-btn" aria-label={t('settings.fontLarger')} disabled={prefs.fontSize >= FONT_MAX} onClick={() => stepFont(1)}>
-                    <Plus size={16} />
-                  </button>
-                </div>
-              </Setting>
-              <Switch label={t('settings.webgl')} hint={t('settings.webglHint')} checked={prefs.webgl} onChange={(v) => setPrefs({ webgl: v })} />
-              <Switch label={t('settings.screenReader')} hint={t('settings.screenReaderHint')} checked={reader} onChange={setScreenReader} />
-              <Switch label={t('settings.remoteClipboard')} hint={t('settings.remoteClipboardHint')} checked={prefs.remoteClipboard} onChange={(v) => setPrefs({ remoteClipboard: v })} />
-            </div>
-          </section>
-        )
-      case 'keyboard':
+      case 'chat':
         return (
           <>
             <section className="section">
-              <h2>{t('settings.keyboard')}</h2>
+              <h2>{t('settings.chat.composerSidebar')}</h2>
               <div className="settings-group">
                 <Setting label={t('settings.composerEnter')} hint={t('settings.composerEnterHint', { mod: isMac ? t('settings.modEnterMac') : t('settings.modEnterOther') })} id="sm-ce-l">
                   <Seg
@@ -224,25 +426,24 @@ function SettingsWorkbench({ modal, onClose }: { modal?: boolean; onClose?: () =
                     onChange={(v) => setPrefs({ composerEnter: v })}
                   />
                 </Setting>
-                {isMac && <Switch label={t('settings.optionIsMeta')} hint={t('settings.optionIsMetaHint')} checked={prefs.optionIsMeta} onChange={(v) => setPrefs({ optionIsMeta: v })} />}
-              </div>
-            </section>
-            <section className="section">
-              <h2>{t('settings.touch')}</h2>
-              <div className="settings-group">
-                <Switch label={t('settings.keybar')} checked={prefs.keybar} onChange={(v) => setPrefs({ keybar: v })} />
-                {prefs.keybar && <Switch label={t('settings.tapKeyboard')} hint={t('settings.tapKeyboardHint')} checked={prefs.tapKeyboard} onChange={(v) => setPrefs({ tapKeyboard: v })} />}
-              </div>
-            </section>
-            <CustomKeysSection />
-          </>
-        )
-      case 'agents':
-        return (
-          <>
-            <section className="section">
-              <h2>{t('settings.agents')}</h2>
-              <div className="settings-group">
+                <Setting label={t('convo.order.groupBy')} id="sm-grp-l">
+                  <Seg
+                    labelledBy="sm-grp-l"
+                    value={prefs.sidebarGroup}
+                    options={[['status', t('convo.order.groupStatus')], ['project', t('convo.order.groupProject')], ['session', t('convo.order.groupSession')]]}
+                    onChange={(v) => setPrefs({ sidebarGroup: v })}
+                  />
+                </Setting>
+                <Setting label={t('convo.order.sortBy')} id="sm-srt-l">
+                  <Seg
+                    labelledBy="sm-srt-l"
+                    value={prefs.sidebarSort}
+                    options={[['recent', t('convo.order.sortRecent')], ['smart', t('convo.order.sortSmart')], ['name', t('convo.order.sortName')]]}
+                    onChange={(v) => setPrefs({ sidebarSort: v })}
+                  />
+                </Setting>
+                <Switch label={t('convo.order.nestChildren')} checked={prefs.sidebarNestChildren} onChange={(v) => setPrefs({ sidebarNestChildren: v })} />
+                <Switch label={t('convo.order.pinFixed')} checked={prefs.pinFixedOrder} onChange={(v) => setPrefs({ pinFixedOrder: v })} />
                 <Setting label={t('settings.pinned')} hint={prefs.pinnedAgents.length ? t('settings.pinnedHint', { n: prefs.pinnedAgents.length }) : t('settings.pinnedNone')} id="sm-pin-l">
                   <button type="button" className="btn" aria-describedby="sm-pin-l" disabled={!prefs.pinnedAgents.length} onClick={() => setPrefs({ pinnedAgents: [] })}>
                     {t('settings.unpinAll')}
@@ -250,8 +451,9 @@ function SettingsWorkbench({ modal, onClose }: { modal?: boolean; onClose?: () =
                 </Setting>
               </div>
             </section>
+            <InlineTranslateCard onDirty={setTranslateDirty} />
             <section className="section">
-              <h2>{t('settings.chime')}</h2>
+              <h2>{t('settings.chat.alerts')}</h2>
               <div className="settings-group">
                 <Setting label={t('settings.chimeWhen')} hint={t('settings.chimeWhenHint')} id="sm-chime-l">
                   <Seg
@@ -284,31 +486,94 @@ function SettingsWorkbench({ modal, onClose }: { modal?: boolean; onClose?: () =
             <PushSection />
           </>
         )
-      case 'translate':
-        return <TranslateSection onDirty={setTranslateDirty} />
+      case 'terminal':
+        return (
+          <>
+            <section className="section">
+              <h2>{t('settings.terminal.display')}</h2>
+              <div className="settings-group">
+                <Setting label={t('settings.termTheme')} id="sm-tt-l">
+                  <button type="button" className="btn scheme-btn" aria-labelledby="sm-tt-l sm-tt-v" onClick={() => setSchemesOpen(true)}>
+                    <span id="sm-tt-v"><CurrentScheme /></span>
+                    <ChevronRight size={15} />
+                  </button>
+                </Setting>
+                <Setting label={t('settings.fontSize')} id="sm-fs-l">
+                  <div className="stepper" role="group" aria-labelledby="sm-fs-l">
+                    <button type="button" className="icon-btn" aria-label={t('settings.fontSmaller')} disabled={prefs.fontSize <= FONT_MIN} onClick={() => stepFont(-1)}>
+                      <Minus size={15} />
+                    </button>
+                    <span className="value" aria-live="polite">{prefs.fontSize}</span>
+                    <button type="button" className="icon-btn" aria-label={t('settings.fontLarger')} disabled={prefs.fontSize >= FONT_MAX} onClick={() => stepFont(1)}>
+                      <Plus size={15} />
+                    </button>
+                  </div>
+                </Setting>
+              </div>
+            </section>
+            <section className="section">
+              <h2>{t('settings.terminal.behavior')}</h2>
+              <div className="settings-group">
+                {isMac && <Switch label={t('settings.optionIsMeta')} hint={t('settings.optionIsMetaHint')} checked={prefs.optionIsMeta} onChange={(v) => setPrefs({ optionIsMeta: v })} />}
+                <Switch label={t('settings.webgl')} hint={t('settings.webglHint')} checked={prefs.webgl} onChange={(v) => setPrefs({ webgl: v })} />
+                <Switch label={t('settings.remoteClipboard')} hint={t('settings.remoteClipboardHint')} checked={prefs.remoteClipboard} onChange={(v) => setPrefs({ remoteClipboard: v })} />
+                <Switch label={t('settings.screenReader')} hint={t('settings.screenReaderHint')} checked={reader} onChange={setScreenReader} />
+              </div>
+            </section>
+          </>
+        )
+      case 'touch':
+        return (
+          <>
+            <section className="section">
+              <h2>{t('settings.touch')}</h2>
+              <div className="settings-group">
+                <Switch label={t('settings.keybar')} checked={prefs.keybar} onChange={(v) => setPrefs({ keybar: v })} />
+                {prefs.keybar && <Switch label={t('settings.tapKeyboard')} hint={t('settings.tapKeyboardHint')} checked={prefs.tapKeyboard} onChange={(v) => setPrefs({ tapKeyboard: v })} />}
+              </div>
+            </section>
+            <div className="sm-card-wrap">
+              <CustomKeysSection />
+            </div>
+          </>
+        )
       case 'account':
         return (
           <>
             <section className="section">
               <h2>{t('settings.account')}</h2>
               <div className="settings-group">
+                <div className="sm-profile-banner">
+                  <span className="sm-avatar" aria-hidden="true">{(me?.display_name || me?.username || '?').slice(0, 1).toUpperCase()}</span>
+                  <div className="sm-profile-meta">
+                    <span className="sm-profile-name">{me?.display_name || me?.username}</span>
+                    <span className="hint">@{me?.username}{me?.role === 'admin' ? ' · Admin' : ''}</span>
+                  </div>
+                </div>
                 <ProfileSetting onDirty={setProfileDirty} />
+              </div>
+            </section>
+            <section className="section">
+              <h2>{t('settings.account.security')}</h2>
+              <div className="settings-group">
                 <PasswordSetting />
                 {boot?.oidc?.enabled && <SSOSetting />}
                 <TwoStepSetting />
-                {modal && (
+              </div>
+            </section>
+            {modal && (
+              <section className="section">
+                <h2>{t('settings.account.session')}</h2>
+                <div className="settings-group">
                   <Setting label={t('nav.signOut')} hint={me?.username}>
                     <button type="button" className="btn" onClick={() => { onClose?.(); void signOut(setMe, toast) }}>
                       <LogOut size={14} strokeWidth={1.75} aria-hidden="true" />
                       <span>{t('nav.signOut')}</span>
                     </button>
                   </Setting>
-                )}
-              </div>
-            </section>
-            <p className="notices">
-              <a href="/THIRD-PARTY-NOTICES.txt" target="_blank" rel="noopener">{t('settings.notices')}</a>
-            </p>
+                </div>
+              </section>
+            )}
           </>
         )
     }
@@ -397,10 +662,10 @@ function SettingsWorkbench({ modal, onClose }: { modal?: boolean; onClose?: () =
   )
 }
 
-export function SettingsDialog({ onClose }: { onClose: () => void }) {
+export function SettingsDialog({ initialCat, onClose }: { initialCat?: SettingsCatId; onClose: () => void }) {
   return (
     <Dialog title={t('settings.title')} onClose={onClose} hideTitle className="dlg settings-modal">
-      <SettingsWorkbench modal onClose={onClose} />
+      <SettingsWorkbench modal initialCat={initialCat} onClose={onClose} />
     </Dialog>
   )
 }

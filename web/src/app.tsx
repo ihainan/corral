@@ -14,7 +14,7 @@ import { AgentsChat } from './pages/AgentsChat'
 import { HostsPage } from './pages/Hosts'
 import { HostEditPage } from './pages/HostEdit'
 import { KeysPage } from './pages/Keys'
-import { isDesktopSettings, OPEN_SETTINGS, openSettingsModal, SettingsDialog, SettingsPage } from './pages/Settings'
+import { isDesktopSettings, OPEN_SETTINGS, openSettingsModal, SettingsDialog, SettingsPage, type SettingsCatId } from './pages/Settings'
 import { AdminUsersPage, AdminAuditPage } from './pages/Admin'
 import { preloadTerminal, RecordingPlayerPage, RecordingsPage, TerminalPage } from './pages/lazyPages'
 import { TerminalTabs, useTabsMode } from './pages/TerminalTabs'
@@ -157,17 +157,23 @@ export function App() {
 }
 
 function SettingsModalHost() {
-  const [open, setOpen] = useState(false)
+  const [openCat, setOpenCat] = useState<SettingsCatId | null>(null)
   const path = usePath()
+  const pathRef = useRef(path)
+  pathRef.current = path
+  const defaultCatForPath = (): SettingsCatId =>
+    pathRef.current === '/agents' ? 'chat' : pathRef.current.startsWith('/t/') ? 'terminal' : 'general'
   useEffect(() => {
-    const onOpen = () => {
-      if (isDesktopSettings()) setOpen(true)
+    const onOpen = (e: Event) => {
+      if (!isDesktopSettings()) return
+      const cat = (e as CustomEvent<{ cat?: SettingsCatId }>).detail?.cat
+      setOpenCat(cat ?? defaultCatForPath())
     }
     const onKey = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && e.key === ',') {
         if (!isDesktopSettings()) return
         e.preventDefault()
-        setOpen((v) => !v)
+        setOpenCat((v) => (v ? null : defaultCatForPath()))
       }
     }
     window.addEventListener(OPEN_SETTINGS, onOpen)
@@ -178,10 +184,10 @@ function SettingsModalHost() {
     }
   }, [])
   useEffect(() => {
-    if (path === '/settings') setOpen(false)
+    if (path === '/settings') setOpenCat(null)
   }, [path])
-  if (!open) return null
-  return <SettingsDialog onClose={() => setOpen(false)} />
+  if (!openCat) return null
+  return <SettingsDialog initialCat={openCat} onClose={() => setOpenCat(null)} />
 }
 
 // Whoever signs in on this device takes over its notifications. A failure

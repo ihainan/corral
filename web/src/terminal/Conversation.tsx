@@ -1760,7 +1760,7 @@ export function ConversationView({
           <AgentList rows={rows} menus query={sideQuery} onQuery={setSideQuery} search={searchAsked} onSearchLeft={() => setSearchAsked(0)} hint={!isTouchOnly} compact={!isTouchOnly} showNew={!isTouchOnly} />
           {!isTouchOnly && (
             <div className="convo-side-foot">
-              <button type="button" className="icon-btn convo-side-foot-ic" onClick={openSettingsModal} aria-label={t('nav.settings')} title={`${t('nav.settings')} (${mac ? '⌘,' : 'Ctrl+,'})`}>
+              <button type="button" className="icon-btn convo-side-foot-ic" onClick={() => openSettingsModal('chat')} aria-label={t('nav.settings')} title={`${t('nav.settings')} (${mac ? '⌘,' : 'Ctrl+,'})`}>
                 <Settings size={14} strokeWidth={1.75} aria-hidden="true" />
               </button>
               <button type="button" className="icon-btn convo-side-foot-ic" onClick={() => setKeysShown('side')} aria-label={t('convo.side.shortcuts')} title={t('convo.side.shortcuts')}>
