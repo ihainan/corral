@@ -141,10 +141,21 @@ export function swallowNextClick() {
   document.addEventListener('click', stop, true)
 }
 
+let openDialogs = 0
+
 export function Dialog(props: { title: string; onClose: () => void; children: ReactNode; sheet?: boolean; hideTitle?: boolean; wide?: boolean; seeThrough?: boolean; guard?: boolean; busy?: boolean; icon?: ReactNode; tone?: 'danger' | 'warn'; sub?: ReactNode; className?: string; dialogProps?: React.HTMLAttributes<HTMLDivElement> }) {
   const dismiss = () => !props.guard && !props.busy && props.onClose()
   const ref = useFocusTrap<HTMLDivElement>(dismiss)
   const backDown = useRef(false)
+  useEffect(() => {
+    if (++openDialogs === 1) document.documentElement.classList.add('modal-open')
+    return () => {
+      if (--openDialogs <= 0) {
+        openDialogs = 0
+        document.documentElement.classList.remove('modal-open')
+      }
+    }
+  }, [])
   useSheetDrag(ref, props.sheet !== false && !props.guard && !props.busy, props.onClose)
   return createPortal(
     <div

@@ -284,14 +284,14 @@ rec() { # pid start fg procstart sid log agent [via]
   # Where its requests go and how it signs in (see claude_ep, codex_ep):
   # read where a conversation is shown, not in the rounds the list makes,
   # which are over every agent of the host.
-  ep= auth=
+  ep= auth= ac=
   if [ "$times" != times ]; then
     case $7 in
     claude) claude_ep "$1" "$cwd";;
     codex) codex_ep "$1";;
     esac
   fi
-  printf 'pid=%s\nstart=%s\nbtime=%s\nhz=%s\nfg=%s\nprocstart=%s\nsid=%s\nlog=%s\nlogmtime=%s\nlogts=%s\ntty=%s\ncwd=%s\nanc=%s\nagent=%s\nvia=%s\nep=%s\nauth=%s\n%s\0' "$1" "$2" "$btime" "$hz" "$3" "$4" "$5" "$6" "$lw" "$lt" "$tty" "$cwd" "$anc" "$7" "${8-}" "$ep" "$auth" "$env"
+  printf 'pid=%s\nstart=%s\nbtime=%s\nhz=%s\nfg=%s\nprocstart=%s\nsid=%s\nlog=%s\nlogmtime=%s\nlogts=%s\ntty=%s\ncwd=%s\nanc=%s\nagent=%s\nvia=%s\nep=%s\nauth=%s\nac=%s\n%s\0' "$1" "$2" "$btime" "$hz" "$3" "$4" "$5" "$6" "$lw" "$lt" "$tty" "$cwd" "$anc" "$7" "${8-}" "$ep" "$auth" "$ac" "$env"
 }
 # (A file's lines joined by $2, as tr would put it in place of each
 # newline, the last one's left out: x. The shell's own: a name of a
@@ -648,6 +648,7 @@ type convoProc struct {
 	// sends the host of the address and nothing else of it: see claude_ep.
 	ep   string
 	auth string
+	ac   string
 }
 
 // convoAuths: how an agent signs in, as its process and settings say —
@@ -915,6 +916,10 @@ func parseConvoLocate(out string) (l convoLocated) {
 			case "auth":
 				if convoAuths[v] {
 					p.auth = v
+				}
+			case "ac":
+				if len(v) <= 512 {
+					p.ac = v
 				}
 			case "HERDR_PANE_ID":
 				p.herdrPane = v
@@ -1803,7 +1808,81 @@ func (st *convoState) meta() convo.Meta {
 			m.HistoryPartial, m.Forked = false, false
 		}
 	}
+	if st.bind != nil && st.bind.ac != "" && m.Window > 0 {
+		if at := resolveAutoCompact(st.bind.ac, m.Model, m.Window); at > 0 {
+			m.AutoCompact = at
+			m.AutoCompactBy = "setting"
+		}
+	}
 	return m
+}
+
+// resolveAutoCompact parses the sanitized key=int list emitted by claude_ep
+// (e.g. "claude-opus-5-5=400000,global=500000,pct=40") and resolves the active
+// auto-compact token threshold for the session's model and window.
+func resolveAutoCompact(acRaw, model string, window int64) int64 {
+	if acRaw == "" || window <= 0 {
+		return 0
+	}
+	var globalWin int64
+	var pctOverride int64
+	models := map[string]int64{}
+	for _, part := range strings.Split(acRaw, ",") {
+		k, v, ok := strings.Cut(part, "=")
+		if !ok || k == "" || v == "" {
+			continue
+		}
+		n, err := strconv.ParseInt(v, 10, 64)
+		if err != nil || n <= 0 {
+			continue
+		}
+		switch k {
+		case "global":
+			if globalWin == 0 {
+				globalWin = n
+			}
+		case "pct":
+			if pctOverride == 0 && n <= 100 {
+				pctOverride = n
+			}
+		default:
+			lk := strings.ToLower(k)
+			if _, exists := models[lk]; !exists {
+				models[lk] = n
+			}
+		}
+	}
+	normModel := strings.ToLower(strings.TrimSpace(model))
+	baseModel := normModel
+	if i := strings.IndexByte(baseModel, '['); i > 0 {
+		baseModel = baseModel[:i]
+	}
+	var chosen int64
+	if normModel != "" {
+		if n, ok := models[normModel]; ok {
+			chosen = n
+		} else if n, ok := models[baseModel]; ok {
+			chosen = n
+		} else {
+			bestLen := 0
+			for k, n := range models {
+				if len(k) > bestLen && strings.HasPrefix(baseModel, k+"-") {
+					bestLen = len(k)
+					chosen = n
+				}
+			}
+		}
+	}
+	if chosen == 0 && globalWin > 0 {
+		chosen = globalWin
+	}
+	if chosen == 0 && pctOverride > 0 {
+		chosen = (window * pctOverride) / 100
+	}
+	if chosen <= 0 || chosen > window {
+		return 0
+	}
+	return chosen
 }
 
 type convoStates struct {
@@ -1900,6 +1979,7 @@ type convoBind struct {
 	// key an address may carry, stay on the host.
 	Via  string `json:"via,omitempty"`
 	Auth string `json:"auth,omitempty"`
+	ac   string
 	// started is when the process started (unix milliseconds; 0 when not
 	// known): what was queued before was another process's.
 	started int64
@@ -2425,7 +2505,7 @@ func (s *Server) locateScan(ctx context.Context, sess *term.Session, st *convoSt
 		st.named = named
 		st.bind = nil
 		if p != nil {
-			b := &convoBind{PID: p.pid, Start: p.start, Session: p.sid, Agent: p.agent, Pane: p.herdrPane, Via: p.ep, Auth: p.auth}
+			b := &convoBind{PID: p.pid, Start: p.start, Session: p.sid, Agent: p.agent, Pane: p.herdrPane, Via: p.ep, Auth: p.auth, ac: p.ac}
 			if sess.Persistence == "tmux" {
 				b.Pane, b.Title = p.tmuxPane, l.tmuxTitle
 			}
@@ -5183,11 +5263,11 @@ setting_env() {
 # it was started in all but the odd case.
 claude_ep() { # pid cwd
   aev=$(tr '\0\n' '\n\001' <"/proc/$1/environ" 2>/dev/null |
-    grep -E '^(ANTHROPIC_BASE_URL|ANTHROPIC_AUTH_TOKEN|ANTHROPIC_API_KEY|CLAUDE_CODE_USE_BEDROCK|CLAUDE_CODE_USE_VERTEX|CLAUDE_CONFIG_DIR)=' | head -c 4096)
-  bu= au=
+    grep -E '^(ANTHROPIC_BASE_URL|ANTHROPIC_AUTH_TOKEN|ANTHROPIC_API_KEY|CLAUDE_CODE_USE_BEDROCK|CLAUDE_CODE_USE_VERTEX|CLAUDE_CONFIG_DIR|CLAUDE_AUTOCOMPACT_PCT_OVERRIDE)=' | head -c 4096)
+  bu= au= ac=
   cfgd=$(printf '%s\n' "$aev" | sed -n 's/^CLAUDE_CONFIG_DIR=//p' | head -1)
   [ -n "$cfgd" ] || cfgd=$HOME/.claude
-  for sf in /etc/claude-code/managed-settings.json "$2/.claude/settings.local.json" "$2/.claude/settings.json" "$cfgd/settings.json"; do
+  for sf in /etc/claude-code/managed-settings.json "$2/.claude/settings.local.json" "$2/.claude/settings.json" "$cfgd/settings.local.json" "$cfgd/settings.json"; do
     [ -r "$sf" ] || continue
     if [ -z "$bu" ]; then setting_env "$sf" ANTHROPIC_BASE_URL; bu=$pv; fi
     if [ -z "$au" ]; then
@@ -5207,6 +5287,61 @@ claude_ep() { # pid cwd
   [ -n "$au" ] || au=login
   ep=; auth=$au
   [ -n "$bu" ] && { host_of "$bu"; ep=$bl; }
+  acp=$(printf '%s\n' "$aev" | sed -n 's/^CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=//p' | head -1)
+  if command -v python3 >/dev/null 2>&1; then
+    ac=$(python3 -I -c '
+import json, re, sys
+env_pct = sys.argv[1]
+out = {}
+g = 0
+pct = 0
+for p in sys.argv[2:]:
+    try:
+        with open(p, "r", encoding="utf-8") as f:
+            d = json.load(f)
+    except Exception:
+        continue
+    if not isinstance(d, dict):
+        continue
+    ms = d.get("modelSettings")
+    if isinstance(ms, dict):
+        for k, v in ms.items():
+            if not isinstance(k, str) or not isinstance(v, dict):
+                continue
+            w = v.get("autoCompactWindow")
+            if isinstance(w, (int, float)) and int(w) > 0:
+                lk = re.sub(r"[^A-Za-z0-9._:-]", "", k.lower())[:64]
+                if lk and lk not in out:
+                    out[lk] = int(w)
+    gw = d.get("autoCompactWindow")
+    if g == 0 and isinstance(gw, (int, float)) and int(gw) > 0:
+        g = int(gw)
+    ev = d.get("env")
+    if pct == 0 and isinstance(ev, dict):
+        ep = ev.get("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE")
+        try:
+            n = int(str(ep).strip())
+            if 1 <= n <= 100:
+                pct = n
+        except Exception:
+            pass
+if pct == 0 and env_pct:
+    try:
+        n = int(env_pct.strip())
+        if 1 <= n <= 100:
+            pct = n
+    except Exception:
+        pass
+parts = [f"{k}={v}" for k, v in out.items()]
+if g > 0:
+    parts.append(f"global={g}")
+if pct > 0:
+    parts.append(f"pct={pct}")
+print(",".join(parts)[:512], end="")
+' "$acp" /etc/claude-code/managed-settings.json "$2/.claude/settings.local.json" "$2/.claude/settings.json" "$cfgd/settings.local.json" "$cfgd/settings.json" 2>/dev/null)
+  elif [ -n "$acp" ]; then
+    case $acp in *[!0-9]*) ;; *) ac="pct=$acp";; esac
+  fi
 }
 # The value of key $3 in section $2 (top-level: "") of the TOML file $1: pv.
 toml_of() {

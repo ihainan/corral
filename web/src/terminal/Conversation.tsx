@@ -1,4 +1,5 @@
 import { createContext, Fragment, memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { createPortal } from 'react-dom'
 import { Activity, ArrowDown, ArrowDownAZ, ArrowUp, ArrowUpDown, Bot, Check, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, ChevronsDownUp, ChevronsUpDown, Clock, Columns2, Copy, Cpu, Download, Eye, FilePen, FileText, Folder, FolderOpen, Gauge as GaugeIcon, GitBranch, GitFork, Hand, Image as ImageIcon, ImageOff, Info, Keyboard, ListChecks, ListOrdered, Loader, LogOut, MessageCircleQuestion, MessagesSquare, MoreHorizontal, MoreVertical, PanelLeft, PanelRight, Pin, Plus, Radar, RotateCw, Search, Server, ShieldOff, Sparkles, SquarePlus, SquareTerminal, Target, TextCursorInput, TriangleAlert, X } from 'lucide-react'
 import { t, getLang, type I18nKey } from '../i18n'
 import { api } from '../api'
@@ -2943,14 +2944,17 @@ function EffortSaid({ level }: { level: string }) {
   )
 }
 
-function compactThreshold(window: number, agentKind?: string, observedPre?: number): { at: number; pct: number; observed: boolean } {
+function compactThreshold(window: number, agentKind?: string, observedPre?: number, configuredAt?: number): { at: number; pct: number; source: 'setting' | 'observed' | 'estimate' } {
+  if (configuredAt && configuredAt > 0 && configuredAt <= window) {
+    return { at: configuredAt, pct: Math.round((configuredAt / window) * 100), source: 'setting' }
+  }
   if (observedPre && observedPre >= window * 0.5 && observedPre <= window * 0.98) {
-    return { at: observedPre, pct: Math.round((observedPre / window) * 100), observed: true }
+    return { at: observedPre, pct: Math.round((observedPre / window) * 100), source: 'observed' }
   }
   const kind = (agentKind ?? '').toLowerCase()
   const ratio = kind === 'codex' ? 0.9 : kind === 'claude' && window <= 200_000 ? 0.835 : 0.8
   const at = Math.round(window * ratio)
-  return { at, pct: Math.round(ratio * 100), observed: false }
+  return { at, pct: Math.round(ratio * 100), source: 'estimate' }
 }
 
 function Runs({ meta, goal, active, mode, model, effort, quota, via, auth, agentKind, compactPre, onSide }: { meta: ConvoMeta; goal?: string; active: boolean; mode?: ModeSwitch; model?: ModelSwitch; effort?: EffortSwitch; quota?: QuotaOf; via?: string; auth?: string; agentKind?: string; compactPre?: number; onSide?: () => void }) {
@@ -3488,10 +3492,17 @@ function Runs({ meta, goal, active, mode, model, effort, quota, via, auth, agent
             <h3 className="convo-pop-head">{t('convo.ctxHead')}</h3>
             {windows.map((w) => {
               const p = Math.min(100, Math.round((used / w) * 100))
-              const ct = compactThreshold(w, agentKind, compactPre)
+              const ct = compactThreshold(w, agentKind, compactPre, meta.auto_compact)
               const left = ct.at - used
               const toCompact = ct.at > 0 ? used / ct.at : 0
-              const compactHint = t(ct.observed ? 'convo.ctxCompactHintObserved' : 'convo.ctxCompactHint', { at: tokens(ct.at), p: ct.pct })
+              const compactHint = t(
+                ct.source === 'setting'
+                  ? 'convo.ctxCompactHintSetting'
+                  : ct.source === 'observed'
+                    ? 'convo.ctxCompactHintObserved'
+                    : 'convo.ctxCompactHint',
+                { at: tokens(ct.at), p: ct.pct },
+              )
               return (
                 <div key={w} className="convo-runs-win">
                   <div className="convo-runs-row">
@@ -3506,10 +3517,12 @@ function Runs({ meta, goal, active, mode, model, effort, quota, via, auth, agent
                   <div className="convo-runs-compact" title={compactHint}>
                     <span className="convo-runs-compact-label">
                       <span className="convo-runs-tick" aria-hidden="true" />
-                      <span>{t('convo.ctxCompactAt', { at: tokens(ct.at) })}</span>
+                      <span>{t(ct.source === 'setting' ? 'convo.ctxCompactExactAt' : 'convo.ctxCompactAt', { at: tokens(ct.at) })}</span>
                     </span>
                     {left > 0 ? (
-                      <span className={'convo-runs-compact-left' + (toCompact >= 0.85 ? ' is-warn' : '')}>{t('convo.ctxCompactLeft', { n: tokens(left) })}</span>
+                      <span className={'convo-runs-compact-left' + (toCompact >= 0.85 ? ' is-warn' : '')}>
+                        {t(ct.source === 'setting' ? 'convo.ctxCompactLeftExactShort' : 'convo.ctxCompactLeft', { n: tokens(left) })}
+                      </span>
                     ) : (
                       <span className="convo-runs-soon">{t('convo.ctxCompactSoon')}</span>
                     )}
@@ -5752,10 +5765,107 @@ const PICTURE_PATH = /(?:^|[\s"'(（「])((?:\/(?!\/)|~\/)[^\s"'()（）「」<>
 const UPLOADED = /\/\.cache\/corral\/uploads\/[^/]+$/
 const baseOf = (p: string) => p.slice(p.lastIndexOf('/') + 1)
 
+// Inline/standalone picture chip with desktop hover thumbnail popover.
+function PicChip({ path, said, inline, thumb, onOpen }: { path: string; said: string; inline?: boolean; thumb?: (p: string, signal: AbortSignal) => Promise<Blob>; onOpen: (p: string) => void }) {
+  const [tipRect, setTipRect] = useState<{ top: number; bottom: number; left: number; right: number } | null>(null)
+  const [blob, setBlob] = useState<Blob | null>(null)
+  const [gone, setGone] = useState(false)
+  const timer = useRef<number | null>(null)
+  const url = useObjectURL(blob)
+
+  const clearTip = useCallback(() => {
+    if (timer.current !== null) {
+      window.clearTimeout(timer.current)
+      timer.current = null
+    }
+    setTipRect(null)
+  }, [])
+
+  useEffect(() => {
+    if (!tipRect) return
+    const onScroll = () => clearTip()
+    window.addEventListener('scroll', onScroll, true)
+    return () => window.removeEventListener('scroll', onScroll, true)
+  }, [tipRect, clearTip])
+
+  useEffect(() => {
+    return () => {
+      if (timer.current !== null) window.clearTimeout(timer.current)
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!tipRect || !thumb || blob || gone) return
+    const ctl = new AbortController()
+    thumb(path, ctl.signal).then(
+      (b) => !ctl.signal.aborted && setBlob(b),
+      () => !ctl.signal.aborted && setGone(true),
+    )
+    return () => ctl.abort()
+  }, [tipRect, thumb, path, blob, gone])
+
+  const pop = tipRect && (() => {
+    const vw = typeof window !== 'undefined' ? window.innerWidth : 1280
+    const vh = typeof window !== 'undefined' ? window.innerHeight : 800
+    const cardW = 296
+    const center = (tipRect.left + tipRect.right) / 2
+    const left = Math.min(Math.max(8, Math.round(center - cardW / 2)), Math.max(8, vw - cardW - 8))
+    const showAbove = tipRect.top >= 256 || tipRect.top >= vh - tipRect.bottom
+    const posStyle = showAbove ? { left, bottom: Math.max(8, vh - tipRect.top + 8) } : { left, top: Math.min(vh - 80, tipRect.bottom + 8) }
+    const name = baseOf(path)
+    return createPortal(
+      <div className="convo-pic-hover" role="tooltip" style={posStyle}>
+        <div className="convo-pic-hover-frame">
+          {url && !gone ? (
+            <img src={url} alt="" decoding="async" className="convo-pic-hover-img" onError={() => setGone(true)} />
+          ) : gone ? (
+            <span className="convo-pic-hover-state"><ImageOff size={18} aria-hidden="true" /></span>
+          ) : (
+            <span className="convo-pic-hover-state"><Loader size={16} className="convo-running-spin" aria-hidden="true" /></span>
+          )}
+        </div>
+        <div className="convo-pic-hover-cap">
+          <span className="convo-pic-hover-said">{said}</span>
+          {name && name !== said && <span className="convo-pic-hover-name">{name}</span>}
+        </div>
+      </div>,
+      document.body,
+    )
+  })()
+
+  return (
+    <>
+      <button
+        type="button"
+        className={'convo-pic' + (inline ? ' is-inline' : '')}
+        onClick={() => {
+          clearTip()
+          onOpen(path)
+        }}
+        onMouseEnter={(e) => {
+          if (isCoarse() || !thumb) return
+          const r = e.currentTarget.getBoundingClientRect()
+          if (timer.current !== null) window.clearTimeout(timer.current)
+          timer.current = window.setTimeout(() => {
+            timer.current = null
+            setTipRect({ top: r.top, bottom: r.bottom, left: r.left, right: r.right })
+          }, 160)
+        }}
+        onMouseLeave={clearTip}
+        title={thumb && !isCoarse() ? undefined : path}
+      >
+        <ImageIcon size={inline ? 13 : 14} aria-hidden="true" />
+        <span>{said}</span>
+      </button>
+      {pop}
+    </>
+  )
+}
+
 // The person's words with the pictures they name in their places: each path
 // a chip to look at it — one put up from here "图片 1", another by its file's
 // name — the path whole in its title, the words copied as they were.
-function withPictures(text: string, open: ((p: string) => void) | null): ReactNode {
+function withPictures(text: string, open: ((p: string) => void) | null, thumb?: (p: string, signal: AbortSignal) => Promise<Blob>): ReactNode {
   const parts: ReactNode[] = []
   const ups = [...text.matchAll(PICTURE_PATH)].map((m) => m[1]).filter((p, i, all) => UPLOADED.test(p) && all.indexOf(p) === i)
   let at = 0
@@ -5768,10 +5878,7 @@ function withPictures(text: string, open: ((p: string) => void) | null): ReactNo
     const said = n < 0 ? baseOf(path) : ups.length > 1 ? t('convo.picN', { n: n + 1 }) : t('convo.pic')
     parts.push(
       open ? (
-        <button key={k++} type="button" className="convo-pic is-inline" onClick={() => open(path)} title={path}>
-          <ImageIcon size={13} aria-hidden="true" />
-          <span>{said}</span>
-        </button>
+        <PicChip key={k++} path={path} said={said} inline thumb={thumb} onOpen={open} />
       ) : (
         <span key={k++} className="convo-pic is-inline is-unknown" title={path}>
           <ImageIcon size={13} aria-hidden="true" />
@@ -5887,7 +5994,7 @@ function UserTurn({ e, onCopy }: { e: ConvoEntry; onCopy: (s: string) => void })
   }, [acts, text, e.parts])
   const group = grid ? (grid.filter(Boolean) as string[]) : undefined
   const view = acts ? (p: string) => acts.view(p, group) : null
-  const shown = useMemo(() => withPictures(text, view), [text, acts, grid])
+  const shown = useMemo(() => withPictures(text, view, acts?.thumb), [text, acts, grid])
   const any = files.some(Boolean)
   // (A shell command run with "!": in the terminal's letters, as typed.)
   const shell = /^! \S/.test(text)
@@ -5916,10 +6023,7 @@ function UserTurn({ e, onCopy }: { e: ConvoEntry; onCopy: (s: string) => void })
             {files.map((f, i) => {
               const said = files.length > 1 ? t('convo.picN', { n: i + 1 }) : t('convo.pic')
               return f ? (
-                <button key={i} type="button" className="convo-pic" onClick={() => acts!.view(f)} title={f}>
-                  <ImageIcon size={14} aria-hidden="true" />
-                  <span>{said}</span>
-                </button>
+                <PicChip key={i} path={f} said={said} thumb={acts?.thumb} onOpen={(p) => acts!.view(p)} />
               ) : (
                 <span key={i} className="convo-pic is-unknown" title={t('convo.picUnknown')}>
                   <ImageIcon size={14} aria-hidden="true" />

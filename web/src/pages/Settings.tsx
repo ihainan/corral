@@ -6,7 +6,7 @@ import { getLang, hasKey, setLang, t, type Lang } from '../i18n'
 import { setPrefs, usePrefs } from '../prefs'
 import { linkHandler } from '../router'
 import { rememberSettingsScroll, signOut, takeSettingsScroll, useSession } from '../app'
-import { Confirm, Dialog, Field, LoadError, useToast } from '../components/ui'
+import { Confirm, Dialog, DialogHead, Field, LoadError, useToast } from '../components/ui'
 import { CurrentScheme, SchemeDialog } from '../terminal/SchemePicker'
 import { TwoStepSetting } from './TwoStep'
 import { ssoErrorText } from './Auth'
@@ -446,14 +446,22 @@ function TranslateConfigDialog({ config, onClose }: { config: TranslateConfig | 
   return (
     <Dialog
       wide
+      hideTitle
+      className="dlg"
       title={t('settings.translateDialogTitle')}
-      sub={t('settings.translateDialogSub')}
-      icon={<Languages size={18} />}
       guard={dirty}
       busy={saving}
       onClose={onClose}
     >
-      <form className="stack" onSubmit={save}>
+      <DialogHead
+        title={t('settings.translateDialogTitle')}
+        sub={t('settings.translateDialogSub')}
+        icon={<Languages size={18} />}
+        tile
+        onClose={onClose}
+      />
+      <form className="tr-dialog-form" onSubmit={save}>
+        <div className="dlg-body">
         <Field label={t('settings.translateMode')} hint={t(mode === 'summarize' ? 'settings.translateModeSummarizeHint' : 'settings.translateModeTranslateHint')}>
           <div className="seg" role="radiogroup" aria-label={t('settings.translateMode')}>
             {(['translate', 'summarize'] as const).map((m) => (
@@ -560,7 +568,8 @@ function TranslateConfigDialog({ config, onClose }: { config: TranslateConfig | 
           </div>
         </div>
 
-        <div className="dialog-actions">
+        </div>
+        <div className="dlg-foot">
           <button type="button" className="btn" disabled={testing || saving} onClick={() => void runTest()}>
             {testing ? t('settings.translateTesting') : t('settings.translateTest')}
           </button>

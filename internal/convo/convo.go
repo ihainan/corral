@@ -445,6 +445,11 @@ type Meta struct {
 	// WindowBy says how Window is known: "log", "model" (its model's
 	// window), "request" (its requests asked for the 1M window).
 	WindowBy string `json:"window_by,omitempty"`
+	// AutoCompact is the configured auto-compact token threshold, when explicitly
+	// set by the agent's settings or environment (e.g. Claude Code's
+	// modelSettings.<model>.autoCompactWindow or CLAUDE_AUTOCOMPACT_PCT_OVERRIDE).
+	AutoCompact   int64  `json:"auto_compact,omitempty"`
+	AutoCompactBy string `json:"auto_compact_by,omitempty"`
 	// Cost is the latest of what the session used, as Claude Code's log
 	// last said it in what was read (its cost-state rows: running totals,
 	// not added up); nil, none read.

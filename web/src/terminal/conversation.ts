@@ -208,6 +208,8 @@ export interface ConvoMeta {
   context?: number // tokens the latest request sent
   window?: number // the model's context window, where it is known: as the log says it (Codex's), or of the model (Claude's)
   window_by?: 'log' | 'model' | 'request' // how: said by the log, the model's own, the 1M its requests asked for
+  auto_compact?: number // configured auto-compact threshold (e.g. Claude Code settings.json autoCompactWindow)
+  auto_compact_by?: 'setting'
   cost?: ConvoCost // the latest of what the session used, as the log read said it (convo.Cost)
   quota?: ConvoQuota // the subscription's use, as the log last said it (Codex's; convo.Quota)
   answer?: ConvoAnswer // the latest answer read: its tokens and how long it took (Claude Code's; convo.Answer)

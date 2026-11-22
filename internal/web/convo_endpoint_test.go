@@ -242,3 +242,71 @@ func TestParseConvoLocateEndpoint(t *testing.T) {
 		t.Errorf("the first value: %+v", p)
 	}
 }
+
+func TestEndpointClaudeAutoCompact(t *testing.T) {
+	probe := `claude_ep $$ "$1"; printf '%s' "$ac"`
+	home := t.TempDir()
+	proj := t.TempDir()
+	writeFile(t, filepath.Join(home, ".claude", "settings.json"), `{
+  "modelSettings": {
+    "claude-opus-5-5": {
+      "effortLevel": "high",
+      "autoCompactWindow": 400000
+    },
+    "claude-fable-5-2": {
+      "autoCompactWindow": 450000
+    }
+  }
+}`)
+	got := runEndpointSh(t, []string{"HOME=" + home}, probe, proj)
+	if !strings.Contains(got, "claude-opus-5-5=400000") || !strings.Contains(got, "claude-fable-5-2=450000") {
+		t.Fatalf("claude_ep autoCompact = %q, want modelSettings entries", got)
+	}
+
+	// Project settings take precedence over user settings.
+	writeFile(t, filepath.Join(proj, ".claude", "settings.json"), `{
+  "modelSettings": {
+    "claude-opus-5-5": {
+      "autoCompactWindow": 320000
+    }
+  },
+  "env": {
+    "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "55"
+  }
+}`)
+	gotProj := runEndpointSh(t, []string{"HOME=" + home}, probe, proj)
+	if !strings.Contains(gotProj, "claude-opus-5-5=320000") || !strings.Contains(gotProj, "pct=55") {
+		t.Fatalf("project override autoCompact = %q", gotProj)
+	}
+
+	// Process env fallback when settings don't specify pct.
+	emptyProj := t.TempDir()
+	emptyHome := t.TempDir()
+	gotEnv := runEndpointSh(t, []string{"HOME=" + emptyHome, "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=40"}, probe, emptyProj)
+	if gotEnv != "pct=40" {
+		t.Fatalf("env pct override = %q, want pct=40", gotEnv)
+	}
+}
+
+func TestResolveAutoCompact(t *testing.T) {
+	cases := []struct {
+		name   string
+		acRaw  string
+		model  string
+		window int64
+		want   int64
+	}{
+		{"exact model match", "claude-opus-5-5=400000,claude-fable-5-2=450000", "claude-opus-5-5", 1_000_000, 400_000},
+		{"bracket 1m suffix match", "claude-opus-5-5=400000", "claude-opus-5-5[1m]", 1_000_000, 400_000},
+		{"dated model prefix match", "claude-opus-5-5=400000", "claude-opus-5-5-20260501", 1_000_000, 400_000},
+		{"global fallback", "claude-fable-5-2=450000,global=350000", "claude-opus-5-5", 1_000_000, 350_000},
+		{"pct fallback", "pct=40", "claude-opus-5-5", 1_000_000, 400_000},
+		{"model overrides pct", "claude-opus-5-5=400000,pct=60", "claude-opus-5-5", 1_000_000, 400_000},
+		{"exceeds window ignored", "claude-opus-5-5=400000", "claude-opus-5-5", 200_000, 0},
+	}
+	for _, tc := range cases {
+		if got := resolveAutoCompact(tc.acRaw, tc.model, tc.window); got != tc.want {
+			t.Errorf("%s: resolveAutoCompact(%q, %q, %d) = %d, want %d", tc.name, tc.acRaw, tc.model, tc.window, got, tc.want)
+		}
+	}
+}
