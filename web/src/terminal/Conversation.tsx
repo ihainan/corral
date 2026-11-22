@@ -1,9 +1,10 @@
 import { createContext, Fragment, memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
-import { Activity, ArrowDown, ArrowDownAZ, ArrowUp, ArrowUpDown, Bot, Check, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, ChevronsDownUp, ChevronsUpDown, Clock, Columns2, Copy, Cpu, Download, Eye, FilePen, FileText, Folder, FolderOpen, Gauge as GaugeIcon, GitBranch, GitFork, Hand, Image as ImageIcon, ImageOff, Info, Keyboard, ListChecks, ListOrdered, Loader, LogOut, MessageCircleQuestion, MessagesSquare, MoreHorizontal, MoreVertical, PanelLeft, PanelRight, Pin, Plus, Radar, RotateCw, Search, Server, ShieldOff, Sparkles, SquarePlus, SquareTerminal, Target, TextCursorInput, TriangleAlert, X } from 'lucide-react'
+import { Activity, ArrowDown, ArrowDownAZ, ArrowUp, ArrowUpDown, Bot, Check, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, ChevronsDownUp, ChevronsUpDown, Clock, Columns2, Copy, Cpu, Download, Eye, FilePen, FileText, Folder, FolderOpen, Gauge as GaugeIcon, GitBranch, GitFork, Hand, Image as ImageIcon, ImageOff, Info, Keyboard, ListChecks, ListOrdered, Loader, LogOut, MessageCircleQuestion, MessagesSquare, Moon, MoreHorizontal, MoreVertical, PanelLeft, PanelRight, Pin, Plus, Radar, RotateCw, Search, Server, Settings, ShieldOff, Sparkles, SquarePlus, SquareTerminal, Sun, Target, TextCursorInput, TriangleAlert, X } from 'lucide-react'
 import { t, getLang, type I18nKey } from '../i18n'
 import { api } from '../api'
-import { setPrefs, usePrefs } from '../prefs'
+import { isDark, setPrefs, usePrefs } from '../prefs'
+import { navigate } from '../router'
 import { asHeld, buildAgentGroups, dayStart, FOLDED, foldAt, isLiveBlocked, listOrder, pinned, type ConvoListRow, type OrderOpts, type RowCmds } from './agentOrder'
 import { copyText, Dialog, DialogHead, isCoarse, Menu, MenuLayer, swallowNextClick, useToast, type MenuItem } from '../components/ui'
 import { saveFile } from '../saveFile'
@@ -34,7 +35,7 @@ import { callOut, keptEntries } from './conversation'
 import { ShowTerminal } from './showTerminal'
 import { FileTypeIcon } from './fileIcons'
 import { categoryIcon, stepIcon, ThinkIcon, WorkIcon } from './stepIcons'
-import { SessionCard, type CardData } from './sessionCard'
+import { SessionCard, type CardActs, type CardData } from './sessionCard'
 import type { Convo, ConvoAnswer, ConvoCost, ConvoQuota, ConvoQuotaWindow, ConvoEntry, ConvoShell, ConvoHunk, ConvoMeta, ConvoPart, ConvoQueued, ConvoRunning, ConvoTask, ConvoTool, ConvoTrouble, ConvoEvent } from './conversation'
 import { agentName } from './askText'
 import { duration, hhmm, when } from './convoTime'
@@ -146,7 +147,7 @@ const SPLIT_PCT_V_KEY = 'corral.convoSplitPctV'
 const SPLIT_MIN_W = 760
 const clampSplitPct = (v: number) => Math.max(25, Math.min(75, Math.round(v * 10) / 10))
 // (The thread's own width the dock leaves it, beside it; less, the dock goes over it.)
-const DOCK_THREAD = 560
+const DOCK_THREAD = 480
 // (The card's taps for the dock, numbered across the page's life: one taken is
 // known by its number in dock.tsx, which outlives this view — review, 11-15.)
 let dockTaps = 0
@@ -1365,7 +1366,7 @@ export function ConversationView({
   // "?" where nothing is typed in: what keys there are (also in ⋮). (⌘F and
   // Ctrl+F are the browser's find; this one's search is in ⋮.)
   // (Opened from ⋮: the focus goes back to ⋮ after, the menu being gone.)
-  const [keysShown, setKeysShown] = useState<'' | 'key' | 'menu'>('')
+  const [keysShown, setKeysShown] = useState<'' | 'key' | 'menu' | 'side' | 'status'>('')
   // The session card: shut, over the thread under its button, or a sheet from the bottom (narrow, or from the menu).
   const [card, setCard] = useState<'' | 'pop' | 'sheet'>('')
   const [gitChanges, setGitChanges] = useState<{ against: ChangesAgainst; base?: string } | null>(null) // (the Changes view, from the card)
@@ -1689,6 +1690,41 @@ export function ConversationView({
       can: (e: ConvoEntry) => atRest || !!next(e),
     }
   }, [onForkAt, atRest])
+  const darkNow = isDark()
+  const quotaOf: QuotaOf | undefined =
+    convo.status === 'ready' && convo.meta
+      ? convo.bind?.agent === 'codex'
+        ? { codex: true as const, said: convo.meta.quota }
+        : convo.of && convo.bind?.agent === 'agy' && convo.bind.session
+          ? { sid: convo.of.split(' ')[0], session: convo.bind.session, agent: 'agy' as const }
+          : convo.of && convo.bind?.agent === 'claude' && convo.bind.session && !convo.bind.via && convo.bind.auth !== 'bedrock' && convo.bind.auth !== 'vertex'
+            ? { sid: convo.of.split(' ')[0], session: convo.bind.session }
+            : undefined
+      : undefined
+  const sessionCardActs: CardActs = {
+    onFolder: files?.open ? (dir) => files.open!(dir) : undefined,
+    onChanges: (key, path) => show(key, path),
+    // (In the dock where there is one; else the view as a dialog.)
+    onGitChanges: (against, base) => {
+      if (!dockable) return setGitChanges({ against, base })
+      // (A turn's panel in its slot: shut for it — the dock is not drawn under one.)
+      setChanges(null)
+      setSubs(null)
+      setBgCmd(null)
+      setDockStart({ against, base, n: ++dockTaps })
+      setDockTab('changes')
+      setDockOpen(true)
+    },
+    onRunning: (id) => {
+      const r = convo.running?.find((x) => x.id === id) ?? hostCmd(id)
+      if (!r) return
+      if (r.kind === 'agent' && isSubId(r.id)) openSub({ agent: r.id, title: r.what })
+      else openCmd(r)
+    },
+    onDraft,
+  }
+  const sessionCardData = convo.of && convo.status === 'ready' ? cardData(convo, list, mode, effort, hostCmds) : null
+  const showStatusBar = !!(side && wide && !isTouchOnly)
   return (
     <OpenAllOf.Provider value={allOpen}>
     <ForkAtOf.Provider value={forkAt}>
@@ -1697,20 +1733,49 @@ export function ConversationView({
     <CodeSpanOf.Provider value={codeSpan}>
     <FileLinkOf.Provider value={fileLink}>
     <div className="convo" role="region" aria-label={t('convo.title')} ref={root}>
+      <div className="convo-workspace">
       {sideShown && (
         <nav className="convo-side" aria-label={t('convo.agents')} style={{ width: sideWidth }} ref={sideEl}>
-          <NewAgentRow />
-          <AgentList rows={rows} menus query={sideQuery} onQuery={setSideQuery} search={searchAsked} onSearchLeft={() => setSearchAsked(0)} hint={!isTouchOnly} />
+          {isTouchOnly && <NewAgentRow />}
+          <AgentList rows={rows} menus query={sideQuery} onQuery={setSideQuery} search={searchAsked} onSearchLeft={() => setSearchAsked(0)} hint={!isTouchOnly} compact={!isTouchOnly} showNew={!isTouchOnly} />
           {!isTouchOnly && (
-            <p className="convo-side-keys">
-              {t(mac ? 'convo.switchKeysMac' : 'convo.switchKeys')}
-              {mac && (
-                <>
-                  <br />
-                  {t(allOpen === 0 ? 'convo.openKeys' : allOpen === 1 ? 'convo.openFullKeys' : 'convo.foldKeys')}
-                </>
-              )}
-            </p>
+            <div className="convo-side-foot">
+              <button type="button" className="convo-side-foot-btn" onClick={() => navigate('/settings')} title={t('nav.settings')}>
+                <Settings size={14} aria-hidden="true" />
+                <span>{t('nav.settings')}</span>
+              </button>
+              <div className="convo-side-foot-acts">
+                <button
+                  type="button"
+                  className="icon-btn convo-side-foot-ic"
+                  onClick={() => setPrefs({ theme: darkNow ? 'light' : 'dark' })}
+                  aria-label={t(darkNow ? 'convo.side.themeToLight' : 'convo.side.themeToDark')}
+                  title={t(darkNow ? 'convo.side.themeToLight' : 'convo.side.themeToDark')}
+                >
+                  {darkNow ? <Sun size={14} aria-hidden="true" /> : <Moon size={14} aria-hidden="true" />}
+                </button>
+                {list.length > 0 && (
+                  <button
+                    type="button"
+                    className="icon-btn convo-side-foot-ic"
+                    onClick={toggleAllOpen}
+                    aria-label={t(allOpen === 0 ? 'pageKeys.openAll' : allOpen === 1 ? 'pageKeys.openFull' : 'pageKeys.foldAll')}
+                    title={t(allOpen === 0 ? 'pageKeys.openAll' : allOpen === 1 ? 'pageKeys.openFull' : 'pageKeys.foldAll') + (mac ? ' (Ctrl+O)' : '')}
+                  >
+                    {allOpen === 2 ? <ChevronsDownUp size={14} aria-hidden="true" /> : <ChevronsUpDown size={14} aria-hidden="true" />}
+                  </button>
+                )}
+                <button
+                  type="button"
+                  className="icon-btn convo-side-foot-ic"
+                  onClick={() => setKeysShown('side')}
+                  aria-label={t('convo.side.shortcuts')}
+                  title={t('convo.side.shortcuts')}
+                >
+                  <Keyboard size={14} aria-hidden="true" />
+                </button>
+              </div>
+            </div>
           )}
         </nav>
       )}
@@ -1846,7 +1911,14 @@ export function ConversationView({
               className="icon-btn convo-card-btn"
               aria-expanded={card === 'pop'}
               aria-haspopup="dialog"
-              onClick={() => setCard(card ? '' : cardMode())}
+              onClick={() => {
+                if (dockable && dockOpen) {
+                  setCard('')
+                  setDockTab('info')
+                  return
+                }
+                setCard(card ? '' : cardMode())
+              }}
               aria-label={t('card.open')}
               title={t('card.open')}
             >
@@ -1990,31 +2062,10 @@ export function ConversationView({
           </div>
         )
       })()}
-      {card && convo.of && (
+      {card && sessionCardData && (
         <SessionCard
-          data={cardData(convo, list, mode, effort, hostCmds)}
-          acts={{
-            onFolder: files?.open ? (dir) => files.open!(dir) : undefined,
-            onChanges: (key, path) => show(key, path),
-            // (In the dock where there is one; else the view as a dialog.)
-            onGitChanges: (against, base) => {
-              if (!dockable) return setGitChanges({ against, base })
-              // (A turn's panel in its slot: shut for it — the dock is not drawn under one.)
-              setChanges(null)
-              setSubs(null)
-              setBgCmd(null)
-              setDockStart({ against, base, n: ++dockTaps })
-              setDockTab('changes')
-              setDockOpen(true)
-            },
-            onRunning: (id) => {
-              const r = convo.running?.find((x) => x.id === id) ?? hostCmd(id)
-              if (!r) return
-              if (r.kind === 'agent' && isSubId(r.id)) openSub({ agent: r.id, title: r.what })
-              else openCmd(r)
-            },
-            onDraft,
-          }}
+          data={sessionCardData}
+          acts={sessionCardActs}
           anchor={card === 'pop' ? cardBtn.current : null}
           sheet={card === 'sheet'}
           onClose={() => setCard('')}
@@ -2177,20 +2228,7 @@ export function ConversationView({
             mode={mode}
             model={model}
             effort={effort}
-            quota={
-              convo.bind?.agent === 'codex'
-                ? { codex: true as const, said: convo.meta.quota }
-                : convo.of && convo.bind?.agent === 'agy' && convo.bind.session
-                  ? { sid: convo.of.split(' ')[0], session: convo.bind.session, agent: 'agy' as const }
-                  : // The subscription's use is the account's, which this session
-                    // does not draw on when its requests go elsewhere: not shown
-                    // then, in place of a number that is about something else.
-                    // (A key set is no such case: Claude Code asks whether to use
-                    // one, and goes on with the account where that was refused.)
-                    convo.of && convo.bind?.agent === 'claude' && convo.bind.session && !convo.bind.via && convo.bind.auth !== 'bedrock' && convo.bind.auth !== 'vertex'
-                    ? { sid: convo.of.split(' ')[0], session: convo.bind.session }
-                    : undefined
-            }
+            quota={quotaOf}
             via={convo.bind?.via}
             auth={convo.bind?.auth}
             agentKind={convo.bind?.agent ?? agent?.program}
@@ -2310,6 +2348,7 @@ export function ConversationView({
           pane={convo.of.split(' ')[1] || convo.bind?.pane || ''}
           tab={dockTab}
           onTab={setDockTab}
+          info={sessionCardData ? { data: sessionCardData, acts: sessionCardActs } : undefined}
           start={dockStart}
           ask={filesAsk}
           onInsert={(p) => dockSink?.insert(p)}
@@ -2332,7 +2371,7 @@ export function ConversationView({
             }
           }
           acts={files ? { view: (p) => files.view(p), open: files.open } : undefined}
-          over={viewW <= 1300 || viewW - (sideShown ? sideWidth : 0) - dockW < DOCK_THREAD}
+          over={viewW < 1180 || viewW - (sideShown ? sideWidth : 0) - dockW < DOCK_THREAD}
           expanded={dockBig ? viewW - (sideShown ? sideWidth : 0) : 0}
           canExpand={viewW - (sideShown ? sideWidth : 0) > dockW + 80}
           onExpand={setDockBig}
@@ -2345,6 +2384,20 @@ export function ConversationView({
           active={active}
           onSettled={convo.refresh}
           toast={toast}
+        />
+      )}
+      </div>
+      {showStatusBar && (
+        <WorkbenchStatusBar
+          rows={rows}
+          quota={quotaOf}
+          active={active}
+          branch={convo.status === 'ready' ? convo.meta?.branch : undefined}
+          ctx={convo.status === 'ready' && convo.meta?.context ? { used: convo.meta.context, window: convo.meta.window } : undefined}
+          bgCount={(hostCmds?.n ?? 0) + (convo.running?.length ?? 0)}
+          dock={dockHere ? { open: dockOpen, tab: dockTab, onToggle: () => setDockOpen(!dockOpen), onOpenTab: (tb) => { setChanges(null); setSubs(null); setBgCmd(null); setDockTab(tb); setDockOpen(true) } } : undefined}
+          onOpenQuota={() => root.current?.querySelector<HTMLButtonElement>('.convo-runs-ctx')?.click()}
+          onOpenKeys={() => setKeysShown('status')}
         />
       )}
       {picking && side && <Picker rows={rows} onClose={unpick} searchFirst={picking === 'search'} />}
@@ -3668,6 +3721,184 @@ function QuotaPart({ sid, session, agent }: { sid: string; session: string; agen
   )
 }
 
+// Compact live quota hook for the desktop workbench status bar: reuses the
+// exact same quotaSeen/askQuota cache as QuotaPart so opening the popover or
+// switching tabs never duplicates host requests.
+function useStatusQuota(quota: QuotaOf | undefined, active: boolean): { five_hour?: ConvoQuotaWindow; weekly?: ConvoQuotaWindow; groups?: QuotaGroup[] } | undefined {
+  const remote = quota && !('codex' in quota) ? quota : undefined
+  const key = remote ? remote.sid + ' ' + remote.session + (remote.agent ? ' ' + remote.agent : '') : ''
+  const [seen, setSeen] = useState<QuotaSeen | undefined>(() => (key ? quotaSeen.get(key) : undefined))
+  useEffect(() => {
+    if (!remote || !active) {
+      setSeen(key ? quotaSeen.get(key) : undefined)
+      return
+    }
+    let live = true
+    const look = (initial: boolean) => {
+      const was = quotaSeen.get(key)
+      if (initial && was && was.q !== 'failed' && Date.now() - was.at < QUOTA_EVERY) return setSeen(was)
+      void askQuota(remote.sid, remote.session, key, remote.agent).then((v) => live && setSeen(v))
+    }
+    look(true)
+    const timer = setInterval(() => look(false), QUOTA_EVERY)
+    return () => {
+      live = false
+      clearInterval(timer)
+    }
+  }, [key, remote?.sid, remote?.session, remote?.agent, active])
+  if (!quota) return undefined
+  if ('codex' in quota) return quota.said && (quota.said.five_hour || quota.said.weekly) ? quota.said : undefined
+  if (!seen) return undefined
+  return seen.q === 'failed' ? seen.last : seen.q.known ? seen.q : undefined
+}
+
+function shortQuotaName(name: string): string {
+  const low = name.toLowerCase()
+  if (low.includes('gemini')) return 'Gemini'
+  if (low.includes('claude')) return 'Claude'
+  if (low.includes('gpt')) return 'GPT'
+  return name.split(/\s+/)[0] || name
+}
+
+function WorkbenchStatusBar({
+  rows,
+  quota,
+  active,
+  branch,
+  ctx,
+  bgCount,
+  dock,
+  onOpenQuota,
+  onOpenKeys,
+}: {
+  rows: ConvoListRow[]
+  quota?: QuotaOf
+  active: boolean
+  branch?: string
+  ctx?: { used: number; window?: number }
+  bgCount: number
+  dock?: { open: boolean; tab: DockTab; onToggle: () => void; onOpenTab: (tb: DockTab) => void }
+  onOpenQuota: () => void
+  onOpenKeys: () => void
+}) {
+  const shown = useStatusQuota(quota, active)
+  const blocked = rows.filter(isLiveBlocked)
+  const working = rows.filter((r) => !isLiveBlocked(r) && (r.status === 'working' || r.bg === 'running'))
+  const now = Date.now() / 1000
+  const dockTabWord: Record<DockTab, I18nKey> = { info: 'dock.info', changes: 'dock.changes', files: 'dock.files', terminal: 'dock.terminal' }
+  const ctxLabel = ctx ? (ctx.window ? `${Math.min(100, Math.round((ctx.used / ctx.window) * 100))}%` : tokens(ctx.used)) : ''
+  const ctxPct = ctx?.window ? Math.round((ctx.used / ctx.window) * 100) : 0
+  return (
+    <footer className="convo-statusbar" aria-label={t('convo.statusBar.label')}>
+      <div className="convo-sb-group">
+        {blocked.length > 0 && (
+          <button
+            type="button"
+            className="convo-sb-btn is-warn"
+            onClick={() => blocked[0].onPick()}
+            title={blocked.map((r) => r.title).join(', ')}
+          >
+            <span className="convo-sb-dot is-blocked" aria-hidden="true" />
+            <span>{t('convo.statusBar.waiting', { n: blocked.length })}</span>
+          </button>
+        )}
+        {working.length > 0 && (
+          <button
+            type="button"
+            className="convo-sb-btn is-accent"
+            onClick={() => working[0].onPick()}
+            title={working.map((r) => r.title).join(', ')}
+          >
+            <span className="convo-sb-dot is-working" aria-hidden="true" />
+            <span>{t('convo.statusBar.working', { n: working.length })}</span>
+          </button>
+        )}
+        <span className="convo-sb-item">{t('convo.statusBar.agents', { n: rows.length })}</span>
+        {shown && (
+          <>
+            <span className="convo-sb-sep" aria-hidden="true" />
+            <button type="button" className="convo-sb-btn convo-sb-quota" onClick={onOpenQuota} title={t('convo.statusBar.quotaTip')}>
+              {shown.groups?.length
+                ? shown.groups.map((g, idx) => {
+                    const w = g.five_hour ?? g.weekly
+                    if (!w) return null
+                    const left = Math.max(0, Math.min(100, Math.round(100 - w.used)))
+                    const tone = left <= 5 ? ' is-danger' : left <= 20 ? ' is-warn' : ''
+                    return (
+                      <span key={g.name} className={'convo-sb-qpart' + tone}>
+                        {idx > 0 && <span className="convo-sb-qdot" aria-hidden="true">·</span>}
+                        <span>{shortQuotaName(g.name)}</span>
+                        <strong>{left}%</strong>
+                      </span>
+                    )
+                  })
+                : (
+                    [
+                      ['convo.statusBar.fiveHour', shown.five_hour],
+                      ['convo.statusBar.weekly', shown.weekly],
+                    ] as const
+                  ).map(([lbl, w], idx) => {
+                    if (!w || (w.resets_at > 0 && w.resets_at <= now)) return null
+                    const used = Math.round(w.used)
+                    const tone = used >= 95 ? ' is-danger' : used >= 80 ? ' is-warn' : ''
+                    return (
+                      <span key={lbl} className={'convo-sb-qpart' + tone}>
+                        {idx > 0 && shown.five_hour && !(shown.five_hour.resets_at > 0 && shown.five_hour.resets_at <= now) && <span className="convo-sb-qdot" aria-hidden="true">·</span>}
+                        <span>{t(lbl)}</span>
+                        <strong>{used}%</strong>
+                      </span>
+                    )
+                  })}
+            </button>
+          </>
+        )}
+      </div>
+      <div className="convo-sb-group is-right">
+        {branch && (
+          dock ? (
+            <button type="button" className="convo-sb-btn convo-sb-branch" onClick={() => dock.onOpenTab('changes')} title={t('convo.branch', { b: branch })}>
+              <GitBranch size={12} aria-hidden="true" />
+              <span className="convo-sb-trunc">{branch}</span>
+            </button>
+          ) : (
+            <span className="convo-sb-item convo-sb-branch" title={t('convo.branch', { b: branch })}>
+              <GitBranch size={12} aria-hidden="true" />
+              <span className="convo-sb-trunc">{branch}</span>
+            </span>
+          )
+        )}
+        {bgCount > 0 && dock && (
+          <button type="button" className="convo-sb-btn is-accent" onClick={() => dock.onOpenTab('info')}>
+            <span className="convo-sb-dot is-working" aria-hidden="true" />
+            <span>{t('convo.statusBar.bg', { n: bgCount })}</span>
+          </button>
+        )}
+        {ctxLabel && (
+          <button type="button" className={'convo-sb-btn' + (ctxPct >= 90 ? ' is-danger' : ctxPct >= 80 ? ' is-warn' : '')} onClick={onOpenQuota} title={t('convo.statusBar.quotaTip')}>
+            <GaugeIcon size={12} aria-hidden="true" />
+            <span>{ctxLabel}</span>
+          </button>
+        )}
+        {dock && (
+          <button
+            type="button"
+            className={'convo-sb-btn' + (dock.open ? ' is-active' : '')}
+            aria-pressed={dock.open}
+            onClick={dock.onToggle}
+            title={t(dock.open ? 'dock.close' : 'dock.open')}
+          >
+            <PanelRight size={12} aria-hidden="true" />
+            <span>{t(dockTabWord[dock.tab])}</span>
+          </button>
+        )}
+        <button type="button" className="convo-sb-btn" onClick={onOpenKeys} aria-label={t('convo.side.shortcuts')} title={t('convo.side.shortcuts')}>
+          <Keyboard size={12} aria-hidden="true" />
+        </button>
+      </div>
+    </footer>
+  )
+}
+
 // A Codex session's quota, as its log last said it (each request's
 // token_count): nothing read, its time said when it is not of just now.
 function QuotaSaid({ quota }: { quota?: ConvoQuota }) {
@@ -3932,7 +4163,7 @@ function ListOrderMenu() {
   )
 }
 
-export function AgentList({ rows, menus, onPicked, placed, query: given, onQuery, search, showSearch, onSearchLeft, hint }: { rows: ConvoListRow[]; menus?: boolean; onPicked?: () => void; placed?: Map<string, ConvoListRow>; query?: string; onQuery?: (q: string) => void; search?: number; showSearch?: boolean; onSearchLeft?: () => void; hint?: boolean }) {
+export function AgentList({ rows, menus, onPicked, placed, query: given, onQuery, search, showSearch, onSearchLeft, hint, compact, showNew }: { rows: ConvoListRow[]; menus?: boolean; onPicked?: () => void; placed?: Map<string, ConvoListRow>; query?: string; onQuery?: (q: string) => void; search?: number; showSearch?: boolean; onSearchLeft?: () => void; hint?: boolean; compact?: boolean; showNew?: boolean }) {
   // Its rows' menu (menus: the side list's; the switcher's rows have none):
   // one for the list, of the row it was opened on by its key, as that row
   // may go to another group meanwhile and be drawn anew; at its "more"
@@ -4102,10 +4333,24 @@ export function AgentList({ rows, menus, onPicked, placed, query: given, onQuery
   const showOrder = rows.length > 1
   return (
     <>
-      {(showBar || showOrder) && (
+      {(showBar || showOrder || showNew) && (
         <div className={'list-toolbar' + (showBar ? '' : ' is-compact')}>
           {showBar && <ListSearch value={query} onChange={setQuery} focus={search} onLeft={onSearchLeft} hint={hint ? KEY_SEARCH : undefined} />}
           {showOrder && <ListOrderMenu />}
+          {showNew && (
+            <button
+              type="button"
+              className="icon-btn list-new-btn"
+              aria-label={t('newAgent.title')}
+              title={t('newAgent.title')}
+              onClick={() => {
+                onPicked?.()
+                window.dispatchEvent(new Event(NEW_AGENT))
+              }}
+            >
+              <Plus size={15} aria-hidden="true" />
+            </button>
+          )}
         </div>
       )}
       {hiddenBlocked.length > 0 && (
@@ -4270,7 +4515,7 @@ export function AgentList({ rows, menus, onPicked, placed, query: given, onQuery
               }}
               onKeyDown={hasMenu ? menuKey(r.key) : undefined}
             >
-              <AgentIcon program={r.program} size={isChild ? 20 : isNestedVisual ? 22 : 30} dot={r.bg === 'running' || r.cmds ? 'bg' : said ? (r.status as 'blocked' | 'working' | 'done') : undefined} />
+              <AgentIcon program={r.program} size={compact ? (isChild ? 18 : isNestedVisual ? 20 : 24) : isChild ? 20 : isNestedVisual ? 22 : 30} dot={r.bg === 'running' || r.cmds ? 'bg' : said ? (r.status as 'blocked' | 'working' | 'done') : undefined} />
               {/* (Two lines a row, always: its name; where it is — the session's title,
                   which tells alike names apart — and when. A third only for what
                   waits on the person: what it asks, or messages not seen taken in.
