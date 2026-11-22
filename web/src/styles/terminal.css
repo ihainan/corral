@@ -644,7 +644,6 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 .term-root.light .convo-dock .composer-box { box-shadow: none; }
 .convo-dock .composer-box:focus-within,
 .term-root.light .convo-dock .composer-box:focus-within { border-color: color-mix(in srgb, var(--term-accent-text) 70%, var(--term-line)); box-shadow: 0 0 0 2px color-mix(in srgb, var(--term-accent-text) 12%, transparent); }
-@media (pointer: fine) { .convo-dock { padding-bottom: 12px; } }
 @media (max-width: 640px) { .convo-dock { padding-left: max(12px, env(safe-area-inset-left, 0px)); padding-right: max(12px, env(safe-area-inset-right, 0px)); } }
 .convo-runs { position: relative; display: flex; align-items: center; gap: 4px; min-width: 0; overflow: visible; min-height: 24px; margin-top: -4px; font-size: var(--fs-sub); line-height: var(--lh-sub); color: var(--term-fg-3); font-variant-numeric: tabular-nums; }
 .convo-runs-item {
@@ -1665,33 +1664,6 @@ button.convo-queue-row.is-note:last-child { border-radius: 0 0 var(--r-lg) var(-
 }
 .convo-side-foot-ic { width: 24px; height: 24px; border-radius: var(--r-sm); color: var(--term-fg-3); }
 .convo-side-foot-ic:hover { background: var(--term-hover); color: var(--term-fg); }
-
-/* Pure 24px desktop global status bar (left: active fleet states, right: account quota) */
-.convo-statusbar {
-  flex: none; height: 24px; box-sizing: border-box;
-  display: flex; align-items: center; justify-content: space-between; gap: 12px;
-  padding: 0 10px; border-top: 1px solid var(--term-line); background: var(--term-chrome);
-  color: var(--term-fg-3); font-family: var(--font-ui); font-size: var(--fs-note); line-height: var(--lh-note);
-  font-variant-numeric: tabular-nums; user-select: none; overflow: hidden;
-}
-.convo-sb-group { display: flex; align-items: center; gap: 4px; min-width: 0; }
-.convo-sb-group.is-right { flex: 0 1 auto; justify-content: flex-end; }
-.convo-sb-btn {
-  flex: none; display: inline-flex; align-items: center; gap: 4px; height: 20px; padding: 0 6px;
-  border: 0; border-radius: var(--r-xs); background: none; color: var(--term-fg-2);
-  font: inherit; white-space: nowrap; cursor: pointer;
-}
-.convo-sb-btn:hover { background: var(--term-hover); color: var(--term-fg); }
-.convo-sb-btn:focus-visible { outline: 2px solid var(--term-accent-text); outline-offset: -2px; }
-.convo-sb-dot { flex: none; width: 6px; height: 6px; border-radius: 50%; }
-.convo-sb-dot.is-blocked { background: var(--term-warn-text); }
-.convo-sb-dot.is-working { background: var(--term-accent-text); }
-.convo-sb-quota { gap: 4px; color: var(--term-fg-3); min-width: 0; overflow: hidden; }
-.convo-sb-qpart { display: inline-flex; align-items: center; gap: 3px; white-space: nowrap; }
-.convo-sb-qpart strong { font-weight: 500; color: var(--term-fg-2); }
-.convo-sb-qpart.is-warn strong, .convo-sb-qpart.is-warn { color: var(--term-warn-text); }
-.convo-sb-qpart.is-danger strong, .convo-sb-qpart.is-danger { color: var(--term-danger-text); }
-.convo-sb-qdot { color: var(--term-fg-3); margin-right: 1px; }
 /* An agents' list's search box (side, picker, a phone's list). 16px on a
    touch screen: iOS zooms into a smaller field. */
 .list-search {
@@ -2360,13 +2332,18 @@ button.convo-queue-row.is-note:last-child { border-radius: 0 0 var(--r-lg) var(-
   .convo-side .list-search:focus-within { border-color: var(--term-accent-text); background: var(--term-bg); }
   .convo-side .list-search-icon { width: 16px; }
   .convo-side .list-search input { font-size: var(--fs-sub); line-height: var(--lh-sub); }
-  .convo-side .list-order-btn, .convo-side .list-new-btn {
+  .convo-side .list-order-btn {
     flex: none; width: 28px; height: 28px; border: 0; border-radius: var(--r-sm);
     background: none; color: var(--term-fg-2);
   }
-  .convo-side .list-order-btn:hover, .convo-side .list-new-btn:hover { background: var(--term-hover); color: var(--term-fg); }
+  .convo-side .list-order-btn:hover { background: var(--term-hover); color: var(--term-fg); }
   .convo-side .list-order-btn.is-active { background: var(--term-hover); color: var(--term-fg); }
-  .convo-side .list-new-btn:focus-visible { outline: 2px solid var(--term-accent-text); outline-offset: -2px; }
+  .convo-side .list-new-btn {
+    flex: none; width: 28px; height: 28px; border: 0; border-radius: var(--r-sm);
+    background: var(--accent); color: var(--accent-fg);
+  }
+  .convo-side .list-new-btn:hover { background: var(--accent-hover); color: var(--accent-fg); }
+  .convo-side .list-new-btn:focus-visible { outline: 2px solid var(--term-accent-text); outline-offset: 2px; }
   .convo-side .convo-list-row { padding: 6px 8px; gap: 8px; border-radius: var(--r-sm); }
   .convo-side .convo-list-row .agent-icon { margin-top: 2px; }
   .convo-side .convo-list-row.is-child .agent-icon { margin-top: 0; }

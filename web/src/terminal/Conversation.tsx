@@ -1722,7 +1722,6 @@ export function ConversationView({
     onDraft,
   }
   const sessionCardData = convo.of && convo.status === 'ready' ? cardData(convo, list, mode, effort, hostCmds) : null
-  const showStatusBar = !!(side && wide && !isTouchOnly)
   const hideDesktopLineage = !!(sideShown && !isTouchOnly)
   const curRowForLineage = rows.find((r) => r.current)
   const lineageParent = lineageBar
@@ -2388,14 +2387,6 @@ export function ConversationView({
         />
       )}
       </div>
-      {showStatusBar && (
-        <WorkbenchStatusBar
-          rows={rows}
-          quota={quotaOf}
-          active={active}
-          onOpenQuota={() => root.current?.querySelector<HTMLButtonElement>('.convo-runs-ctx')?.click()}
-        />
-      )}
       {picking && side && <Picker rows={rows} onClose={unpick} searchFirst={picking === 'search'} />}
     </div>
     </FileLinkOf.Provider>
@@ -3714,116 +3705,6 @@ function QuotaPart({ sid, session, agent }: { sid: string; session: string; agen
       {seen?.q === 'failed' && shown && <p className="convo-runs-note">{t('quota.failedKept', { at: quotaClock((seen.lastAt ?? 0) / 1000) })}</p>}
       {!!stale && <p className="convo-runs-note">{t('quota.stale', { n: stale })}</p>}
     </QuotaView>
-  )
-}
-
-function useStatusQuota(quota: QuotaOf | undefined, active: boolean): { five_hour?: ConvoQuotaWindow; weekly?: ConvoQuotaWindow; groups?: QuotaGroup[] } | undefined {
-  const remote = quota && !('codex' in quota) ? quota : undefined
-  const key = remote ? remote.sid + ' ' + remote.session + (remote.agent ? ' ' + remote.agent : '') : ''
-  const [seen, setSeen] = useState<QuotaSeen | undefined>(() => (key ? quotaSeen.get(key) : undefined))
-  useEffect(() => {
-    if (!remote || !active) {
-      setSeen(key ? quotaSeen.get(key) : undefined)
-      return
-    }
-    let live = true
-    const look = (initial: boolean) => {
-      const was = quotaSeen.get(key)
-      if (initial && was && was.q !== 'failed' && Date.now() - was.at < QUOTA_EVERY) return setSeen(was)
-      void askQuota(remote.sid, remote.session, key, remote.agent).then((v) => live && setSeen(v))
-    }
-    look(true)
-    const timer = setInterval(() => look(false), QUOTA_EVERY)
-    return () => {
-      live = false
-      clearInterval(timer)
-    }
-  }, [key, remote?.sid, remote?.session, remote?.agent, active])
-  if (!quota) return undefined
-  if ('codex' in quota) return quota.said && (quota.said.five_hour || quota.said.weekly) ? quota.said : undefined
-  if (!seen) return undefined
-  return seen.q === 'failed' ? seen.last : seen.q.known ? seen.q : undefined
-}
-
-function shortQuotaName(name: string): string {
-  const low = name.toLowerCase()
-  if (low.includes('gemini')) return 'Gemini'
-  if (low.includes('claude')) return 'Claude'
-  if (low.includes('gpt')) return 'GPT'
-  return name.split(/\s+/)[0] || name
-}
-
-// Pure 24px global status bar: left shows only active global fleet states
-// (waiting / working, clickable to jump), right shows account quota.
-function WorkbenchStatusBar({
-  rows,
-  quota,
-  active,
-  onOpenQuota,
-}: {
-  rows: ConvoListRow[]
-  quota?: QuotaOf
-  active: boolean
-  onOpenQuota: () => void
-}) {
-  const shown = useStatusQuota(quota, active)
-  const blocked = rows.filter(isLiveBlocked)
-  const working = rows.filter((r) => !isLiveBlocked(r) && (r.status === 'working' || r.bg === 'running'))
-  const now = Date.now() / 1000
-  return (
-    <footer className="convo-statusbar" aria-label={t('convo.statusBar.label')}>
-      <div className="convo-sb-group">
-        {blocked.length > 0 && (
-          <button type="button" className="convo-sb-btn" onClick={() => blocked[0].onPick()} title={blocked.map((r) => r.title).join(', ')}>
-            <span className="convo-sb-dot is-blocked" aria-hidden="true" />
-            <span>{t('convo.statusBar.waiting', { n: blocked.length })}</span>
-          </button>
-        )}
-        {working.length > 0 && (
-          <button type="button" className="convo-sb-btn" onClick={() => working[0].onPick()} title={working.map((r) => r.title).join(', ')}>
-            <span className="convo-sb-dot is-working" aria-hidden="true" />
-            <span>{t('convo.statusBar.working', { n: working.length })}</span>
-          </button>
-        )}
-      </div>
-      <div className="convo-sb-group is-right">
-        {shown && (
-          <button type="button" className="convo-sb-btn convo-sb-quota" onClick={onOpenQuota} title={t('convo.statusBar.quotaTip')}>
-            {shown.groups?.length
-              ? shown.groups.map((g, idx) => {
-                  const w = g.five_hour ?? g.weekly
-                  if (!w) return null
-                  const left = Math.max(0, Math.min(100, Math.round(100 - w.used)))
-                  const tone = left <= 5 ? ' is-danger' : left <= 20 ? ' is-warn' : ''
-                  return (
-                    <span key={g.name} className={'convo-sb-qpart' + tone}>
-                      {idx > 0 && <span className="convo-sb-qdot" aria-hidden="true">·</span>}
-                      <span>{shortQuotaName(g.name)}</span>
-                      <strong>{left}%</strong>
-                    </span>
-                  )
-                })
-              : (
-                  [
-                    ['convo.statusBar.fiveHour', shown.five_hour],
-                    ['convo.statusBar.weekly', shown.weekly],
-                  ] as const
-                ).map(([lbl, w], idx) => {
-                  if (!w || (w.resets_at > 0 && w.resets_at <= now)) return null
-                  const used = Math.round(w.used)
-                  const tone = used >= 95 ? ' is-danger' : used >= 80 ? ' is-warn' : ''
-                  return (
-                    <span key={lbl} className={'convo-sb-qpart' + tone}>
-                      {idx > 0 && shown.five_hour && !(shown.five_hour.resets_at > 0 && shown.five_hour.resets_at <= now) && <span className="convo-sb-qdot" aria-hidden="true">·</span>}
-                      <span>{t(lbl)}</span>
-                      <strong>{used}%</strong>
-                    </span>
-                  )
-                })}
-          </button>
-        )}
-      </div>
-    </footer>
   )
 }
 
