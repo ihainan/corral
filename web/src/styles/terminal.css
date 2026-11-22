@@ -1570,20 +1570,41 @@ button.convo-queue-row.is-note:last-child { border-radius: 0 0 var(--r-lg) var(-
 .convo-list-row.is-nested { padding: 6px 8px; gap: 8px; }
 .convo-list-row.is-nested .agent-icon { margin-top: 2px; }
 .convo-list-row.is-nested .convo-list-title { font-size: var(--fs-sub); line-height: var(--lh-sub); font-weight: 500; }
-.convo-list-item.is-nested > .convo-list-dots { top: 4px; right: 4px; }
-/* Nested child agents under a parent row: single-level 1px hairline tree guide. */
+.convo-list-item.is-nested > .convo-list-actions { top: 4px; right: 4px; }
+/* Nested child agents under a parent row: subtle curved 1px tree guide aligned under parent icon center. */
 .convo-list-children {
+  --tree-line: color-mix(in srgb, var(--term-fg) 14%, transparent);
   display: flex; flex-direction: column; gap: 2px;
-  margin-left: 16px; padding-left: 8px; border-left: 1px solid var(--term-line);
+  margin: 0 0 2px 24px; padding-left: 12px;
 }
-.convo-list-subtoggle {
-  display: inline-flex; align-items: center; gap: 4px; align-self: flex-start;
-  padding: 2px 6px; margin: 1px 0; border: 0; border-radius: var(--r-xs);
-  background: none; color: var(--term-fg-3); font: 500 var(--fs-note)/var(--lh-note) var(--font-ui);
-  cursor: pointer; font-variant-numeric: tabular-nums;
+.convo-list-tree .convo-list-children { margin-left: 20px; }
+.convo-list-item.is-child { position: relative; }
+.convo-list-item.is-child::before {
+  content: ''; position: absolute; left: -12px; top: -4px; width: 10px; height: 18px;
+  border-left: 1px solid var(--tree-line); border-bottom: 1px solid var(--tree-line);
+  border-bottom-left-radius: var(--r-sm); pointer-events: none;
 }
-.convo-list-subtoggle:hover { background: var(--term-row-hover); color: var(--term-fg-2); }
-.convo-list-subtoggle:focus-visible { outline: 2px solid var(--term-accent-text); outline-offset: -2px; }
+.convo-list-item.is-child:first-child::before { top: -2px; height: 16px; }
+.convo-list-item.is-child:not(:last-child)::after {
+  content: ''; position: absolute; left: -12px; top: 10px; bottom: -4px;
+  border-left: 1px solid var(--tree-line); pointer-events: none;
+}
+.convo-list-row.is-child { padding: 4px 8px; gap: 8px; }
+.convo-list-row.is-child .agent-icon { margin-top: 0; }
+.convo-list-row.is-child .convo-list-title { font-size: var(--fs-sub); line-height: var(--lh-sub); font-weight: 500; }
+.convo-list-item.is-child.is-single > .convo-list-row { align-items: center; }
+.convo-list-item.is-child.is-single .convo-list-line { align-items: center; }
+.convo-list-item.is-child.is-single > .convo-list-actions { top: 2px; right: 4px; }
+.convo-list-subpill {
+  display: inline-flex; align-items: center; gap: 2px; height: 22px; padding: 0 6px;
+  border: 0; border-radius: 999px;
+  background: color-mix(in srgb, var(--term-fg) 6%, transparent); color: var(--term-fg-3);
+  font-size: var(--fs-note); line-height: var(--lh-note); font-weight: 500; font-variant-numeric: tabular-nums;
+  cursor: pointer;
+}
+.convo-list-subpill:hover { background: color-mix(in srgb, var(--term-fg) 12%, transparent); color: var(--term-fg); }
+.convo-list-subpill.is-collapsed { color: var(--term-fg-2); background: color-mix(in srgb, var(--term-fg) 9%, transparent); }
+.convo-list-subpill:focus-visible { outline: 2px solid var(--term-accent-text); outline-offset: -2px; }
 .convo-list-parent-ref {
   min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   font-size: var(--fs-note); line-height: var(--lh-note); color: var(--term-fg-3);
@@ -1621,8 +1642,8 @@ button.convo-queue-row.is-note:last-child { border-radius: 0 0 var(--r-lg) var(-
 }
 .convo-lineage-chip {
   flex: none; display: inline-flex; align-items: center; gap: 6px; max-width: 200px;
-  padding: 2px 8px; border-radius: var(--r-pill); border: 1px solid var(--term-line);
-  background: var(--term-surface); color: var(--term-fg-2); font: 500 var(--fs-note)/var(--lh-note) var(--font-ui);
+  padding: 2px 8px; border-radius: 999px; border: 1px solid var(--term-line);
+  background: var(--term-chrome); color: var(--term-fg-2); font: 500 var(--fs-note)/var(--lh-note) var(--font-ui);
   cursor: pointer;
 }
 .convo-lineage-chip:hover { background: var(--term-row-hover); color: var(--term-fg); }
@@ -1697,33 +1718,49 @@ button.convo-queue-row.is-note:last-child { border-radius: 0 0 var(--r-lg) var(-
 .convo-list-more:hover { background: var(--term-hover); color: var(--term-fg-2); }
 .convo-list-more:focus-visible { outline: 2px solid var(--term-accent-text); outline-offset: -2px; }
 .convo-spin.is-small { width: 9px; height: 9px; margin: 0; border-width: 1.5px; flex: none; }
-@media (pointer: coarse) { .convo-list-row { padding: 10px 12px; } }
-/* A row's "more" button (the side list's): over the row's end, by its
-   first line, shown at a hover, a keyboard's focus in the row or its menu
-   open; its time gives it the room (hidden, keeping its own), else the
-   line makes room. Where nothing hovers (a tablet), always there, the row's
-   text kept clear of it. */
+@media (pointer: coarse) {
+  .convo-list-row { padding: 10px 12px; }
+  .convo-list-row.is-child { padding: 8px 10px; }
+  .convo-list-item.is-child::before { height: 22px; }
+  .convo-list-item.is-child:first-child::before { height: 20px; }
+  .convo-list-item.is-child.is-single > .convo-list-actions { top: 6px; }
+  .convo-list-subpill { height: 26px; padding: 0 8px; }
+}
+/* A row's "more" button (the side list's) and subagent fold pill: over the
+   row's end, by its first line. The subagent pill stays fixed at the right
+   edge; "more" appears beside it on hover, keyboard focus or menu open. */
 .convo-list-item { position: relative; }
+.convo-list-actions {
+  position: absolute; top: 6px; right: 6px; display: inline-flex; align-items: center; gap: 2px;
+  pointer-events: none;
+}
+.convo-list-actions > .convo-list-subpill { pointer-events: auto; }
 /* (Hidden by being clear, not gone: it can still take the focus, from Tab
    or given back to it, which shows it.) */
 .convo-list-dots {
-  position: absolute; top: 5px; right: 6px; display: inline-flex; align-items: center; justify-content: center;
+  display: inline-flex; align-items: center; justify-content: center;
   width: 26px; height: 24px; padding: 0; border: 0; border-radius: var(--r-sm); background: none; color: var(--term-fg-2); cursor: pointer;
   opacity: 0; pointer-events: none;
 }
 .convo-list-dots:hover, .convo-list-item.is-menu .convo-list-dots { background: color-mix(in srgb, var(--term-fg) 10%, transparent); color: var(--term-fg); }
 .convo-list-dots:focus-visible { outline: 2px solid var(--term-accent-text); outline-offset: -2px; }
+.convo-list-item.has-children .convo-list-line { padding-right: 40px; }
 .convo-list-item.has-menu:has(:focus-visible) .convo-list-dots, .convo-list-item.is-menu .convo-list-dots { opacity: 1; pointer-events: auto; }
-.convo-list-item.has-menu:has(:focus-visible) .convo-list-line:not(:has(.convo-list-when)), .convo-list-item.is-menu .convo-list-line:not(:has(.convo-list-when)) { padding-right: 26px; }
+.convo-list-item.has-menu:not(.has-children):has(:focus-visible) .convo-list-line:not(:has(.convo-list-when)), .convo-list-item.has-menu:not(.has-children).is-menu .convo-list-line:not(:has(.convo-list-when)) { padding-right: 26px; }
+.convo-list-item.has-children.has-menu:has(:focus-visible) .convo-list-line, .convo-list-item.has-children.is-menu .convo-list-line { padding-right: 64px; }
+.convo-list-item.is-child.is-single.has-menu:has(:focus-visible) .convo-list-when, .convo-list-item.is-child.is-single.is-menu .convo-list-when { opacity: 0; }
 .convo-list-item.is-menu > .convo-list-row:not([aria-current='true']) { background: var(--term-row-hover); --dot-ring: var(--term-row-hover); }
 @media (hover: hover) {
   .convo-list-item.has-menu:hover .convo-list-dots { opacity: 1; pointer-events: auto; }
-  .convo-list-item.has-menu:hover .convo-list-line:not(:has(.convo-list-when)) { padding-right: 26px; }
+  .convo-list-item.has-menu:not(.has-children):hover .convo-list-line:not(:has(.convo-list-when)) { padding-right: 26px; }
+  .convo-list-item.has-children.has-menu:hover .convo-list-line { padding-right: 64px; }
+  .convo-list-item.is-child.is-single.has-menu:hover .convo-list-when { opacity: 0; }
   .convo-list-item.has-menu:hover > .convo-list-row:not([aria-current='true']) { background: var(--term-row-hover); --dot-ring: var(--term-row-hover); }
 }
 @media (hover: none) {
   .convo-list-group .convo-list-item.has-menu .convo-list-dots { opacity: 1; pointer-events: auto; color: var(--term-fg-3); }
-  .convo-list-group .convo-list-item.has-menu .convo-list-line { padding-right: 28px; } /* (the button, always shown, at its right) */
+  .convo-list-group .convo-list-item.has-menu:not(.has-children) .convo-list-line { padding-right: 28px; } /* (the button, always shown, at its right) */
+  .convo-list-group .convo-list-item.has-children.has-menu .convo-list-line { padding-right: 64px; }
 }
 @media (forced-colors: active) { .convo-list-dots { color: ButtonText; } }
 .convo-nudge {

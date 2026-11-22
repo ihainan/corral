@@ -226,16 +226,16 @@ const labelOf = (e: Entry, said: string, hosts: number, named = true, sameWsPare
   if (r && sameWsParent && !own) {
     const title = (named && said) || agentName || r.a.agent || said
     const host = hosts > 1 ? e.s.host_name : ''
-    const where = [host, agentName && agentName !== title ? agentName : '', ws && ws !== title ? ws : '', tabOf(r), agentMark(r.a.agent) ? '' : r.a.agent].filter(Boolean)
+    const where = [host, named && said && agentName && agentName !== title ? agentName : '', agentMark(r.a.agent) ? '' : r.a.agent].filter(Boolean)
     return { title, where: where.join(' · ') }
   }
   if (!r || (!ws && !own)) return { title: said, where: whereOf(e, hosts) }
   const host = hosts > 1 ? e.s.host_name : ''
   const title = own || ws
-  const where = [host, own ? ws : '', tabOf(r), named && said !== title ? said : '', agentMark(r.a.agent) ? '' : r.a.agent].filter(Boolean)
+  const where = [host, own && !sameWsParent ? ws : '', sameWsParent ? '' : tabOf(r), named && said !== title ? said : '', agentMark(r.a.agent) ? '' : r.a.agent].filter(Boolean)
   // (Nothing else to say under it — a Codex not named, say, its first message
   // not used for a name — the folder it runs in, rather than an empty line.)
-  if (!where.length && said && said !== title) where.push(said)
+  if (!where.length && !sameWsParent && said && said !== title) where.push(said)
   return { title, where: where.join(' · ') }
 }
 

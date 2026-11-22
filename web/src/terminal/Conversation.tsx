@@ -3822,7 +3822,7 @@ export function AgentList({ rows, menus, onPicked, placed, query: given, onQuery
             childMap.set(r.nestedParentKey, list)
           }
         }
-        const renderRow = (r: ConvoListRow) => {
+        const renderRow = (r: ConvoListRow, sub?: { count: number; collapsed: boolean; dot: string; onToggle: () => void }) => {
           const isChild = r.nestDepth === 1
           const isNestedVisual = !!g.tree || isChild
           // (At rest, nothing to say of it but when.)
@@ -3838,16 +3838,35 @@ export function AgentList({ rows, menus, onPicked, placed, query: given, onQuery
                 .filter(Boolean)
                 .join('\n')
           const hasMenu = !!(menus && r.menu)
+          const hasSub = !!sub
           const parentRef = r.viaParentTitle
             ? r.viaParentTitle
             : r.crossParentTitle
               ? t('convo.lineage.fromParent', { name: r.crossParentTitle })
               : ''
+          const childSub = isChild ? [r.where, parentRef ? '↳ ' + parentRef : ''].filter(Boolean).join(' · ') : ''
+          const isSingleChild = isChild && !childSub
+          const whenEl =
+            since || bgSaid ? (
+              <span className="convo-list-when">
+                {bgSaid && <span className={'convo-list-bg' + (bgSaid === 'stale' ? ' is-stale' : '')}>{t(bgSaid === 'bg' ? 'convo.list.bg' : 'convo.list.bgStale')}</span>}
+                {bgSaid && since && ' · '}
+                {since}
+              </span>
+            ) : null
           return (
             <div
               key={r.key}
               data-flip={'r:' + r.key}
-              className={'convo-list-item' + (hasMenu ? ' has-menu' : '') + (rowMenu?.key === r.key ? ' is-menu' : '') + (isNestedVisual ? ' is-nested' : '') + (isChild ? ' is-child' : '')}
+              className={
+                'convo-list-item' +
+                (hasMenu ? ' has-menu' : '') +
+                (hasSub ? ' has-children' : '') +
+                (rowMenu?.key === r.key ? ' is-menu' : '') +
+                (isNestedVisual ? ' is-nested' : '') +
+                (isChild ? ' is-child' : '') +
+                (isSingleChild ? ' is-single' : '')
+              }
               onContextMenu={
                 hasMenu
                   ? (e) => {
@@ -3869,11 +3888,12 @@ export function AgentList({ rows, menus, onPicked, placed, query: given, onQuery
               }}
               onKeyDown={hasMenu ? menuKey(r.key) : undefined}
             >
-              <AgentIcon program={r.program} size={isNestedVisual ? 22 : 30} dot={r.bg === 'running' || r.cmds ? 'bg' : said ? (r.status as 'blocked' | 'working' | 'done') : undefined} />
+              <AgentIcon program={r.program} size={isChild ? 20 : isNestedVisual ? 22 : 30} dot={r.bg === 'running' || r.cmds ? 'bg' : said ? (r.status as 'blocked' | 'working' | 'done') : undefined} />
               {/* (Two lines a row, always: its name; where it is — the session's title,
                   which tells alike names apart — and when. A third only for what
                   waits on the person: what it asks, or messages not seen taken in.
-                  The whole of each in its tooltip and the conversation's bar.) */}
+                  Nested same-workspace children stay compact on one line when they
+                  have no extra subtitle. The whole of each in its tooltip and bar.) */}
               <span
                 className="convo-list-text"
                 title={[r.title, parentRef ? '↳ ' + parentRef : '', r.where, r.sessionGroup, r.projectKey, r.now, bgHint]
@@ -3889,18 +3909,15 @@ export function AgentList({ rows, menus, onPicked, placed, query: given, onQuery
                       <span className="sr-only">{t('convo.pinnedRow')}</span>
                     </span>
                   )}
+                  {isSingleChild && whenEl}
                 </span>
-                <span className="convo-list-meta">
-                  <span className="convo-list-where">{r.where || '\u00a0'}</span>
-                  {(since || bgSaid) && (
-                    <span className="convo-list-when">
-                      {bgSaid && <span className={'convo-list-bg' + (bgSaid === 'stale' ? ' is-stale' : '')}>{t(bgSaid === 'bg' ? 'convo.list.bg' : 'convo.list.bgStale')}</span>}
-                      {bgSaid && since && ' · '}
-                      {since}
-                    </span>
-                  )}
-                </span>
-                {parentRef && <span className="convo-list-parent-ref">↳ {parentRef}</span>}
+                {!isSingleChild && (
+                  <span className="convo-list-meta">
+                    <span className="convo-list-where">{isChild ? childSub : r.where || '\u00a0'}</span>
+                    {whenEl}
+                  </span>
+                )}
+                {!isChild && parentRef && <span className="convo-list-parent-ref">↳ {parentRef}</span>}
                 {/* (Its status by its dot only, and its group: in words for a screen
                     reader, and shown where the system's colours take the dot's away.) */}
                 {/* (Commands it left running: at work in the background, as its group says — review batch4.) */}
@@ -3908,20 +3925,38 @@ export function AgentList({ rows, menus, onPicked, placed, query: given, onQuery
                 {r.status === 'blocked' && r.now && <span className="convo-list-now is-blocked">{r.now}</span>}
               </span>
             </button>
-            {hasMenu && (
-              <button
-                type="button"
-                className="convo-list-dots"
-                data-key={r.key}
-                aria-label={t('convo.rowMenu', { name: r.title })}
-                aria-haspopup="menu"
-                aria-expanded={rowMenu?.key === r.key}
-                title={t('common.more')}
-                onClick={() => (rowMenu?.key === r.key ? closeMenu() : openMenu(r.key))}
-                onKeyDown={menuKey(r.key)}
-              >
-                <MoreHorizontal size={16} aria-hidden="true" />
-              </button>
+            {(hasMenu || hasSub) && (
+              <span className="convo-list-actions">
+                {hasMenu && (
+                  <button
+                    type="button"
+                    className="convo-list-dots"
+                    data-key={r.key}
+                    aria-label={t('convo.rowMenu', { name: r.title })}
+                    aria-haspopup="menu"
+                    aria-expanded={rowMenu?.key === r.key}
+                    title={t('common.more')}
+                    onClick={() => (rowMenu?.key === r.key ? closeMenu() : openMenu(r.key))}
+                    onKeyDown={menuKey(r.key)}
+                  >
+                    <MoreHorizontal size={16} aria-hidden="true" />
+                  </button>
+                )}
+                {sub && (
+                  <button
+                    type="button"
+                    className={'convo-list-subpill' + (sub.collapsed ? ' is-collapsed' : '')}
+                    aria-expanded={!sub.collapsed}
+                    aria-label={t('convo.lineage.toggleChildren')}
+                    title={t('convo.lineage.subCount', { n: sub.count })}
+                    onClick={sub.onToggle}
+                  >
+                    {sub.dot && <span className={'convo-list-gdot is-' + sub.dot} aria-hidden="true" />}
+                    {sub.collapsed ? <ChevronRight size={11} aria-hidden="true" /> : <ChevronDown size={11} aria-hidden="true" />}
+                    <span>{sub.count}</span>
+                  </button>
+                )}
+              </span>
             )}
             </div>
           )
@@ -3954,24 +3989,13 @@ export function AgentList({ rows, menus, onPicked, placed, query: given, onQuery
               : ''
             items.push(
               <Fragment key={r.key}>
-                {renderRow(r)}
-                {kidsInList.length > 0 && (
-                  <div className="convo-list-children">
-                    <button
-                      type="button"
-                      className={'convo-list-subtoggle' + (isParentCollapsed ? ' is-collapsed' : '')}
-                      aria-expanded={!isParentCollapsed}
-                      aria-label={t('convo.lineage.toggleChildren')}
-                      onClick={() => toggleParentFolded(r.key)}
-                    >
-                      {isParentCollapsed ? <ChevronRight size={12} aria-hidden="true" /> : <ChevronDown size={12} aria-hidden="true" />}
-                      <GitFork size={11} aria-hidden="true" />
-                      <span>{t('convo.lineage.subCount', { n: kidsInList.length })}</span>
-                      {subDot && <span className={'convo-list-gdot is-' + subDot} aria-hidden="true" />}
-                    </button>
-                    {visibleKids.map(renderRow)}
-                  </div>
+                {renderRow(
+                  r,
+                  kidsInList.length > 0
+                    ? { count: kidsInList.length, collapsed: isParentCollapsed, dot: subDot, onToggle: () => toggleParentFolded(r.key) }
+                    : undefined,
                 )}
+                {visibleKids.length > 0 && <div className="convo-list-children">{visibleKids.map((k) => renderRow(k))}</div>}
               </Fragment>,
             )
           }
