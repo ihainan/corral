@@ -3965,7 +3965,7 @@ function ListOrderMenu() {
           title={t('convo.order.menu')}
           onClick={toggle}
         >
-          <ArrowUpDown size={15} aria-hidden="true" />
+          <ArrowUpDown size={15} strokeWidth={1.75} aria-hidden="true" />
         </button>
       )}
     />
@@ -4157,7 +4157,7 @@ export function AgentList({ rows, menus, onPicked, placed, query: given, onQuery
                 window.dispatchEvent(new Event(NEW_AGENT))
               }}
             >
-              <Plus size={16} strokeWidth={1.75} aria-hidden="true" />
+              <Plus size={15} strokeWidth={2} aria-hidden="true" />
             </button>
           )}
         </div>

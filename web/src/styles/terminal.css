@@ -2340,10 +2340,10 @@ button.convo-queue-row.is-note:last-child { border-radius: 0 0 var(--r-lg) var(-
   .convo-side .list-order-btn.is-active { background: var(--term-hover); color: var(--term-fg); }
   .convo-side .list-new-btn {
     flex: none; width: 28px; height: 28px; border: 0; border-radius: var(--r-sm);
-    background: var(--accent); color: var(--accent-fg);
+    background: none; color: var(--term-accent-text);
   }
-  .convo-side .list-new-btn:hover { background: var(--accent-hover); color: var(--accent-fg); }
-  .convo-side .list-new-btn:focus-visible { outline: 2px solid var(--term-accent-text); outline-offset: 2px; }
+  .convo-side .list-new-btn:hover { background: var(--term-accent-soft); color: var(--term-accent-text); }
+  .convo-side .list-new-btn:focus-visible { outline: 2px solid var(--term-accent-text); outline-offset: -2px; }
   .convo-side .convo-list-row { padding: 6px 8px; gap: 8px; border-radius: var(--r-sm); }
   .convo-side .convo-list-row .agent-icon { margin-top: 2px; }
   .convo-side .convo-list-row.is-child .agent-icon { margin-top: 0; }
