@@ -21,7 +21,7 @@ var codexLooks = map[string]bool{"/status": true, "/ps": true, "/diff": true, "/
 // convoModes: the permission modes a Claude Code may be switched to from
 // the agents page (the ones Shift+Tab goes through; which a session has
 // depends on how it was started).
-var convoModes = map[string]bool{"default": true, "acceptEdits": true, "plan": true, "auto": true, "bypassPermissions": true}
+var convoModes = map[string]bool{"default": true, "acceptEdits": true, "plan": true, "auto": true, "bypassPermissions": true, "build": true}
 
 // convoModeMost: the presses at most on the way to a mode (there are not
 // that many to go through).

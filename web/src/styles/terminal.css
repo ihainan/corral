@@ -711,10 +711,12 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 .convo-runs-row { display: flex; justify-content: space-between; gap: 16px; padding: 3px 0; font-variant-numeric: tabular-nums; }
 .convo-runs-row > :first-child { color: var(--term-fg-3); flex: none; }
 .convo-runs-row > :last-child { min-width: 0; overflow-wrap: anywhere; text-align: right; }
-.convo-runs-bar { height: 4px; margin: 1px 0 6px; border-radius: 3px; background: var(--term-line); overflow: hidden; }
+.convo-runs-bar { position: relative; height: 4px; margin: 1px 0 6px; border-radius: 3px; background: var(--term-line); overflow: hidden; }
 .convo-runs-bar i { display: block; height: 100%; background: var(--term-accent-text); }
 .convo-runs-bar.is-warn i { background: var(--term-warn-text); }
 .convo-runs-bar.is-danger i { background: var(--term-danger-text); }
+.convo-runs-mark { position: absolute; top: 0; bottom: 0; width: 2px; background: var(--term-fg-3); opacity: 0.7; pointer-events: none; }
+.convo-runs-soon { color: var(--term-warn-text); font-weight: 500; }
 .convo-runs-note { margin: 4px 0 0; font-size: var(--fs-note); line-height: var(--lh-note); color: var(--term-fg-3); }
 /* Progressive container-query degradation for the composer footer bar so pills
    never clip mid-word in narrow windows, split panes, side panels, or phones.
@@ -1546,7 +1548,7 @@ button.convo-queue-row.is-note:last-child { border-radius: 0 0 var(--r-lg) var(-
 .term-root.dark .convo-side { --term-row-hover: rgba(255, 255, 255, 0.04); --term-row-current: rgba(255, 255, 255, 0.075); --row-lift: inset 0 0 0 1px rgba(255, 255, 255, 0.05); }
 /* (+ New agent and Search toolbar stay pinned at the top; only the agent list scrolls.) */
 .convo-side > * { flex-shrink: 0; }
-.convo-side > .convo-list-groups { flex: 1 1 0; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 2px 2px 4px 0; margin-right: -2px; }
+.convo-side > .convo-list-groups { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 2px 2px 4px 0; margin-right: -2px; }
 .convo-side > .list-toolbar { margin-bottom: 6px; padding-bottom: 6px; border-bottom: 1px solid color-mix(in srgb, var(--term-line) 65%, transparent); }
 /* Its edge, dragged to size it: over the line between, taking no room */
 .convo-side-grip {
@@ -1861,7 +1863,7 @@ button.convo-queue-row.is-note:last-child { border-radius: 0 0 var(--r-lg) var(-
   box-shadow: 0 12px 32px rgba(0, 0, 0, 0.22); font-family: var(--font-ui);
 }
 .convo-picker > * { flex-shrink: 0; }
-.convo-picker > .convo-list-groups { flex: 1 1 0; min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
+.convo-picker > .convo-list-groups { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
 .convo-picker-title { padding: 4px 4px 8px 10px; font-weight: 600; font-size: var(--fs-h3); line-height: var(--lh-h3); display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 @media (max-width: 640px) {
   .convo-picker {
@@ -1910,7 +1912,7 @@ button.convo-queue-row.is-note:last-child { border-radius: 0 0 var(--r-lg) var(-
    agent and "waiting on me" side by side; then its search, its groups. */
 .agents-list.agents-phone { display: flex; flex-direction: column; overflow: hidden; padding: 8px max(12px, env(safe-area-inset-right, 0px)) 0 max(12px, env(safe-area-inset-left, 0px)); }
 .agents-list.agents-phone > * { flex-shrink: 0; }
-.agents-list.agents-phone > .convo-list-groups { flex: 1 1 0; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding-bottom: calc(16px + env(safe-area-inset-bottom, 0px)); }
+.agents-list.agents-phone > .convo-list-groups { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding-bottom: calc(16px + env(safe-area-inset-bottom, 0px)); }
 .agents-phone-top { display: flex; gap: 8px; margin: 0 0 8px; }
 .convo-side-new.agents-phone-new { flex: 1; width: auto; min-width: 0; margin: 0; height: 40px; }
 .agents-phone-mine { flex: none; height: 40px; padding: 0 12px; border: 1px solid transparent; border-radius: var(--r); background: color-mix(in srgb, var(--term-fg) 5%, transparent); color: var(--term-fg-2); font: inherit; font-size: var(--fs-sub); line-height: var(--lh-sub); cursor: pointer; }
@@ -2186,10 +2188,57 @@ button.convo-queue-row.is-note:last-child { border-radius: 0 0 var(--r-lg) var(-
 .new-agent-old > .link-btn { align-self: flex-start; } /* (at the fields' edge, not centred between them) */
 .new-agent .field > span { font-size: var(--fs-sub); line-height: var(--lh-sub); font-weight: 500; color: var(--fg-2); }
 .new-agent-olds { display: flex; flex-direction: column; gap: 4px; max-height: 240px; overflow: auto; }
+.new-agent-olds.is-search { max-height: 280px; }
 .new-agent-oldrow { display: flex; justify-content: space-between; gap: 12px; padding: 8px 10px; border: 1px solid var(--line); border-radius: var(--r-sm); background: none; text-align: left; cursor: pointer; color: var(--fg); font-size: var(--fs-sub); line-height: var(--lh-sub); }
 .new-agent-oldrow.on { border-color: var(--accent, #3b6cf6); background: var(--bg-subtle); }
-.new-agent-oldtitle { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.new-agent-oldtitle { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
 .new-agent-oldwhen { flex: none; color: var(--fg-3); font-size: var(--fs-note); line-height: var(--lh-note); }
+.new-agent-wt-branch { margin-top: 6px; }
+.new-agent-resume { display: flex; flex-direction: column; gap: 10px; }
+.new-agent-search {
+  display: flex; align-items: center; gap: 8px; padding: 0 10px;
+  border: 1px solid var(--line); border-radius: var(--r); background: var(--bg-subtle);
+}
+.new-agent-search:focus-within { border-color: var(--accent, #3b6cf6); background: var(--surface); }
+.new-agent-search-ic { flex: none; color: var(--fg-3); }
+.new-agent-search input {
+  flex: 1; min-width: 0; height: 34px; border: 0; background: none; color: var(--fg);
+  font: inherit; font-size: var(--fs-sub); line-height: var(--lh-sub); outline: none;
+}
+.new-agent-search-clear { flex: none; padding: 2px; }
+.new-agent-filters { display: flex; flex-direction: column; gap: 6px; }
+.new-agent-chips { display: flex; flex-wrap: wrap; gap: 4px; }
+.new-agent-subfilters { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; }
+.new-agent-chip {
+  display: inline-flex; align-items: center; gap: 4px; padding: 4px 8px;
+  border: 1px solid var(--line); border-radius: 999px; background: none; color: var(--fg-2);
+  font: inherit; font-size: var(--fs-note); line-height: var(--lh-note); cursor: pointer;
+}
+.new-agent-chip:hover { background: var(--bg-hover); color: var(--fg); }
+.new-agent-chip.is-on { border-color: var(--accent, #3b6cf6); background: var(--accent-soft, var(--bg-subtle)); color: var(--fg); font-weight: 500; }
+.new-agent-closed-check { display: inline-flex; align-items: center; gap: 6px; font-size: var(--fs-note); line-height: var(--lh-note); color: var(--fg-2); cursor: pointer; }
+.new-agent-empty { margin: 8px 0; text-align: center; }
+.new-agent-resrow {
+  display: flex; align-items: flex-start; gap: 10px; width: 100%; padding: 8px 10px;
+  border: 1px solid var(--line); border-radius: var(--r); background: none; text-align: left;
+  cursor: pointer; color: var(--fg); font-size: var(--fs-sub); line-height: var(--lh-sub);
+}
+.new-agent-resrow:hover { background: var(--bg-hover); }
+.new-agent-resrow.on { border-color: var(--accent, #3b6cf6); background: var(--bg-subtle); }
+.new-agent-res-ic { flex: none; display: inline-flex; align-items: center; padding-top: 2px; }
+.new-agent-res-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.new-agent-res-top { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+.new-agent-res-snip { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--fs-note); line-height: var(--lh-note); color: var(--fg-2); }
+.new-agent-res-dir { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono); font-size: var(--fs-note); line-height: var(--lh-note); color: var(--fg-3); }
+.convo-models-search {
+  display: flex; align-items: center; gap: 6px; padding: 4px 8px; margin: 2px 4px 6px;
+  border: 1px solid var(--term-line); border-radius: var(--r-sm); background: var(--term-surface, var(--term-bg));
+}
+.convo-models-search input {
+  flex: 1; min-width: 0; border: 0; background: none; color: var(--term-fg);
+  font: inherit; font-size: var(--fs-note); line-height: var(--lh-note); outline: none;
+}
+.convo-models-scroll { max-height: 260px; overflow-y: auto; overscroll-behavior: contain; }
 
 /* The input history on the host: what was sent, a page at a time, to put back in the composer */
 .host-history { display: flex; flex-direction: column; gap: 10px; }

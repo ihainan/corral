@@ -348,25 +348,22 @@ export function buildAgentGroups(rows: ConvoListRow[], opts: OrderOpts = {}): Ag
   const out: AgentGroup[] = []
 
   // 1. Pinned group (independent manual order; blocked pinned rows are protected in UI).
-  // When nestChildren is enabled, non-blocked unpinned descendants of a pinned parent
-  // nest directly underneath their nearest pinned ancestor inside Pinned so orchestrators
-  // pinned at the top actually display their subagents underneath them.
+  // When nestChildren is enabled, ALL unpinned descendants of a pinned parent
+  // (including live-blocked ones waiting for approval) stay nested directly
+  // underneath their nearest pinned ancestor inside Pinned so subagents are
+  // never ripped out of their parent's tree into "For you". Collapsed parents
+  // and collapsed Pinned groups still surface live-blocked children in place.
   const pinnedRows = rows.filter(pinned)
   const pinnedKeys = new Set(pinnedRows.map((r) => r.key))
   const unpinned = rows.filter((r) => !pinned(r))
 
-  // 2. Unpinned live-blocked agents ALWAYS surface at top of uncollapsible "Needs you"
-  //    (never nested under a parent, even if the parent is pinned or collapsed).
-  const blockedRows = sortRows(unpinned.filter(isLiveBlocked), sort).map((r) => stripNestMeta(r, allByKey, nestChildren))
-  const allNonBlocked = unpinned.filter((r) => !isLiveBlocked(r))
-
   const pinnedChildKeys = new Set<string>()
   const pinnedChildrenByRoot = new Map<string, ConvoListRow[]>()
-  if (nestChildren && pinnedRows.length && allNonBlocked.length) {
-    const nonBlockedByKey = new Map<string, ConvoListRow>()
-    for (const r of allNonBlocked) nonBlockedByKey.set(r.key, r)
+  if (nestChildren && pinnedRows.length && unpinned.length) {
+    const unpinnedByKey = new Map<string, ConvoListRow>()
+    for (const r of unpinned) unpinnedByKey.set(r.key, r)
 
-    for (const r of allNonBlocked) {
+    for (const r of unpinned) {
       let curKey = r.parentKey
       const seen = new Set<string>([r.key])
       let steps = 0
@@ -378,7 +375,7 @@ export function buildAgentGroups(rows: ConvoListRow[], opts: OrderOpts = {}): Ag
           pinnedAnc = curKey
           break
         }
-        const up = nonBlockedByKey.get(curKey)
+        const up = unpinnedByKey.get(curKey)
         if (!up) break
         curKey = up.parentKey
         steps++
@@ -396,7 +393,10 @@ export function buildAgentGroups(rows: ConvoListRow[], opts: OrderOpts = {}): Ag
     const pBase = pinFixed ? byPinOrder(pinnedRows) : sortRows(pinnedRows, sort)
     const pProjected: ConvoListRow[] = []
     for (const p of pBase) {
-      const rawKids = nestChildren ? sortRows(pinnedChildrenByRoot.get(p.key) ?? [], sort) : []
+      const sortedKids = nestChildren ? sortRows(pinnedChildrenByRoot.get(p.key) ?? [], sort) : []
+      // Keep live-blocked subagents at the top of their parent's subtree so
+      // approval requests are immediately noticeable right under their parent.
+      const rawKids = [...sortedKids.filter(isLiveBlocked), ...sortedKids.filter((k) => !isLiveBlocked(k))]
       const kids = rawKids.map((kid): ConvoListRow => ({
         ...kid,
         nestDepth: 1,
@@ -426,11 +426,13 @@ export function buildAgentGroups(rows: ConvoListRow[], opts: OrderOpts = {}): Ag
     })
   }
 
-  const nonBlocked = pinnedChildKeys.size ? allNonBlocked.filter((r) => !pinnedChildKeys.has(r.key)) : allNonBlocked
+  const remaining = pinnedChildKeys.size ? unpinned.filter((r) => !pinnedChildKeys.has(r.key)) : unpinned
 
   if (groupMode === 'status') {
     if (!nestChildren) {
       // Exact flat Status-mode behavior.
+      const blockedRows = sortRows(remaining.filter(isLiveBlocked), sort).map((r) => stripNestMeta(r, allByKey, false))
+      const nonBlocked = remaining.filter((r) => !isLiveBlocked(r))
       const doneRows = sortRows(nonBlocked.filter((r) => r.status === 'done' && !working(r)), sort).map((r) => stripNestMeta(r, allByKey, false))
       const todoRows = [...blockedRows, ...doneRows]
       if (todoRows.length) {
@@ -448,10 +450,11 @@ export function buildAgentGroups(rows: ConvoListRow[], opts: OrderOpts = {}): Ag
       return out
     }
 
-    // Nested Status mode: build parent-child trees among unpinned non-blocked rows,
-    // placing each tree into the highest active status group of its members so an
-    // idle parent with a working/done child stays prominently visible alongside its child.
-    const forest = projectNestedBucket(nonBlocked, allByKey, sort, true)
+    // Nested Status mode: build parent-child trees over all remaining unpinned rows
+    // (including live-blocked children) so a subagent waiting for approval stays
+    // attached to its parent tree in "For you" instead of being detached from it.
+    const forest = projectNestedBucket(remaining, allByKey, sort, true)
+    const blockedTrees: ConvoListRow[] = []
     const doneTrees: ConvoListRow[] = []
     const workTrees: ConvoListRow[] = []
     const idleTrees: ConvoListRow[] = []
@@ -459,15 +462,17 @@ export function buildAgentGroups(rows: ConvoListRow[], opts: OrderOpts = {}): Ag
 
     for (const t of forest.trees) {
       const members = [t.root, ...t.children]
+      const hasBlocked = members.some(isLiveBlocked)
       const hasDone = members.some((m) => m.status === 'done' && !working(m))
       const hasWorking = members.some(working)
-      if (hasDone) doneTrees.push(...members)
+      if (hasBlocked) blockedTrees.push(...members)
+      else if (hasDone) doneTrees.push(...members)
       else if (hasWorking) workTrees.push(...members)
       else if (t.maxSince > 0) idleTrees.push(...members)
       else otherTrees.push(...members)
     }
 
-    const todoRows = [...blockedRows, ...doneTrees]
+    const todoRows = [...blockedTrees, ...doneTrees]
     if (todoRows.length) {
       out.push({ id: 'convo.group.todo', labelKey: 'convo.group.todo', kind: 'todo', rows: todoRows, collapsible: false, ...groupCounts(todoRows) })
     }
@@ -484,6 +489,40 @@ export function buildAgentGroups(rows: ConvoListRow[], opts: OrderOpts = {}): Ag
   }
 
   // Project / Session modes:
+  // Top-level blocked rows (or blocked rows whose parent is in a different bucket)
+  // surface in "For you"; blocked subagents whose parent lives in the same bucket
+  // stay nested under their parent (and remain visible even if the bucket/parent is collapsed).
+  const isProject = groupMode === 'project'
+  const bucketKeyOf = (r: ConvoListRow) => {
+    const rawKey = isProject ? (r.projectKey ?? '') : (r.sessionGroup ?? '')
+    return rawKey || '__other__'
+  }
+  const remByKey = new Map<string, ConvoListRow>()
+  for (const r of remaining) remByKey.set(r.key, r)
+  const staysNestedInBucket = (r: ConvoListRow): boolean => {
+    if (!nestChildren || !r.parentKey) return false
+    const bKey = bucketKeyOf(r)
+    let curKey: string | undefined = r.parentKey
+    const seen = new Set<string>([r.key])
+    let steps = 0
+    while (curKey && steps < 16) {
+      if (seen.has(curKey)) return false
+      seen.add(curKey)
+      const up = remByKey.get(curKey)
+      if (!up || bucketKeyOf(up) !== bKey) return false
+      if (!up.parentKey) return true
+      curKey = up.parentKey
+      steps++
+    }
+    return true
+  }
+  const blockedRows = sortRows(
+    remaining.filter((r) => isLiveBlocked(r) && !staysNestedInBucket(r)),
+    sort,
+  ).map((r) => stripNestMeta(r, allByKey, nestChildren))
+  const blockedTopKeys = new Set(blockedRows.map((r) => r.key))
+  const nonBlocked = remaining.filter((r) => !blockedTopKeys.has(r.key))
+
   if (blockedRows.length) {
     out.push({
       id: 'convo.group.todo',
@@ -497,7 +536,6 @@ export function buildAgentGroups(rows: ConvoListRow[], opts: OrderOpts = {}): Ag
 
   if (!nonBlocked.length) return out
 
-  const isProject = groupMode === 'project'
   const labels = isProject ? projectLabels(nonBlocked.map((r) => r.projectKey ?? '')) : null
   const buckets = new Map<string, { label?: string; labelKey?: I18nKey; sub?: string; rows: ConvoListRow[]; isFallback: boolean }>()
 

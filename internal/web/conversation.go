@@ -1738,10 +1738,11 @@ type convoState struct {
 	cxTitleWait   bool
 	cxTitleFail   bool // (the read failed: not read again for convoTitleBackoff, from cxTitleFailAt)
 	cxTitleFailAt time.Time
-	// (An Antigravity CLI pane: whether its live screen showed a permission/question dialog.)
+	// (An Antigravity CLI pane: whether its live screen showed a permission/question dialog or queued prompts.)
 	agyWaitAt     time.Time
 	agyWaitFor    string
 	agyWait       bool
+	agyQueued     []convo.Queued
 	agyWaitFail   bool
 	agyWaitFailAt time.Time
 	// (An Antigravity CLI conversation: last read of step_type=17 ERROR_MESSAGE rows from conversations/<sid>.db.)
@@ -2106,12 +2107,15 @@ func (s *Server) apiConversation(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	// Antigravity CLI: herdr may miss or drop "waiting" to "idle" while a tool
-	// confirmation sits on screen; check the live pane over herdr's Unix socket
-	// (or tmux capture) whenever a turn/tool call is still pending and quiet.
-	if st.agent == "agy" && st.bind != nil && !st.sub && (st.status == "busy" || st.status == "") && (st.agyWait || st.grewAt.IsZero() || time.Since(st.grewAt) >= 1500*time.Millisecond) {
+	// confirmation sits on screen, and agy keeps queued follow-up prompts on
+	// screen (not in transcript_full.jsonl) until consumed. In herdr mode the
+	// Unix socket read takes ~1ms (cached 2s), so check whenever busy/unknown.
+	if st.agent == "agy" && st.bind != nil && !st.sub && (st.status == "busy" || st.status == "") && (sess.Persistence == "herdr" || st.agyWait || len(st.agyQueued) > 0 || st.grewAt.IsZero() || time.Since(st.grewAt) >= 1500*time.Millisecond) {
 		if s.agyWaits(ctx, sess, st) {
 			st.status = "waiting:permission prompt"
 		}
+	} else if st.agent == "agy" && st.status != "busy" && st.status != "" {
+		st.agyQueued = nil
 	}
 	ans.Available, ans.Gen, ans.Rev, ans.Older, ans.More, ans.AgentStatus = true, st.gen, st.parser.Rev(), st.older, more, st.status
 	if w, ok := strings.CutPrefix(st.status, "waiting:"); ok {
@@ -2146,6 +2150,9 @@ func (s *Server) apiConversation(w http.ResponseWriter, r *http.Request) {
 		ans.Meta = &m
 	}
 	ans.Queued = st.parser.Queued()
+	if st.agent == "agy" && len(ans.Queued) == 0 && len(st.agyQueued) > 0 && (st.status == "busy" || st.status == "") {
+		ans.Queued = st.agyQueued
+	}
 	ans.Running = st.parser.Running()
 	if !st.grewAt.IsZero() {
 		ans.QuietMs = max(0, time.Since(st.grewAt).Milliseconds())
@@ -4011,10 +4018,10 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 	if what != "reply" && what != "panel" && (b.Digest != "" || len(b.Keys) > 0) {
 		textOK = false
 	}
-	if what == "model" && (b.Model == "" || len(b.Model) > 64 || strings.ContainsFunc(b.Model, func(r rune) bool { return r < 0x20 || r == 0x7f })) {
+	if what == "model" && (b.Model == "" || len(b.Model) > 128 || strings.ContainsFunc(b.Model, func(r rune) bool { return r < 0x20 || r == 0x7f })) {
 		textOK = false
 	}
-	if what == "effort" && effortLevel(b.Effort) < 0 {
+	if what == "effort" && effortLevel(b.Effort) < 0 && b.Effort != "default" {
 		textOK = false
 	}
 	// (A Codex's effort, with its model: a label its picker shows, compared, never typed.)
@@ -4293,11 +4300,23 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 	agyCommand := front.agent == "agy" && what == "command" && (text == "/compact" || text == "/clear")
 	agyMode := front.agent == "agy" && what == "mode" && agyModes[b.Mode]
 	agyModel := front.agent == "agy" && (what == "models" || what == "model" || what == "effort")
-	agyLook := front.agent == "agy" && (what == "sent_missing" || what == "sent_enter")
+	agyLook := front.agent == "agy" && (what == "sent_missing" || what == "sent_enter" || what == "send_now")
+	ocMode := front.agent == "opencode" && what == "mode" && ocModes[b.Mode]
+	ocModel := front.agent == "opencode" && (what == "models" || what == "model" || what == "effort")
 	ocLive := (front.agent == "opencode" || front.agent == "codex" || front.agent == "agy") && (what == "panel_screen" || (what == "panel" && b.Live)) // (and Codex's / Agy's: terminal as it is, a key only on the screen shown)
-	if (front.agent == "codex" || front.agent == "opencode" || front.agent == "agy") && what != "send" && what != "interrupt" && !codexAnswer && !codexCommand && !codexModel && !codexLook && !ocLive && !agyAnswer && !agyCommand && !agyMode && !agyModel && !agyLook {
+	if (front.agent == "codex" || front.agent == "opencode" || front.agent == "agy") && what != "send" && what != "interrupt" && !codexAnswer && !codexCommand && !codexModel && !codexLook && !ocLive && !ocMode && !ocModel && !agyAnswer && !agyCommand && !agyMode && !agyModel && !agyLook {
 		reason = "unsupported"
 		writeError(w, http.StatusConflict, "unsupported", "not for this agent")
+		return
+	}
+	if what == "effort" && b.Effort == "default" && front.agent != "opencode" {
+		reason = "bad_request"
+		writeError(w, http.StatusBadRequest, "bad_request", "invalid effort level")
+		return
+	}
+	if what == "mode" && b.Mode == "build" && front.agent != "opencode" {
+		reason = "bad_request"
+		writeError(w, http.StatusBadRequest, "bad_request", "invalid mode")
 		return
 	}
 	if b.Fill && front.agent != "claude" { // (Claude Code's prompts' rows only, as tried: plans/5-claude-own-words.md; herdr too, bracketed paste, 11-15)
@@ -4318,6 +4337,14 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 	if what == "models" || what == "model" {
 		release := turn
 		turn = func() {} // (convoModel gives it back, once its steps have ended on the host)
+		if front.agent == "opencode" {
+			if what == "models" {
+				s.convoOpenCodeModels(w, ctx, sess, b.Session, &outcome, &reason, release)
+			} else {
+				s.convoOpenCodeModel(w, ctx, sess, b.Session, b.Model, b.Effort, &outcome, &reason, release)
+			}
+			return
+		}
 		if front.agent == "agy" {
 			if what == "models" {
 				s.convoAgyModels(w, ctx, sess, b.Pane, socket, b.PID, b.Start, b.Session, &outcome, &reason, release)
@@ -4337,6 +4364,10 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 	if what == "effort" {
 		release := turn
 		turn = func() {} // (convoEffort gives it back, once its steps have ended on the host)
+		if front.agent == "opencode" {
+			s.convoOpenCodeEffort(w, ctx, sess, b.Session, b.Effort, &outcome, &reason, release)
+			return
+		}
 		if front.agent == "agy" {
 			s.convoAgyEffort(w, ctx, sess, b.Pane, socket, b.PID, b.Start, b.Session, b.Effort, &outcome, &reason, release)
 			return
@@ -4416,10 +4447,22 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 		if what == "interrupt" && front.agent == "opencode" {
 			press = append(append(append([]string(nil), press...), "pause"), press...)
 		}
+		// (Antigravity CLI sends queued messages immediately with Alt+M.)
+		if what == "send_now" && front.agent == "agy" {
+			if sess.Persistence == "herdr" {
+				press = []string{"alt+m"}
+			} else {
+				press = []string{"M-m"}
+			}
+		}
 	}
 	if what == "mode" && b.Mode != "" {
 		release := turn
 		turn = func() {} // (convoModeTo gives it back, once its last command has ended on the host)
+		if front.agent == "opencode" {
+			s.convoOpenCodeMode(w, ctx, sess, b.Session, b.Mode, &outcome, &reason, release)
+			return
+		}
 		s.convoModeTo(w, ctx, sess, front.agent, b.Pane, socket, b.PID, b.Start, b.Session, press, b.Mode, &outcome, &reason, release)
 		return
 	}

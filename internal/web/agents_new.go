@@ -102,8 +102,8 @@ func (s *Server) apiNewAgent(w http.ResponseWriter, r *http.Request) {
 		(b.ParentPane != "" && !herdrPaneID.MatchString(b.ParentPane)) ||
 		(b.Placement != "" && b.Placement != "workspace" && b.Placement != "split") ||
 		(b.Placement == "split" && b.ParentPane == "") ||
-		(b.Resume != "" && (!sessionUUID.MatchString(b.Resume) || b.Kind != "claude" && b.Kind != "codex" && b.Kind != "agy")) ||
-		(b.Fork && (b.Resume == "" || b.Kind == "agy")) || (b.At != "" && (!b.Fork || b.Kind != "claude" || !sessionUUID.MatchString(b.At))) ||
+		(b.Resume != "" && !((b.Kind == "opencode" && ocSessionID.MatchString(b.Resume)) || ((b.Kind == "claude" || b.Kind == "codex" || b.Kind == "agy") && sessionUUID.MatchString(b.Resume)))) ||
+		(b.Fork && (b.Resume == "" || b.Kind == "agy" || b.Kind == "opencode")) || (b.At != "" && (!b.Fork || b.Kind != "claude" || !sessionUUID.MatchString(b.At))) ||
 		(b.Worktree && (b.Resume != "" || b.Placement == "split")) ||
 		(!b.Worktree && b.WorktreeBranch != "") ||
 		!worktreeBranchOK(strings.TrimSpace(b.WorktreeBranch)) ||
@@ -448,6 +448,8 @@ func agentArgs(kind string, how agentStart) []string {
 		args = append(args, "resume", how.resume) // (taken up: codex resume <id>)
 	case how.resume != "" && kind == "agy":
 		args = append(args, "--conversation", how.resume) // (taken up: agy --conversation <id>)
+	case how.resume != "" && kind == "opencode":
+		args = append(args, "--session", how.resume) // (taken up: opencode --session <id>)
 	case how.resume != "" && how.fork:
 		args = append(args, "--resume", how.resume, "--fork-session")
 	case how.resume != "":

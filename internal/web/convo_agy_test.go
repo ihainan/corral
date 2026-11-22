@@ -467,6 +467,27 @@ func TestAgyScreenAsksAndWaitCache(t *testing.T) {
 		t.Fatalf("agyScreenAsks(staleScrollback) = true, want false")
 	}
 
+	// Queued follow-up messages rendered above agy's input box must be extracted
+	// cleanly while ignoring collapsed attachment chips.
+	queuedScreen := strings.Join([]string{
+		"  ▸ 📎 1 image(s) (277 KB)  (ctrl+o to expand)",
+		"● Edited 1 file (security_test.go) (ctrl+o to expand)",
+		"⋮ Initial focus is on completing...",
+		"▸ 以及基于 Herdr（90 个 RPC）与 tmux 接口还能做哪些高价值功能 -> 你来自行决定。 (alt+m to send immediately)",
+		"▸ 第二条排队消息",
+		rule,
+		">",
+		rule,
+		"Press up to edit queued messages                                     auto · Gemini 4 Neon · high",
+	}, "\n")
+	q := agyQueuedOnScreen(queuedScreen)
+	if len(q) != 2 || q[0].Text != "以及基于 Herdr（90 个 RPC）与 tmux 接口还能做哪些高价值功能 -> 你来自行决定。" || q[1].Text != "第二条排队消息" {
+		t.Fatalf("agyQueuedOnScreen = %+v", q)
+	}
+	if qEmpty := agyQueuedOnScreen(idleAfterPerm); len(qEmpty) != 0 {
+		t.Fatalf("agyQueuedOnScreen(idle) = %+v, want empty", qEmpty)
+	}
+
 	// Wait cache: fresh within convoTitleTTL, invalidated by pressed >= agyWaitAt,
 	// backed off on failure for convoTitleBackoff.
 	now := time.Now()

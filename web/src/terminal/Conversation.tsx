@@ -2171,6 +2171,8 @@ export function ConversationView({
             }
             via={convo.bind?.via}
             auth={convo.bind?.auth}
+            agentKind={convo.bind?.agent ?? agent?.program}
+            compactPre={convo.entries.findLast((e) => e.role === 'note' && (e.parts[0]?.event?.kind === 'compact' || e.parts[0]?.event?.kind === 'idle_compact') && (e.parts[0]?.event?.pre ?? 0) > 0)?.parts[0]?.event?.pre}
             onSide={sideBind ? () => setBtwShown(sideIdent) : undefined}
           />
         )}
@@ -2789,8 +2791,8 @@ function tokens(n: number): string {
   return String(n)
 }
 
-// (Claude Code's permission modes; Codex's approval policies.)
-const MODES = ['default', 'acceptEdits', 'plan', 'auto', 'bypassPermissions', 'dontAsk', 'untrusted', 'on-failure', 'on-request', 'never', 'unknown'] as const
+// (Claude Code's permission modes; Codex's approval policies; OpenCode's agents.)
+const MODES = ['default', 'acceptEdits', 'plan', 'auto', 'bypassPermissions', 'dontAsk', 'untrusted', 'on-failure', 'on-request', 'never', 'build', 'unknown'] as const
 // (One of none of these: OpenCode's agent — build, or one of the person's own — as its status line has it, capitalised.)
 const modeName = (m: string) => ((MODES as readonly string[]).includes(m) ? t(`convo.mode.${m}` as I18nKey) : m.charAt(0).toUpperCase() + m.slice(1))
 
@@ -2814,15 +2816,17 @@ function goalSaid(g: string): string {
 // (Shift+Tab until it is there, on the host): now, what the last switch went
 // to (the log says it only with the next message); busy, one on its way.
 // (codex: a Codex's — its collaboration mode, plan or default, what is switched; its approval policy shown otherwise.)
-export type ModeSwitch = { now?: string; busy: boolean; onPick?: (mode: string) => void; codex?: boolean; agy?: boolean }
+export type ModeSwitch = { now?: string; busy: boolean; onPick?: (mode: string) => void; codex?: boolean; agy?: boolean; opencode?: boolean }
 // (A Codex's collaboration modes, in Shift+Tab's order.)
 const CODEX_MODES = ['default', 'plan'] as const
 // (Antigravity CLI's execution modes, in Shift+Tab's order.)
 const AGY_MODES = ['default', 'acceptEdits', 'plan', 'auto'] as const
+// (OpenCode's primary agents: build and plan.)
+const OPENCODE_MODES = ['build', 'plan'] as const
 // (Those Shift+Tab goes through, in its order; which a session has depends on how it was started.)
 const PICKED_MODES = ['default', 'acceptEdits', 'plan', 'auto', 'bypassPermissions'] as const
 // Each mode's mark, and a line of what it lets the agent do (11-14: five names to tell apart by name alone).
-const MODE_ICON: Record<(typeof PICKED_MODES)[number], typeof Info> = { default: Hand, acceptEdits: FilePen, plan: ListChecks, auto: Sparkles, bypassPermissions: ShieldOff }
+const MODE_ICON: Record<(typeof PICKED_MODES)[number] | 'build', typeof Info> = { default: Hand, acceptEdits: FilePen, plan: ListChecks, auto: Sparkles, bypassPermissions: ShieldOff, build: FilePen }
 
 // Switching the model, from a menu of what Claude Code's picker offers
 // (list: null while it is read), for the session only.
@@ -2887,7 +2891,7 @@ export function named(o: ModelOpt): [string, string] {
   const word = o.label.split(/\s+/)[0]
   return head && !head.includes('\n') && word && head.toLowerCase().startsWith(word.toLowerCase()) ? [head, desc.slice(at + separator![0].length)] : [o.label, desc]
 }
-const effortName = (e: string) => ((EFFORTS as readonly string[]).includes(e) ? t(`convo.effort.${e}` as I18nKey) : e)
+const effortName = (e: string) => (e === 'default' ? t('convo.effort.default') : (EFFORTS as readonly string[]).includes(e) ? t(`convo.effort.${e}` as I18nKey) : e)
 
 // What the session runs with, under the composer: its permission mode on
 // the left (a tap: a menu of them); its branch, model and how
@@ -2907,13 +2911,27 @@ function EffortSaid({ level }: { level: string }) {
   )
 }
 
-function Runs({ meta, goal, active, mode, model, effort, quota, via, auth, onSide }: { meta: ConvoMeta; goal?: string; active: boolean; mode?: ModeSwitch; model?: ModelSwitch; effort?: EffortSwitch; quota?: QuotaOf; via?: string; auth?: string; onSide?: () => void }) {
+function compactThreshold(window: number, agentKind?: string, observedPre?: number): { at: number; pct: number; observed: boolean } {
+  if (observedPre && observedPre >= window * 0.5 && observedPre <= window * 0.98) {
+    return { at: observedPre, pct: Math.round((observedPre / window) * 100), observed: true }
+  }
+  const kind = (agentKind ?? '').toLowerCase()
+  const ratio = kind === 'codex' ? 0.9 : kind === 'claude' && window <= 200_000 ? 0.835 : 0.8
+  const at = Math.round(window * ratio)
+  return { at, pct: Math.round(ratio * 100), observed: false }
+}
+
+function Runs({ meta, goal, active, mode, model, effort, quota, via, auth, agentKind, compactPre, onSide }: { meta: ConvoMeta; goal?: string; active: boolean; mode?: ModeSwitch; model?: ModelSwitch; effort?: EffortSwitch; quota?: QuotaOf; via?: string; auth?: string; agentKind?: string; compactPre?: number; onSide?: () => void }) {
   const [open, setOpen] = useState<false | 'ctx' | 'model' | 'effort' | 'mode'>(false) // (which of its pop-ups)
+  const [modelFilter, setModelFilter] = useState('')
   // (Another agent bound meanwhile — the pane's program changed: its model and effort menus, of the one before, closed;
   // opened again, the list read is the new one's.)
   useEffect(() => {
     setOpen((o) => (o === 'model' || o === 'effort' ? false : o))
   }, [model?.of])
+  useEffect(() => {
+    if (open !== 'model') setModelFilter('')
+  }, [open])
   const [effortsOf, setEffortsOf] = useState('') // (a Codex's model whose efforts show, chosen with it)
   // The model menu's choice, held while it is open: a model and how hard it
   // thinks are chosen there together and taken at once, by its button — one
@@ -3063,8 +3081,8 @@ function Runs({ meta, goal, active, mode, model, effort, quota, via, auth, onSid
     modelBtn.current?.focus()
     setGoing(toSaid)
     if (model.efforts) model.onPick(toModel!, stage.effort)
-    else if (mode?.agy && !modelMoved && effortMoved && toEffort) effort?.onPick(toEffort)
-    else if (mode?.agy && toModel) model.onPick(toModel, toEffort)
+    else if ((mode?.agy || mode?.opencode) && !modelMoved && effortMoved && toEffort) effort?.onPick(toEffort)
+    else if ((mode?.agy || mode?.opencode) && toModel) model.onPick(toModel, toEffort)
     else if (effortMoved && toModel) model.onPick(toModel, stage.effort)
     else if (effortMoved) effort?.onPick(stage.effort!)
     else model.onPick(toModel!)
@@ -3236,7 +3254,27 @@ function Runs({ meta, goal, active, mode, model, effort, quota, via, auth, onSid
           {model.list === null ? (
             <p className="convo-runs-note" role="status">{t(model.unread && !model.busy ? 'convo.modelUnread' : 'convo.modelReading')}</p>
           ) : (
-            model.list.map((o) => {
+            <>
+              {model.list.length > 10 && (
+                <div className="convo-models-search">
+                  <Search size={13} aria-hidden="true" />
+                  <input
+                    type="search"
+                    value={modelFilter}
+                    placeholder={t('convo.modelSearch')}
+                    onChange={(e) => setModelFilter(e.target.value)}
+                    onKeyDown={(e) => e.stopPropagation()}
+                  />
+                </div>
+              )}
+              <div className="convo-models-scroll">
+                {model.list
+                  .filter((o) => {
+                    const q = modelFilter.trim().toLowerCase()
+                    if (!q) return true
+                    return (o.label + ' ' + (o.desc ?? '')).toLowerCase().includes(q)
+                  })
+                  .map((o) => {
               // (As its picker last said, which the log may not yet. A Codex's
               // log names it in small letters: "gpt-6-sol" is "GPT-6-Sol".)
               const now = nowOf(o)
@@ -3277,7 +3315,9 @@ function Runs({ meta, goal, active, mode, model, effort, quota, via, auth, onSid
                   )}
                 </Fragment>
               )
-            })
+            })}
+              </div>
+            </>
           )}
           {/* How hard it is asked to think, in the same menu as the model
               — as Claude Code's own picker has it (its slider sits under
@@ -3321,8 +3361,8 @@ function Runs({ meta, goal, active, mode, model, effort, quota, via, auth, onSid
           ref={menu}
           onBlur={(e) => !box.current?.contains(e.relatedTarget as Node | null) && setOpen(false)} // (Tab out of it: closed)
         >
-          {(mode.codex ? CODEX_MODES : mode.agy ? AGY_MODES : PICKED_MODES).map((m) => {
-            const now = mode.codex ? collabNow === m : (mode.now || meta.mode) === m
+          {(mode.codex ? CODEX_MODES : mode.agy ? AGY_MODES : mode.opencode ? OPENCODE_MODES : PICKED_MODES).map((m) => {
+            const now = mode.codex ? collabNow === m : (mode.now || meta.mode || (mode.opencode ? 'build' : '')) === m
             return (
               <button
                 key={m}
@@ -3346,7 +3386,7 @@ function Runs({ meta, goal, active, mode, model, effort, quota, via, auth, onSid
               </button>
             )
           })}
-          {!mode.codex && <p className="convo-runs-note">{t('convo.modeNote')}</p>}
+          {!mode.codex && !mode.opencode && <p className="convo-runs-note">{t('convo.modeNote')}</p>}
         </div>
       )}
       {open === 'effort' && effort && (
@@ -3387,13 +3427,26 @@ function Runs({ meta, goal, active, mode, model, effort, quota, via, auth, onSid
             <h3 className="convo-pop-head">{t('convo.ctxHead')}</h3>
             {windows.map((w) => {
               const p = Math.min(100, Math.round((used / w) * 100))
+              const ct = compactThreshold(w, agentKind, compactPre)
+              const left = ct.at - used
               return (
                 <div key={w} className="convo-runs-win">
                   <div className="convo-runs-row">
                     <span>{t('convo.ctxTitle')}</span>
                     <span title={t('convo.ctxTokens', { n: used.toLocaleString(getLang()) })}>{t('convo.ctxOfShort', { n: tokens(used), w: tokens(w), p })}</span>
                   </div>
-                  <div className={'convo-runs-bar' + (p >= 90 ? ' is-danger' : p >= 80 ? ' is-warn' : '')}><i style={{ width: p + '%' }} /></div>
+                  <div className={'convo-runs-bar' + (p >= 90 ? ' is-danger' : p >= 80 ? ' is-warn' : '')}>
+                    <i style={{ width: p + '%' }} />
+                    <em className="convo-runs-mark" style={{ left: Math.min(99, ct.pct) + '%' }} title={t('convo.ctxCompactHint', { at: tokens(ct.at), p: ct.pct })} />
+                  </div>
+                  <div className="convo-runs-row" title={t('convo.ctxCompactHint', { at: tokens(ct.at), p: ct.pct })}>
+                    <span>{t('convo.ctxCompact')}</span>
+                    {left > 0 ? (
+                      <span>{t(ct.observed ? 'convo.ctxCompactLeftExact' : 'convo.ctxCompactLeft', { n: tokens(left) })}</span>
+                    ) : (
+                      <span className="convo-runs-soon">{t('convo.ctxCompactSoon')}</span>
+                    )}
+                  </div>
                 </div>
               )
             })}

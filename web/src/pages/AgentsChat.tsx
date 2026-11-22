@@ -1453,6 +1453,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, keysActive, isSe
   // (Bound, the agent it is bound to says; the list's, of a reading before, only till then.)
   const codex = convo.bind?.agent ? convo.bind.agent === 'codex' : !!row && isCodex(row.a.agent)
   const agy = convo.bind?.agent ? convo.bind.agent === 'agy' : !!row && isAgy(row.a.agent)
+  const opencode = convo.bind?.agent ? convo.bind.agent === 'opencode' : !!row && isOpenCode(row.a.agent)
   // (Claude Code's own keys and pickers: not Codex's, OpenCode's, nor Antigravity's.)
   const notClaude = convo.bind?.agent ? convo.bind.agent !== 'claude' : !!row && (isCodex(row.a.agent) || isOpenCode(row.a.agent) || isAgy(row.a.agent))
 
@@ -1468,7 +1469,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, keysActive, isSe
   // (A Codex's: its collaboration mode, plan or default — Shift+Tab goes from one to the other; its log says it at once.)
   const modeWas = codex ? convo.meta?.collab : convo.meta?.mode
   if (modeNow && (modeNow.bind !== bindKey || modeWas !== modeNow.was || lastSeq > modeNow.last || convo.gen !== modeNow.gen)) setModeNow(null)
-  const canMode = bound && (!notClaude || codex || agy) && convo.status === 'ready' && !!convo.meta && agent?.status !== 'blocked' && !agent?.other
+  const canMode = bound && (!notClaude || codex || agy || opencode) && convo.status === 'ready' && !!convo.meta && agent?.status !== 'blocked' && !agent?.other
   // To the mode picked: Shift+Tab on the host until its screen shows it
   // (one it was not started with is not there: it is left as it was).
   // (The log as it is when a switch is answered: what it says by then is
@@ -1519,16 +1520,16 @@ function AgentChat({ cur, entries, all, titles, onPick, active, keysActive, isSe
   }, [convo.defaultChanged, toast])
   const [modelNow, setModelNow] = useState<{ model: string; bind: string; was?: string } | null>(null)
   if (modelNow && (modelNow.bind !== bindKey || convo.meta?.model !== modelNow.was)) setModelNow(null)
-  const canModel = bound && (!notClaude || codex || agy) && convo.status === 'ready' && !!convo.meta?.model && (agent?.status === 'idle' || agent?.status === 'done') && !agent?.other
-  // How hard it is asked to think, set through Claude Code's /effort (or agy's /effort),
-  // for this session only. Offered only where its log has said one (or on agy with a model).
+  const canModel = bound && (!notClaude || codex || agy || opencode) && convo.status === 'ready' && !!convo.meta?.model && (agent?.status === 'idle' || agent?.status === 'done') && !agent?.other
+  // How hard it is asked to think, set through Claude Code's /effort (or agy's /effort, or OpenCode's model variant),
+  // for this session only. Offered only where its log has said one (or on agy/opencode with a model).
   // (effortNow: what a switch took, until the log says it — an answer
   // names the level, and /effort writes no row of its own. Dropped when
   // the conversation changes under it, or the log says another.)
   const [effortNow, setEffortNow] = useState<{ effort: string; bind: string; was?: string } | null>(null)
   const [effortBusy, setEffortBusy] = useState(false)
   if (effortNow && (effortNow.bind !== bindKey || convo.meta?.effort !== effortNow.was)) setEffortNow(null)
-  const canEffort = bound && ((!notClaude && !!convo.meta?.effort) || (agy && !!convo.meta?.model)) && convo.status === 'ready' && (agent?.status === 'idle' || agent?.status === 'done') && !agent?.other
+  const canEffort = bound && ((!notClaude && !!convo.meta?.effort) || ((agy || opencode) && !!convo.meta?.model)) && convo.status === 'ready' && (agent?.status === 'idle' || agent?.status === 'done') && !agent?.other
   const pressBody = () => {
     const b = convo.bind!
     return { pane: b.pane, pid: b.pid, start: b.start, session: b.session }
@@ -1573,14 +1574,14 @@ function AgentChat({ cur, entries, all, titles, onPick, active, keysActive, isSe
       .finally(() => setEffortBusy(false))
   }
 
-  const modelCacheKey = agy ? `agy:${cur.s.host_id}` : bindKey
+  const modelCacheKey = agy ? `agy:${cur.s.host_id}` : opencode ? `oc:${cur.s.host_id}` : bindKey
   const openModels = () => {
     if (!convo.bind || modelBusy) return
     const now = Date.now()
     if (models && models.bind === bindKey && models.list && now - (models.at ?? 0) < MODEL_CACHE_MS) return
     const hit = keptModelCache.get(modelCacheKey)
     if (hit && now - hit.at < MODEL_CACHE_MS) {
-      setModels({ list: hit.list, bind: bindKey, at: hit.at, byLog: hit.byLog || agy })
+      setModels({ list: hit.list, bind: bindKey, at: hit.at, byLog: hit.byLog || agy || opencode })
       return
     }
     const bind = bindKey
@@ -1626,7 +1627,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, keysActive, isSe
             if (next?.length) keptModelCache.set(ckey, { list: next, at: Date.now(), byLog: !!m.byLog })
             return { ...m, list: next }
           })
-          if (agy) {
+          if (agy || opencode) {
             setModelNow({ model: r.model || label, bind, was: wasModel })
             setEffortNow({ effort: r.effort ?? effort ?? '', bind, was: wasEffort })
           }
@@ -3152,9 +3153,9 @@ function AgentChat({ cur, entries, all, titles, onPick, active, keysActive, isSe
       onLook={liveFor(convo.bind?.agent) && convo.bind ? () => setLiveOf(bindKey) : undefined}
       onCopied={() => toast(t('common.copied'))}
       composer={composer}
-      onSendNow={canPress && !notClaude ? () => press('now') : undefined}
+      onSendNow={canPress && (!notClaude || agy) ? () => press('now') : undefined}
       sendNow={said?.what === 'now' && said.bind === bindKey ? said.text : undefined}
-      mode={{ now: modeNow?.bind === bindKey ? modeNow.mode : undefined, busy: modeBusy, onPick: canMode ? pickMode : undefined, codex, agy }}
+      mode={{ now: modeNow?.bind === bindKey ? modeNow.mode : undefined, busy: modeBusy, onPick: canMode ? pickMode : undefined, codex, agy, opencode }}
       model={canModel || modelBusy ? { list: models?.bind === bindKey ? models.list : null, now: modelNow?.bind === bindKey ? modelNow.model : undefined, unread: models?.bind === bindKey && !!models.unread, byLog: models?.bind === bindKey && !!models.byLog, fresh: !!models?.at && Date.now() - models.at < 60000, busy: modelBusy, can: canModel, onOpen: openModels, onPick: pickModel, of: bindKey, ...(codex ? { efforts: CODEX_EFFORTS } : {}) } : undefined}
       effort={{ now: effortNow?.bind === bindKey ? effortNow.effort : undefined, busy: effortBusy, can: canEffort, onPick: pickEffort }}
       lead={lead}

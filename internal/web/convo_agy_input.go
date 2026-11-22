@@ -11,6 +11,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/ihainan/corral/internal/convo"
 	"github.com/ihainan/corral/internal/herdr"
 	"github.com/ihainan/corral/internal/sshx"
 	"github.com/ihainan/corral/internal/term"
@@ -483,9 +484,69 @@ END {
   }
 }'`
 
+// agyQueuedBulletRe matches queued user message lines agy renders directly
+// above its input box while working, e.g.:
+//   ▸ follow-up prompt text (alt+m to send immediately)
+var (
+	agyQueuedBulletRe = regexp.MustCompile(`^[ \t]*[▸►▶][ \t]+(.+?)\s*$`)
+	agyQueuedHintRe   = regexp.MustCompile(`\s*\(alt\+m to send immediately\)\s*$`)
+)
+
+// agyQueuedOnScreen extracts queued user messages visible on an Antigravity CLI
+// pane screen so Chat Mode can render the same Queue UI as Claude Code.
+func agyQueuedOnScreen(screen string) []convo.Queued {
+	plain := panelSGR.ReplaceAllString(strings.NewReplacer("\x00", "", "\r", "").Replace(screen), "")
+	lines := strings.Split(strings.TrimRight(plain, "\n"), "\n")
+	top, _, boxed := agyBoxBounds(lines)
+	hasFooterHint := false
+	footStart := max(0, len(lines)-10)
+	if boxed && top+1 < len(lines) {
+		footStart = top + 1
+	}
+	for i := footStart; i < len(lines); i++ {
+		if strings.Contains(lines[i], "Press up to edit queued messages") || strings.Contains(lines[i], "alt+m to send immediately") {
+			hasFooterHint = true
+			break
+		}
+	}
+	// Scan up to 16 lines immediately above the input box (or the bottom 20
+	// lines when the box is not yet drawn).
+	end := len(lines)
+	if boxed {
+		end = top
+	}
+	start := max(0, end-16)
+	var out []convo.Queued
+	for i := start; i < end; i++ {
+		raw := lines[i]
+		m := agyQueuedBulletRe.FindStringSubmatch(raw)
+		if m == nil {
+			continue
+		}
+		body := strings.TrimSpace(m[1])
+		// Exclude collapsed attachment lines ("▸ 📎 1 image(s) (277 KB) (ctrl+o to expand)").
+		if strings.Contains(body, "(ctrl+o to expand)") || strings.HasPrefix(body, "📎") {
+			continue
+		}
+		hasInlineHint := agyQueuedHintRe.MatchString(body)
+		if !hasInlineHint && !hasFooterHint {
+			continue
+		}
+		text := strings.TrimSpace(agyQueuedHintRe.ReplaceAllString(body, ""))
+		if text == "" {
+			continue
+		}
+		out = append(out, convo.Queued{Text: text})
+		if len(out) >= 16 {
+			break
+		}
+	}
+	return out
+}
+
 // agyWaits checks whether an Antigravity CLI pane is currently waiting on a
-// permission prompt, question, or trust dialog (e.g. when herdr reports idle
-// or working while a confirmation sits on screen, or in tmux). Cached on st
+// permission prompt, question, or trust dialog — and in the same ~1ms read
+// captures any queued messages visible above agy's input box. Cached on st
 // for convoTitleTTL (2s) and invalidated immediately on any press/reply.
 // In herdr mode, reads directly over herdr's Unix socket (~1ms, no shell spawn).
 func (s *Server) agyWaits(ctx context.Context, sess *term.Session, st *convoState) bool {
@@ -527,7 +588,11 @@ func (s *Server) agyWaits(ctx context.Context, sess *term.Session, st *convoStat
 		}
 	}
 	waits := err == nil && agyScreenAsks(screen)
-	st.agyWaitAt, st.agyWaitFor, st.agyWait, st.agyWaitFail, st.agyWaitFailAt = began, who, waits, err != nil, time.Now()
+	var queued []convo.Queued
+	if err == nil && !waits {
+		queued = agyQueuedOnScreen(screen)
+	}
+	st.agyWaitAt, st.agyWaitFor, st.agyWait, st.agyQueued, st.agyWaitFail, st.agyWaitFailAt = began, who, waits, queued, err != nil, time.Now()
 	return waits
 }
 
