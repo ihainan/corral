@@ -2811,6 +2811,14 @@ export function modelName(id: string): string {
   return id
 }
 
+// Compact chip label: strips provider prefixes like "opencode-go/" or "magpie/devin/"
+// before applying modelName so footer chips stay concise and readable.
+function shortModelName(id: string): string {
+  const slash = id.lastIndexOf('/')
+  const tail = slash > 0 && slash < id.length - 1 ? id.slice(slash + 1) : id
+  return modelName(tail)
+}
+
 // A key for a dialog open over the page (or already taken): not the page's.
 const underDialog = (e: KeyboardEvent) => e.defaultPrevented || !!document.querySelector('[aria-modal="true"]')
 
@@ -2909,6 +2917,11 @@ export function rowByLog(list: ModelOpt[], model: string | undefined): string | 
   const hits = list.filter((o) => named(o)[0].toLowerCase() === said)
   if (hits.length === 1) return hits[0].label
   const low = model.toLowerCase()
+  const bySuffix = list.filter((o) => {
+    const l = o.label.toLowerCase()
+    return l === low || l.endsWith('/' + low)
+  })
+  if (bySuffix.length === 1) return bySuffix[0].label
   const byDesc = list.filter((o) => {
     const d = (o.desc ?? '').toLowerCase()
     return !!d && (d === low || low.startsWith(d + '-'))
@@ -3213,8 +3226,8 @@ function Runs({ meta, goal, active, mode, model, effort, quota, via, auth, agent
               {going && model.busy
                 ? t('convo.modelGoing', { what: going })
                 : modelShowsEffort
-                  ? t('convo.modelEffortChip', { m: modelName(shownModel!), e: effortName(shownEffort!) })
-                  : modelName(shownModel!)}
+                  ? t('convo.modelEffortChip', { m: shortModelName(shownModel!), e: effortName(shownEffort!) })
+                  : shortModelName(shownModel!)}
             </span>
             {going && model.busy ? <Loader size={12} className="convo-running-spin" aria-hidden="true" /> : <ChevronsUpDown size={12} aria-hidden="true" />}
           </button>
@@ -3225,7 +3238,7 @@ function Runs({ meta, goal, active, mode, model, effort, quota, via, auth, agent
           >
             <ModelGlyph model={shownModel!} size={13} />
             <span className="convo-runs-model-name">
-              {modelShowsEffort ? t('convo.modelEffortChip', { m: modelName(shownModel!), e: effortName(shownEffort!) }) : modelName(shownModel!)}
+              {modelShowsEffort ? t('convo.modelEffortChip', { m: shortModelName(shownModel!), e: effortName(shownEffort!) }) : shortModelName(shownModel!)}
             </span>
           </span>
         ))}

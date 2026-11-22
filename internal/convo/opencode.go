@@ -29,6 +29,11 @@ type OpenCode struct {
 	orphans map[string]map[string]ocPart
 	title   string
 	meta    Meta
+	// Session-level overrides from OpenCode 2's session_v2 table (authoritative
+	// immediately after model/variant/agent switches, before any new reply).
+	sessModel   string
+	sessVariant string
+	sessAgent   string
 	// modeAt, effortAt: when the step that said meta's Mode and Effort was made.
 	modeAt, effortAt int64
 	tasks            []Task
@@ -84,6 +89,9 @@ type OpenCodeRow struct {
 	// what waits to be taken in, all of it.
 	RevertOrder int64      `json:"rvo,omitempty"`
 	Busy        *bool      `json:"busy,omitempty"`
+	Model       string     `json:"model,omitempty"`
+	Variant     string     `json:"variant,omitempty"`
+	Agent       string     `json:"agent,omitempty"`
 	O           int64      `json:"o,omitempty"`
 	NP          *int       `json:"np,omitempty"`
 	Q           []ocQueued `json:"q,omitempty"`
@@ -206,7 +214,19 @@ func NewOpenCode() *OpenCode {
 
 func (c *OpenCode) Rev() int           { return c.rev }
 func (c *OpenCode) Title() string      { return c.title }
-func (c *OpenCode) Meta() Meta         { return c.meta }
+func (c *OpenCode) Meta() Meta {
+	m := c.meta
+	if c.sessModel != "" {
+		m.Model = c.sessModel
+	}
+	if c.sessVariant != "" {
+		m.Effort = c.sessVariant
+	}
+	if c.sessAgent != "" {
+		m.Mode = c.sessAgent
+	}
+	return m
+}
 func (c *OpenCode) Trimmed() bool      { return c.trimmed }
 func (c *OpenCode) Tasks() []Task      { return c.tasks }
 func (c *OpenCode) Queued() []Queued   { return c.queue }
@@ -299,6 +319,13 @@ func (c *OpenCode) take(rows []OpenCodeRow) {
 			c.revertAt, c.revertPart, c.revertOrder = clip(r.Revert, maxID), r.RevertPart, r.RevertOrder
 			if r.Busy != nil {
 				c.busySaid, c.busy = true, *r.Busy
+			}
+			if r.Model != "" {
+				c.sessModel = clip(clean(r.Model), maxMeta)
+				c.sessVariant = clip(clean(r.Variant), maxMeta)
+			}
+			if r.Agent != "" {
+				c.sessAgent = clip(clean(r.Agent), maxMeta)
 			}
 		case "q":
 			q := make([]Queued, 0, min(len(r.Q), maxOcQueue))

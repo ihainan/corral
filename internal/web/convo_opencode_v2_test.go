@@ -321,3 +321,41 @@ func TestOcIdleInput(t *testing.T) {
 		}
 	}
 }
+
+func TestOpenCodeV2SessionModelOverride(t *testing.T) {
+	if _, err := exec.LookPath("python3"); err != nil {
+		t.Skip("no python3")
+	}
+	db := filepath.Join(t.TempDir(), "opencode.db")
+	script := `import sqlite3, sys, json
+c = sqlite3.connect(sys.argv[1])
+c.execute('create table session_v2 (id text, parent_id text, directory text, title text, revert text, model text, agent text, time_created int, time_updated int, time_idle int, time_busy int)')
+c.execute('create table session_message (id text, session_id text, type text, seq int, time_created int, time_updated int, data text)')
+c.execute('create table session_inbox (id text, session_id text, type text, payload text, delivery text, enqueued_seq int, time_created int)')
+c.execute('insert into session_v2 values (?,?,?,?,?,?,?,?,?,?,?)', (
+    'ses_bbbbbbbbbb', None, '/w', 'Switch test', None,
+    json.dumps({'id': 'deepseek-v4.1-flash', 'providerID': 'opencode-go', 'variant': 'high'}),
+    'plan', 100, 900, 800, 40,
+))
+c.execute('insert into session_message values (?,?,?,?,?,?,?)', (
+    'msg_aaaaaaaaaa', 'ses_bbbbbbbbbb', 'assistant', 1, 200, 250,
+    json.dumps({
+        'model': {'id': 'devin/claude-opus-5-5', 'providerID': 'magpie', 'variant': 'default'},
+        'agent': 'build',
+        'time': {'created': 200, 'completed': 250},
+        'content': [{'type': 'text', 'text': 'old reply'}],
+    }),
+))
+c.commit()
+`
+	if out, err := exec.Command("python3", "-c", script, db).CombinedOutput(); err != nil {
+		t.Fatalf("%v %s", err, out)
+	}
+	out := ocV2Run(t, db, "tail", "10")
+	oc := convo.NewOpenCode()
+	oc.Feed(ocFeedRows(out))
+	m := oc.Meta()
+	if m.Model != "opencode-go/deepseek-v4.1-flash" || m.Effort != "high" || m.Mode != "plan" {
+		t.Fatalf("meta = %+v, want Model=opencode-go/deepseek-v4.1-flash Effort=high Mode=plan", m)
+	}
+}

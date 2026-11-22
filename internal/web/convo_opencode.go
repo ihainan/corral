@@ -156,7 +156,11 @@ except sqlite3.OperationalError:
 def num(x):
     return x if isinstance(x, int) and not isinstance(x, bool) else 0
 if V2:
-    r = c.execute('select title, revert, time_busy, time_idle from session_v2 where id = ?', (sid,)).fetchone()
+    try:
+        r = c.execute('select title, revert, time_busy, time_idle, model, agent from session_v2 where id = ?', (sid,)).fetchone()
+    except sqlite3.OperationalError:
+        r0 = c.execute('select title, revert, time_busy, time_idle from session_v2 where id = ?', (sid,)).fetchone()
+        r = (r0 + (None, None)) if r0 else None
 else:
     try:
         r = c.execute('select title, revert from session where id = ?', (sid,)).fetchone()
@@ -180,6 +184,20 @@ if V2:
     # (At work from when it was set going till it came to rest: steps and
     # waits for an answer between them included.)
     s['busy'] = num(r[2]) > num(r[3])
+    if len(r) > 5 and isinstance(r[5], str) and r[5]:
+        s['agent'] = r[5][:64]
+    if len(r) > 4 and isinstance(r[4], str) and r[4]:
+        try:
+            sm = json.loads(r[4])
+        except ValueError:
+            sm = None
+        if isinstance(sm, dict):
+            mid = sm.get('id') if isinstance(sm.get('id'), str) else ''
+            pid = sm.get('providerID') if isinstance(sm.get('providerID'), str) else ''
+            if mid:
+                s['model'] = ((pid + '/' + mid) if pid else mid)[:200]
+            if isinstance(sm.get('variant'), str) and sm.get('variant'):
+                s['variant'] = sm['variant'][:64]
 out.write(line(s))
 def mrow(m):
     return line({'k': 'm', 'id': m[0], 'c': m[1], 'u': m[2], 'd': slim_msg(m[3])})
