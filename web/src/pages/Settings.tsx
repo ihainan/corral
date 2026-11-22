@@ -1,12 +1,12 @@
-import { useEffect, useLayoutEffect, useState, type FormEvent, type ReactNode } from 'react'
-import { Brain, ChevronDown, ChevronRight, Film, KeyRound, Languages, LogOut, Minus, Plus, ScrollText, Users } from 'lucide-react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react'
+import { ArrowLeft, Bot, Brain, ChevronDown, ChevronRight, Film, Keyboard, KeyRound, Languages, LogOut, Minus, Plus, ScrollText, Search, SlidersHorizontal, SquareTerminal, User, Users, X } from 'lucide-react'
 import { disablePush, enablePush, pushState, syncPush, type PushState } from '../push'
 import { api, ApiError, errorText, type Me } from '../api'
-import { getLang, hasKey, setLang, t, type Lang } from '../i18n'
+import { getLang, hasKey, setLang, t, type I18nKey, type Lang } from '../i18n'
 import { setPrefs, usePrefs } from '../prefs'
-import { linkHandler } from '../router'
+import { linkHandler, navigate } from '../router'
 import { rememberSettingsScroll, signOut, takeSettingsScroll, useSession } from '../app'
-import { Confirm, Dialog, DialogHead, Field, LoadError, useToast } from '../components/ui'
+import { Confirm, Dialog, DialogHead, Field, isCoarse, LoadError, useToast } from '../components/ui'
 import { CurrentScheme, SchemeDialog } from '../terminal/SchemePicker'
 import { TwoStepSetting } from './TwoStep'
 import { ssoErrorText } from './Auth'
@@ -15,6 +15,52 @@ import { playChime } from '../terminal/chime'
 import { setScreenReader, useScreenReader } from '../terminal/screenReader'
 import { saveTranslateConfig, testTranslateConfig, TRANSLATE_LANGS, useTranslateConfig, type TranslateConfig, type TranslateMode } from '../terminal/thoughtTranslate'
 import { Markdown } from '../terminal/markdown'
+
+// Desktop Settings modal event: opens the two-column native-style Settings
+// dialog over the current workspace (preserving live agents & terminals).
+export const OPEN_SETTINGS = 'corral.openSettings'
+const DESKTOP_SETTINGS_MQ = '(min-width: 820px) and (pointer: fine)'
+export function isDesktopSettings(): boolean {
+  return !isCoarse() && window.matchMedia(DESKTOP_SETTINGS_MQ).matches
+}
+export function openSettingsModal() {
+  if (isDesktopSettings()) window.dispatchEvent(new Event(OPEN_SETTINGS))
+  else navigate('/settings')
+}
+
+function useDesktopSettings(): boolean {
+  const [ok, setOk] = useState(isDesktopSettings)
+  useEffect(() => {
+    const mq = window.matchMedia(DESKTOP_SETTINGS_MQ)
+    const on = () => setOk(!isCoarse() && mq.matches)
+    mq.addEventListener('change', on)
+    return () => mq.removeEventListener('change', on)
+  }, [])
+  return ok
+}
+
+type SettingsCatId = 'general' | 'terminal' | 'keyboard' | 'agents' | 'translate' | 'account'
+interface SettingsCatDef {
+  id: SettingsCatId
+  group: 'general' | 'agents' | 'account'
+  labelKey: I18nKey
+  keywords: string
+  icon: (p: { size: number; strokeWidth: number; 'aria-hidden': true }) => ReactNode
+}
+
+const SETTINGS_CATS: SettingsCatDef[] = [
+  { id: 'general', group: 'general', labelKey: 'settings.cat.general', keywords: 'appearance theme dark light system language 中文 english 外观 主题 深色 浅色 语言', icon: (p) => <SlidersHorizontal {...p} /> },
+  { id: 'terminal', group: 'general', labelKey: 'settings.cat.terminal', keywords: 'terminal theme scheme color font size webgl screen reader clipboard 终端 配色 字体 剪贴板 读屏', icon: (p) => <SquareTerminal {...p} /> },
+  { id: 'keyboard', group: 'general', labelKey: 'settings.cat.keyboard', keywords: 'keyboard enter send newline option meta touch keybar custom keys macro 键盘 回车 换行 快捷键 触控 按键 自定义', icon: (p) => <Keyboard {...p} /> },
+  { id: 'agents', group: 'agents', labelKey: 'settings.cat.agents', keywords: 'agents pinned chime sound bell tone notification push alert 智能体 置顶 提示音 铃声 推送 通知', icon: (p) => <Bot {...p} /> },
+  { id: 'translate', group: 'agents', labelKey: 'settings.cat.translate', keywords: 'thought thinking translate summarize model api key base url deepseek 思考 翻译 总结 模型 密钥', icon: (p) => <Languages {...p} /> },
+  { id: 'account', group: 'account', labelKey: 'settings.cat.account', keywords: 'account profile display name password sso oidc 2fa totp two step sign out logout notices 账户 密码 登录 两步验证 退出 声明', icon: (p) => <User {...p} /> },
+]
+const SETTINGS_GROUPS: { id: 'general' | 'agents' | 'account'; labelKey: I18nKey }[] = [
+  { id: 'general', labelKey: 'settings.group.general' },
+  { id: 'agents', labelKey: 'settings.group.agents' },
+  { id: 'account', labelKey: 'settings.group.account' },
+]
 
 // As the terminal's menu sets it (one point at a time).
 const FONT_MIN = 9
@@ -59,7 +105,308 @@ function Seg<T extends string>(props: { labelledBy: string; value: T; options: [
   )
 }
 
+function SettingsWorkbench({ modal, onClose }: { modal?: boolean; onClose?: () => void }) {
+  const { me, setMe, boot } = useSession()
+  const prefs = usePrefs()
+  const reader = useScreenReader()
+  const toast = useToast()
+  const [lang, setLangState] = useState<Lang>(getLang())
+  const [profileDirty, setProfileDirty] = useState(false)
+  const [translateDirty, setTranslateDirty] = useState(false)
+  const [schemesOpen, setSchemesOpen] = useState(false)
+  const [langAsk, setLangAsk] = useState<Lang | null>(null)
+  const [cat, setCat] = useState<SettingsCatId>('general')
+  const [query, setQuery] = useState('')
+  const searchRef = useRef<HTMLInputElement>(null)
+  const bodyRef = useRef<HTMLDivElement>(null)
+
+  const switchLang = (v: Lang) => {
+    setLang(v)
+    setLangState(v)
+    location.reload()
+  }
+  const stepFont = (d: number) => setPrefs({ fontSize: Math.min(FONT_MAX, Math.max(FONT_MIN, prefs.fontSize + d)) })
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'f') {
+        e.preventDefault()
+        searchRef.current?.focus()
+        searchRef.current?.select()
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [])
+
+  const q = query.trim().toLowerCase()
+  const matchedCats = useMemo(() => {
+    if (!q) return SETTINGS_CATS
+    return SETTINGS_CATS.filter((c) => t(c.labelKey).toLowerCase().includes(q) || c.keywords.toLowerCase().includes(q))
+  }, [q])
+
+  const activeCat = matchedCats.some((c) => c.id === cat) ? cat : (matchedCats[0]?.id ?? cat)
+  const activeDef = SETTINGS_CATS.find((c) => c.id === activeCat) ?? SETTINGS_CATS[0]
+
+  const selectCat = (id: SettingsCatId) => {
+    setCat(id)
+    bodyRef.current?.scrollTo({ top: 0 })
+  }
+
+  const renderCategory = (id: SettingsCatId): ReactNode => {
+    switch (id) {
+      case 'general':
+        return (
+          <section className="section">
+            <h2>{t('settings.appearance')}</h2>
+            <div className="settings-group">
+              <Setting label={t('settings.theme')} id="sm-theme-l">
+                <Seg
+                  labelledBy="sm-theme-l"
+                  value={prefs.theme}
+                  options={[['system', t('settings.themeSystem')], ['light', t('settings.themeLight')], ['dark', t('settings.themeDark')]]}
+                  onChange={(v) => setPrefs({ theme: v })}
+                />
+              </Setting>
+              <Setting label={t('settings.language')} id="sm-lang-l">
+                <Seg
+                  labelledBy="sm-lang-l"
+                  value={lang}
+                  options={[['zh-CN', '简体中文'], ['en', 'English']]}
+                  onChange={(v) => {
+                    if (v !== lang && (profileDirty || translateDirty)) setLangAsk(v)
+                    else if (v !== lang) switchLang(v)
+                  }}
+                />
+              </Setting>
+            </div>
+          </section>
+        )
+      case 'terminal':
+        return (
+          <section className="section">
+            <h2>{t('settings.terminal')}</h2>
+            <div className="settings-group">
+              <Setting label={t('settings.termTheme')} id="sm-tt-l">
+                <button type="button" className="btn scheme-btn" aria-labelledby="sm-tt-l sm-tt-v" onClick={() => setSchemesOpen(true)}>
+                  <span id="sm-tt-v"><CurrentScheme /></span>
+                  <ChevronRight size={16} />
+                </button>
+              </Setting>
+              <Setting label={t('settings.fontSize')} id="sm-fs-l">
+                <div className="stepper" role="group" aria-labelledby="sm-fs-l">
+                  <button type="button" className="icon-btn" aria-label={t('settings.fontSmaller')} disabled={prefs.fontSize <= FONT_MIN} onClick={() => stepFont(-1)}>
+                    <Minus size={16} />
+                  </button>
+                  <span className="value" aria-live="polite">{prefs.fontSize}</span>
+                  <button type="button" className="icon-btn" aria-label={t('settings.fontLarger')} disabled={prefs.fontSize >= FONT_MAX} onClick={() => stepFont(1)}>
+                    <Plus size={16} />
+                  </button>
+                </div>
+              </Setting>
+              <Switch label={t('settings.webgl')} hint={t('settings.webglHint')} checked={prefs.webgl} onChange={(v) => setPrefs({ webgl: v })} />
+              <Switch label={t('settings.screenReader')} hint={t('settings.screenReaderHint')} checked={reader} onChange={setScreenReader} />
+              <Switch label={t('settings.remoteClipboard')} hint={t('settings.remoteClipboardHint')} checked={prefs.remoteClipboard} onChange={(v) => setPrefs({ remoteClipboard: v })} />
+            </div>
+          </section>
+        )
+      case 'keyboard':
+        return (
+          <>
+            <section className="section">
+              <h2>{t('settings.keyboard')}</h2>
+              <div className="settings-group">
+                <Setting label={t('settings.composerEnter')} hint={t('settings.composerEnterHint', { mod: isMac ? t('settings.modEnterMac') : t('settings.modEnterOther') })} id="sm-ce-l">
+                  <Seg
+                    labelledBy="sm-ce-l"
+                    value={prefs.composerEnter}
+                    options={[['send', t('settings.composerEnterSend')], ['newline', t('settings.composerEnterNewline')]]}
+                    onChange={(v) => setPrefs({ composerEnter: v })}
+                  />
+                </Setting>
+                {isMac && <Switch label={t('settings.optionIsMeta')} hint={t('settings.optionIsMetaHint')} checked={prefs.optionIsMeta} onChange={(v) => setPrefs({ optionIsMeta: v })} />}
+              </div>
+            </section>
+            <section className="section">
+              <h2>{t('settings.touch')}</h2>
+              <div className="settings-group">
+                <Switch label={t('settings.keybar')} checked={prefs.keybar} onChange={(v) => setPrefs({ keybar: v })} />
+                {prefs.keybar && <Switch label={t('settings.tapKeyboard')} hint={t('settings.tapKeyboardHint')} checked={prefs.tapKeyboard} onChange={(v) => setPrefs({ tapKeyboard: v })} />}
+              </div>
+            </section>
+            <CustomKeysSection />
+          </>
+        )
+      case 'agents':
+        return (
+          <>
+            <section className="section">
+              <h2>{t('settings.agents')}</h2>
+              <div className="settings-group">
+                <Setting label={t('settings.pinned')} hint={prefs.pinnedAgents.length ? t('settings.pinnedHint', { n: prefs.pinnedAgents.length }) : t('settings.pinnedNone')} id="sm-pin-l">
+                  <button type="button" className="btn" aria-describedby="sm-pin-l" disabled={!prefs.pinnedAgents.length} onClick={() => setPrefs({ pinnedAgents: [] })}>
+                    {t('settings.unpinAll')}
+                  </button>
+                </Setting>
+              </div>
+            </section>
+            <section className="section">
+              <h2>{t('settings.chime')}</h2>
+              <div className="settings-group">
+                <Setting label={t('settings.chimeWhen')} hint={t('settings.chimeWhenHint')} id="sm-chime-l">
+                  <Seg
+                    labelledBy="sm-chime-l"
+                    value={prefs.chime}
+                    options={[['off', t('settings.chimeOff')], ['done', t('settings.chimeDone')], ['all', t('settings.chimeAll')]]}
+                    onChange={(v) => setPrefs({ chime: v })}
+                  />
+                </Setting>
+                {prefs.chime !== 'off' && (
+                  <>
+                    <Setting label={t('settings.chimeTone')} id="sm-chime-tone-l">
+                      <div className="settings-inline">
+                        <Seg
+                          labelledBy="sm-chime-tone-l"
+                          value={prefs.chimeTone}
+                          options={[['bell', t('settings.chimeToneBell')], ['soft', t('settings.chimeToneSoft')], ['ping', t('settings.chimeTonePing')]]}
+                          onChange={(v) => (setPrefs({ chimeTone: v }), playChime(v))}
+                        />
+                        <button type="button" className="btn" onClick={() => playChime(prefs.chimeTone)}>
+                          {t('settings.chimeTry')}
+                        </button>
+                      </div>
+                    </Setting>
+                    <Switch label={t('settings.chimeBells')} hint={t('settings.chimeBellsHint')} checked={prefs.chimeBells} onChange={(v) => setPrefs({ chimeBells: v })} />
+                  </>
+                )}
+              </div>
+            </section>
+            <PushSection />
+          </>
+        )
+      case 'translate':
+        return <TranslateSection onDirty={setTranslateDirty} />
+      case 'account':
+        return (
+          <>
+            <section className="section">
+              <h2>{t('settings.account')}</h2>
+              <div className="settings-group">
+                <ProfileSetting onDirty={setProfileDirty} />
+                <PasswordSetting />
+                {boot?.oidc?.enabled && <SSOSetting />}
+                <TwoStepSetting />
+                {modal && (
+                  <Setting label={t('nav.signOut')} hint={me?.username}>
+                    <button type="button" className="btn" onClick={() => { onClose?.(); void signOut(setMe, toast) }}>
+                      <LogOut size={14} strokeWidth={1.75} aria-hidden="true" />
+                      <span>{t('nav.signOut')}</span>
+                    </button>
+                  </Setting>
+                )}
+              </div>
+            </section>
+            <p className="notices">
+              <a href="/THIRD-PARTY-NOTICES.txt" target="_blank" rel="noopener">{t('settings.notices')}</a>
+            </p>
+          </>
+        )
+    }
+  }
+
+  return (
+    <div className={'sm-shell' + (modal ? ' is-modal' : ' is-page')}>
+      <aside className="sm-side" aria-label={t('settings.title')}>
+        <div className="sm-side-top">
+          {modal && onClose ? (
+            <button type="button" className="sm-back" onClick={onClose}>
+              <ArrowLeft size={14} strokeWidth={1.75} aria-hidden="true" />
+              <span>{t('settings.backToApp')}</span>
+            </button>
+          ) : (
+            <span className="sm-brand">{t('settings.title')}</span>
+          )}
+        </div>
+        <div className="sm-search-wrap">
+          <label className="sm-search">
+            <Search size={14} strokeWidth={1.75} className="sm-search-ic" aria-hidden="true" />
+            <input
+              ref={searchRef}
+              type="text"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder={t('settings.searchPlaceholder')}
+              aria-label={t('settings.searchPlaceholder')}
+            />
+            {query ? (
+              <button type="button" className="icon-btn sm-search-clear" onClick={() => setQuery('')} aria-label={t('convo.searchClear')}>
+                <X size={13} aria-hidden="true" />
+              </button>
+            ) : (
+              <span className="sm-search-kbd" aria-hidden="true">{isMac ? '⌘F' : 'Ctrl+F'}</span>
+            )}
+          </label>
+        </div>
+        <nav className="sm-nav" aria-label={t('settings.title')}>
+          {SETTINGS_GROUPS.map((g) => {
+            const items = matchedCats.filter((c) => c.group === g.id)
+            if (!items.length) return null
+            return (
+              <div key={g.id} className="sm-group">
+                <div className="sm-group-label">{t(g.labelKey)}</div>
+                {items.map((item) => (
+                  <button
+                    key={item.id}
+                    type="button"
+                    className="sm-nav-item"
+                    aria-current={activeCat === item.id ? 'page' : undefined}
+                    onClick={() => selectCat(item.id)}
+                  >
+                    {item.icon({ size: 15, strokeWidth: 1.75, 'aria-hidden': true })}
+                    <span>{t(item.labelKey)}</span>
+                  </button>
+                ))}
+              </div>
+            )
+          })}
+          {matchedCats.length === 0 && <p className="sm-empty">{t('settings.searchNone')}</p>}
+        </nav>
+      </aside>
+      <div className="sm-main">
+        <header className="sm-head">
+          <div className="sm-crumb">
+            <span className="sm-crumb-root">{t('settings.title')}</span>
+            <span className="sm-crumb-sep" aria-hidden="true">/</span>
+            <span className="sm-crumb-cur">{t(activeDef.labelKey)}</span>
+          </div>
+          {modal && onClose && (
+            <button type="button" className="icon-btn sm-close" onClick={onClose} aria-label={t('common.close')} title={t('common.close')}>
+              <X size={16} strokeWidth={1.75} aria-hidden="true" />
+            </button>
+          )}
+        </header>
+        <div className="sm-body" ref={bodyRef}>
+          {matchedCats.length > 0 ? renderCategory(activeCat) : <p className="sm-empty">{t('settings.searchNone')}</p>}
+        </div>
+      </div>
+      {schemesOpen && <SchemeDialog onClose={() => setSchemesOpen(false)} />}
+      {langAsk && (
+        <Confirm title={t('settings.langTitle')} body={t('settings.langUnsaved')} confirm={t('settings.langSwitch')} onClose={() => setLangAsk(null)} onConfirm={() => switchLang(langAsk)} />
+      )}
+    </div>
+  )
+}
+
+export function SettingsDialog({ onClose }: { onClose: () => void }) {
+  return (
+    <Dialog title={t('settings.title')} onClose={onClose} hideTitle className="dlg settings-modal">
+      <SettingsWorkbench modal onClose={onClose} />
+    </Dialog>
+  )
+}
+
 export function SettingsPage() {
+  const desktop = useDesktopSettings()
   const { me, setMe, boot } = useSession()
   const prefs = usePrefs()
   const reader = useScreenReader()
@@ -76,14 +423,23 @@ export function SettingsPage() {
   }
   // Back from a page opened here (phones): where the list was.
   useLayoutEffect(() => {
+    if (desktop) return
     const y = takeSettingsScroll()
     if (y) window.scrollTo(0, y)
-  }, [])
+  }, [desktop])
   const morePage = (href: string) => (e: React.MouseEvent) => {
     rememberSettingsScroll()
     linkHandler(href)(e)
   }
   const stepFont = (d: number) => setPrefs({ fontSize: Math.min(FONT_MAX, Math.max(FONT_MIN, prefs.fontSize + d)) })
+
+  if (desktop) {
+    return (
+      <main className="page page-settings-desktop">
+        <SettingsWorkbench />
+      </main>
+    )
+  }
 
   return (
     <main className="page page-form page-settings">

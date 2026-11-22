@@ -14,7 +14,7 @@ import { AgentsChat } from './pages/AgentsChat'
 import { HostsPage } from './pages/Hosts'
 import { HostEditPage } from './pages/HostEdit'
 import { KeysPage } from './pages/Keys'
-import { SettingsPage } from './pages/Settings'
+import { isDesktopSettings, OPEN_SETTINGS, openSettingsModal, SettingsDialog, SettingsPage } from './pages/Settings'
 import { AdminUsersPage, AdminAuditPage } from './pages/Admin'
 import { preloadTerminal, RecordingPlayerPage, RecordingsPage, TerminalPage } from './pages/lazyPages'
 import { TerminalTabs, useTabsMode } from './pages/TerminalTabs'
@@ -149,10 +149,39 @@ export function App() {
       <ToastProvider>
         <PushSync userId={me?.must_change_password ? undefined : me?.id} />
         <UpdateNotice loaded={loadedVersion.current} />
+        {me && !me.must_change_password && <SettingsModalHost />}
         {route(path, boot, me, tabs)}
       </ToastProvider>
     </SessionCtx.Provider>
   )
+}
+
+function SettingsModalHost() {
+  const [open, setOpen] = useState(false)
+  const path = usePath()
+  useEffect(() => {
+    const onOpen = () => {
+      if (isDesktopSettings()) setOpen(true)
+    }
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && e.key === ',') {
+        if (!isDesktopSettings()) return
+        e.preventDefault()
+        setOpen((v) => !v)
+      }
+    }
+    window.addEventListener(OPEN_SETTINGS, onOpen)
+    window.addEventListener('keydown', onKey)
+    return () => {
+      window.removeEventListener(OPEN_SETTINGS, onOpen)
+      window.removeEventListener('keydown', onKey)
+    }
+  }, [])
+  useEffect(() => {
+    if (path === '/settings') setOpen(false)
+  }, [path])
+  if (!open) return null
+  return <SettingsDialog onClose={() => setOpen(false)} />
 }
 
 // Whoever signs in on this device takes over its notifications. A failure
@@ -294,7 +323,22 @@ function Shell({ active, children }: { active: NavKey; children: ReactNode }) {
   const named = (i: (typeof main)[number]) =>
     i.key === 'agents' && waiting.n ? `${i.label}，${t(waiting.stale ? 'nav.waitingStaleN' : 'nav.waitingN', { n: waiting.n })}` : undefined
   const item = (i: (typeof main)[number]) => (
-    <a key={i.key} className="nav-item" href={i.href} onClick={linkHandler(i.href)} aria-current={i.key === active ? 'page' : undefined} title={i.label} aria-label={named(i)}>
+    <a
+      key={i.key}
+      className="nav-item"
+      href={i.href}
+      onClick={(e) => {
+        if (i.key === 'settings' && !e.metaKey && !e.ctrlKey && !e.shiftKey && e.button === 0 && isDesktopSettings() && path !== '/settings') {
+          e.preventDefault()
+          openSettingsModal()
+          return
+        }
+        linkHandler(i.href)(e)
+      }}
+      aria-current={i.key === active ? 'page' : undefined}
+      title={i.label}
+      aria-label={named(i)}
+    >
       {i.icon}
       <span className="label">{i.label}</span>
       {badge(i.key, 'nav-badge')}

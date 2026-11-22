@@ -4,7 +4,7 @@ import { Activity, ArrowDown, ArrowDownAZ, ArrowUp, ArrowUpDown, Bot, Check, Che
 import { t, getLang, type I18nKey } from '../i18n'
 import { api } from '../api'
 import { setPrefs, usePrefs } from '../prefs'
-import { navigate } from '../router'
+import { openSettingsModal } from '../pages/Settings'
 import { asHeld, buildAgentGroups, dayStart, FOLDED, foldAt, isLiveBlocked, listOrder, pinned, type ConvoListRow, type OrderOpts, type RowCmds } from './agentOrder'
 import { copyText, Dialog, DialogHead, isCoarse, Menu, MenuLayer, swallowNextClick, useToast, type MenuItem } from '../components/ui'
 import { saveFile } from '../saveFile'
@@ -1760,7 +1760,7 @@ export function ConversationView({
           <AgentList rows={rows} menus query={sideQuery} onQuery={setSideQuery} search={searchAsked} onSearchLeft={() => setSearchAsked(0)} hint={!isTouchOnly} compact={!isTouchOnly} showNew={!isTouchOnly} />
           {!isTouchOnly && (
             <div className="convo-side-foot">
-              <button type="button" className="icon-btn convo-side-foot-ic" onClick={() => navigate('/settings')} aria-label={t('nav.settings')} title={t('nav.settings')}>
+              <button type="button" className="icon-btn convo-side-foot-ic" onClick={openSettingsModal} aria-label={t('nav.settings')} title={`${t('nav.settings')} (${mac ? '⌘,' : 'Ctrl+,'})`}>
                 <Settings size={14} strokeWidth={1.75} aria-hidden="true" />
               </button>
               <button type="button" className="icon-btn convo-side-foot-ic" onClick={() => setKeysShown('side')} aria-label={t('convo.side.shortcuts')} title={t('convo.side.shortcuts')}>
