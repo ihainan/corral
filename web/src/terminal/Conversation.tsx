@@ -3100,7 +3100,13 @@ function Runs({ meta, goal, active, mode, model, effort, quota, via, auth, agent
       : rawToEffort
   const modelMoved = !!toModel && toModel !== nowRow?.label
   const effortMoved = !!toEffort && (model?.efforts ? !!stage.effort && (effortWord(stage.effort) !== nowEffort || modelMoved) : hasPerModelEfforts ? toEffort !== nowEffort : !!stage.effort && stage.effort !== nowEffort)
-  const toSaid = [toRow ? named(toRow)[0] : toModel, toEffort ? (model?.efforts ? t(EFFORT_WORDS[toEffort] ?? 'convo.effort') : effortName(toEffort)) : ''].filter(Boolean).join(' · ')
+  const toShortModel = (() => {
+    const raw = toRow ? named(toRow)[0] : toModel
+    if (!raw) return ''
+    const slash = raw.lastIndexOf('/')
+    return slash > 0 && slash < raw.length - 1 ? raw.slice(slash + 1) : raw
+  })()
+  const toSaid = [toShortModel, toEffort ? (model?.efforts ? t(EFFORT_WORDS[toEffort] ?? 'convo.effort') : effortName(toEffort)) : ''].filter(Boolean).join(' · ')
   // Taken: the model and the effort in one switch (Claude Code's picker takes both
   // with one "s", a Codex's with its model, agy's via /model <id> or /effort <level>);
   // the effort alone, with the model it is on; the model alone, as before.
@@ -3395,14 +3401,17 @@ function Runs({ meta, goal, active, mode, model, effort, quota, via, auth, agent
               </div>
             </>
           )}
-          {model.list !== null && (
-            <div className="convo-models-foot">
-              <p className="convo-runs-note">{t(merged ? 'convo.modelEffortOnly' : 'convo.modelOnly')}</p>
-              <button ref={applyBtn} type="button" className="btn btn-primary convo-models-apply" disabled={model.busy || (!modelMoved && !effortMoved)} onClick={apply}>
-                {modelMoved || effortMoved ? (modelMoved || model.efforts ? t('convo.applySwitch', { what: toSaid }) : t('convo.applyEffort', { e: effortName(toEffort!) })) : t('convo.applyNone')}
-              </button>
-            </div>
-          )}
+          {model.list !== null && (() => {
+            const applyLabel = modelMoved || effortMoved ? (modelMoved || model.efforts ? t('convo.applySwitch', { what: toSaid }) : t('convo.applyEffort', { e: effortName(toEffort!) })) : t('convo.applyNone')
+            return (
+              <div className="convo-models-foot">
+                <p className="convo-runs-note">{t(merged ? 'convo.modelEffortOnly' : 'convo.modelOnly')}</p>
+                <button ref={applyBtn} type="button" className="btn btn-primary convo-models-apply" disabled={model.busy || (!modelMoved && !effortMoved)} title={applyLabel} onClick={apply}>
+                  <span className="convo-models-apply-text">{applyLabel}</span>
+                </button>
+              </div>
+            )
+          })()}
         </div>
       )}
       {open === 'mode' && mode?.onPick && (

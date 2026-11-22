@@ -264,14 +264,18 @@ code, .mono { font-family: var(--font-mono); font-size: var(--fs-sub); }
 .btn-danger:hover { background: var(--danger-soft); }
 .btn-ghost { background: transparent; border-color: transparent; }
 .btn-ghost:hover { background: var(--bg-hover); }
-.btn-block { width: 100%; }
+.btn-block { width: 100%; max-width: 100%; min-width: 0; overflow: hidden; }
 /* Single sign-on on the sign-in page: its button under the form, "or" between them. */
 .auth-sso { display: inline-flex; align-items: center; justify-content: center; gap: 8px; text-decoration: none; }
 .auth-or { display: flex; align-items: center; gap: 12px; margin: 0; color: var(--fg-3); font-size: var(--fs-note); line-height: var(--lh-note); }
 .auth-or::before, .auth-or::after { content: ''; flex: 1; height: 1px; background: var(--line); }
 .auth-sso-err { margin: 0 0 16px; }
 .hint-block { display: block; margin-top: 4px; }
-.row-title .sso-badge { margin-left: 8px; padding: 0 6px; border-radius: var(--r-xs); background: var(--accent-soft); color: var(--accent-text); font-weight: 500; font-size: var(--fs-note); line-height: var(--lh-note); }
+.row-title .sso-badge {
+  display: inline-flex; align-items: center; vertical-align: middle; position: relative; top: -1px;
+  margin-left: 8px; padding: 0 6px; border-radius: var(--r-xs); background: var(--accent-soft); color: var(--accent-text);
+  font-weight: 500; font-size: var(--fs-note); line-height: var(--lh-note);
+}
 .icon-btn {
   display: inline-grid; place-items: center; width: 36px; height: 36px; border-radius: var(--r);
   border: 0; background: transparent; color: var(--fg-3); cursor: pointer; flex: none; position: relative;
@@ -1297,7 +1301,7 @@ details.adv > .form { margin-top: 16px; }
 .scard-inspect { display: flex; flex-direction: column; gap: 6px; padding: 4px 10px 2px; }
 .scard-inspect-meta { display: flex; flex-wrap: wrap; gap: 4px; }
 .scard-chip {
-  display: inline-flex; align-items: center; padding: 2px 8px; border-radius: 999px;
+  display: inline-block; vertical-align: middle; padding: 2px 8px; border-radius: 999px;
   background: var(--bg-subtle); border: 1px solid var(--line); color: var(--fg-2);
   font-size: var(--fs-note); line-height: var(--lh-note); max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
