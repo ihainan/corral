@@ -2344,10 +2344,12 @@ button.convo-queue-row.is-note:last-child { border-radius: 0 0 var(--r-lg) var(-
   }
   .convo-side .list-new-btn:hover { background: var(--term-accent-soft); color: var(--term-accent-text); }
   .convo-side .list-new-btn:focus-visible { outline: 2px solid var(--term-accent-text); outline-offset: -2px; }
-  .convo-side .convo-list-row { padding: 8px 10px; gap: 10px; border-radius: var(--r); }
-  .convo-side .convo-list-row .agent-icon { margin-top: 4px; }
-  .convo-side .convo-list-row.is-nested .agent-icon { margin-top: 2px; }
-  .convo-side .convo-list-row.is-child .agent-icon { margin-top: 2px; }
+  .convo-side .convo-list-row { align-items: center; padding: 8px 10px; gap: 10px; border-radius: var(--r); }
+  .convo-side .convo-list-row .agent-icon { margin-top: 0; }
+  .convo-side .convo-list-row:has(.convo-list-now, .convo-list-parent-ref) { align-items: flex-start; }
+  .convo-side .convo-list-row:has(.convo-list-now, .convo-list-parent-ref) .agent-icon { margin-top: 4px; }
+  .convo-side .convo-list-row.is-nested:has(.convo-list-now, .convo-list-parent-ref) .agent-icon,
+  .convo-side .convo-list-row.is-child:has(.convo-list-now, .convo-list-parent-ref) .agent-icon { margin-top: 2px; }
   .convo-side .convo-list-row.is-child .agent-icon-dot,
   .convo-side .convo-list-row.is-nested .agent-icon-dot {
     width: 6px; height: 6px; right: -1px; bottom: -1px;
@@ -2359,6 +2361,8 @@ button.convo-queue-row.is-note:last-child { border-radius: 0 0 var(--r-lg) var(-
   }
   .convo-side .convo-list-text { gap: 2px; }
   .convo-side .convo-list-bg { color: var(--term-fg-2); font-weight: 400; }
+  .convo-side .convo-list-item.is-child:not(.is-single)::before { height: 28px; }
+  .convo-side .convo-list-item.is-child:not(.is-single):first-child::before { height: 26px; }
 }
 @media (pointer: coarse) {
   .convo-side-new { height: 44px; }
