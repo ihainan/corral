@@ -192,6 +192,22 @@ func TestAgySubagentIDAndSetTitle(t *testing.T) {
 	}
 }
 
+func TestAgySystemMessagePreambleAndReminder(t *testing.T) {
+	ag := NewAgy()
+	// Internal harness Reminder wrapped with the standard preamble must not leak as a chat notice.
+	ag.Feed([]byte(`{"step_index":1,"source":"SYSTEM","type":"SYSTEM_MESSAGE","status":"DONE","created_at":"2026-11-22T04:00:00Z","content":"The following is a <SYSTEM_MESSAGE> not actually sent by the user. It is provided by the system as important information to pay attention to.\n\n<SYSTEM_MESSAGE>\nReminder: work efficiently.\n</SYSTEM_MESSAGE>"}` + "\n"))
+	if got := ag.Since(0); len(got) != 0 {
+		t.Fatalf("reminder SYSTEM_MESSAGE leaked %d entries: %+v", len(got), got)
+	}
+
+	// Real system wakeup message with the same preamble must extract the inner message, not the preamble.
+	ag.Feed([]byte(`{"step_index":2,"source":"SYSTEM","type":"SYSTEM_MESSAGE","status":"DONE","created_at":"2026-11-22T04:01:00Z","content":"The following is a <SYSTEM_MESSAGE> not actually sent by the user. It is provided by the system as important information to pay attention to.\n\n<SYSTEM_MESSAGE>\nTimer fired: check deploy status\n</SYSTEM_MESSAGE>"}` + "\n"))
+	got := ag.Since(0)
+	if len(got) != 1 || got[0].Parts[0].Event == nil || got[0].Parts[0].Event.Text != "Timer fired: check deploy status" {
+		t.Fatalf("wakeup SYSTEM_MESSAGE = %+v, want inner text", got)
+	}
+}
+
 // pbEncode helpers for synthetic Antigravity step_type=17 payloads in tests.
 func testPBVarint(v uint64) []byte {
 	var out []byte

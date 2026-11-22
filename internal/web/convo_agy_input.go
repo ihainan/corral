@@ -86,17 +86,28 @@ agy_fds() {
 var errAgyAsks = errors.New("it asks something: its input is not there")
 
 // agyAsking: phrases present in agy's permission, question, or trust prompts.
+// Deliberately excludes "esc to cancel", which agy also prints on its working
+// footer bar whenever a turn or command is running (including while showing
+// the non-blocking "How's the CLI experience so far?" feedback strip).
 var agyAsking = []string{
 	"Requesting permission for:",
 	"Run this command?",
 	"Do you trust the contents of this project?",
 	"↑/↓ Navigate",
-	"esc to cancel",
 	"tab Amend",
 	"ctrl+g edit/expand",
 	"ctrl+r Review",
-	"Question ",
+	"esc Skip",
+	"enter Confirm",
 }
+
+// agyChoiceCursorRe matches the active numbered option line of an interactive
+// permission or question menu (e.g. "> 1. Yes, run command"), without matching
+// the non-blocking "[1] Good [2] Fine [3] Bad [0] Skip" feedback strip.
+var agyChoiceCursorRe = regexp.MustCompile(`(?m)^[ \t]*[>›❯][ \t]*\d+\.[ \t]+\S`)
+
+// agyQuestionHeaderRe matches agy's multi-question header ("Question 1/2").
+var agyQuestionHeaderRe = regexp.MustCompile(`(?m)^[ \t]*Question[ \t]+\d+/\d+`)
 
 // agyRule: a horizontal rule drawn above and below agy's input box (≥12 box-drawing dashes).
 var agyRule = regexp.MustCompile(`^[ \t]*─{12,}[ \t]*$`)
@@ -174,10 +185,11 @@ func agyIdleInputColor(ansiScreen string) error {
 }
 
 func agyNotBoxedErr(lines []string) error {
-	// Inspect the last 45 non-blank lines so trailing empty rows or tall
-	// multi-line commands with a Reason: prefix never push the prompt out.
+	// Inspect only the bottom 12 non-blank lines (the active prompt/choice
+	// footer region) so stale scrollback or command output above a running
+	// status bar cannot trigger a false "waiting for you" popup.
 	var tail []string
-	for i := len(lines) - 1; i >= 0 && len(tail) < 45; i-- {
+	for i := len(lines) - 1; i >= 0 && len(tail) < 12; i-- {
 		if strings.TrimSpace(lines[i]) == "" {
 			continue
 		}
@@ -188,6 +200,9 @@ func agyNotBoxedErr(lines []string) error {
 		if strings.Contains(foot, w) {
 			return errAgyAsks
 		}
+	}
+	if agyChoiceCursorRe.MatchString(foot) || agyQuestionHeaderRe.MatchString(foot) {
+		return errAgyAsks
 	}
 	return errScreen
 }

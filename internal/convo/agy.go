@@ -420,7 +420,7 @@ func (c *Agy) systemMessage(r agyRow) {
 		return
 	}
 	line := firstLineOf(inner)
-	if line == "" {
+	if line == "" || strings.HasPrefix(line, "Reminder:") {
 		return
 	}
 	t, _ := cut(clean(line), maxNotice)
@@ -841,16 +841,19 @@ func agyExtractUserText(s string) string {
 func agyExtractTag(s, tag string) string {
 	openTag := "<" + tag + ">"
 	closeTag := "</" + tag + ">"
+	if j := strings.Index(s, closeTag); j >= 0 {
+		// Use the last openTag before closeTag so an inline mention in a
+		// preamble (e.g. "The following is a <SYSTEM_MESSAGE> not actually sent
+		// by the user...") is skipped in favor of the actual tagged block.
+		if i := strings.LastIndex(s[:j], openTag); i >= 0 {
+			return strings.TrimSpace(s[i+len(openTag) : j])
+		}
+	}
 	i := strings.Index(s, openTag)
 	if i < 0 {
 		return ""
 	}
-	rest := s[i+len(openTag):]
-	j := strings.Index(rest, closeTag)
-	if j < 0 {
-		return strings.TrimSpace(rest)
-	}
-	return strings.TrimSpace(rest[:j])
+	return strings.TrimSpace(s[i+len(openTag):])
 }
 
 func agyStripBlock(s, tag string) string {

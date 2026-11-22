@@ -427,6 +427,46 @@ func TestAgyScreenAsksAndWaitCache(t *testing.T) {
 		t.Fatalf("agyScreenAsks(idleAfterPerm) = true, want false")
 	}
 
+	// Running command with agy's non-blocking CLI feedback banner + "esc to cancel"
+	// working footer must NOT trigger a false "waiting for you" popup.
+	runningWithFeedback := strings.Join([]string{
+		"● Running (cd /home/ihainan/tmp/corral-devtools/wtsteps/web && node scrip...) (ctrl+o to expand)",
+		"⋮ Running command...",
+		"└ Tip: Press ctrl+g to open an external editor for long prompts.",
+		"How's the CLI experience so far? Help us improve:",
+		"[1] Good   [2] Fine   [3] Bad   [0] Skip",
+		"",
+		"esc to cancel                                          auto · Gemini 4 Neon · high",
+	}, "\n")
+	if agyScreenAsks(runningWithFeedback) {
+		t.Fatalf("agyScreenAsks(runningWithFeedback) = true, want false")
+	}
+
+	// Plain running footer ("───" + "esc to cancel") without an input box must NOT report asking.
+	runningNoBox := strings.Join([]string{
+		"● Running (pnpm run build) (ctrl+o to expand)",
+		"⢿  Running command...",
+		rule,
+		"esc to cancel                                          auto · Gemini 4 Neon · high",
+	}, "\n")
+	if agyScreenAsks(runningNoBox) {
+		t.Fatalf("agyScreenAsks(runningNoBox) = true, want false")
+	}
+
+	// Stale scrollback mentioning permission phrases far above a running footer must NOT trigger asking.
+	staleScrollback := strings.Join([]string{
+		"Requesting permission for:",
+		"Run this command?",
+		"line 1", "line 2", "line 3", "line 4", "line 5", "line 6",
+		"line 7", "line 8", "line 9", "line 10", "line 11",
+		"⢿  Running command...",
+		rule,
+		"esc to cancel                                          auto · Gemini 4 Neon · high",
+	}, "\n")
+	if agyScreenAsks(staleScrollback) {
+		t.Fatalf("agyScreenAsks(staleScrollback) = true, want false")
+	}
+
 	// Wait cache: fresh within convoTitleTTL, invalidated by pressed >= agyWaitAt,
 	// backed off on failure for convoTitleBackoff.
 	now := time.Now()
