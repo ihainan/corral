@@ -1,5 +1,5 @@
 import { useMemo, useState, type FormEvent } from 'react'
-import { Bot } from 'lucide-react'
+import { Bot, GitFork } from 'lucide-react'
 import { api, ApiError, errorText, type SessionInfo } from '../api'
 import { t } from '../i18n'
 import { Dialog } from '../components/ui'
@@ -14,7 +14,16 @@ import { AgentGlyph } from './agentIcons'
 
 export const NEW_AGENT = 'corral:new-agent' // (asked from the list: the page opens this)
 
+export interface NewSubagentParent {
+  sessionId: string
+  pane: string
+  title: string
+  dir: string
+  ws?: string
+}
+
 type Kind = 'claude' | 'codex' | 'opencode' | 'agy'
+type Placement = 'split' | 'workspace'
 type Old = { id: string; modified: number; title?: string; first?: string }
 
 const RECENT = 'corral.newAgentDirs'
@@ -41,21 +50,37 @@ const lastKind = (): Kind => {
   return v === 'codex' || v === 'opencode' || v === 'agy' ? v : 'claude'
 }
 
+const SUB_PLACEMENT = 'corral.subagentPlacement'
+const lastPlacement = (): Placement => (local.get(SUB_PLACEMENT) === 'workspace' ? 'workspace' : 'split')
+
 const herdrOf = (s: SessionInfo) => (s.persistence === 'herdr' && s.meta?.t === 'herdr' && !s.meta.lost ? s.meta : null)
 
-export function NewAgentDialog({ sessions, onDone, onOpen, onClose }: { sessions: SessionInfo[]; onDone: (s: SessionInfo, pane: string, first: string) => void; onOpen: (s: SessionInfo, pane: string) => void; onClose: () => void }) {
-  // (Where one may be started: herdr's sessions, and tmux's.)
-  const herdrs = sessions.filter((s) => herdrOf(s) || s.persistence === 'tmux')
-  const [sid, setSid] = useState(herdrs[0]?.id ?? '')
+export function NewAgentDialog({
+  sessions,
+  parent,
+  onDone,
+  onOpen,
+  onClose,
+}: {
+  sessions: SessionInfo[]
+  parent?: NewSubagentParent
+  onDone: (s: SessionInfo, pane: string, first: string, parent?: NewSubagentParent) => void
+  onOpen: (s: SessionInfo, pane: string) => void
+  onClose: () => void
+}) {
+  // (Where one may be started: herdr's sessions, and tmux's — locked to parent's herdr session for subagents.)
+  const herdrs = parent ? sessions.filter((s) => s.id === parent.sessionId && herdrOf(s)) : sessions.filter((s) => herdrOf(s) || s.persistence === 'tmux')
+  const [sid, setSid] = useState(parent?.sessionId ?? herdrs[0]?.id ?? '')
   const sess = herdrs.find((s) => s.id === sid)
   // (Folders the agents there work in, then the ones started from here lately.)
   const dirs = useMemo(() => {
     const m = sess ? herdrOf(sess) : null
     const seen = (m?.workspaces ?? []).flatMap((w) => w.agents.map((a) => a.cwd)).filter(Boolean)
-    return [...new Set([...seen, ...recentDirs()])].slice(0, 12)
-  }, [sess])
-  const [dir, setDir] = useState(() => dirs[0] ?? '~/')
+    return [...new Set([...(parent?.dir ? [parent.dir] : []), ...seen, ...recentDirs()])].slice(0, 12)
+  }, [sess, parent?.dir])
+  const [dir, setDir] = useState(() => parent?.dir || dirs[0] || '~/')
   const [kind, setKind] = useState<Kind>(lastKind)
+  const [placement, setPlacement] = useState<Placement>(lastPlacement)
   // In a git worktree of its own, made and tidied by the agent itself
   // (Claude Code's -w, Codex's --worktree): not for OpenCode, nor a session
   // taken up.
@@ -91,7 +116,7 @@ export function NewAgentDialog({ sessions, onDone, onOpen, onClose }: { sessions
   }, [sess])
   if (!herdrs.length) {
     return (
-      <Dialog title={t('newAgent.title')} onClose={onClose} icon={<Bot size={18} />}>
+      <Dialog title={t(parent ? 'newAgent.subagentTitle' : 'newAgent.title')} onClose={onClose} icon={parent ? <GitFork size={18} /> : <Bot size={18} />}>
         <p className="lead">{t('newAgent.noHerdr')}</p>
         <div className="dialog-actions">
           <button className="btn" onClick={onClose}>
@@ -122,10 +147,19 @@ export function NewAgentDialog({ sessions, onDone, onOpen, onClose }: { sessions
     setBusy(true)
     setError('')
     try {
-      const body = { dir: dir.trim(), kind, label: label.trim(), resume: kind !== 'opencode' ? resume : '', fork: canFork && copying, worktree: inWorktree }
+      const body = {
+        dir: dir.trim(),
+        kind,
+        label: label.trim(),
+        resume: kind !== 'opencode' ? resume : '',
+        fork: canFork && copying,
+        worktree: inWorktree,
+        ...(parent ? { parent_pane: parent.pane, placement } : {}),
+      }
       const r = await api<{ pane?: string; tmux?: string }>('POST', `/api/sessions/${sess.id}/agents`, { ...body, key: keyOf(sess.id + '\n' + JSON.stringify(body)) }, { timeoutMs: 90000 })
       keepDir(dir.trim())
       local.set(KIND, kind)
+      if (parent) local.set(SUB_PLACEMENT, placement)
       const said = !resume || copying ? first.trim() : ''
       if (r.tmux) {
         // (A tmux session of its own: a terminal opened on it here, gone to as any other.
@@ -138,24 +172,32 @@ export function NewAgentDialog({ sessions, onDone, onOpen, onClose }: { sessions
           setBusy(false) // (it may be closed now: what is said stays till then — review b2b-1)
           return
         }
-        onDone(opened, '', said)
+        onDone(opened, '', said, parent)
         return
       }
-      onDone(sess, r.pane ?? '', said)
+      onDone(sess, r.pane ?? '', said, parent)
     } catch (err) {
       if (err instanceof ApiError && err.code === 'bad_folder') setError(t('newAgent.badFolder'))
       else if (err instanceof ApiError && err.code === 'no_session') setError(t('fork.noSession'))
-      else if (err instanceof ApiError && err.code === 'start_failed') setError(t('newAgent.failed', { why: err.message }) + (err.extra.closed === false ? ' ' + t('newAgent.notClosed') : ''))
-      else if (err instanceof ApiError && (err.code === 'busy' || err.code === 'in_progress')) setError(t('newAgent.busy'))
+      else if (err instanceof ApiError && err.code === 'start_failed') {
+        const notClosedKey = parent && placement === 'split' ? 'newAgent.notClosedPane' : 'newAgent.notClosed'
+        setError(t('newAgent.failed', { why: err.message }) + (err.extra.closed === false ? ' ' + t(notClosedKey) : ''))
+      } else if (err instanceof ApiError && (err.code === 'busy' || err.code === 'in_progress')) setError(t('newAgent.busy'))
       else setError(t('newAgent.unknown') + (err instanceof ApiError && typeof err.extra.workspace === 'string' && err.extra.workspace ? ' ' + t('newAgent.which', { w: err.extra.workspace }) : ''))
       setBusy(false)
     }
   }
   const close = () => !busy && onClose()
   return (
-    <Dialog title={t('newAgent.title')} onClose={close} icon={<Bot size={18} />}>
+    <Dialog title={t(parent ? 'newAgent.subagentTitle' : 'newAgent.title')} onClose={close} icon={parent ? <GitFork size={18} /> : <Bot size={18} />}>
       <form className="new-agent" onSubmit={submit}>
-        {herdrs.length > 1 && (
+        {parent && (
+          <p className="new-agent-parent">
+            <GitFork size={14} aria-hidden="true" />
+            <span>{t('newAgent.subagentUnder', { name: parent.title })}</span>
+          </p>
+        )}
+        {!parent && herdrs.length > 1 && (
           <label className="field">
             <span>{t('newAgent.where')}</span>
             <select
@@ -176,6 +218,19 @@ export function NewAgentDialog({ sessions, onDone, onOpen, onClose }: { sessions
               ))}
             </select>
           </label>
+        )}
+        {parent && (
+          <div className="field">
+            <span>{t('newAgent.placement')}</span>
+            <div className="seg" role="radiogroup" aria-label={t('newAgent.placement')}>
+              {(['split', 'workspace'] as const).map((p) => (
+                <button key={p} type="button" role="radio" aria-checked={placement === p} aria-pressed={placement === p} onClick={() => setPlacement(p)}>
+                  {t(`newAgent.placement.${p}`)}
+                </button>
+              ))}
+            </div>
+            <p className="hint">{t(`newAgent.placementHint.${placement}`)}</p>
+          </div>
         )}
         <label className="field">
           <span>{t('newAgent.dir')}</span>
@@ -222,7 +277,7 @@ export function NewAgentDialog({ sessions, onDone, onOpen, onClose }: { sessions
         )}
         <label className="field">
           <span>{t('newAgent.label')}</span>
-          <input className="input" value={label} maxLength={40} placeholder={t('newAgent.labelHint')} onChange={(e) => setLabel(e.target.value)} />
+          <input className="input" value={label} maxLength={40} placeholder={t(parent && placement === 'split' ? 'newAgent.labelHintSplit' : 'newAgent.labelHint')} onChange={(e) => setLabel(e.target.value)} />
         </label>
         {/* (OpenCode: going on with an old conversation is not offered here — said, not just missing.) */}
         {kind === 'opencode' && <p className="hint">{t('newAgent.noResumeOpencode')}</p>}

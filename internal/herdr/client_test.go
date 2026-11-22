@@ -166,6 +166,8 @@ func TestDialGivesUpOnSilentHost(t *testing.T) {
 func TestSnapshotTokensAndReportMetadata(t *testing.T) {
 	srv := testutil.StartSSHServer(t, "alice", "alice-pass", t.TempDir())
 	var gotEnv map[string]string
+	var gotSplitTarget, gotSplitDir, gotSplitCwd string
+	var gotSplitEnv map[string]string
 	var gotTokens map[string]string
 	var gotSource string
 	var gotTTL int64
@@ -206,6 +208,17 @@ func TestSnapshotTokensAndReportMetadata(t *testing.T) {
 				gotEnv = p.Env
 				resp := `{"id":"` + req.ID + `","result":{"workspace":{"workspace_id":"w2"},"root_pane":{"pane_id":"w2:p1","terminal_id":"term-9"}}}` + "\n"
 				_, _ = ch.Write([]byte(resp))
+			case "pane.split":
+				var p struct {
+					TargetPaneID string            `json:"target_pane_id"`
+					Direction    string            `json:"direction"`
+					Cwd          string            `json:"cwd"`
+					Env          map[string]string `json:"env"`
+				}
+				_ = json.Unmarshal(req.Params, &p)
+				gotSplitTarget, gotSplitDir, gotSplitCwd, gotSplitEnv = p.TargetPaneID, p.Direction, p.Cwd, p.Env
+				resp := `{"id":"` + req.ID + `","result":{"type":"pane_info","pane":{"pane_id":"w1:p3","workspace_id":"w1","terminal_id":"term-10"}}}` + "\n"
+				_, _ = ch.Write([]byte(resp))
 			case "pane.report_metadata":
 				var p struct {
 					Source string            `json:"source"`
@@ -245,6 +258,16 @@ func TestSnapshotTokensAndReportMetadata(t *testing.T) {
 	cl2.Close()
 	if err != nil || ws != "w2" || pane != "w2:p1" || termID != "term-9" || gotEnv["CORRAL_PARENT_PANE"] != "w1:p1" {
 		t.Fatalf("CreateWorkspaceWithEnv: ws=%s pane=%s term=%s env=%v err=%v", ws, pane, termID, gotEnv, err)
+	}
+
+	clSplit, err := Dial(ctx, c, "/run/herdr.sock")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sws, spane, sterm, err := clSplit.SplitPaneWithEnv(ctx, "w1:p1", "right", "/tmp/work", map[string]string{"CORRAL_PARENT_PANE": "w1:p1"})
+	clSplit.Close()
+	if err != nil || sws != "w1" || spane != "w1:p3" || sterm != "term-10" || gotSplitTarget != "w1:p1" || gotSplitDir != "right" || gotSplitCwd != "/tmp/work" || gotSplitEnv["CORRAL_PARENT_PANE"] != "w1:p1" {
+		t.Fatalf("SplitPaneWithEnv: ws=%s pane=%s term=%s target=%s dir=%s cwd=%s env=%v err=%v", sws, spane, sterm, gotSplitTarget, gotSplitDir, gotSplitCwd, gotSplitEnv, err)
 	}
 
 	cl3, err := Dial(ctx, c, "/run/herdr.sock")

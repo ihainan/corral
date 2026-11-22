@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState, type ReactNode } from 'react'
-import { ArrowDown, ArrowUp, ArrowUpToLine, ChevronLeft, CircleStop, Code2, Copy, Eye, FoldVertical, GitBranch, Globe, History, Languages, MessageSquarePlus, Paperclip, Pencil, Pin, PinOff, Plus, Power, Square, SquareSlash, SquareTerminal, TextCursorInput, Unlink } from 'lucide-react'
+import { ArrowDown, ArrowLeftRight, ArrowUp, ArrowUpToLine, ChevronLeft, CircleStop, Code2, Columns2, Copy, Eye, FoldVertical, GitBranch, GitFork, Globe, History, Languages, Maximize2, MessageSquarePlus, Paperclip, Pencil, Pin, PinOff, Plus, Power, Square, SquareSlash, SquareTerminal, TextCursorInput, Unlink, X } from 'lucide-react'
 import { api, ApiError, authGen, errorText, onAuthChange, uploadFile, type SessionInfo } from '../api'
 import { useSession } from '../app'
 import { t, type I18nKey } from '../i18n'
@@ -18,10 +18,10 @@ import { useCompletion } from '../terminal/Completion'
 import { PanelWindow } from '../terminal/PanelWindow'
 import { convoTarget, herdrTarget, InlineReply } from '../terminal/ReplyDialog'
 import { SessionOpDialog, type SessionOp } from '../terminal/sessionOps'
-import { NEW_AGENT, NewAgentDialog } from '../terminal/newAgent'
+import { NEW_AGENT, NewAgentDialog, type NewSubagentParent } from '../terminal/newAgent'
 import { type CodexRewind, ForkDialog, RenameDialog, type RenameTarget } from '../terminal/agentOps'
 import { agentWho, ChimeCounter, chime, countsOf } from '../terminal/chime'
-import { AgentList, CODEX_EFFORTS, ConversationView, glanceOf, type ConvoAgent, type ConvoListRow, type ConvoPending, type ConvoWent, type FileActs, type ModelOpt } from '../terminal/Conversation'
+import { AgentList, CODEX_EFFORTS, ConversationView, glanceOf, type ConvoAgent, type ConvoLineageBar, type ConvoListRow, type ConvoPending, type ConvoSplitPane, type ConvoWent, type FileActs, type ModelOpt } from '../terminal/Conversation'
 import { saveTranslateConfig, useTranslateConfig } from '../terminal/thoughtTranslate'
 import { FilesDialog } from '../terminal/FilesDialog'
 import { PortsDialog } from '../terminal/PortsDialog'
@@ -389,24 +389,97 @@ export function AgentsChat({ bar, active = true }: { bar?: ReactNode; active?: b
       navigate(chatAddress(e), false, FROM_LIST) // (down the ladder: an entry)
     } else navigate(chatAddress(e), true, history.state) // (another, in its place: its mark kept, wide or not)
   }
-  // A new agent (asked from the list): once started, it is gone to, its
-  // first message waiting in its composer.
-  const [newAgent, setNewAgent] = useState(false)
+  // A new agent (or subagent) asked from the list or row menu: once started, it
+  // is gone to (or opened in split view when spawned under the active parent on desktop),
+  // its first message waiting in its composer.
+  const [newAgent, setNewAgent] = useState<boolean | NewSubagentParent>(false)
   useEffect(() => {
     const on = () => active && setNewAgent(true)
     window.addEventListener(NEW_AGENT, on)
     return () => window.removeEventListener(NEW_AGENT, on)
   }, [active])
+  // Split-screen secondary agent (desktop only): lets users view parent & subagent
+  // (or any two agents) side by side in Chat Mode.
+  const [splitKey, setSplitKey] = useState<string | null>(null)
+  const [focusedPane, setFocusedPane] = useState<'primary' | 'secondary'>('primary')
+  const splitEntry = !stack && splitKey && cur && splitKey !== cur.key ? entries.find((e) => e.key === splitKey) : undefined
+  useEffect(() => {
+    if (stack && splitKey) {
+      setSplitKey(null)
+      setFocusedPane('primary')
+    }
+  }, [stack, splitKey])
+  useEffect(() => {
+    if (!splitKey) return
+    if (cur && splitKey === cur.key) {
+      setSplitKey(null)
+      setFocusedPane('primary')
+      return
+    }
+    if (!sessions || sessions.some((x) => x.persistence === 'herdr' && (x.meta?.t !== 'herdr' || x.meta.lost))) return
+    if (!entries.some((e) => e.key === splitKey)) {
+      setSplitKey(null)
+      setFocusedPane('primary')
+    }
+  }, [splitKey, cur, sessions, entries])
+  const openSplit = (e: Entry) => {
+    if (stack || !cur) {
+      choose(e)
+      return
+    }
+    if (e.key === cur.key) {
+      setFocusedPane('primary')
+      return
+    }
+    setSplitKey(e.key)
+    setFocusedPane('secondary')
+  }
+  const openParentChildSplit = (parent: Entry, child: Entry) => {
+    if (stack) {
+      choose(parent)
+      return
+    }
+    choose(parent)
+    setSplitKey(child.key)
+    setFocusedPane('secondary')
+  }
+  const closeSplit = () => {
+    setSplitKey(null)
+    setFocusedPane('primary')
+  }
+  const swapSplit = () => {
+    if (!cur || !splitEntry) return
+    const prevCur = cur
+    const prevSplit = splitEntry
+    choose(prevSplit)
+    setSplitKey(prevCur.key)
+  }
+  const expandSplit = () => {
+    if (!splitEntry) return
+    const target = splitEntry
+    setSplitKey(null)
+    setFocusedPane('primary')
+    choose(target)
+  }
+  const chooseFromList = (e: Entry) => {
+    if (splitEntry && e.key === splitEntry.key) {
+      setFocusedPane('secondary')
+      return
+    }
+    choose(e)
+    setFocusedPane('primary')
+  }
   // An alert tapped while a dialog was up here: held, said over the page, gone to when asked.
   const [held, setHeld] = useState(() => !!heldOpen())
   useEffect(() => onHeldOpen(() => setHeld(!!heldOpen())), [])
   // (Gone to once the list has it: before, the list of before would put another in front.)
-  const [arriving, setArriving] = useState<{ s: SessionInfo; pane: string; key: string; until: number; late?: boolean } | null>(null)
-  const started = (s: SessionInfo, pane: string, first: string) => {
+  const [arriving, setArriving] = useState<{ s: SessionInfo; pane: string; key: string; until: number; late?: boolean; openInSplit?: boolean } | null>(null)
+  const started = (s: SessionInfo, pane: string, first: string, parent?: NewSubagentParent) => {
     setNewAgent(false)
     const key = s.persistence === 'tmux' ? tmuxKey(s) : agentKey(s, pane) // (a tmux session of its own: its row)
     if (first) keepDraft('agents ' + key, first)
-    setArriving({ s, pane, key, until: Date.now() + 30000 })
+    const openInSplit = !stack && !!parent && !!cur && cur.s.id === parent.sessionId && cur.pane === parent.pane
+    setArriving({ s, pane, key, until: Date.now() + 30000, openInSplit })
     // (Read again at once and in a second — herdr's summary takes a moment to have it: not at the next read, seconds on. 11-14.)
     readSessionsNow()
     setTimeout(readSessionsNow, 1000)
@@ -415,8 +488,14 @@ export function AgentsChat({ bar, active = true }: { bar?: ReactNode; active?: b
     if (!arriving) return
     const e = entries.find((x) => x.key === arriving.key)
     if (e) {
+      const asSplit = arriving.openInSplit && !stack && cur && cur.key !== e.key
       setArriving(null)
-      choose(e)
+      if (asSplit) {
+        setSplitKey(e.key)
+        setFocusedPane('secondary')
+      } else {
+        choose(e)
+      }
       return
     }
     // (Not there in time: said so, with a way to look again or to its terminal — not dropped without a word.)
@@ -611,6 +690,48 @@ export function AgentsChat({ bar, active = true }: { bar?: ReactNode; active?: b
     )
   } else {
     const k = cur.key // (its state by the agent, whichever connection shows it)
+    const secondaryNode = splitEntry ? (() => {
+      const sk = splitEntry.key
+      return (
+        <AgentChat
+          key={'split ' + sk + ' ' + splitEntry.s.id}
+          cur={splitEntry}
+          entries={entries}
+          all={sessions ?? []}
+          titles={titles.current}
+          onPick={(e) => {
+            if (e.key === cur.key) setFocusedPane('primary')
+            else openSplit(e)
+          }}
+          active={active}
+          keysActive={active && focusedPane === 'secondary'}
+          isSecondary
+          primaryKey={cur.key}
+          splitKey={splitEntry.key}
+          onSplitOpen={openSplit}
+          onSplitClose={closeSplit}
+          onSplitSwap={swapSplit}
+          onSplitExpand={expandSplit}
+          onNewSubagent={(p) => setNewAgent(p)}
+          toast={toast}
+          composerEnter={prefs.composerEnter}
+          sent={sentBy[sk] ?? []}
+          setSent={(f) => setSentBy((all) => ({ ...all, [sk]: f(all[sk] ?? []) }))}
+          sending={!!sendingBy[sk]}
+          setSending={(v) => setSendingBy((all) => ({ ...all, [sk]: v }))}
+          draft={draftBy[sk]}
+          setDraftShown={(f) => setDraftBy((all) => ({ ...all, [sk]: f(all[sk]) }))}
+          used={usedBy.current.get(sk) ?? usedBy.current.set(sk, new Map()).get(sk)!}
+          query={sideQuery}
+          onQuery={setSideQuery}
+          onStarted={started}
+          onClosed={(key) => {
+            setGone((g) => new Set(g).add(key))
+            if (splitKey === key) closeSplit()
+          }}
+        />
+      )
+    })() : null
     body = (
       <AgentChat
         key={k + ' ' + cur.s.id}
@@ -618,8 +739,15 @@ export function AgentsChat({ bar, active = true }: { bar?: ReactNode; active?: b
         entries={entries}
         all={sessions ?? []}
         titles={titles.current}
-        onPick={choose}
+        onPick={chooseFromList}
         active={active}
+        keysActive={active && (!splitEntry || focusedPane === 'primary')}
+        splitPane={secondaryNode ? { node: secondaryNode, focused: focusedPane, onFocus: setFocusedPane } : undefined}
+        splitKey={splitEntry?.key ?? null}
+        onSplitOpen={!stack ? openSplit : undefined}
+        onSplitParentChild={!stack ? openParentChildSplit : undefined}
+        onSplitClose={closeSplit}
+        onNewSubagent={(p) => setNewAgent(p)}
         toast={toast}
         composerEnter={prefs.composerEnter}
         sent={sentBy[k] ?? []}
@@ -634,6 +762,7 @@ export function AgentsChat({ bar, active = true }: { bar?: ReactNode; active?: b
         onStarted={started}
         onClosed={(key) => {
           setGone((g) => new Set(g).add(key))
+          if (splitKey === key) closeSplit()
           // (A phone: back to the list, if it is still the one in front; else the next is shown.)
           if (stack && lastCur.current?.key === key) toList()
         }}
@@ -650,7 +779,15 @@ export function AgentsChat({ bar, active = true }: { bar?: ReactNode; active?: b
 
   return (
     <div className={'term-root agents-chat ' + (scheme.dark ? 'dark' : 'light') + (active ? '' : ' inactive') + (stack ? ' is-stack is-' + screen : '')} inert={!active} aria-hidden={active ? undefined : true} style={chromeVars(scheme) as React.CSSProperties} ref={rootRef}>
-      {newAgent && sessions && <NewAgentDialog sessions={sessions} onDone={started} onOpen={(s, pane) => (setNewAgent(false), choose({ s, pane, key: agentKey(s, pane) }))} onClose={() => setNewAgent(false)} />}
+      {newAgent && sessions && (
+        <NewAgentDialog
+          sessions={sessions}
+          parent={typeof newAgent === 'object' ? newAgent : undefined}
+          onDone={started}
+          onOpen={(s, pane) => (setNewAgent(false), choose({ s, pane, key: agentKey(s, pane) }))}
+          onClose={() => setNewAgent(false)}
+        />
+      )}
       {/* (A phone's conversation has its way back in its own bar.) */}
       {/* (The tabs in the bar the terminals have, with its way back to the hosts.) */}
       {bar ? (
@@ -870,7 +1007,7 @@ const tmuxCmdsOf = (e: Entry): RowCmds | undefined => {
 
 // The conversation of one agent, and what is sent to it. Keyed by the
 // agent: nothing of another's (its draft, what was sent, a stop) carries over.
-function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerEnter, sent, setSent, sending, setSending, draft: shownDraft, setDraftShown, used, lead, onClosed, onStarted, query, onQuery }: {
+function AgentChat({ cur, entries, all, titles, onPick, active, keysActive, isSecondary, primaryKey, splitPane, splitKey, onSplitOpen, onSplitParentChild, onSplitClose, onSplitSwap, onSplitExpand, onNewSubagent, toast, composerEnter, sent, setSent, sending, setSending, draft: shownDraft, setDraftShown, used, lead, onClosed, onStarted, query, onQuery }: {
   cur: Entry
   entries: Entry[]
   all: SessionInfo[]
@@ -884,14 +1021,26 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   used: Map<string, Set<number>> // per reading: the turns that confirmed one
   lead?: ReactNode
   onClosed: (key: string) => void // (a pane closed from here: this one's, or another's from its row's menu)
-  onStarted: (s: SessionInfo, pane: string, first: string) => void // (a copy of one started: gone to, its first message in its composer)
+  onStarted: (s: SessionInfo, pane: string, first: string, parent?: NewSubagentParent) => void // (a copy of one started: gone to, its first message in its composer)
   query: string // the side list's search
   onQuery: (q: string) => void
   onPick: (e: Entry) => void
   active: boolean
+  keysActive?: boolean
+  isSecondary?: boolean
+  primaryKey?: string
+  splitPane?: ConvoSplitPane
+  splitKey?: string | null
+  onSplitOpen?: (e: Entry) => void
+  onSplitParentChild?: (parent: Entry, child: Entry) => void
+  onSplitClose?: () => void
+  onSplitSwap?: () => void
+  onSplitExpand?: () => void
+  onNewSubagent?: (parent: NewSubagentParent) => void
   toast: (s: string, error?: boolean) => void
   composerEnter: string
 }) {
+  const kActive = keysActive ?? active
   const download = useDownload() // (a host file saved, and said so: picture.tsx)
   const { boot } = useSession()
   const [portsOpen, setPortsOpen] = useState(false)
@@ -1205,14 +1354,14 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
         const st = current && agent && !r.bg ? agent.status : r.status
         const parentKey = r.lost || !r.a.parent_pane ? undefined : agentKey(e.s, r.a.parent_pane)
         const sameWsParent = !!parentKey && wsByKey.get(parentKey) === r.wsId
-        return { key: e.key, ...labelOf(e, said, hosts, !!named, sameWsParent), now: r.lost || r.bg || st !== 'blocked' ? undefined : glanceOf(e.s.id, e.pane, st, r.a.since) || undefined /* (said only of one waiting on the person) */, program: r.a.agent, status: st, liveStatus: st, bg: r.lost ? undefined : r.bg, cmds: cmdsOf(r), since: r.lost ? undefined : r.bg ? r.a.bg_since : r.a.since, current, pinned: pinAt(e.key), projectKey: normalizeProjectPath(r.a.cwd), sessionGroup: sessionGroupOf(e, all), parentKey, lineageSource: r.lost ? undefined : r.a.lineage_source, onPick: () => onPick(e), menu: () => rowMenu.current(e) }
+        return { key: e.key, ...labelOf(e, said, hosts, !!named, sameWsParent), now: r.lost || r.bg || st !== 'blocked' ? undefined : glanceOf(e.s.id, e.pane, st, r.a.since) || undefined /* (said only of one waiting on the person) */, program: r.a.agent, status: st, liveStatus: st, bg: r.lost ? undefined : r.bg, cmds: cmdsOf(r), since: r.lost ? undefined : r.bg ? r.a.bg_since : r.a.since, current, inSplit: !isSecondary && !!splitKey && e.key === splitKey, pinned: pinAt(e.key), projectKey: normalizeProjectPath(r.a.cwd), sessionGroup: sessionGroupOf(e, all), parentKey, lineageSource: r.lost ? undefined : r.a.lineage_source, onPick: () => onPick(e), menu: () => rowMenu.current(e) }
       }
       const title = (current && agent?.title) || keptTitle(titles, e) || `${e.s.host_name} · ${sessionWhich(e.s, all)}`
-      return { key: e.key, title, where: whereOf(e, hosts), program: current ? agent?.program : undefined, status: current && agent ? agent.status : 'unknown', cmds: current ? agent?.cmds : tmuxCmdsOf(e), current, pinned: pinAt(e.key), sessionGroup: sessionGroupOf(e, all), onPick: () => onPick(e), menu: () => rowMenu.current(e) }
+      return { key: e.key, title, where: whereOf(e, hosts), program: current ? agent?.program : undefined, status: current && agent ? agent.status : 'unknown', cmds: current ? agent?.cmds : tmuxCmdsOf(e), current, inSplit: !isSecondary && !!splitKey && e.key === splitKey, pinned: pinAt(e.key), sessionGroup: sessionGroupOf(e, all), onPick: () => onPick(e), menu: () => rowMenu.current(e) }
     })
     return placedAs ? out.map((r) => (r.current ? { ...r, placeAs: placedAs } : r)) : out
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [entries, cur, agent, convoTitle, all, titles, onPick, placedAs, pins])
+  }, [entries, cur, agent, convoTitle, all, titles, onPick, placedAs, pins, splitKey, isSecondary])
   const shown = rows.find((r) => r.current)
   const known = !!shown && shown.status !== 'unknown'
   useEffect(() => {
@@ -1758,13 +1907,13 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   // (Another agent picked with the keyboard, or the page back in front: its
   // box takes the keys, as the terminal's does. Not from a dialog over it.)
   useEffect(() => {
-    if (!active || !hasKeyboardPointer()) return
+    if (!kActive || !hasKeyboardPointer()) return
     const frame = requestAnimationFrame(() => {
       const at = document.activeElement
       if ((!at || at === document.body) && !document.querySelector('[aria-modal="true"]')) field.current?.focus()
     })
     return () => cancelAnimationFrame(frame)
-  }, [active])
+  }, [kActive])
   // Text put in where the cursor is (or at the end, the field away).
   // (A path put in the composer as the agent takes one: quoted for a shell, or Gemini's @path.)
   const insertPath = (p: string) => {
@@ -2670,13 +2819,40 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       },
     }
   }
+  const subagentParentOf = (e: Entry): NewSubagentParent | null => {
+    const r = e.row
+    if (e.s.persistence !== 'herdr' || !r || r.lost) return null
+    const match = rows.find((x) => x.key === e.key)
+    return {
+      sessionId: e.s.id,
+      pane: r.a.pane_id,
+      title: match?.title || (r.ws && r.ws !== '~' ? r.ws : '') || dirName(r.a.cwd) || r.a.agent,
+      dir: r.a.cwd || '~/',
+      ws: r.ws,
+    }
+  }
+  const newSubagentItem = (e: Entry): MenuItem | null => {
+    if (!onNewSubagent) return null
+    const p = subagentParentOf(e)
+    if (!p) return null
+    return { label: t('newAgent.subagentItem'), icon: <GitFork size={16} />, onSelect: () => onNewSubagent(p) }
+  }
+  const splitRowItem = (e: Entry): MenuItem | null => {
+    if (lead || !onSplitOpen || e.key === cur.key) return null
+    if (splitKey === e.key && onSplitClose) {
+      return { label: t('convo.split.close'), icon: <Columns2 size={16} />, onSelect: onSplitClose }
+    }
+    return { label: t('convo.split.open'), icon: <Columns2 size={16} />, onSelect: () => onSplitOpen(e) }
+  }
   // (Claude Code's own commands on it are not there: they are of the one
   // shown, its process known.)
   rowMenu.current = (e) => [
     { label: t('convo.showTerminal'), icon: <SquareTerminal size={16} />, onSelect: terminalOf(e) },
+    splitRowItem(e),
     pinItem(e.key),
     ...pinReorderItems(e.key),
     forkItem(e),
+    newSubagentItem(e),
     renameItem(e),
     unlinkItem(e),
     closable(e) ? { label: t('agents.close'), icon: <Power size={16} />, danger: true, separator: true, onSelect: () => setClosing(e) } : null,
@@ -2700,6 +2876,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
     pinItem(cur.key),
     // (Within its group here: no rule of its own, as it has in a row's menu.)
     ((f) => f && { ...f, separator: false })(forkItem(cur)),
+    newSubagentItem(cur),
     renameItem(cur),
     unlinkItem(cur),
     { label: t(translateCfg?.enabled ? 'convo.translate.off' : 'convo.translate.on'), icon: <Languages size={16} />, onSelect: toggleTranslate },
@@ -2735,6 +2912,65 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
         : null)(convo.bind?.session),
     canClose ? { label: t('agents.close'), icon: <Power size={16} />, danger: true, separator: true, onSelect: () => setClosing(cur) } : null,
   ]
+  const curLineageRow = rows.find((r) => r.current)
+  const parentLineageRow = curLineageRow?.parentKey ? rows.find((r) => r.key === curLineageRow.parentKey) : undefined
+  const parentLineageEntry = parentLineageRow ? entries.find((e) => e.key === parentLineageRow.key) : undefined
+  const childLineageRows = curLineageRow ? rows.filter((r) => r.parentKey === curLineageRow.key) : []
+  const curSubagentParent = subagentParentOf(cur)
+  const lineageBar: ConvoLineageBar | undefined =
+    parentLineageRow || childLineageRows.length
+      ? {
+          parent: parentLineageRow
+            ? {
+                key: parentLineageRow.key,
+                title: parentLineageRow.title,
+                status: parentLineageRow.liveStatus ?? parentLineageRow.status,
+                onPick: parentLineageRow.onPick,
+              }
+            : undefined,
+          children: childLineageRows.map((c) => ({
+            key: c.key,
+            title: c.title,
+            where: c.where,
+            status: c.liveStatus ?? c.status,
+            onPick: c.onPick,
+          })),
+          splitKey: isSecondary ? primaryKey : (splitKey ?? undefined),
+          canSplit: !isSecondary && !lead && !!onSplitOpen,
+          onSplitChild:
+            !isSecondary && onSplitOpen
+              ? (key) => {
+                  const target = entries.find((e) => e.key === key)
+                  if (target) onSplitOpen(target)
+                }
+              : undefined,
+          onSplitWithParent:
+            !isSecondary && parentLineageEntry && onSplitParentChild
+              ? () => onSplitParentChild(parentLineageEntry, cur)
+              : undefined,
+          onCloseSplit: !isSecondary ? onSplitClose : undefined,
+          onNewSubagent: curSubagentParent && onNewSubagent ? () => onNewSubagent(curSubagentParent) : undefined,
+        }
+      : undefined
+  const barExtra = isSecondary ? (
+    <>
+      {onSplitSwap && (
+        <button type="button" className="icon-btn convo-bar-split-act" onClick={onSplitSwap} aria-label={t('convo.split.swap')} title={t('convo.split.swap')}>
+          <ArrowLeftRight size={16} aria-hidden="true" />
+        </button>
+      )}
+      {onSplitExpand && (
+        <button type="button" className="icon-btn convo-bar-split-act" onClick={onSplitExpand} aria-label={t('convo.split.expand')} title={t('convo.split.expand')}>
+          <Maximize2 size={15} aria-hidden="true" />
+        </button>
+      )}
+      {onSplitClose && (
+        <button type="button" className="icon-btn convo-bar-split-act" onClick={onSplitClose} aria-label={t('convo.split.close')} title={t('convo.split.close')}>
+          <X size={16} aria-hidden="true" />
+        </button>
+      )}
+    </>
+  ) : undefined
   // (Files dropped on the conversation go up as picked ones do.)
   const dropping = (e: React.DragEvent) => e.dataTransfer.types.includes('Files')
   return (
@@ -2768,7 +3004,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       ask={
         waits && replyTo ? (
           // (One a pane, and a process in it: nothing of another's carries over. Not tied to a terminal: no size to wait for.)
-          <InlineReply key={replyTo.key} target={replyTo} resizedAt={0} active={active} held={() => false} call={asked} pending={pendingCall} onAnswered={(yes) => {
+          <InlineReply key={replyTo.key} target={replyTo} resizedAt={0} active={kActive} held={() => false} call={asked} pending={pendingCall} onAnswered={(yes) => {
             setAnswered(yes)
             // (Answered: not waiting in the list and the title either, at once — not at its next read. 11-14.)
             const pane = cur.pane
@@ -2782,8 +3018,12 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       // for the name.)
       onStop={canPress && !lead && (!!draft.trim() || !!up || askHides) ? () => press('stop') : undefined}
       stop={said?.what === 'stop' && said.bind === bindKey ? said.text : undefined}
-      side={{ rows }}
+      side={isSecondary ? undefined : { rows }}
       active={active}
+      keysActive={kActive}
+      splitPane={isSecondary ? undefined : splitPane}
+      barExtra={barExtra}
+      lineageBar={lineageBar}
       onDismiss={(id) => setSent((ps) => ps.filter((p) => p.id !== id))}
       onResend={(id) => {
         const p = sent.find((q) => q.id === id)

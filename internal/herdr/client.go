@@ -424,6 +424,37 @@ func (c *Client) Split(ctx context.Context, direction string) error {
 	return c.Call(ctx, "pane.split", map[string]any{"direction": direction, "focus": true}, nil)
 }
 
+// SplitPaneWithEnv splits targetPaneID ("right" or "down") without stealing
+// focus, optionally setting cwd and env vars on the new pane, and returns the
+// workspace id, new pane id, and new pane terminal id.
+func (c *Client) SplitPaneWithEnv(ctx context.Context, targetPaneID, direction, cwd string, env map[string]string) (workspace, pane, terminalID string, err error) {
+	if direction == "" {
+		direction = "right"
+	}
+	var res struct {
+		Pane struct {
+			ID          string `json:"pane_id"`
+			WorkspaceID string `json:"workspace_id"`
+			TerminalID  string `json:"terminal_id"`
+		} `json:"pane"`
+	}
+	params := map[string]any{
+		"direction":      direction,
+		"target_pane_id": targetPaneID,
+		"focus":          false,
+	}
+	if cwd != "" {
+		params["cwd"] = cwd
+	}
+	if len(env) > 0 {
+		params["env"] = env
+	}
+	if err := c.Call(ctx, "pane.split", params, &res); err != nil {
+		return "", "", "", err
+	}
+	return res.Pane.WorkspaceID, res.Pane.ID, res.Pane.TerminalID, nil
+}
+
 // FocusDirection focuses the pane next to the focused one: "left", "right",
 // "up" or "down".
 func (c *Client) FocusDirection(ctx context.Context, direction string) error {

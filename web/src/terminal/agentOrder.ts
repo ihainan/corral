@@ -31,6 +31,7 @@ export interface ConvoListRow {
   cmds?: RowCmds // (its turn over: commands it left running in the background)
   since?: number // (unix ms) when its status last changed
   current: boolean
+  inSplit?: boolean // currently shown in the right split pane
   placeAs?: { status: ConvoListRow['status']; since?: number; cmds?: RowCmds } // (the one shown: where it is placed meanwhile, see asHeld)
   pinned?: number // pinned at the top: its place among the pinned (the order they were pinned)
   projectKey?: string // normalized working directory path (for "Group by project")

@@ -83,10 +83,13 @@ func (s *Server) apiNewAgent(w http.ResponseWriter, r *http.Request) {
 		Clear      bool   `json:"clear"`       // (its input emptied after: the message taken to the page's own)
 		Worktree   bool   `json:"worktree"`    // (not with resume: a session taken up stays where it was)
 		ParentPane string `json:"parent_pane"` // (optional herdr parent pane to record corral_spawn lineage)
+		Placement  string `json:"placement"`   // ("workspace" (default) or "split" inside parent_pane's workspace)
 		Key        string `json:"key"`
 	}
 	if err := readJSON(r, &b); err != nil || !agentKinds[b.Kind] || !newAgentKey.MatchString(b.Key) ||
 		(b.ParentPane != "" && !herdrPaneID.MatchString(b.ParentPane)) ||
+		(b.Placement != "" && b.Placement != "workspace" && b.Placement != "split") ||
+		(b.Placement == "split" && b.ParentPane == "") ||
 		(b.Resume != "" && (!sessionUUID.MatchString(b.Resume) || b.Kind != "claude" && b.Kind != "codex" && b.Kind != "agy")) ||
 		(b.Fork && (b.Resume == "" || b.Kind == "agy")) || (b.At != "" && (!b.Fork || b.Kind != "claude" || !sessionUUID.MatchString(b.At))) ||
 		(b.Worktree && (worktreeFlag[b.Kind] == "" || b.Resume != "")) ||
@@ -104,6 +107,10 @@ func (s *Server) apiNewAgent(w http.ResponseWriter, r *http.Request) {
 	var sess *term.Session
 	var socket string
 	if ts, err := s.terms.Get(currentUser(r).ID, r.PathValue("id")); err == nil && ts.Persistence == "tmux" {
+		if b.Placement == "split" {
+			writeError(w, http.StatusConflict, "unsupported", "split subagent is only supported in herdr sessions")
+			return
+		}
 		if ts.State() != term.StateRunning {
 			writeError(w, http.StatusConflict, "not_running", "this session is not running")
 			return
@@ -136,7 +143,7 @@ func (s *Server) apiNewAgent(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), newAgentWait+30*time.Second)
 	defer cancel()
 	rec := &recorder{header: http.Header{}}
-	s.newAgent(ctx, rec, sess, socket, dir, b.Kind, b.Label, agentStart{resume: b.Resume, fork: b.Fork, at: b.At, worktree: b.Worktree, back: b.Back, atText: b.AtText, clear: b.Clear, parentPane: b.ParentPane, key: b.Key})
+	s.newAgent(ctx, rec, sess, socket, dir, b.Kind, b.Label, agentStart{resume: b.Resume, fork: b.Fork, at: b.At, worktree: b.Worktree, back: b.Back, atText: b.AtText, clear: b.Clear, parentPane: b.ParentPane, placement: b.Placement, key: b.Key})
 	s.newAgents.finish(key, who, run, rec.status, rec.body.Bytes())
 	for k, v := range rec.header {
 		w.Header()[k] = v
@@ -149,7 +156,7 @@ func (s *Server) apiNewAgent(w http.ResponseWriter, r *http.Request) {
 	}
 	actx, acancel := context.WithTimeout(context.WithoutCancel(r.Context()), 5*time.Second)
 	defer acancel()
-	s.audit(r.WithContext(actx), "agents.new", sess.HostName, map[string]any{"session": sess.ID, "kind": b.Kind, "resume": b.Resume != "", "fork": b.Fork, "at": b.At != "" || b.Back > 0, "worktree": b.Worktree, "outcome": outcome})
+	s.audit(r.WithContext(actx), "agents.new", sess.HostName, map[string]any{"session": sess.ID, "kind": b.Kind, "resume": b.Resume != "", "fork": b.Fork, "at": b.At != "" || b.Back > 0, "worktree": b.Worktree, "placement": b.Placement, "outcome": outcome})
 }
 
 // agentStart: how an agent is started: anew (in a worktree of its own, or
@@ -164,6 +171,7 @@ type agentStart struct {
 	atText     string // (its words)
 	clear      bool   // (its input emptied once seen holding them)
 	parentPane string // (optional herdr parent pane for corral_spawn lineage)
+	placement  string // ("workspace" or "split")
 	key        string // (idempotency key, reused as spawn evidence_key)
 }
 
@@ -210,6 +218,7 @@ func (s *Server) newAgent(ctx context.Context, w http.ResponseWriter, sess *term
 		writeFileError(w, err)
 		return
 	}
+	rawLabel := cleanAgentLabel(label)
 	label = agentLabel(label, dir)
 	// Claude Code's: its log (up to a message, where one is named) a
 	// session of its own, taken up as one. (Gone again where no agent was
@@ -285,12 +294,25 @@ func (s *Server) newAgent(ctx context.Context, w http.ResponseWriter, sess *term
 			}
 		}
 	}
+	if how.placement == "split" && !hasParent {
+		keep = false
+		writeError(w, http.StatusNotFound, "not_found", "parent pane was not found in this herdr session")
+		return
+	}
 	c := herdrDial(w, ctx, sess, socket)
 	if c == nil {
 		keep = false
 		return
 	}
-	ws, pane, termID, err := c.CreateWorkspaceWithEnv(ctx, dir, label, spawnEnv)
+	var ws, pane, termID string
+	if how.placement == "split" {
+		ws, pane, termID, err = c.SplitPaneWithEnv(ctx, how.parentPane, "right", dir, spawnEnv)
+		if err == nil && rawLabel != "" && herdrPaneID.MatchString(pane) {
+			_ = c.RenamePane(ctx, pane, rawLabel)
+		}
+	} else {
+		ws, pane, termID, err = c.CreateWorkspaceWithEnv(ctx, dir, label, spawnEnv)
+	}
 	c.Close()
 	var apiErr *herdr.APIError
 	switch {
@@ -307,11 +329,20 @@ func (s *Server) newAgent(ctx context.Context, w http.ResponseWriter, sess *term
 	}
 	// The agent: started by herdr's own start (which waits until herdr
 	// finds it ready, not just started), told plainly whether it failed.
-	failed, why := s.startAgent(ctx, sess, socket, pane, agentName(label, kind), kind, how)
+	startName := agentName(label, kind)
+	if how.placement == "split" && rawLabel == "" {
+		startName = agentName(kind, kind)
+	}
+	failed, why := s.startAgent(ctx, sess, socket, pane, startName, kind, how)
 	switch {
 	case failed:
 		keep = false
-		closed := s.closeWorkspace(sess, socket, ws) == nil
+		var closed bool
+		if how.placement == "split" {
+			closed = s.closePane(sess, socket, pane) == nil
+		} else {
+			closed = s.closeWorkspace(sess, socket, ws) == nil
+		}
 		writeErrorExtra(w, http.StatusUnprocessableEntity, "start_failed", why, map[string]any{"closed": closed, "workspace": ws})
 	case why != "":
 		// (Started or not, it cannot be told: left as it is, for the person to see.)
@@ -490,6 +521,19 @@ func (s *Server) closeWorkspace(sess *term.Session, socket, ws string) error {
 	return c.CloseWorkspace(ctx, ws)
 }
 
+// closePane closes a split pane made for a subagent that failed to start,
+// leaving the parent workspace untouched.
+func (s *Server) closePane(sess *term.Session, socket, pane string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	c, err := herdr.Dial(ctx, sess.Client(), socket)
+	if err != nil {
+		return err
+	}
+	defer c.Close()
+	return c.ClosePane(ctx, pane)
+}
+
 func (a *newAgents) take(key, who string) (run *newAgentRun, first, busy bool) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -542,20 +586,28 @@ func agentDir(d string) (string, bool) {
 	return "", false
 }
 
-// agentLabel: the workspace's name, as asked for (without control
-// characters, at most maxAgentLabel), else the folder's own.
-func agentLabel(l, dir string) string {
+func cleanAgentLabel(l string) string {
 	l = strings.TrimSpace(strings.Map(func(r rune) rune {
 		if unicode.IsControl(r) {
 			return -1
 		}
 		return r
 	}, l))
-	if l == "" {
-		l = path.Base(dir)
-	}
 	if utf8.RuneCountInString(l) > maxAgentLabel {
 		l = string([]rune(l)[:maxAgentLabel])
+	}
+	return l
+}
+
+// agentLabel: the workspace's name, as asked for (without control
+// characters, at most maxAgentLabel), else the folder's own.
+func agentLabel(l, dir string) string {
+	l = cleanAgentLabel(l)
+	if l == "" {
+		l = path.Base(dir)
+		if utf8.RuneCountInString(l) > maxAgentLabel {
+			l = string([]rune(l)[:maxAgentLabel])
+		}
 	}
 	return l
 }

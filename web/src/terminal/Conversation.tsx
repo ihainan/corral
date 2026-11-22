@@ -1,5 +1,5 @@
 import { createContext, Fragment, memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { Activity, ArrowDown, ArrowDownAZ, ArrowUp, ArrowUpDown, Bot, Check, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, ChevronsDownUp, ChevronsUpDown, Clock, Copy, Cpu, Download, Eye, FilePen, FileText, Folder, FolderOpen, Gauge as GaugeIcon, GitBranch, GitFork, Hand, Image as ImageIcon, ImageOff, Info, Keyboard, ListChecks, ListOrdered, Loader, LogOut, MessageCircleQuestion, MessagesSquare, MoreHorizontal, MoreVertical, PanelLeft, PanelRight, Pin, Plus, Radar, RotateCw, Search, Server, ShieldOff, Sparkles, SquarePlus, SquareTerminal, Target, TextCursorInput, TriangleAlert, X } from 'lucide-react'
+import { Activity, ArrowDown, ArrowDownAZ, ArrowUp, ArrowUpDown, Bot, Check, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, ChevronsDownUp, ChevronsUpDown, Clock, Columns2, Copy, Cpu, Download, Eye, FilePen, FileText, Folder, FolderOpen, Gauge as GaugeIcon, GitBranch, GitFork, Hand, Image as ImageIcon, ImageOff, Info, Keyboard, ListChecks, ListOrdered, Loader, LogOut, MessageCircleQuestion, MessagesSquare, MoreHorizontal, MoreVertical, PanelLeft, PanelRight, Pin, Plus, Radar, RotateCw, Search, Server, ShieldOff, Sparkles, SquarePlus, SquareTerminal, Target, TextCursorInput, TriangleAlert, X } from 'lucide-react'
 import { t, getLang, type I18nKey } from '../i18n'
 import { api } from '../api'
 import { setPrefs, usePrefs } from '../prefs'
@@ -140,6 +140,9 @@ const SIDE_W_KEY = 'corral.convoSideWidth'
 const SIDE_W = 288
 const SIDE_W_MIN = 220
 const SIDE_W_MAX = 520
+const SPLIT_PCT_KEY = 'corral.convoSplitPct'
+const SPLIT_MIN_W = 760
+const clampSplitPct = (v: number) => Math.max(28, Math.min(72, Math.round(v * 10) / 10))
 // (The thread's own width the dock leaves it, beside it; less, the dock goes over it.)
 const DOCK_THREAD = 560
 // (The card's taps for the dock, numbered across the page's life: one taken is
@@ -205,6 +208,23 @@ function useRunWhileSeen(el: HTMLElement | null, on: boolean) {
 // (Where the side list was scrolled to, across the views made for each agent: see ConversationView.)
 let sideScrolled = 0
 
+export interface ConvoLineageBar {
+  parent?: { key: string; title: string; status: ConvoListRow['status']; onPick: () => void }
+  children: { key: string; title: string; where?: string; status: ConvoListRow['status']; onPick: () => void }[]
+  splitKey?: string
+  canSplit?: boolean
+  onSplitChild?: (key: string) => void
+  onSplitWithParent?: () => void
+  onCloseSplit?: () => void
+  onNewSubagent?: () => void
+}
+
+export interface ConvoSplitPane {
+  node: ReactNode
+  focused: 'primary' | 'secondary'
+  onFocus: (which: 'primary' | 'secondary') => void
+}
+
 export function ConversationView({
   convo,
   agent,
@@ -215,6 +235,10 @@ export function ConversationView({
   stop,
   side,
   active = true,
+  keysActive,
+  splitPane,
+  barExtra,
+  lineageBar,
   onDismiss,
   onEnter,
   onResend,
@@ -251,7 +275,11 @@ export function ConversationView({
   onStop?: () => void // (it works: press Esc in its pane)
   stop?: string // what became of the last stop pressed, to say
   side?: { rows: ConvoListRow[] } // the agents to go to: beside the thread where there is room, else from the bar
-  active?: boolean // (its tab is the one shown: keys are for it)
+  active?: boolean // (its tab is the one shown: polling & live updates run)
+  keysActive?: boolean // (defaults to active: per-pane keyboard shortcuts such as Ctrl+O, [, ], ?)
+  splitPane?: ConvoSplitPane // (optional secondary conversation shown side by side)
+  barExtra?: ReactNode // (optional action buttons in the top bar before more)
+  lineageBar?: ConvoLineageBar // (parent/child quick-jump & split actions)
   onDismiss: (id: number) => void
   onEnter?: (id: number) => Promise<boolean> // (a message seen still in the input: Enter for it, where it still is)
   onResend?: (id: number) => void // (one a subagent took in: back in the composer, to send to this one)
@@ -280,6 +308,7 @@ export function ConversationView({
   retrying?: { n: number; of: number; why?: string } | null // (a Codex's screen says its request failed and is tried again: its log silent meanwhile)
   reviewing?: string // (a Codex's approvals reviewer looks at this command now: its screen's word)
 }) {
+  const kActive = keysActive ?? active
   const working = agent?.status === 'working'
   const waits = agent?.status === 'blocked'
   // The list beside the thread: where the view is wide enough, unless folded away (kept on this device).
@@ -289,6 +318,28 @@ export function ConversationView({
   const [sideW, setSideW] = useState(() => Number(local.get(SIDE_W_KEY)) || SIDE_W)
   const sideWidth = sideWidthOf(sideW, viewW || SIDE_MIN)
   const sideEl = useRef<HTMLElement>(null)
+  const [splitPct, setSplitPct] = useState(() => {
+    const n = Number(local.get(SPLIT_PCT_KEY))
+    return Number.isFinite(n) && n >= 28 && n <= 72 ? n : 50
+  })
+  const panesEl = useRef<HTMLDivElement>(null)
+  const mainEl = useRef<HTMLDivElement>(null)
+  const keepSplitPct = (v: number) => {
+    const p = clampSplitPct(v)
+    setSplitPct(p)
+    if (p === 50) local.remove(SPLIT_PCT_KEY)
+    else local.set(SPLIT_PCT_KEY, String(p))
+    if (mainEl.current) mainEl.current.style.flex = `0 0 ${p}%`
+    return p
+  }
+  const splitDrag = useRef<{ id: number; x: number; pct: number; w: number; to: number; frame: number } | null>(null)
+  const endSplitDrag = (keep: boolean) => {
+    const d = splitDrag.current
+    if (!d) return
+    splitDrag.current = null
+    cancelAnimationFrame(d.frame)
+    keepSplitPct(keep ? d.to : d.pct)
+  }
   const keepSideW = (w: number) => {
     const v = sideWidthOf(w, viewW || SIDE_MIN)
     setSideW(v)
@@ -325,6 +376,21 @@ export function ConversationView({
     return () => ro.disconnect()
   }, [])
   const sideShown = !!side && wide && !folded
+  const splitShown = !!splitPane && (viewW === 0 || viewW >= SPLIT_MIN_W)
+  const wasSplit = useRef(false)
+  useEffect(() => {
+    const nowSplit = !!splitPane
+    if (nowSplit && !wasSplit.current && sideShown && viewW >= SPLIT_MIN_W && viewW < 1160) {
+      setFolded(true)
+    }
+    wasSplit.current = nowSplit
+  }, [splitPane, sideShown, viewW])
+  useEffect(() => {
+    if (!splitShown && splitDrag.current) {
+      cancelAnimationFrame(splitDrag.current.frame)
+      splitDrag.current = null
+    }
+  }, [splitShown])
   const sideShownNow = useRef(sideShown)
   // The side list as it was scrolled: this view is made anew for each agent
   // gone to (the agents page keys it by the agent), its list with it, which
@@ -525,7 +591,7 @@ export function ConversationView({
     })
   }, [])
   useEffect(() => {
-    if (!active) return
+    if (!kActive) return
     const onKey = (e: KeyboardEvent) => {
       // Allow Ctrl+O inside the chat composer too (just like Claude Code CLI),
       // while still leaving search inputs, dialogs, and embedded xterm untouched.
@@ -539,7 +605,7 @@ export function ConversationView({
     }
     window.addEventListener('keydown', onKey, true)
     return () => window.removeEventListener('keydown', onKey, true)
-  }, [active, toggleAllOpen])
+  }, [kActive, toggleAllOpen])
   // (Of turns no longer kept, nothing is.)
   useEffect(() => {
     const keys = new Set(list.flatMap((it) => (it.kind === 'work' ? [it.key] : [])))
@@ -1229,7 +1295,7 @@ export function ConversationView({
     if (firstSeq < was.seq) jump(-1)
   }, [convo.loadingOlder, firstSeq, jump, convo.of, convo.gen])
   useEffect(() => {
-    if (!active) return
+    if (!kActive) return
     const onKey = (e: KeyboardEvent) => {
       const dir = jumpKey(e)
       if (!dir || editable(e.target) || underDialog(e) || subsNow.current) return
@@ -1238,7 +1304,7 @@ export function ConversationView({
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [active, jump])
+  }, [kActive, jump])
   // ⌘K on a Mac where the agents are listed: their search. Elsewhere "/",
   // not while typing (the browsers there keep Ctrl+K for their own search).
   useEffect(() => {
@@ -1359,7 +1425,7 @@ export function ConversationView({
     return () => window.removeEventListener('resize', onResize)
   }, [card])
   useEffect(() => {
-    if (!active) return
+    if (!kActive) return
     const onKey = (e: KeyboardEvent) => {
       // (Nor over a menu that is open: it would open under it.)
       if (!helpKey(e) || editable(e.target) || underDialog(e) || document.querySelector('[role="menu"]')) return
@@ -1368,7 +1434,7 @@ export function ConversationView({
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [active])
+  }, [kActive])
 
   // What was sent, not in the log yet (also before a new conversation's log is written).
   const pendingList = pending.map((p) => {
@@ -1674,7 +1740,14 @@ export function ConversationView({
           }}
         />
       )}
-      <div className="convo-main">
+      <div className={'convo-panes' + (splitShown ? ' is-split' : '')} ref={panesEl}>
+      <div
+        className={'convo-main' + (splitShown && splitPane?.focused === 'primary' ? ' is-focused' : '')}
+        ref={mainEl}
+        style={splitShown ? { flex: `0 0 ${splitPct}%` } : undefined}
+        onPointerDownCapture={splitShown ? () => splitPane?.onFocus('primary') : undefined}
+        onFocusCapture={splitShown ? () => splitPane?.onFocus('primary') : undefined}
+      >
       {(name.length > 0 || status || convo.failing || side || lead) && (
         <div className="convo-bar">
           {lead}
@@ -1758,6 +1831,7 @@ export function ConversationView({
               <Info size={18} aria-hidden="true" />
             </button>
           )}
+          {barExtra}
           {onStop && (
             <button type="button" className="btn btn-ghost convo-stop" onClick={onStop}>
               {t('convo.stop')}
@@ -1790,45 +1864,103 @@ export function ConversationView({
       )}
       {(() => {
         const curRow = rows.find((r) => r.current)
-        if (!curRow) return null
-        const parentRow = curRow.parentKey ? rows.find((r) => r.key === curRow.parentKey) : undefined
-        const childRows = rows.filter((r) => r.parentKey === curRow.key)
-        if (!parentRow && !childRows.length) return null
+        const parentItem = lineageBar
+          ? lineageBar.parent
+          : curRow?.parentKey
+            ? (() => {
+                const p = rows.find((r) => r.key === curRow.parentKey)
+                return p ? { key: p.key, title: p.title, status: p.liveStatus ?? p.status, onPick: p.onPick } : undefined
+              })()
+            : undefined
+        const childItems = lineageBar
+          ? lineageBar.children
+          : curRow
+            ? rows
+                .filter((r) => r.parentKey === curRow.key)
+                .map((c) => ({ key: c.key, title: c.title, where: c.where, status: c.liveStatus ?? c.status, onPick: c.onPick }))
+            : []
+        if (!parentItem && !childItems.length) return null
+        const canSplitNow = !!lineageBar?.canSplit && (viewW === 0 || viewW >= SPLIT_MIN_W)
+        const activeSplitKey = lineageBar?.splitKey
+        const splitIsChild = !!activeSplitKey && childItems.some((c) => c.key === activeSplitKey)
+        const preferredChild =
+          childItems.find((c) => c.status === 'blocked') ??
+          childItems.find((c) => c.status === 'working') ??
+          childItems.find((c) => c.status === 'done') ??
+          childItems[0]
         return (
           <div className="convo-lineage-bar" aria-label={t('convo.lineage.childrenLabel')}>
-            {parentRow && (
+            {parentItem && (
               <button
                 type="button"
-                className="convo-lineage-chip is-parent"
-                title={t('convo.lineage.parentChip', { name: parentRow.title })}
-                onClick={() => parentRow.onPick()}
+                className={'convo-lineage-chip is-parent' + (activeSplitKey === parentItem.key ? ' is-split-active' : '')}
+                title={t('convo.lineage.parentChip', { name: parentItem.title })}
+                onClick={() => parentItem.onPick()}
               >
                 <ArrowUp size={12} aria-hidden="true" />
-                <span className="convo-lineage-chip-text">{parentRow.title}</span>
+                <span className="convo-lineage-chip-text">{parentItem.title}</span>
               </button>
             )}
-            {childRows.length > 0 && (
+            {childItems.length > 0 && (
               <>
                 <span className="convo-lineage-label">
                   <GitFork size={12} aria-hidden="true" />
                   <span>{t('convo.lineage.childrenLabel')}</span>
                 </span>
-                {childRows.map((c) => {
-                  const st = c.liveStatus ?? c.status
+                {childItems.map((c) => {
+                  const isSplitHere = activeSplitKey === c.key
                   return (
                     <button
                       key={c.key}
                       type="button"
-                      className={'convo-lineage-chip is-' + st}
+                      className={'convo-lineage-chip is-' + c.status + (isSplitHere ? ' is-split-active' : '')}
                       title={[c.title, c.where].filter(Boolean).join('\n')}
-                      onClick={() => c.onPick()}
+                      onClick={() => (splitIsChild && lineageBar?.onSplitChild ? lineageBar.onSplitChild(c.key) : c.onPick())}
                     >
-                      <span className={'convo-lineage-dot is-' + st} aria-hidden="true" />
+                      <span className={'convo-lineage-dot is-' + c.status} aria-hidden="true" />
                       <span className="convo-lineage-chip-text">{c.title}</span>
                     </button>
                   )
                 })}
               </>
+            )}
+            {(canSplitNow || lineageBar?.onNewSubagent) && (
+              <span className="convo-lineage-actions">
+                {canSplitNow && childItems.length > 0 && preferredChild && lineageBar?.onSplitChild && (
+                  <button
+                    type="button"
+                    className={'convo-lineage-btn' + (splitIsChild ? ' is-active' : '')}
+                    aria-pressed={splitIsChild}
+                    title={t(splitIsChild ? 'convo.split.close' : 'convo.split.withSub')}
+                    onClick={() => (splitIsChild ? lineageBar.onCloseSplit?.() : lineageBar.onSplitChild?.(preferredChild.key))}
+                  >
+                    <Columns2 size={13} aria-hidden="true" />
+                    <span>{t(splitIsChild ? 'convo.split.close' : 'convo.split.withSub')}</span>
+                  </button>
+                )}
+                {canSplitNow && !childItems.length && parentItem && lineageBar?.onSplitWithParent && (
+                  <button
+                    type="button"
+                    className="convo-lineage-btn"
+                    title={t('convo.split.withParent')}
+                    onClick={() => lineageBar.onSplitWithParent?.()}
+                  >
+                    <Columns2 size={13} aria-hidden="true" />
+                    <span>{t('convo.split.withParent')}</span>
+                  </button>
+                )}
+                {lineageBar?.onNewSubagent && (
+                  <button
+                    type="button"
+                    className="convo-lineage-btn is-icon"
+                    aria-label={t('convo.lineage.newSubagent')}
+                    title={t('convo.lineage.newSubagent')}
+                    onClick={() => lineageBar.onNewSubagent?.()}
+                  >
+                    <Plus size={13} aria-hidden="true" />
+                  </button>
+                )}
+              </span>
             )}
           </div>
         )
@@ -2040,6 +2172,66 @@ export function ConversationView({
           />
         )}
       </div>
+      </div>
+      {splitShown && splitPane && (
+        <>
+          <div
+            className="convo-split-grip"
+            role="separator"
+            aria-orientation="vertical"
+            aria-label={t('convo.split.resize')}
+            title={t('convo.split.resize')}
+            aria-valuenow={Math.round(splitPct)}
+            aria-valuemin={28}
+            aria-valuemax={72}
+            tabIndex={0}
+            onPointerDown={(e) => {
+              if (e.button !== 0 || splitDrag.current) return
+              const w = panesEl.current?.clientWidth ?? 0
+              if (!w) return
+              e.preventDefault()
+              e.currentTarget.setPointerCapture(e.pointerId)
+              splitDrag.current = { id: e.pointerId, x: e.clientX, pct: splitPct, w, to: splitPct, frame: 0 }
+            }}
+            onPointerMove={(e) => {
+              const d = splitDrag.current
+              if (!d || e.pointerId !== d.id) return
+              if (e.pointerType === 'mouse' && e.buttons === 0) return endSplitDrag(true)
+              d.to = clampSplitPct(d.pct + ((e.clientX - d.x) / d.w) * 100)
+              cancelAnimationFrame(d.frame)
+              d.frame = requestAnimationFrame(() => {
+                if (mainEl.current) mainEl.current.style.flex = `0 0 ${d.to}%`
+              })
+            }}
+            onPointerUp={(e) => {
+              if (splitDrag.current?.id === e.pointerId) endSplitDrag(true)
+            }}
+            onPointerCancel={(e) => {
+              if (splitDrag.current?.id === e.pointerId) endSplitDrag(false)
+            }}
+            onLostPointerCapture={(e) => {
+              if (splitDrag.current?.id === e.pointerId) endSplitDrag(true)
+            }}
+            onDoubleClick={() => keepSplitPct(50)}
+            onKeyDown={(e) => {
+              const step = e.shiftKey ? 10 : 4
+              if (e.key === 'ArrowLeft') keepSplitPct(splitPct - step)
+              else if (e.key === 'ArrowRight') keepSplitPct(splitPct + step)
+              else if (e.key === 'Home') keepSplitPct(28)
+              else if (e.key === 'End') keepSplitPct(72)
+              else return
+              e.preventDefault()
+            }}
+          />
+          <div
+            className={'convo-split-pane' + (splitPane.focused === 'secondary' ? ' is-focused' : '')}
+            onPointerDownCapture={() => splitPane.onFocus('secondary')}
+            onFocusCapture={() => splitPane.onFocus('secondary')}
+          >
+            {splitPane.node}
+          </div>
+        </>
+      )}
       </div>
       {changes && shownEdits && <ChangesPanel key={changes.key} edits={shownEdits} focus={changes.path} onClose={unshow} active={active} onCopy={copy} />}
       {subs && subs.length > 0 && convo.of && (
@@ -3903,6 +4095,12 @@ export function AgentList({ rows, menus, onPicked, placed, query: given, onQuery
               >
                 <span className="convo-list-line">
                   <span className="convo-list-title">{r.title}</span>
+                  {r.inSplit && (
+                    <span className="convo-list-split" title={t('convo.split.rowBadge')}>
+                      <Columns2 size={12} aria-hidden="true" />
+                      <span className="sr-only">{t('convo.split.rowBadge')}</span>
+                    </span>
+                  )}
                   {pinned(r) && g.id !== 'convo.group.pinned' && (
                     <span className="convo-list-pin">
                       <Pin size={12} aria-hidden="true" />
