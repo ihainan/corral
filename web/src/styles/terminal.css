@@ -553,6 +553,11 @@ html.term-dark .overlay, html.term-dark .menu, html.term-dark .toast {
 .convo-split-grip:hover::after, .convo-split-grip:active::after { background: var(--term-line-strong); }
 .convo-split-grip:focus-visible { outline: none; }
 .convo-split-grip:focus-visible::after { background: var(--term-accent-text); }
+@media (pointer: coarse) {
+  .convo-split-grip { width: 16px; margin: 0 -8px; }
+  .convo-split-grip::after { left: 7px; }
+  .convo-bar-split-act { width: 36px; height: 36px; }
+}
 .convo-split-pane { flex: 1; min-width: 0; position: relative; display: flex; border-left: 1px solid var(--term-line); overflow: hidden; }
 .convo-panes.is-split { --split-dim: color-mix(in srgb, var(--term-chrome) 55%, var(--term-bg)); }
 .convo-panes.is-split > .convo-main:not(.is-focused),
@@ -1700,6 +1705,12 @@ button.convo-queue-row.is-note:last-child { border-radius: 0 0 var(--r-lg) var(-
 .convo-lineage-btn:hover { background: var(--term-row-hover); color: var(--term-fg); }
 .convo-lineage-btn.is-active { border-color: color-mix(in srgb, var(--term-accent-text) 45%, transparent); background: var(--term-accent-soft); color: var(--term-accent-text); }
 .convo-lineage-btn:focus-visible { outline: 2px solid var(--term-accent-text); outline-offset: 1px; }
+@media (pointer: coarse) {
+  .convo-lineage-bar { padding-top: 6px; padding-bottom: 6px; gap: 8px; }
+  .convo-lineage-chip { min-height: 32px; padding: 4px 10px; }
+  .convo-lineage-btn { height: 32px; padding: 0 10px; }
+  .convo-lineage-btn.is-icon { width: 32px; padding: 0; }
+}
 .convo-list-split { flex: none; display: inline-flex; align-items: center; color: var(--term-accent-text); }
 .convo-list-row {
   display: flex; align-items: flex-start; gap: 10px; width: 100%; padding: 8px 10px; border: 0; border-radius: var(--r);
@@ -1767,11 +1778,12 @@ button.convo-queue-row.is-note:last-child { border-radius: 0 0 var(--r-lg) var(-
 .convo-spin.is-small { width: 9px; height: 9px; margin: 0; border-width: 1.5px; flex: none; }
 @media (pointer: coarse) {
   .convo-list-row { padding: 10px 12px; }
-  .convo-list-row.is-child { padding: 8px 10px; }
-  .convo-list-item.is-child::before { height: 22px; }
-  .convo-list-item.is-child:first-child::before { height: 20px; }
-  .convo-list-item.is-child.is-single > .convo-list-actions { top: 6px; }
-  .convo-list-subpill { height: 26px; padding: 0 8px; }
+  .convo-list-row.is-child { min-height: 44px; padding: 10px 10px; }
+  .convo-list-item.is-child::before { height: 24px; }
+  .convo-list-item.is-child:first-child::before { height: 22px; }
+  .convo-list-item.is-child.is-single > .convo-list-actions { top: 8px; }
+  .convo-list-subpill { position: relative; height: 28px; padding: 0 8px; }
+  .convo-list-subpill::after { content: ''; position: absolute; inset: -8px -6px; }
 }
 /* A row's "more" button (the side list's) and subagent fold pill: over the
    row's end, by its first line. The subagent pill stays fixed at the right
@@ -2136,6 +2148,7 @@ button.convo-queue-row.is-note:last-child { border-radius: 0 0 var(--r-lg) var(-
   .convo-side .list-search, .convo-picker .list-search, .agents-phone .list-search { padding-left: 11px; } /* (as the rows, 12 there) */
 }
 .new-agent { display: flex; flex-direction: column; gap: 14px; }
+.new-agent .seg button { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .new-agent-parent {
   display: inline-flex; align-items: center; gap: 6px; align-self: flex-start; margin: 0; padding: 4px 10px;
   border-radius: 999px; background: var(--bg-subtle); border: 1px solid var(--line);
