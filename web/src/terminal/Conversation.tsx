@@ -5767,6 +5767,7 @@ const baseOf = (p: string) => p.slice(p.lastIndexOf('/') + 1)
 
 // Inline/standalone picture chip with desktop hover thumbnail popover.
 function PicChip({ path, said, inline, thumb, onOpen }: { path: string; said: string; inline?: boolean; thumb?: (p: string, signal: AbortSignal) => Promise<Blob>; onOpen: (p: string) => void }) {
+  const btnRef = useRef<HTMLButtonElement>(null)
   const [tipRect, setTipRect] = useState<{ top: number; bottom: number; left: number; right: number } | null>(null)
   const [blob, setBlob] = useState<Blob | null>(null)
   const [gone, setGone] = useState(false)
@@ -5829,13 +5830,14 @@ function PicChip({ path, said, inline, thumb, onOpen }: { path: string; said: st
           {name && name !== said && <span className="convo-pic-hover-name">{name}</span>}
         </div>
       </div>,
-      document.body,
+      btnRef.current?.closest('.term-root') ?? document.body,
     )
   })()
 
   return (
     <>
       <button
+        ref={btnRef}
         type="button"
         className={'convo-pic' + (inline ? ' is-inline' : '')}
         onClick={() => {
