@@ -734,12 +734,24 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 .convo-runs-row { display: flex; justify-content: space-between; gap: 16px; padding: 3px 0; font-variant-numeric: tabular-nums; }
 .convo-runs-row > :first-child { color: var(--term-fg-3); flex: none; }
 .convo-runs-row > :last-child { min-width: 0; overflow-wrap: anywhere; text-align: right; }
-.convo-runs-bar { position: relative; height: 4px; margin: 1px 0 6px; border-radius: 3px; background: var(--term-line); overflow: hidden; }
-.convo-runs-bar i { display: block; height: 100%; background: var(--term-accent-text); }
+.convo-runs-bar { position: relative; height: 6px; margin: 2px 0 6px; border-radius: 999px; background: var(--term-line); overflow: hidden; }
+.convo-runs-zone { position: absolute; top: 0; right: 0; bottom: 0; background: color-mix(in srgb, var(--term-fg) 8%, transparent); pointer-events: none; }
+.convo-runs-bar i { position: relative; z-index: 1; display: block; height: 100%; border-radius: 999px; background: var(--term-accent-text); }
 .convo-runs-bar.is-warn i { background: var(--term-warn-text); }
 .convo-runs-bar.is-danger i { background: var(--term-danger-text); }
-.convo-runs-mark { position: absolute; top: 0; bottom: 0; width: 2px; background: var(--term-fg-3); opacity: 0.7; pointer-events: none; }
-.convo-runs-soon { color: var(--term-warn-text); font-weight: 500; }
+.convo-runs-mark { position: absolute; z-index: 2; top: 0; bottom: 0; width: 2px; background: var(--term-fg-3); opacity: 0.85; pointer-events: none; }
+.convo-runs-compact {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  margin-bottom: 4px; font-size: var(--fs-note); line-height: var(--lh-note); font-variant-numeric: tabular-nums;
+}
+.convo-runs-compact-label { display: inline-flex; align-items: center; gap: 6px; min-width: 0; color: var(--term-fg-3); white-space: nowrap; }
+.convo-runs-tick { flex: none; width: 2px; height: 10px; border-radius: 999px; background: var(--term-fg-3); opacity: 0.85; }
+.convo-runs-compact-left { flex: none; color: var(--term-fg-2); font-weight: 500; white-space: nowrap; }
+.convo-runs-compact-left.is-warn { color: var(--term-warn-text); }
+.convo-runs-soon {
+  flex: none; padding: 1px 6px; border-radius: 999px; white-space: nowrap;
+  background: color-mix(in srgb, var(--term-warn-text) 14%, transparent); color: var(--term-warn-text); font-weight: 500;
+}
 .convo-runs-note { margin: 4px 0 0; font-size: var(--fs-note); line-height: var(--lh-note); color: var(--term-fg-3); }
 /* Progressive container-query degradation for the composer footer bar so pills
    never clip mid-word in narrow windows, split panes, side panels, or phones.

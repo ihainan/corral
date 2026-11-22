@@ -3481,20 +3481,26 @@ function Runs({ meta, goal, active, mode, model, effort, quota, via, auth, agent
               const p = Math.min(100, Math.round((used / w) * 100))
               const ct = compactThreshold(w, agentKind, compactPre)
               const left = ct.at - used
+              const toCompact = ct.at > 0 ? used / ct.at : 0
+              const compactHint = t(ct.observed ? 'convo.ctxCompactHintObserved' : 'convo.ctxCompactHint', { at: tokens(ct.at), p: ct.pct })
               return (
                 <div key={w} className="convo-runs-win">
                   <div className="convo-runs-row">
                     <span>{t('convo.ctxTitle')}</span>
                     <span title={t('convo.ctxTokens', { n: used.toLocaleString(getLang()) })}>{t('convo.ctxOfShort', { n: tokens(used), w: tokens(w), p })}</span>
                   </div>
-                  <div className={'convo-runs-bar' + (p >= 90 ? ' is-danger' : p >= 80 ? ' is-warn' : '')}>
+                  <div className={'convo-runs-bar' + (p >= 90 || toCompact >= 0.96 ? ' is-danger' : p >= 80 || toCompact >= 0.85 ? ' is-warn' : '')}>
+                    <span className="convo-runs-zone" style={{ left: Math.min(99, ct.pct) + '%' }} aria-hidden="true" />
                     <i style={{ width: p + '%' }} />
-                    <em className="convo-runs-mark" style={{ left: Math.min(99, ct.pct) + '%' }} title={t('convo.ctxCompactHint', { at: tokens(ct.at), p: ct.pct })} />
+                    <em className="convo-runs-mark" style={{ left: Math.min(99, ct.pct) + '%' }} title={compactHint} />
                   </div>
-                  <div className="convo-runs-row" title={t('convo.ctxCompactHint', { at: tokens(ct.at), p: ct.pct })}>
-                    <span>{t('convo.ctxCompact')}</span>
+                  <div className="convo-runs-compact" title={compactHint}>
+                    <span className="convo-runs-compact-label">
+                      <span className="convo-runs-tick" aria-hidden="true" />
+                      <span>{t('convo.ctxCompactAt', { at: tokens(ct.at) })}</span>
+                    </span>
                     {left > 0 ? (
-                      <span>{t(ct.observed ? 'convo.ctxCompactLeftExact' : 'convo.ctxCompactLeft', { n: tokens(left) })}</span>
+                      <span className={'convo-runs-compact-left' + (toCompact >= 0.85 ? ' is-warn' : '')}>{t('convo.ctxCompactLeft', { n: tokens(left) })}</span>
                     ) : (
                       <span className="convo-runs-soon">{t('convo.ctxCompactSoon')}</span>
                     )}
