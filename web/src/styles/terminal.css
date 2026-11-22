@@ -599,10 +599,8 @@ html.term-dark .overlay, html.term-dark .menu, html.term-dark .toast {
 .convo-panes.is-split .composer-keys,
 .convo-panes.is-split .convo-runs-side-name,
 .convo-panes.is-split .convo-runs.has-ctx .convo-runs-branch,
-.convo-panes.is-split .convo-runs.has-ctx .convo-runs-via,
-.convo-panes.is-split .convo-runs-effort-word { display: none; }
+.convo-panes.is-split .convo-runs.has-ctx .convo-runs-via { display: none; }
 .convo-panes.is-split .convo-runs { gap: 4px; }
-.convo-panes.is-split .convo-runs-effort::before { content: "·"; margin-right: 1px; }
 .convo-panes.is-split .convo-bar-status { max-width: 140px; overflow: hidden; text-overflow: ellipsis; }
 .convo-panes.is-split .convo-col { padding: 16px 16px 24px; }
 .convo-panes.is-split .convo-dock { padding: 0 12px 6px; }
@@ -640,7 +638,7 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 }
 .convo-runs-mode { flex: 0 0 auto; }
 .convo-runs-branch { flex: 0 1 auto; min-width: 0; max-width: 148px; overflow: hidden; }
-.convo-runs-model { flex: 0 1 auto; min-width: 0; max-width: 220px; overflow: hidden; }
+.convo-runs-model { flex: 0 1 auto; min-width: 0; max-width: 240px; overflow: hidden; }
 .convo-runs-model-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* How hard it thinks, beside the model as Claude Code's own line has it */
 .convo-runs-effort { flex: 0 0 auto; }
@@ -764,8 +762,6 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 .convo-runs-row.is-narrow-only { display: none; }
 @container convo-dock (max-width: 680px) {
   .convo-runs-side-name { display: none; }
-  .convo-runs-effort-word { display: none; }
-  .convo-runs-effort::before { content: "·"; margin-right: 1px; }
 }
 @container convo-dock (max-width: 560px) {
   .convo-runs.has-ctx .convo-runs-via { display: none; }
@@ -785,10 +781,6 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 @media (max-width: 520px) {
   .convo-runs.has-ctx .convo-runs-branch, .convo-runs.has-ctx .convo-runs-via { display: none; }
   .convo-runs-row.is-narrow-only { display: flex; }
-}
-@media (max-width: 400px) {
-  .convo-runs-effort-word { display: none; }
-  .convo-runs-effort::before { content: "·"; margin-right: 1px; } /* (after the model, as "Opus 5.5 · 高") */
 }
 .convo-col {
   max-width: 780px; margin: 0 auto; display: flex; flex-direction: column; gap: 12px;

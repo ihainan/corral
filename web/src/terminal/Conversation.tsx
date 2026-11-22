@@ -2936,12 +2936,7 @@ const effortName = (e: string) => (e === 'default' ? t('convo.effort.default') :
 // very narrow phone the level alone, beside the model as Claude Code's own
 // line has it ("Opus 5.5 · 高") — 11-18, the model was cut for it.
 function EffortSaid({ level }: { level: string }) {
-  return (
-    <span>
-      <span className="convo-runs-effort-word">{t('convo.effortWord')}</span>
-      {effortName(level)}
-    </span>
-  )
+  return <span>{effortName(level)}</span>
 }
 
 function compactThreshold(window: number, agentKind?: string, observedPre?: number, configuredAt?: number): { at: number; pct: number; source: 'setting' | 'observed' | 'estimate' } {
@@ -3143,6 +3138,7 @@ function Runs({ meta, goal, active, mode, model, effort, quota, via, auth, agent
   const windows = known ? [known] : WINDOWS.filter((w) => w >= used || w === WINDOWS[WINDOWS.length - 1])
   // (The gauge: of its window, else of the smaller it may be.)
   const full = Math.min(1, used / windows[0])
+  const modelShowsEffort = !!shownEffort && !!shownModel && (merged || !model || !!(model.efforts && model.can) || !(effort?.can || effort?.busy))
   return (
     // (The focus gone elsewhere, as by Tab, while the model menu is open, the list read or not: closed.)
     <div className={'convo-runs' + (used > 0 ? ' has-ctx' : '')} ref={box} onBlur={(e) => (open === 'model' || open === 'effort' || open === 'mode') && !box.current?.contains(e.relatedTarget as Node | null) && setOpen(false)}>
@@ -3216,19 +3212,24 @@ function Runs({ meta, goal, active, mode, model, effort, quota, via, auth, agent
             <span className="convo-runs-model-name">
               {going && model.busy
                 ? t('convo.modelGoing', { what: going })
-                : merged && shownEffort
-                  ? t('convo.modelEffortChip', { m: modelName(shownModel!), e: effortName(shownEffort) })
+                : modelShowsEffort
+                  ? t('convo.modelEffortChip', { m: modelName(shownModel!), e: effortName(shownEffort!) })
                   : modelName(shownModel!)}
             </span>
             {going && model.busy ? <Loader size={12} className="convo-running-spin" aria-hidden="true" /> : <ChevronsUpDown size={12} aria-hidden="true" />}
           </button>
         ) : (
-          <span className="convo-runs-item convo-runs-model" title={shownModel}>
+          <span
+            className="convo-runs-item convo-runs-model"
+            title={modelShowsEffort ? `${shownModel} · ${t('convo.effort')}: ${effortName(shownEffort!)}` : shownModel}
+          >
             <ModelGlyph model={shownModel!} size={13} />
-            <span className="convo-runs-model-name">{modelName(shownModel!)}</span>
+            <span className="convo-runs-model-name">
+              {modelShowsEffort ? t('convo.modelEffortChip', { m: modelName(shownModel!), e: effortName(shownEffort!) }) : modelName(shownModel!)}
+            </span>
           </span>
         ))}
-      {shownEffort && !(merged && shownModel && model) &&
+      {shownEffort && !modelShowsEffort &&
         (() => {
           const level = shownEffort // (what the switch took, else what the log says)
           return effort?.can || effort?.busy ? (
