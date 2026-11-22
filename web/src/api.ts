@@ -346,6 +346,7 @@ export interface HerdrAgent {
   thread_title?: string
   bare_title?: boolean
   // Terminal instance id and confirmed parent-child lineage within the same herdr server.
+  name?: string
   terminal_id?: string
   parent_pane?: string
   parent_term_id?: string

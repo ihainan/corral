@@ -30,6 +30,7 @@ import (
 type herdrAgent struct {
 	PaneID string `json:"pane_id"`
 	Agent  string `json:"agent"`
+	Name   string `json:"name,omitempty"` // herdr agent name (from `herdr agent start <name>`)
 	Status string `json:"status"`
 	Title  string `json:"title"`
 	Cwd    string `json:"cwd"`
@@ -334,7 +335,7 @@ func summarize(session string, s *herdr.Snapshot, times *agentTimes, old bool) h
 			bare = true
 		}
 		out.Workspaces[i].Agents = append(out.Workspaces[i].Agents,
-			herdrAgent{ThreadTitle: truncate(thread, 120), BareTitle: bare, PaneID: p.ID, Agent: p.Agent, Status: p.AgentStatus, Title: truncate(p.Title, 120), Cwd: p.Cwd, Session: agentSession(p), Since: paneSince(p, times, old),
+			herdrAgent{ThreadTitle: truncate(thread, 120), BareTitle: bare, PaneID: p.ID, Agent: p.Agent, Name: truncate(p.Name, 120), Status: p.AgentStatus, Title: truncate(p.Title, 120), Cwd: p.Cwd, Session: agentSession(p), Since: paneSince(p, times, old),
 				Tab: p.TabID, TabLabel: truncate(tabs[p.TabID], 120), Tabs: tabCount[p.WorkspaceID], Label: truncate(named[p.ID], 120), Mark: statusMark(p)})
 		if p.AgentStatus == herdr.StatusBlocked {
 			out.Waiting++

@@ -214,11 +214,21 @@ export const dirName = (cwd?: string): string => {
 // its own has no such name: see whereOf.)
 // (named: said is a name of the work's, not the folder or program it was
 // told by for want of one — that says nothing under a workspace's name.)
-const labelOf = (e: Entry, said: string, hosts: number, named = true): { title: string; where: string } => {
+const labelOf = (e: Entry, said: string, hosts: number, named = true, sameWsParent = false): { title: string; where: string } => {
   const r = e.row
   const ws = r && r.ws !== '~' ? r.ws : ''
   // (A name given its pane, the most of the person's own: before its workspace's.)
   const own = r?.a.label ?? ''
+  const agentName = r?.a.name ?? ''
+  // A subagent split inside its parent's workspace should not duplicate the
+  // parent's workspace name as its own title: prefer its pane label, its
+  // conversation title, or its herdr agent name (e.g. "antigravity").
+  if (r && sameWsParent && !own) {
+    const title = (named && said) || agentName || r.a.agent || said
+    const host = hosts > 1 ? e.s.host_name : ''
+    const where = [host, agentName && agentName !== title ? agentName : '', ws && ws !== title ? ws : '', tabOf(r), agentMark(r.a.agent) ? '' : r.a.agent].filter(Boolean)
+    return { title, where: where.join(' · ') }
+  }
   if (!r || (!ws && !own)) return { title: said, where: whereOf(e, hosts) }
   const host = hosts > 1 ? e.s.host_name : ''
   const title = own || ws
@@ -1179,6 +1189,8 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   const rowMenu = useRef<(e: Entry) => (MenuItem | null)[]>(() => [])
   const rows = useMemo((): ConvoListRow[] => {
     const hosts = hostCount(entries)
+    const wsByKey = new Map<string, string>()
+    for (const e of entries) if (e.row) wsByKey.set(e.key, e.row.wsId)
     const out = entries.map((e): ConvoListRow => {
       const current = e.key === cur.key && e.s.id === cur.s.id
       if (current && convoTitle) {
@@ -1191,7 +1203,9 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
         const named = ((isCodex(r.a.agent) || isAgy(r.a.agent)) && r.a.thread_title) || (current && convo.bind?.pane === r.a.pane_id && convoTitle) || keptTitle(titles, e) || paneName(r.a)
         const said = named || dirName(r.a.cwd) || r.a.agent
         const st = current && agent && !r.bg ? agent.status : r.status
-        return { key: e.key, ...labelOf(e, said, hosts, !!named), now: r.lost || r.bg || st !== 'blocked' ? undefined : glanceOf(e.s.id, e.pane, st, r.a.since) || undefined /* (said only of one waiting on the person) */, program: r.a.agent, status: st, liveStatus: st, bg: r.lost ? undefined : r.bg, cmds: cmdsOf(r), since: r.lost ? undefined : r.bg ? r.a.bg_since : r.a.since, current, pinned: pinAt(e.key), projectKey: normalizeProjectPath(r.a.cwd), sessionGroup: sessionGroupOf(e, all), parentKey: r.lost || !r.a.parent_pane ? undefined : agentKey(e.s, r.a.parent_pane), lineageSource: r.lost ? undefined : r.a.lineage_source, onPick: () => onPick(e), menu: () => rowMenu.current(e) }
+        const parentKey = r.lost || !r.a.parent_pane ? undefined : agentKey(e.s, r.a.parent_pane)
+        const sameWsParent = !!parentKey && wsByKey.get(parentKey) === r.wsId
+        return { key: e.key, ...labelOf(e, said, hosts, !!named, sameWsParent), now: r.lost || r.bg || st !== 'blocked' ? undefined : glanceOf(e.s.id, e.pane, st, r.a.since) || undefined /* (said only of one waiting on the person) */, program: r.a.agent, status: st, liveStatus: st, bg: r.lost ? undefined : r.bg, cmds: cmdsOf(r), since: r.lost ? undefined : r.bg ? r.a.bg_since : r.a.since, current, pinned: pinAt(e.key), projectKey: normalizeProjectPath(r.a.cwd), sessionGroup: sessionGroupOf(e, all), parentKey, lineageSource: r.lost ? undefined : r.a.lineage_source, onPick: () => onPick(e), menu: () => rowMenu.current(e) }
       }
       const title = (current && agent?.title) || keptTitle(titles, e) || `${e.s.host_name} · ${sessionWhich(e.s, all)}`
       return { key: e.key, title, where: whereOf(e, hosts), program: current ? agent?.program : undefined, status: current && agent ? agent.status : 'unknown', cmds: current ? agent?.cmds : tmuxCmdsOf(e), current, pinned: pinAt(e.key), sessionGroup: sessionGroupOf(e, all), onPick: () => onPick(e), menu: () => rowMenu.current(e) }
@@ -3012,13 +3026,17 @@ function PhoneList({ entries, all, titles, query, onQuery, onPick }: { entries: 
   // (Its rows as the side list's are made — see AgentChat — none of them the one shown.)
   const rows = useMemo((): ConvoListRow[] => {
     const hosts = hostCount(entries)
+    const wsByKey = new Map<string, string>()
+    for (const e of entries) if (e.row) wsByKey.set(e.key, e.row.wsId)
     const pinAt = (key: string) => (pins.includes(key) ? pins.indexOf(key) : undefined)
     return entries.map((e): ConvoListRow => {
       if (e.row) {
         const r = e.row
         const named = ((isCodex(r.a.agent) || isAgy(r.a.agent)) && r.a.thread_title) || keptTitle(titles, e) || paneName(r.a)
         const said = named || dirName(r.a.cwd) || r.a.agent
-        return { key: e.key, ...labelOf(e, said, hosts, !!named), now: r.lost || r.bg || r.status !== 'blocked' ? undefined : glanceOf(e.s.id, e.pane, r.status, r.a.since) || undefined, program: r.a.agent, status: r.status, liveStatus: r.status, bg: r.lost ? undefined : r.bg, cmds: cmdsOf(r), since: r.lost ? undefined : r.bg ? r.a.bg_since : r.a.since, current: false, pinned: pinAt(e.key), projectKey: normalizeProjectPath(r.a.cwd), sessionGroup: sessionGroupOf(e, all), parentKey: r.lost || !r.a.parent_pane ? undefined : agentKey(e.s, r.a.parent_pane), lineageSource: r.lost ? undefined : r.a.lineage_source, onPick: () => onPick(e) }
+        const parentKey = r.lost || !r.a.parent_pane ? undefined : agentKey(e.s, r.a.parent_pane)
+        const sameWsParent = !!parentKey && wsByKey.get(parentKey) === r.wsId
+        return { key: e.key, ...labelOf(e, said, hosts, !!named, sameWsParent), now: r.lost || r.bg || r.status !== 'blocked' ? undefined : glanceOf(e.s.id, e.pane, r.status, r.a.since) || undefined, program: r.a.agent, status: r.status, liveStatus: r.status, bg: r.lost ? undefined : r.bg, cmds: cmdsOf(r), since: r.lost ? undefined : r.bg ? r.a.bg_since : r.a.since, current: false, pinned: pinAt(e.key), projectKey: normalizeProjectPath(r.a.cwd), sessionGroup: sessionGroupOf(e, all), parentKey, lineageSource: r.lost ? undefined : r.a.lineage_source, onPick: () => onPick(e) }
       }
       const title = keptTitle(titles, e) || `${e.s.host_name} · ${sessionWhich(e.s, all)}`
       return { key: e.key, title, where: whereOf(e, hosts), status: 'unknown', cmds: tmuxCmdsOf(e), current: false, pinned: pinAt(e.key), sessionGroup: sessionGroupOf(e, all), onPick: () => onPick(e) }

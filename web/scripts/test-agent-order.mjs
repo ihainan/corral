@@ -194,4 +194,38 @@ assert.equal(labels.get('~'), '~')
   assert.deepEqual(keys.sort(), ['cyc1', 'cyc2', 'orphan'])
 }
 
+// 10. Pinned parent nests unpinned non-blocked children/grandchildren directly inside Pinned
+{
+  const rows = [
+    row({ key: 'pinA', title: 'Model Hub CYY', pinned: 0, status: 'idle', since: 200, projectKey: '/repo/ai' }),
+    row({ key: 'pinB', title: 'Other Pin', pinned: 1, status: 'idle', since: 300, projectKey: '/repo/ai' }),
+    row({ key: 'sub1', title: 'antigravity', status: 'idle', since: 250, projectKey: '/repo/ai', parentKey: 'pinA' }),
+    row({ key: 'sub2', title: 'grandchild', status: 'working', since: 260, projectKey: '/repo/other', parentKey: 'sub1' }),
+    row({ key: 'subBlocked', title: 'Blocked Sub', status: 'blocked', since: 400, projectKey: '/repo/ai', parentKey: 'pinA' }),
+    row({ key: 'other', title: 'Standalone', status: 'idle', since: 100, projectKey: '/repo/ai' }),
+  ]
+
+  for (const group of ['status', 'project', 'session']) {
+    const groups = buildAgentGroups(rows, { group, sort: 'recent', pinFixed: true, nestChildren: true })
+    const pinnedGrp = groups.find((g) => g.kind === 'pinned')
+    const todoGrp = groups.find((g) => g.kind === 'todo')
+    assert.ok(pinnedGrp && todoGrp, `mode=${group}`)
+    // pinA stays first (pinFixed), with sub2 (more recent) and sub1 nested right under pinA, then pinB.
+    assert.deepEqual(pinnedGrp.rows.map((r) => r.key), ['pinA', 'sub2', 'sub1', 'pinB'])
+    assert.deepEqual(pinnedGrp.rows[0].childKeys, ['sub2', 'sub1'])
+    assert.equal(pinnedGrp.rows[1].nestDepth, 1)
+    assert.equal(pinnedGrp.rows[1].nestedParentKey, 'pinA')
+    assert.equal(pinnedGrp.rows[1].viaParentTitle, 'antigravity')
+    assert.equal(pinnedGrp.rows[2].nestDepth, 1)
+    assert.equal(pinnedGrp.rows[2].nestedParentKey, 'pinA')
+    // Blocked child ALWAYS surfaces in uncollapsible todo, never hidden under pinned parent.
+    assert.equal(todoGrp.collapsible, false)
+    assert.deepEqual(todoGrp.rows.map((r) => r.key), ['subBlocked'])
+    assert.equal(todoGrp.rows[0].crossParentTitle, 'Model Hub CYY')
+    // sub1 and sub2 must NOT be duplicated in any other group.
+    const allKeys = groups.flatMap((g) => g.rows.map((r) => r.key))
+    assert.equal(allKeys.length, new Set(allKeys).size)
+  }
+}
+
 console.log('agentOrder: all tests passed')

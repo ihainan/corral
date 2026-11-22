@@ -347,25 +347,85 @@ export function buildAgentGroups(rows: ConvoListRow[], opts: OrderOpts = {}): Ag
   const out: AgentGroup[] = []
 
   // 1. Pinned group (independent manual order; blocked pinned rows are protected in UI).
+  // When nestChildren is enabled, non-blocked unpinned descendants of a pinned parent
+  // nest directly underneath their nearest pinned ancestor inside Pinned so orchestrators
+  // pinned at the top actually display their subagents underneath them.
   const pinnedRows = rows.filter(pinned)
+  const pinnedKeys = new Set(pinnedRows.map((r) => r.key))
+  const unpinned = rows.filter((r) => !pinned(r))
+
+  // 2. Unpinned live-blocked agents ALWAYS surface at top of uncollapsible "Needs you"
+  //    (never nested under a parent, even if the parent is pinned or collapsed).
+  const blockedRows = sortRows(unpinned.filter(isLiveBlocked), sort).map((r) => stripNestMeta(r, allByKey, nestChildren))
+  const allNonBlocked = unpinned.filter((r) => !isLiveBlocked(r))
+
+  const pinnedChildKeys = new Set<string>()
+  const pinnedChildrenByRoot = new Map<string, ConvoListRow[]>()
+  if (nestChildren && pinnedRows.length && allNonBlocked.length) {
+    const nonBlockedByKey = new Map<string, ConvoListRow>()
+    for (const r of allNonBlocked) nonBlockedByKey.set(r.key, r)
+
+    for (const r of allNonBlocked) {
+      let curKey = r.parentKey
+      const seen = new Set<string>([r.key])
+      let steps = 0
+      let pinnedAnc: string | undefined
+      while (curKey && steps < 16) {
+        if (seen.has(curKey)) break
+        seen.add(curKey)
+        if (pinnedKeys.has(curKey)) {
+          pinnedAnc = curKey
+          break
+        }
+        const up = nonBlockedByKey.get(curKey)
+        if (!up) break
+        curKey = up.parentKey
+        steps++
+      }
+      if (pinnedAnc) {
+        pinnedChildKeys.add(r.key)
+        const list = pinnedChildrenByRoot.get(pinnedAnc) ?? []
+        list.push(r)
+        pinnedChildrenByRoot.set(pinnedAnc, list)
+      }
+    }
+  }
+
   if (pinnedRows.length) {
-    const pSorted = (pinFixed ? byPinOrder(pinnedRows) : sortRows(pinnedRows, sort)).map((r) => stripNestMeta(r, allByKey, nestChildren))
+    const pBase = pinFixed ? byPinOrder(pinnedRows) : sortRows(pinnedRows, sort)
+    const pProjected: ConvoListRow[] = []
+    for (const p of pBase) {
+      const rawKids = nestChildren ? sortRows(pinnedChildrenByRoot.get(p.key) ?? [], sort) : []
+      const kids = rawKids.map((kid): ConvoListRow => ({
+        ...kid,
+        nestDepth: 1,
+        nestedParentKey: p.key,
+        viaParentTitle: kid.parentKey && kid.parentKey !== p.key ? allByKey.get(kid.parentKey)?.title : undefined,
+        crossParentTitle: undefined,
+        childKeys: undefined,
+      }))
+      const crossParent = nestChildren && p.parentKey ? allByKey.get(p.parentKey)?.title : undefined
+      pProjected.push({
+        ...p,
+        nestDepth: kids.length ? 0 : undefined,
+        nestedParentKey: undefined,
+        viaParentTitle: undefined,
+        crossParentTitle: crossParent,
+        childKeys: kids.length ? kids.map((k) => k.key) : undefined,
+      })
+      for (const k of kids) pProjected.push(k)
+    }
     out.push({
       id: 'convo.group.pinned',
       labelKey: 'convo.group.pinned',
       kind: 'pinned',
-      rows: pSorted,
+      rows: pProjected,
       collapsible: true,
-      ...groupCounts(pSorted),
+      ...groupCounts(pProjected),
     })
   }
 
-  const unpinned = rows.filter((r) => !pinned(r))
-
-  // 2. Unpinned live-blocked agents ALWAYS surface at top of uncollapsible "Needs you"
-  //    (never nested under a parent, even if the parent is idle or collapsed).
-  const blockedRows = sortRows(unpinned.filter(isLiveBlocked), sort).map((r) => stripNestMeta(r, allByKey, nestChildren))
-  const nonBlocked = unpinned.filter((r) => !isLiveBlocked(r))
+  const nonBlocked = pinnedChildKeys.size ? allNonBlocked.filter((r) => !pinnedChildKeys.has(r.key)) : allNonBlocked
 
   if (groupMode === 'status') {
     if (!nestChildren) {
