@@ -2344,17 +2344,47 @@ button.convo-queue-row.is-note:last-child { border-radius: 0 0 var(--r-lg) var(-
   }
   .convo-side .list-new-btn:hover { background: var(--term-accent-soft); color: var(--term-accent-text); }
   .convo-side .list-new-btn:focus-visible { outline: 2px solid var(--term-accent-text); outline-offset: -2px; }
-  .convo-side .convo-list-row { padding: 6px 8px; gap: 8px; border-radius: var(--r-sm); }
-  .convo-side .convo-list-row .agent-icon { margin-top: 2px; }
-  .convo-side .convo-list-row.is-child .agent-icon { margin-top: 0; }
-  .convo-side .convo-list-text { gap: 2px; }
-  .convo-side .convo-list-title { font-size: var(--fs-sub); line-height: var(--lh-sub); }
-  .convo-side .convo-list-bg { color: var(--term-fg-2); font-weight: 400; }
+  .convo-side .convo-list-group { gap: 1px; margin-bottom: 6px; }
+  .convo-side .convo-list-row { align-items: center; padding: 4px 8px; gap: 8px; border-radius: var(--r-sm); }
+  .convo-side .convo-list-row.is-nested { padding: 4px 8px; gap: 8px; }
+  .convo-side .convo-list-row.is-child { padding: 3px 8px; gap: 6px; }
+  .convo-side .convo-list-row .agent-icon { margin-top: 0; background: color-mix(in srgb, var(--term-fg) 4.5%, transparent); }
+  .convo-side .convo-list-row.is-child .agent-icon { margin-top: 0; background: none; }
+  .convo-side .agent-icon svg { transform: scale(1.04); }
+  .convo-side .agent-icon-dot {
+    width: 6px; height: 6px; right: -1px; bottom: -1px;
+    box-shadow: 0 0 0 1.5px var(--dot-ring, var(--term-chrome));
+  }
+  .convo-side .agent-icon-dot.is-bg {
+    box-shadow: 0 0 0 1.5px var(--dot-ring, var(--term-chrome)), inset 0 0 0 1.5px var(--term-accent-text);
+  }
+  .convo-side .convo-list-row.is-child .agent-icon-dot { width: 5px; height: 5px; right: 0; bottom: 0; }
+  .convo-side .convo-list-text { gap: 1px; }
+  .convo-side .convo-list-title { font-size: var(--fs-sub); line-height: var(--lh-sub-tight); }
+  .convo-side .convo-list-meta { gap: 6px; font-size: var(--fs-micro); line-height: var(--lh-micro); }
+  .convo-side .convo-list-where { color: var(--term-fg-3); }
+  .convo-side .convo-list-when { font-size: var(--fs-micro); line-height: var(--lh-micro); }
+  .convo-side .convo-list-now { font-size: var(--fs-micro); line-height: var(--lh-micro); }
+  .convo-side .convo-list-parent-ref { font-size: var(--fs-micro); line-height: var(--lh-micro); }
+  .convo-side .convo-list-bg { color: var(--term-fg-3); font-weight: 400; }
   .convo-side .convo-list-item > .convo-list-actions { top: 4px; right: 4px; }
-  .convo-side .convo-list-head.is-section { padding: 6px 8px 4px; }
-  .convo-side .convo-list-head.is-tree { padding: 4px 8px; }
-  .convo-side .convo-list-children { margin: 0 0 2px 20px; }
+  .convo-side .convo-list-dots { width: 22px; height: 20px; }
+  .convo-side .convo-list-subpill { height: 18px; padding: 0 6px; font-size: var(--fs-micro); line-height: var(--lh-micro); }
+  .convo-side .convo-list-head.is-section {
+    padding: 6px 8px 3px; font-size: var(--fs-micro); line-height: var(--lh-micro);
+    text-transform: uppercase; letter-spacing: 0.05em; color: var(--term-fg-3);
+  }
+  .convo-side .convo-list-head.is-tree {
+    padding: 4px 8px; gap: 6px; font-size: var(--fs-note); line-height: var(--lh-note); color: var(--term-fg-2);
+  }
+  .convo-side .convo-list-head > .convo-list-gcount { font-size: var(--fs-micro); line-height: var(--lh-micro); }
+  .convo-side .convo-list-tree { margin-left: 14px; padding-left: 8px; gap: 1px; }
+  .convo-side .convo-list-children { margin: 0 0 2px 20px; padding-left: 10px; gap: 1px; }
   .convo-side .convo-list-tree .convo-list-children { margin-left: 16px; }
+  .convo-side .convo-list-item.is-child::before { left: -10px; top: -2px; width: 8px; height: 20px; }
+  .convo-side .convo-list-item.is-child:first-child::before { top: -1px; height: 19px; }
+  .convo-side .convo-list-item.is-child.is-single::before { top: -2px; height: 14px; }
+  .convo-side .convo-list-item.is-child:not(:last-child)::after { left: -10px; top: 10px; bottom: -2px; }
 }
 @media (pointer: coarse) {
   .convo-side-new { height: 44px; }
