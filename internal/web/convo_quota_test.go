@@ -1,11 +1,13 @@
 package web
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -221,4 +223,76 @@ func TestQuotaOfAgyUsage(t *testing.T) {
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("agyQuotaCommand sh -n failed: %v\n%s", err, out)
 	}
+}
+
+func TestAgyQuotaPollerStaleWhileRevalidateAndSingleflight(t *testing.T) {
+	now := time.Date(2026, 11, 22, 11, 0, 0, 0, time.UTC)
+	var mu sync.Mutex
+	clock := func() time.Time {
+		mu.Lock()
+		defer mu.Unlock()
+		return now
+	}
+	advance := func(d time.Duration) {
+		mu.Lock()
+		now = now.Add(d)
+		mu.Unlock()
+	}
+
+	p := &agyQuotaPoller{nowFn: clock}
+	var calls int
+	gate := make(chan struct{})
+	fetch := func(ctx context.Context) (quotaInfo, error) {
+		mu.Lock()
+		calls++
+		n := calls
+		mu.Unlock()
+		if n == 1 {
+			<-gate
+		}
+		return quotaInfo{Known: true, UpdatedAt: clock().Unix(), Groups: []quotaGroup{{Name: "Gemini", FiveHour: &quotaWindow{Used: float64(n * 10)}}}}, nil
+	}
+
+	// Two concurrent cold requests coalesce into a single fetch.
+	errCh := make(chan error, 2)
+	qCh := make(chan quotaInfo, 2)
+	for i := 0; i < 2; i++ {
+		go func() {
+			q, err := p.getOrRefresh(context.Background(), "1\x001", fetch)
+			errCh <- err
+			qCh <- q
+		}()
+	}
+	time.Sleep(30 * time.Millisecond)
+	close(gate)
+	for i := 0; i < 2; i++ {
+		if err := <-errCh; err != nil {
+			t.Fatalf("cold fetch err: %v", err)
+		}
+		q := <-qCh
+		if !q.Known || len(q.Groups) != 1 || q.Groups[0].FiveHour.Used != 10 {
+			t.Fatalf("unexpected cold quota: %+v", q)
+		}
+	}
+	mu.Lock()
+	if calls != 1 {
+		t.Fatalf("expected singleflight 1 call, got %d", calls)
+	}
+	mu.Unlock()
+
+	// Advance past fresh TTL (within stale window): returns cached immediately and triggers async refresh.
+	advance(agyQuotaFresh + time.Second)
+	q, err := p.getOrRefresh(context.Background(), "1\x001", fetch)
+	if err != nil || !q.Known || q.Groups[0].FiveHour.Used != 10 {
+		t.Fatalf("stale-while-revalidate should return cached immediately: %+v %v", q, err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		ent, ok := p.getCached("1\x001")
+		if ok && len(ent.q.Groups) == 1 && ent.q.Groups[0].FiveHour.Used == 20 {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("expected async background refresh to update cached quota to 20")
 }

@@ -93,6 +93,7 @@ type Server struct {
 	subConvos        convoStates  // and the logs of subagents opened from them
 	subScans         subScanSeen  // what their logs said last (convo_subscan.go)
 	quotaRuns        quotaRuns    // when Claude Code was last asked for its quota (convo_quota.go)
+	agyQuota         agyQuotaPoller // background periodic & stale-while-revalidate Antigravity quota cache
 	turns            turnIndexes  // the person's turns in those logs, for the page's panel of them (convo_turns.go)
 	newAgents        newAgents    // agents being started from the conversation page
 	claudeLists      sessionLists // Claude Code's sessions of a folder, as last listed

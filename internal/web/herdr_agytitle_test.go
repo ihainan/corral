@@ -19,6 +19,8 @@ func TestAgyTitleBare(t *testing.T) {
 		{"agy", "", "/home/u/AI", true},
 		{"agy", "agy", "/home/u/AI", true},
 		{"agy", "agy --conversation 123", "/home/u/AI", true},
+		{"agy", "agy --conversation=7741b9ca-3d5d-448a-8418-1a8464f064bf --mode auto", "/home/u/AI", true},
+		{"agy", "aswap run 1 --share-history -- --conversation  -i", "/home/u/AI", true},
 		{"agy", "✳ agy", "/home/u/AI", true},
 		{"agy", "AI", "/home/u/AI", true},
 		{"agy", "Antigravity", "/home/u/AI", true},
@@ -289,4 +291,45 @@ func TestAgyTitlerFallbackAndLLMCache(t *testing.T) {
 	}
 	cancel3()
 	<-done3
+}
+
+// TestAgyTitlerSeedBySIDOnRestart verifies that when Herdr reports an agy
+// session UUID on the very first snapshot after Corral restarts, track()
+// immediately seeds ThreadTitle from SQLite before any SSH scan completes.
+func TestAgyTitlerSeedBySIDOnRestart(t *testing.T) {
+	at := newAgyTitler(
+		func(ctx context.Context) (map[string]agyPaneTitleInfo, error) {
+			return nil, context.DeadlineExceeded
+		},
+		func(ctx context.Context, _ string, info agyPaneTitleInfo) (string, bool) {
+			return agyFallbackTitle(info), false
+		},
+		nil,
+	)
+	at.seedBySID = func(_ context.Context, sids []string) map[string]string {
+		out := map[string]string{}
+		for _, sid := range sids {
+			if sid == "7741b9ca-3d5d-448a-8418-1a8464f064bf" {
+				out[sid] = "执行任务4 ModelHub 102"
+			}
+		}
+		return out
+	}
+	sum := herdrSummary{
+		Workspaces: []herdrWorkspace{{
+			ID: "w33",
+			Agents: []herdrAgent{{
+				PaneID:    "w33:p5",
+				Agent:     "agy",
+				Label:     "ag-hub",
+				BareTitle: true,
+				Session:   "7741b9ca-3d5d-448a-8418-1a8464f064bf",
+			}},
+		}},
+	}
+	at.track(&sum)
+	at.decorate(&sum)
+	if got := sum.Workspaces[0].Agents[0].ThreadTitle; got != "执行任务4 ModelHub 102" {
+		t.Fatalf("expected immediate 0ms SQLite seed on restart, got %q", got)
+	}
 }

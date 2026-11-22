@@ -36,6 +36,8 @@ const (
 	agyTitleEvery       = 2 * time.Minute
 	agyTitleSoon        = 2 * time.Second
 	agyTitleNudge       = 4 * time.Second
+	agyTitleRetryMin    = 3 * time.Second
+	agyTitleRetryMax    = 30 * time.Second
 	agyTitleScanMax     = 128 << 10
 	agyTitleRunes       = 60
 	agyTitleFailBackoff = 5 * time.Minute
@@ -43,7 +45,7 @@ const (
 )
 
 var (
-	agyLaunchTitle  = regexp.MustCompile(`^(?i)(?:agy|antigravity)(?:\s+-\S+(?:\s+[^-\s]\S*)?)*$`)
+	agyLaunchTitle  = regexp.MustCompile(`^(?i)(?:(?:agy|antigravity)(?:\s+-\S+(?:\s+[^-\s]\S*)?)*|aswap\s+run\b.*)$`)
 	reUserReqBlock  = regexp.MustCompile(`(?s)<USER_REQUEST>\s*(.*?)\s*</USER_REQUEST>`)
 	reMetaBlock     = regexp.MustCompile(`(?s)<(?:ADDITIONAL_METADATA|CONTEXT_SUMMARY|SYSTEM_INSTRUCTION|USER_SETTINGS_CHANGE)>.*?</(?:ADDITIONAL_METADATA|CONTEXT_SUMMARY|SYSTEM_INSTRUCTION|USER_SETTINGS_CHANGE)>`)
 	reUploadPath    = regexp.MustCompile(`(?:file://)?(?:/[^\s"'<>]+)*/\.cache/corral/uploads/[^\s"'<>]+`)
@@ -99,7 +101,7 @@ const agyTitlesScript = `import json, os, re, sqlite3, sys, urllib.parse
 
 sock = sys.argv[1]
 uid = os.geteuid()
-pane_re = re.compile(r'^w\d+:p\d+$')
+pane_re = re.compile(r'^w[0-9A-Za-z]+:p\d+$')
 lock_re = re.compile(r'^(.*)/presence/([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})\.lock$')
 noninter_flag_arg = {
     '-i', '--prompt-interactive', '--add-dir', '--agent', '--conversation',
@@ -478,21 +480,24 @@ func cleanAgyLLMTitle(raw string) string {
 // agyTitler periodically scans bare AGY panes on a herdr server and decorates
 // their herdrAgent.ThreadTitle with a concise cached title.
 type agyTitler struct {
-	mu       sync.Mutex
-	want     map[string]bool
-	found    map[string]string // pane -> resolved subtitle
-	paneSID  map[string]string // pane -> last seen conversation UUID
-	digest   map[string]string // pane -> last resolved topic digest
-	inFlight map[string]bool   // pane -> async LLM summarization running for digest
-	failAt   map[string]time.Time
-	soon     bool
-	nudged   bool
-	wake     chan struct{}
-	poke     func()
-	scan     func(ctx context.Context) (map[string]agyPaneTitleInfo, error)
-	resolve  func(ctx context.Context, pane string, info agyPaneTitleInfo) (title string, needLLM bool)
-	genLLM   func(ctx context.Context, pane string, info agyPaneTitleInfo) (string, error)
-	every    time.Duration
+	mu        sync.Mutex
+	want      map[string]bool
+	found     map[string]string // pane -> resolved subtitle
+	paneSID   map[string]string // pane -> last seen conversation UUID
+	digest    map[string]string // pane -> last resolved topic digest
+	inFlight  map[string]bool   // pane -> async LLM summarization running for digest
+	failAt    map[string]time.Time
+	soon      bool
+	nudged    bool
+	retryWait time.Duration
+	wake      chan struct{}
+	poke      func()
+	scan      func(ctx context.Context) (map[string]agyPaneTitleInfo, error)
+	resolve   func(ctx context.Context, pane string, info agyPaneTitleInfo) (title string, needLLM bool)
+	genLLM    func(ctx context.Context, pane string, info agyPaneTitleInfo) (string, error)
+	seedBySID func(ctx context.Context, sids []string) map[string]string
+	saveBySID func(ctx context.Context, sid, title string)
+	every     time.Duration
 }
 
 func newAgyTitler(
@@ -517,13 +522,13 @@ func newAgyTitler(
 
 func (s *Server) newServerAgyTitler(sess *term.Session, socket string) *agyTitler {
 	userID := sess.OwnerID
-	return newAgyTitler(
+	at := newAgyTitler(
 		func(ctx context.Context) (map[string]agyPaneTitleInfo, error) {
-			out, err := sshx.Output(ctx, sess.Client(), agyTitlesCommand(socket), agyTitleScanMax)
+			res, err := sshx.Exec(ctx, sess.Client(), agyTitlesCommand(socket), agyTitleScanMax, sshx.ExecOptions{AwaitSlot: 12 * time.Second})
 			if err != nil {
 				return nil, err
 			}
-			return parseAgyTitles(out), nil
+			return parseAgyTitles(res.Out), nil
 		},
 		func(ctx context.Context, _ string, info agyPaneTitleInfo) (string, bool) {
 			return s.resolveAgyTitleSync(ctx, userID, info)
@@ -532,6 +537,34 @@ func (s *Server) newServerAgyTitler(sess *term.Session, socket string) *agyTitle
 			return s.generateAgyTitleLLM(ctx, userID, info)
 		},
 	)
+	if userID > 0 && s.store != nil {
+		at.seedBySID = func(ctx context.Context, sids []string) map[string]string {
+			keys := make([]string, 0, len(sids))
+			for _, sid := range sids {
+				keys = append(keys, "agy-sid:"+strings.ToLower(sid))
+			}
+			cached, err := s.store.CachedThoughtTranslations(ctx, userID, "_", keys)
+			if err != nil || len(cached) == 0 {
+				return nil
+			}
+			out := make(map[string]string, len(cached))
+			for k, v := range cached {
+				if sid, ok := strings.CutPrefix(k, "agy-sid:"); ok && strings.TrimSpace(v) != "" {
+					out[sid] = strings.TrimSpace(v)
+				}
+			}
+			return out
+		}
+		at.saveBySID = func(ctx context.Context, sid, title string) {
+			sid = strings.ToLower(strings.TrimSpace(sid))
+			title = strings.TrimSpace(title)
+			if sid == "" || title == "" {
+				return
+			}
+			_ = s.store.PutThoughtTranslation(ctx, userID, "agy-sid:"+sid, "_", title)
+		}
+	}
+	return at
 }
 
 // resolveAgyTitleSync checks the SQLite cache if the user's LLM config is
@@ -610,14 +643,17 @@ func (a *agyTitler) setPoke(f func()) {
 
 func (a *agyTitler) track(sum *herdrSummary) {
 	a.mu.Lock()
-	defer a.mu.Unlock()
 	want := map[string]bool{}
+	var needSeed []struct{ pane, sid string }
 	for _, w := range sum.Workspaces {
 		for _, ag := range w.Agents {
 			if ag.BareTitle && isAgyAgent(ag.Agent) {
 				want[ag.PaneID] = true
 				if !a.want[ag.PaneID] {
 					a.soon = true
+				}
+				if a.found[ag.PaneID] == "" && ag.Session != "" && a.seedBySID != nil {
+					needSeed = append(needSeed, struct{ pane, sid string }{ag.PaneID, strings.ToLower(ag.Session)})
 				}
 			}
 		}
@@ -631,7 +667,35 @@ func (a *agyTitler) track(sum *herdrSummary) {
 		}
 	}
 	a.want = want
-	if a.soon {
+	seedFn := a.seedBySID
+	soon := a.soon
+	a.mu.Unlock()
+
+	// Seed titles immediately from SQLite by Herdr's reported session UUID so
+	// AGY panes show their saved topic on the very first frame after restart.
+	if len(needSeed) > 0 && seedFn != nil {
+		sids := make([]string, 0, len(needSeed))
+		for _, ns := range needSeed {
+			sids = append(sids, ns.sid)
+		}
+		sctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		seeded := seedFn(sctx, sids)
+		cancel()
+		if len(seeded) > 0 {
+			a.mu.Lock()
+			for _, ns := range needSeed {
+				if a.want[ns.pane] && a.found[ns.pane] == "" {
+					if title := seeded[ns.sid]; title != "" {
+						a.found[ns.pane] = title
+						a.paneSID[ns.pane] = ns.sid
+					}
+				}
+			}
+			a.mu.Unlock()
+		}
+	}
+
+	if soon {
 		select {
 		case a.wake <- struct{}{}:
 		default:
@@ -677,6 +741,9 @@ func (a *agyTitler) run(ctx context.Context) {
 		wait := time.Hour
 		if len(a.want) > 0 {
 			wait = max(0, time.Until(last.Add(a.every)))
+			if a.retryWait > 0 {
+				wait = min(wait, max(0, time.Until(last.Add(a.retryWait))))
+			}
 			if a.soon {
 				wait = min(wait, max(0, time.Until(last.Add(agyTitleSoon))))
 			} else if a.nudged {
@@ -701,12 +768,22 @@ func (a *agyTitler) run(ctx context.Context) {
 			continue
 		}
 		last = time.Now()
-		sctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		sctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 		got, err := a.scan(sctx)
 		cancel()
 		if err != nil {
+			a.mu.Lock()
+			if a.retryWait <= 0 {
+				a.retryWait = agyTitleRetryMin
+			} else {
+				a.retryWait = min(a.retryWait*2, agyTitleRetryMax)
+			}
+			a.mu.Unlock()
 			continue
 		}
+		a.mu.Lock()
+		a.retryWait = 0
+		a.mu.Unlock()
 		type llmJob struct {
 			pane   string
 			digest string
@@ -760,6 +837,7 @@ func (a *agyTitler) run(ctx context.Context) {
 				continue
 			}
 			sameSID := prevSID == info.SID
+			saveSID, saveTitle := "", ""
 			if !needLLM {
 				// Exact cache hit or LLM disabled: apply immediately.
 				if title != a.found[p] {
@@ -770,6 +848,9 @@ func (a *agyTitler) run(ctx context.Context) {
 					}
 					changed = true
 				}
+				if title != "" {
+					saveSID, saveTitle = info.SID, title
+				}
 				a.paneSID[p] = info.SID
 				a.digest[p] = dig
 			} else {
@@ -779,6 +860,7 @@ func (a *agyTitler) run(ctx context.Context) {
 				if (!sameSID || a.found[p] == "") && title != "" && title != a.found[p] {
 					a.found[p] = title
 					changed = true
+					saveSID, saveTitle = info.SID, title
 				}
 				a.paneSID[p] = info.SID
 				if !a.inFlight[p] && !failedRecently && a.genLLM != nil {
@@ -786,7 +868,13 @@ func (a *agyTitler) run(ctx context.Context) {
 					jobs = append(jobs, llmJob{pane: p, digest: dig, info: info})
 				}
 			}
+			saveFn := a.saveBySID
 			a.mu.Unlock()
+			if saveFn != nil && saveSID != "" && saveTitle != "" {
+				sctx, scancel := context.WithTimeout(ctx, 2*time.Second)
+				saveFn(sctx, saveSID, saveTitle)
+				scancel()
+			}
 		}
 		if changed {
 			a.mu.Lock()
@@ -802,6 +890,7 @@ func (a *agyTitler) run(ctx context.Context) {
 				a.mu.Lock()
 				delete(a.inFlight, j.pane)
 				poke := a.poke
+				saveFn := a.saveBySID
 				updated := false
 				if err != nil {
 					a.failAt[j.digest] = time.Now()
@@ -816,6 +905,11 @@ func (a *agyTitler) run(ctx context.Context) {
 					a.digest[j.pane] = j.digest
 				}
 				a.mu.Unlock()
+				if err == nil && title != "" && saveFn != nil {
+					sctx, scancel := context.WithTimeout(ctx, 2*time.Second)
+					saveFn(sctx, j.info.SID, title)
+					scancel()
+				}
 				if updated && poke != nil {
 					poke()
 				}

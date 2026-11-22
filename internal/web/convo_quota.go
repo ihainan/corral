@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/ihainan/corral/internal/sshx"
+	"github.com/ihainan/corral/internal/term"
 )
 
 // The subscription's quota (5-hour and weekly use) of a host's Claude Code, as
@@ -173,17 +174,206 @@ END {
 	return "sh -c " + sshx.QuoteShell(script)
 }
 
-const agyQuotaCacheTTL = 60 * time.Second
+const (
+	agyQuotaFresh       = 3 * time.Minute  // served directly without triggering background refresh
+	agyQuotaStaleMax    = 60 * time.Minute // served immediately while refreshing asynchronously
+	agyQuotaPollEvery   = 5 * time.Minute  // periodic background refresh while agy panes are active
+	agyQuotaActiveTTL   = 20 * time.Minute // stop background loop once no agy pane/viewer is active
+	agyQuotaFetchLimit  = 25 * time.Second
+	agyQuotaFailBackoff = 90 * time.Second
+)
 
 type agyQuotaEntry struct {
 	q  quotaInfo
 	at time.Time
 }
 
-var (
-	agyQuotaMu    sync.Mutex
-	agyQuotaCache = map[string]agyQuotaEntry{}
-)
+type agyQuotaFlight struct {
+	done chan struct{}
+	q    quotaInfo
+	err  error
+}
+
+type agyQuotaHost struct {
+	sess   *term.Session
+	seenAt time.Time
+	failed time.Time
+	loopOn bool
+}
+
+// agyQuotaPoller caches Antigravity/Gemini subscription quota per (owner, host),
+// pre-warms it in the background whenever an agy session is active, refreshes
+// periodically, and serves stale-while-revalidate so opening the quota popover
+// is instant instead of blocking 3-8s on `agy -p /usage`.
+type agyQuotaPoller struct {
+	mu     sync.Mutex
+	cache  map[string]agyQuotaEntry
+	flight map[string]*agyQuotaFlight
+	hosts  map[string]*agyQuotaHost
+	nowFn  func() time.Time
+}
+
+func (p *agyQuotaPoller) now() time.Time {
+	if p.nowFn != nil {
+		return p.nowFn()
+	}
+	return time.Now()
+}
+
+func (p *agyQuotaPoller) getCached(key string) (agyQuotaEntry, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	ent, ok := p.cache[key]
+	return ent, ok
+}
+
+// startFetch ensures at most one in-flight fetch per key (singleflight) and
+// returns the flight handle.
+func (p *agyQuotaPoller) startFetch(key string, fetch func(context.Context) (quotaInfo, error)) (*agyQuotaFlight, bool) {
+	p.mu.Lock()
+	if p.flight == nil {
+		p.flight = map[string]*agyQuotaFlight{}
+	}
+	if fl, ok := p.flight[key]; ok {
+		p.mu.Unlock()
+		return fl, false
+	}
+	fl := &agyQuotaFlight{done: make(chan struct{})}
+	p.flight[key] = fl
+	p.mu.Unlock()
+
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), agyQuotaFetchLimit)
+		q, err := fetch(ctx)
+		cancel()
+		now := p.now()
+		p.mu.Lock()
+		if err == nil && q.Known {
+			if p.cache == nil {
+				p.cache = map[string]agyQuotaEntry{}
+			}
+			p.cache[key] = agyQuotaEntry{q: q, at: now}
+			if h := p.hosts[key]; h != nil {
+				h.failed = time.Time{}
+			}
+		} else if h := p.hosts[key]; h != nil {
+			h.failed = now
+		}
+		delete(p.flight, key)
+		fl.q, fl.err = q, err
+		close(fl.done)
+		p.mu.Unlock()
+	}()
+	return fl, true
+}
+
+// getOrRefresh returns cached quota immediately when available (triggering an
+// async background refresh if stale), or joins/starts a singleflight fetch on
+// cold miss.
+func (p *agyQuotaPoller) getOrRefresh(ctx context.Context, key string, fetch func(context.Context) (quotaInfo, error)) (quotaInfo, error) {
+	now := p.now()
+	if ent, ok := p.getCached(key); ok && now.Sub(ent.at) < agyQuotaStaleMax {
+		if now.Sub(ent.at) >= agyQuotaFresh {
+			p.startFetch(key, fetch)
+		}
+		return ent.q, nil
+	}
+	fl, _ := p.startFetch(key, fetch)
+	select {
+	case <-fl.done:
+		return fl.q, fl.err
+	case <-ctx.Done():
+		return quotaInfo{}, ctx.Err()
+	}
+}
+
+// warm registers an active session hosting agy, triggers an immediate
+// background pre-warm if the cache is missing/stale, and keeps a lightweight
+// periodic refresher running while the session stays active.
+func (p *agyQuotaPoller) warm(key string, sess *term.Session, fetch func(context.Context, *term.Session) (quotaInfo, error)) {
+	if sess == nil || sess.State() != term.StateRunning {
+		return
+	}
+	now := p.now()
+	p.mu.Lock()
+	if p.hosts == nil {
+		p.hosts = map[string]*agyQuotaHost{}
+	}
+	h := p.hosts[key]
+	if h == nil {
+		h = &agyQuotaHost{}
+		p.hosts[key] = h
+	}
+	h.sess = sess
+	h.seenAt = now
+	ent, hasCache := p.cache[key]
+	needNow := (!hasCache || now.Sub(ent.at) >= agyQuotaFresh) && (h.failed.IsZero() || now.Sub(h.failed) >= agyQuotaFailBackoff)
+	startLoop := !h.loopOn
+	if startLoop {
+		h.loopOn = true
+	}
+	p.mu.Unlock()
+
+	if needNow {
+		p.startFetch(key, func(ctx context.Context) (quotaInfo, error) {
+			return fetch(ctx, sess)
+		})
+	}
+	if !startLoop {
+		return
+	}
+	go func() {
+		ticker := time.NewTicker(agyQuotaPollEvery)
+		defer ticker.Stop()
+		for range ticker.C {
+			now := p.now()
+			p.mu.Lock()
+			h := p.hosts[key]
+			if h == nil || h.sess == nil || h.sess.State() != term.StateRunning || now.Sub(h.seenAt) > agyQuotaActiveTTL {
+				if h != nil {
+					h.loopOn = false
+					delete(p.hosts, key)
+				}
+				p.mu.Unlock()
+				return
+			}
+			curSess := h.sess
+			ent, hasCache := p.cache[key]
+			due := !hasCache || now.Sub(ent.at) >= agyQuotaFresh
+			p.mu.Unlock()
+			if due {
+				p.startFetch(key, func(ctx context.Context) (quotaInfo, error) {
+					return fetch(ctx, curSess)
+				})
+			}
+		}
+	}()
+}
+
+func (s *Server) fetchAgyQuota(ctx context.Context, sess *term.Session) (quotaInfo, error) {
+	if sess == nil || sess.State() != term.StateRunning {
+		return quotaInfo{}, errors.New("session not running")
+	}
+	res, err := sshx.Exec(ctx, sess.Client(), agyQuotaCommand(), quotaReadMax, sshx.ExecOptions{AwaitSlot: 12 * time.Second})
+	if err != nil {
+		return quotaInfo{}, err
+	}
+	q, ok := quotaOfAgyUsage(res.Out, time.Now())
+	if !ok {
+		return quotaInfo{}, errors.New("quota parse failed")
+	}
+	return q, nil
+}
+
+// warmAgyQuota pre-warms and periodically refreshes Antigravity/Gemini quota
+// for the host of sess whenever active agy panes are detected.
+func (s *Server) warmAgyQuota(sess *term.Session) {
+	if sess == nil || sess.State() != term.StateRunning {
+		return
+	}
+	key := fmt.Sprintf("%d\x00%d", sess.OwnerID, sess.HostID)
+	s.agyQuota.warm(key, sess, s.fetchAgyQuota)
+}
 
 // agyQuotaCommand runs `agy -p /usage --output-format json`, which prints
 // Antigravity's subscription quota buckets as JSON without starting a turn or
@@ -276,16 +466,12 @@ func (s *Server) apiConversationQuota(w http.ResponseWriter, r *http.Request) {
 	now := time.Now()
 	if agent == "agy" {
 		cacheKey := fmt.Sprintf("%d\x00%d", sess.OwnerID, sess.HostID)
-		agyQuotaMu.Lock()
-		ent, hit := agyQuotaCache[cacheKey]
-		agyQuotaMu.Unlock()
-		if hit && now.Sub(ent.at) < agyQuotaCacheTTL {
-			writeJSON(w, http.StatusOK, ent.q)
-			return
-		}
-		ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
+		s.warmAgyQuota(sess)
+		ctx, cancel := context.WithTimeout(r.Context(), agyQuotaFetchLimit)
 		defer cancel()
-		res, err := sshx.Exec(ctx, sess.Client(), agyQuotaCommand(), quotaReadMax, sshx.ExecOptions{})
+		q, err := s.agyQuota.getOrRefresh(ctx, cacheKey, func(fctx context.Context) (quotaInfo, error) {
+			return s.fetchAgyQuota(fctx, sess)
+		})
 		if err != nil {
 			if errors.Is(err, context.Canceled) {
 				return
@@ -293,14 +479,6 @@ func (s *Server) apiConversationQuota(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadGateway, "no_quota", "Antigravity's quota could not be read")
 			return
 		}
-		q, ok := quotaOfAgyUsage(res.Out, now)
-		if !ok {
-			writeError(w, http.StatusBadGateway, "no_quota", "Antigravity's quota could not be parsed")
-			return
-		}
-		agyQuotaMu.Lock()
-		agyQuotaCache[cacheKey] = agyQuotaEntry{q: q, at: now}
-		agyQuotaMu.Unlock()
 		writeJSON(w, http.StatusOK, q)
 		return
 	}

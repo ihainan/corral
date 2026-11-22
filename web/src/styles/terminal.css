@@ -1735,6 +1735,7 @@ button.convo-queue-row.is-note:last-child { border-radius: 0 0 var(--r-lg) var(-
   .convo-lineage-btn.is-icon { width: 32px; padding: 0; }
 }
 .convo-list-split { flex: none; display: inline-flex; align-items: center; color: var(--term-accent-text); }
+.convo-list-line .convo-list-split { align-self: center; margin-left: -4px; }
 .convo-list-row {
   display: flex; align-items: flex-start; gap: 10px; width: 100%; padding: 8px 10px; border: 0; border-radius: var(--r);
   background: none; color: var(--term-fg); font: inherit; text-align: left; cursor: pointer;
