@@ -1114,7 +1114,9 @@ func (s *Server) apiHerdrAction(w http.ResponseWriter, r *http.Request) {
 	var b struct {
 		Action string `json:"action"`
 		Target string `json:"target"`
+		Other  string `json:"other"` // (swap_panes: second pane id)
 		Label  string `json:"label"` // (rename_*: the new name)
+		Force  bool   `json:"force"` // (remove_worktree: force removal)
 	}
 	if err := readJSON(r, &b); err != nil || len(b.Target) > 64 || (b.Target == "") != herdrUntargeted[b.Action] {
 		writeError(w, http.StatusBadRequest, "bad_request", "action and target are required")
@@ -1146,6 +1148,30 @@ func (s *Server) apiHerdrAction(w http.ResponseWriter, r *http.Request) {
 		err = c.FocusPane(ctx, b.Target)
 	case "zoom_pane":
 		err = c.ZoomPane(ctx, b.Target, "on")
+	case "zoom_pane_toggle":
+		if !herdrPaneID.MatchString(b.Target) {
+			writeError(w, http.StatusBadRequest, "bad_request", "bad pane")
+			return
+		}
+		err = c.ZoomPane(ctx, b.Target, "toggle")
+	case "swap_panes":
+		if !herdrPaneID.MatchString(b.Target) || !herdrPaneID.MatchString(b.Other) {
+			writeError(w, http.StatusBadRequest, "bad_request", "two valid panes are required")
+			return
+		}
+		err = c.SwapPanes(ctx, b.Target, b.Other)
+	case "remove_worktree":
+		if !herdrPaneID.MatchString(b.Target) {
+			writeError(w, http.StatusBadRequest, "bad_request", "bad workspace")
+			return
+		}
+		err = c.RemoveWorktree(ctx, b.Target, b.Force)
+	case "interrupt_pane":
+		if !herdrPaneID.MatchString(b.Target) {
+			writeError(w, http.StatusBadRequest, "bad_request", "bad pane")
+			return
+		}
+		err = c.SendKeys(ctx, b.Target, []string{"esc"})
 	case "unzoom":
 		err = c.ZoomPane(ctx, "", "off")
 	case "zoom_toggle":

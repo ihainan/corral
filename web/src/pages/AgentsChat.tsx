@@ -2650,6 +2650,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, keysActive, isSe
   // Not a tmux one's: its entry is the whole tmux session, other windows too.
   // This one, from the bar's menu; any, from its row's.
   const [closing, setClosing] = useState<Entry | null>(null)
+  const [stoppingFleet, setStoppingFleet] = useState<Entry[] | null>(null)
   const closable = (e: Entry) => e.s.persistence === 'herdr' && !!e.row && !e.row.lost
   const canClose = closable(cur)
   // Claude Code's own commands on its session: only while it is idle.
@@ -2899,6 +2900,26 @@ function AgentChat({ cur, entries, all, titles, onPick, active, keysActive, isSe
       (e) => toast(errorText(e), true),
     )
   }
+  const curLineageRow = rows.find((r) => r.current)
+  const parentLineageRow = curLineageRow?.parentKey ? rows.find((r) => r.key === curLineageRow.parentKey) : undefined
+  const parentLineageEntry = parentLineageRow ? entries.find((e) => e.key === parentLineageRow.key) : undefined
+  const childLineageRows = curLineageRow ? rows.filter((r) => r.parentKey === curLineageRow.key) : []
+  const workingChildEntries = childLineageRows
+    .filter((c) => (c.liveStatus ?? c.status) === 'working')
+    .map((c) => entries.find((e) => e.key === c.key))
+    .filter((e): e is Entry => !!e && e.s.persistence === 'herdr' && !!e.row && !e.row.lost)
+  const otherSplitKey = isSecondary ? primaryKey : splitKey
+  const otherSplitEntry = otherSplitKey ? entries.find((e) => e.key === otherSplitKey) : undefined
+  const canCliZoom = cur.s.persistence === 'herdr' && !!cur.row && !cur.row.lost
+  const canCliSwap =
+    canCliZoom &&
+    otherSplitEntry?.s.persistence === 'herdr' &&
+    !!otherSplitEntry.row &&
+    !otherSplitEntry.row.lost &&
+    otherSplitEntry.s.id === cur.s.id &&
+    !!cur.row!.a.tab &&
+    otherSplitEntry.row.a.tab === cur.row!.a.tab &&
+    otherSplitEntry.row.a.pane_id !== cur.row!.a.pane_id
   const more = (): (MenuItem | null)[] => [
     ...(isSecondary
       ? [
@@ -2907,6 +2928,37 @@ function AgentChat({ cur, entries, all, titles, onPick, active, keysActive, isSe
         ]
       : []),
     { label: t('convo.showTerminal'), icon: <SquareTerminal size={16} />, group: t('menu.group.agent'), separator: isSecondary && (!!onSplitSwap || !!onSplitExpand), onSelect: openTerminal },
+    canCliZoom
+      ? {
+          label: t('convo.cliZoom'),
+          icon: <Maximize2 size={16} />,
+          onSelect: () => {
+            void api('POST', `/api/sessions/${encodeURIComponent(cur.s.id)}/herdr`, { action: 'zoom_pane_toggle', target: cur.row!.a.pane_id }).then(
+              () => toast(t('card.cliZoomDone')),
+              (e) => toast(errorText(e), true),
+            )
+          },
+        }
+      : null,
+    canCliSwap
+      ? {
+          label: t('convo.cliSwap'),
+          icon: <ArrowLeftRight size={16} />,
+          onSelect: () => {
+            void api('POST', `/api/sessions/${encodeURIComponent(cur.s.id)}/herdr`, {
+              action: 'swap_panes',
+              target: cur.row!.a.pane_id,
+              other: otherSplitEntry!.row!.a.pane_id,
+            }).then(
+              () => {
+                onSplitSwap?.()
+                toast(t('convo.cliSwapped'))
+              },
+              (e) => toast(errorText(e), true),
+            )
+          },
+        }
+      : null,
     pinItem(cur.key),
     // (Within its group here: no rule of its own, as it has in a row's menu.)
     ((f) => f && { ...f, separator: false })(forkItem(cur)),
@@ -2944,12 +2996,17 @@ function AgentChat({ cur, entries, all, titles, onPick, active, keysActive, isSe
       sess && sess !== NO_SESSION
         ? { label: t('convo.copySession'), icon: <Copy size={16} />, ...(bound && opsOf.length ? {} : { separator: true, group: t('menu.group.convo') }), onSelect: async () => void ((await copyText(sess)) && toast(t('convo.sessionCopied', { id: sess.slice(0, 8) }))) }
         : null)(convo.bind?.session),
-    canClose ? { label: t('agents.close'), icon: <Power size={16} />, danger: true, separator: true, onSelect: () => setClosing(cur) } : null,
+    workingChildEntries.length >= 2
+      ? {
+          label: t('convo.fleet.stopAll', { n: workingChildEntries.length }),
+          icon: <CircleStop size={16} />,
+          danger: true,
+          separator: true,
+          onSelect: () => setStoppingFleet(workingChildEntries),
+        }
+      : null,
+    canClose ? { label: t('agents.close'), icon: <Power size={16} />, danger: true, separator: workingChildEntries.length < 2, onSelect: () => setClosing(cur) } : null,
   ]
-  const curLineageRow = rows.find((r) => r.current)
-  const parentLineageRow = curLineageRow?.parentKey ? rows.find((r) => r.key === curLineageRow.parentKey) : undefined
-  const parentLineageEntry = parentLineageRow ? entries.find((e) => e.key === parentLineageRow.key) : undefined
-  const childLineageRows = curLineageRow ? rows.filter((r) => r.parentKey === curLineageRow.key) : []
   const curSubagentParent = subagentParentOf(cur)
   const lineageBar: ConvoLineageBar | undefined =
     parentLineageRow || childLineageRows.length
@@ -3208,6 +3265,29 @@ function AgentChat({ cur, entries, all, titles, onPick, active, keysActive, isSe
           onClosed(closing.key)
         }}
         onClose={() => setClosing(null)}
+      />
+    )}
+    {stoppingFleet && stoppingFleet.length > 0 && (
+      <Confirm
+        title={t('convo.fleet.stopAllTitle')}
+        body={t('convo.fleet.stopAllConfirm', { n: stoppingFleet.length })}
+        confirm={t('convo.stop')}
+        danger
+        onConfirm={async () => {
+          const targets = stoppingFleet
+          const results = await Promise.allSettled(
+            targets.map((e) =>
+              api('POST', `/api/sessions/${encodeURIComponent(e.s.id)}/herdr`, {
+                action: 'interrupt_pane',
+                target: e.row!.a.pane_id,
+              }),
+            ),
+          )
+          const ok = results.filter((r) => r.status === 'fulfilled').length
+          toast(t('convo.fleet.stopped', { ok, total: targets.length }), ok === 0)
+          readSessionsNow()
+        }}
+        onClose={() => setStoppingFleet(null)}
       />
     )}
     </div>

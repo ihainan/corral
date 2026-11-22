@@ -300,6 +300,7 @@ func (s *Server) registerRoutes() {
 	s.handle("GET /api/sessions/{id}/git", SignedIn, s.apiGitInfo)
 	s.handle("GET /api/sessions/{id}/git/pr", SignedIn, s.apiGitPR)
 	s.handle("GET /api/sessions/{id}/git/changes", SignedIn, s.apiGitChanges)
+	s.handle("GET /api/sessions/{id}/pane-inspect", SignedIn, s.apiPaneInspect)
 	s.handle("GET /api/sessions/{id}/files/download", SignedIn, s.apiFilesDownload)
 	s.handle("GET /api/sessions/{id}/files/view", SignedIn, s.apiFilesView)
 	s.handle("GET /api/sessions/{id}/files/text", SignedIn, s.apiFilesText)

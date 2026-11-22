@@ -419,6 +419,129 @@ func (c *Client) ClosePane(ctx context.Context, paneID string) error {
 	return c.Call(ctx, "pane.close", map[string]any{"pane_id": paneID}, nil)
 }
 
+// SwapPanes swaps two panes in the same tab.
+func (c *Client) SwapPanes(ctx context.Context, sourcePaneID, targetPaneID string) error {
+	return c.Call(ctx, "pane.swap", map[string]any{
+		"source_pane_id": sourcePaneID,
+		"target_pane_id": targetPaneID,
+	}, nil)
+}
+
+// WorktreeInfo describes one Git worktree known to Herdr.
+type WorktreeInfo struct {
+	Path             string `json:"path"`
+	Branch           string `json:"branch,omitempty"`
+	Label            string `json:"label,omitempty"`
+	OpenWorkspaceID  string `json:"open_workspace_id,omitempty"`
+	IsBare           bool   `json:"is_bare"`
+	IsDetached       bool   `json:"is_detached"`
+	IsPrunable       bool   `json:"is_prunable"`
+	IsLinkedWorktree bool   `json:"is_linked_worktree"`
+}
+
+// WorktreeSourceInfo describes the source Git repository for worktree.list.
+type WorktreeSourceInfo struct {
+	RepoName string `json:"repo_name,omitempty"`
+	RepoRoot string `json:"repo_root,omitempty"`
+}
+
+// WorktreeListResult is the response payload of worktree.list.
+type WorktreeListResult struct {
+	Source    WorktreeSourceInfo `json:"source"`
+	Worktrees []WorktreeInfo     `json:"worktrees"`
+}
+
+// CreateWorktree creates a Git worktree-backed workspace via worktree.create
+// without stealing focus, returning workspace id, root pane id, terminal id,
+// checkout path, and branch name.
+func (c *Client) CreateWorktree(ctx context.Context, cwd, branch, label string) (workspace, pane, terminalID, wtPath, wtBranch string, err error) {
+	var res struct {
+		Workspace struct {
+			ID string `json:"workspace_id"`
+		} `json:"workspace"`
+		RootPane struct {
+			ID         string `json:"pane_id"`
+			TerminalID string `json:"terminal_id"`
+		} `json:"root_pane"`
+		Worktree WorktreeInfo `json:"worktree"`
+	}
+	params := map[string]any{"cwd": cwd, "focus": false}
+	if branch != "" {
+		params["branch"] = branch
+	}
+	if label != "" {
+		params["label"] = label
+	}
+	// Creating a git worktree can take a few seconds on large repos.
+	if err := c.CallWithin(ctx, 30*time.Second, "worktree.create", params, &res); err != nil {
+		return "", "", "", "", "", err
+	}
+	return res.Workspace.ID, res.RootPane.ID, res.RootPane.TerminalID, res.Worktree.Path, res.Worktree.Branch, nil
+}
+
+// ListWorktrees queries Herdr's worktree.list for cwd or workspaceID.
+func (c *Client) ListWorktrees(ctx context.Context, cwd, workspaceID string) (*WorktreeListResult, error) {
+	params := map[string]any{}
+	if workspaceID != "" {
+		params["workspace_id"] = workspaceID
+	} else if cwd != "" {
+		params["cwd"] = cwd
+	}
+	var res WorktreeListResult
+	if err := c.Call(ctx, "worktree.list", params, &res); err != nil {
+		return nil, err
+	}
+	return &res, nil
+}
+
+// RemoveWorktree closes and removes a worktree-backed workspace via worktree.remove.
+func (c *Client) RemoveWorktree(ctx context.Context, workspaceID string, force bool) error {
+	return c.CallWithin(ctx, 20*time.Second, "worktree.remove", map[string]any{
+		"workspace_id": workspaceID,
+		"force":        force,
+	}, nil)
+}
+
+// ProcessEntry is one foreground process reported by pane.process_info.
+type ProcessEntry struct {
+	PID     int      `json:"pid"`
+	Name    string   `json:"name"`
+	Argv    []string `json:"argv,omitempty"`
+	Cmdline string   `json:"cmdline,omitempty"`
+	Cwd     string   `json:"cwd,omitempty"`
+}
+
+// PaneProcessInfoResult is the structured process info for a Herdr pane.
+type PaneProcessInfoResult struct {
+	PaneID                   string         `json:"pane_id"`
+	ShellPID                 int            `json:"shell_pid"`
+	ForegroundProcessGroupID int            `json:"foreground_process_group_id"`
+	ForegroundProcesses      []ProcessEntry `json:"foreground_processes"`
+}
+
+// PaneProcessInfo queries Herdr's pane.process_info for paneID.
+func (c *Client) PaneProcessInfo(ctx context.Context, paneID string) (*PaneProcessInfoResult, error) {
+	var res struct {
+		ProcessInfo PaneProcessInfoResult `json:"process_info"`
+	}
+	if err := c.Call(ctx, "pane.process_info", map[string]any{"pane_id": paneID}, &res); err != nil {
+		return nil, err
+	}
+	return &res.ProcessInfo, nil
+}
+
+// AgentExplain queries Herdr's agent.explain for target (pane id or agent name)
+// and returns the raw JSON explain object.
+func (c *Client) AgentExplain(ctx context.Context, target string) (json.RawMessage, error) {
+	var res struct {
+		Explain json.RawMessage `json:"explain"`
+	}
+	if err := c.Call(ctx, "agent.explain", map[string]any{"target": target}, &res); err != nil {
+		return nil, err
+	}
+	return res.Explain, nil
+}
+
 // Split splits the focused pane, "right" or "down", focusing the new one.
 func (c *Client) Split(ctx context.Context, direction string) error {
 	return c.Call(ctx, "pane.split", map[string]any{"direction": direction, "focus": true}, nil)

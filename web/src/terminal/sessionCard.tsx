@@ -12,7 +12,7 @@
 // half-made change, or meet the agent's own git).
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
-import { Bot, ChevronRight, FolderOpen, GitBranch, GitCommitHorizontal, GitPullRequest, Gauge, ListTodo, MessageSquareText, Terminal } from 'lucide-react'
+import { Activity, Bot, ChevronDown, ChevronRight, Cpu, FolderOpen, GitBranch, GitCommitHorizontal, GitPullRequest, Gauge, ListTodo, Maximize2, MessageSquareText, SquareTerminal, Terminal } from 'lucide-react'
 import { api, ApiError } from '../api'
 import { t } from '../i18n'
 import { Dialog, DialogHead } from '../components/ui'
@@ -39,6 +39,28 @@ type GitInfo = {
   diff?: { files: number; add: number; del: number }
 }
 type GitPR = { gh: boolean; pr: { number: number; state: string; title: string; url: string; draft: boolean } | null }
+
+type PaneInspect = {
+  mode: string
+  pane?: string
+  shell_pid?: number
+  zoomed?: boolean
+  processes?: { pid: number; name: string; cmdline?: string; cwd?: string }[]
+  explain?: {
+    agent?: string
+    authority?: string
+    screen_skipped?: boolean
+    skip_reason?: string
+    matched_rules?: { id: string; state?: string; region?: string }[]
+  }
+  worktree?: {
+    linked: boolean
+    branch?: string
+    path?: string
+    repo_name?: string
+    total?: number
+  }
+}
 
 export interface CardFile {
   path: string
@@ -107,6 +129,23 @@ function useGit(sid: string, pane: string) {
   return { git, pr, error, retry: () => setAgain((n) => n + 1) }
 }
 
+function usePaneInspect(sid: string, pane: string, enabled: boolean) {
+  const [inspect, setInspect] = useState<PaneInspect | null>(null)
+  const [loading, setLoading] = useState(false)
+  useEffect(() => {
+    if (!enabled) return
+    const ctl = new AbortController()
+    const q = pane ? '?pane=' + encodeURIComponent(pane) : ''
+    setLoading(true)
+    api<PaneInspect>('GET', `/api/sessions/${sid}/pane-inspect${q}`, undefined, { signal: ctl.signal, timeoutMs: 12000 })
+      .then((res) => !ctl.signal.aborted && setInspect(res))
+      .catch(() => {})
+      .finally(() => !ctl.signal.aborted && setLoading(false))
+    return () => ctl.abort()
+  }, [sid, pane, enabled])
+  return { inspect, loading }
+}
+
 // (more: it opens a view of its own, the Changes view — a chevron says so.)
 function Row({ icon, children, sub, onClick, title, more }: { icon: ReactNode; children: ReactNode; sub?: ReactNode; onClick?: () => void; title?: string; more?: boolean }) {
   const body = (
@@ -140,6 +179,16 @@ function Counts({ add, del }: { add: number; del: number }) {
 
 function CardBody({ data, acts, close }: { data: CardData; acts: CardActs; close: () => void }) {
   const { git, pr, error, retry } = useGit(data.sid, data.pane)
+  const [inspectOpen, setInspectOpen] = useState(false)
+  const { inspect, loading: inspectLoading } = usePaneInspect(data.sid, data.pane, inspectOpen)
+  const [cliMsg, setCliMsg] = useState('')
+  const runCliAct = (action: 'zoom_pane_toggle' | 'focus_pane', doneKey: 'card.cliZoomDone' | 'card.cliFocusDone') => {
+    if (!data.pane) return
+    setCliMsg('')
+    void api('POST', `/api/sessions/${data.sid}/herdr`, { action, target: data.pane })
+      .then(() => setCliMsg(t(doneKey)))
+      .catch(() => {})
+  }
   const now = Date.now()
   const procCmds = (data.cmds?.list ?? []).filter((c) => !c.task || !data.running.some((r) => r.id === c.task))
   const procMore = data.cmds ? Math.max(data.cmds.n - data.cmds.list.length, 0) : 0
@@ -337,6 +386,60 @@ function CardBody({ data, acts, close }: { data: CardData; acts: CardActs; close
           </Row>
         </section>
       )}
+
+      <section className="scard-sec">
+        <button type="button" className="scard-toggle" aria-expanded={inspectOpen} onClick={() => setInspectOpen((v) => !v)}>
+          <Activity size={14} aria-hidden="true" />
+          <span>{t('card.inspect')}</span>
+          {inspectOpen ? <ChevronDown size={14} className="scard-chev" aria-hidden="true" /> : <ChevronRight size={14} className="scard-chev" aria-hidden="true" />}
+        </button>
+        {inspectOpen && (
+          <div className="scard-inspect">
+            {inspectLoading && !inspect && <p className="scard-note">{t('card.inspectLoading')}</p>}
+            {inspect?.worktree?.linked && (
+              <div className="scard-inspect-meta">
+                <span className="scard-chip">{t('card.inspectWorktree', { n: inspect.worktree.total ?? 1 })}</span>
+              </div>
+            )}
+            {inspect?.explain && (
+              <div className="scard-inspect-meta">
+                <span className="scard-chip">
+                  {t(inspect.explain.authority === 'hook' ? 'card.inspectAuthHook' : 'card.inspectAuthScreen')}
+                </span>
+                {(inspect.explain.matched_rules ?? []).slice(0, 3).map((r) => (
+                  <span key={r.id} className="scard-chip is-mono" title={[r.id, r.state, r.region].filter(Boolean).join(' · ')}>
+                    {r.id}
+                  </span>
+                ))}
+              </div>
+            )}
+            {inspect && (inspect.processes?.length ?? 0) > 0 ? (
+              <ul className="scard-procs">
+                {inspect.processes!.slice(0, 6).map((p) => (
+                  <li key={p.pid} className="scard-proc" title={p.cmdline || p.name}>
+                    <Cpu size={13} className="scard-ic" aria-hidden="true" />
+                    <span className="scard-proc-pid">{p.pid}</span>
+                    <code className="scard-proc-cmd">{p.cmdline || p.name}</code>
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              inspect && !inspectLoading && <p className="scard-note">{t('card.inspectEmpty')}</p>
+            )}
+            {inspect?.mode === 'herdr' && data.pane && (
+              <div className="scard-inspect-acts">
+                <button type="button" className="btn btn-sm" onClick={() => runCliAct('zoom_pane_toggle', 'card.cliZoomDone')}>
+                  <Maximize2 size={13} /> {t('card.cliZoom')}
+                </button>
+                <button type="button" className="btn btn-sm" onClick={() => runCliAct('focus_pane', 'card.cliFocusDone')}>
+                  <SquareTerminal size={13} /> {t('card.cliFocus')}
+                </button>
+                {cliMsg && <span className="scard-hint">{cliMsg}</span>}
+              </div>
+            )}
+          </div>
+        )}
+      </section>
 
       {acts.onDraft && git?.repo && (canCommit || canPR) && (
         <section className="scard-sec scard-asks">

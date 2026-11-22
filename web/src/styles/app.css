@@ -1286,6 +1286,29 @@ details.adv > .form { margin-top: 16px; }
 .scard-asks { flex-direction: row; flex-wrap: wrap; gap: 8px; padding: 12px 10px 4px; }
 .scard-asks .btn { gap: 6px; }
 .scard-asks .scard-hint { flex-basis: 100%; }
+.scard-toggle {
+  display: flex; align-items: center; gap: 8px; width: 100%; padding: 6px 10px;
+  border: 0; border-radius: var(--r); background: none; color: var(--fg-2);
+  font: 500 var(--fs-sub)/var(--lh-sub) var(--font-ui); text-align: left; cursor: pointer;
+}
+.scard-toggle:hover { background: var(--bg-hover); color: var(--fg); }
+.scard-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.scard-toggle > .scard-chev { margin-left: auto; }
+.scard-inspect { display: flex; flex-direction: column; gap: 6px; padding: 4px 10px 2px; }
+.scard-inspect-meta { display: flex; flex-wrap: wrap; gap: 4px; }
+.scard-chip {
+  display: inline-flex; align-items: center; padding: 2px 8px; border-radius: 999px;
+  background: var(--bg-subtle); border: 1px solid var(--line); color: var(--fg-2);
+  font-size: var(--fs-note); line-height: var(--lh-note); max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.scard-chip.is-mono { font-family: var(--font-mono); }
+.scard-procs { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.scard-proc { display: flex; align-items: center; gap: 6px; min-width: 0; font-size: var(--fs-note); line-height: var(--lh-note); }
+.scard-proc .scard-ic { margin-top: 0; }
+.scard-proc-pid { flex: none; font-family: var(--font-mono); color: var(--fg-3); font-variant-numeric: tabular-nums; }
+.scard-proc-cmd { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono); color: var(--fg-2); }
+.scard-inspect-acts { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding-top: 2px; }
+.scard-inspect-acts .btn { gap: 6px; }
 
 /* Thinking translation configuration modal & live Chat Mode preview */
 .tr-key-row { display: flex; gap: 8px; align-items: center; }

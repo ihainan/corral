@@ -81,10 +81,11 @@ export function NewAgentDialog({
   const [dir, setDir] = useState(() => parent?.dir || dirs[0] || '~/')
   const [kind, setKind] = useState<Kind>(lastKind)
   const [placement, setPlacement] = useState<Placement>(lastPlacement)
-  // In a git worktree of its own, made and tidied by the agent itself
-  // (Claude Code's -w, Codex's --worktree): not for OpenCode, nor a session
-  // taken up.
+  // In a git worktree of its own: Herdr sessions support native worktree.create
+  // for all 4 agent kinds (with optional custom branch), while tmux supports
+  // Claude Code (-w) and Codex (--worktree).
   const [worktree, setWorktree] = useState(false)
+  const [worktreeBranch, setWorktreeBranch] = useState('')
   const [label, setLabel] = useState('')
   const [first, setFirst] = useState('')
   const [olds, setOlds] = useState<Old[] | null>(null)
@@ -95,7 +96,9 @@ export function NewAgentDialog({
   const [fork, setFork] = useState(false)
   const canFork = kind === 'claude' || kind === 'codex'
   const copying = fork && canFork && !!resume
-  const inWorktree = worktree && kind !== 'opencode' && kind !== 'agy' && !resume
+  const isHerdrSess = !!sess && !!herdrOf(sess)
+  const canWorktree = !resume && !(parent && placement === 'split') && (isHerdrSess || (kind !== 'opencode' && kind !== 'agy'))
+  const inWorktree = worktree && canWorktree
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   // (One key for one thing asked: said again unchanged (its answer not
@@ -154,6 +157,7 @@ export function NewAgentDialog({
         resume: kind !== 'opencode' ? resume : '',
         fork: canFork && copying,
         worktree: inWorktree,
+        ...(inWorktree && isHerdrSess && worktreeBranch.trim() ? { worktree_branch: worktreeBranch.trim() } : {}),
         ...(parent ? { parent_pane: parent.pane, placement } : {}),
       }
       const r = await api<{ pane?: string; tmux?: string }>('POST', `/api/sessions/${sess.id}/agents`, { ...body, key: keyOf(sess.id + '\n' + JSON.stringify(body)) }, { timeoutMs: 90000 })
@@ -266,13 +270,28 @@ export function NewAgentDialog({
             ))}
           </div>
         </div>
-        {kind !== 'opencode' && kind !== 'agy' && !resume && (
+        {canWorktree && (
           <div className="field">
             <label className="check">
               <input type="checkbox" checked={worktree} onChange={(e) => setWorktree(e.target.checked)} />
               <span>{t('newAgent.worktree')}</span>
             </label>
-            <p className="hint">{t('newAgent.worktreeHint', { agent: t(`newAgent.kind.${kind}`) })}</p>
+            <p className="hint">{t(isHerdrSess && (kind === 'agy' || kind === 'opencode' || !!worktreeBranch.trim()) ? 'newAgent.worktreeHintHerdr' : 'newAgent.worktreeHint', { agent: t(`newAgent.kind.${kind}`) })}</p>
+            {inWorktree && isHerdrSess && (
+              <label className="field" style={{ marginTop: 6 }}>
+                <span>{t('newAgent.worktreeBranch')}</span>
+                <input
+                  className="input"
+                  value={worktreeBranch}
+                  maxLength={120}
+                  autoCapitalize="none"
+                  autoCorrect="off"
+                  spellCheck={false}
+                  placeholder={t('newAgent.worktreeBranchHint')}
+                  onChange={(e) => setWorktreeBranch(e.target.value)}
+                />
+              </label>
+            )}
           </div>
         )}
         <label className="field">

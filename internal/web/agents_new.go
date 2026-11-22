@@ -37,10 +37,21 @@ var (
 	agentKinds = map[string]bool{"claude": true, "codex": true, "opencode": true, "agy": true}
 	// worktreeFlag: what starts a kind in a git worktree of its own, which it
 	// makes and manages itself (none for OpenCode).
-	worktreeFlag = map[string]string{"claude": "-w", "codex": "--worktree"}
-	newAgentKey  = regexp.MustCompile(`^[A-Za-z0-9-]{8,64}$`)
-	sessionUUID  = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+	worktreeFlag   = map[string]string{"claude": "-w", "codex": "--worktree"}
+	newAgentKey    = regexp.MustCompile(`^[A-Za-z0-9-]{8,64}$`)
+	sessionUUID    = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+	worktreeBranch = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/-]{0,119}$`)
 )
+
+func worktreeBranchOK(b string) bool {
+	if b == "" {
+		return true
+	}
+	if !worktreeBranch.MatchString(b) || strings.Contains(b, "..") || strings.Contains(b, "//") || strings.HasSuffix(b, "/") || strings.HasSuffix(b, ".lock") || strings.HasSuffix(b, ".") {
+		return false
+	}
+	return true
+}
 
 const (
 	newAgentWait  = 45 * time.Second // herdr's wait for the agent to be ready
@@ -80,11 +91,12 @@ func (s *Server) apiNewAgent(w http.ResponseWriter, r *http.Request) {
 		// message back-th from the last, its words at_text — codexRewind.)
 		Back     int    `json:"back"`
 		AtText   string `json:"at_text"`
-		Clear      bool   `json:"clear"`       // (its input emptied after: the message taken to the page's own)
-		Worktree   bool   `json:"worktree"`    // (not with resume: a session taken up stays where it was)
-		ParentPane string `json:"parent_pane"` // (optional herdr parent pane to record corral_spawn lineage)
-		Placement  string `json:"placement"`   // ("workspace" (default) or "split" inside parent_pane's workspace)
-		Key        string `json:"key"`
+		Clear          bool   `json:"clear"`           // (its input emptied after: the message taken to the page's own)
+		Worktree       bool   `json:"worktree"`        // (not with resume: a session taken up stays where it was)
+		WorktreeBranch string `json:"worktree_branch"` // (optional branch name when creating a Herdr Git worktree)
+		ParentPane     string `json:"parent_pane"`     // (optional herdr parent pane to record corral_spawn lineage)
+		Placement      string `json:"placement"`       // ("workspace" (default) or "split" inside parent_pane's workspace)
+		Key            string `json:"key"`
 	}
 	if err := readJSON(r, &b); err != nil || !agentKinds[b.Kind] || !newAgentKey.MatchString(b.Key) ||
 		(b.ParentPane != "" && !herdrPaneID.MatchString(b.ParentPane)) ||
@@ -92,12 +104,15 @@ func (s *Server) apiNewAgent(w http.ResponseWriter, r *http.Request) {
 		(b.Placement == "split" && b.ParentPane == "") ||
 		(b.Resume != "" && (!sessionUUID.MatchString(b.Resume) || b.Kind != "claude" && b.Kind != "codex" && b.Kind != "agy")) ||
 		(b.Fork && (b.Resume == "" || b.Kind == "agy")) || (b.At != "" && (!b.Fork || b.Kind != "claude" || !sessionUUID.MatchString(b.At))) ||
-		(b.Worktree && (worktreeFlag[b.Kind] == "" || b.Resume != "")) ||
+		(b.Worktree && (b.Resume != "" || b.Placement == "split")) ||
+		(!b.Worktree && b.WorktreeBranch != "") ||
+		!worktreeBranchOK(strings.TrimSpace(b.WorktreeBranch)) ||
 		(b.Back != 0 && (!b.Fork || b.Kind != "codex" || b.Back < 1 || b.Back > codexRewindMax || strings.TrimSpace(b.AtText) == "" || utf8.RuneCountInString(b.AtText) > 4000)) ||
 		(b.Back == 0 && (b.AtText != "" || b.Clear)) {
 		writeError(w, http.StatusBadRequest, "bad_request", "folder, kind and key are required")
 		return
 	}
+	b.WorktreeBranch = strings.TrimSpace(b.WorktreeBranch)
 	dir, ok := agentDir(b.Dir)
 	if !ok && !b.Fork {
 		writeError(w, http.StatusBadRequest, "bad_folder", "a folder's full path (or one under ~/) is required")
@@ -109,6 +124,10 @@ func (s *Server) apiNewAgent(w http.ResponseWriter, r *http.Request) {
 	if ts, err := s.terms.Get(currentUser(r).ID, r.PathValue("id")); err == nil && ts.Persistence == "tmux" {
 		if b.Placement == "split" {
 			writeError(w, http.StatusConflict, "unsupported", "split subagent is only supported in herdr sessions")
+			return
+		}
+		if b.Worktree && (worktreeFlag[b.Kind] == "" || b.WorktreeBranch != "") {
+			writeError(w, http.StatusBadRequest, "bad_request", "git worktree isolation for this agent requires a herdr session")
 			return
 		}
 		if ts.State() != term.StateRunning {
@@ -143,7 +162,7 @@ func (s *Server) apiNewAgent(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), newAgentWait+30*time.Second)
 	defer cancel()
 	rec := &recorder{header: http.Header{}}
-	s.newAgent(ctx, rec, sess, socket, dir, b.Kind, b.Label, agentStart{resume: b.Resume, fork: b.Fork, at: b.At, worktree: b.Worktree, back: b.Back, atText: b.AtText, clear: b.Clear, parentPane: b.ParentPane, placement: b.Placement, key: b.Key})
+	s.newAgent(ctx, rec, sess, socket, dir, b.Kind, b.Label, agentStart{resume: b.Resume, fork: b.Fork, at: b.At, worktree: b.Worktree, worktreeBranch: b.WorktreeBranch, back: b.Back, atText: b.AtText, clear: b.Clear, parentPane: b.ParentPane, placement: b.Placement, key: b.Key})
 	s.newAgents.finish(key, who, run, rec.status, rec.body.Bytes())
 	for k, v := range rec.header {
 		w.Header()[k] = v
@@ -163,16 +182,18 @@ func (s *Server) apiNewAgent(w http.ResponseWriter, r *http.Request) {
 // not), taking up a session of before (resume), or a copy of one (fork; of
 // it up to the message at, where at is given).
 type agentStart struct {
-	resume     string
-	fork       bool
-	at         string
-	worktree   bool
-	back       int    // (a Codex's copy: rewound to before the person's message back-th from the last — codexRewind)
-	atText     string // (its words)
-	clear      bool   // (its input emptied once seen holding them)
-	parentPane string // (optional herdr parent pane for corral_spawn lineage)
-	placement  string // ("workspace" or "split")
-	key        string // (idempotency key, reused as spawn evidence_key)
+	resume         string
+	fork           bool
+	at             string
+	worktree       bool
+	worktreeBranch string // optional custom branch for Herdr worktree.create
+	herdrWorktree  bool   // true when Herdr already created the git worktree workspace
+	back           int    // (a Codex's copy: rewound to before the person's message back-th from the last — codexRewind)
+	atText         string // (its words)
+	clear          bool   // (its input emptied once seen holding them)
+	parentPane     string // (optional herdr parent pane for corral_spawn lineage)
+	placement      string // ("workspace" or "split")
+	key            string // (idempotency key, reused as spawn evidence_key)
 }
 
 func (s *Server) newAgent(ctx context.Context, w http.ResponseWriter, sess *term.Session, socket, dir, kind, label string, how agentStart) {
@@ -304,11 +325,17 @@ func (s *Server) newAgent(ctx context.Context, w http.ResponseWriter, sess *term
 		keep = false
 		return
 	}
-	var ws, pane, termID string
+	var ws, pane, termID, wtPath, wtBranch string
+	useHerdrWorktree := how.worktree && how.placement != "split" && (worktreeFlag[kind] == "" || how.worktreeBranch != "")
 	if how.placement == "split" {
 		ws, pane, termID, err = c.SplitPaneWithEnv(ctx, how.parentPane, "right", dir, spawnEnv)
 		if err == nil && rawLabel != "" && herdrPaneID.MatchString(pane) {
 			_ = c.RenamePane(ctx, pane, rawLabel)
+		}
+	} else if useHerdrWorktree {
+		ws, pane, termID, wtPath, wtBranch, err = c.CreateWorktree(ctx, dir, how.worktreeBranch, label)
+		if err == nil {
+			how.herdrWorktree = true
 		}
 	} else {
 		ws, pane, termID, err = c.CreateWorkspaceWithEnv(ctx, dir, label, spawnEnv)
@@ -340,6 +367,8 @@ func (s *Server) newAgent(ctx context.Context, w http.ResponseWriter, sess *term
 		var closed bool
 		if how.placement == "split" {
 			closed = s.closePane(sess, socket, pane) == nil
+		} else if how.herdrWorktree {
+			closed = s.removeWorktree(sess, socket, ws) == nil || s.closeWorkspace(sess, socket, ws) == nil
 		} else {
 			closed = s.closeWorkspace(sess, socket, ws) == nil
 		}
@@ -371,6 +400,12 @@ func (s *Server) newAgent(ctx context.Context, w http.ResponseWriter, sess *term
 			}
 		}
 		out := map[string]any{"workspace": ws, "pane": pane}
+		if wtPath != "" {
+			out["worktree_path"] = wtPath
+		}
+		if wtBranch != "" {
+			out["worktree_branch"] = wtBranch
+		}
 		if kind == "codex" && how.fork {
 			hp, found := s.herdrRewindPaneOf(ctx, sess, socket, pane, how.resume)
 			s.codexForkAfter(ctx, out, hp, found, how, label, dir)
@@ -418,7 +453,7 @@ func agentArgs(kind string, how agentStart) []string {
 	case how.resume != "":
 		args = append(args, "--resume", how.resume)
 	}
-	if how.worktree && worktreeFlag[kind] != "" {
+	if how.worktree && !how.herdrWorktree && worktreeFlag[kind] != "" {
 		args = append(args, worktreeFlag[kind])
 	}
 	return args
@@ -519,6 +554,17 @@ func (s *Server) closeWorkspace(sess *term.Session, socket, ws string) error {
 	}
 	defer c.Close()
 	return c.CloseWorkspace(ctx, ws)
+}
+
+func (s *Server) removeWorktree(sess *term.Session, socket, ws string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	c, err := herdr.Dial(ctx, sess.Client(), socket)
+	if err != nil {
+		return err
+	}
+	defer c.Close()
+	return c.RemoveWorktree(ctx, ws, true)
 }
 
 // closePane closes a split pane made for a subagent that failed to start,
