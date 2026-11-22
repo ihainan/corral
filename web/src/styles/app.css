@@ -57,10 +57,8 @@
      places already stand on it. Anything else is either a mistake or a size
      taken from something else it must match — see EXEMPT in the checker,
      where each one says what it is measured against. */
-  --fs-micro: 11px; --lh-micro: 14px; /* compact sidebar secondary, section labels */
   --fs-note: 12px; --lh-note: 18px;   /* times, labels */
   --fs-sub: 13px; --lh-sub: 20px;     /* secondary words, code */
-  --lh-sub-tight: 16px;               /* compact sidebar titles */
   --fs-ui: 14px; --lh-ui: 20px;       /* controls, lists — as body is set, below */
   --fs-body: 15px; --lh-body: 25px;   /* the thread's text */
   --fs-h3: 15px; --lh-h3: 22px;       /* a section's heading */

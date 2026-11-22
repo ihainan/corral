@@ -139,8 +139,8 @@ const SIDE_MIN = 900 // (px) the view's width from which the list goes beside th
 // The list's width beside the thread (px): dragged by its edge, kept in the
 // browser; never past half the view.
 const SIDE_W_KEY = 'corral.convoSideWidth'
-const SIDE_W = 264
-const SIDE_W_MIN = 216
+const SIDE_W = 288
+const SIDE_W_MIN = 220
 const SIDE_W_MAX = 520
 const SPLIT_PCT_KEY = 'corral.convoSplitPct'
 const SPLIT_PCT_V_KEY = 'corral.convoSplitPctV'
@@ -4324,7 +4324,7 @@ export function AgentList({ rows, menus, onPicked, placed, query: given, onQuery
               }}
               onKeyDown={hasMenu ? menuKey(r.key) : undefined}
             >
-              <AgentIcon program={r.program} size={compact ? (isChild ? 18 : isNestedVisual ? 20 : 22) : isChild ? 20 : isNestedVisual ? 22 : 30} dot={r.bg === 'running' || r.cmds ? 'bg' : said ? (r.status as 'blocked' | 'working' | 'done') : undefined} />
+              <AgentIcon program={r.program} size={compact ? (isChild ? 20 : isNestedVisual ? 22 : 28) : isChild ? 20 : isNestedVisual ? 22 : 30} dot={r.bg === 'running' || r.cmds ? 'bg' : said ? (r.status as 'blocked' | 'working' | 'done') : undefined} />
               {/* (Two lines a row, always: its name; where it is — the session's title,
                   which tells alike names apart — and when. A third only for what
                   waits on the person: what it asks, or messages not seen taken in.
