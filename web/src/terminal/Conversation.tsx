@@ -1700,7 +1700,7 @@ export function ConversationView({
       {sideShown && (
         <nav className="convo-side" aria-label={t('convo.agents')} style={{ width: sideWidth }} ref={sideEl}>
           <NewAgentRow />
-          <AgentList rows={rows} menus query={sideQuery} onQuery={setSideQuery} search={searchAsked} onSearchLeft={() => setSearchAsked(0)} hint={!isTouchOnly} />
+          <AgentList rows={rows} menus query={sideQuery} onQuery={setSideQuery} search={searchAsked} onSearchLeft={() => setSearchAsked(0)} hint={!isTouchOnly} compact={!isTouchOnly} />
           {!isTouchOnly && (
             <p className="convo-side-keys">
               {t(mac ? 'convo.switchKeysMac' : 'convo.switchKeys')}
@@ -3932,7 +3932,7 @@ function ListOrderMenu() {
   )
 }
 
-export function AgentList({ rows, menus, onPicked, placed, query: given, onQuery, search, showSearch, onSearchLeft, hint }: { rows: ConvoListRow[]; menus?: boolean; onPicked?: () => void; placed?: Map<string, ConvoListRow>; query?: string; onQuery?: (q: string) => void; search?: number; showSearch?: boolean; onSearchLeft?: () => void; hint?: boolean }) {
+export function AgentList({ rows, menus, onPicked, placed, query: given, onQuery, search, showSearch, onSearchLeft, hint, compact }: { rows: ConvoListRow[]; menus?: boolean; onPicked?: () => void; placed?: Map<string, ConvoListRow>; query?: string; onQuery?: (q: string) => void; search?: number; showSearch?: boolean; onSearchLeft?: () => void; hint?: boolean; compact?: boolean }) {
   // Its rows' menu (menus: the side list's; the switcher's rows have none):
   // one for the list, of the row it was opened on by its key, as that row
   // may go to another group meanwhile and be drawn anew; at its "more"
@@ -4270,7 +4270,7 @@ export function AgentList({ rows, menus, onPicked, placed, query: given, onQuery
               }}
               onKeyDown={hasMenu ? menuKey(r.key) : undefined}
             >
-              <AgentIcon program={r.program} size={isChild ? 20 : isNestedVisual ? 22 : 30} dot={r.bg === 'running' || r.cmds ? 'bg' : said ? (r.status as 'blocked' | 'working' | 'done') : undefined} />
+              <AgentIcon program={r.program} size={compact ? (isChild ? 18 : isNestedVisual ? 20 : 24) : isChild ? 20 : isNestedVisual ? 22 : 30} dot={r.bg === 'running' || r.cmds ? 'bg' : said ? (r.status as 'blocked' | 'working' | 'done') : undefined} />
               {/* (Two lines a row, always: its name; where it is — the session's title,
                   which tells alike names apart — and when. A third only for what
                   waits on the person: what it asks, or messages not seen taken in.

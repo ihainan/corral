@@ -2281,6 +2281,26 @@ button.convo-queue-row.is-note:last-child { border-radius: 0 0 var(--r-lg) var(-
 .convo-side .list-search, .agents-phone .list-search { border-color: transparent; background: color-mix(in srgb, var(--term-fg) 5%, transparent); }
 .convo-side .list-search:focus-within, .agents-phone .list-search:focus-within { border-color: var(--term-accent-text); background: var(--term-bg); }
 .convo-side .list-search-icon, .convo-picker .list-search-icon, .agents-phone .list-search-icon { width: 30px; }
+/* Desktop sidebar scale: step down one rung from mobile chat-list sizing
+   (24px icons, 13px titles, 32px top controls) so the sidebar sits quietly
+   beside the 14px conversation bar and 15px thread body. Touch/mobile untouched. */
+@media (pointer: fine) {
+  .convo-side .convo-side-new { height: 32px; margin: 2px 2px 8px; font-size: var(--fs-sub); line-height: var(--lh-sub); }
+  .convo-side .list-search { height: 32px; padding: 0 4px 0 8px; gap: 6px; }
+  .convo-side .list-search-icon { width: 24px; }
+  .convo-side .list-search input { font-size: var(--fs-sub); line-height: var(--lh-sub); }
+  .convo-side .list-order-btn { width: 32px; height: 32px; }
+  .convo-side .convo-list-row { padding: 6px 8px; gap: 8px; }
+  .convo-side .convo-list-row .agent-icon { margin-top: 2px; }
+  .convo-side .convo-list-row.is-child .agent-icon { margin-top: 0; }
+  .convo-side .convo-list-text { gap: 2px; }
+  .convo-side .convo-list-title { font-size: var(--fs-sub); line-height: var(--lh-sub); }
+  .convo-side .convo-list-item > .convo-list-actions { top: 4px; right: 4px; }
+  .convo-side .convo-list-head.is-section { padding: 6px 8px 4px; }
+  .convo-side .convo-list-head.is-tree { padding: 4px 8px; }
+  .convo-side .convo-list-children { margin: 0 0 2px 20px; }
+  .convo-side .convo-list-tree .convo-list-children { margin-left: 16px; }
+}
 @media (pointer: coarse) {
   .convo-side-new { height: 44px; }
   .convo-side .list-search, .convo-picker .list-search, .agents-phone .list-search { padding-left: 11px; } /* (as the rows, 12 there) */
