@@ -1880,8 +1880,12 @@ export function ConversationView({
                 .map((c) => ({ key: c.key, title: c.title, where: c.where, status: c.liveStatus ?? c.status, onPick: c.onPick }))
             : []
         if (!parentItem && !childItems.length) return null
-        const canSplitNow = !!lineageBar?.canSplit && (viewW === 0 || viewW >= SPLIT_MIN_W)
         const activeSplitKey = lineageBar?.splitKey
+        // In split mode, omit redundant lineage chrome when the other pane already
+        // displays the sole related agent (e.g. parent on left, only child on right).
+        if (splitShown && !parentItem && childItems.length === 1 && activeSplitKey === childItems[0].key) return null
+        if (!side && parentItem && activeSplitKey === parentItem.key && !childItems.length) return null
+        const canSplitNow = !!lineageBar?.canSplit && (viewW === 0 || viewW >= SPLIT_MIN_W)
         const splitIsChild = !!activeSplitKey && childItems.some((c) => c.key === activeSplitKey)
         const preferredChild =
           childItems.find((c) => c.status === 'blocked') ??
@@ -1926,19 +1930,18 @@ export function ConversationView({
             )}
             {(canSplitNow || lineageBar?.onNewSubagent) && (
               <span className="convo-lineage-actions">
-                {canSplitNow && childItems.length > 0 && preferredChild && lineageBar?.onSplitChild && (
+                {canSplitNow && !splitShown && childItems.length > 0 && preferredChild && lineageBar?.onSplitChild && (
                   <button
                     type="button"
-                    className={'convo-lineage-btn' + (splitIsChild ? ' is-active' : '')}
-                    aria-pressed={splitIsChild}
-                    title={t(splitIsChild ? 'convo.split.close' : 'convo.split.withSub')}
-                    onClick={() => (splitIsChild ? lineageBar.onCloseSplit?.() : lineageBar.onSplitChild?.(preferredChild.key))}
+                    className="convo-lineage-btn"
+                    title={t('convo.split.withSub')}
+                    onClick={() => lineageBar.onSplitChild?.(preferredChild.key)}
                   >
                     <Columns2 size={13} aria-hidden="true" />
-                    <span>{t(splitIsChild ? 'convo.split.close' : 'convo.split.withSub')}</span>
+                    <span>{t('convo.split.withSub')}</span>
                   </button>
                 )}
-                {canSplitNow && !childItems.length && parentItem && lineageBar?.onSplitWithParent && (
+                {canSplitNow && !splitShown && !childItems.length && parentItem && lineageBar?.onSplitWithParent && (
                   <button
                     type="button"
                     className="convo-lineage-btn"

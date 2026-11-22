@@ -2872,7 +2872,13 @@ function AgentChat({ cur, entries, all, titles, onPick, active, keysActive, isSe
     )
   }
   const more = (): (MenuItem | null)[] => [
-    { label: t('convo.showTerminal'), icon: <SquareTerminal size={16} />, group: t('menu.group.agent'), onSelect: openTerminal },
+    ...(isSecondary
+      ? [
+          onSplitSwap ? { label: t('convo.split.swap'), icon: <ArrowLeftRight size={16} />, onSelect: onSplitSwap } : null,
+          onSplitExpand ? { label: t('convo.split.expand'), icon: <Maximize2 size={16} />, onSelect: onSplitExpand } : null,
+        ]
+      : []),
+    { label: t('convo.showTerminal'), icon: <SquareTerminal size={16} />, group: t('menu.group.agent'), separator: isSecondary && (!!onSplitSwap || !!onSplitExpand), onSelect: openTerminal },
     pinItem(cur.key),
     // (Within its group here: no rule of its own, as it has in a row's menu.)
     ((f) => f && { ...f, separator: false })(forkItem(cur)),
@@ -2952,25 +2958,12 @@ function AgentChat({ cur, entries, all, titles, onPick, active, keysActive, isSe
           onNewSubagent: curSubagentParent && onNewSubagent ? () => onNewSubagent(curSubagentParent) : undefined,
         }
       : undefined
-  const barExtra = isSecondary ? (
-    <>
-      {onSplitSwap && (
-        <button type="button" className="icon-btn convo-bar-split-act" onClick={onSplitSwap} aria-label={t('convo.split.swap')} title={t('convo.split.swap')}>
-          <ArrowLeftRight size={16} aria-hidden="true" />
-        </button>
-      )}
-      {onSplitExpand && (
-        <button type="button" className="icon-btn convo-bar-split-act" onClick={onSplitExpand} aria-label={t('convo.split.expand')} title={t('convo.split.expand')}>
-          <Maximize2 size={15} aria-hidden="true" />
-        </button>
-      )}
-      {onSplitClose && (
-        <button type="button" className="icon-btn convo-bar-split-act" onClick={onSplitClose} aria-label={t('convo.split.close')} title={t('convo.split.close')}>
-          <X size={16} aria-hidden="true" />
-        </button>
-      )}
-    </>
-  ) : undefined
+  const barExtra =
+    isSecondary && onSplitClose ? (
+      <button type="button" className="icon-btn convo-bar-split-act" onClick={onSplitClose} aria-label={t('convo.split.close')} title={t('convo.split.close')}>
+        <X size={16} aria-hidden="true" />
+      </button>
+    ) : undefined
   // (Files dropped on the conversation go up as picked ones do.)
   const dropping = (e: React.DragEvent) => e.dataTransfer.types.includes('Files')
   return (

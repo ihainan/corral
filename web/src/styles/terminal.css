@@ -554,10 +554,30 @@ html.term-dark .overlay, html.term-dark .menu, html.term-dark .toast {
 .convo-split-grip:focus-visible { outline: none; }
 .convo-split-grip:focus-visible::after { background: var(--term-accent-text); }
 .convo-split-pane { flex: 1; min-width: 0; position: relative; display: flex; border-left: 1px solid var(--term-line); overflow: hidden; }
+.convo-panes.is-split { --split-dim: color-mix(in srgb, var(--term-chrome) 55%, var(--term-bg)); }
+.convo-panes.is-split > .convo-main:not(.is-focused),
+.convo-panes.is-split > .convo-split-pane:not(.is-focused) .convo { background: var(--split-dim); }
+.convo-panes.is-split > .convo-main:not(.is-focused) .convo-scroll-wrap::after,
+.convo-panes.is-split > .convo-split-pane:not(.is-focused) .convo-scroll-wrap::after { background: linear-gradient(to bottom, transparent, var(--split-dim)); }
 .convo-panes.is-split > .convo-main:not(.is-focused) > .convo-bar,
-.convo-panes.is-split > .convo-split-pane:not(.is-focused) .convo-bar { background: var(--term-chrome); }
-.convo-panes.is-split > .convo-main.is-focused > .convo-bar,
-.convo-panes.is-split > .convo-split-pane.is-focused .convo-bar { box-shadow: inset 0 2px 0 var(--term-accent-text); }
+.convo-panes.is-split > .convo-split-pane:not(.is-focused) .convo-bar { background: var(--split-dim); }
+.convo-panes.is-split > .convo-main:not(.is-focused) > .convo-bar .convo-bar-name,
+.convo-panes.is-split > .convo-split-pane:not(.is-focused) .convo-bar .convo-bar-name { opacity: 0.72; }
+.convo-panes.is-split .convo-bar { gap: 6px; padding: 8px 12px; }
+.convo-panes.is-split .convo-bar-where,
+.convo-panes.is-split .convo-bar-dur,
+.convo-panes.is-split .convo-card-btn,
+.convo-panes.is-split .convo-split-pane .convo-tray-btn,
+.convo-panes.is-split .composer-keys,
+.convo-panes.is-split .convo-runs-side-name,
+.convo-panes.is-split .convo-runs.has-ctx .convo-runs-branch,
+.convo-panes.is-split .convo-runs.has-ctx .convo-runs-via,
+.convo-panes.is-split .convo-runs-effort-word { display: none; }
+.convo-panes.is-split .convo-runs { gap: 4px; }
+.convo-panes.is-split .convo-runs-effort::before { content: "·"; margin-right: 1px; }
+.convo-panes.is-split .convo-bar-status { max-width: 140px; overflow: hidden; text-overflow: ellipsis; }
+.convo-panes.is-split .convo-col { padding: 16px 16px 24px; }
+.convo-panes.is-split .convo-dock { padding: 0 12px 6px; }
 .convo-bar-split-act { flex: none; width: 28px; height: 28px; color: var(--term-fg-2); }
 .convo-bar-split-act:hover { background: var(--term-hover); color: var(--term-fg); }
 .convo-scroll-wrap { flex: 1; min-height: 0; display: flex; flex-direction: column; position: relative; container-type: inline-size; }
