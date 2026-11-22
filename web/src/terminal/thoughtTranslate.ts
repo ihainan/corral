@@ -1,8 +1,11 @@
 import { useEffect, useSyncExternalStore } from 'react'
 import { ApiError, api, onAuthChange } from '../api'
 
+export type TranslateMode = 'translate' | 'summarize'
+
 export interface TranslateConfig {
   enabled: boolean
+  mode: TranslateMode
   target_lang: string
   base_url: string
   model: string
@@ -11,6 +14,7 @@ export interface TranslateConfig {
 
 export interface TranslateConfigPatch {
   enabled?: boolean
+  mode?: TranslateMode
   target_lang?: string
   base_url?: string
   model?: string
@@ -20,6 +24,7 @@ export interface TranslateConfigPatch {
 
 export interface TranslateTestResult {
   ok: boolean
+  mode?: TranslateMode
   original?: string
   sample: string
   latency_ms: number
@@ -27,6 +32,7 @@ export interface TranslateTestResult {
 
 export interface ThoughtTranslationState {
   enabled: boolean
+  mode: TranslateMode
   status: 'idle' | 'loading' | 'done' | 'skipped' | 'error'
   text?: string
   error?: string
@@ -61,7 +67,7 @@ let storeVer = 0
 
 const cache = new Map<string, CacheEntry>()
 const listeners = new Set<() => void>()
-const queue: { key: string; lang: string; text: string }[] = []
+const queue: { key: string; mode: TranslateMode; lang: string; text: string }[] = []
 const queuedKeys = new Set<string>()
 let flushTimer: ReturnType<typeof setTimeout> | null = null
 let inFlight = 0
@@ -118,12 +124,13 @@ export function ensureTranslateConfig(force = false): Promise<TranslateConfig | 
 
 export async function saveTranslateConfig(patch: TranslateConfigPatch): Promise<TranslateConfig> {
   const prevLang = config?.target_lang
+  const prevMode = config?.mode
   const next = await api<TranslateConfig>('PUT', '/api/me/translate', patch)
   config = next
   configLoaded = true
-  // Clear cached errors (e.g. user just fixed API key or URL) and refetch if target language changed.
+  // Clear cached errors (e.g. user just fixed API key or URL) and refetch if target language/mode changed.
   for (const [k, v] of cache) {
-    if (v.status === 'error' || (prevLang && prevLang !== next.target_lang)) {
+    if (v.status === 'error' || (prevLang && prevLang !== next.target_lang) || (prevMode && prevMode !== next.mode)) {
       cache.delete(k)
     }
   }
@@ -131,7 +138,7 @@ export async function saveTranslateConfig(patch: TranslateConfigPatch): Promise<
   return next
 }
 
-export async function testTranslateConfig(draft?: { target_lang?: string; base_url?: string; model?: string; api_key?: string }): Promise<TranslateTestResult> {
+export async function testTranslateConfig(draft?: { mode?: TranslateMode; target_lang?: string; base_url?: string; model?: string; api_key?: string }): Promise<TranslateTestResult> {
   return api<TranslateTestResult>('POST', '/api/me/translate/test', draft ?? {})
 }
 
@@ -188,8 +195,14 @@ export function clientNeedsTranslation(raw: string, targetLang: string): boolean
   }
 }
 
-function cacheKey(lang: string, text: string): string {
-  return lang + '\0' + text
+function clientNeedsProcessing(raw: string, targetLang: string, mode: TranslateMode): boolean {
+  if (clientNeedsTranslation(raw, targetLang)) return true
+  if (mode === 'summarize' && raw.trim().length >= 180) return true
+  return false
+}
+
+function cacheKey(mode: TranslateMode, lang: string, text: string): string {
+  return mode + '\0' + lang + '\0' + text
 }
 
 function setCache(key: string, entry: CacheEntry) {
@@ -200,15 +213,15 @@ function setCache(key: string, entry: CacheEntry) {
   cache.set(key, entry)
 }
 
-function enqueue(lang: string, text: string, priority: boolean) {
-  const key = cacheKey(lang, text)
+function enqueue(mode: TranslateMode, lang: string, text: string, priority: boolean) {
+  const key = cacheKey(mode, lang, text)
   if (cache.has(key) || queuedKeys.has(key)) return
   setCache(key, { status: 'loading' })
   queuedKeys.add(key)
   if (priority) {
-    queue.unshift({ key, lang, text })
+    queue.unshift({ key, mode, lang, text })
   } else {
-    queue.push({ key, lang, text })
+    queue.push({ key, mode, lang, text })
   }
   notify()
   if (priority) {
@@ -227,10 +240,11 @@ function enqueue(lang: string, text: string, priority: boolean) {
 
 function pump() {
   while (inFlight < MAX_INFLIGHT && queue.length > 0) {
+    const firstMode = queue[0].mode
     const firstLang = queue[0].lang
-    const batch: { key: string; lang: string; text: string }[] = []
+    const batch: { key: string; mode: TranslateMode; lang: string; text: string }[] = []
     for (let i = 0; i < queue.length && batch.length < BATCH_MAX; ) {
-      if (queue[i].lang === firstLang) {
+      if (queue[i].mode === firstMode && queue[i].lang === firstLang) {
         batch.push(queue.splice(i, 1)[0])
       } else {
         i++
@@ -238,19 +252,20 @@ function pump() {
     }
     if (batch.length === 0) break
     inFlight++
-    void sendBatch(firstLang, batch).finally(() => {
+    void sendBatch(firstMode, firstLang, batch).finally(() => {
       inFlight--
       if (queue.length > 0) pump()
     })
   }
 }
 
-async function sendBatch(lang: string, batch: { key: string; lang: string; text: string }[]) {
+async function sendBatch(mode: TranslateMode, lang: string, batch: { key: string; mode: TranslateMode; lang: string; text: string }[]) {
   try {
     const res = await api<{
       target_lang: string
       results: { hash: string; status: 'ok' | 'skipped' | 'error'; text?: string; cached?: boolean; error?: string }[]
     }>('POST', '/api/translate/thoughts', {
+      mode,
       target_lang: lang,
       items: batch.map((b) => ({ text: b.text })),
     })
@@ -299,23 +314,24 @@ export function useThoughtTranslation(text: string, opts: { active: boolean; pri
   useSyncExternalStore(subscribe, () => storeVer)
   const trimmed = text.trim()
   const enabled = !!config?.enabled
+  const mode: TranslateMode = config?.mode === 'summarize' ? 'summarize' : 'translate'
   const lang = config?.target_lang || 'zh-CN'
 
   useEffect(() => {
     if (opts.active) void ensureTranslateConfig()
   }, [opts.active])
 
-  const needs = enabled && !!trimmed && clientNeedsTranslation(trimmed, lang)
-  const key = needs ? cacheKey(lang, trimmed) : ''
+  const needs = enabled && !!trimmed && clientNeedsProcessing(trimmed, lang, mode)
+  const key = needs ? cacheKey(mode, lang, trimmed) : ''
   const entry = key ? cache.get(key) : undefined
 
   useEffect(() => {
     if (!opts.active || !needs || entry) return
-    enqueue(lang, trimmed, !!opts.priority)
-  }, [opts.active, needs, entry, lang, trimmed, opts.priority])
+    enqueue(mode, lang, trimmed, !!opts.priority)
+  }, [opts.active, needs, entry, mode, lang, trimmed, opts.priority])
 
-  if (!enabled || !trimmed) return { enabled, status: 'idle' }
-  if (!needs) return { enabled, status: 'skipped' }
-  if (!entry) return { enabled, status: opts.active ? 'loading' : 'idle' }
-  return { enabled, status: entry.status, text: entry.text, error: entry.error }
+  if (!enabled || !trimmed) return { enabled, mode, status: 'idle' }
+  if (!needs) return { enabled, mode, status: 'skipped' }
+  if (!entry) return { enabled, mode, status: opts.active ? 'loading' : 'idle' }
+  return { enabled, mode, status: entry.status, text: entry.text, error: entry.error }
 }

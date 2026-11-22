@@ -13,7 +13,7 @@ import { ssoErrorText } from './Auth'
 import { CustomKeysSection } from './CustomKeys'
 import { playChime } from '../terminal/chime'
 import { setScreenReader, useScreenReader } from '../terminal/screenReader'
-import { saveTranslateConfig, testTranslateConfig, TRANSLATE_LANGS, useTranslateConfig, type TranslateConfig } from '../terminal/thoughtTranslate'
+import { saveTranslateConfig, testTranslateConfig, TRANSLATE_LANGS, useTranslateConfig, type TranslateConfig, type TranslateMode } from '../terminal/thoughtTranslate'
 import { Markdown } from '../terminal/markdown'
 
 // As the terminal's menu sets it (one point at a time).
@@ -316,13 +316,14 @@ function TranslateSection({ onDirty }: { onDirty: (d: boolean) => void }) {
     }
   }
 
+  const modeLabel = config?.mode === 'summarize' ? t('settings.translateModeSummarize') : t('settings.translateModeTranslate')
   const langLabel = TRANSLATE_LANGS.find((l) => l.code === (config?.target_lang || 'zh-CN'))?.label ?? (config?.target_lang || 'zh-CN')
   const modelName = config?.model || 'deepseek-flash'
   const keyStatus =
     !config || config.has_key || isLocalTranslateUrl(config.base_url)
       ? t('settings.translateKeyReady')
       : t('settings.translateKeyMissing')
-  const summaryHint = `${langLabel} · ${modelName} · ${keyStatus}`
+  const summaryHint = `${modeLabel} · ${langLabel} · ${modelName} · ${keyStatus}`
 
   return (
     <section className="section">
@@ -347,6 +348,7 @@ function TranslateSection({ onDirty }: { onDirty: (d: boolean) => void }) {
 
 function TranslateConfigDialog({ config, onClose }: { config: TranslateConfig | null; onClose: () => void }) {
   const toast = useToast()
+  const [mode, setMode] = useState<TranslateMode>(config?.mode === 'summarize' ? 'summarize' : 'translate')
   const [targetLang, setTargetLang] = useState(config?.target_lang || 'zh-CN')
   const [baseUrl, setBaseUrl] = useState(config?.base_url || 'https://api.deepseek.com/v1')
   const [model, setModel] = useState(config?.model || 'deepseek-flash')
@@ -355,14 +357,20 @@ function TranslateConfigDialog({ config, onClose }: { config: TranslateConfig | 
   const [testing, setTesting] = useState(false)
   const [previewOpen, setPreviewOpen] = useState(true)
   const [showOrig, setShowOrig] = useState(false)
-  const [testState, setTestState] = useState<{ ok: boolean; latency?: number; original?: string; translated?: string; error?: string } | null>(null)
+  const [testState, setTestState] = useState<{ ok: boolean; mode?: TranslateMode; latency?: number; original?: string; translated?: string; error?: string } | null>(null)
 
   const dirty =
     !!config &&
-    (targetLang !== config.target_lang || baseUrl.trim() !== config.base_url || model.trim() !== config.model || apiKey.trim() !== '')
+    (mode !== (config.mode === 'summarize' ? 'summarize' : 'translate') || targetLang !== config.target_lang || baseUrl.trim() !== config.base_url || model.trim() !== config.model || apiKey.trim() !== '')
 
   const onLangChange = (next: string) => {
     setTargetLang(next)
+    setTestState(null)
+    setShowOrig(false)
+  }
+
+  const onModeChange = (next: TranslateMode) => {
+    setMode(next)
     setTestState(null)
     setShowOrig(false)
   }
@@ -373,6 +381,7 @@ function TranslateConfigDialog({ config, onClose }: { config: TranslateConfig | 
     setSaving(true)
     try {
       const patch: Parameters<typeof saveTranslateConfig>[0] = {
+        mode,
         target_lang: targetLang,
         base_url: baseUrl.trim(),
         model: model.trim(),
@@ -409,6 +418,7 @@ function TranslateConfigDialog({ config, onClose }: { config: TranslateConfig | 
     setShowOrig(false)
     try {
       const res = await testTranslateConfig({
+        mode,
         target_lang: targetLang,
         base_url: baseUrl.trim(),
         model: model.trim(),
@@ -416,6 +426,7 @@ function TranslateConfigDialog({ config, onClose }: { config: TranslateConfig | 
       })
       setTestState({
         ok: true,
+        mode: res.mode || mode,
         latency: res.latency_ms,
         original: res.original || previewSampleFor(targetLang),
         translated: res.sample,
@@ -443,6 +454,15 @@ function TranslateConfigDialog({ config, onClose }: { config: TranslateConfig | 
       onClose={onClose}
     >
       <form className="stack" onSubmit={save}>
+        <Field label={t('settings.translateMode')} hint={t(mode === 'summarize' ? 'settings.translateModeSummarizeHint' : 'settings.translateModeTranslateHint')}>
+          <div className="seg" role="radiogroup" aria-label={t('settings.translateMode')}>
+            {(['translate', 'summarize'] as const).map((m) => (
+              <button key={m} type="button" role="radio" aria-checked={mode === m} aria-pressed={mode === m} onClick={() => onModeChange(m)}>
+                {t(m === 'summarize' ? 'settings.translateModeSummarize' : 'settings.translateModeTranslate')}
+              </button>
+            ))}
+          </div>
+        </Field>
         <Field label={t('settings.translateLang')}>
           <select className="select" value={targetLang} onChange={(e) => onLangChange(e.target.value)}>
             {TRANSLATE_LANGS.map((l) => (
@@ -500,22 +520,40 @@ function TranslateConfigDialog({ config, onClose }: { config: TranslateConfig | 
             </button>
             {previewOpen && (
               <div className="tr-preview-body">
-                {(translatedText || testing) && (
-                  <div className="tr-preview-bar">
-                    {testing && <span className="tr-preview-status">{t('convo.translate.loading')}</span>}
-                    {translatedText && (
-                      <button
-                        type="button"
-                        className="tr-preview-toggle"
-                        aria-pressed={showOrig}
-                        onClick={() => setShowOrig((v) => !v)}
-                      >
-                        {t(showOrig ? 'convo.translate.translated' : 'convo.translate.original')}
-                      </button>
+                {mode === 'summarize' ? (
+                  <>
+                    <Markdown text={originalText} />
+                    {(translatedText || testing) && (
+                      <div className="tr-preview-sum">
+                        <div className="tr-preview-sum-head">{t('convo.translate.summaryLabel')}</div>
+                        {testing ? (
+                          <span className="tr-preview-status">{t('convo.translate.summarizing')}</span>
+                        ) : (
+                          translatedText && <Markdown text={translatedText} />
+                        )}
+                      </div>
                     )}
-                  </div>
+                  </>
+                ) : (
+                  <>
+                    {(translatedText || testing) && (
+                      <div className="tr-preview-bar">
+                        {testing && <span className="tr-preview-status">{t('convo.translate.loading')}</span>}
+                        {translatedText && (
+                          <button
+                            type="button"
+                            className="tr-preview-toggle"
+                            aria-pressed={showOrig}
+                            onClick={() => setShowOrig((v) => !v)}
+                          >
+                            {t(showOrig ? 'convo.translate.translated' : 'convo.translate.original')}
+                          </button>
+                        )}
+                      </div>
+                    )}
+                    <Markdown text={shownText} />
+                  </>
                 )}
-                <Markdown text={shownText} />
               </div>
             )}
             <p className="tr-preview-reply">{t('settings.translatePreviewReply')}</p>

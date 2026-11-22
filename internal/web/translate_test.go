@@ -195,3 +195,127 @@ func TestTranslateConfigAndThoughtsAPI(t *testing.T) {
 		t.Fatalf("expected has_key=false after clear: %s", r.Body)
 	}
 }
+
+func TestTranslateSummarizeMode(t *testing.T) {
+	// Long same-language thoughts should be summarized in summarize mode,
+	// while skipped in translate mode.
+	longZh := strings.Repeat("我们需要检查数据库的缓存失效逻辑，确认在并发切换模式时不会互相覆盖结果。", 6)
+	if needsThoughtProcessing(longZh, "zh-CN", "translate") {
+		t.Fatalf("expected long Chinese thought to be skipped in translate mode")
+	}
+	if !needsThoughtProcessing(longZh, "zh-CN", "summarize") {
+		t.Fatalf("expected long Chinese thought to be processed in summarize mode")
+	}
+	if needsThoughtProcessing("简短思考，不用总结。", "zh-CN", "summarize") {
+		t.Fatalf("expected short Chinese thought to be skipped in summarize mode")
+	}
+
+	h := newHarness(t)
+	alice := h.admin()
+
+	var calls atomic.Int32
+	var lastSys string
+	var mu sync.Mutex
+
+	mockLLM := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/chat/completions" {
+			http.NotFound(w, r)
+			return
+		}
+		var req map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "bad json", http.StatusBadRequest)
+			return
+		}
+		calls.Add(1)
+		msgs, _ := req["messages"].([]any)
+		sysMsg := ""
+		if len(msgs) >= 1 {
+			if m, ok := msgs[0].(map[string]any); ok {
+				sysMsg, _ = m["content"].(string)
+			}
+		}
+		mu.Lock()
+		lastSys = sysMsg
+		mu.Unlock()
+		prefix := "译文："
+		if strings.Contains(sysMsg, "讲人话") {
+			prefix = "总结："
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"choices": []map[string]any{
+				{"message": map[string]any{"content": prefix + "核心意思在这里"}},
+			},
+		})
+	}))
+	defer mockLLM.Close()
+	h.srv.translateClient = mockLLM.Client()
+
+	// Save config in translate mode first.
+	r := alice.do("PUT", "/api/me/translate", map[string]any{
+		"enabled":     true,
+		"target_lang": "zh-CN",
+		"mode":        "translate",
+		"base_url":    mockLLM.URL + "/v1",
+		"model":       "deepseek-flash",
+		"api_key":     "sk-sum-test",
+	})
+	mustStatus(t, r, 200, "save translate mode")
+	if r.json()["mode"] != "translate" {
+		t.Fatalf("expected mode=translate, got %s", r.Body)
+	}
+
+	engText := "Let's inspect `internal/web/translate.go` and isolate summarize cache entries so switching modes works cleanly."
+	r1 := alice.do("POST", "/api/translate/thoughts", map[string]any{
+		"items": []map[string]string{{"text": engText}},
+	})
+	mustStatus(t, r1, 200, "translate mode call")
+	if !strings.Contains(string(r1.Body), "译文：") {
+		t.Fatalf("expected translate output, got %s", r1.Body)
+	}
+
+	// Switch to summarize mode and verify persistence + isolated cache + summarize prompt.
+	r = alice.do("PUT", "/api/me/translate", map[string]any{
+		"mode": "summarize",
+	})
+	mustStatus(t, r, 200, "switch to summarize mode")
+	if r.json()["mode"] != "summarize" {
+		t.Fatalf("expected mode=summarize, got %s", r.Body)
+	}
+	rGet := alice.do("GET", "/api/me/translate", nil)
+	mustStatus(t, rGet, 200, "get summarize mode")
+	if rGet.json()["mode"] != "summarize" {
+		t.Fatalf("GET expected mode=summarize, got %s", rGet.Body)
+	}
+
+	beforeCalls := calls.Load()
+	r2 := alice.do("POST", "/api/translate/thoughts", map[string]any{
+		"items": []map[string]string{{"text": engText}},
+	})
+	mustStatus(t, r2, 200, "summarize mode call")
+	if calls.Load() != beforeCalls+1 {
+		t.Fatalf("expected new LLM call for summarize mode (isolated cache), got %d", calls.Load()-beforeCalls)
+	}
+	if !strings.Contains(string(r2.Body), "总结：") {
+		t.Fatalf("expected summarize output, got %s", r2.Body)
+	}
+	mu.Lock()
+	sys := lastSys
+	mu.Unlock()
+	if !strings.Contains(sys, "讲人话") {
+		t.Fatalf("expected colloquial Chinese summarize prompt, got %q", sys)
+	}
+
+	// Second summarize call hits SQLite cache (0 new LLM calls).
+	r3 := alice.do("POST", "/api/translate/thoughts", map[string]any{
+		"items": []map[string]string{{"text": engText}},
+	})
+	mustStatus(t, r3, 200, "summarize cached call")
+	if calls.Load() != beforeCalls+1 {
+		t.Fatalf("expected summarize cache hit, got %d calls", calls.Load()-beforeCalls)
+	}
+	if !strings.Contains(string(r3.Body), `"cached":true`) {
+		t.Fatalf("expected cached:true in summarize response: %s", r3.Body)
+	}
+}

@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState, type ReactNode } from 'react'
-import { ArrowDown, ArrowLeftRight, ArrowUp, ArrowUpDown, ArrowUpToLine, ChevronLeft, CircleStop, Code2, Columns2, Copy, Eye, FoldVertical, GitBranch, GitFork, Globe, History, Languages, Maximize2, MessageSquarePlus, Paperclip, Pencil, Pin, PinOff, Plus, Power, Square, SquareSlash, SquareTerminal, TextCursorInput, Unlink, X } from 'lucide-react'
+import { ArrowDown, ArrowLeftRight, ArrowUp, ArrowUpDown, ArrowUpToLine, ChevronLeft, CircleStop, Code2, Columns2, Copy, Eye, FoldVertical, GitBranch, GitFork, Globe, History, Languages, Maximize2, MessageSquarePlus, Paperclip, Pencil, Pin, PinOff, Plus, Power, Rows2, Sparkles, Square, SquareSlash, SquareTerminal, TextCursorInput, Unlink, X } from 'lucide-react'
 import { api, ApiError, authGen, errorText, onAuthChange, uploadFile, type SessionInfo } from '../api'
 import { useSession } from '../app'
 import { t, type I18nKey } from '../i18n'
@@ -398,17 +398,21 @@ export function AgentsChat({ bar, active = true }: { bar?: ReactNode; active?: b
     window.addEventListener(NEW_AGENT, on)
     return () => window.removeEventListener(NEW_AGENT, on)
   }, [active])
-  // Split-screen secondary agent (desktop only): lets users view parent & subagent
-  // (or any two agents) side by side in Chat Mode.
+  // Split-screen secondary agent: supports both left-right ('row') and
+  // top-bottom ('col') layouts, plus 'auto' (switches to top-bottom on portrait
+  // or narrow screens so portrait tablets/monitors & phones can split cleanly).
   const [splitKey, setSplitKey] = useState<string | null>(null)
   const [focusedPane, setFocusedPane] = useState<'primary' | 'secondary'>('primary')
-  const splitEntry = !stack && splitKey && cur && splitKey !== cur.key ? entries.find((e) => e.key === splitKey) : undefined
-  useEffect(() => {
-    if (stack && splitKey) {
-      setSplitKey(null)
-      setFocusedPane('primary')
-    }
-  }, [stack, splitKey])
+  const [splitDir, setSplitDir] = useState<'auto' | 'row' | 'col'>(() => {
+    const v = local.get('corral.convoSplitDir')
+    return v === 'row' || v === 'col' ? v : 'auto'
+  })
+  const toggleSplitDir = (currentEffective?: 'row' | 'col') => {
+    const next: 'row' | 'col' = currentEffective ? (currentEffective === 'col' ? 'row' : 'col') : splitDir === 'col' ? 'row' : 'col'
+    setSplitDir(next)
+    local.set('corral.convoSplitDir', next)
+  }
+  const splitEntry = splitKey && cur && splitKey !== cur.key ? entries.find((e) => e.key === splitKey) : undefined
   useEffect(() => {
     if (!splitKey) return
     if (cur && splitKey === cur.key) {
@@ -423,7 +427,7 @@ export function AgentsChat({ bar, active = true }: { bar?: ReactNode; active?: b
     }
   }, [splitKey, cur, sessions, entries])
   const openSplit = (e: Entry) => {
-    if (stack || !cur) {
+    if (!cur) {
       choose(e)
       return
     }
@@ -435,10 +439,6 @@ export function AgentsChat({ bar, active = true }: { bar?: ReactNode; active?: b
     setFocusedPane('secondary')
   }
   const openParentChildSplit = (parent: Entry, child: Entry) => {
-    if (stack) {
-      choose(parent)
-      return
-    }
     choose(parent)
     setSplitKey(child.key)
     setFocusedPane('secondary')
@@ -712,6 +712,8 @@ export function AgentsChat({ bar, active = true }: { bar?: ReactNode; active?: b
           onSplitClose={closeSplit}
           onSplitSwap={swapSplit}
           onSplitExpand={expandSplit}
+          splitDir={splitDir}
+          onSplitDirToggle={toggleSplitDir}
           onNewSubagent={(p) => setNewAgent(p)}
           toast={toast}
           composerEnter={prefs.composerEnter}
@@ -742,10 +744,12 @@ export function AgentsChat({ bar, active = true }: { bar?: ReactNode; active?: b
         onPick={chooseFromList}
         active={active}
         keysActive={active && (!splitEntry || focusedPane === 'primary')}
-        splitPane={secondaryNode ? { node: secondaryNode, focused: focusedPane, onFocus: setFocusedPane } : undefined}
+        splitPane={secondaryNode ? { node: secondaryNode, focused: focusedPane, onFocus: setFocusedPane, dir: splitDir, onDirToggle: toggleSplitDir } : undefined}
         splitKey={splitEntry?.key ?? null}
-        onSplitOpen={!stack ? openSplit : undefined}
-        onSplitParentChild={!stack ? openParentChildSplit : undefined}
+        splitDir={splitDir}
+        onSplitDirToggle={toggleSplitDir}
+        onSplitOpen={openSplit}
+        onSplitParentChild={openParentChildSplit}
         onSplitClose={closeSplit}
         onNewSubagent={(p) => setNewAgent(p)}
         toast={toast}
@@ -1007,7 +1011,7 @@ const tmuxCmdsOf = (e: Entry): RowCmds | undefined => {
 
 // The conversation of one agent, and what is sent to it. Keyed by the
 // agent: nothing of another's (its draft, what was sent, a stop) carries over.
-function AgentChat({ cur, entries, all, titles, onPick, active, keysActive, isSecondary, primaryKey, splitPane, splitKey, onSplitOpen, onSplitParentChild, onSplitClose, onSplitSwap, onSplitExpand, onNewSubagent, toast, composerEnter, sent, setSent, sending, setSending, draft: shownDraft, setDraftShown, used, lead, onClosed, onStarted, query, onQuery }: {
+function AgentChat({ cur, entries, all, titles, onPick, active, keysActive, isSecondary, primaryKey, splitPane, splitKey, splitDir, onSplitDirToggle, onSplitOpen, onSplitParentChild, onSplitClose, onSplitSwap, onSplitExpand, onNewSubagent, toast, composerEnter, sent, setSent, sending, setSending, draft: shownDraft, setDraftShown, used, lead, onClosed, onStarted, query, onQuery }: {
   cur: Entry
   entries: Entry[]
   all: SessionInfo[]
@@ -1031,6 +1035,8 @@ function AgentChat({ cur, entries, all, titles, onPick, active, keysActive, isSe
   primaryKey?: string
   splitPane?: ConvoSplitPane
   splitKey?: string | null
+  splitDir?: 'auto' | 'row' | 'col'
+  onSplitDirToggle?: (currentEffective?: 'row' | 'col') => void
   onSplitOpen?: (e: Entry) => void
   onSplitParentChild?: (parent: Entry, child: Entry) => void
   onSplitClose?: () => void
@@ -2868,7 +2874,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, keysActive, isSe
     return { label: t('newAgent.subagentItem'), icon: <GitFork size={16} />, onSelect: () => onNewSubagent(p) }
   }
   const splitRowItem = (e: Entry): MenuItem | null => {
-    if (lead || !onSplitOpen || e.key === cur.key) return null
+    if (!onSplitOpen || e.key === cur.key) return null
     if (splitKey === e.key && onSplitClose) {
       return { label: t('convo.split.close'), icon: <Columns2 size={16} />, onSelect: onSplitClose }
     }
@@ -2901,6 +2907,17 @@ function AgentChat({ cur, entries, all, titles, onPick, active, keysActive, isSe
       (e) => toast(errorText(e), true),
     )
   }
+  const toggleTranslateMode = () => {
+    const nextMode = translateCfg?.mode === 'summarize' ? 'translate' : 'summarize'
+    void saveTranslateConfig({ mode: nextMode }).then(
+      (saved) => toast(t(saved.mode === 'summarize' ? 'convo.translate.modeSummarizeOn' : 'convo.translate.modeTranslateOn')),
+      (e) => toast(errorText(e), true),
+    )
+  }
+  const splitEffectiveDir = (): 'row' | 'col' => {
+    if (splitDir === 'row' || splitDir === 'col') return splitDir
+    return window.innerWidth < 820 || window.innerHeight > window.innerWidth * 1.05 ? 'col' : 'row'
+  }
   const curLineageRow = rows.find((r) => r.current)
   const parentLineageRow = curLineageRow?.parentKey ? rows.find((r) => r.key === curLineageRow.parentKey) : undefined
   const parentLineageEntry = parentLineageRow ? entries.find((e) => e.key === parentLineageRow.key) : undefined
@@ -2924,7 +2941,20 @@ function AgentChat({ cur, entries, all, titles, onPick, active, keysActive, isSe
   const more = (): (MenuItem | null)[] => [
     ...(isSecondary
       ? [
-          onSplitSwap ? { label: t('convo.split.swap'), icon: <ArrowLeftRight size={16} />, onSelect: onSplitSwap } : null,
+          onSplitDirToggle
+            ? {
+                label: t(splitEffectiveDir() === 'col' ? 'convo.split.toRow' : 'convo.split.toCol'),
+                icon: splitEffectiveDir() === 'col' ? <Columns2 size={16} /> : <Rows2 size={16} />,
+                onSelect: () => onSplitDirToggle(splitEffectiveDir()),
+              }
+            : null,
+          onSplitSwap
+            ? {
+                label: t('convo.split.swap'),
+                icon: splitEffectiveDir() === 'col' ? <ArrowUpDown size={16} /> : <ArrowLeftRight size={16} />,
+                onSelect: onSplitSwap,
+              }
+            : null,
           onSplitExpand ? { label: t('convo.split.expand'), icon: <Maximize2 size={16} />, onSelect: onSplitExpand } : null,
         ]
       : []),
@@ -2967,6 +2997,13 @@ function AgentChat({ cur, entries, all, titles, onPick, active, keysActive, isSe
     renameItem(cur),
     unlinkItem(cur),
     { label: t(translateCfg?.enabled ? 'convo.translate.off' : 'convo.translate.on'), icon: <Languages size={16} />, onSelect: toggleTranslate },
+    translateCfg?.enabled
+      ? {
+          label: t(translateCfg.mode === 'summarize' ? 'convo.translate.toTranslate' : 'convo.translate.toSummarize'),
+          icon: <Sparkles size={16} />,
+          onSelect: toggleTranslateMode,
+        }
+      : null,
     boot.forwarding ? { label: t('ports.title'), icon: <Globe size={16} />, separator: true, onSelect: () => setPortsOpen(true) } : null,
     boot.code ? { label: t('code.open'), icon: <Code2 size={16} />, separator: !boot.forwarding, onSelect: () => code.open(cur.s.host_id, cur.s.host_name) } : null,
     boot.code && code.running[cur.s.host_id] ? { label: t('code.stop'), icon: <CircleStop size={16} />, onSelect: () => code.stop(cur.s.host_id) } : null,
@@ -3028,7 +3065,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, keysActive, isSe
             onPick: c.onPick,
           })),
           splitKey: isSecondary ? primaryKey : (splitKey ?? undefined),
-          canSplit: !isSecondary && !lead && !!onSplitOpen,
+          canSplit: !isSecondary && !!onSplitOpen,
           onSplitChild:
             !isSecondary && onSplitOpen
               ? (key) => {
@@ -3044,11 +3081,25 @@ function AgentChat({ cur, entries, all, titles, onPick, active, keysActive, isSe
           onNewSubagent: curSubagentParent && onNewSubagent ? () => onNewSubagent(curSubagentParent) : undefined,
         }
       : undefined
+  const effDir = splitEffectiveDir()
   const barExtra =
     isSecondary && onSplitClose ? (
-      <button type="button" className="icon-btn convo-bar-split-act" onClick={onSplitClose} aria-label={t('convo.split.close')} title={t('convo.split.close')}>
-        <X size={16} aria-hidden="true" />
-      </button>
+      <>
+        {onSplitDirToggle && (
+          <button
+            type="button"
+            className="icon-btn convo-bar-split-act"
+            onClick={() => onSplitDirToggle(effDir)}
+            aria-label={t(effDir === 'col' ? 'convo.split.toRow' : 'convo.split.toCol')}
+            title={t(effDir === 'col' ? 'convo.split.toRow' : 'convo.split.toCol')}
+          >
+            {effDir === 'col' ? <Columns2 size={15} aria-hidden="true" /> : <Rows2 size={15} aria-hidden="true" />}
+          </button>
+        )}
+        <button type="button" className="icon-btn convo-bar-split-act" onClick={onSplitClose} aria-label={t('convo.split.close')} title={t('convo.split.close')}>
+          <X size={16} aria-hidden="true" />
+        </button>
+      </>
     ) : undefined
   // (Files dropped on the conversation go up as picked ones do.)
   const dropping = (e: React.DragEvent) => e.dataTransfer.types.includes('Files')

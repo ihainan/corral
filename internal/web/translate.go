@@ -258,6 +258,38 @@ func (f *translateFlightState) do(key string, fn func() (string, error)) (string
 	return c.text, c.err
 }
 
+func normalizeTranslateMode(raw string) (string, bool) {
+	switch strings.TrimSpace(raw) {
+	case "", "translate":
+		return "translate", true
+	case "summarize":
+		return "summarize", true
+	default:
+		return "", false
+	}
+}
+
+func translateCacheLang(mode, targetLang string) string {
+	if mode == "summarize" {
+		return "sum:" + targetLang
+	}
+	return targetLang
+}
+
+func needsThoughtProcessing(text, targetLang, mode string) bool {
+	if needsThoughtTranslation(text, targetLang) {
+		return true
+	}
+	// In summarize mode, also summarize long reasoning traces that are already
+	// in the target language so verbose multi-paragraph thinking gets a crisp TL;DR.
+	if mode == "summarize" {
+		if _, ok := translateLangNames[targetLang]; ok && len([]rune(strings.TrimSpace(text))) >= 180 {
+			return true
+		}
+	}
+	return false
+}
+
 func translateSystemPrompt(targetLang string) string {
 	name := translateLangNames[targetLang]
 	return "Translate the following AI coding assistant reasoning trace into " + name + ".\n" +
@@ -267,6 +299,39 @@ func translateSystemPrompt(targetLang string) string {
 		"- Preserve Markdown structure (headings, lists, bold, code fences) and paragraph breaks.\n" +
 		"- Keep the translation concise, natural, and accurate for software engineering context.\n" +
 		"- Output ONLY the translated text with no preamble, explanations, or extra quotes."
+}
+
+func summarizeSystemPrompt(targetLang string) string {
+	switch targetLang {
+	case "zh-CN":
+		return "你是一位资深工程师，正在把 AI 编程助手的原始思考过程，用自然、直白、口语化的简体中文总结给同事看。\n" +
+			"要求：\n" +
+			"- 讲人话：像工程师当面口头同步进度一样自然（例如「排查下来问题出在……」「看了下代码发现……」「接下来打算先改……再跑测试」），彻底杜绝翻译腔、书面官话和机器人套话（不要出现「该思考过程表明」「助手认为」「综上所述」「值得注意的是」「为了确保」等表达）。\n" +
+			"- 抓重点去废话：直接过滤掉自言自语、犹豫试探（如 Let me check / Wait / Okay）和车轱辘话，只提炼真正有信息量的发现、判断理由和下一步打算。\n" +
+			"- 控制篇幅：原文较短（1–3 句）时，用 1–2 句极简大白话说清即可，不要强行分点；原文较长或包含多个判断/步骤时，用 1 句核心结论 + 2–4 条短要点（Markdown 列表），每条尽量不超过一句话。\n" +
+			"- 保留技术精准度：文件名、函数/变量名、命令、参数、配置项、报错码原样保留并用反引号包裹（如 `convo_agy_input.go`、`flex: 1 1 auto`），不要生硬直译技术名词。\n" +
+			"- 严格忠实原文，绝不脑补原文未提及的结论或动作。\n" +
+			"- 只输出总结正文，不要加「总结：」「中文总结：」等任何前缀或多余引号。"
+	case "zh-TW":
+		return "你是一位資深工程師，正在把 AI 程式助手的原始思考過程，用自然、直白、口語化的繁體中文總結給同事看。\n" +
+			"要求：\n" +
+			"- 講人話：像工程師當面口頭同步進度一樣自然直白，杜絕翻譯腔、官話和機器人口吻（不要出現「該思考過程表明」「助手決定」「綜上所述」等說法）。\n" +
+			"- 抓重點去廢話：過濾掉自言自語、猶豫試探和重複語句，只保留真正有資訊量的發現、判斷原因與下一步行動。\n" +
+			"- 控制篇幅：原文較短（1–3 句）時用 1–2 句簡潔大白話說清；原文較長或包含多個步驟時，用 1 句核心結論 + 2–4 條精簡要點（Markdown 列表）。\n" +
+			"- 保留技術精準度：檔名、函式/變數名、指令、參數與錯誤碼原樣保留並用反引號包裹。\n" +
+			"- 嚴格忠實原文，不腦補未提及的內容。\n" +
+			"- 只輸出總結正文，不加任何前綴或額外引號。"
+	default:
+		name := translateLangNames[targetLang]
+		return "You are a senior software engineer summarizing an AI coding assistant's raw reasoning trace for a teammate in natural, plain-spoken " + name + ".\n" +
+			"Rules:\n" +
+			"- Speak like a real engineer giving a quick verbal update: clear, direct, and conversational. Avoid stiff robotic phrasing or literal translationese (never say 'The assistant is considering...', 'In summary...', or 'This reasoning trace shows...').\n" +
+			"- Cut filler self-talk ('Let me check', 'Wait', 'Okay') and dead-end repetition; keep only the real findings, root causes, key decisions, and concrete next steps.\n" +
+			"- Match length to complexity: for short thoughts (1-3 sentences), reply with 1-2 crisp sentences; for longer multi-step thoughts, write 1 short lead sentence followed by 2-4 concise Markdown bullets.\n" +
+			"- Keep all file paths, code symbols, CLI commands, flags, and error codes verbatim in backticks.\n" +
+			"- Never invent facts or actions not in the original trace.\n" +
+			"- Output ONLY the summary with no preamble, heading, or extra quotes."
+	}
 }
 
 func (s *Server) translateHTTP() *http.Client {
@@ -279,7 +344,10 @@ func (s *Server) translateHTTP() *http.Client {
 	return s.translateDefaultClient
 }
 
-func (s *Server) callTranslateLLM(ctx context.Context, baseURL, model, apiKey, targetLang, text string) (string, error) {
+func (s *Server) callTranslateLLM(ctx context.Context, baseURL, model, apiKey, targetLang, mode, text string) (string, error) {
+	if mode == "summarize" {
+		return s.callChatLLM(ctx, baseURL, model, apiKey, summarizeSystemPrompt(targetLang), text, 0.25)
+	}
 	return s.callChatLLM(ctx, baseURL, model, apiKey, translateSystemPrompt(targetLang), text, 0.1)
 }
 
@@ -369,6 +437,7 @@ func (s *Server) openTranslateKey(cfg *store.TranslateConfig) (string, error) {
 
 type translateConfigView struct {
 	Enabled    bool   `json:"enabled"`
+	Mode       string `json:"mode"`
 	TargetLang string `json:"target_lang"`
 	BaseURL    string `json:"base_url"`
 	Model      string `json:"model"`
@@ -376,8 +445,13 @@ type translateConfigView struct {
 }
 
 func translateView(cfg *store.TranslateConfig) translateConfigView {
+	mode := cfg.Mode
+	if mode != "summarize" {
+		mode = store.DefaultTranslateMode
+	}
 	return translateConfigView{
 		Enabled:    cfg.Enabled,
+		Mode:       mode,
 		TargetLang: cfg.TargetLang,
 		BaseURL:    cfg.BaseURL,
 		Model:      cfg.Model,
@@ -400,6 +474,7 @@ func (s *Server) apiGetTranslateConfig(w http.ResponseWriter, r *http.Request) {
 func (s *Server) apiPutTranslateConfig(w http.ResponseWriter, r *http.Request) {
 	var b struct {
 		Enabled    *bool   `json:"enabled"`
+		Mode       *string `json:"mode"`
 		TargetLang *string `json:"target_lang"`
 		BaseURL    *string `json:"base_url"`
 		Model      *string `json:"model"`
@@ -418,6 +493,14 @@ func (s *Server) apiPutTranslateConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	if b.Enabled != nil {
 		cfg.Enabled = *b.Enabled
+	}
+	if b.Mode != nil {
+		mode, ok := normalizeTranslateMode(*b.Mode)
+		if !ok {
+			writeError(w, http.StatusBadRequest, "bad_request", "unsupported translation mode")
+			return
+		}
+		cfg.Mode = mode
 	}
 	if b.TargetLang != nil {
 		lang := strings.TrimSpace(*b.TargetLang)
@@ -473,6 +556,7 @@ func (s *Server) apiPutTranslateConfig(w http.ResponseWriter, r *http.Request) {
 // POST /api/me/translate/test
 func (s *Server) apiTestTranslateConfig(w http.ResponseWriter, r *http.Request) {
 	var b struct {
+		Mode       string `json:"mode"`
 		TargetLang string `json:"target_lang"`
 		BaseURL    string `json:"base_url"`
 		Model      string `json:"model"`
@@ -489,6 +573,15 @@ func (s *Server) apiTestTranslateConfig(w http.ResponseWriter, r *http.Request) 
 	if err != nil {
 		s.internalError(w, r, err)
 		return
+	}
+	mode := cfg.Mode
+	if strings.TrimSpace(b.Mode) != "" {
+		var ok bool
+		mode, ok = normalizeTranslateMode(b.Mode)
+		if !ok {
+			writeError(w, http.StatusBadRequest, "bad_request", "unsupported translation mode")
+			return
+		}
 	}
 	targetLang := cfg.TargetLang
 	if strings.TrimSpace(b.TargetLang) != "" {
@@ -529,13 +622,14 @@ func (s *Server) apiTestTranslateConfig(w http.ResponseWriter, r *http.Request) 
 	t0 := time.Now()
 	tctx, cancel := context.WithTimeout(r.Context(), translateUpstreamTime)
 	defer cancel()
-	out, err := s.callTranslateLLM(tctx, baseURL, model, apiKey, targetLang, sampleIn)
+	out, err := s.callTranslateLLM(tctx, baseURL, model, apiKey, targetLang, mode, sampleIn)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "translate_failed", err.Error())
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":         true,
+		"mode":       mode,
 		"original":   sampleIn,
 		"sample":     out,
 		"latency_ms": time.Since(t0).Milliseconds(),
@@ -553,6 +647,7 @@ type translateThoughtResult struct {
 // POST /api/translate/thoughts
 func (s *Server) apiTranslateThoughts(w http.ResponseWriter, r *http.Request) {
 	var b struct {
+		Mode       string `json:"mode"`
 		TargetLang string `json:"target_lang"`
 		Items      []struct {
 			Text string `json:"text"`
@@ -576,6 +671,15 @@ func (s *Server) apiTranslateThoughts(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, "translate_disabled", "thought translation is disabled")
 		return
 	}
+	mode := cfg.Mode
+	if strings.TrimSpace(b.Mode) != "" {
+		var ok bool
+		mode, ok = normalizeTranslateMode(b.Mode)
+		if !ok {
+			writeError(w, http.StatusBadRequest, "bad_request", "unsupported translation mode")
+			return
+		}
+	}
 	targetLang := cfg.TargetLang
 	if strings.TrimSpace(b.TargetLang) != "" {
 		targetLang = strings.TrimSpace(b.TargetLang)
@@ -584,6 +688,7 @@ func (s *Server) apiTranslateThoughts(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "bad_request", "unsupported target language")
 		return
 	}
+	cacheLang := translateCacheLang(mode, targetLang)
 
 	results := make([]translateThoughtResult, len(b.Items))
 	needIdx := make([]int, 0, len(b.Items))
@@ -597,7 +702,7 @@ func (s *Server) apiTranslateThoughts(w http.ResponseWriter, r *http.Request) {
 		}
 		h := translateHash(txt)
 		results[i].Hash = h
-		if !needsThoughtTranslation(txt, targetLang) {
+		if !needsThoughtProcessing(txt, targetLang, mode) {
 			results[i].Status = "skipped"
 			continue
 		}
@@ -609,7 +714,7 @@ func (s *Server) apiTranslateThoughts(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if len(needHashes) > 0 {
-		cached, err := s.store.CachedThoughtTranslations(r.Context(), uid, targetLang, needHashes)
+		cached, err := s.store.CachedThoughtTranslations(r.Context(), uid, cacheLang, needHashes)
 		if err != nil {
 			s.internalError(w, r, err)
 			return
@@ -643,7 +748,7 @@ func (s *Server) apiTranslateThoughts(w http.ResponseWriter, r *http.Request) {
 					defer wg.Done()
 					txt := strings.TrimSpace(b.Items[i].Text)
 					h := results[i].Hash
-					flightKey := fmt.Sprintf("%d\x00%s\x00%s", uid, targetLang, h)
+					flightKey := fmt.Sprintf("%d\x00%s\x00%s", uid, cacheLang, h)
 					tr, err := s.translateFlight.do(flightKey, func() (string, error) {
 						select {
 						case sem <- struct{}{}:
@@ -653,11 +758,11 @@ func (s *Server) apiTranslateThoughts(w http.ResponseWriter, r *http.Request) {
 						}
 						tctx, cancel := context.WithTimeout(r.Context(), translateUpstreamTime)
 						defer cancel()
-						out, err := s.callTranslateLLM(tctx, baseURL, cfg.Model, apiKey, targetLang, txt)
+						out, err := s.callTranslateLLM(tctx, baseURL, cfg.Model, apiKey, targetLang, mode, txt)
 						if err != nil {
 							return "", err
 						}
-						_ = s.store.PutThoughtTranslation(context.Background(), uid, h, targetLang, out)
+						_ = s.store.PutThoughtTranslation(context.Background(), uid, h, cacheLang, out)
 						return out, nil
 					})
 					if err != nil {
@@ -673,6 +778,7 @@ func (s *Server) apiTranslateThoughts(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Cache-Control", "no-store")
 	writeJSON(w, http.StatusOK, map[string]any{
+		"mode":        mode,
 		"target_lang": targetLang,
 		"results":     results,
 	})

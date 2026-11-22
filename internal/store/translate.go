@@ -13,6 +13,7 @@ import (
 type TranslateConfig struct {
 	UserID     int64
 	Enabled    bool
+	Mode       string // "translate" (default) or "summarize"
 	TargetLang string
 	BaseURL    string
 	Model      string
@@ -23,6 +24,7 @@ type TranslateConfig struct {
 }
 
 const (
+	DefaultTranslateMode    = "translate"
 	DefaultTranslateLang    = "zh-CN"
 	DefaultTranslateBaseURL = "https://api.deepseek.com/v1"
 	DefaultTranslateModel   = "deepseek-flash"
@@ -34,15 +36,16 @@ const (
 func (s *Store) TranslateConfigOf(ctx context.Context, userID int64) (*TranslateConfig, error) {
 	c := &TranslateConfig{
 		UserID:     userID,
+		Mode:       DefaultTranslateMode,
 		TargetLang: DefaultTranslateLang,
 		BaseURL:    DefaultTranslateBaseURL,
 		Model:      DefaultTranslateModel,
 	}
 	var enabled int
 	err := s.db.QueryRowContext(ctx,
-		`SELECT enabled, target_lang, base_url, model, ciphertext, wrapped_key, key_id, updated_at
+		`SELECT enabled, mode, target_lang, base_url, model, ciphertext, wrapped_key, key_id, updated_at
 		 FROM user_translate_config WHERE user_id = ?`, userID).
-		Scan(&enabled, &c.TargetLang, &c.BaseURL, &c.Model, &c.Ciphertext, &c.WrappedKey, &c.KeyID, &c.UpdatedAt)
+		Scan(&enabled, &c.Mode, &c.TargetLang, &c.BaseURL, &c.Model, &c.Ciphertext, &c.WrappedKey, &c.KeyID, &c.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return c, nil
 	}
@@ -50,6 +53,9 @@ func (s *Store) TranslateConfigOf(ctx context.Context, userID int64) (*Translate
 		return nil, err
 	}
 	c.Enabled = enabled != 0
+	if c.Mode != "summarize" {
+		c.Mode = DefaultTranslateMode
+	}
 	return c, nil
 }
 
@@ -60,11 +66,16 @@ func (s *Store) SaveTranslateConfig(ctx context.Context, c *TranslateConfig) err
 	if c.Enabled {
 		enabled = 1
 	}
+	mode := c.Mode
+	if mode != "summarize" {
+		mode = DefaultTranslateMode
+	}
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO user_translate_config (user_id, enabled, target_lang, base_url, model, ciphertext, wrapped_key, key_id, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`INSERT INTO user_translate_config (user_id, enabled, mode, target_lang, base_url, model, ciphertext, wrapped_key, key_id, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(user_id) DO UPDATE SET
 		   enabled = excluded.enabled,
+		   mode = excluded.mode,
 		   target_lang = excluded.target_lang,
 		   base_url = excluded.base_url,
 		   model = excluded.model,
@@ -72,7 +83,7 @@ func (s *Store) SaveTranslateConfig(ctx context.Context, c *TranslateConfig) err
 		   wrapped_key = excluded.wrapped_key,
 		   key_id = excluded.key_id,
 		   updated_at = excluded.updated_at`,
-		c.UserID, enabled, c.TargetLang, c.BaseURL, c.Model, c.Ciphertext, c.WrappedKey, c.KeyID, now)
+		c.UserID, enabled, mode, c.TargetLang, c.BaseURL, c.Model, c.Ciphertext, c.WrappedKey, c.KeyID, now)
 	return err
 }
 

@@ -545,20 +545,40 @@ html.term-dark .overlay, html.term-dark .menu, html.term-dark .toast {
 .term-root .convo .btn-ghost { color: var(--term-fg); }
 .term-root .convo .btn-ghost:hover { background: var(--term-hover); }
 .convo-panes { flex: 1; min-width: 0; display: flex; position: relative; }
+.convo-panes.is-split-col { flex-direction: column; }
 .convo-main { flex: 1; min-width: 0; display: flex; flex-direction: column; position: relative; }
+.convo-panes.is-split-col > .convo-main,
+.convo-panes.is-split-col > .convo-split-pane { min-height: 0; }
 .convo-split-grip {
   flex: none; position: relative; z-index: 3; width: 8px; margin: 0 -4px; cursor: col-resize; touch-action: none;
+  display: flex; align-items: center; justify-content: center;
 }
 .convo-split-grip::after { content: ''; position: absolute; top: 0; bottom: 0; left: 3px; width: 2px; background: transparent; transition: background 0.12s; }
 .convo-split-grip:hover::after, .convo-split-grip:active::after { background: var(--term-line-strong); }
 .convo-split-grip:focus-visible { outline: none; }
 .convo-split-grip:focus-visible::after { background: var(--term-accent-text); }
+.convo-split-handle {
+  position: relative; z-index: 1; width: 2px; height: 24px; border-radius: 999px;
+  background: var(--term-line-strong); opacity: 0.45; transition: opacity 0.12s, background 0.12s;
+}
+.convo-split-grip:hover .convo-split-handle,
+.convo-split-grip:active .convo-split-handle,
+.convo-split-grip:focus-visible .convo-split-handle { opacity: 1; background: var(--term-accent-text); }
+.convo-split-grip.is-col { width: auto; height: 8px; margin: -4px 0; cursor: row-resize; }
+.convo-split-grip.is-col::after { top: 3px; bottom: auto; left: 0; right: 0; width: auto; height: 2px; }
+.convo-split-grip.is-col .convo-split-handle { width: 32px; height: 4px; }
 @media (pointer: coarse) {
   .convo-split-grip { width: 16px; margin: 0 -8px; }
   .convo-split-grip::after { left: 7px; }
+  .convo-split-grip.is-col { width: auto; height: 16px; margin: -8px 0; }
+  .convo-split-grip.is-col::after { top: 7px; left: 0; right: 0; }
   .convo-bar-split-act { width: 36px; height: 36px; }
 }
 .convo-split-pane { flex: 1; min-width: 0; position: relative; display: flex; border-left: 1px solid var(--term-line); overflow: hidden; }
+.convo-split-pane.is-col { border-left: 0; border-top: 1px solid var(--term-line); }
+.convo-panes.is-compact-col > .convo-main:not(.is-focused) .convo-runs,
+.convo-panes.is-compact-col > .convo-split-pane:not(.is-focused) .convo-runs { display: none; }
+.convo-panes.is-split-col .convo-col { padding: 12px 16px 16px; }
 .convo-panes.is-split { --split-dim: color-mix(in srgb, var(--term-chrome) 55%, var(--term-bg)); }
 .convo-panes.is-split > .convo-main:not(.is-focused),
 .convo-panes.is-split > .convo-split-pane:not(.is-focused) .convo { background: var(--split-dim); }
@@ -979,6 +999,15 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 .convo-thinking-status { font-size: var(--fs-note); line-height: var(--lh-note); color: var(--term-fg-3); }
 .convo-thinking-toggle { appearance: none; border: 1px solid var(--term-line); border-radius: var(--r); background: transparent; color: var(--term-fg-2); font: inherit; font-size: var(--fs-note); line-height: var(--lh-note); padding: 1px 8px; cursor: pointer; }
 .convo-thinking-toggle:hover, .convo-thinking-toggle:focus-visible { color: var(--term-fg); border-color: var(--term-fg-3); }
+.convo-thinking-summary {
+  margin-top: 8px; padding: 8px 12px; border: 1px solid var(--term-line); border-radius: var(--r);
+  background: color-mix(in srgb, var(--term-fg) 4%, var(--term-bg)); color: var(--term-fg-2);
+}
+.convo-thinking-summary-head {
+  display: inline-flex; align-items: center; gap: 6px; margin-bottom: 4px;
+  font-size: var(--fs-note); line-height: var(--lh-note); font-weight: 500; color: var(--term-accent-text);
+}
+.convo-thinking-summary p:last-child, .convo-thinking-summary ul:last-child, .convo-thinking-summary ol:last-child { margin-bottom: 0; }
 .convo-work-body > .convo-note { margin: 4px 0; }
 /* What a rewind took back: a quiet line; what it was, faded, behind it. */
 .convo-gone { display: flex; flex-direction: column; min-width: 0; }
@@ -1781,6 +1810,51 @@ button.convo-queue-row.is-note:last-child { border-radius: 0 0 var(--r-lg) var(-
 @media (forced-colors: active) {
   .convo-list-status { position: static; width: auto; height: auto; margin: 0; overflow: visible; clip: auto; font-size: var(--fs-note); line-height: var(--lh-note); }
 }
+/* Custom sidebar row hover card (replaces raw multi-line OS title tooltip). */
+.convo-row-tip {
+  position: fixed; z-index: 40; width: min(320px, calc(100vw - 24px)); padding: 10px 12px;
+  border: 1px solid var(--term-line-strong, var(--term-line)); border-radius: var(--r-lg);
+  background: var(--term-pop, var(--term-bg)); color: var(--term-fg);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.22); pointer-events: none;
+  display: flex; flex-direction: column; gap: 8px; font-family: var(--font-ui);
+  animation: fade 0.12s var(--ease);
+}
+.convo-row-tip-head { display: flex; align-items: flex-start; gap: 8px; min-width: 0; }
+.convo-row-tip-titles { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.convo-row-tip-title { font-size: var(--fs-ui); line-height: var(--lh-ui); font-weight: 600; color: var(--term-fg); overflow-wrap: anywhere; }
+.convo-row-tip-sub { font-size: var(--fs-note); line-height: var(--lh-note); color: var(--term-fg-2); overflow-wrap: anywhere; }
+.convo-row-tip-badge {
+  flex: none; padding: 2px 6px; border-radius: 999px; font-size: var(--fs-note); line-height: var(--lh-note); font-weight: 500;
+  background: color-mix(in srgb, var(--term-fg) 8%, transparent); color: var(--term-fg-2); white-space: nowrap;
+}
+.convo-row-tip-badge.is-blocked { background: color-mix(in srgb, var(--term-warn-text) 14%, transparent); color: var(--term-warn-text); }
+.convo-row-tip-badge.is-working,
+.convo-row-tip-badge.is-bg { background: color-mix(in srgb, var(--term-accent-text) 14%, transparent); color: var(--term-accent-text); }
+.convo-row-tip-badge.is-done { background: color-mix(in srgb, var(--term-ok-text) 14%, transparent); color: var(--term-ok-text); }
+.convo-row-tip-badge.is-stale { color: var(--term-fg-3); }
+.convo-row-tip-wait {
+  display: flex; align-items: flex-start; gap: 6px; padding: 6px 8px; border-radius: var(--r);
+  background: color-mix(in srgb, var(--term-warn-text) 10%, transparent); color: var(--term-warn-text);
+  font-size: var(--fs-note); line-height: var(--lh-note); overflow-wrap: anywhere;
+}
+.convo-row-tip-wait svg { flex: none; margin-top: 2px; }
+.convo-row-tip-meta { display: flex; flex-direction: column; gap: 4px; padding-top: 6px; border-top: 1px solid var(--term-line); }
+.convo-row-tip-row { display: flex; align-items: center; gap: 6px; min-width: 0; font-size: var(--fs-note); line-height: var(--lh-note); color: var(--term-fg-3); }
+.convo-row-tip-row svg { flex: none; opacity: 0.8; }
+.convo-row-tip-val { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.convo-row-tip-val.is-mono { font-family: var(--font-mono); color: var(--term-fg-2); }
+.convo-row-tip-time { flex: none; font-variant-numeric: tabular-nums; color: var(--term-fg-3); white-space: nowrap; }
+.convo-row-tip-cmds { display: flex; flex-direction: column; gap: 4px; padding-top: 6px; border-top: 1px solid var(--term-line); }
+.convo-row-tip-bgnote { font-size: var(--fs-note); line-height: var(--lh-note); color: var(--term-accent-text); font-weight: 500; }
+.convo-row-tip-bgnote.is-stale { color: var(--term-fg-3); font-weight: 400; }
+.convo-row-tip-cmd {
+  display: flex; align-items: center; gap: 6px; padding: 4px 6px; border-radius: var(--r);
+  background: color-mix(in srgb, var(--term-fg) 5%, transparent); color: var(--term-fg-2);
+  font-family: var(--font-mono); font-size: var(--fs-note); line-height: var(--lh-note); min-width: 0;
+}
+.convo-row-tip-cmd svg { flex: none; opacity: 0.72; }
+.convo-row-tip-cmd span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.convo-row-tip-more { font-size: var(--fs-note); line-height: var(--lh-note); color: var(--term-fg-3); }
 /* Where it is (its workspace, what the agent called it): up to two lines.
    How it is going is said by its dot (and its group). */
 .convo-list-sub {

@@ -141,8 +141,9 @@ const SIDE_W = 288
 const SIDE_W_MIN = 220
 const SIDE_W_MAX = 520
 const SPLIT_PCT_KEY = 'corral.convoSplitPct'
+const SPLIT_PCT_V_KEY = 'corral.convoSplitPctV'
 const SPLIT_MIN_W = 760
-const clampSplitPct = (v: number) => Math.max(28, Math.min(72, Math.round(v * 10) / 10))
+const clampSplitPct = (v: number) => Math.max(25, Math.min(75, Math.round(v * 10) / 10))
 // (The thread's own width the dock leaves it, beside it; less, the dock goes over it.)
 const DOCK_THREAD = 560
 // (The card's taps for the dock, numbered across the page's life: one taken is
@@ -223,6 +224,8 @@ export interface ConvoSplitPane {
   node: ReactNode
   focused: 'primary' | 'secondary'
   onFocus: (which: 'primary' | 'secondary') => void
+  dir?: 'auto' | 'row' | 'col'
+  onDirToggle?: (currentEffective?: 'row' | 'col') => void
 }
 
 export function ConversationView({
@@ -315,30 +318,46 @@ export function ConversationView({
   const root = useRef<HTMLDivElement>(null)
   const [wide, setWide] = useState(false)
   const [viewW, setViewW] = useState(0)
+  const [viewH, setViewH] = useState(0)
   const [sideW, setSideW] = useState(() => Number(local.get(SIDE_W_KEY)) || SIDE_W)
   const sideWidth = sideWidthOf(sideW, viewW || SIDE_MIN)
   const sideEl = useRef<HTMLElement>(null)
   const [splitPct, setSplitPct] = useState(() => {
     const n = Number(local.get(SPLIT_PCT_KEY))
-    return Number.isFinite(n) && n >= 28 && n <= 72 ? n : 50
+    return Number.isFinite(n) && n >= 25 && n <= 75 ? n : 50
+  })
+  const [splitPctV, setSplitPctV] = useState(() => {
+    const n = Number(local.get(SPLIT_PCT_V_KEY))
+    return Number.isFinite(n) && n >= 25 && n <= 75 ? n : 50
   })
   const panesEl = useRef<HTMLDivElement>(null)
   const mainEl = useRef<HTMLDivElement>(null)
-  const keepSplitPct = (v: number) => {
+  const splitDirMode = splitPane?.dir ?? 'auto'
+  const splitIsCol =
+    splitDirMode === 'col' ||
+    (splitDirMode === 'auto' && viewW > 0 && (viewW < 820 || (viewH > 0 && viewH > viewW * 1.05)))
+  const activeSplitPct = splitIsCol ? splitPctV : splitPct
+  const keepSplitPct = (v: number, col = splitIsCol) => {
     const p = clampSplitPct(v)
-    setSplitPct(p)
-    if (p === 50) local.remove(SPLIT_PCT_KEY)
-    else local.set(SPLIT_PCT_KEY, String(p))
+    if (col) {
+      setSplitPctV(p)
+      if (p === 50) local.remove(SPLIT_PCT_V_KEY)
+      else local.set(SPLIT_PCT_V_KEY, String(p))
+    } else {
+      setSplitPct(p)
+      if (p === 50) local.remove(SPLIT_PCT_KEY)
+      else local.set(SPLIT_PCT_KEY, String(p))
+    }
     if (mainEl.current) mainEl.current.style.flex = `0 0 ${p}%`
     return p
   }
-  const splitDrag = useRef<{ id: number; x: number; pct: number; w: number; to: number; frame: number } | null>(null)
+  const splitDrag = useRef<{ id: number; pos: number; pct: number; span: number; to: number; col: boolean; frame: number } | null>(null)
   const endSplitDrag = (keep: boolean) => {
     const d = splitDrag.current
     if (!d) return
     splitDrag.current = null
     cancelAnimationFrame(d.frame)
-    keepSplitPct(keep ? d.to : d.pct)
+    keepSplitPct(keep ? d.to : d.pct, d.col)
   }
   const keepSideW = (w: number) => {
     const v = sideWidthOf(w, viewW || SIDE_MIN)
@@ -369,6 +388,7 @@ export function ConversationView({
     const look = () => {
       setWide(el.clientWidth >= SIDE_MIN)
       setViewW(el.clientWidth)
+      setViewH(el.clientHeight)
     }
     look()
     const ro = new ResizeObserver(look)
@@ -376,7 +396,8 @@ export function ConversationView({
     return () => ro.disconnect()
   }, [])
   const sideShown = !!side && wide && !folded
-  const splitShown = !!splitPane && (viewW === 0 || viewW >= SPLIT_MIN_W)
+  const splitShown = !!splitPane && (splitIsCol || viewW === 0 || viewW >= SPLIT_MIN_W)
+  const splitCompactCol = splitShown && splitIsCol && viewH > 0 && viewH < 760
   const wasSplit = useRef(false)
   useEffect(() => {
     const nowSplit = !!splitPane
@@ -1740,11 +1761,11 @@ export function ConversationView({
           }}
         />
       )}
-      <div className={'convo-panes' + (splitShown ? ' is-split' : '')} ref={panesEl}>
+      <div className={'convo-panes' + (splitShown ? ' is-split' : '') + (splitShown && splitIsCol ? ' is-split-col' : '') + (splitCompactCol ? ' is-compact-col' : '')} ref={panesEl}>
       <div
         className={'convo-main' + (splitShown && splitPane?.focused === 'primary' ? ' is-focused' : '')}
         ref={mainEl}
-        style={splitShown ? { flex: `0 0 ${splitPct}%` } : undefined}
+        style={splitShown ? { flex: `0 0 ${activeSplitPct}%` } : undefined}
         onPointerDownCapture={splitShown ? () => splitPane?.onFocus('primary') : undefined}
         onFocusCapture={splitShown ? () => splitPane?.onFocus('primary') : undefined}
       >
@@ -2181,28 +2202,37 @@ export function ConversationView({
       {splitShown && splitPane && (
         <>
           <div
-            className="convo-split-grip"
+            className={'convo-split-grip' + (splitIsCol ? ' is-col' : '')}
             role="separator"
-            aria-orientation="vertical"
+            aria-orientation={splitIsCol ? 'horizontal' : 'vertical'}
             aria-label={t('convo.split.resize')}
-            title={t('convo.split.resize')}
-            aria-valuenow={Math.round(splitPct)}
-            aria-valuemin={28}
-            aria-valuemax={72}
+            title={t('convo.split.resizeHint')}
+            aria-valuenow={Math.round(activeSplitPct)}
+            aria-valuemin={25}
+            aria-valuemax={75}
             tabIndex={0}
             onPointerDown={(e) => {
               if (e.button !== 0 || splitDrag.current) return
-              const w = panesEl.current?.clientWidth ?? 0
-              if (!w) return
+              const span = splitIsCol ? (panesEl.current?.clientHeight ?? 0) : (panesEl.current?.clientWidth ?? 0)
+              if (!span) return
               e.preventDefault()
               e.currentTarget.setPointerCapture(e.pointerId)
-              splitDrag.current = { id: e.pointerId, x: e.clientX, pct: splitPct, w, to: splitPct, frame: 0 }
+              splitDrag.current = {
+                id: e.pointerId,
+                pos: splitIsCol ? e.clientY : e.clientX,
+                pct: activeSplitPct,
+                span,
+                to: activeSplitPct,
+                col: splitIsCol,
+                frame: 0,
+              }
             }}
             onPointerMove={(e) => {
               const d = splitDrag.current
               if (!d || e.pointerId !== d.id) return
               if (e.pointerType === 'mouse' && e.buttons === 0) return endSplitDrag(true)
-              d.to = clampSplitPct(d.pct + ((e.clientX - d.x) / d.w) * 100)
+              const curPos = d.col ? e.clientY : e.clientX
+              d.to = clampSplitPct(d.pct + ((curPos - d.pos) / d.span) * 100)
               cancelAnimationFrame(d.frame)
               d.frame = requestAnimationFrame(() => {
                 if (mainEl.current) mainEl.current.style.flex = `0 0 ${d.to}%`
@@ -2217,19 +2247,21 @@ export function ConversationView({
             onLostPointerCapture={(e) => {
               if (splitDrag.current?.id === e.pointerId) endSplitDrag(true)
             }}
-            onDoubleClick={() => keepSplitPct(50)}
+            onDoubleClick={() => keepSplitPct(50, splitIsCol)}
             onKeyDown={(e) => {
               const step = e.shiftKey ? 10 : 4
-              if (e.key === 'ArrowLeft') keepSplitPct(splitPct - step)
-              else if (e.key === 'ArrowRight') keepSplitPct(splitPct + step)
-              else if (e.key === 'Home') keepSplitPct(28)
-              else if (e.key === 'End') keepSplitPct(72)
+              if ((splitIsCol && e.key === 'ArrowUp') || (!splitIsCol && e.key === 'ArrowLeft')) keepSplitPct(activeSplitPct - step, splitIsCol)
+              else if ((splitIsCol && e.key === 'ArrowDown') || (!splitIsCol && e.key === 'ArrowRight')) keepSplitPct(activeSplitPct + step, splitIsCol)
+              else if (e.key === 'Home') keepSplitPct(25, splitIsCol)
+              else if (e.key === 'End') keepSplitPct(75, splitIsCol)
               else return
               e.preventDefault()
             }}
-          />
+          >
+            <span className="convo-split-handle" aria-hidden="true" />
+          </div>
           <div
-            className={'convo-split-pane' + (splitPane.focused === 'secondary' ? ' is-focused' : '')}
+            className={'convo-split-pane' + (splitIsCol ? ' is-col' : '') + (splitPane.focused === 'secondary' ? ' is-focused' : '')}
             onPointerDownCapture={() => splitPane.onFocus('secondary')}
             onFocusCapture={() => splitPane.onFocus('secondary')}
           >
@@ -3928,8 +3960,42 @@ export function AgentList({ rows, menus, onPicked, placed, query: given, onQuery
   const [folded, setFoldedNow] = useState<string[]>(() => keptNames(SIDE_FOLD_KEY))
   // Which parent rows have their nested children folded shut.
   const [parentFolded, setParentFoldedNow] = useState<string[]>(() => keptNames(SIDE_PARENT_FOLD_KEY))
+  // Hover preview card for desktop pointers (replaces the raw multi-line OS title tooltip).
+  const [rowTip, setRowTip] = useState<{ key: string; rect: { top: number; bottom: number; left: number; right: number } } | null>(null)
+  const tipTimer = useRef<number | null>(null)
+  const clearRowTip = useCallback(() => {
+    if (tipTimer.current !== null) {
+      window.clearTimeout(tipTimer.current)
+      tipTimer.current = null
+    }
+    setRowTip(null)
+  }, [])
+  const scheduleRowTip = useCallback((key: string, el: HTMLElement) => {
+    if (isCoarse()) return
+    if (tipTimer.current !== null) window.clearTimeout(tipTimer.current)
+    const rect = el.getBoundingClientRect()
+    tipTimer.current = window.setTimeout(() => {
+      tipTimer.current = null
+      setRowTip({ key, rect: { top: rect.top, bottom: rect.bottom, left: rect.left, right: rect.right } })
+    }, 320)
+  }, [])
+  useEffect(() => {
+    if (rowMenu) clearRowTip()
+  }, [rowMenu, clearRowTip])
+  useEffect(() => {
+    return () => {
+      if (tipTimer.current !== null) window.clearTimeout(tipTimer.current)
+    }
+  }, [])
   // (Rows regrouped by a poll slide to their place; a search's are its own — useFlip.)
   const groupsEl = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    const el = groupsEl.current
+    if (!el) return
+    const onScroll = () => clearRowTip()
+    el.addEventListener('scroll', onScroll, { passive: true })
+    return () => el.removeEventListener('scroll', onScroll)
+  }, [clearRowTip])
   const setOpen = (f: (o: string[]) => string[]) =>
     setOpenNow((o) => {
       const now = f(o)
@@ -4085,11 +4151,6 @@ export function AgentList({ rows, menus, onPicked, placed, query: given, onQuery
           // words by its time, as its hollow dot alone did not say it; what goes on,
           // in its tooltip. As the dot: running, or commands, not while it waits.)
           const bgSaid = r.bg === 'running' || (r.cmds && r.status !== 'blocked') ? 'bg' : r.bg === 'stale' ? 'stale' : ''
-          const bgHint = !bgSaid
-            ? ''
-            : [r.bg === 'running' ? t('convo.list.bgAgents') : r.bg === 'stale' ? t('convo.status.bgStale') : '', r.cmds?.list.length ? t('convo.list.bgCmds', { list: r.cmds.list.map((c) => c.title || '?').join(t('convo.listSep')) }) : '']
-                .filter(Boolean)
-                .join('\n')
           const hasMenu = !!(menus && r.menu)
           const hasSub = !!sub
           const parentRef = r.viaParentTitle
@@ -4120,10 +4181,15 @@ export function AgentList({ rows, menus, onPicked, placed, query: given, onQuery
                 (isChild ? ' is-child' : '') +
                 (isSingleChild ? ' is-single' : '')
               }
+              onMouseEnter={(e) => {
+                if (!rowMenu) scheduleRowTip(r.key, e.currentTarget)
+              }}
+              onMouseLeave={clearRowTip}
               onContextMenu={
                 hasMenu
                   ? (e) => {
                       e.preventDefault()
+                      clearRowTip()
                       const k = keyOpened.current
                       if (k && k.key === r.key && rowMenu?.key === r.key && Date.now() - k.at < 1000) return
                       openMenu(r.key, { x: e.clientX, y: e.clientY })
@@ -4136,6 +4202,7 @@ export function AgentList({ rows, menus, onPicked, placed, query: given, onQuery
               className={'convo-list-row is-' + r.status + (isNestedVisual ? ' is-nested' : '') + (isChild ? ' is-child' : '')}
               aria-current={r.current || undefined}
               onClick={() => {
+                clearRowTip()
                 onPicked?.()
                 r.onPick() // (of the one shown: nothing, or the end of a switch to another; the list may be of before)
               }}
@@ -4146,14 +4213,8 @@ export function AgentList({ rows, menus, onPicked, placed, query: given, onQuery
                   which tells alike names apart — and when. A third only for what
                   waits on the person: what it asks, or messages not seen taken in.
                   Nested same-workspace children stay compact on one line when they
-                  have no extra subtitle. The whole of each in its tooltip and bar.) */}
-              <span
-                className="convo-list-text"
-                title={[r.title, parentRef ? '↳ ' + parentRef : '', r.where, r.sessionGroup, r.projectKey, r.now, bgHint]
-                  .filter(Boolean)
-                  .filter((v, i, arr) => arr.indexOf(v) === i)
-                  .join('\n')}
-              >
+                  have no extra subtitle. Full details live in the hover card.) */}
+              <span className="convo-list-text">
                 <span className="convo-list-line">
                   <span className="convo-list-title">{r.title}</span>
                   {r.inSplit && (
@@ -4325,6 +4386,96 @@ export function AgentList({ rows, menus, onPicked, placed, query: given, onQuery
       {rowMenu && menuRow && (
         <MenuLayer label={t('convo.rowMenu', { name: menuRow.title })} anchor={rowMenu.anchor} at={rowMenu.at} sheet={rowMenu.sheet} trigger={menuTrigger} items={menuItems(menuRow)} onClose={closeMenu} />
       )}
+      {!rowMenu && rowTip && (() => {
+        const tipRow = rows.find((r) => r.key === rowTip.key)
+        if (!tipRow) return null
+        const tipSince = stamp(tipRow, now)
+        const tipStatusKey: I18nKey | null =
+          tipRow.status === 'blocked'
+            ? 'convo.status.blocked'
+            : tipRow.status === 'working'
+              ? 'convo.status.working'
+              : tipRow.bg === 'running' || tipRow.cmds
+                ? 'convo.status.bg'
+                : tipRow.bg === 'stale'
+                  ? 'convo.status.bgStale'
+                  : tipRow.status === 'done'
+                    ? 'convo.status.done'
+                    : null
+        const tipStatusTone =
+          tipRow.status === 'blocked'
+            ? 'blocked'
+            : tipRow.status === 'working'
+              ? 'working'
+              : tipRow.bg === 'running' || tipRow.cmds
+                ? 'bg'
+                : tipRow.bg === 'stale'
+                  ? 'stale'
+                  : tipRow.status === 'done'
+                    ? 'done'
+                    : ''
+        const tipParent = tipRow.parentKey ? rows.find((p) => p.key === tipRow.parentKey)?.title : ''
+        const cmds = tipRow.cmds?.list ?? []
+        const cardW = 320
+        const vw = typeof window !== 'undefined' ? window.innerWidth : 1280
+        const vh = typeof window !== 'undefined' ? window.innerHeight : 800
+        const left = rowTip.rect.right + 10 + cardW <= vw - 8 ? rowTip.rect.right + 10 : Math.max(8, rowTip.rect.left - cardW - 10)
+        const top = Math.min(Math.max(8, rowTip.rect.top - 4), Math.max(8, vh - 240))
+        return (
+          <div className="convo-row-tip" role="tooltip" style={{ top, left }}>
+            <div className="convo-row-tip-head">
+              <AgentIcon program={tipRow.program} size={22} />
+              <div className="convo-row-tip-titles">
+                <div className="convo-row-tip-title">{tipRow.title}</div>
+                {tipRow.where && tipRow.where !== tipRow.title && <div className="convo-row-tip-sub">{tipRow.where}</div>}
+              </div>
+              {tipStatusKey && <span className={'convo-row-tip-badge is-' + tipStatusTone}>{t(tipStatusKey)}</span>}
+            </div>
+            {tipRow.status === 'blocked' && tipRow.now && (
+              <div className="convo-row-tip-wait">
+                <TriangleAlert size={13} aria-hidden="true" />
+                <span>{tipRow.now}</span>
+              </div>
+            )}
+            {(tipParent || tipRow.sessionGroup || tipRow.projectKey || tipSince) && (
+              <div className="convo-row-tip-meta">
+                {tipParent && (
+                  <div className="convo-row-tip-row">
+                    <GitFork size={12} aria-hidden="true" />
+                    <span className="convo-row-tip-val">{tipParent}</span>
+                  </div>
+                )}
+                {(tipRow.sessionGroup || tipSince) && (
+                  <div className="convo-row-tip-row">
+                    <Server size={12} aria-hidden="true" />
+                    <span className="convo-row-tip-val">{tipRow.sessionGroup || tipRow.program}</span>
+                    {tipSince && <span className="convo-row-tip-time">{tipSince}</span>}
+                  </div>
+                )}
+                {tipRow.projectKey && (
+                  <div className="convo-row-tip-row">
+                    <Folder size={12} aria-hidden="true" />
+                    <span className="convo-row-tip-val is-mono">{tipRow.projectKey}</span>
+                  </div>
+                )}
+              </div>
+            )}
+            {(tipRow.bg === 'running' || tipRow.bg === 'stale' || cmds.length > 0) && (
+              <div className="convo-row-tip-cmds">
+                {tipRow.bg === 'running' && <div className="convo-row-tip-bgnote">{t('convo.list.bgAgents')}</div>}
+                {tipRow.bg === 'stale' && <div className="convo-row-tip-bgnote is-stale">{t('convo.status.bgStale')}</div>}
+                {cmds.slice(0, 3).map((c, idx) => (
+                  <div key={idx} className="convo-row-tip-cmd">
+                    <SquareTerminal size={11} aria-hidden="true" />
+                    <span>{c.title || '?'}</span>
+                  </div>
+                ))}
+                {cmds.length > 3 && <div className="convo-row-tip-more">{t('convo.rowTip.moreCmds', { n: cmds.length - 3 })}</div>}
+              </div>
+            )}
+          </div>
+        )
+      })()}
     </>
   )
 }
@@ -6206,8 +6357,9 @@ function Thinking({ text, live }: { text: string; live?: boolean }) {
   const tr = useThoughtTranslation(text, { active: !live && (seen || open), priority: open })
   if (live) return null // (said under the steps, as the step under way)
   const translated = tr.status === 'done' && !!tr.text
+  const isSummary = tr.mode === 'summarize'
   const shown = translated && !showOrig ? tr.text! : text
-  const title = thoughtTitle(shown)
+  const title = thoughtTitle(isSummary ? (translated ? tr.text! : text) : shown)
   return (
     <div ref={setEl} className="convo-step is-thought">
       {/* (The mark stands for "thinking": said to a reader by the button's name, not
@@ -6218,23 +6370,42 @@ function Thinking({ text, live }: { text: string; live?: boolean }) {
       </button>
       {open && (
         <div className="convo-thinking">
-          {(translated || tr.status === 'loading' || tr.status === 'error') && (
-            <div className="convo-thinking-bar">
-              {tr.status === 'loading' && <span className="convo-thinking-status">{t('convo.translate.loading')}</span>}
-              {tr.status === 'error' && <span className="convo-thinking-status" title={tr.error}>{t('convo.translate.failed')}</span>}
-              {translated && (
-                <button
-                  type="button"
-                  className="convo-thinking-toggle"
-                  aria-pressed={showOrig}
-                  onClick={() => setShowOrig((v) => !v)}
-                >
-                  {t(showOrig ? 'convo.translate.translated' : 'convo.translate.original')}
-                </button>
+          {isSummary ? (
+            <>
+              <Markdown text={text} />
+              {(translated || tr.status === 'loading' || tr.status === 'error') && (
+                <div className="convo-thinking-summary">
+                  <div className="convo-thinking-summary-head">
+                    <Sparkles size={12} aria-hidden="true" />
+                    <span>{t('convo.translate.summaryLabel')}</span>
+                  </div>
+                  {tr.status === 'loading' && <span className="convo-thinking-status">{t('convo.translate.summarizing')}</span>}
+                  {tr.status === 'error' && <span className="convo-thinking-status" title={tr.error}>{t('convo.translate.failed')}</span>}
+                  {translated && <Markdown text={tr.text!} />}
+                </div>
               )}
-            </div>
+            </>
+          ) : (
+            <>
+              {(translated || tr.status === 'loading' || tr.status === 'error') && (
+                <div className="convo-thinking-bar">
+                  {tr.status === 'loading' && <span className="convo-thinking-status">{t('convo.translate.loading')}</span>}
+                  {tr.status === 'error' && <span className="convo-thinking-status" title={tr.error}>{t('convo.translate.failed')}</span>}
+                  {translated && (
+                    <button
+                      type="button"
+                      className="convo-thinking-toggle"
+                      aria-pressed={showOrig}
+                      onClick={() => setShowOrig((v) => !v)}
+                    >
+                      {t(showOrig ? 'convo.translate.translated' : 'convo.translate.original')}
+                    </button>
+                  )}
+                </div>
+              )}
+              <Markdown text={shown} />
+            </>
           )}
-          <Markdown text={shown} />
         </div>
       )}
     </div>
