@@ -76,11 +76,10 @@ func TestLineageExtractorRejectsUnsafeAndOutOfScopeCommands(t *testing.T) {
 		`HERDR_SOCKET_PATH=/run/herdr/other.sock herdr pane split --json`,
 		`herdr --socket /run/herdr/other.sock pane split --json`,
 		`herdr --session other pane split --json`,
-		`false; herdr pane split --json`,
 		`false || herdr pane split --json`,
-		`herdr pane split --json | cat`,
+		`herdr pane split --json | sh`,
 		"cat <<'EOF'\nherdr pane split --json\nEOF",
-		`$(herdr pane split --json)`,
+		`echo '{"result":{"type":"pane_info","pane":{"pane_id":"w1:p2"}}}'`,
 	}
 	for _, cmd := range rejected {
 		if intent := ex.classifyHerdrCommand(cmd); intent.valid {
@@ -93,6 +92,9 @@ func TestLineageExtractorRejectsUnsafeAndOutOfScopeCommands(t *testing.T) {
 		`cd /repo && HERDR_SOCKET_PATH=/run/herdr/s3.sock herdr workspace create --cwd /repo --json 2>&1`,
 		`herdr --session 3 tab create --json`,
 		`/home/user/.local/bin/herdr pane split --json`,
+		// Real-world Claude/Codex idioms: output pipe truncation & variable capture scripts.
+		`herdr workspace create --cwd /repo --label "Protocol Bridge" --no-focus 2>&1 | head -c 800`,
+		`mkdir -p /tmp/x; W=$(herdr workspace create --label "Dev" --cwd /repo 2>&1); echo "$W" | head -c 400`,
 	}
 	for _, cmd := range accepted {
 		if intent := ex.classifyHerdrCommand(cmd); !intent.valid {
@@ -148,5 +150,27 @@ func TestLineageExtractorCodexCodeModeCreation(t *testing.T) {
 		`{"type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"call_cm3","output":[{"type":"input_text","text":"Script completed\nOutput:\n{\"chunk_id\":\"c3\",\"exit_code\":1,\"output\":\"{\\\"result\\\":{\\\"type\\\":\\\"pane_info\\\",\\\"pane\\\":{\\\"pane_id\\\":\\\"w1:p9\\\",\\\"terminal_id\\\":\\\"term-9\\\"}}}\"}"}]}}` + "\n"
 	if got3 := ex.Feed([]byte(rawFail)); len(got3) != 0 {
 		t.Fatalf("non-zero exit_code wrapper must be rejected, got %+v", got3)
+	}
+}
+
+func TestLineageExtractorRealWorldCompoundScripts(t *testing.T) {
+	ex := newLineageExtractor("claude", "/run/herdr/s3.sock", "3")
+
+	// 1. Real Claude idiom: `herdr workspace create ... 2>&1 | head -c 800`
+	rawPipe := "" +
+		`{"type":"assistant","message":{"content":[{"type":"tool_use","id":"tu_pipe","name":"Bash","input":{"command":"herdr workspace create --cwd /repo --label \"Protocol Bridge\" --no-focus 2>&1 | head -c 800"}}]}}` + "\n" +
+		`{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tu_pipe","is_error":false,"content":"{\"id\":\"cli:workspace:create\",\"result\":{\"root_pane\":{\"pane_id\":\"w34:p1\",\"terminal_id\":\"term-34\"},\"type\":\"workspace_created\"}}"}]}}` + "\n"
+	gotPipe := ex.Feed([]byte(rawPipe))
+	if len(gotPipe) != 1 || gotPipe[0].ChildPane != "w34:p1" || gotPipe[0].ChildTermID != "term-34" {
+		t.Fatalf("pipe-truncated workspace create missed: %+v", gotPipe)
+	}
+
+	// 2. Real Claude idiom: multi-line script with VAR=$(herdr pane split ...) spawning 2 children
+	rawMulti := "" +
+		`{"type":"assistant","message":{"content":[{"type":"tool_use","id":"tu_multi","name":"Bash","input":{"command":"P1=$(herdr pane split --current --direction right --no-focus 2>&1)\necho \"$P1\"\nP2=$(herdr pane split --current --direction down --no-focus 2>&1)\necho \"$P2\""}}]}}` + "\n" +
+		`{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tu_multi","is_error":false,"content":"{\"id\":\"cli:pane:split\",\"result\":{\"pane\":{\"pane_id\":\"w1:p2\",\"terminal_id\":\"term-2\"},\"type\":\"pane_info\"}}\n{\"id\":\"cli:pane:split\",\"result\":{\"pane\":{\"pane_id\":\"w1:p3\",\"terminal_id\":\"term-3\"},\"type\":\"pane_info\"}}"}]}}` + "\n"
+	gotMulti := ex.Feed([]byte(rawMulti))
+	if len(gotMulti) != 2 || gotMulti[0].ChildPane != "w1:p2" || gotMulti[1].ChildPane != "w1:p3" {
+		t.Fatalf("multi-line VAR=$(herdr pane split) missed: %+v", gotMulti)
 	}
 }

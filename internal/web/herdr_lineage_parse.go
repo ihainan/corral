@@ -43,8 +43,8 @@ type lineageExtractor struct {
 	serverSession string
 
 	// Pending tool calls waiting for results.
-	claudePending    map[string]herdrCmdIntent   // tool_use_id -> intent
-	codexPending     map[string]herdrCmdIntent   // call_id -> intent
+	claudePending    map[string][]herdrCmdIntent // tool_use_id -> intents
+	codexPending     map[string][]herdrCmdIntent // call_id -> intents
 	codexCodePending map[string][]herdrCmdIntent // custom_tool_call call_id -> exec_command intents
 	agyPending       []agyPendingIntent          // FIFO aligned with PLANNER_RESPONSE.tool_calls
 
@@ -58,8 +58,8 @@ type lineageExtractor struct {
 }
 
 type agyPendingIntent struct {
-	id     string
-	intent herdrCmdIntent
+	id      string
+	intents []herdrCmdIntent
 }
 
 type herdrCmdIntent struct {
@@ -223,24 +223,24 @@ func (e *lineageExtractor) feedClaudeLine(line []byte) []lineageDiscovery {
 			if json.Unmarshal(b.Input, &in) != nil {
 				continue
 			}
-			intent := e.classifyHerdrCommand(in.Command)
-			if !intent.valid {
+			intents := e.classifyHerdrCommands(in.Command)
+			if len(intents) == 0 {
 				continue
 			}
 			if e.claudePending == nil {
-				e.claudePending = map[string]herdrCmdIntent{}
+				e.claudePending = map[string][]herdrCmdIntent{}
 			}
 			if len(e.claudePending) >= lineageMaxPending {
-				e.claudePending = map[string]herdrCmdIntent{}
+				e.claudePending = map[string][]herdrCmdIntent{}
 			}
-			e.claudePending[b.ID] = intent
+			e.claudePending[b.ID] = intents
 		}
 	case "user":
 		for _, b := range blocks {
 			if b.Type != "tool_result" || b.ToolUseID == "" {
 				continue
 			}
-			intent, ok := e.claudePending[b.ToolUseID]
+			intents, ok := e.claudePending[b.ToolUseID]
 			if !ok {
 				continue
 			}
@@ -249,9 +249,7 @@ func (e *lineageExtractor) feedClaudeLine(line []byte) []lineageDiscovery {
 				continue
 			}
 			text := extractClaudeToolResultText(b.Content)
-			if d, matched := e.matchResult(intent, text, "claude:"+b.ToolUseID); matched {
-				out = append(out, d)
-			}
+			out = append(out, e.matchMultiResults(intents, text, "claude:"+b.ToolUseID)...)
 		}
 	}
 	return out
@@ -319,8 +317,8 @@ func (e *lineageExtractor) feedCodexLine(line []byte) []lineageDiscovery {
 			return nil
 		}
 		cmd := extractCodexCommand(it.Command)
-		intent := e.classifyHerdrCommand(cmd)
-		if !intent.valid {
+		intents := e.classifyHerdrCommands(cmd)
+		if len(intents) == 0 {
 			return nil
 		}
 		if e.recordSeen(it.ID) {
@@ -330,9 +328,7 @@ func (e *lineageExtractor) feedCodexLine(line []byte) []lineageDiscovery {
 		if it.ID == "" {
 			key = ""
 		}
-		if d, ok := e.matchResult(intent, it.Output, key); ok {
-			return []lineageDiscovery{d}
-		}
+		return e.matchMultiResults(intents, it.Output, key)
 	case "response_item":
 		var p struct {
 			Type      string          `json:"type"`
@@ -356,22 +352,22 @@ func (e *lineageExtractor) feedCodexLine(line []byte) []lineageDiscovery {
 				return nil
 			}
 			cmd := extractCodexFuncCallCmd(p.Arguments)
-			intent := e.classifyHerdrCommand(cmd)
-			if !intent.valid {
+			intents := e.classifyHerdrCommands(cmd)
+			if len(intents) == 0 {
 				return nil
 			}
 			if e.codexPending == nil {
-				e.codexPending = map[string]herdrCmdIntent{}
+				e.codexPending = map[string][]herdrCmdIntent{}
 			}
 			if len(e.codexPending) >= lineageMaxPending {
-				e.codexPending = map[string]herdrCmdIntent{}
+				e.codexPending = map[string][]herdrCmdIntent{}
 			}
-			e.codexPending[p.CallID] = intent
+			e.codexPending[p.CallID] = intents
 		case "function_call_output":
 			if p.CallID == "" {
 				return nil
 			}
-			intent, ok := e.codexPending[p.CallID]
+			intents, ok := e.codexPending[p.CallID]
 			if !ok {
 				return nil
 			}
@@ -383,9 +379,7 @@ func (e *lineageExtractor) feedCodexLine(line []byte) []lineageDiscovery {
 			if hasNonZeroExit(outText, codexExitCodeRe) {
 				return nil
 			}
-			if d, matched := e.matchResult(intent, outText, "codex:"+p.CallID); matched {
-				return []lineageDiscovery{d}
-			}
+			return e.matchMultiResults(intents, outText, "codex:"+p.CallID)
 		case "custom_tool_call":
 			if p.CallID == "" || p.Name != "exec" || !strings.Contains(p.Input, "tools.exec_command") {
 				return nil
@@ -393,9 +387,7 @@ func (e *lineageExtractor) feedCodexLine(line []byte) []lineageDiscovery {
 			cmds := extractCodexCodeModeCmds(p.Input)
 			var intents []herdrCmdIntent
 			for _, cmd := range cmds {
-				if intent := e.classifyHerdrCommand(cmd); intent.valid {
-					intents = append(intents, intent)
-				}
+				intents = append(intents, e.classifyHerdrCommands(cmd)...)
 			}
 			if len(intents) == 0 {
 				return nil
@@ -609,18 +601,18 @@ func (e *lineageExtractor) feedAgyLine(line []byte) []lineageDiscovery {
 				if len(e.agyPending) >= lineageMaxPending {
 					break
 				}
-				var intent herdrCmdIntent
+				var intents []herdrCmdIntent
 				if tc.Name == "run_command" {
 					var args struct {
 						CommandLine string `json:"CommandLine"`
 					}
 					if json.Unmarshal(tc.Args, &args) == nil {
-						intent = e.classifyHerdrCommand(args.CommandLine)
+						intents = e.classifyHerdrCommands(args.CommandLine)
 					}
 				}
 				e.agyPending = append(e.agyPending, agyPendingIntent{
-					id:     "agy:" + strconv.Itoa(row.StepIndex) + ":" + strconv.Itoa(idx),
-					intent: intent,
+					id:      "agy:" + strconv.Itoa(row.StepIndex) + ":" + strconv.Itoa(idx),
+					intents: intents,
 				})
 			}
 		}
@@ -630,7 +622,7 @@ func (e *lineageExtractor) feedAgyLine(line []byte) []lineageDiscovery {
 		}
 		head := e.agyPending[0]
 		e.agyPending = e.agyPending[1:]
-		if !head.intent.valid {
+		if len(head.intents) == 0 {
 			return nil
 		}
 		if row.Status == "ERROR" || row.Status == "RUNNING" {
@@ -640,9 +632,7 @@ func (e *lineageExtractor) feedAgyLine(line []byte) []lineageDiscovery {
 		if hasNonZeroExit(body, agyExitCodeRe) {
 			return nil
 		}
-		if d, matched := e.matchResult(head.intent, body, head.id); matched {
-			return []lineageDiscovery{d}
-		}
+		return e.matchMultiResults(head.intents, body, head.id)
 	}
 	return nil
 }
@@ -656,63 +646,226 @@ func hasNonZeroExit(text string, re *regexp.Regexp) bool {
 	return err == nil && n != 0
 }
 
-// --- Strict simple-command shell proof ---
+// --- Safe shell proof (supports real agent scripts: pipes to head/tail/jq, VAR=$(herdr ...), multi-line) ---
 
-// classifyHerdrCommand validates that rawCmd is a simple, provable invocation
-// of a herdr creation/start command targeting this herdr server (no pipes,
-// subshells, `;`/`||` chains, heredocs, `--remote`, `ssh`, `docker`, `--help`,
-// or mismatched HERDR_SOCKET_PATH / --socket / --session).
+var safePipeReaders = map[string]bool{
+	"head": true, "tail": true, "cat": true, "jq": true, "tee": true,
+	"cut": true, "tr": true, "sed": true, "awk": true, "grep": true,
+	"rg": true, "python": true, "python3": true, "node": true,
+}
+
+// classifyHerdrCommand checks if rawCmd contains at least one provable herdr
+// creation/start invocation (kept for single-command tests).
 func (e *lineageExtractor) classifyHerdrCommand(rawCmd string) herdrCmdIntent {
+	list := e.classifyHerdrCommands(rawCmd)
+	if len(list) == 0 {
+		return herdrCmdIntent{}
+	}
+	return list[0]
+}
+
+// classifyHerdrCommands extracts every provable herdr creation/start command
+// targeting this herdr server from a shell command or multi-statement script
+// (supporting real agent idioms like `herdr ... 2>&1 | head -c 800` and
+// `W=$(herdr workspace create ...); echo "$W"`), while strictly rejecting
+// heredocs, `||` error fallbacks, `--remote`, `ssh`, `docker exec`, `--help`,
+// echo/comment spoofing, or mismatched HERDR_SOCKET_PATH / --socket / --session.
+func (e *lineageExtractor) classifyHerdrCommands(rawCmd string) []herdrCmdIntent {
 	cmd := strings.TrimSpace(rawCmd)
-	if cmd == "" || len(cmd) > 4096 {
-		return herdrCmdIntent{}
+	if cmd == "" || len(cmd) > 16384 || !strings.Contains(cmd, "herdr") {
+		return nil
 	}
-	// Reject multiline scripts, heredocs, subshells, pipes, `;`, `||`, background `&`.
-	if strings.ContainsAny(cmd, "\r\n;`") || strings.Contains(cmd, "$(") || strings.Contains(cmd, "<<") || strings.Contains(cmd, "||") {
-		return herdrCmdIntent{}
+	// Reject heredocs, backticks, fallback `||`, and self-spoofed result types in the command text.
+	if strings.Contains(cmd, "<<") || strings.Contains(cmd, "`") || strings.Contains(cmd, "||") {
+		return nil
 	}
-	// Split on "&&": allow only harmless `cd ...` or `export K=V` prefix stages before the final herdr command.
-	stages := splitAndAnd(cmd)
-	if len(stages) == 0 || len(stages) > 4 {
-		return herdrCmdIntent{}
+	if strings.Contains(cmd, "workspace_created") || strings.Contains(cmd, "tab_created") ||
+		strings.Contains(cmd, "pane_info") || strings.Contains(cmd, "pane_split") {
+		return nil
+	}
+
+	stmts, ok := splitShellStatements(cmd)
+	if !ok || len(stmts) == 0 || len(stmts) > 32 {
+		return nil
+	}
+
+	// Reject entire script if any statement invokes a remote host or container.
+	envOverrides := map[string]string{}
+	for _, st := range stmts {
+		if stmtHasRemoteExec(st) {
+			return nil
+		}
+		if words, ok := splitSimpleShellWords(st); ok && len(words) >= 2 && words[0] == "export" {
+			for _, w := range words[1:] {
+				if simpleEnvAssignRe.MatchString(w) {
+					k, v, _ := strings.Cut(w, "=")
+					envOverrides[k] = v
+				}
+			}
+		}
+	}
+	if sock, set := envOverrides["HERDR_SOCKET_PATH"]; set {
+		if sock == "" || e.serverSocket == "" || sock != e.serverSocket {
+			return nil
+		}
+	}
+
+	var out []herdrCmdIntent
+	for _, st := range stmts {
+		// Unwrap simple variable capture: VAR=$(herdr ...) or export VAR=$(herdr ...)
+		candidates := []string{st}
+		if inner, captured := unwrapCommandSubAssign(st); captured {
+			candidates = []string{inner}
+		}
+		for _, cand := range candidates {
+			if intent, ok := e.classifyPipeline(cand, envOverrides); ok {
+				out = append(out, intent)
+			}
+		}
+	}
+	return out
+}
+
+func stmtHasRemoteExec(stmt string) bool {
+	pipes, ok := splitShellPipes(stmt)
+	if !ok {
+		return false
+	}
+	for _, seg := range pipes {
+		words, ok := splitSimpleShellWords(seg)
+		if !ok || len(words) == 0 {
+			continue
+		}
+		idx := 0
+		for idx < len(words) && simpleEnvAssignRe.MatchString(words[idx]) {
+			idx++
+		}
+		if idx >= len(words) {
+			continue
+		}
+		bin := baseCmdName(words[idx])
+		if bin == "ssh" || bin == "docker" || bin == "podman" || bin == "kubectl" {
+			return true
+		}
+		for _, w := range words[idx+1:] {
+			if w == "--remote" || strings.HasPrefix(w, "--remote=") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func baseCmdName(bin string) string {
+	if slash := strings.LastIndexByte(bin, '/'); slash >= 0 {
+		return bin[slash+1:]
+	}
+	return bin
+}
+
+// unwrapCommandSubAssign unwraps `VAR=$(...)` or `export VAR=$(...)` when the
+// right-hand side is a single balanced `$(...)` expression.
+func unwrapCommandSubAssign(stmt string) (string, bool) {
+	s := strings.TrimSpace(stmt)
+	if strings.HasPrefix(s, "export ") {
+		s = strings.TrimSpace(strings.TrimPrefix(s, "export "))
+	}
+	eq := strings.IndexByte(s, '=')
+	if eq <= 0 || !simpleEnvAssignRe.MatchString(s[:eq+1]) {
+		return "", false
+	}
+	rhs := strings.TrimSpace(s[eq+1:])
+	if strings.HasPrefix(rhs, `"`) && strings.HasSuffix(rhs, `"`) && len(rhs) >= 2 {
+		rhs = rhs[1 : len(rhs)-1]
+	}
+	if !strings.HasPrefix(rhs, "$(") || !strings.HasSuffix(rhs, ")") {
+		return "", false
+	}
+	// Ensure the opening `$(` matches the final `)` (no trailing tokens).
+	depth := 0
+	var quote byte
+	esc := false
+	for i := 0; i < len(rhs); i++ {
+		c := rhs[i]
+		if esc {
+			esc = false
+			continue
+		}
+		if quote == '\'' {
+			if c == '\'' {
+				quote = 0
+			}
+			continue
+		}
+		if quote == '"' {
+			if c == '\\' {
+				esc = true
+			} else if c == '"' {
+				quote = 0
+			}
+			continue
+		}
+		switch c {
+		case '\\':
+			esc = true
+		case '\'', '"':
+			quote = c
+		case '$':
+			if i+1 < len(rhs) && rhs[i+1] == '(' {
+				depth++
+				i++
+			}
+		case '(':
+			depth++
+		case ')':
+			depth--
+			if depth == 0 && i != len(rhs)-1 {
+				return "", false
+			}
+		}
+	}
+	if depth != 0 {
+		return "", false
+	}
+	inner := strings.TrimSpace(rhs[2 : len(rhs)-1])
+	if inner == "" || strings.Contains(inner, "$(") {
+		return "", false
+	}
+	return inner, true
+}
+
+func (e *lineageExtractor) classifyPipeline(stmt string, inheritedEnv map[string]string) (herdrCmdIntent, bool) {
+	if strings.Contains(stmt, "$(") {
+		return herdrCmdIntent{}, false
+	}
+	pipes, ok := splitShellPipes(stmt)
+	if !ok || len(pipes) == 0 || len(pipes) > 4 {
+		return herdrCmdIntent{}, false
+	}
+	// Downstream pipe stages (if any) must be harmless output readers/formatters.
+	for i := 1; i < len(pipes); i++ {
+		pwords, pok := splitSimpleShellWords(pipes[i])
+		if !pok || len(pwords) == 0 {
+			return herdrCmdIntent{}, false
+		}
+		idx := 0
+		for idx < len(pwords) && simpleEnvAssignRe.MatchString(pwords[idx]) {
+			idx++
+		}
+		if idx >= len(pwords) || !safePipeReaders[baseCmdName(pwords[idx])] {
+			return herdrCmdIntent{}, false
+		}
+	}
+
+	words, ok := splitSimpleShellWords(pipes[0])
+	if !ok || len(words) == 0 {
+		return herdrCmdIntent{}, false
 	}
 
 	envOverrides := map[string]string{}
-	for i := 0; i < len(stages)-1; i++ {
-		words, ok := splitSimpleShellWords(stages[i])
-		if !ok || len(words) == 0 {
-			return herdrCmdIntent{}
-		}
-		switch words[0] {
-		case "cd":
-			if len(words) > 2 {
-				return herdrCmdIntent{}
-			}
-		case "export":
-			for _, w := range words[1:] {
-				if !simpleEnvAssignRe.MatchString(w) {
-					return herdrCmdIntent{}
-				}
-				k, v, _ := strings.Cut(w, "=")
-				envOverrides[k] = v
-			}
-		default:
-			// Allow pure env assignments only if there is nothing else.
-			for _, w := range words {
-				if !simpleEnvAssignRe.MatchString(w) {
-					return herdrCmdIntent{}
-				}
-				k, v, _ := strings.Cut(w, "=")
-				envOverrides[k] = v
-			}
-		}
+	for k, v := range inheritedEnv {
+		envOverrides[k] = v
 	}
-
-	words, ok := splitSimpleShellWords(stages[len(stages)-1])
-	if !ok || len(words) == 0 {
-		return herdrCmdIntent{}
-	}
-
 	// Consume leading inline VAR=val assignments.
 	idx := 0
 	for idx < len(words) && simpleEnvAssignRe.MatchString(words[idx]) {
@@ -721,26 +874,18 @@ func (e *lineageExtractor) classifyHerdrCommand(rawCmd string) herdrCmdIntent {
 		idx++
 	}
 	if idx >= len(words) {
-		return herdrCmdIntent{}
+		return herdrCmdIntent{}, false
 	}
 
 	// Executable must be `herdr` (or `/path/to/herdr`), NOT echo/printf/ssh/docker/etc.
-	bin := words[idx]
-	if slash := strings.LastIndexByte(bin, '/'); slash >= 0 {
-		bin = bin[slash+1:]
-	}
-	if bin != "herdr" {
-		return herdrCmdIntent{}
+	if baseCmdName(words[idx]) != "herdr" {
+		return herdrCmdIntent{}, false
 	}
 
 	// Verify HERDR_SOCKET_PATH env override if set.
 	if sock, set := envOverrides["HERDR_SOCKET_PATH"]; set {
-		if sock == "" || (e.serverSocket != "" && sock != e.serverSocket) {
-			return herdrCmdIntent{}
-		}
-		// If we don't know our own serverSocket, reject unverified socket override.
-		if e.serverSocket == "" {
-			return herdrCmdIntent{}
+		if sock == "" || e.serverSocket == "" || sock != e.serverSocket {
+			return herdrCmdIntent{}, false
 		}
 	}
 
@@ -756,16 +901,16 @@ func (e *lineageExtractor) classifyHerdrCommand(rawCmd string) herdrCmdIntent {
 			break
 		}
 		if a == "-h" || a == "--help" || a == "help" {
-			return herdrCmdIntent{}
+			return herdrCmdIntent{}, false
 		}
 		if a == "--remote" || strings.HasPrefix(a, "--remote=") {
-			return herdrCmdIntent{}
+			return herdrCmdIntent{}, false
 		}
 		if a == "--socket" || strings.HasPrefix(a, "--socket=") {
 			var v string
 			if a == "--socket" {
 				if i+1 >= len(args) {
-					return herdrCmdIntent{}
+					return herdrCmdIntent{}, false
 				}
 				i++
 				v = args[i]
@@ -773,7 +918,7 @@ func (e *lineageExtractor) classifyHerdrCommand(rawCmd string) herdrCmdIntent {
 				_, v, _ = strings.Cut(a, "=")
 			}
 			if v == "" || e.serverSocket == "" || v != e.serverSocket {
-				return herdrCmdIntent{}
+				return herdrCmdIntent{}, false
 			}
 			continue
 		}
@@ -781,7 +926,7 @@ func (e *lineageExtractor) classifyHerdrCommand(rawCmd string) herdrCmdIntent {
 			var v string
 			if a == "--session" || a == "-s" {
 				if i+1 >= len(args) {
-					return herdrCmdIntent{}
+					return herdrCmdIntent{}, false
 				}
 				i++
 				v = args[i]
@@ -789,7 +934,7 @@ func (e *lineageExtractor) classifyHerdrCommand(rawCmd string) herdrCmdIntent {
 				_, v, _ = strings.Cut(a, "=")
 			}
 			if v == "" || e.serverSession == "" || v != e.serverSession {
-				return herdrCmdIntent{}
+				return herdrCmdIntent{}, false
 			}
 			continue
 		}
@@ -804,19 +949,19 @@ func (e *lineageExtractor) classifyHerdrCommand(rawCmd string) herdrCmdIntent {
 	}
 
 	if len(pos) < 2 {
-		return herdrCmdIntent{}
+		return herdrCmdIntent{}, false
 	}
 	switch pos[0] + " " + pos[1] {
 	case "workspace create":
-		return herdrCmdIntent{action: "workspace_created", valid: true}
+		return herdrCmdIntent{action: "workspace_created", valid: true}, true
 	case "tab create":
-		return herdrCmdIntent{action: "tab_created", valid: true}
+		return herdrCmdIntent{action: "tab_created", valid: true}, true
 	case "pane split":
-		return herdrCmdIntent{action: "pane_split", valid: true}
+		return herdrCmdIntent{action: "pane_split", valid: true}, true
 	case "agent start":
-		return herdrCmdIntent{action: "agent_started", valid: true}
+		return herdrCmdIntent{action: "agent_started", valid: true}, true
 	default:
-		return herdrCmdIntent{}
+		return herdrCmdIntent{}, false
 	}
 }
 
@@ -830,9 +975,106 @@ func herdrFlagTakesValue(flag string) bool {
 	return false
 }
 
-// splitAndAnd splits a shell line on unquoted `&&` while rejecting unquoted `|`,
-// single `&` (except inside `2>&1`), `<`, or `>` (except `2>&1` / `2>/dev/null`).
-func splitAndAnd(s string) []string {
+// splitShellStatements splits a shell script on unquoted `\n`, `;`, and `&&`
+// while stripping unquoted `# ...` line comments and respecting quotes & `$(...)`.
+func splitShellStatements(s string) ([]string, bool) {
+	var parts []string
+	var cur strings.Builder
+	var quote byte
+	escaped := false
+	parenDepth := 0
+	flush := func() {
+		if t := strings.TrimSpace(cur.String()); t != "" {
+			parts = append(parts, t)
+		}
+		cur.Reset()
+	}
+
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if escaped {
+			cur.WriteByte(c)
+			escaped = false
+			continue
+		}
+		if quote == '\'' {
+			if c == '\'' {
+				quote = 0
+			}
+			cur.WriteByte(c)
+			continue
+		}
+		if quote == '"' {
+			if c == '\\' {
+				escaped = true
+				cur.WriteByte(c)
+				continue
+			}
+			if c == '"' {
+				quote = 0
+			}
+			cur.WriteByte(c)
+			continue
+		}
+		switch c {
+		case '\\':
+			escaped = true
+			cur.WriteByte(c)
+		case '\'', '"':
+			quote = c
+			cur.WriteByte(c)
+		case '(':
+			parenDepth++
+			cur.WriteByte(c)
+		case ')':
+			if parenDepth > 0 {
+				parenDepth--
+			}
+			cur.WriteByte(c)
+		case '#':
+			if parenDepth == 0 && (cur.Len() == 0 || s[i-1] == ' ' || s[i-1] == '\t' || s[i-1] == '\n' || s[i-1] == ';') {
+				// Skip comment through end of line.
+				for i < len(s) && s[i] != '\n' {
+					i++
+				}
+				flush()
+				continue
+			}
+			cur.WriteByte(c)
+		case '\r', '\n', ';':
+			if parenDepth == 0 {
+				flush()
+				continue
+			}
+			cur.WriteByte(c)
+		case '&':
+			if parenDepth == 0 && i+1 < len(s) && s[i+1] == '&' {
+				flush()
+				i++
+				continue
+			}
+			// Allow 2>&1; reject backgrounding `&` at top level.
+			if i >= 2 && s[i-2:i] == "2>" && i+1 < len(s) && s[i+1] == '1' {
+				cur.WriteByte(c)
+				continue
+			}
+			if parenDepth == 0 {
+				return nil, false
+			}
+			cur.WriteByte(c)
+		default:
+			cur.WriteByte(c)
+		}
+	}
+	if quote != 0 || escaped || parenDepth != 0 {
+		return nil, false
+	}
+	flush()
+	return parts, true
+}
+
+// splitShellPipes splits a single shell statement on unquoted `|` (rejecting `||`).
+func splitShellPipes(s string) ([]string, bool) {
 	var parts []string
 	var cur strings.Builder
 	var quote byte
@@ -871,37 +1113,26 @@ func splitAndAnd(s string) []string {
 			quote = c
 			cur.WriteByte(c)
 		case '|':
-			return nil
-		case '&':
-			if i+1 < len(s) && s[i+1] == '&' {
-				parts = append(parts, strings.TrimSpace(cur.String()))
-				cur.Reset()
-				i++
-				continue
+			if i+1 < len(s) && s[i+1] == '|' {
+				return nil, false
 			}
-			// Allow 2>&1 only.
-			if i >= 2 && s[i-2:i] == "2>" && i+1 < len(s) && s[i+1] == '1' {
-				cur.WriteByte(c)
-				continue
+			t := strings.TrimSpace(cur.String())
+			if t == "" {
+				return nil, false
 			}
-			return nil
-		case '#':
-			// Comment at word start rejects the command.
-			if cur.Len() == 0 || s[i-1] == ' ' || s[i-1] == '\t' {
-				return nil
-			}
-			cur.WriteByte(c)
+			parts = append(parts, t)
+			cur.Reset()
 		default:
 			cur.WriteByte(c)
 		}
 	}
 	if quote != 0 || escaped {
-		return nil
+		return nil, false
 	}
-	if tail := strings.TrimSpace(cur.String()); tail != "" {
-		parts = append(parts, tail)
+	if t := strings.TrimSpace(cur.String()); t != "" {
+		parts = append(parts, t)
 	}
-	return parts
+	return parts, true
 }
 
 func splitSimpleShellWords(s string) ([]string, bool) {
