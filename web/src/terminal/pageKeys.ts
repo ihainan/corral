@@ -62,6 +62,13 @@ export function switchKey(e: KeyLike): -1 | 0 | 1 {
   return e.key === 'ArrowUp' ? -1 : e.key === 'ArrowDown' ? 1 : 0
 }
 
+// ⌘P on a Mac, Ctrl+P elsewhere: to another agent, by its name — the list over
+// the conversation, or the search of the one beside it. As VS Code's quick open;
+// taken while typing too, which "/" could not be (the person, 11-23: "/" is the
+// composer's own). The browser's is Print, which a page may take and the web does.
+export const pickKey = (e: KeyLike, mac: boolean) =>
+  !composing(e) && !e.altKey && !e.shiftKey && e.key.toLowerCase() === 'p' && (mac ? e.metaKey && !e.ctrlKey : e.ctrlKey && !e.metaKey)
+
 // ⌘B on a Mac, Ctrl+B elsewhere: the list beside folded or opened, as VS Code
 // has it. (Firefox's own is its bookmarks sidebar, little used: as "/".)
 export const sideKey = (e: KeyLike, mac: boolean) =>

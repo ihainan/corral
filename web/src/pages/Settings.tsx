@@ -401,7 +401,7 @@ function SettingsWorkbench({ modal, initialCat, onClose }: { modal?: boolean; in
                   </Setting>
                 )}
                 <Setting label={t('settings.general.scSearch')}>
-                  <span className="sm-kbd">/</span>
+                  <span className="sm-kbd">{isMac ? '⌘P' : 'Ctrl+P'}</span>
                 </Setting>
                 <Setting label={t('settings.general.scSidebar')}>
                   <span className="sm-kbd">{isMac ? '⌘B' : 'Ctrl+B'}</span>

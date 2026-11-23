@@ -9,7 +9,7 @@ import { asHeld, buildAgentGroups, dayStart, FOLDED, foldAt, isLiveBlocked, list
 import { copyText, Dialog, DialogHead, isCoarse, Menu, MenuLayer, swallowNextClick, useToast, type MenuItem } from '../components/ui'
 import { saveFile } from '../saveFile'
 import { StatusItem, useWorkbench } from '../workbench'
-import { composing, foldAllKey, helpKey, jumpKey, onMac, sideKey, switchKey, takenFromTerminal, terminalHasKeys } from './pageKeys'
+import { composing, foldAllKey, helpKey, jumpKey, onMac, pickKey, sideKey, switchKey, takenFromTerminal, terminalHasKeys } from './pageKeys'
 import { keepNames, keptNames, local } from '../storage'
 import { useFlip } from '../flip'
 import { CodeSpanOf, FileLinkOf, Markdown } from './markdown'
@@ -478,6 +478,8 @@ export function ConversationView({
   // press puts the focus there again.)
   const [searchAsked, setSearchAsked] = useState(0)
   const unpick = useCallback(() => setPicking(false), [])
+  const pickingNow = useRef(picking)
+  pickingNow.current = picking
   useEffect(() => {
     if (sideShown || !active) setPicking(false) // (a tab sent to the back keeps no dialog open)
   }, [sideShown, active])
@@ -1353,6 +1355,21 @@ export function ConversationView({
   useEffect(() => {
     if (!active || !side) return
     const onKey = (e: KeyboardEvent) => {
+      // ⌘P / Ctrl+P: from anywhere, the composer too; pressed again, the list it opened closed. (Off a Mac, in a
+      // terminal it is the shell's previous line: the terminal's, as the setting says.)
+      if (pickKey(e, mac)) {
+        if (!mac && terminalHasKeys(e, prefsKeysFirst.current)) return
+        if (pickingNow.current) {
+          e.preventDefault()
+          setPicking(false)
+          return
+        }
+        if (underDialog(e)) return
+        e.preventDefault()
+        if (sideShownNow.current) setSearchAsked((n) => n + 1)
+        else setPicking('search')
+        return
+      }
       if (composing(e) || underDialog(e) || e.altKey) return
       // (Shift as some layouts need it for "/", as the German's.)
       // (⌘K on the workbench: the command palette's — "/" for this, as elsewhere.)
@@ -4982,7 +4999,8 @@ export const SEARCH_FROM = 5
 // (⌘K on a Mac; elsewhere "/", as the browsers there keep Ctrl+K for their
 // own search: as the key is said. On a Mac's workbench ⌘K is the command
 // palette's: "/" there too — its box said ⌘K, which opened the palette, 11-23.)
-const keySearch = (wb: boolean) => (mac && !wb ? '⌘K' : '/')
+// (What is said for it: ⌘P, Ctrl+P — "/" and, off the workbench, ⌘K still do it, as before.)
+const keySearch = (_wb?: boolean) => (mac ? '⌘P' : 'Ctrl+P')
 const KEY_SIDE = mac ? '⌘B' : 'Ctrl+B'
 
 // What the session card shows of the conversation as the page has it: the
