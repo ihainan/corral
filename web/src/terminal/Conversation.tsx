@@ -4458,13 +4458,13 @@ export function AgentList({ rows, menus, onPicked, placed, query: given, onQuery
   // the list over a full-width conversation, "/" opened it, the keys then did nothing).
   const [hi, setHi] = useState<string | null>(null)
   const shownRows = (el: Element) => [...(el.closest('.convo-side, .convo-picker')?.querySelectorAll<HTMLButtonElement>('button.convo-list-row[data-row]') ?? [])]
-  const searchRef = useRef<HTMLElement | null>(null)
+  // (Where its rows are found from: its toolbar, there from the first draw — words pasted in, or given, mark too. Review of 11-23.)
+  const toolbarRef = useRef<HTMLDivElement>(null)
   useLayoutEffect(() => {
-    const el = searchRef.current
+    const el = toolbarRef.current
     setHi(query.trim() && el ? (shownRows(el)[0]?.dataset.row ?? null) : null)
   }, [query])
   const navKey = (e: React.KeyboardEvent<HTMLInputElement>) => {
-    searchRef.current = e.currentTarget
     if (composing(e.nativeEvent) || e.altKey || e.metaKey || e.ctrlKey) return
     const all = shownRows(e.currentTarget)
     if (!all.length) return
@@ -4474,15 +4474,15 @@ export function AgentList({ rows, menus, onPicked, placed, query: given, onQuery
       const to = all[e.key === 'ArrowDown' ? (at + 1) % all.length : at <= 0 ? all.length - 1 : at - 1]
       setHi(to.dataset.row ?? null)
       to.scrollIntoView({ block: 'nearest' })
-    } else if (e.key === 'Enter' && at >= 0) {
+    } else if (e.key === 'Enter' && (at >= 0 || query.trim())) {
       e.preventDefault()
-      all[at].click()
+      all[at >= 0 ? at : 0].click() // (none marked, some words typed: the first found)
     }
   }
   return (
     <>
       {(showBar || showOrder || showNew) && (
-        <div className={'list-toolbar' + (showBar ? '' : ' is-compact')}>
+        <div className={'list-toolbar' + (showBar ? '' : ' is-compact')} ref={toolbarRef}>
           {showBar && <ListSearch value={query} onChange={setQuery} focus={search} onLeft={onSearchLeft} hint={hint ? keySearch(wbList) : undefined} onNav={navKey} />}
           {showOrder && <ListOrderMenu />}
           {showNew && (
