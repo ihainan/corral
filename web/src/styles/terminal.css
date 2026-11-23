@@ -2110,6 +2110,32 @@ button.convo-queue-row.is-note:last-child { border-radius: 0 0 var(--r-lg) var(-
 .convo-picker > * { flex-shrink: 0; }
 .convo-picker > .convo-list-groups { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
 .convo-picker-title { padding: 4px 4px 8px 10px; font-weight: 600; font-size: var(--fs-h3); line-height: var(--lh-h3); display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+/* The list over the conversation, with a keyboard to hand: a quick switcher, as the palette (11-23). Its search the
+   head, the order and "new" as the side list's icons beside it, the side list's rows, its keys at the foot. */
+.convo-picker.is-keyed { top: 44px; width: min(420px, calc(100% - 24px)); max-height: min(72%, 600px); padding: 0; box-shadow: 0 16px 48px rgba(0, 0, 0, 0.18), 0 2px 8px rgba(0, 0, 0, 0.08); }
+.convo-picker.is-keyed > .list-toolbar { height: 48px; box-sizing: border-box; margin: 0; padding: 0 8px 0 16px; gap: 4px; border-bottom: 1px solid var(--term-line); }
+.convo-picker.is-keyed .list-search,
+.convo-picker.is-keyed .list-search:focus-within { flex: 1; height: 100%; padding: 0; gap: 10px; border: 0; border-radius: 0; background: none; }
+.convo-picker.is-keyed .list-search-icon { width: 16px; color: var(--term-fg-3); }
+.convo-picker.is-keyed .list-search input { font-size: var(--fs-body); line-height: var(--lh-body); }
+.convo-picker.is-keyed .list-order-btn, .convo-picker.is-keyed .list-new-btn { flex: none; width: 28px; height: 28px; border: 0; border-radius: var(--r-sm); background: none; color: var(--term-fg-2); }
+.convo-picker.is-keyed .list-order-btn:hover, .convo-picker.is-keyed .list-order-btn.is-active { background: var(--term-hover); color: var(--term-fg); }
+.convo-picker.is-keyed .list-new-btn { color: var(--term-accent-text); }
+.convo-picker.is-keyed .list-new-btn:hover { background: var(--term-accent-soft); }
+.convo-picker.is-keyed .list-new-btn:focus-visible, .convo-picker.is-keyed .list-order-btn:focus-visible { outline: 2px solid var(--term-accent-text); outline-offset: -2px; }
+.convo-picker.is-keyed > .convo-list-groups { padding: 6px; }
+.convo-picker.is-keyed .convo-list-group { margin-bottom: 4px; gap: 2px; }
+.convo-picker.is-keyed .convo-list-head { padding: 8px 10px 4px; }
+.convo-picker.is-keyed .convo-list-row { align-items: center; padding: 6px 10px; gap: 10px; border-radius: var(--r); }
+.convo-picker.is-keyed .convo-list-row .agent-icon { margin-top: 0; }
+.convo-picker.is-keyed .convo-list-row:has(.convo-list-now, .convo-list-parent-ref) { align-items: flex-start; }
+.convo-picker.is-keyed .convo-list-row:has(.convo-list-now, .convo-list-parent-ref) .agent-icon { margin-top: 2px; }
+.convo-picker.is-keyed .convo-list-text { gap: 2px; }
+.convo-picker.is-keyed .convo-list-more { margin: 2px 0 0; }
+.convo-picker.is-keyed:has(.list-search input:focus) .convo-list-row.is-hi { outline: 0; background: var(--term-accent-soft); --dot-ring: var(--term-accent-soft); } /* (the one Return opens: filled, as the palette marks it — a frame read as a field) */
+.convo-picker-foot { flex: none; display: flex; align-items: center; gap: 16px; padding: 8px 16px; border-top: 1px solid var(--term-line); font-size: var(--fs-note); line-height: var(--lh-note); color: var(--term-fg-3); }
+.convo-picker-foot kbd { font-family: var(--font-mono); font-size: var(--fs-note); line-height: var(--lh-note); padding: 0 6px; border: 1px solid var(--term-line-strong); border-radius: var(--r-xs); color: var(--term-fg-2); background: var(--term-chrome); }
+.convo-picker-foot-key { margin-left: auto; font-family: var(--font-mono); }
 @media (max-width: 640px) {
   .convo-picker {
     top: auto; bottom: 0; left: 0; width: 100%; max-height: 78%; border-radius: var(--r-xl) var(--r-xl) 0 0; border-bottom: 0;

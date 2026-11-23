@@ -5202,8 +5202,8 @@ function Picker({ rows, onClose, searchFirst }: { rows: ConvoListRow[]; onClose:
   // (Once, when it opens: focus moved on in it stays where it was moved.)
   useEffect(() => {
     const prev = document.activeElement as HTMLElement | null
-    // (Opened by ⌘K: its search box first, which shows it.)
-    if (searchFirst) box.current?.querySelector<HTMLInputElement>('.list-search input')?.focus()
+    // (Opened by its key, or with a keyboard to hand: its search box first, which heads it.)
+    if (searchFirst || !isTouchOnly) box.current?.querySelector<HTMLInputElement>('.list-search input')?.focus()
     else (box.current?.querySelector<HTMLElement>('[aria-current="true"]') ?? box.current?.querySelector<HTMLElement>('button'))?.focus()
     const onKey = (e: KeyboardEvent) => {
       // (Another dialog over it — the palette, settings —: its keys are that one's, Escape and Tab too. Review of 11-23.)
@@ -5242,15 +5242,34 @@ function Picker({ rows, onClose, searchFirst }: { rows: ConvoListRow[]; onClose:
           onClose()
         }}
       />
-      <div className="convo-picker" role="dialog" aria-modal="true" aria-label={t('convo.pick')} ref={box}>
-        <div className="convo-picker-title">
-          <span>{t('convo.pick')}</span>
-          <button type="button" className="icon-btn convo-picker-close" onClick={onClose} aria-label={t('common.close')} title={t('common.close')}>
-            <X size={16} />
-          </button>
-        </div>
-        <NewAgentRow onPicked={onClose} />
-        <AgentList rows={rows} placed={first} onPicked={onClose} showSearch={searchFirst} />
+      {/* With a keyboard to hand, a quick switcher as the palette is (the person, 11-23: it looked a sidebar put in a
+          box): its search the head, "new" and the order beside it, the rows as the side list's, the keys at its foot.
+          A touch screen keeps its heading, its close and its big "new". */}
+      <div className={'convo-picker' + (isTouchOnly ? '' : ' is-keyed')} role="dialog" aria-modal="true" aria-label={t('convo.pick')} ref={box}>
+        {isTouchOnly && (
+          <div className="convo-picker-title">
+            <span>{t('convo.pick')}</span>
+            <button type="button" className="icon-btn convo-picker-close" onClick={onClose} aria-label={t('common.close')} title={t('common.close')}>
+              <X size={16} />
+            </button>
+          </div>
+        )}
+        {isTouchOnly && <NewAgentRow onPicked={onClose} />}
+        <AgentList rows={rows} placed={first} onPicked={onClose} showSearch={searchFirst || !isTouchOnly} compact={!isTouchOnly} showNew={!isTouchOnly} />
+        {!isTouchOnly && (
+          <div className="convo-picker-foot" aria-hidden="true">
+            <span>
+              <kbd>↑</kbd> <kbd>↓</kbd> {t('palette.move')}
+            </span>
+            <span>
+              <kbd>↵</kbd> {t('palette.open')}
+            </span>
+            <span>
+              <kbd>Esc</kbd> {t('convo.pickClose')}
+            </span>
+            <span className="convo-picker-foot-key">{keySearch()}</span>
+          </div>
+        )}
       </div>
     </>
   )
