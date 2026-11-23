@@ -1355,21 +1355,7 @@ export function ConversationView({
   useEffect(() => {
     if (!active || !side) return
     const onKey = (e: KeyboardEvent) => {
-      // ⌘P / Ctrl+P: from anywhere, the composer too; pressed again, the list it opened closed. (Off a Mac, in a
-      // terminal it is the shell's previous line: the terminal's, as the setting says.)
-      if (pickKey(e, mac)) {
-        if (!mac && terminalHasKeys(e, prefsKeysFirst.current)) return
-        if (pickingNow.current) {
-          e.preventDefault()
-          setPicking(false)
-          return
-        }
-        if (underDialog(e)) return
-        e.preventDefault()
-        if (sideShownNow.current) setSearchAsked((n) => n + 1)
-        else setPicking('search')
-        return
-      }
+      if (pickKey(e, mac)) return // (its own, below)
       if (composing(e) || underDialog(e) || e.altKey) return
       // (Shift as some layouts need it for "/", as the German's.)
       // (⌘K on the workbench: the command palette's — "/" for this, as elsewhere.)
@@ -1381,6 +1367,27 @@ export function ConversationView({
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
+  }, [active, side])
+  // ⌘P / Ctrl+P: from anywhere, the composer too; pressed again, the list it opened closed. Caught first, as ⌥↑↓
+  // is: a terminal focused here would have sent it as its byte before the page saw it. (Off a Mac, in a terminal
+  // it is the shell's previous line: the terminal's, as the setting says.) Print never opens from this page: over
+  // another dialog — settings, the palette — it does nothing else. (Review of 11-23.)
+  useEffect(() => {
+    if (!active || !side) return
+    const onKey = (e: KeyboardEvent) => {
+      if (!pickKey(e, mac) || e.defaultPrevented) return
+      if (!mac && terminalHasKeys(e, prefsKeysFirst.current)) return
+      e.preventDefault()
+      e.stopPropagation()
+      if (!e.repeat && !mac) takenFromTerminal(e, 'Ctrl+P', (m) => toast(m), (key) => t('keys.taken', { key }))
+      const others = [...document.querySelectorAll('[aria-modal="true"]')].some((d) => !d.classList.contains('convo-picker')) || (!pickingNow.current && document.documentElement.classList.contains('modal-open'))
+      if (others) return
+      if (pickingNow.current) setPicking(false)
+      else if (sideShownNow.current) setSearchAsked((n) => n + 1)
+      else setPicking('search')
+    }
+    window.addEventListener('keydown', onKey, true)
+    return () => window.removeEventListener('keydown', onKey, true)
   }, [active, side])
   // ⌘B (Ctrl+B elsewhere): the list beside folded or opened, as its button
   // does; where it fits beside. Typing too, not in a terminal (tmux's prefix).
