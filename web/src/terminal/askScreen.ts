@@ -40,26 +40,28 @@ const isTabLine = (l: string) => isMultiTabLine(l) || loneTabLine.test(l)
 // The dialog's own tab bar, above the hint. Claude Code draws a rule right
 // over it, a lone question's "☐ Header" too (seen on 2.1.312 and 2.1.330),
 // and a question's words may have tab-like lines ("☐ Billing page", even
-// "☐ Billing  ✔ Submit"): so the latest tab line under a rule. Only a whole
-// bar of several, "←  ☐ A  ☐ B  ✔ Submit  →", is never a question's words:
-// one later than that is the dialog's, rule or not. With no tab line under a
-// rule (the screen cut above it), the latest such whole bar, unless a dialog
-// ends between it and the latest tab line (a choice, a review page, a line
-// all key hints): then that line, an earlier dialog's bar above it (review
-// E, F, G; 11-24).
+// "☐ Billing  ✔ Submit", a choice's description "←  ☐ A  ✔ Submit  →"): so
+// the latest tab line under a rule — unless that one's dialog ended (a rule,
+// a review page, a line all key hints) before a later whole bar of several,
+// "←  ☐ A  ☐ B  ✔ Submit  →": then that bar, a newer dialog's. With no tab
+// line under a rule (the screen cut above it), the latest such whole bar,
+// unless a dialog ends between it and the latest tab line (those, or a
+// choice): then that line, an earlier dialog's bar above it (review E, F, G,
+// H; 11-24).
 function findTabTop(lines: string[], hint: number): number {
   const ruled = (i: number) => {
     for (let j = i - 1; j >= 0; j--) if (lines[j].trim()) return rule.test(lines[j])
     return false
   }
   const latest = (ok: (l: string, i: number) => boolean) => lines.findLastIndex((l, i) => i < hint && ok(l, i))
+  const endsBetween = (a: number, b: number, choices: boolean) =>
+    lines.slice(a + 1, b).some((l) => rule.test(l) || /^\s*Review your answers\s*$/.test(l) || hintLine(l) || (choices && optionLine.test(besideAt(l))))
   const under = latest((l, i) => isTabLine(l) && ruled(i))
   const bar = latest((l) => multiTabLine.test(l))
-  if (under >= 0) return bar > under ? bar : under
+  if (under >= 0) return bar > under && endsBetween(under, bar, false) ? bar : under
   const top = latest((l) => isTabLine(l))
   if (bar < 0 || bar === top) return top
-  const ended = lines.slice(bar + 1, top).some((l) => optionLine.test(besideAt(l)) || /^\s*Review your answers\s*$/.test(l) || hintLine(l))
-  return ended ? top : bar
+  return endsBetween(bar, top, true) ? top : bar
 }
 const ownLabel = /^Type something\.?$/
 const rule = /^\s*[─━╌]{8,}\s*$/

@@ -808,6 +808,16 @@ await run('reviewG-questionWordsLikeHintsOrBars', () => {
   }
 })
 
+await run('reviewH-barInAChoicesDescription', () => {
+  const screen = [R, '☐ Style', '', 'Which navigation style should we use?', '', '❯ 1. Checkbox tabs', '     ←  ☐ A  ☐ B  ✔ Submit  →', '  2. Plain tabs', '     No checkbox prefix', '  3. Type something.', R, '  4. Chat about this', '', 'Enter to select · ↑/↓ to navigate · Esc to cancel']
+  const r = readAskScreen(screen.join('\n'))
+  assert.equal(r.kind, 'question')
+  assert.deepEqual(r.tabs, [])
+  assert.equal(r.question, 'Which navigation style should we use?')
+  assert.deepEqual(r.options.map((o) => o.label), ['Checkbox tabs', 'Plain tabs', 'Type something.'])
+  assert.equal(r.options[0].desc, '←  ☐ A  ☐ B  ✔ Submit  →')
+})
+
 if (failures.length) {
   console.error(`askScreen: ${failures.length} test(s) failed:`)
   for (const f of failures) console.error(' -', f)
