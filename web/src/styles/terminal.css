@@ -20,6 +20,9 @@ html.term-mode body { position: fixed; inset: 0; }
   --wb-focus: inset 0 0 0 2px var(--term-accent-text);
 }
 .term-root.wb-on { padding: 0 0 var(--wb-status) var(--wb-rail); }
+/* (The status bar under them keeps the home indicator's strip (--wb-status): none kept again — review E, 11-24) */
+.term-root.wb-on .convo-dock, .term-root.wb-on .keybar { padding-bottom: 6px; }
+.term-root.wb-on .term-ended { padding-bottom: 8px; }
 /* (Settings are the rail's there: the list's own way to them goes.) */
 .term-root.wb-on .convo-side-foot { display: none; } /* (settings: the rail's; the keys: the header's menu, and "?" — 11-23) */
 /* A tab in the back: laid out at the same size (so it keeps its grid and
