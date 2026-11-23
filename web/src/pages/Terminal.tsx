@@ -48,7 +48,7 @@ import { useSession, VERSION_EVENT } from '../app'
 import { Rail, StatusBar, StatusItem, useWorkbench } from '../workbench'
 import { geminiPath, shellPath } from '../terminal/paths'
 import { agentWho, BellFilter, ChimeCounter, chime, oscNotice } from '../terminal/chime'
-import { usableHeight } from '../keyboardCover'
+import { keyboardIsUp, usableHeight } from '../keyboardCover'
 
 const isTouch = window.matchMedia('(pointer: coarse)').matches || navigator.maxTouchPoints > 0
 
@@ -89,7 +89,7 @@ if (isMac && isTouch && window.visualViewport) {
       keyboardWentDown = false // (zoomed: not known, focus decides)
       return
     }
-    const now = window.innerHeight - vv.height > 120
+    const now = keyboardIsUp()
     if (up && !now) keyboardWentDown = true
     if (now) keyboardWentDown = hardwareKeys = false // (an on-screen keyboard: none attached)
     up = now
@@ -1656,7 +1656,7 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
       if (!root) return
       // While the keyboard is up iOS may pan the visual viewport; follow it. When
       // it is down, ignore offsetTop: iOS 26 can leave a stale value behind.
-      const keyboardUp = vv && !zoomed ? window.innerHeight - vv.height > 120 : false
+      const keyboardUp = keyboardIsUp()
       root.style.height = `${usableHeight(h, keyboardUp)}px`
       root.style.transform = keyboardUp && vv ? `translateY(${Math.round(vv.offsetTop)}px)` : ''
 

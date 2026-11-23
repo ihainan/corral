@@ -9,7 +9,7 @@ import { getLang } from './i18n'
 import { App } from './app'
 import { askEarly } from './api'
 import { preloadTerminal } from './pages/lazyPages'
-import { showKeyboardNumbers, usableHeight } from './keyboardCover'
+import { keyboardIsUp, showKeyboardNumbers, usableHeight } from './keyboardCover'
 import './notifyopen' // listens from the start (see there)
 import { unlockChime } from './terminal/chime'
 
@@ -45,7 +45,7 @@ if ('serviceWorker' in navigator && location.protocol === 'https:') {
     const h = vv && !zoomed ? vv.height : window.innerHeight
     // Pinch zoom also shrinks the visual viewport; only an unzoomed one that
     // lost height is the keyboard.
-    const keyboardUp = vv ? (vv.scale ?? 1) <= 1.01 && window.innerHeight - vv.height > 120 : false
+    const keyboardUp = keyboardIsUp()
     const de = document.documentElement.style
     de.setProperty('--vv-h', `${usableHeight(h, keyboardUp)}px`)
     de.setProperty('--vv-top', keyboardUp && vv ? `${Math.round(vv.offsetTop)}px` : '0px')
@@ -57,6 +57,8 @@ if ('serviceWorker' in navigator && location.protocol === 'https:') {
   vv?.addEventListener('resize', apply)
   vv?.addEventListener('scroll', apply)
   window.addEventListener('resize', apply)
+  document.addEventListener('focusin', apply) // (the readout: showKeyboardNumbers)
+  document.addEventListener('focusout', () => setTimeout(apply, 0))
 }
 
 unlockChime() // (sound lets itself be played from the first tap or key on: terminal/chime.ts)

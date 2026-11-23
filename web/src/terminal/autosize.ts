@@ -1,4 +1,4 @@
-import { usableHeight } from '../keyboardCover'
+import { keyboardIsUp, usableHeight } from '../keyboardCover'
 import { useEffect, type RefObject } from 'react'
 
 // A composer's box grows with its text, up to max: its height measured on a
@@ -77,7 +77,7 @@ export function useComposerFit(ref: RefObject<HTMLTextAreaElement | null>, text:
     if (!el || !on) return
     const fit = () => {
       const vv = window.visualViewport
-      const vh = vv ? usableHeight(vv.height, (vv.scale ?? 1) <= 1.01 && window.innerHeight - vv.height > 120) : window.innerHeight
+      const vh = vv ? usableHeight(vv.height, keyboardIsUp()) : window.innerHeight
       fitComposer(el, Math.max(40, Math.min(vh * 0.4, vh - 260)))
     }
     fit()

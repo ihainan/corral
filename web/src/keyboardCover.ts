@@ -11,6 +11,22 @@ const iPhone = /iPhone/.test(navigator.userAgent)
 const webkit26 = typeof CSS !== 'undefined' && typeof CSS.supports === 'function' && CSS.supports('anchor-name: --a')
 export const KEYBOARD_COVER = iPhone && webkit26 ? 130 : 0
 
+// Whether an on-screen keyboard is up: the visual viewport, unzoomed, at
+// least 120px shorter than the tallest seen at this width. Not innerHeight
+// against it: iOS 26 on an iPhone (11-24) may shrink the layout viewport
+// with the keyboard too, leaving the two equal with the keyboard up. (Pinch
+// zoom also shrinks the visual viewport: never taken for a keyboard.)
+const tallest = new Map<number, number>()
+export function keyboardIsUp(): boolean {
+  const vv = window.visualViewport
+  if (!vv || (vv.scale ?? 1) > 1.01) return false
+  const w = Math.round(window.innerWidth)
+  const h = Math.max(vv.height, window.innerHeight)
+  const top = Math.max(tallest.get(w) ?? 0, h)
+  tallest.set(w, top)
+  return top - vv.height > 120 || window.innerHeight - vv.height > 120
+}
+
 // The height to lay a page out in: the visual viewport's, less what the
 // keyboard's bars cover while it is up.
 export const usableHeight = (vvHeight: number, keyboardUp: boolean) => Math.max(200, Math.round(vvHeight - (keyboardUp ? KEYBOARD_COVER : 0)))
@@ -20,7 +36,9 @@ export const usableHeight = (vvHeight: number, keyboardUp: boolean) => Math.max(
 export function showKeyboardNumbers(keyboardUp: boolean) {
   if (!iPhone) return
   let el = document.getElementById('kb-numbers')
-  if (!keyboardUp) {
+  const a = document.activeElement
+  const editing = !!a && (a.tagName === 'TEXTAREA' || a.tagName === 'INPUT' || (a as HTMLElement).isContentEditable)
+  if (!keyboardUp && !editing) {
     el?.remove()
     return
   }
@@ -32,5 +50,5 @@ export function showKeyboardNumbers(keyboardUp: boolean) {
     document.body.appendChild(el)
   }
   const nav = navigator as Navigator & { standalone?: boolean }
-  el.textContent = `ih ${window.innerHeight} vvh ${vv ? Math.round(vv.height) : '-'} vvtop ${vv ? Math.round(vv.offsetTop) : '-'} sh ${screen.height} cover ${KEYBOARD_COVER} app ${nav.standalone ? 1 : 0} w26 ${webkit26 ? 1 : 0}`
+  el.textContent = `ih ${window.innerHeight} vvh ${vv ? Math.round(vv.height) : '-'} vvtop ${vv ? Math.round(vv.offsetTop) : '-'} sh ${screen.height} top ${tallest.get(Math.round(window.innerWidth)) ?? '-'} kb ${keyboardUp ? 1 : 0} cover ${KEYBOARD_COVER} app ${nav.standalone ? 1 : 0} w26 ${webkit26 ? 1 : 0}`
 }
