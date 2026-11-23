@@ -43,12 +43,19 @@ export function askOn(call: ConvoTool | undefined, s: AskScreen): number {
     // the same: the terminal is shown instead.)
     const nos = (x: string) => x.replace(/\s+/g, '')
     const whole = (o: (typeof shown)[number], asked: string) => !!nos(asked) && nos(o.label + (o.under ?? '')) === nos(asked)
-    const wrappedLabel = (o: (typeof shown)[number], asked: string) => {
-      const a = nos(asked)
+    const wrappedLabel = (o: (typeof shown)[number], asked: ConvoAsk['options'][number]) => {
+      const a = nos(asked.label)
       const l = nos(o.label)
-      return !!l && !!o.desc && a.startsWith(l) && nos(o.label + o.desc).startsWith(a) && labels.filter((x) => nos(x).startsWith(l)).length === 1
+      if (!l || !o.desc || !a.startsWith(l)) return false
+      const combined = nos(o.label + o.desc)
+      if (!combined.startsWith(a) || labels.filter((x) => nos(x).startsWith(l)).length !== 1) return false
+      const tail = combined.slice(a.length)
+      const desc = nos(asked.description ?? '')
+      if (!tail) return !desc
+      const cleanTail = tail.endsWith('…') ? tail.slice(0, -1) : tail
+      return !!desc && !!cleanTail && (tail === desc || desc.startsWith(cleanTail))
     }
-    return shown.length === a.options.length && shown.every((o, i) => o.n === i + 1 && (s.beside ? whole(o, labels[i]) : sameLabel(o.label, labels[i], labels, o.cut) || wrappedLabel(o, labels[i])))
+    return shown.length === a.options.length && shown.every((o, i) => o.n === i + 1 && (s.beside ? whole(o, labels[i]) : sameLabel(o.label, labels[i], labels, o.cut) || wrappedLabel(o, a.options[i])))
   })
   // (Two questions alike: which one this is cannot be told.)
   return at >= 0 && asks.filter((a) => sameQ(a.question, s.question)).length === 1 ? at : -1
@@ -402,24 +409,39 @@ export function OwnBox({ label, busy, onGo, hint, keep }: { label: string; busy:
   )
 }
 
+type R = Extract<AskScreen, { kind: 'review' }>
+
+// The screen still shows the exact same review page (answers, completeness, and options).
+const sameReview = (x: AskScreen, r0: R): x is R =>
+  x.kind === 'review' &&
+  x.incomplete === r0.incomplete &&
+  x.answers.length === r0.answers.length &&
+  x.answers.every((a, i) => sameWords(a.question, r0.answers[i].question) && sameWords(a.answer, r0.answers[i].answer)) &&
+  x.options.length === r0.options.length &&
+  x.options.every((o, i) => o.n === r0.options[i].n && sameWords(o.label, r0.options[i].label))
+
 // Moves to choice n on the review page (by ↑↓), then Enter — works even when
 // digit shortcuts do not auto-submit on tabbed AskUserQuestion dialogs.
-export async function pickReview(target: ReplyTarget, now: Screen, n: number): Promise<Screen> {
+// Re-verifies that answers and option labels stay unchanged before every step.
+export async function pickReview(target: ReplyTarget, now: Screen, n: number, expected?: R): Promise<Screen> {
+  const initial = at(now)
+  const r0 = expected ?? (initial.kind === 'review' ? initial : null)
+  if (!r0 || !sameReview(initial, r0)) throw new Unsure()
   let s = now
   for (let guard = 0; guard < 4; guard++) {
     const r = at(s)
-    if (r.kind !== 'review') throw new Unsure()
+    if (!sameReview(r, r0)) throw new Unsure()
     const cur = r.options.find((o) => o.cursor)?.n
     if (cur === n) break
     if (cur === undefined) throw new Unsure()
     const d = n - cur
     const keys = Array(Math.min(4, Math.abs(d))).fill(d > 0 ? 'down' : 'up')
     const want = cur + (d > 0 ? keys.length : -keys.length)
-    s = await step(target, s, keys, (x) => x.kind === 'review' && x.options.find((o) => o.cursor)?.n === want)
+    s = await step(target, s, keys, (x) => sameReview(x, r0) && x.options.find((o) => o.cursor)?.n === want)
   }
   const r = at(s)
-  if (r.kind !== 'review' || r.options.find((o) => o.cursor)?.n !== n) throw new Unsure()
-  return step(target, s, ['enter'], (x) => x.kind !== 'review')
+  if (!sameReview(r, r0) || r.options.find((o) => o.cursor)?.n !== n) throw new Unsure()
+  return step(target, s, ['enter'], (x) => !sameReview(x, r0))
 }
 
 // The page that reviews the answers before they go: as the screen says it.
@@ -438,7 +460,7 @@ export function ReviewPanel({ shown, digest, target, drive, busy, alive }: { sho
           ))}
         </dl>
       )}
-      <Choices digest={digest} options={shown.options} busy={busy} onPick={(n) => drive((now) => pickReview(withAlive(target, alive), now, n))} />
+      <Choices digest={digest} options={shown.options} busy={busy} onPick={(n) => drive((now) => pickReview(withAlive(target, alive), now, n, shown))} />
     </div>
   )
 }

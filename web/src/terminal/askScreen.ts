@@ -31,13 +31,51 @@ export type AskScreen =
   | { kind: 'unknown' }
 
 const optionLine = /^\s*(❯)?\s*(\d{1,2})\.\s+(?:\[( |✔)\]\s+)?(.*?)\s*$/
-const tabLine = /^\s*(?:←\s+)?((?:[☐☒☑]\s+\S.*?\s*)+)(?:[✔✓]\s+Submit)?(?:\s*→)?\s*$/
+const multiTabLine = /^\s*←\s+(?:[☐☒☑]\s+\S.*?\s+)+[✔✓]\s+Submit(?:\s+→)?\s*$/
+const submitTabLine = /^\s*(?:←\s+)?(?:[☐☒]\s+\S.*?\s*)+[✔✓]\s+Submit(?:\s+→)?\s*$/
+const loneTabLine = /^\s*[☐☒]\s+\S.*$/
+const isTabLine = (l: string) => multiTabLine.test(l) || submitTabLine.test(l) || loneTabLine.test(l)
 const ownLabel = /^Type something\.?$/
 const rule = /^\s*[─━╌]{8,}\s*$/
 const scrollNote = /^[↑↓]\s+\d+\s+more\s+lines?$/
 const cjk = /[\u3000-\u9fff\uff00-\uffef]/
 const joinWrapped = (a: string, b: string) => (!a ? b : cjk.test(a.slice(-1)) || cjk.test(b[0]) ? a + b : a + ' ' + b)
 const stripBar = (l: string) => l.replace(/^\s*\u2502\s?/, '').trim()
+
+// Parse tab labels without splitting on "✔" inside a label such as "Color ✔ dark".
+function parseTabs(line: string): { label: string; answered: boolean }[] {
+  const re = /\s{2,}[☐☒☑]/.test(line)
+    ? /([☐☒☑])\s+(\S.*?)(?=\s{2,}[☐☒☑]|\s+[✔✓]\s+Submit(?:\s+→)?\s*$|\s+→\s*$|\s*$)/g
+    : /([☐☒☑])\s+(\S.*?)(?=\s+[☐☒☑]|\s+[✔✓]\s+Submit(?:\s+→)?\s*$|\s+→\s*$|\s*$)/g
+  return [...line.matchAll(re)].map((m) => ({ label: m[2].trim(), answered: m[1] !== '☐' }))
+}
+
+// Find the dialog's tab bar above the footer hint: take the first tab line
+// after the dialog's top divider rule (or previous footer hint) so checkboxes
+// inside the question body cannot hijack the tab bar.
+function findTabTop(lines: string[], hint: number): number {
+  let optEnd = hint
+  for (let i = hint - 1; i >= 0; i--) {
+    const t = lines[i].trim()
+    if (!t) continue
+    if (/^(?:\d{1,2}\.\s+)?Chat about this$/i.test(t)) continue
+    if (rule.test(lines[i])) {
+      optEnd = i
+    }
+    break
+  }
+  let start = 0
+  for (let i = optEnd - 1; i >= 0; i--) {
+    if (rule.test(lines[i]) || /Enter to select/.test(lines[i])) {
+      start = i + 1
+      break
+    }
+  }
+  for (let i = start; i < optEnd; i++) {
+    if (isTabLine(lines[i])) return i
+  }
+  return -1
+}
 
 // (Words that ran to their column's edge: what is beside them, a preview's
 // box, begins at most 4 spaces after.)
@@ -107,7 +145,7 @@ function described(lines: string[]): ScreenOption[] {
 export function askLead(text: string): string[] {
   const lines = lastLines(text)
   const hint = lines.findLastIndex((l, i) => /Enter to select/.test(l) && /navigate/.test(l + ' ' + (lines[i + 1] ?? '')))
-  const top = lines.findLastIndex((l, i) => i < hint && tabLine.test(l))
+  const top = hint >= 0 ? findTabTop(lines, hint) : -1
   if (hint < 0 || top < 0) return []
   // (The dialog's own rule over it, then the words; the person's message, ❯ or >, before them.)
   const over = lines.slice(0, top).findLastIndex((l) => rule.test(l))
@@ -143,67 +181,104 @@ export function askLead(text: string): string[] {
 const whole = (o: ScreenOption[], cursorElsewhere = false) =>
   o.length > 0 && o.every((x, i) => x.n === i + 1) && o.filter((x) => x.cursor).length === (cursorElsewhere ? 0 : 1)
 
-// (Lines after a menu that are its own: hints, its file. Anything else: the
-// menu is not the last thing on the screen, so not what a key would answer.)
-const hints = [
-  /^\s*shift\+tab to approve with this feedback\s*$/i,
-  /^\s*ctrl\+g to edit in Vim(?: · \S.*)?$/i,
-  /^\s*Esc to cancel(?: · Tab to amend)?\s*$/i,
-  /^\s*Enter to (?:select|confirm)\b.*$/i,
-  /^\s*(?:[↑↓←→/]+|Tab\/Arrow keys)\s+to navigate\b.*$/i,
+// (Lines after a menu that are its own: known key hint segments, its file.
+// Anything else: the menu is not the last thing on the screen, so not what a
+// key would answer.)
+const hintSegments = [
+  /^shift\+tab to approve with this feedback$/i,
+  /^ctrl\+g to edit in Vim$/i,
+  /^Enter to (?:select|confirm)$/i,
+  /^(?:[↑↓←→/]+|Tab\/Arrow keys|Arrow keys)\s+to navigate$/i,
+  /^Tab to (?:switch questions|amend)$/i,
+  /^n to add notes$/i,
+  /^Esc to cancel$/i,
 ]
-const tailOK = (rest: string[]) => rest.length <= 4 && rest.every((l) => !l.trim() || /^[\s\u2500-\u257f]+$/.test(l) || hints.some((h) => h.test(l)))
+const hintLine = (l: string) => {
+  const s = l.trim()
+  if (!s) return false
+  // Plan dialogs may append the plan file path after "ctrl+g to edit in Vim · ".
+  if (/^ctrl\+g to edit in Vim · \S+$/i.test(s)) return true
+  const parts = s.split(/\s*·\s*/)
+  return parts.length > 0 && parts.every((p) => hintSegments.some((h) => h.test(p)))
+}
+const tailOK = (rest: string[]) => rest.length <= 4 && rest.every((l) => !l.trim() || /^[\s\u2500-\u257f]+$/.test(l) || hintLine(l))
 
 // Parse Claude Code's "Review your answers" page, which may appear with or
 // without "Ready to submit your answers?", with a leading "│" gutter and
 // multi-line wrapped questions/answers, scroll notes ("↑ 1 more line"), and
-// either no footer or "Enter to select · ... · Esc to cancel".
+// either no footer or known "Enter to select · ... · Esc to cancel" hints.
 function parseReview(lines: string[]): Extract<AskScreen, { kind: 'review' }> | null {
   const review = lines.findLastIndex((l) => /^\s*Review your answers\s*$/.test(l))
   if (review < 0) return null
   const rest = lines.slice(review + 1)
   // (A tab bar after "Review your answers" belongs to a newer question drawn below an old review in scrollback.)
-  if (rest.some((l) => tabLine.test(l))) return null
+  if (rest.some((l) => isTabLine(l))) return null
   const ready = rest.findIndex((l) => /Ready to submit your answers\?/.test(l))
   const firstOpt = rest.findIndex((l, i) => i > ready && optionLine.test(besideAt(l)))
   if (firstOpt < 0) return null
   const summaryEnd = ready >= 0 ? ready : firstOpt
+  // Any divider rule between "Review your answers" and the menu means another
+  // dialog (such as a permission prompt) started below a stale review summary.
+  if (rest.slice(0, firstOpt).some((l) => rule.test(l))) return null
+  if (ready >= 0 && rest.slice(ready + 1, firstOpt).some((l) => l.trim() && !scrollNote.test(stripBar(l)))) return null
   const after = rest.slice(firstOpt)
   const opts = options(after)
   const last = after.findLastIndex((l) => optionLine.test(besideAt(l)))
   if (!whole(opts) || !tailOK(after.slice(last + 1))) return null
-  const hasSubmitTab = lines.slice(Math.max(0, review - 4), review).some((l) => tabLine.test(l) && /[✔✓]\s+Submit/.test(l))
   const isSubmitMenu = opts.length === 2 && /^Submit answers$/.test(opts[0].label) && /^Cancel$/.test(opts[1].label)
-  if (ready < 0 && !hasSubmitTab && !isSubmitMenu) return null
+  if (ready < 0 && !isSubmitMenu) return null
 
   const summary = rest.slice(0, summaryEnd)
   const answers: { question: string; answer: string }[] = []
   let cur: { question: string; answer: string; mode: 'q' | 'a' } | null = null
+  let blankSeen = false
   const flush = () => {
     if (cur && cur.question && cur.answer) answers.push({ question: cur.question, answer: cur.answer })
     cur = null
   }
   for (const raw of summary) {
+    if (!raw.trim()) {
+      blankSeen = true
+      continue
+    }
+    const hasBar = /^\s*\u2502/.test(raw)
+    const indent = raw.search(/\S/)
     const l = stripBar(raw)
-    if (!l || scrollNote.test(l) || /not answered all questions/i.test(l)) {
+    if (!l) {
+      blankSeen = true
+      continue
+    }
+    if (scrollNote.test(l)) {
+      blankSeen = false
+      continue
+    }
+    if (/not answered all questions/i.test(l)) {
+      flush()
+      blankSeen = true
       continue
     }
     const q = /^[●•]\s+(.*\S)\s*$/.exec(l)
     if (q) {
       flush()
       cur = { question: q[1], answer: '', mode: 'q' }
+      blankSeen = false
       continue
     }
     const a = /^→\s+(.*\S)\s*$/.exec(l)
     if (a && cur) {
       cur.answer = a[1]
       cur.mode = 'a'
+      blankSeen = false
       continue
     }
-    if (cur) {
+    if (cur && !blankSeen && (hasBar || indent >= 2)) {
       if (cur.mode === 'q') cur.question = joinWrapped(cur.question, l)
       else cur.answer = joinWrapped(cur.answer, l)
+      continue
     }
+    // Unrecognized text inside the summary region (e.g. a subsequent permission
+    // dialog below a stale review) disqualifies this as a review screen.
+    return null
   }
   flush()
   const incomplete = summary.some((l) => /not answered all questions/i.test(l))
@@ -221,14 +296,13 @@ export function readAskScreen(text: string): AskScreen {
   // A question: its tabs (or a lone one's header), the question, its choices
   // to the rule above "Chat about this", the key hints last.
   if (hint >= 0 && hint >= lines.length - 3) {
-    const top = lines.findLastIndex((l, i) => i < hint && tabLine.test(l))
+    const top = findTabTop(lines, hint)
     if (top < 0) return { kind: 'unknown' }
-    const tabs = [...lines[top].matchAll(/([☐☒☑])\s+(\S.*?)(?=\s+[☐☒☑✔✓]|\s+→\s*$|\s*$)/g)].map((m) => ({ label: m[2].trim(), answered: m[1] !== '☐' }))
+    const tabs = parseTabs(lines[top])
     const body = lines.slice(top + 1, hint)
     const first = body.findIndex((l) => optionLine.test(besideAt(l)))
     if (first <= 0) return { kind: 'unknown' }
     const headLines = body.slice(0, first)
-    if (headLines.some((l) => /^\s*Review your answers\s*$/.test(l))) return { kind: 'unknown' }
     const afterFirst = body.slice(first)
     const end = afterFirst.findIndex((l) => rule.test(l))
     const optBlock = end >= 0 ? afterFirst.slice(0, end) : afterFirst
@@ -244,6 +318,8 @@ export function readAskScreen(text: string): AskScreen {
     if (opts.length >= 2 && /^Chat about this$/i.test(opts[opts.length - 1].label) && ownLabel.test(opts[opts.length - 2].label)) {
       opts = opts.slice(0, -1)
     }
+    const isSubmitMenu = opts.length === 2 && /^Submit answers$/.test(opts[0].label) && /^Cancel$/.test(opts[1].label)
+    if (isSubmitMenu && headLines.some((l) => /^\s*Review your answers\s*$/.test(l))) return { kind: 'unknown' }
     const sub = optBlock.find((l) => /^\s*(❯\s*)?Submit\s*$/.test(l))
     if (!question || !whole(opts, !!sub && /❯/.test(sub))) return { kind: 'unknown' }
     const own = opts.find((o) => ownLabel.test(o.label))?.n

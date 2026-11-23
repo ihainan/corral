@@ -99,7 +99,8 @@ export function keepShown<S extends Screen>(s: S): S {
 // nothing was pressed: sending it again presses it once at most. Only
 // where the screen answered counts down (any other, as before); not once
 // the one answering is gone (alive: the card no longer shown — review581).
-export async function steadily<B extends { digest: string }>(send: (b: B) => Promise<unknown>, look: () => Promise<Screen>, b: B, alive: () => boolean = () => true): Promise<unknown> {
+export async function steadily<B extends { digest: string }>(send: (b: B) => Promise<unknown>, look: () => Promise<Screen>, b: B, alive: () => boolean = () => true, retry = true): Promise<unknown> {
+  if (!alive()) throw new Error('reply target gone')
   const first = shown.get(b.digest)
   let prev = first
   let body = b
@@ -107,7 +108,7 @@ export async function steadily<B extends { digest: string }>(send: (b: B) => Pro
     try {
       return await send(body)
     } catch (e) {
-      if (!(e instanceof ApiError && e.code === 'screen_changed') || !first || !prev || !countsDown(first.text) || i >= 4 || !alive()) throw e
+      if (!retry || !(e instanceof ApiError && e.code === 'screen_changed') || !first || !prev || !countsDown(first.text) || i >= 4 || !alive()) throw e
       // (Read again, not the refusal's screen: herdr's says it as drawn, its
       // GET as joined — review581.)
       let now: Screen
@@ -129,4 +130,11 @@ export async function steadily<B extends { digest: string }>(send: (b: B) => Pro
 
 // withAlive: a target whose answers say who answers is still there (alive),
 // unless they say so themselves — for those made in many steps.
-export const withAlive = (t: ReplyTarget, alive: () => boolean): ReplyTarget => ({ ...t, reply: (b) => t.reply({ alive, ...b }) })
+export const withAlive = (t: ReplyTarget, alive: () => boolean): ReplyTarget => ({
+  ...t,
+  reply: (b) => {
+    const ok = b.alive ?? alive
+    if (!ok()) return Promise.reject(new Error('reply target gone'))
+    return t.reply({ alive, ...b })
+  },
+})
