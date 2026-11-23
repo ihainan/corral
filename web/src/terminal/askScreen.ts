@@ -37,18 +37,18 @@ const loneTabLine = /^\s*[☐☒]\s+\S.*$/
 const isMultiTabLine = (l: string) => multiTabLine.test(l) || submitTabLine.test(l)
 const isTabLine = (l: string) => isMultiTabLine(l) || loneTabLine.test(l)
 
-// Pick the latest tab bar above hint; if that candidate is a lone single-tab
-// line (which can also appear inside a question body like "☐ Billing page")
-// and a multi-tab bar appears above it without an intervening divider rule,
-// use that multi-tab bar instead.
+// The dialog's own tab bar, above the hint: Claude Code draws a rule right
+// over it, a lone question's "☐ Header" too (seen on 2.1.312 and 2.1.330),
+// and no line of a question's words follows one ("☐ Billing page" in its
+// body does not). The last tab line so drawn; where none is (the screen cut
+// above its rule), the latest tab line, as before (review E, 11-24).
 function findTabTop(lines: string[], hint: number): number {
-  const top = lines.findLastIndex((l, i) => i < hint && isTabLine(l))
-  if (top < 0 || isMultiTabLine(lines[top])) return top
-  for (let i = top - 1; i >= 0; i--) {
-    if (rule.test(lines[i])) break
-    if (isMultiTabLine(lines[i])) return i
+  const ruled = (i: number) => {
+    for (let j = i - 1; j >= 0; j--) if (lines[j].trim()) return rule.test(lines[j])
+    return false
   }
-  return top
+  const top = lines.findLastIndex((l, i) => i < hint && isTabLine(l) && ruled(i))
+  return top >= 0 ? top : lines.findLastIndex((l, i) => i < hint && isTabLine(l))
 }
 const ownLabel = /^Type something\.?$/
 const rule = /^\s*[─━╌]{8,}\s*$/

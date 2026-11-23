@@ -755,6 +755,30 @@ await run('fix4-1-uncheckedBoxInQuestionBody', () => {
   assert.equal(rSolo.question, 'Ship this single change?')
 })
 
+const R = '────────────────────────────────────────────────────────────'
+// 22. [review E] The dialog's tab bar is the one right under a rule. A real lone question (Claude Code 2.1.330,
+// captured 11-24): its "☐ Ship" header under the rule, a "☐ …" line in its words kept as words; a lone question
+// after an old review with no rule between (the latest tab line, as before); the same with the rule.
+await run('reviewE-tabBarUnderRule', () => {
+  const real = ['❯ plan tonight', 'RULE', ' ☐ Ship', '', 'Which items ship tonight?', '', '❯ 1. Billing page', '     the rest waits', '  2. Nothing', '     wait a day', '  3. Type something.', 'RULE', '  4. Chat about this', '', 'Enter to select · ↑/↓ to navigate · Esc to cancel']
+  const r1 = readAskScreen(real.map((l) => (l === 'RULE' ? R : l)).join('\n'))
+  assert.equal(r1.kind, 'question')
+  assert.deepEqual(r1.tabs, [])
+  assert.equal(r1.question, 'Which items ship tonight?')
+  const body = ['RULE', '☐ Ship', '', 'Which items ship tonight?', '☐ Billing page', '  the rest waits', '', '❯ 1. Yes', '  2. No', '  3. Type something.', 'RULE', '  Chat about this', '', 'Enter to select · ↑/↓ to navigate · Esc to cancel']
+  const r2 = readAskScreen(body.map((l) => (l === 'RULE' ? R : l)).join('\n'))
+  assert.equal(r2.kind, 'question')
+  assert.deepEqual(r2.tabs, [])
+  assert.ok(r2.question.startsWith('Which items ship tonight?'), r2.question)
+  const after = ['←  ☒ Old  ☒ Earlier  ✔ Submit  →', 'Review your answers', '  ● Old question?', '    → Old answer', 'RULE?', '☐ New', '', 'Single question?', '❯ 1. Yes', '  2. No', '  3. Type something.', 'Enter to select · ↑/↓ to navigate · Esc to cancel']
+  for (const withRule of [false, true]) {
+    const r3 = readAskScreen(after.flatMap((l) => (l === 'RULE?' ? (withRule ? [R] : []) : [l])).join('\n'))
+    assert.equal(r3.kind, 'question', String(withRule))
+    assert.deepEqual(r3.tabs, [], String(withRule))
+    assert.equal(r3.question, 'Single question?', String(withRule))
+  }
+})
+
 if (failures.length) {
   console.error(`askScreen: ${failures.length} test(s) failed:`)
   for (const f of failures) console.error(' -', f)
