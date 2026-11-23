@@ -253,6 +253,23 @@ export function waitingAgents(list: SessionInfo[]): number {
   return seen.size
 }
 
+// Agents at work across the sessions, each once (the status bar's count).
+export function workingAgents(list: SessionInfo[]): number {
+  const seen = new Set<string>()
+  const now = Date.now()
+  for (const s of list) {
+    if (s.meta?.t !== 'herdr' || s.meta.lost) continue
+    for (const w of s.meta.workspaces)
+      for (const a of w.agents) {
+        // (As the list has it: one done or idle whose background work still runs works.)
+        const key = agentKey(s, a.pane_id)
+        const known = (STATUS_ORDER as string[]).includes(a.status) ? (a.status as AgentStatus) : 'unknown'
+        if (withBg(key, a, known, now).status === 'working') seen.add(key)
+      }
+  }
+  return seen.size
+}
+
 // One session's agents, as its summary says: how many wait, work, are done
 // and not looked at. lost: the summary is old (herdr lost since), or there is
 // none yet — none of it is to be told as now. null: no agents' summary (a plain shell, tmux).
@@ -269,13 +286,13 @@ export function sessionAgents(s: SessionInfo): { waiting: number; working: numbe
 // poll: read the list here too (pages where nothing else does) — every
 // VISIBLE_EVERY while in sight, HIDDEN_EVERY behind another tab.
 const VISIBLE_EVERY = 15000
-export function useWaitingCount(poll: boolean): { n: number | null; stale: boolean } {
-  const read = () => ({ n: lastList ? waitingAgents(lastList) : null, stale: listFailed })
+export function useWaitingCount(poll: boolean): { n: number | null; working: number | null; stale: boolean } {
+  const read = () => ({ n: lastList ? waitingAgents(lastList) : null, working: lastList ? workingAgents(lastList) : null, stale: listFailed })
   const [v, setV] = useState(read)
   useEffect(() => {
     const f = () => setV((cur) => {
       const next = read()
-      return cur.n === next.n && cur.stale === next.stale ? cur : next
+      return cur.n === next.n && cur.working === next.working && cur.stale === next.stale ? cur : next
     })
     listeners.add(f)
     f()

@@ -105,6 +105,7 @@ const EXEMPT = [
   // Type that is not a passage to read, and so takes no line from the scale.
   /\.sc-|\.complete-/,            // the completion panel: its rows are a height, set out above
   /\.kl-chip\b|\.reply-key\b|\.convo-ask-key\b|\.herdr-count\b/, // a badge: one glyph centred in a box, line 1
+  /\.wb-rail-badge\b/,             // a count on the rail's icon: 16 high, sized to the icon, not a line of text
   /\.tab\b/,                      // a strip of tabs, as the terminal's own
   /\.picture-path\b/,             // a path in mono, sized to sit under the picture's name
   /\.convo-ask-label\b/,          // 22: with 11 above and below it, a choice is 44 to press

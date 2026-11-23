@@ -19,6 +19,7 @@ import { AdminUsersPage, AdminAuditPage } from './pages/Admin'
 import { preloadTerminal, RecordingPlayerPage, RecordingsPage, TerminalPage } from './pages/lazyPages'
 import { TerminalTabs, useTabsMode } from './pages/TerminalTabs'
 import { draftsFor } from './terminal/drafts'
+import { Rail, StatusBar, useWorkbench } from './workbench'
 
 interface Session {
   boot: Bootstrap
@@ -352,6 +353,15 @@ function Shell({ active, children }: { active: NavKey; children: ReactNode }) {
   )
   // On phones the admin pages sit under Settings in the tab bar.
   const tabActive = active === 'users' || active === 'audit' || active === 'recordings' ? 'settings' : active
+  const wb = useWorkbench()
+  if (wb)
+    return (
+      <div className="shell wb-shell">
+        <Rail active={active} />
+        <div className="content">{children}</div>
+        <StatusBar />
+      </div>
+    )
   return (
     <div className="shell">
       <nav className="sidebar" aria-label={t('nav.main')}>

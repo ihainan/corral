@@ -45,6 +45,7 @@ import { knownSession } from '../terminal/agents'
 import { holdTermMode } from '../terminal/chatSend'
 import { useComposerFit } from '../terminal/autosize'
 import { useSession, VERSION_EVENT } from '../app'
+import { Rail, StatusBar, StatusItem, useWorkbench } from '../workbench'
 import { geminiPath, shellPath } from '../terminal/paths'
 import { agentWho, BellFilter, ChimeCounter, chime, oscNotice } from '../terminal/chime'
 
@@ -230,6 +231,8 @@ function dropParam(id: string, name: string, value: string) {
 // onEnd: where to go once the user has ended this session (with tabs, the
 // next one), else the host list.
 export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, onEnd }: { id: string; watch?: boolean; active?: boolean; tabs?: React.ReactNode; onInfo?: (id: string, i: TabInfo) => void; onEnd?: () => void }) {
+  // (The workbench's rail and status bar: with the tabs, 760 and up.)
+  const wbOn = useWorkbench() && !!tabs && !watch
   const activeRef = useRef(active)
   activeRef.current = active
   const prefs = usePrefs()
@@ -2685,7 +2688,7 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
 
   return (
     <div
-      className={'term-root ' + (scheme.dark ? 'dark' : 'light') + (active ? '' : ' inactive')}
+      className={'term-root ' + (scheme.dark ? 'dark' : 'light') + (active ? '' : ' inactive') + (wbOn ? ' wb-on' : '')}
       inert={!active}
       aria-hidden={active ? undefined : true}
       style={chromeVars(scheme) as React.CSSProperties}
@@ -2714,9 +2717,12 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
       }}
     >
       <header className="term-bar">
-        <button className="icon-btn" onClick={() => navigate('/')} aria-label={t('term.backToHosts')} title={t('term.backToHosts')}>
-          <ChevronLeft size={20} />
-        </button>
+        {/* (The way back to the hosts is the rail's, on the workbench.) */}
+        {!wbOn && (
+          <button className="icon-btn" onClick={() => navigate('/')} aria-label={t('term.backToHosts')} title={t('term.backToHosts')}>
+            <ChevronLeft size={20} />
+          </button>
+        )}
         {watch ? (
           <div className="term-title term-title-static">
             <span className="term-host">
@@ -2985,6 +2991,16 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
           )}
           {fresh.dialogs}
         </>
+      )}
+      {wbOn && <Rail />}
+      {wbOn && (
+        <StatusBar>
+          <StatusItem mark={statusClass === 's-open' ? 'on' : statusClass === 's-ended' ? 'off' : 'trouble'} title={statusText}>
+            {info?.host_name ?? ''}
+            {info?.persistence && info.persistence !== 'none' ? ' · ' + info.persistence : ''}
+          </StatusItem>
+          {statusClass !== 's-open' && <span>{statusText}</span>}
+        </StatusBar>
       )}
     </div>
   )

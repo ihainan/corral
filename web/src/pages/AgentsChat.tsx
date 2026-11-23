@@ -38,6 +38,7 @@ import { holdTermMode, tmuxKey } from '../terminal/chatSend'
 import { camesAfter, containedInMessage, isCommand, pairSent, sameMessage, squeezed, type Submission } from '../terminal/sentSeen'
 import { viewRefusal } from '../terminal/sendView'
 import { agentKey, sessionWhich } from '../terminal/sessionName'
+import { Rail, StatusBar, StatusItem, useWorkbench } from '../workbench'
 import { agentMark } from '../terminal/agentIcons'
 import { useComposerFit } from '../terminal/autosize'
 
@@ -255,12 +256,15 @@ export function makeRoom(pins: string[], here: Set<string>, max: number): string
   return over <= 0 ? pins : pins.filter((k) => here.has(k) || over-- <= 0)
 }
 
-export function AgentsChat({ bar, active = true }: { bar?: ReactNode; active?: boolean }) {
+// What the agents' tab says of the conversation in front (its name, program, state).
+export interface AgentsHead { title: string; program?: string; status: string }
+export function AgentsChat({ bar, active = true, onHead }: { bar?: ReactNode; active?: boolean; onHead?: (h: AgentsHead | null) => void }) {
   const toast = useToast()
   const prefs = usePrefs()
   // (Its own two looks, light and dark as the app is: not the terminal's colours.)
   const scheme = isDark() ? corralDark : corralLight
   const { sessions, failed } = useRunningSessions(active, 3000)
+  const wb = useWorkbench()
   // A sound when one finishes or comes to need the person (terminal/chime.ts).
   const chimeCounts = useRef(new ChimeCounter())
   useEffect(() => {
@@ -753,6 +757,7 @@ export function AgentsChat({ bar, active = true }: { bar?: ReactNode; active?: b
         onSplitParentChild={openParentChildSplit}
         onSplitClose={closeSplit}
         onNewSubagent={(p) => setNewAgent(p)}
+        onHead={onHead}
         toast={toast}
         composerEnter={prefs.composerEnter}
         sent={sentBy[k] ?? []}
@@ -782,8 +787,10 @@ export function AgentsChat({ bar, active = true }: { bar?: ReactNode; active?: b
     )
   }
 
+  // (The workbench's rail and status bar: with the tabs, 760 and up.)
+  const wbOn = wb && !!bar && !stack
   return (
-    <div className={'term-root agents-chat ' + (scheme.dark ? 'dark' : 'light') + (active ? '' : ' inactive') + (stack ? ' is-stack is-' + screen : '')} inert={!active} aria-hidden={active ? undefined : true} style={chromeVars(scheme) as React.CSSProperties} ref={rootRef}>
+    <div className={'term-root agents-chat ' + (scheme.dark ? 'dark' : 'light') + (active ? '' : ' inactive') + (stack ? ' is-stack is-' + screen : '') + (wbOn ? ' wb-on' : '')} inert={!active} aria-hidden={active ? undefined : true} style={chromeVars(scheme) as React.CSSProperties} ref={rootRef}>
       {newAgent && sessions && (
         <NewAgentDialog
           sessions={sessions}
@@ -797,9 +804,12 @@ export function AgentsChat({ bar, active = true }: { bar?: ReactNode; active?: b
       {/* (The tabs in the bar the terminals have, with its way back to the hosts.) */}
       {bar ? (
         <header className="term-bar">
-          <button type="button" className="icon-btn" onClick={() => navigate('/')} aria-label={t('term.backToHosts')} title={t('term.backToHosts')}>
-            <ChevronLeft size={20} />
-          </button>
+          {/* (The way back to the hosts is the rail's, on the workbench.) */}
+          {!wbOn && (
+            <button type="button" className="icon-btn" onClick={() => navigate('/')} aria-label={t('term.backToHosts')} title={t('term.backToHosts')}>
+              <ChevronLeft size={20} />
+            </button>
+          )}
           {bar}
         </header>
       ) : stack && screen === 'chat' && cur ? null : stack && screen === 'chat' ? (
@@ -857,6 +867,17 @@ export function AgentsChat({ bar, active = true }: { bar?: ReactNode; active?: b
         </p>
       )}
       <div className="term-body">{body}</div>
+      {wbOn && <Rail active="agents" />}
+      {wbOn && (
+        <StatusBar>
+          {cur && (
+            <StatusItem mark={failed ? 'trouble' : 'on'} title={failed ? t('agents.failed') : undefined}>
+              {cur.s.host_name}
+              {cur.s.persistence && cur.s.persistence !== 'none' ? ' · ' + cur.s.persistence : ''}
+            </StatusItem>
+          )}
+        </StatusBar>
+      )}
     </div>
   )
 }
@@ -1012,7 +1033,8 @@ const tmuxCmdsOf = (e: Entry): RowCmds | undefined => {
 
 // The conversation of one agent, and what is sent to it. Keyed by the
 // agent: nothing of another's (its draft, what was sent, a stop) carries over.
-function AgentChat({ cur, entries, all, titles, onPick, active, keysActive, isSecondary, primaryKey, splitPane, splitKey, splitDir, onSplitDirToggle, onSplitOpen, onSplitParentChild, onSplitClose, onSplitSwap, onSplitExpand, onNewSubagent, toast, composerEnter, sent, setSent, sending, setSending, draft: shownDraft, setDraftShown, used, lead, onClosed, onStarted, query, onQuery }: {
+function AgentChat({ cur, entries, all, titles, onPick, active, keysActive, isSecondary, primaryKey, splitPane, splitKey, splitDir, onSplitDirToggle, onSplitOpen, onSplitParentChild, onSplitClose, onSplitSwap, onSplitExpand, onNewSubagent, onHead, toast, composerEnter, sent, setSent, sending, setSending, draft: shownDraft, setDraftShown, used, lead, onClosed, onStarted, query, onQuery }: {
+  onHead?: (h: AgentsHead | null) => void
   cur: Entry
   entries: Entry[]
   all: SessionInfo[]
@@ -1163,6 +1185,11 @@ function AgentChat({ cur, entries, all, titles, onPick, active, keysActive, isSe
     const dialog = ownCC && status !== 'blocked' && convo.agentStatus === 'waiting' && !answerable(convo.waitingFor)
     return { where: row.ws === '~' ? '' : row.ws, title, status, bg, dialog, cmds: cmdsOf(row), other: readsLog(row.a.agent) ? undefined : row.a.agent, program: row.a.agent }
   }, [herdr, row, convo.bind, convo.agentStatus, convo.waitingFor, convo.bgCmds, convo.failing, convoTitle, convo.entries])
+  // (The tab of the agents' page says which conversation is in front.)
+  useEffect(() => {
+    onHead?.(agent ? { title: agent.title ?? '', program: agent.program, status: agent.bg && agent.status !== 'blocked' ? 'bg' : agent.status } : null)
+    return () => onHead?.(null) // (none in front any more — the last closed, its session gone: the tab says so)
+  }, [onHead, agent?.title, agent?.program, agent?.status, agent?.bg]) // eslint-disable-line react-hooks/exhaustive-deps
   // A finished one looked at here is seen: the gateway keeps it, so it is
   // no longer "done" in any browser (herdr's own word goes only with its
   // pane focused in herdr). Not while the page is behind another.

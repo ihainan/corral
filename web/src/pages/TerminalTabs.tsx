@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { ArrowLeftToLine, ArrowRightToLine, Bot, ExternalLink, Link2, Plus, X } from 'lucide-react'
-import { AgentsChat } from './AgentsChat'
+import { AgentsChat, type AgentsHead } from './AgentsChat'
+import { AgentIcon } from '../terminal/agentIcons'
 import { api, authGen, choiceOf, probeBootstrap, type OpenChoice, type SessionInfo } from '../api'
 import { sessionWhich } from '../terminal/sessionName'
-import { HIDDEN_EVERY, markRead, readAt, waitingAgents, waitingTitle } from '../terminal/agents'
+import { HIDDEN_EVERY, markRead, noteSessions, readAt, waitingAgents, waitingTitle } from '../terminal/agents'
 import { t } from '../i18n'
 import { local } from '../storage'
 import { navigate } from '../router'
@@ -187,6 +188,7 @@ export function TerminalTabs({ current }: { current: string }) {
   if (agents && !agentsSeen) setAgentsSeen(true)
   const [infos, setInfos] = useState<Record<string, TabInfo>>({})
   const [newOpen, setNewOpen] = useState(false)
+  const [head, setHead] = useState<AgentsHead | null>(null) // (the conversation the agents' tab has in front)
   const toast = useToast()
 
   // A list counts from when it was asked for. One request at a time: asked
@@ -205,6 +207,8 @@ export function TerminalTabs({ current }: { current: string }) {
     let readAtGw = 0
     api<SessionInfo[]>('GET', '/api/sessions', undefined, { onResponse: (r) => (readAtGw = readAt(r)) })
       .then((l) => {
+        // (The rail's and the status bar's counts, from the same list — not one of a sign-in gone since.)
+        if (authGen() === signedIn) noteSessions(l, readAtGw)
         const running = l.filter((x) => x.state === 'running')
         const next = inPlace(running)
         markRead(next, readAtGw)
@@ -212,7 +216,8 @@ export function TerminalTabs({ current }: { current: string }) {
         setListAt(at)
         void keepTabs(running, inst, signedIn)
       })
-      .catch(() => {}) // (the tabs stay as they were; the next poll tries again)
+      // (The tabs stay as they were; the next poll tries again. The counts are said to be of before.)
+      .catch(() => authGen() === signedIn && noteSessions(null))
       .finally(() => {
         const again = loading.current === 'again'
         loading.current = 'no'
@@ -472,7 +477,7 @@ export function TerminalTabs({ current }: { current: string }) {
   const [closing, setClosing] = useState<SessionInfo | null>(null)
   // (Several at once, from a tab's menu: the others, or those to its right.)
   const [closingMany, setClosingMany] = useState<{ keep: SessionInfo; list: SessionInfo[] } | null>(null)
-  const bar = <TabBar tabs={tabs} current={current} infos={infos} onNew={() => setNewOpen(true)} onMove={move} onClose={setClosing} onCloseMany={(keep, list) => setClosingMany({ keep, list })} />
+  const bar = <TabBar tabs={tabs} current={current} infos={infos} head={head} onNew={() => setNewOpen(true)} onMove={move} onClose={setClosing} onCloseMany={(keep, list) => setClosingMany({ keep, list })} />
   // (The tab shown is drawn in the same frame as the one left goes: not a
   // frame later, once the effect above has mounted it — a frame of neither,
   // the page's own background, flashed between them.)
@@ -483,7 +488,7 @@ export function TerminalTabs({ current }: { current: string }) {
         <TerminalPage key={id} id={id} active={id === current} tabs={bar} onInfo={onInfo} onEnd={() => endTab(id)} />
       ))}
       {/* (Kept once shown, as the terminals are: what it is sending, and what was sent, stay.) */}
-      {agentsSeen && <AgentsChat bar={bar} active={agents} />}
+      {agentsSeen && <AgentsChat bar={bar} active={agents} onHead={setHead} />}
       {newOpen && (
         <NewTabDialog
           busyHost={busyHost}
@@ -719,7 +724,7 @@ function useTabDrag(nav: React.RefObject<HTMLElement | null>, ids: string[], cur
   return { drag, onPointerDown, offset, dragged, moved }
 }
 
-function TabBar(p: { tabs: SessionInfo[]; current: string; infos: Record<string, TabInfo>; onNew: () => void; onMove: (id: string, to: number) => void; onClose: (s: SessionInfo) => void; onCloseMany: (keep: SessionInfo, list: SessionInfo[]) => void }) {
+function TabBar(p: { tabs: SessionInfo[]; current: string; infos: Record<string, TabInfo>; head: AgentsHead | null; onNew: () => void; onMove: (id: string, to: number) => void; onClose: (s: SessionInfo) => void; onCloseMany: (keep: SessionInfo, list: SessionInfo[]) => void }) {
   const toast = useToast()
   // A tab's own menu, at a right click (or the menu key) — as a browser's
   // tabs have one (11-15): open it in a window of its own, copy its link, a
@@ -791,10 +796,12 @@ function TabBar(p: { tabs: SessionInfo[]; current: string; infos: Record<string,
         className="term-tab term-tab-agents"
         aria-current={p.current === AGENTS ? 'page' : undefined}
         onClick={() => p.current !== AGENTS && navigate('/agents')}
-        title={t('nav.agents')}
+        title={p.head ? t('tabs.agentsHead', { title: p.head.title }) : t('nav.agents')}
       >
-        <Bot size={15} aria-hidden="true" />
-        <span className="term-tab-name">{t('nav.agents')}</span>
+        {/* (The conversation in front, by its name and program: the list beside it
+            is how to go to another — workbench 11-23. None yet: the agents' page.) */}
+        {p.head ? <AgentIcon program={p.head.program} size={15} bare /> : <Bot size={15} aria-hidden="true" />}
+        <span className="term-tab-name">{p.head?.title || t('nav.agents')}</span>
         {waitingAll > 0 && (
           <span className="term-tab-count term-tab-wait" aria-label={t('herdr.waiting', { n: waitingAll })}>
             <span className="term-tab-sdot" aria-hidden="true" />

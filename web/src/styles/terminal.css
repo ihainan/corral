@@ -11,6 +11,17 @@ html.term-mode body { position: fixed; inset: 0; }
   display: flex; flex-direction: column;
   background: var(--term-bg); color: var(--term-fg);
 }
+/* The workbench's rail and status bar (app.css) in the scheme's colours, and
+   room kept for them (760 and up: workbench.tsx). */
+.term-root {
+  --wb-chrome: var(--term-chrome); --wb-line: var(--term-line); --wb-hover: var(--term-hover); --wb-active: var(--term-row-current);
+  --wb-fg: var(--term-fg); --wb-fg-2: var(--term-fg-2); --wb-fg-3: var(--term-fg-3);
+  --wb-warn: var(--term-warn-text); --wb-ok: var(--term-ok-text); --wb-danger: var(--term-danger-text);
+  --wb-focus: inset 0 0 0 2px var(--term-accent-text);
+}
+.term-root.wb-on { padding: 0 0 var(--wb-status) var(--wb-rail); }
+/* (Settings are the rail's there: the list's own way to them goes.) */
+.term-root.wb-on .convo-side-foot-settings { display: none; }
 /* A tab in the back: laid out at the same size (so it keeps its grid and
    needs no refit), not seen, not reachable. */
 .term-root.inactive { visibility: hidden; pointer-events: none; }
