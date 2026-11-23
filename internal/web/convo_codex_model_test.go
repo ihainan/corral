@@ -1,11 +1,16 @@
 package web
 
 import (
+	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ihainan/corral/internal/sshx"
 )
@@ -316,37 +321,104 @@ func TestCodexModelSwitchCaseInsensitiveAndEarlyStop(t *testing.T) {
 }
 
 func TestParseCodexModelsCache(t *testing.T) {
+	now := time.Date(2026, 11, 23, 15, 0, 0, 0, time.UTC)
 	raw := []byte(`{
 		"fetched_at": "2026-11-23T14:00:00Z",
+		"client_version": "0.171.0",
 		"models": [
-			{"slug": "gpt-4o-audio", "display_name": "gpt-4o-audio", "description": "Routed via Sub2API", "visibility": "list", "priority": 50},
-			{"slug": "hidden-model", "display_name": "Hidden", "description": "Should not appear", "visibility": "hide", "priority": 0},
-			{"slug": "gpt-6.1-sol", "display_name": "GPT-6.1-Sol", "description": "Latest workhorse", "visibility": "list", "priority": 1},
-			{"slug": "gpt-6.1-sol-dup", "display_name": "gpt-6.1-sol", "description": "Duplicate casing", "visibility": "list", "priority": 2},
+			{"slug": "gpt-4o-audio", "display_name": "gpt-4o-audio", "description": "Routed via Sub2API", "visibility": "list", "priority": 50, "supported_in_api": true},
+			{"slug": "hidden-model", "display_name": "Hidden", "description": "Should not appear", "visibility": "hide", "priority": 0, "supported_in_api": true},
+			{"slug": "gpt-5.6", "display_name": "GPT-5.6 (Sol)", "description": "Latest workhorse", "visibility": "list", "priority": 1, "supported_in_api": true},
+			{"slug": "gpt-5.6-dup", "display_name": "gpt-5.6 (sol)", "description": "Duplicate casing", "visibility": "list", "priority": 2, "supported_in_api": true},
 			{"slug": "slug-only", "display_name": "", "description": "Fallback to slug", "visibility": "list", "priority": 5}
 		]
 	}`)
-	opts := parseCodexModelsCache(raw)
-	if len(opts) != 3 {
-		t.Fatalf("got %d models, want 3: %+v", len(opts), opts)
+	opts, fetchedAt, ok := parseCodexModelsCache(raw, now)
+	if !ok || len(opts) != 3 {
+		t.Fatalf("got ok=%v %d models, want ok=true 3: %+v", ok, len(opts), opts)
 	}
-	if opts[0].Label != "GPT-6.1-Sol" || opts[0].Desc != "Latest workhorse" {
+	if !fetchedAt.Equal(time.Date(2026, 11, 23, 14, 0, 0, 0, time.UTC)) {
+		t.Fatalf("fetchedAt = %v", fetchedAt)
+	}
+	if opts[0].Label != "GPT-5.6 (Sol)" || opts[0].Slug != "gpt-5.6" || opts[0].Desc != "Latest workhorse" {
 		t.Fatalf("first model: %+v", opts[0])
 	}
-	if opts[1].Label != "slug-only" || opts[2].Label != "gpt-4o-audio" {
+	if opts[1].Label != "slug-only" || opts[1].Slug != "slug-only" || opts[2].Label != "gpt-4o-audio" {
 		t.Fatalf("ordering: %+v", opts)
 	}
-	if got := parseCodexModelsCache([]byte(`{"models":[]}`)); got != nil {
-		t.Fatalf("empty models should return nil: %+v", got)
+
+	// Missing fetched_at -> reject (fall back to TUI).
+	if _, _, ok := parseCodexModelsCache([]byte(`{"models":[{"slug":"gpt-5.6","visibility":"list"}]}`), now); ok {
+		t.Fatalf("missing fetched_at should be rejected")
 	}
-	if got := parseCodexModelsCache([]byte(`not json`)); got != nil {
-		t.Fatalf("invalid json should return nil: %+v", got)
+	// Stale fetched_at (>12h) -> reject.
+	stale := []byte(`{"fetched_at":"2026-11-23T01:00:00Z","models":[{"slug":"gpt-5.6","visibility":"list"}]}`)
+	if _, _, ok := parseCodexModelsCache(stale, now); ok {
+		t.Fatalf("stale fetched_at (>12h) should be rejected")
+	}
+	// Far-future fetched_at (>5m) -> reject.
+	future := []byte(`{"fetched_at":"2026-11-23T15:10:00Z","models":[{"slug":"gpt-5.6","visibility":"list"}]}`)
+	if _, _, ok := parseCodexModelsCache(future, now); ok {
+		t.Fatalf("future fetched_at should be rejected")
+	}
+	// Any model with supported_in_api=false -> reject fast path (fall back to TUI).
+	unsupported := []byte(`{"fetched_at":"2026-11-23T14:30:00Z","models":[{"slug":"gpt-5.6","visibility":"list","supported_in_api":true},{"slug":"chatgpt-only","visibility":"list","supported_in_api":false}]}`)
+	if _, _, ok := parseCodexModelsCache(unsupported, now); ok {
+		t.Fatalf("supported_in_api=false should disqualify disk cache fast path")
+	}
+	if _, _, ok := parseCodexModelsCache([]byte(`{"fetched_at":"2026-11-23T14:30:00Z","models":[]}`), now); ok {
+		t.Fatalf("empty models should return ok=false")
+	}
+	if _, _, ok := parseCodexModelsCache([]byte(`not json`), now); ok {
+		t.Fatalf("invalid json should return ok=false")
+	}
+}
+
+func TestCodexDiskCacheTimestampAndRejection(t *testing.T) {
+	srv := &Server{}
+	ctx := context.Background()
+	const hostID int64 = 904001
+	const via = "gw.example"
+	t.Cleanup(func() {
+		srv.forgetCodexModels(ctx, hostID, via, "")
+		codexModelsCacheMu.Lock()
+		delete(codexRejectedDiskAt, codexModelStoreKey(hostID, via, ""))
+		codexModelsCacheMu.Unlock()
+	})
+
+	// 1. Stored timestamp uses fetched_at, not time.Now(): an entry older than lineListFor is not served.
+	oldFetched := time.Now().Add(-lineListFor - time.Minute).UTC().Truncate(time.Second)
+	srv.noteCodexDiskModels(ctx, hostID, via, "", []modelOpt{{Label: "Old"}}, oldFetched)
+	var outcome, reason string
+	if srv.keptCodexModelsFor(httptest.NewRecorder(), ctx, hostID, via, "", &outcome, &reason) {
+		t.Fatalf("expired fetched_at should not be served from keptCodexModelsFor")
+	}
+
+	// 2. Fresh disk cache is served; after forgetCodexModels (switch failure), that exact fetched_at is rejected.
+	freshFetched := time.Now().Add(-30 * time.Minute).UTC().Truncate(time.Second)
+	srv.noteCodexDiskModels(ctx, hostID, via, "", []modelOpt{{Label: "GPT-5.6 (Sol)", Slug: "gpt-5.6"}}, freshFetched)
+	rec := httptest.NewRecorder()
+	if !srv.keptCodexModelsFor(rec, ctx, hostID, via, "", &outcome, &reason) {
+		t.Fatalf("expected fresh disk cache hit")
+	}
+	if isCodexDiskCacheRejected(hostID, via, "", freshFetched) {
+		t.Fatalf("fresh disk cache should not be rejected before forgetCodexModels")
+	}
+	srv.forgetCodexModels(ctx, hostID, via, "")
+	if !isCodexDiskCacheRejected(hostID, via, "", freshFetched) {
+		t.Fatalf("same disk fetched_at must be rejected after forgetCodexModels")
+	}
+	// A newer models_cache.json with a later fetched_at is NOT rejected.
+	newerFetched := freshFetched.Add(5 * time.Minute)
+	if isCodexDiskCacheRejected(hostID, via, "", newerFetched) {
+		t.Fatalf("newer disk fetched_at should not be rejected")
 	}
 }
 
 func TestCodexModelsCacheCommand(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
 	dir := t.TempDir()
-	cache := `{"models":[{"slug":"gpt-6.1-sol","display_name":"GPT-6.1-Sol","description":"Fast","visibility":"list","priority":0,"model_messages":{"instructions_template":"` + strings.Repeat("x", 20000) + `"}},{"slug":"secret","display_name":"Secret","visibility":"hide","priority":0}]}`
+	cache := `{"fetched_at":"` + now.Format(time.RFC3339) + `","client_version":"0.171.0","models":[{"slug":"gpt-5.6","display_name":"GPT-5.6 (Sol)","description":"Fast","visibility":"list","priority":0,"supported_in_api":true,"model_messages":{"instructions_template":"` + strings.Repeat("x", 20000) + `"}},{"slug":"secret","display_name":"Secret","visibility":"hide","priority":0,"supported_in_api":true}]}`
 	if err := os.WriteFile(dir+"/models_cache.json", []byte(cache), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -356,11 +428,63 @@ func TestCodexModelsCacheCommand(t *testing.T) {
 	if err != nil {
 		t.Fatalf("codexModelsCacheCommand failed: %v", err)
 	}
-	opts := parseCodexModelsCache(out)
-	if len(opts) != 1 || opts[0].Label != "GPT-6.1-Sol" || opts[0].Desc != "Fast" {
-		t.Fatalf("parsed output: %+v (raw %d bytes)", opts, len(out))
+	opts, fetchedAt, ok := parseCodexModelsCache(out, now.Add(time.Minute))
+	if !ok || len(opts) != 1 || opts[0].Label != "GPT-5.6 (Sol)" || opts[0].Slug != "gpt-5.6" || opts[0].Desc != "Fast" {
+		t.Fatalf("parsed output: ok=%v %+v (raw %d bytes)", ok, opts, len(out))
+	}
+	if !fetchedAt.Equal(now) {
+		t.Fatalf("fetchedAt = %v, want %v", fetchedAt, now)
 	}
 	if _, err := exec.LookPath("python3"); err == nil && len(out) > 2048 {
 		t.Fatalf("expected python3 extractor to strip instructions_template, got %d bytes", len(out))
+	}
+
+	// Preserve supported_in_api=false through the python3 extractor so Go rejects fast path.
+	apiFalse := `{"fetched_at":"` + now.Format(time.RFC3339) + `","models":[{"slug":"gpt-5.6","visibility":"list","supported_in_api":false}]}`
+	if err := os.WriteFile(dir+"/models_cache.json", []byte(apiFalse), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c = exec.Command("sh", "-c", codexModelsCacheCommand(0))
+	c.Env = append(os.Environ(), "CODEX_HOME="+dir)
+	out, err = c.Output()
+	if err != nil {
+		t.Fatalf("codexModelsCacheCommand (supported_in_api=false) failed: %v", err)
+	}
+	var rawCheck map[string]any
+	if json.Unmarshal(out, &rawCheck) != nil {
+		t.Fatalf("invalid json from extractor: %q", string(out))
+	}
+	if _, _, ok := parseCodexModelsCache(out, now.Add(time.Minute)); ok {
+		t.Fatalf("expected supported_in_api=false to be preserved and rejected")
+	}
+
+	// Oversized file (>4 MiB) must exit 3 before python3 parses it.
+	if err := os.WriteFile(dir+"/models_cache.json", make([]byte, (4<<20)+10), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c = exec.Command("sh", "-c", codexModelsCacheCommand(0))
+	c.Env = append(os.Environ(), "CODEX_HOME="+dir)
+	_, err = c.Output()
+	var ee *exec.ExitError
+	if !errors.As(err, &ee) || ee.ExitCode() != 3 {
+		t.Fatalf("oversized cache: got err=%v, want exit 3", err)
+	}
+
+	// CODEX_HOME containing a newline in /proc/<pid>/environ must exit 3 (not guess the path).
+	if _, statErr := os.Stat("/proc/self/environ"); statErr == nil {
+		sleeper := exec.Command("sleep", "5")
+		sleeper.Env = append(os.Environ(), "CODEX_HOME="+dir+"\ninjected")
+		if err := sleeper.Start(); err != nil {
+			t.Fatal(err)
+		}
+		defer func() {
+			_ = sleeper.Process.Kill()
+			_ = sleeper.Wait()
+		}()
+		c = exec.Command("sh", "-c", codexModelsCacheCommand(int64(sleeper.Process.Pid)))
+		_, err = c.Output()
+		if !errors.As(err, &ee) || ee.ExitCode() != 3 {
+			t.Fatalf("newline in CODEX_HOME: got err=%v, want exit 3", err)
+		}
 	}
 }

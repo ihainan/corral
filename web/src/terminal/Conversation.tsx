@@ -2982,7 +2982,7 @@ const MODE_ICON: Record<(typeof PICKED_MODES)[number] | 'build', typeof Info> = 
 
 // Switching the model, from a menu of what Claude Code's picker offers
 // (list: null while it is read), for the session only.
-export type ModelOpt = { label: string; desc?: string; current?: boolean; efforts?: string[] }
+export type ModelOpt = { label: string; slug?: string; desc?: string; current?: boolean; efforts?: string[] }
 // (fresh: the list read a moment ago, its "current" to go by; can: it may be switched now.)
 // (efforts: a Codex's, chosen with its model, its picker's second step.)
 // A Codex's efforts as its picker names them (its second step), their
@@ -3028,6 +3028,8 @@ export function rowByLog(list: ModelOpt[], model: string | undefined): string | 
   const hits = list.filter((o) => named(o)[0].toLowerCase() === said)
   if (hits.length === 1) return hits[0].label
   const low = model.toLowerCase()
+  const bySlug = list.filter((o) => !!o.slug && o.slug.toLowerCase() === low)
+  if (bySlug.length === 1) return bySlug[0].label
   const bySuffix = list.filter((o) => {
     const l = o.label.toLowerCase()
     return l === low || l.endsWith('/' + low)
@@ -3149,7 +3151,8 @@ function Runs({ head, statusAt, modelAt, quiet, meta, goal, active, mode, model,
   const menu = useRef<HTMLDivElement>(null)
   const mergedNow = useRef(false)
   const moveEffort = useRef<(d: 1 | -1) => void>(() => {})
-  const listed = (open === 'model' && !!model?.list) || open === 'effort' || open === 'mode'
+  const modelFailed = open === 'model' && model?.list === null && !!model?.unread && !model?.busy
+  const listed = (open === 'model' && (!!model?.list || modelFailed)) || open === 'effort' || open === 'mode'
   useEffect(() => {
     // (Only where the focus still is with it: not taken back from where it went meanwhile.)
     if (!listed || !inside(document.activeElement)) return
@@ -3200,10 +3203,16 @@ function Runs({ head, statusAt, modelAt, quiet, meta, goal, active, mode, model,
   useLayoutEffect(() => {
     if (!open) return
     const vv = window.visualViewport
+    const dockEl = box.current?.closest('.convo-dock') as HTMLElement | null
     const fit = () => {
       const holder = (open === 'model' || open === 'effort' || (open === 'mode' && modeToComposer)) && modelBox.current ? modelBox.current : box.current
       const pop = popHost.current?.querySelector<HTMLElement>('.convo-runs-pop')
       if (!pop || !holder) return
+      // Portaled popups sit outside .convo-dock, so mirror the 560px / 470px
+      // container-query breakpoints onto the popup element for is-narrow-only rows.
+      const dockW = dockEl ? dockEl.getBoundingClientRect().width : Infinity
+      pop.classList.toggle('is-dock-narrow-via', dockW <= 560)
+      pop.classList.toggle('is-dock-narrow-branch', dockW <= 470)
       const seen = vv ? vv.height : window.innerHeight
       if (pop.classList.contains('is-sheet')) {
         pop.style.left = ''
@@ -3221,7 +3230,7 @@ function Runs({ head, statusAt, modelAt, quiet, meta, goal, active, mode, model,
       const pad = 12
       const gap = 6
       const w = pop.offsetWidth || (open === 'mode' ? 300 : 320)
-      const alignRight = open === 'ctx' || (toComposer && (open === 'model' || open === 'effort'))
+      const alignRight = open === 'ctx' || (toComposer && (open === 'model' || open === 'effort')) || (modeToComposer && open === 'mode')
       const wantLeft = alignRight ? by.right - w : by.left
       const maxLeft = Math.max(vl + pad, vl + vw - w - pad)
       pop.style.left = Math.round(Math.max(vl + pad, Math.min(wantLeft, maxLeft))) + 'px'
@@ -3241,10 +3250,13 @@ function Runs({ head, statusAt, modelAt, quiet, meta, goal, active, mode, model,
       }
     }
     fit()
+    const ro = dockEl && typeof ResizeObserver !== 'undefined' ? new ResizeObserver(fit) : null
+    if (ro && dockEl) ro.observe(dockEl)
     vv?.addEventListener('resize', fit)
     vv?.addEventListener('scroll', fit)
     window.addEventListener('resize', fit)
     return () => {
+      ro?.disconnect()
       vv?.removeEventListener('resize', fit)
       vv?.removeEventListener('scroll', fit)
       window.removeEventListener('resize', fit)
@@ -3262,7 +3274,12 @@ function Runs({ head, statusAt, modelAt, quiet, meta, goal, active, mode, model,
   const shownModel = model?.now || meta.model
   const shownEffort = effort?.now !== undefined ? effort.now : meta.effort
   // (The one it is on, as the rows tick it; and how hard it thinks now.)
-  const nowOf = (o: ModelOpt) => (model!.byLog ? o.label === rowByLog(model!.list!, shownModel) : model!.fresh && model!.list!.some((x) => x.current) ? !!o.current : modelName(shownModel!).toLowerCase() === o.label.toLowerCase())
+  const nowOf = (o: ModelOpt) =>
+    model!.byLog
+      ? o.label === rowByLog(model!.list!, shownModel)
+      : model!.fresh && model!.list!.some((x) => x.current)
+        ? !!o.current
+        : modelName(shownModel!).toLowerCase() === o.label.toLowerCase() || (!!o.slug && !!shownModel && shownModel.toLowerCase() === o.slug.toLowerCase())
   const nowRow = model?.list && shownModel ? model.list.find(nowOf) : undefined
   const nowEffort = merged ? shownEffort : meta.effort?.toLowerCase()
   const toModel = stage.model ?? nowRow?.label
@@ -3496,7 +3513,15 @@ function Runs({ head, statusAt, modelAt, quiet, meta, goal, active, mode, model,
               <div className="convo-models-err" role="status">
                 <p className="convo-runs-note">{model.error || t('convo.modelUnread')}</p>
                 {model.onRetry && (
-                  <button type="button" className="btn btn-sm convo-models-retry" onClick={model.onRetry}>
+                  <button
+                    type="button"
+                    className="btn btn-sm convo-models-retry"
+                    onClick={() => {
+                      // Keep focus inside the popup anchor while the retry button unmounts during loading.
+                      ;(modelBtn.current ?? effortModelBtn.current)?.focus()
+                      model.onRetry?.()
+                    }}
+                  >
                     {t('common.retry')}
                   </button>
                 )}
@@ -3523,7 +3548,7 @@ function Runs({ head, statusAt, modelAt, quiet, meta, goal, active, mode, model,
                   .filter((o) => {
                     const q = modelFilter.trim().toLowerCase()
                     if (!q) return true
-                    return (o.label + ' ' + (o.desc ?? '')).toLowerCase().includes(q)
+                    return (o.label + ' ' + (o.slug ?? '') + ' ' + (o.desc ?? '')).toLowerCase().includes(q)
                   })
                   .map((o) => {
               // (As its picker last said, which the log may not yet. A Codex's

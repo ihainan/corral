@@ -866,6 +866,8 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
    never clip mid-word in narrow windows, split panes, side panels, or phones.
    Hidden items (via / branch) move cleanly into the Context popover. */
 .convo-runs-row.is-narrow-only { display: none; }
+.convo-runs-pop.is-dock-narrow-via .convo-runs-row.is-narrow-via { display: flex; }
+.convo-runs-pop.is-dock-narrow-branch .convo-runs-row.is-narrow-branch { display: flex; }
 @container convo-dock (max-width: 680px) {
   .convo-runs-side-name { display: none; }
 }

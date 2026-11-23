@@ -438,9 +438,11 @@ type codexModelCacheEntry struct {
 }
 
 var (
-	codexModelFronts   sync.Map // modelFrontKey → codexModelFront
-	codexModelsCacheMu sync.Mutex
-	codexModelsCache   = map[string]codexModelCacheEntry{}
+	codexModelFronts    sync.Map // modelFrontKey → codexModelFront
+	codexModelsCacheMu  sync.Mutex
+	codexModelsCache    = map[string]codexModelCacheEntry{}
+	codexLastDiskAt     = map[string]time.Time{} // key → fetched_at of the last disk cache served
+	codexRejectedDiskAt = map[string]time.Time{} // key → fetched_at invalidated after a switch failure
 )
 
 func codexModelStoreKey(hostID int64, via, auth string) string {
@@ -458,6 +460,14 @@ func noteCodexModelFront(key string, f codexModelFront) {
 }
 
 func (s *Server) noteCodexModels(ctx context.Context, hostID int64, via, auth string, opts []modelOpt) {
+	s.noteCodexModelsAt(ctx, hostID, via, auth, opts, time.Now(), false)
+}
+
+func (s *Server) noteCodexDiskModels(ctx context.Context, hostID int64, via, auth string, opts []modelOpt, fetchedAt time.Time) {
+	s.noteCodexModelsAt(ctx, hostID, via, auth, opts, fetchedAt, true)
+}
+
+func (s *Server) noteCodexModelsAt(ctx context.Context, hostID int64, via, auth string, opts []modelOpt, at time.Time, fromDisk bool) {
 	if len(opts) == 0 {
 		return
 	}
@@ -467,13 +477,18 @@ func (s *Server) noteCodexModels(ctx context.Context, hostID int64, via, auth st
 		clean[i] = o
 	}
 	key := codexModelStoreKey(hostID, via, auth)
-	now := time.Now()
 	codexModelsCacheMu.Lock()
-	codexModelsCache[key] = codexModelCacheEntry{opts: clean, at: now}
+	codexModelsCache[key] = codexModelCacheEntry{opts: clean, at: at}
+	if fromDisk {
+		codexLastDiskAt[key] = at
+	} else {
+		delete(codexLastDiskAt, key)
+		delete(codexRejectedDiskAt, key)
+	}
 	codexModelsCacheMu.Unlock()
 	if s.store != nil {
 		if raw, err := json.Marshal(clean); err == nil {
-			_ = s.store.PutModelList(context.WithoutCancel(ctx), key, now.Unix(), raw)
+			_ = s.store.PutModelList(context.WithoutCancel(ctx), key, at.Unix(), raw)
 		}
 	}
 }
@@ -482,31 +497,61 @@ func (s *Server) forgetCodexModels(ctx context.Context, hostID int64, via, auth 
 	key := codexModelStoreKey(hostID, via, auth)
 	codexModelsCacheMu.Lock()
 	delete(codexModelsCache, key)
+	if at, ok := codexLastDiskAt[key]; ok && !at.IsZero() {
+		codexRejectedDiskAt[key] = at
+		delete(codexLastDiskAt, key)
+	}
 	codexModelsCacheMu.Unlock()
 	if s.store != nil {
 		_ = s.store.DeleteModelList(context.WithoutCancel(ctx), key)
 	}
 }
 
-const codexModelsCacheMax = 4<<20 + 64
+func isCodexDiskCacheRejected(hostID int64, via, auth string, fetchedAt time.Time) bool {
+	key := codexModelStoreKey(hostID, via, auth)
+	codexModelsCacheMu.Lock()
+	defer codexModelsCacheMu.Unlock()
+	rej, ok := codexRejectedDiskAt[key]
+	if !ok {
+		return false
+	}
+	if time.Since(rej) > codexDiskCacheMaxAge {
+		delete(codexRejectedDiskAt, key)
+		return false
+	}
+	return rej.Equal(fetchedAt)
+}
+
+const (
+	codexModelsCacheMax  = 4<<20 + 64
+	codexDiskCacheMaxAge = lineListFor // 12h: matches server model-list TTL; older disk caches fall back to live TUI
+)
 
 // codexModelsCacheCommand reads Codex's own models_cache.json from the
 // process's CODEX_HOME (falling back to $CODEX_HOME or $HOME/.codex). When
-// python3 is present, it strips the large per-model instructions_template
-// fields on the host so only a few kilobytes cross SSH. Exits 3 when absent.
+// python3 is present, it verifies the file size first and strips the large
+// per-model instructions_template fields on the host so only a few kilobytes
+// cross SSH. Exits 3 when absent, oversized, or CODEX_HOME contains a newline.
 func codexModelsCacheCommand(pid int64) string {
 	script := `h="${CODEX_HOME:-$HOME/.codex}"
 if [ -n "$1" ] && [ "$1" -gt 0 ] 2>/dev/null && [ -r "/proc/$1/environ" ]; then
   eh=$(tr '\0\n' '\n\001' <"/proc/$1/environ" 2>/dev/null | sed -n 's/^CODEX_HOME=//p' | head -n 1)
+  s1=$(printf '\001')
+  case "$eh" in *"$s1"*) exit 3 ;; esac
   [ -n "$eh" ] && h=$eh
 fi
 f="$h/models_cache.json"
 [ -f "$f" ] || exit 3
 if command -v python3 >/dev/null 2>&1; then
+  sz=$(wc -c <"$f" 2>/dev/null | tr -d '[:space:]') || exit 3
+  [ -n "$sz" ] && [ "$sz" -gt 0 ] && [ "$sz" -le 4194304 ] 2>/dev/null || exit 3
   python3 - "$f" <<'PY'
 import json, sys
 with open(sys.argv[1], "r", encoding="utf-8") as fh:
-    data = json.load(fh)
+    raw = fh.read(4194305)
+if len(raw) > 4194304:
+    sys.exit(3)
+data = json.loads(raw)
 models = []
 for m in data.get("models") or []:
     if not isinstance(m, dict):
@@ -517,8 +562,13 @@ for m in data.get("models") or []:
         "description": m.get("description") or "",
         "visibility": m.get("visibility") or "",
         "priority": m.get("priority", 0),
+        "supported_in_api": m.get("supported_in_api"),
     })
-json.dump({"models": models}, sys.stdout, separators=(",", ":"))
+json.dump({
+    "fetched_at": data.get("fetched_at") or "",
+    "client_version": data.get("client_version") or "",
+    "models": models,
+}, sys.stdout, separators=(",", ":"))
 PY
 else
   head -c 4194305 "$f"
@@ -528,18 +578,37 @@ fi`
 
 // parseCodexModelsCache extracts visible Codex picker models from
 // models_cache.json, ordered stably by ascending priority (matching Codex CLI).
-func parseCodexModelsCache(raw []byte) []modelOpt {
+// Rejects caches that lack a fresh fetched_at timestamp or contain models with
+// supported_in_api=false (which Codex filters differently under API-key login).
+func parseCodexModelsCache(raw []byte, now time.Time) ([]modelOpt, time.Time, bool) {
 	var doc struct {
-		Models []struct {
-			Slug        string `json:"slug"`
-			DisplayName string `json:"display_name"`
-			Description string `json:"description"`
-			Visibility  string `json:"visibility"`
-			Priority    int    `json:"priority"`
+		FetchedAt     string `json:"fetched_at"`
+		ClientVersion string `json:"client_version"`
+		Models        []struct {
+			Slug           string `json:"slug"`
+			DisplayName    string `json:"display_name"`
+			Description    string `json:"description"`
+			Visibility     string `json:"visibility"`
+			Priority       int    `json:"priority"`
+			SupportedInAPI *bool  `json:"supported_in_api"`
 		} `json:"models"`
 	}
 	if len(raw) == 0 || json.Unmarshal(raw, &doc) != nil || len(doc.Models) == 0 {
-		return nil
+		return nil, time.Time{}, false
+	}
+	fetchedStr := strings.TrimSpace(doc.FetchedAt)
+	if fetchedStr == "" {
+		return nil, time.Time{}, false
+	}
+	fetchedAt, err := time.Parse(time.RFC3339Nano, fetchedStr)
+	if err != nil {
+		fetchedAt, err = time.Parse(time.RFC3339, fetchedStr)
+		if err != nil {
+			return nil, time.Time{}, false
+		}
+	}
+	if now.Sub(fetchedAt) > codexDiskCacheMaxAge || fetchedAt.Sub(now) > 5*time.Minute {
+		return nil, time.Time{}, false
 	}
 	type item struct {
 		opt      modelOpt
@@ -547,24 +616,30 @@ func parseCodexModelsCache(raw []byte) []modelOpt {
 	}
 	var items []item
 	for _, m := range doc.Models {
+		if m.SupportedInAPI != nil && !*m.SupportedInAPI {
+			// API-key login filters out supported_in_api=false models; without
+			// reading auth.json we cannot know the login mode, so fall back to TUI.
+			return nil, time.Time{}, false
+		}
 		vis := strings.TrimSpace(m.Visibility)
 		if vis != "" && !strings.EqualFold(vis, "list") {
 			continue
 		}
+		slug := strings.TrimSpace(m.Slug)
 		label := strings.TrimSpace(m.DisplayName)
 		if label == "" {
-			label = strings.TrimSpace(m.Slug)
+			label = slug
 		}
 		if label == "" {
 			continue
 		}
 		items = append(items, item{
-			opt:      modelOpt{Label: label, Desc: strings.TrimSpace(m.Description)},
+			opt:      modelOpt{Label: label, Slug: slug, Desc: strings.TrimSpace(m.Description)},
 			priority: m.Priority,
 		})
 	}
 	if len(items) == 0 {
-		return nil
+		return nil, time.Time{}, false
 	}
 	slices.SortStableFunc(items, func(a, b item) int {
 		switch {
@@ -586,19 +661,19 @@ func parseCodexModelsCache(raw []byte) []modelOpt {
 		seen[k] = struct{}{}
 		out = append(out, it.opt)
 	}
-	return out
+	return out, fetchedAt, true
 }
 
 // readCodexModelsCache reads Codex's on-disk models_cache.json over SSH in one
 // fast call (avoiding driving the interactive /model TUI page-by-page).
-func (s *Server) readCodexModelsCache(ctx context.Context, sess *term.Session, pid int64) []modelOpt {
+func (s *Server) readCodexModelsCache(ctx context.Context, sess *term.Session, pid int64) ([]modelOpt, time.Time, bool) {
 	cctx, cancel := context.WithTimeout(ctx, 6*time.Second)
 	defer cancel()
 	out, err := sshx.Output(cctx, sess.Client(), codexModelsCacheCommand(pid), codexModelsCacheMax)
 	if err != nil || len(out) > 4<<20 {
-		return nil
+		return nil, time.Time{}, false
 	}
-	return parseCodexModelsCache(out)
+	return parseCodexModelsCache(out, time.Now())
 }
 
 // keptCodexModels serves a previously read Codex model list immediately

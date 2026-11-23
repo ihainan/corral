@@ -1640,15 +1640,19 @@ function AgentChat({ cur, entries, all, titles, onPick, active, keysActive, isSe
       .finally(() => setEffortBusy(false))
   }
 
-  const modelCacheKey = agy ? `agy:${cur.s.host_id}` : opencode ? `oc:${cur.s.host_id}` : codex ? `codex:${cur.s.host_id}:${convo.bind?.via ?? ''}:${convo.bind?.auth ?? ''}` : bindKey
+  // Do not share a host-level frontend cache for Codex: Codex processes on the
+  // same host may use different CODEX_HOME or provider paths while sharing the
+  // same via hostname and empty auth, and the gateway already serves Codex
+  // lists in one fast path (server cache or models_cache.json).
+  const modelCacheKey = agy ? `agy:${cur.s.host_id}` : opencode ? `oc:${cur.s.host_id}` : bindKey
   const openModels = (force = false) => {
     if (!convo.bind || modelBusy) return
     const now = Date.now()
-    if (!force && models && models.bind === bindKey && models.list && now - (models.at ?? 0) < MODEL_CACHE_MS) return
+    if (!force && !codex && models && models.bind === bindKey && models.list && now - (models.at ?? 0) < MODEL_CACHE_MS) return
     if (force) keptModelCache.delete(modelCacheKey)
-    const hit = !force ? keptModelCache.get(modelCacheKey) : undefined
+    const hit = !force && !codex ? keptModelCache.get(modelCacheKey) : undefined
     if (hit && now - hit.at < MODEL_CACHE_MS) {
-      setModels({ list: hit.list, bind: bindKey, at: hit.at, byLog: hit.byLog || agy || opencode || codex })
+      setModels({ list: hit.list, bind: bindKey, at: hit.at, byLog: hit.byLog || agy || opencode })
       return
     }
     const bind = bindKey
@@ -1661,7 +1665,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, keysActive, isSe
     own(api<{ models: ModelOpt[]; kept?: boolean; effort?: string }>('POST', `/api/sessions/${sid}/conversation/models`, pressBody(), { timeoutMs: MODEL_MS }))
       .then((r) => {
         const at = Date.now()
-        if (r.models?.length) keptModelCache.set(ckey, { list: r.models, at, byLog: !!r.kept })
+        if (!codex && r.models?.length) keptModelCache.set(ckey, { list: r.models, at, byLog: !!r.kept })
         setModels((m) => (m?.bind === bind ? { list: r.models, bind, at, byLog: !!r.kept } : m))
         if (agy && r.effort !== undefined) setEffortNow({ effort: r.effort, bind, was: convo.meta?.effort })
       })
@@ -1692,7 +1696,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, keysActive, isSe
           setModels((m) => {
             if (!m) return m
             const next = m.list && m.list.map((o) => ({ ...o, current: o.label === label }))
-            if (next?.length) keptModelCache.set(ckey, { list: next, at: Date.now(), byLog: !!m.byLog })
+            if (!codex && next?.length) keptModelCache.set(ckey, { list: next, at: Date.now(), byLog: !!m.byLog })
             return { ...m, list: next }
           })
           if (agy || opencode) {

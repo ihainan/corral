@@ -35,6 +35,7 @@ import (
 type modelOpt struct {
 	N       int      `json:"-"` // its number in the picker
 	Label   string   `json:"label"`
+	Slug    string   `json:"slug,omitempty"` // API model slug when known (Codex models_cache.json)
 	Desc    string   `json:"desc,omitempty"`
 	Current bool     `json:"current,omitempty"` // (the session's now: ✔)
 	Efforts []string `json:"efforts,omitempty"` // (per-model supported efforts, when they differ by model: agy)
@@ -792,8 +793,8 @@ func (s *Server) convoModel(w http.ResponseWriter, ctx context.Context, sess *te
 			release()
 			return
 		}
-		if cached := s.readCodexModelsCache(ctx, sess, pid); len(cached) > 0 {
-			s.noteCodexModels(ctx, sess.HostID, via, auth, cached)
+		if cached, fetchedAt, ok := s.readCodexModelsCache(ctx, sess, pid); ok && !isCodexDiskCacheRejected(sess.HostID, via, auth, fetchedAt) {
+			s.noteCodexDiskModels(ctx, sess.HostID, via, auth, cached, fetchedAt)
 			release()
 			*outcome, *reason = "read", "models_cache"
 			writeJSON(w, http.StatusOK, map[string]any{"models": cached, "kept": true})
