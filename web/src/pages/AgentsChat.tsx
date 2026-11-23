@@ -41,7 +41,7 @@ import { agentKey, sessionWhich } from '../terminal/sessionName'
 import { Rail, StatusBar, StatusItem, useWorkbench } from '../workbench'
 import { agentMark } from '../terminal/agentIcons'
 import { useComposerFit } from '../terminal/autosize'
-import { keyboardIsUp, usableHeight } from '../keyboardCover'
+import { keyboardIsUp } from '../keyboard'
 
 // The session a Codex not yet begun on its log is sent to (the gateway's convoNoSession).
 const NO_SESSION = '00000000-0000-0000-0000-000000000000'
@@ -683,7 +683,7 @@ export function AgentsChat({ bar, active = true, onHead }: { bar?: ReactNode; ac
       const root = rootRef.current
       if (!root) return
       const keyboardUp = keyboardIsUp()
-      root.style.height = `${usableHeight(vv && !zoomed ? vv.height : window.innerHeight, keyboardUp)}px`
+      root.style.height = `${Math.round(vv && !zoomed ? vv.height : window.innerHeight)}px`
       root.style.transform = keyboardUp && vv ? `translateY(${Math.round(vv.offsetTop)}px)` : ''
       if (window.scrollY !== 0) window.scrollTo(0, 0)
     }

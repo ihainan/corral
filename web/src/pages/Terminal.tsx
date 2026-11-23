@@ -48,7 +48,7 @@ import { useSession, VERSION_EVENT } from '../app'
 import { Rail, StatusBar, StatusItem, useWorkbench } from '../workbench'
 import { geminiPath, shellPath } from '../terminal/paths'
 import { agentWho, BellFilter, ChimeCounter, chime, oscNotice } from '../terminal/chime'
-import { keyboardIsUp, usableHeight } from '../keyboardCover'
+import { keyboardIsUp } from '../keyboard'
 
 const isTouch = window.matchMedia('(pointer: coarse)').matches || navigator.maxTouchPoints > 0
 
@@ -1657,7 +1657,7 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
       // While the keyboard is up iOS may pan the visual viewport; follow it. When
       // it is down, ignore offsetTop: iOS 26 can leave a stale value behind.
       const keyboardUp = keyboardIsUp()
-      root.style.height = `${usableHeight(h, keyboardUp)}px`
+      root.style.height = `${Math.round(h)}px`
       root.style.transform = keyboardUp && vv ? `translateY(${Math.round(vv.offsetTop)}px)` : ''
 
       if (window.scrollY !== 0) window.scrollTo(0, 0)

@@ -9,7 +9,7 @@ import { getLang } from './i18n'
 import { App } from './app'
 import { askEarly } from './api'
 import { preloadTerminal } from './pages/lazyPages'
-import { keyboardIsUp, showKeyboardNumbers, usableHeight } from './keyboardCover'
+import { keyboardIsUp } from './keyboard'
 import './notifyopen' // listens from the start (see there)
 import { unlockChime } from './terminal/chime'
 
@@ -47,18 +47,15 @@ if ('serviceWorker' in navigator && location.protocol === 'https:') {
     // lost height is the keyboard.
     const keyboardUp = keyboardIsUp()
     const de = document.documentElement.style
-    de.setProperty('--vv-h', `${usableHeight(h, keyboardUp)}px`)
+    de.setProperty('--vv-h', `${Math.round(h)}px`)
     de.setProperty('--vv-top', keyboardUp && vv ? `${Math.round(vv.offsetTop)}px` : '0px')
     // (The key bar then sits on the keyboard: no room kept for the home indicator.)
     document.documentElement.classList.toggle('kb-open', keyboardUp)
-    showKeyboardNumbers(keyboardUp)
   }
   apply()
   vv?.addEventListener('resize', apply)
   vv?.addEventListener('scroll', apply)
   window.addEventListener('resize', apply)
-  document.addEventListener('focusin', apply) // (the readout: showKeyboardNumbers)
-  document.addEventListener('focusout', () => setTimeout(apply, 0))
 }
 
 unlockChime() // (sound lets itself be played from the first tap or key on: terminal/chime.ts)
