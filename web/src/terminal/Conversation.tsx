@@ -3093,6 +3093,21 @@ function Runs({ head, statusAt, modelAt, quiet, meta, goal, active, mode, model,
   // (The permission mode too, beside the model — as Claude Code says it under its own box, and T3 Code and
   // Codex's app in theirs: what the next message may do.)
   const modeToComposer = toComposer
+  // (Its composer's place come or gone while one of its menus is open — a dialog of the agent's own over the
+  // composer, or gone: the chip it hangs from moved between the composer and the status bar, its menu with it,
+  // the focus left on the page. Closed, the focus given to the chip where it is now. Review of 11-23.)
+  const slotWas = useRef(modelAt)
+  useEffect(() => {
+    if (slotWas.current === modelAt) return
+    slotWas.current = modelAt
+    if (open !== 'model' && open !== 'effort' && open !== 'mode') return
+    const which = open
+    setOpen(false)
+    requestAnimationFrame(() => {
+      if (document.activeElement && document.activeElement !== document.body) return
+      ;(which === 'model' ? modelBtn : which === 'effort' ? effortBtn : modeBtn).current?.focus()
+    })
+  }, [modelAt])
   const inside = (n: Node | null | undefined) => !!n && (!!box.current?.contains(n) || !!modelBox.current?.contains(n))
   const ctxBtn = useRef<HTMLButtonElement>(null)
   const modelBtn = useRef<HTMLButtonElement>(null)
@@ -3599,7 +3614,7 @@ function Runs({ head, statusAt, modelAt, quiet, meta, goal, active, mode, model,
       <>
         {modelPart}
         {bypass && !modeToComposer && (
-          <div className="convo-runs in-head">
+          <div className="convo-runs in-head is-bypass-mark">
             <span className="convo-runs-item convo-runs-mode is-bypass" title={t('convo.modeHint')}>
               {shownMode}
             </span>
