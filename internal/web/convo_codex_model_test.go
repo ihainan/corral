@@ -535,18 +535,35 @@ func TestCodexModelsCacheCommand(t *testing.T) {
 
 // A host's clock off the gateway's: fetched_at is aged by the host's clock and
 // told in the gateway's, so a switch's failure (gateway time) keeps refusing
-// the list read before it, and lets one read after it in (review E, 11-24).
+// the list read before it, and lets one read well after it in (review E, F,
+// G; 11-24). The shift is the earliest the clocks allow: at most a second
+// (and the command's time) early, never late.
 func TestCodexModelsCacheHostClockSkew(t *testing.T) {
 	gw := time.Date(2026, 11, 24, 12, 0, 0, 0, time.UTC)
 	out := func(hostNow, fetched time.Time) []byte {
-		return []byte("now=" + strconv.FormatInt(hostNow.Unix(), 10) + "\n" + `{"fetched_at":"` + fetched.Format(time.RFC3339) + `","models":[{"slug":"gpt-5.6","visibility":"list","supported_in_api":true}]}`)
+		return []byte("now=" + strconv.FormatInt(hostNow.Unix(), 10) + "\n" + `{"fetched_at":"` + fetched.Format(time.RFC3339Nano) + `","models":[{"slug":"gpt-5.6","visibility":"list","supported_in_api":true}]}`)
 	}
-	for _, skew := range []time.Duration{-30 * time.Minute, 0, 30 * time.Minute} {
-		host := gw.Add(skew)
-		// Read 10 minutes ago by the host's clock: 10 minutes ago by the gateway's.
-		_, at, ok := parseCodexModelsCacheAt(out(host, host.Add(-10*time.Minute)), gw)
-		if !ok || !at.Equal(gw.Add(-10*time.Minute)) {
-			t.Fatalf("skew %v: ok=%v at=%v, want %v", skew, ok, at, gw.Add(-10*time.Minute))
+	// rejected: what isCodexDiskCacheRejected does with a failure at fail.
+	rejected := func(at, fail time.Time) bool { return !at.After(fail) }
+	for _, skew := range []time.Duration{-30 * time.Minute, -10 * time.Second, -2 * time.Second, 0, 2 * time.Second, 10 * time.Second, 30 * time.Minute} {
+		// The command starts at gw (gateway) and prints within it, 0.4s in.
+		print := gw.Add(400 * time.Millisecond)
+		host := print.Add(skew).Truncate(time.Second)
+		hostAt := func(g time.Time) time.Time { return g.Add(skew) } // a gateway moment by the host's clock
+		// Read 10 minutes ago: about 10 minutes ago by the gateway's, never later.
+		want := gw.Add(-10 * time.Minute)
+		_, at, ok := parseCodexModelsCacheAt(out(host, hostAt(want)), gw)
+		if !ok || at.After(want) || at.Before(want.Add(-2*time.Second)) {
+			t.Fatalf("skew %v: ok=%v at=%v, want %v or up to 2s earlier", skew, ok, at, want)
+		}
+		// A switch failed at gw-2s: the list read at gw-2.5s stays refused; one read 5s after a failure is let in.
+		fail := gw.Add(-2 * time.Second)
+		if _, at, _ := parseCodexModelsCacheAt(out(host, hostAt(fail.Add(-500*time.Millisecond))), gw); !rejected(at, fail) {
+			t.Fatalf("skew %v: a list read before the failure let in (at %v, failure %v)", skew, at, fail)
+		}
+		later := gw.Add(-10 * time.Minute)
+		if _, at, _ := parseCodexModelsCacheAt(out(host, hostAt(later.Add(5*time.Second))), gw); rejected(at, later) {
+			t.Fatalf("skew %v: a list read 5s after the failure refused (at %v, failure %v)", skew, at, later)
 		}
 		// 11 hours old by the host's clock: still in its 12; 13: not, whatever the gateway's clock says.
 		if _, _, ok := parseCodexModelsCacheAt(out(host, host.Add(-11*time.Hour)), gw); !ok {
@@ -556,13 +573,14 @@ func TestCodexModelsCacheHostClockSkew(t *testing.T) {
 			t.Fatalf("skew %v: a 13-hour-old cache taken", skew)
 		}
 	}
-	// Clocks in step: the host's whole second and the command's own time are
-	// not a skew. A list read 0.4s before a failure stays before it.
-	fail := gw.Add(500 * time.Millisecond)
-	fetched := gw.Add(100 * time.Millisecond)
-	hostLine := []byte("now=" + strconv.FormatInt(gw.Unix(), 10) + "\n" + `{"fetched_at":"` + fetched.Format(time.RFC3339Nano) + `","models":[{"slug":"gpt-5.6","visibility":"list","supported_in_api":true}]}`)
-	if _, at, ok := parseCodexModelsCacheAt(hostLine, gw.Add(950*time.Millisecond)); !ok || !at.Equal(fetched) || at.After(fail) {
-		t.Fatalf("clocks in step: ok=%v at=%v, want %v (before the failure at %v)", ok, at, fetched, fail)
+	// Review F's case: clocks in step, read at .100, failure at .500, the host
+	// printing at .900: the list stays before the failure.
+	if _, at, _ := parseCodexModelsCacheAt(out(gw, gw.Add(100*time.Millisecond)), gw.Add(550*time.Millisecond)); !rejected(at, gw.Add(500*time.Millisecond)) {
+		t.Fatalf("review F: at %v let in", at)
+	}
+	// Review G's case: host 10s ahead, read at 12:00:15 (gateway), failure at 12:00:18.
+	if _, at, _ := parseCodexModelsCacheAt(out(gw.Add(30*time.Second), gw.Add(25*time.Second)), gw.Add(20*time.Second)); !rejected(at, gw.Add(18*time.Second)) {
+		t.Fatalf("review G: at %v let in", at)
 	}
 	// No clock line: the gateway's clock for both, as before.
 	raw := []byte(`{"fetched_at":"` + gw.Add(-time.Minute).Format(time.RFC3339) + `","models":[{"slug":"a","visibility":"list"}]}`)

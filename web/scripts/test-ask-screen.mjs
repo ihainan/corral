@@ -794,6 +794,20 @@ await run('reviewF-barOfSeveralAlwaysLatest', () => {
   assert.equal(r2.question, 'New question?')
 })
 
+await run('reviewG-questionWordsLikeHintsOrBars', () => {
+  const tail = ['Keep the rest unchanged?', '', '❯ 1. Yes', '  2. No', '  3. Type something.', 'Enter to select · ↑/↓ to navigate · Esc to cancel']
+  // Key-hint words in the question, a "☐" line under them.
+  const hinted = [R, '←  ☐ Copy  ☐ Next  ✔ Submit  →', '', 'Should "Enter to select" be shown on these pages?', '☐ Billing page', ...tail]
+  // A line of the question that looks like a bar of one.
+  const barlike = [R, '←  ☐ Copy  ☐ Next  ✔ Submit  →', '', 'Should the mockup contain this label?', '☐ Billing  ✔ Submit', ...tail]
+  for (const [name, screen, first] of [['hinted', hinted, 'Should "Enter to select"'], ['barlike', barlike, 'Should the mockup']]) {
+    const r = readAskScreen(screen.join('\n'))
+    assert.equal(r.kind, 'question', name)
+    assert.deepEqual(r.tabs.map((t) => t.label), ['Copy', 'Next'], name)
+    assert.ok(r.question.startsWith(first) && r.question.endsWith('Keep the rest unchanged?'), `${name}: ${r.question}`)
+  }
+})
+
 if (failures.length) {
   console.error(`askScreen: ${failures.length} test(s) failed:`)
   for (const f of failures) console.error(' -', f)

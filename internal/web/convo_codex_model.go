@@ -678,50 +678,45 @@ func parseCodexModelsCache(raw []byte, now time.Time) ([]modelOpt, time.Time, bo
 func (s *Server) readCodexModelsCache(ctx context.Context, sess *term.Session, pid int64) ([]modelOpt, time.Time, bool) {
 	cctx, cancel := context.WithTimeout(ctx, 6*time.Second)
 	defer cancel()
+	before := time.Now()
 	out, err := sshx.Output(cctx, sess.Client(), codexModelsCacheCommand(pid), codexModelsCacheMax)
 	if err != nil || len(out) > 4<<20 {
 		return nil, time.Time{}, false
 	}
-	return parseCodexModelsCacheAt(out, time.Now())
+	return parseCodexModelsCacheAt(out, before)
 }
 
 // parseCodexModelsCacheAt reads the command's output: its host's clock first
 // ("now=<unix seconds>"), then the cache. fetched_at is written by that host's
 // clock, so its age is judged by that clock, and it is told in the gateway's
-// (shifted by the two clocks' difference) to be held against a switch's
-// failure time, which is the gateway's — a host's clock ahead or behind no
-// longer lets a list the switch refused back in, or keeps a newer one out
-// (review E, 11-24). Without that line, the gateway's clock for both.
-func parseCodexModelsCacheAt(out []byte, gatewayNow time.Time) ([]modelOpt, time.Time, bool) {
-	hostNow := gatewayNow
-	if rest, ok := bytes.CutPrefix(out, []byte("now=")); ok {
-		line, body, found := bytes.Cut(rest, []byte("\n"))
-		if !found {
-			return nil, time.Time{}, false
-		}
-		sec, err := strconv.ParseInt(strings.TrimSpace(string(line)), 10, 64)
-		if err != nil || sec <= 0 {
-			return nil, time.Time{}, false
-		}
-		hostNow, out = time.Unix(sec, 0), body
+// to be held against a switch's failure time, which is the gateway's (review
+// E, 11-24). gatewayBefore is the gateway's clock taken before the command
+// ran. The host's line is whole seconds and the command takes a while, so the
+// two clocks' difference is known only to a range; the shift taken is the
+// range's earliest (the host's second just ending as it printed, the command
+// ending at once), so a list read before a failure is never moved after it —
+// at worst one read just after is refused, and the live list read instead
+// (review F, G). Without that line, fetched_at as written.
+func parseCodexModelsCacheAt(out []byte, gatewayBefore time.Time) ([]modelOpt, time.Time, bool) {
+	rest, ok := bytes.CutPrefix(out, []byte("now="))
+	if !ok {
+		return parseCodexModelsCache(out, gatewayBefore)
 	}
-	opts, fetchedAt, ok := parseCodexModelsCache(out, hostNow)
+	line, body, found := bytes.Cut(rest, []byte("\n"))
+	if !found {
+		return nil, time.Time{}, false
+	}
+	sec, err := strconv.ParseInt(strings.TrimSpace(string(line)), 10, 64)
+	if err != nil || sec <= 0 {
+		return nil, time.Time{}, false
+	}
+	hostNow := time.Unix(sec, 0)
+	opts, fetchedAt, ok := parseCodexModelsCache(body, hostNow)
 	if !ok {
 		return nil, time.Time{}, false
 	}
-	// The host's line is whole seconds, and the gateway's clock is read after
-	// the command ran: a difference that small is that, not the clocks', and
-	// shifting by it would move a list read just before a failure to after it
-	// (review F, 11-24).
-	skew := gatewayNow.Sub(hostNow)
-	if skew > -codexClockTolerance && skew < codexClockTolerance {
-		skew = 0
-	}
-	return opts, fetchedAt.Add(skew), true
+	return opts, fetchedAt.Add(gatewayBefore.Sub(hostNow) - time.Second), true
 }
-
-// codexClockTolerance: clocks closer than this are taken as one (see parseCodexModelsCacheAt).
-const codexClockTolerance = 15 * time.Second
 
 // keptCodexModels serves a previously read Codex model list immediately
 // without driving Codex's interactive /model picker or running locateScan.
