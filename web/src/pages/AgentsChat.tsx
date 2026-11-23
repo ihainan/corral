@@ -876,6 +876,8 @@ export function AgentsChat({ bar, active = true, onHead }: { bar?: ReactNode; ac
               {cur.s.persistence && cur.s.persistence !== 'none' ? ' · ' + cur.s.persistence : ''}
             </StatusItem>
           )}
+          {/* (The conversation in front fills this: its branch, the quota.) */}
+          <span className="wb-status-slot" />
         </StatusBar>
       )}
     </div>

@@ -710,6 +710,13 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 .convo-gauge circle { fill: none; stroke-width: 1.6; }
 .convo-gauge-track { stroke: var(--term-line); }
 .convo-gauge-fill { stroke: var(--term-fg-3); stroke-linecap: round; }
+.convo-gauge-tick { stroke: var(--term-fg-2); stroke-width: 1.2; stroke-linecap: round; }
+/* The row in the pane's header, on the workbench (11-23): beside the name, its menus opening below. */
+.convo-runs.in-head { flex: 0 1 auto; margin-top: 0; min-height: 0; gap: 2px; font-size: var(--fs-note); line-height: var(--lh-note); }
+.convo-runs.in-head .convo-runs-pop { top: calc(100% + 6px); bottom: auto; width: 320px; max-width: calc(100vw - 24px); } /* (its own width: the row is only as wide as what it says) */
+.convo-runs.in-head .convo-runs-pop.convo-modes { width: 300px; }
+.convo-runs.in-head .convo-runs-side-name { display: none; } /* (its icon and its title say it: the header has little room) */
+.convo-runs.in-head .convo-runs-pop.convo-modes { right: 0; left: auto; }
 .convo-gauge.is-full .convo-gauge-fill { stroke: var(--term-warn-text); }
 /* The composer's keys: said while one types, not over a box at rest. */
 .convo-dock .composer-keys { opacity: 0; transition: opacity 0.15s; }
@@ -723,6 +730,8 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 .convo-runs-item.is-switch svg { flex: none; opacity: 0.7; }
 .convo-runs-item.is-switch:hover:not(:disabled):not([aria-disabled='true']), .convo-runs-item.is-switch[aria-expanded='true'] { background: var(--term-hover); color: var(--term-fg); }
 .convo-runs-item.is-switch:focus-visible { outline: 2px solid var(--term-accent-text); outline-offset: 1px; }
+/* (Asking nothing before it acts: in red, wherever the mode is said — over the switches' own colours, hovered or open too.) */
+.convo-runs-item.convo-runs-mode.is-bypass, .convo-runs-item.convo-runs-mode.is-bypass:hover:not(:disabled):not([aria-disabled='true']), .convo-runs-item.convo-runs-mode.is-bypass[aria-expanded='true'] { color: var(--term-danger-text); }
 .convo-runs-item.is-switch:disabled, .convo-runs-item.is-switch[aria-disabled='true'] { cursor: progress; }
 .convo-runs-side { flex: none; }
 /* (Narrow: its icon alone, its name said by its label.) */

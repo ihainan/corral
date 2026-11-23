@@ -8,6 +8,7 @@ import { openSettingsModal } from '../pages/Settings'
 import { asHeld, buildAgentGroups, dayStart, FOLDED, foldAt, isLiveBlocked, listOrder, pinned, type ConvoListRow, type OrderOpts, type RowCmds } from './agentOrder'
 import { copyText, Dialog, DialogHead, isCoarse, Menu, MenuLayer, swallowNextClick, useToast, type MenuItem } from '../components/ui'
 import { saveFile } from '../saveFile'
+import { StatusItem, useWorkbench } from '../workbench'
 import { composing, foldAllKey, helpKey, jumpKey, onMac, sideKey, switchKey } from './pageKeys'
 import { keepNames, keptNames, local } from '../storage'
 import { useFlip } from '../flip'
@@ -318,6 +319,17 @@ export function ConversationView({
   const waits = agent?.status === 'blocked'
   // The list beside the thread: where the view is wide enough, unless folded away (kept on this device).
   const root = useRef<HTMLDivElement>(null)
+  // On the workbench (its page's root says so: 760 and up, the tabs): the
+  // model and the rest in the header, the branch and the quota on the
+  // status bar (its slot, in this page's root) — not under the composer.
+  const wbWide = useWorkbench()
+  const [wbSlot, setWbSlot] = useState<Element | null>(null)
+  useLayoutEffect(() => {
+    const page = root.current?.closest('.term-root')
+    const slot = page?.classList.contains('wb-on') ? page.querySelector('.wb-status-slot') : null
+    setWbSlot((was) => (was === slot ? was : slot))
+  })
+  const inWb = wbWide && !!wbSlot
   const [wide, setWide] = useState(false)
   const [viewW, setViewW] = useState(0)
   const [viewH, setViewH] = useState(0)
@@ -1745,6 +1757,26 @@ export function ConversationView({
     lineageChildren.find((c) => c.status === 'working') ??
     lineageChildren.find((c) => c.status === 'done') ??
     lineageChildren[0]
+  // The model, how hard it thinks, the context, the mode: under the
+  // composer, or on the workbench in the pane's header (11-23).
+  const runsAt = (head: boolean) =>
+    convo.status === 'ready' && convo.meta ? (
+      <Runs
+          head={head}
+          meta={convo.meta}
+          goal={convo.bind?.agent === 'codex' ? goal : undefined}
+          active={active}
+          mode={mode}
+          model={model}
+          effort={effort}
+          quota={quotaOf}
+          via={convo.bind?.via}
+          auth={convo.bind?.auth}
+          agentKind={convo.bind?.agent ?? agent?.program}
+          compactPre={convo.entries.findLast((e) => e.role === 'note' && (e.parts[0]?.event?.kind === 'compact' || e.parts[0]?.event?.kind === 'idle_compact') && (e.parts[0]?.event?.pre ?? 0) > 0)?.parts[0]?.event?.pre}
+          onSide={sideBind ? () => setBtwShown(sideIdent) : undefined}
+        />
+    ) : null
   return (
     <OpenAllOf.Provider value={allOpen}>
     <ForkAtOf.Provider value={forkAt}>
@@ -1849,6 +1881,7 @@ export function ConversationView({
           ) : (
             <span className="convo-bar-pick is-static" title={barTip || undefined}>{label}</span>
           )}
+          {inWb && runsAt(true)}
           {(() => {
             const cls = 'convo-bar-status' + (agent && !convo.failing && !stop ? ' is-' + (agent.bg === 'running' || agent.bg === 'checking' ? 'working' : answered && waits ? 'answered' : agent.status) : '')
             const says = (
@@ -2220,22 +2253,9 @@ export function ConversationView({
           />
         )}
         {composer}
-        {convo.status === 'ready' && convo.meta && (
-          <Runs
-            meta={convo.meta}
-            goal={convo.bind?.agent === 'codex' ? goal : undefined}
-            active={active}
-            mode={mode}
-            model={model}
-            effort={effort}
-            quota={quotaOf}
-            via={convo.bind?.via}
-            auth={convo.bind?.auth}
-            agentKind={convo.bind?.agent ?? agent?.program}
-            compactPre={convo.entries.findLast((e) => e.role === 'note' && (e.parts[0]?.event?.kind === 'compact' || e.parts[0]?.event?.kind === 'idle_compact') && (e.parts[0]?.event?.pre ?? 0) > 0)?.parts[0]?.event?.pre}
-            onSide={sideBind ? () => setBtwShown(sideIdent) : undefined}
-          />
-        )}
+        {!inWb && runsAt(false)}
+        {/* (The pane the keys go to says its branch and quota on the status bar.) */}
+        {inWb && kActive && wbSlot && createPortal(<StatusFacts meta={convo.status === 'ready' ? convo.meta : undefined} via={convo.bind?.via} auth={convo.bind?.auth} quota={convo.status === 'ready' ? quotaOf : undefined} />, wbSlot)}
       </div>
       </div>
       {splitShown && splitPane && (
@@ -3005,7 +3025,7 @@ function compactThreshold(window: number, agentKind?: string, observedPre?: numb
   return { at, pct: Math.round(ratio * 100), source: 'estimate' }
 }
 
-function Runs({ meta, goal, active, mode, model, effort, quota, via, auth, agentKind, compactPre, onSide }: { meta: ConvoMeta; goal?: string; active: boolean; mode?: ModeSwitch; model?: ModelSwitch; effort?: EffortSwitch; quota?: QuotaOf; via?: string; auth?: string; agentKind?: string; compactPre?: number; onSide?: () => void }) {
+function Runs({ head, meta, goal, active, mode, model, effort, quota, via, auth, agentKind, compactPre, onSide }: { head?: boolean; meta: ConvoMeta; goal?: string; active: boolean; mode?: ModeSwitch; model?: ModelSwitch; effort?: EffortSwitch; quota?: QuotaOf; via?: string; auth?: string; agentKind?: string; compactPre?: number; onSide?: () => void }) {
   const [open, setOpen] = useState<false | 'ctx' | 'model' | 'effort' | 'mode'>(false) // (which of its pop-ups)
   const [modelFilter, setModelFilter] = useState('')
   // (Another agent bound meanwhile — the pane's program changed: its model and effort menus, of the one before, closed;
@@ -3110,7 +3130,14 @@ function Runs({ meta, goal, active, mode, model, effort, quota, via, auth, agent
       // context's details had the least room of the four and the most to
       // say.)
       pop.style.bottom = ''
-      pop.style.maxHeight = Math.max(0, Math.min(at.top - (vv ? vv.offsetTop : 0), seen) - 16) + 'px'
+      // (In the pane's header, on the workbench: below it, down to the bottom of what can be seen.)
+      // (Not past its own pane either: split one over another, the lower pane would cover the rest.)
+      if (head) {
+        const pane = box.current.closest('.convo-main, .convo-split-pane')?.getBoundingClientRect()
+        const end = Math.min(vv ? vv.offsetTop + vv.height : window.innerHeight, pane ? pane.bottom : Infinity)
+        pop.style.maxHeight = Math.max(0, end - at.bottom - 16) + 'px'
+      }
+      else pop.style.maxHeight = Math.max(0, Math.min(at.top - (vv ? vv.offsetTop : 0), seen) - 16) + 'px'
     }
     fit()
     vv?.addEventListener('resize', fit)
@@ -3121,7 +3148,7 @@ function Runs({ meta, goal, active, mode, model, effort, quota, via, auth, agent
       vv?.removeEventListener('scroll', fit)
       window.removeEventListener('resize', fit)
     }
-  }, [open, sheet])
+  }, [open, sheet, head])
   // Where its requests go, when that is not the model maker's own door:
   // the host, or, for Amazon's and Google's, which have no address of their
   // own to show, their name. "" is the quiet case, most of them.
@@ -3191,16 +3218,20 @@ function Runs({ meta, goal, active, mode, model, effort, quota, via, auth, agent
   const windows = known ? [known] : WINDOWS.filter((w) => w >= used || w === WINDOWS[WINDOWS.length - 1])
   // (The gauge: of its window, else of the smaller it may be.)
   const full = Math.min(1, used / windows[0])
+  // (Where it compacts of itself, a mark on the gauge — as on the bar in its details.)
+  const tick = used > 0 ? Math.min(1, compactThreshold(windows[0], agentKind, compactPre, meta.auto_compact).at / windows[0]) : 0
+  // (Asking nothing before it acts: said in red where it is, not as any other mode — workbench 11-23.)
+  const bypass = !collabNow && !mode?.agy && (mode?.now || meta.mode) === 'bypassPermissions'
   const modelShowsEffort = !!shownEffort && !!shownModel && (merged || !model || !!(model.efforts && model.can) || !(effort?.can || effort?.busy))
   return (
     // (The focus gone elsewhere, as by Tab, while the model menu is open, the list read or not: closed.)
-    <div className={'convo-runs' + (used > 0 ? ' has-ctx' : '')} ref={box} onBlur={(e) => (open === 'model' || open === 'effort' || open === 'mode') && !box.current?.contains(e.relatedTarget as Node | null) && setOpen(false)}>
+    <div className={'convo-runs' + (used > 0 ? ' has-ctx' : '') + (head ? ' in-head' : '')} ref={box} onBlur={(e) => (open === 'model' || open === 'effort' || open === 'mode') && !box.current?.contains(e.relatedTarget as Node | null) && setOpen(false)}>
       {(mode?.now || meta.mode || (mode?.codex && meta.collab) || (mode?.agy && mode.onPick)) &&
         (mode?.onPick || mode?.busy ? (
           <button
             ref={modeBtn}
             type="button"
-            className="convo-runs-item convo-runs-mode is-switch"
+            className={'convo-runs-item convo-runs-mode is-switch' + (bypass ? ' is-bypass' : '')}
             aria-expanded={open === 'mode'}
             aria-haspopup="menu"
             aria-disabled={mode.busy || undefined}
@@ -3213,7 +3244,7 @@ function Runs({ meta, goal, active, mode, model, effort, quota, via, auth, agent
             {!mode.busy && <ChevronsUpDown size={12} aria-hidden="true" />}
           </button>
         ) : (
-          <span className="convo-runs-item convo-runs-mode" title={t('convo.modeHint')}>
+          <span className={'convo-runs-item convo-runs-mode' + (bypass ? ' is-bypass' : '')} title={t('convo.modeHint')}>
             {shownMode}
           </span>
         ))}
@@ -3230,8 +3261,9 @@ function Runs({ meta, goal, active, mode, model, effort, quota, via, auth, agent
           <span className="convo-runs-side-name">{t('side.item')}</span>
         </button>
       )}
-      <span className="spacer" />
-      {meta.branch && (
+      {!head && <span className="spacer" />}
+      {/* (In the header the branch and where requests go are the status bar's.) */}
+      {meta.branch && !head && (
         <span className="convo-runs-item convo-runs-branch" title={t('convo.branch', { b: meta.branch })}>
           <GitBranch size={13} aria-hidden="true" />
           <span className="convo-runs-branch-name">{meta.branch}</span>
@@ -3330,14 +3362,14 @@ function Runs({ meta, goal, active, mode, model, effort, quota, via, auth, agent
         })()}
       {/* Where its requests go, when that is somewhere of the person's own
           choosing: the host and nothing else of the address. */}
-      {where && (
+      {where && !head && (
         <span className="convo-runs-item convo-runs-via" title={t('convo.viaHint', { host: where })}>
           {t('convo.via', { host: where })}
         </span>
       )}
       {used > 0 && (
         <button type="button" className="convo-runs-item convo-runs-ctx" aria-expanded={open === 'ctx'} aria-label={t('convo.ctxLabel', { n: tokens(used) })} title={t('convo.ctxLabel', { n: tokens(used) })} onClick={() => setOpen(open === 'ctx' ? false : 'ctx')}>
-          <Gauge part={full} />
+          <Gauge part={full} tick={tick} />
           {tokens(used)}
         </button>
       )}
@@ -3722,6 +3754,85 @@ function QuotaSaid({ quota }: { quota?: ConvoQuota }) {
   )
 }
 
+// How a window's use is coloured, wherever it is shown (the details' bars, the status bar).
+const quotaTone = (used: number) => (used >= 95 ? ' is-danger' : used >= 80 ? ' is-warn' : '')
+
+// The quota on the workbench's status bar: the two windows' use, short,
+// coloured as their bars are. Read as the details read it, less often (a
+// read is the host's): what the details read meanwhile is taken. Not read
+// behind another tab. (A Codex's: as its log said it, nothing read.)
+const QUOTA_BAR_EVERY = 5 * 60000
+export function QuotaChip({ of }: { of: QuotaOf }) {
+  useRedraw(30000)
+  const codex = 'codex' in of
+  const key = codex ? '' : of.sid + ' ' + of.session + (of.agent ? ' ' + of.agent : '')
+  const [seen, setSeen] = useState(() => (key ? quotaSeen.get(key) : undefined))
+  useEffect(() => {
+    if (codex) return
+    let live = true
+    setSeen(quotaSeen.get(key))
+    const look = () => {
+      if (document.hidden) return
+      const was = quotaSeen.get(key)
+      if (was && Date.now() - was.at < QUOTA_BAR_EVERY) return setSeen(was) // (failed too: not asked again sooner)
+      void askQuota(of.sid, of.session, key, of.agent).then((v) => live && setSeen(v))
+    }
+    look()
+    const timer = setInterval(look, QUOTA_EVERY)
+    document.addEventListener('visibilitychange', look)
+    return () => {
+      live = false
+      clearInterval(timer)
+      document.removeEventListener('visibilitychange', look)
+    }
+  }, [key]) // eslint-disable-line react-hooks/exhaustive-deps
+  const failed = !codex && seen?.q === 'failed'
+  const shown = codex ? of.said : !seen ? undefined : seen.q === 'failed' ? seen.last : seen.q.known ? seen.q : undefined
+  const now = Date.now() / 1000
+  // (agy's by model family: of each window, the family that has used the most.)
+  const groups = shown && 'groups' in shown ? shown.groups : undefined
+  const most = (pick: (g: QuotaGroup) => ConvoQuotaWindow | undefined) =>
+    groups?.map(pick).filter((w): w is ConvoQuotaWindow => !!w && w.resets_at > now).sort((a, b) => b.used - a.used)[0]
+  const wins = (
+    [
+      ['quota.fiveHour', shown?.five_hour ?? most((g) => g.five_hour)],
+      ['quota.weekly', shown?.weekly ?? most((g) => g.weekly)],
+    ] as const
+  ).filter(([, w]) => w && w.resets_at > now)
+  if (!wins.length) return failed ? <StatusItem title={t('quota.failed')}>{t('wb.quotaNone')}</StatusItem> : null
+  const at = failed ? (seen?.lastAt ?? 0) / 1000 : shown?.updated_at
+  const title = [t('quota.title'), at ? t('wb.quotaAt', { at: quotaClock(at) }) : '', failed ? t('quota.failed') : ''].filter(Boolean).join(' · ')
+  return (
+    <StatusItem title={title}>
+      <span className={'wb-quota' + (failed ? ' is-stale' : '')}>
+        {wins.map(([name, w]) => (
+          <span key={name} className={'wb-quota-win' + quotaTone(w!.used)}>
+            {t(name)} {Math.round(w!.used)}%
+          </span>
+        ))}
+      </span>
+    </StatusItem>
+  )
+}
+
+// What the pane in front says on the workbench's status bar: its branch,
+// where its requests go, the subscription's quota.
+function StatusFacts({ meta, via, auth, quota }: { meta?: ConvoMeta; via?: string; auth?: string; quota?: QuotaOf }) {
+  const where = via || (auth === 'bedrock' ? 'Amazon Bedrock' : auth === 'vertex' ? 'Google Vertex AI' : '')
+  return (
+    <>
+      {meta?.branch && (
+        <StatusItem title={t('convo.branch', { b: meta.branch })}>
+          <GitBranch size={12} aria-hidden="true" />
+          {meta.branch}
+        </StatusItem>
+      )}
+      {where && <StatusItem title={t('convo.viaHint', { host: where })}>{t('convo.via', { host: where })}</StatusItem>}
+      {quota && <QuotaChip key={'codex' in quota ? 'codex' : quota.sid + ' ' + quota.session} of={quota} />}
+    </>
+  )
+}
+
 // useRedraw: drawn again each so often while shown (a quota's window reset,
 // its figures grown old, are said so with nothing else changing).
 function useRedraw(ms: number) {
@@ -3810,7 +3921,7 @@ function QuotaView({ shown, children }: { shown?: { five_hour?: ConvoQuotaWindow
                   <span>{w.resets_at <= now ? t('quota.reset') : t('quota.used', { n: Math.round(w.used), at: clock(w.resets_at) })}</span>
                 </div>
                 {w.resets_at > now && (
-                  <div className={'convo-runs-bar' + (w.used >= 95 ? ' is-danger' : w.used >= 80 ? ' is-warn' : '')}>
+                  <div className={'convo-runs-bar' + quotaTone(w.used)}>
                     <i style={{ width: Math.min(100, w.used) + '%' }} />
                   </div>
                 )}
@@ -3894,13 +4005,17 @@ function costModelName(id: string): string {
 }
 
 // How full the context is, as a ring: past 80%, in the warning colour.
-function Gauge({ part }: { part: number }) {
+function Gauge({ part, tick }: { part: number; tick?: number }) {
   const r = 5.5
   const c = 2 * Math.PI * r
+  // (tick: where it compacts of itself, as a part of the window — a short stroke across the ring.)
+  const a = tick ? tick * 2 * Math.PI - Math.PI / 2 : 0
+  const at = (k: number) => [(7 + k * Math.cos(a)).toFixed(2), (7 + k * Math.sin(a)).toFixed(2)]
   return (
     <svg className={'convo-gauge' + (part >= 0.8 ? ' is-full' : '')} viewBox="0 0 14 14" width="14" height="14" aria-hidden="true">
       <circle cx="7" cy="7" r={r} className="convo-gauge-track" />
       <circle cx="7" cy="7" r={r} className="convo-gauge-fill" strokeDasharray={`${(part * c).toFixed(2)} ${c.toFixed(2)}`} transform="rotate(-90 7 7)" />
+      {!!tick && tick < 1 && <line className="convo-gauge-tick" x1={at(r - 2.2)[0]} y1={at(r - 2.2)[1]} x2={at(r + 1.4)[0]} y2={at(r + 1.4)[1]} />}
     </svg>
   )
 }
