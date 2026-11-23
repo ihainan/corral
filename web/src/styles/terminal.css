@@ -747,6 +747,7 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 /* (On the status bar, the pane in front's: its mode, model, context as the bar's items, their menus opening upwards.) */
 .convo-runs.in-status { flex: none; position: relative; margin: 0; min-height: 0; gap: 14px; font: inherit; color: inherit; }
 .convo-runs.in-status .convo-runs-item { height: 22px; padding: 0 6px; margin: 0 -6px; color: inherit; font: inherit; }
+@media (pointer: coarse) { .convo-runs.in-status .convo-runs-item { height: 34px; } } /* (the bar 36 high there: app.css --wb-status) */
 .convo-runs.in-status > :last-child { margin-right: 0; } /* (its hover's tint not cut by the bar's edge) */
 .convo-runs.in-status .convo-runs-goal { display: block; max-width: 200px; overflow: hidden; text-overflow: ellipsis; } /* (its row does not shrink: what is past the bar's room is cut at its end, nothing over another) */
 .convo-runs.in-status .convo-runs-pop { position: fixed; top: auto; right: auto; width: 320px; max-width: calc(100vw - 24px); } /* (left and bottom: set as it opens, see Runs' fit) */

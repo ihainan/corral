@@ -40,7 +40,8 @@
   --pad-x: 16px;
   --ease: cubic-bezier(0.2, 0.8, 0.2, 1);
   --sidebar: 224px;
-  --wb-rail: 52px; --wb-status: 26px; /* the workbench's icon rail and status bar (workbench.tsx) */
+  --wb-rail: 52px; --wb-status: calc(26px + env(safe-area-inset-bottom, 0px)); /* the workbench's icon rail and status bar (workbench.tsx);
+     the bar above a tablet's home bar, as an app it is at the screen's edge (viewport-fit=cover) — 11-23 */
   /* The scale everything is set in (chat redesign, 11-04; put in force 11-07).
      Each role has ONE size and ONE line, and text takes them together, from
      the pair below — never a size with a line of its own choosing. That is
@@ -188,11 +189,13 @@ code, .mono { font-family: var(--font-mono); font-size: var(--fs-sub); }
 }
 .wb-status {
   position: absolute; left: 0; right: 0; bottom: 0; height: var(--wb-status); z-index: 30;
-  display: flex; align-items: center; gap: 14px; padding: 0 12px 0 max(12px, env(safe-area-inset-left, 0px));
+  display: flex; align-items: center; gap: 14px; padding: 0 max(12px, env(safe-area-inset-right, 0px)) env(safe-area-inset-bottom, 0px) max(12px, env(safe-area-inset-left, 0px));
   background: var(--wb-chrome, var(--bg-subtle)); border-top: 1px solid var(--wb-line, var(--line));
   font-size: var(--fs-note); line-height: var(--lh-note); color: var(--wb-fg-3, var(--fg-3));
   white-space: nowrap; overflow: hidden;
 }
+/* (A touch screen, a tablet's: the bar's buttons — its context, its counts — high enough to touch, 22 was not — 11-23) */
+@media (pointer: coarse) { :root { --wb-status: calc(36px + env(safe-area-inset-bottom, 0px)); } }
 .wb-status-left { display: flex; align-items: center; gap: 14px; min-width: 0; overflow: clip; } /* (clip, not hidden: a button in it focused scrolled it, its first mark pushed out — 11-23) */
 .wb-status-gap { flex: 1; }
 .wb-status-slot { display: contents; }
