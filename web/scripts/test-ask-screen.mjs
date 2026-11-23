@@ -711,6 +711,50 @@ await run('fix3-3-latestTabBarWithoutDivider', () => {
   assert.equal(r.question, 'New question?')
 })
 
+// 21. [FIX4 #1] Standalone "☐ ..." line inside question body must not hijack multi-tab bar (repro/d1-bodybox.txt)
+await run('fix4-1-uncheckedBoxInQuestionBody', () => {
+  const bodyBox = [
+    '────────────────────────────────────────',
+    '←  ☐ Plan  ☐ Next  ✔ Submit  →',
+    '',
+    'Which items should ship tonight?',
+    '☐ Billing page',
+    '  the rest waits',
+    '',
+    '❯ 1. Yes',
+    '  2. No',
+    '  3. Type something.',
+    '────────────────────────────────────────',
+    '  Chat about this',
+    '',
+    'Enter to select · ↑/↓ to navigate · Esc to cancel',
+  ].join('\n')
+  const r = readAskScreen(bodyBox)
+  assert.equal(r.kind, 'question', `d1-bodybox.txt must parse as question, got ${r.kind}`)
+  assert.deepEqual(r.tabs, [
+    { label: 'Plan', answered: false },
+    { label: 'Next', answered: false },
+  ])
+  assert.equal(r.question, 'Which items should ship tonight? ☐ Billing page the rest waits')
+
+  // A real lone question separated by a divider rule from an older multi-tab dialog stays lone.
+  const loneAfterRule = [
+    '←  ☒ OldA  ☒ OldB  ✔ Submit  →',
+    '────────────────────────────────────────',
+    '☐ Solo',
+    '',
+    'Ship this single change?',
+    '❯ 1. Yes',
+    '  2. No',
+    '  3. Type something.',
+    'Enter to select · ↑/↓ to navigate · Esc to cancel',
+  ].join('\n')
+  const rSolo = readAskScreen(loneAfterRule)
+  assert.equal(rSolo.kind, 'question')
+  assert.deepEqual(rSolo.tabs, [])
+  assert.equal(rSolo.question, 'Ship this single change?')
+})
+
 if (failures.length) {
   console.error(`askScreen: ${failures.length} test(s) failed:`)
   for (const f of failures) console.error(' -', f)

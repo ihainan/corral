@@ -379,10 +379,15 @@ func TestCodexDiskCacheTimestampAndRejection(t *testing.T) {
 	ctx := context.Background()
 	const hostID int64 = 904001
 	const via = "gw.example"
+	const expiredHostID int64 = 904002
+	key := codexModelStoreKey(hostID, via, "")
+	expiredKey := codexModelStoreKey(expiredHostID, via, "")
 	t.Cleanup(func() {
-		srv.forgetCodexModels(ctx, hostID, via, "")
 		codexModelsCacheMu.Lock()
-		delete(codexRejectedDiskAt, codexModelStoreKey(hostID, via, ""))
+		delete(codexModelsCache, key)
+		delete(codexModelsCache, expiredKey)
+		delete(codexRejectedDiskAt, key)
+		delete(codexRejectedDiskAt, expiredKey)
 		codexModelsCacheMu.Unlock()
 	})
 
@@ -394,7 +399,8 @@ func TestCodexDiskCacheTimestampAndRejection(t *testing.T) {
 		t.Fatalf("expired fetched_at should not be served from keptCodexModelsFor")
 	}
 
-	// 2. Fresh disk cache is served; after forgetCodexModels (switch failure), that exact fetched_at is rejected.
+	// 2. Fresh disk cache is served; after forgetCodexModels (switch failure), fetched_at <= failure time is rejected,
+	// while a strictly newer fetched_at (after failure time) is accepted.
 	freshFetched := time.Now().Add(-30 * time.Minute).UTC().Truncate(time.Second)
 	srv.noteCodexDiskModels(ctx, hostID, via, "", []modelOpt{{Label: "GPT-5.6 (Sol)", Slug: "gpt-5.6"}}, freshFetched)
 	rec := httptest.NewRecorder()
@@ -406,12 +412,44 @@ func TestCodexDiskCacheTimestampAndRejection(t *testing.T) {
 	}
 	srv.forgetCodexModels(ctx, hostID, via, "")
 	if !isCodexDiskCacheRejected(hostID, via, "", freshFetched) {
-		t.Fatalf("same disk fetched_at must be rejected after forgetCodexModels")
+		t.Fatalf("old disk fetched_at (<= failure time) must be rejected after forgetCodexModels")
 	}
-	// A newer models_cache.json with a later fetched_at is NOT rejected.
-	newerFetched := freshFetched.Add(5 * time.Minute)
+	newerFetched := time.Now().Add(time.Second).UTC().Truncate(time.Second)
 	if isCodexDiskCacheRejected(hostID, via, "", newerFetched) {
-		t.Fatalf("newer disk fetched_at should not be rejected")
+		t.Fatalf("disk fetched_at strictly after failure time should be accepted")
+	}
+
+	// 3. A subsequent live TUI read (noteCodexModels) must NOT clear the disk rejection timestamp:
+	// the same stale on-disk file remains rejected if needed later.
+	srv.noteCodexModels(ctx, hostID, via, "", []modelOpt{{Label: "GPT-5.6 (Sol)"}})
+	if !isCodexDiskCacheRejected(hostID, via, "", freshFetched) {
+		t.Fatalf("live TUI read must not clear disk rejection for older fetched_at")
+	}
+
+	// 4. Simulated restart (in-memory maps cleared, as if list was recovered from SQLite):
+	// calling forgetCodexModels must still record rejection for older disk files.
+	codexModelsCacheMu.Lock()
+	delete(codexModelsCache, key)
+	delete(codexRejectedDiskAt, key)
+	codexModelsCacheMu.Unlock()
+	srv.forgetCodexModels(ctx, hostID, via, "")
+	if !isCodexDiskCacheRejected(hostID, via, "", freshFetched) {
+		t.Fatalf("forgetCodexModels after restart (empty memory) must still reject older disk fetched_at")
+	}
+
+	// 5. Expired entries in both codexModelsCache and codexRejectedDiskAt are pruned on writes.
+	staleTime := time.Now().Add(-codexDiskCacheMaxAge - time.Minute)
+	codexModelsCacheMu.Lock()
+	codexModelsCache[expiredKey] = codexModelCacheEntry{opts: []modelOpt{{Label: "Stale"}}, at: staleTime}
+	codexRejectedDiskAt[expiredKey] = staleTime
+	codexModelsCacheMu.Unlock()
+	srv.noteCodexModels(ctx, hostID, via, "", []modelOpt{{Label: "Fresh"}})
+	codexModelsCacheMu.Lock()
+	_, cacheStillThere := codexModelsCache[expiredKey]
+	_, rejStillThere := codexRejectedDiskAt[expiredKey]
+	codexModelsCacheMu.Unlock()
+	if cacheStillThere || rejStillThere {
+		t.Fatalf("expected expired map entries to be pruned, cache=%v rejected=%v", cacheStillThere, rejStillThere)
 	}
 }
 

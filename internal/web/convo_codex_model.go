@@ -441,9 +441,21 @@ var (
 	codexModelFronts    sync.Map // modelFrontKey → codexModelFront
 	codexModelsCacheMu  sync.Mutex
 	codexModelsCache    = map[string]codexModelCacheEntry{}
-	codexLastDiskAt     = map[string]time.Time{} // key → fetched_at of the last disk cache served
-	codexRejectedDiskAt = map[string]time.Time{} // key → fetched_at invalidated after a switch failure
+	codexRejectedDiskAt = map[string]time.Time{} // key → time of last switch failure; disk caches with fetched_at <= this are skipped
 )
+
+func pruneCodexCachesLocked(now time.Time) {
+	for k, ent := range codexModelsCache {
+		if now.Sub(ent.at) >= lineListFor {
+			delete(codexModelsCache, k)
+		}
+	}
+	for k, rej := range codexRejectedDiskAt {
+		if now.Sub(rej) > codexDiskCacheMaxAge {
+			delete(codexRejectedDiskAt, k)
+		}
+	}
+}
 
 func codexModelStoreKey(hostID int64, via, auth string) string {
 	return "codex:" + strconv.FormatInt(hostID, 10) + "\x00" + via + "\x00" + auth
@@ -460,14 +472,14 @@ func noteCodexModelFront(key string, f codexModelFront) {
 }
 
 func (s *Server) noteCodexModels(ctx context.Context, hostID int64, via, auth string, opts []modelOpt) {
-	s.noteCodexModelsAt(ctx, hostID, via, auth, opts, time.Now(), false)
+	s.noteCodexModelsAt(ctx, hostID, via, auth, opts, time.Now())
 }
 
 func (s *Server) noteCodexDiskModels(ctx context.Context, hostID int64, via, auth string, opts []modelOpt, fetchedAt time.Time) {
-	s.noteCodexModelsAt(ctx, hostID, via, auth, opts, fetchedAt, true)
+	s.noteCodexModelsAt(ctx, hostID, via, auth, opts, fetchedAt)
 }
 
-func (s *Server) noteCodexModelsAt(ctx context.Context, hostID int64, via, auth string, opts []modelOpt, at time.Time, fromDisk bool) {
+func (s *Server) noteCodexModelsAt(ctx context.Context, hostID int64, via, auth string, opts []modelOpt, at time.Time) {
 	if len(opts) == 0 {
 		return
 	}
@@ -477,14 +489,10 @@ func (s *Server) noteCodexModelsAt(ctx context.Context, hostID int64, via, auth 
 		clean[i] = o
 	}
 	key := codexModelStoreKey(hostID, via, auth)
+	now := time.Now()
 	codexModelsCacheMu.Lock()
+	pruneCodexCachesLocked(now)
 	codexModelsCache[key] = codexModelCacheEntry{opts: clean, at: at}
-	if fromDisk {
-		codexLastDiskAt[key] = at
-	} else {
-		delete(codexLastDiskAt, key)
-		delete(codexRejectedDiskAt, key)
-	}
 	codexModelsCacheMu.Unlock()
 	if s.store != nil {
 		if raw, err := json.Marshal(clean); err == nil {
@@ -495,12 +503,11 @@ func (s *Server) noteCodexModelsAt(ctx context.Context, hostID int64, via, auth 
 
 func (s *Server) forgetCodexModels(ctx context.Context, hostID int64, via, auth string) {
 	key := codexModelStoreKey(hostID, via, auth)
+	now := time.Now()
 	codexModelsCacheMu.Lock()
+	pruneCodexCachesLocked(now)
 	delete(codexModelsCache, key)
-	if at, ok := codexLastDiskAt[key]; ok && !at.IsZero() {
-		codexRejectedDiskAt[key] = at
-		delete(codexLastDiskAt, key)
-	}
+	codexRejectedDiskAt[key] = now
 	codexModelsCacheMu.Unlock()
 	if s.store != nil {
 		_ = s.store.DeleteModelList(context.WithoutCancel(ctx), key)
@@ -519,7 +526,7 @@ func isCodexDiskCacheRejected(hostID int64, via, auth string, fetchedAt time.Tim
 		delete(codexRejectedDiskAt, key)
 		return false
 	}
-	return rej.Equal(fetchedAt)
+	return !fetchedAt.After(rej)
 }
 
 const (

@@ -3211,13 +3211,17 @@ function Runs({ head, statusAt, modelAt, quiet, meta, goal, active, mode, model,
     if (!open) return
     const vv = window.visualViewport
     const dockEl = box.current?.closest('.convo-dock') as HTMLElement | null
-    const fit = () => {
+    const dockContentWidth = (el: HTMLElement) => {
+      const cs = getComputedStyle(el)
+      return el.clientWidth - (parseFloat(cs.paddingLeft) || 0) - (parseFloat(cs.paddingRight) || 0)
+    }
+    const fit = (measuredDockW?: number) => {
       const holder = (open === 'model' || open === 'effort' || (open === 'mode' && modeToComposer)) && modelBox.current ? modelBox.current : box.current
       const pop = popHost.current?.querySelector<HTMLElement>('.convo-runs-pop')
       if (!pop || !holder) return
-      // Portaled popups sit outside .convo-dock, so mirror the 560px / 470px
-      // container-query breakpoints onto the popup element for is-narrow-only rows.
-      const dockW = dockEl ? dockEl.getBoundingClientRect().width : Infinity
+      // Portaled popups sit outside .convo-dock, so mirror @container convo-dock's
+      // 560px / 470px content-box width breakpoints onto the popup element.
+      const dockW = dockEl ? (measuredDockW ?? dockContentWidth(dockEl)) : Infinity
       pop.classList.toggle('is-dock-narrow-via', dockW <= 560)
       pop.classList.toggle('is-dock-narrow-branch', dockW <= 470)
       const seen = vv ? vv.height : window.innerHeight
@@ -3256,17 +3260,18 @@ function Runs({ head, statusAt, modelAt, quiet, meta, goal, active, mode, model,
         pop.style.maxHeight = Math.max(0, Math.round(roomAbove)) + 'px'
       }
     }
+    const onResize = () => fit()
     fit()
-    const ro = dockEl && typeof ResizeObserver !== 'undefined' ? new ResizeObserver(fit) : null
+    const ro = dockEl && typeof ResizeObserver !== 'undefined' ? new ResizeObserver((entries) => fit(entries[0]?.contentRect.width)) : null
     if (ro && dockEl) ro.observe(dockEl)
-    vv?.addEventListener('resize', fit)
-    vv?.addEventListener('scroll', fit)
-    window.addEventListener('resize', fit)
+    vv?.addEventListener('resize', onResize)
+    vv?.addEventListener('scroll', onResize)
+    window.addEventListener('resize', onResize)
     return () => {
       ro?.disconnect()
-      vv?.removeEventListener('resize', fit)
-      vv?.removeEventListener('scroll', fit)
-      window.removeEventListener('resize', fit)
+      vv?.removeEventListener('resize', onResize)
+      vv?.removeEventListener('scroll', onResize)
+      window.removeEventListener('resize', onResize)
     }
   }, [open, sheet, head, statusAt, modelAt, modeToComposer, model?.list, model?.unread, model?.busy, model?.error, modelFilter, effortsOf])
   // Where its requests go, when that is not the model maker's own door:

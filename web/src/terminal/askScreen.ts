@@ -34,7 +34,22 @@ const optionLine = /^\s*(❯)?\s*(\d{1,2})\.\s+(?:\[( |✔)\]\s+)?(.*?)\s*$/
 const multiTabLine = /^\s*←\s+(?:[☐☒☑]\s+\S.*?\s+)+[✔✓]\s+Submit(?:\s+→)?\s*$/
 const submitTabLine = /^\s*(?:←\s+)?(?:[☐☒]\s+\S.*?\s*)+[✔✓]\s+Submit(?:\s+→)?\s*$/
 const loneTabLine = /^\s*[☐☒]\s+\S.*$/
-const isTabLine = (l: string) => multiTabLine.test(l) || submitTabLine.test(l) || loneTabLine.test(l)
+const isMultiTabLine = (l: string) => multiTabLine.test(l) || submitTabLine.test(l)
+const isTabLine = (l: string) => isMultiTabLine(l) || loneTabLine.test(l)
+
+// Pick the latest tab bar above hint; if that candidate is a lone single-tab
+// line (which can also appear inside a question body like "☐ Billing page")
+// and a multi-tab bar appears above it without an intervening divider rule,
+// use that multi-tab bar instead.
+function findTabTop(lines: string[], hint: number): number {
+  const top = lines.findLastIndex((l, i) => i < hint && isTabLine(l))
+  if (top < 0 || isMultiTabLine(lines[top])) return top
+  for (let i = top - 1; i >= 0; i--) {
+    if (rule.test(lines[i])) break
+    if (isMultiTabLine(lines[i])) return i
+  }
+  return top
+}
 const ownLabel = /^Type something\.?$/
 const rule = /^\s*[─━╌]{8,}\s*$/
 const scrollNote = /^[↑↓]\s+\d+\s+more\s+lines?$/
@@ -118,7 +133,7 @@ function described(lines: string[]): ScreenOption[] {
 export function askLead(text: string): string[] {
   const lines = lastLines(text)
   const hint = lines.findLastIndex((l, i) => /Enter to select/.test(l) && /navigate/.test(l + ' ' + (lines[i + 1] ?? '')))
-  const top = lines.findLastIndex((l, i) => i < hint && isTabLine(l))
+  const top = hint >= 0 ? findTabTop(lines, hint) : -1
   if (hint < 0 || top < 0) return []
   // (The dialog's own rule over it, then the words; the person's message, ❯ or >, before them.)
   const over = lines.slice(0, top).findLastIndex((l) => rule.test(l))
@@ -269,7 +284,7 @@ export function readAskScreen(text: string): AskScreen {
   // A question: its tabs (or a lone one's header), the question, its choices
   // to the rule above "Chat about this", the key hints last.
   if (hint >= 0 && hint >= lines.length - 3) {
-    const top = lines.findLastIndex((l, i) => i < hint && isTabLine(l))
+    const top = findTabTop(lines, hint)
     if (top < 0) return { kind: 'unknown' }
     const tabs = parseTabs(lines[top])
     const body = lines.slice(top + 1, hint)
