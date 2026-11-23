@@ -153,6 +153,28 @@ code, .mono { font-family: var(--font-mono); font-size: var(--fs-sub); }
 .wb-rail-item:focus-visible { outline: none; box-shadow: var(--wb-focus, var(--focus)); }
 @media (pointer: coarse) { .wb-rail-item { width: 44px; height: 44px; } }
 .wb-rail-gap { flex: 1; }
+.wb-rail-sep { flex: none; width: 20px; height: 1px; margin: 2px 0; background: var(--wb-line, var(--line)); }
+/* The command palette (palette.tsx): near the top, as such boxes are, not in the middle. */
+.dialog.palette { align-self: start; margin-top: min(12vh, 96px); max-width: 600px; padding: 0; gap: 0; max-height: min(560px, calc(var(--vv-h, 100dvh) - 32px)); overflow: hidden; }
+.palette-search { flex: none; display: flex; align-items: center; gap: 10px; height: 48px; padding: 0 16px; border-bottom: 1px solid var(--line); color: var(--fg-3); }
+.palette-search input { flex: 1; min-width: 0; height: 100%; border: 0; padding: 0; background: none; color: var(--fg); outline: none; font-size: var(--fs-body); line-height: var(--lh-body); }
+.palette-search input:focus-visible { outline: none; box-shadow: none; } /* (the box is it) */
+.palette-esc, .palette-foot kbd { font-family: var(--font-mono); font-size: var(--fs-note); line-height: var(--lh-note); padding: 0 6px; border: 1px solid var(--line); border-radius: var(--r-xs); color: var(--fg-3); background: var(--bg-subtle); }
+.palette-list { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 6px; }
+.palette-head { padding: 8px 10px 4px; font-size: var(--fs-note); line-height: var(--lh-note); font-weight: 500; color: var(--fg-3); }
+.palette-row { display: flex; align-items: center; gap: 10px; min-height: 40px; padding: 6px 10px; border-radius: var(--r); cursor: pointer; }
+.palette-row[aria-selected='true'] { background: var(--bg-active); }
+.palette-ic { flex: none; width: 20px; display: grid; place-items: center; color: var(--fg-3); }
+.palette-text { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.palette-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--fg); }
+.palette-sub { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--fs-note); line-height: var(--lh-note); color: var(--fg-3); }
+.palette-hint { flex: none; font-size: var(--fs-note); line-height: var(--lh-note); color: var(--fg-3); }
+.palette-hint.is-blocked { color: var(--warn); font-weight: 500; }
+.palette-hint.is-working { color: var(--accent-text); }
+.palette-hint.is-done { color: var(--ok); }
+.palette-none { margin: 0; padding: 16px 10px; color: var(--fg-3); }
+.palette-foot { flex: none; display: flex; gap: 16px; padding: 8px 16px; border-top: 1px solid var(--line); font-size: var(--fs-note); line-height: var(--lh-note); color: var(--fg-3); }
+@media (forced-colors: active) { .palette-row[aria-selected='true'] { outline: 2px solid Highlight; outline-offset: -2px; } }
 .wb-rail-badge {
   position: absolute; top: 1px; right: 0; min-width: 16px; height: 16px; padding: 0 4px; border-radius: 999px;
   font-size: 10px; line-height: 16px; font-weight: 600; font-variant-numeric: tabular-nums; text-align: center;
@@ -1205,6 +1227,18 @@ details.adv > .form { margin-top: 16px; }
 .host-card-state.is-wait { color: var(--warn); font-weight: 600; }
 .host-card-when { margin-left: auto; white-space: nowrap; }
 .host-card-menu { position: absolute; top: 12px; right: 8px; }
+/* On the workbench: a list, one host a row — its name, its address, its state,
+   how long since (design 11-23); the cards stay on phones. */
+.wb-shell .host-grid { display: flex; flex-direction: column; gap: 0; border: 1px solid var(--line); border-radius: var(--r-lg); overflow: hidden; }
+.wb-shell .host-card + .host-card { border-top: 1px solid var(--line); }
+.wb-shell .host-card-main { flex-direction: row; align-items: center; gap: 16px; padding: 10px 56px 10px 16px; border: 0; border-radius: 0; }
+.wb-shell .host-card-main:focus-visible { box-shadow: inset 0 0 0 2px var(--accent); }
+.wb-shell .host-card-top { flex: 0 1 260px; padding-right: 0; }
+.wb-shell .host-mark { width: 28px; height: 28px; font-size: var(--fs-note); line-height: var(--lh-note); }
+.wb-shell .host-card-addr { flex: 1 1 0; min-width: 0; }
+.wb-shell .host-card-foot { flex: 0 0 auto; margin-top: 0; gap: 16px; }
+.wb-shell .host-card-when { margin-left: 0; min-width: 96px; text-align: right; }
+.wb-shell .host-card-menu { top: 50%; transform: translateY(-50%); right: 12px; }
 
 /* Searching a long list, and its order (hosts: pages-1105 1.5). */
 .page-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin: 4px 0 8px; }

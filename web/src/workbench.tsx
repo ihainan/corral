@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
-import { Bot, Film, KeyRound, LogOut, ScrollText, Server, Settings, Users } from 'lucide-react'
+import { Bot, Film, KeyRound, LogOut, ScrollText, Search, Server, Settings, Users } from 'lucide-react'
+import { openPalette, PALETTE_KEY } from './palette'
 import { signOut, useSession } from './app'
 import { t } from './i18n'
 import { linkHandler, usePath } from './router'
@@ -52,6 +53,10 @@ export function Rail({ active }: { active?: RailKey }) {
   const name = me?.display_name || me?.username || ''
   return (
     <nav className="wb-rail" aria-label={t('nav.main')}>
+      <button type="button" className="wb-rail-item" onClick={openPalette} aria-label={t('palette.title')} title={t('palette.title') + (PALETTE_KEY ? ` (${PALETTE_KEY})` : '')} aria-keyshortcuts={PALETTE_KEY ? 'Meta+K' : undefined}>
+        <Search size={19} strokeWidth={1.75} />
+      </button>
+      <span className="wb-rail-sep" aria-hidden="true" />
       {items.map((i) => (
         <a
           key={i.key}

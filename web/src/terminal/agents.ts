@@ -161,6 +161,7 @@ let lastList: SessionInfo[] | null = null
 // (Another account signed in, or none: nothing of the one before stays.)
 export function forgetSessions() {
   lastList = null
+  convoTitles.clear() // (the titles read: another's agents' as well)
   listFailed = false
   told()
 }
@@ -331,6 +332,18 @@ export function useWaitingCount(poll: boolean): { n: number | null; working: num
     }
   }, [poll])
   return v
+}
+
+// The titles read of agents' logs, by agent key, with what its pane's title
+// was then and its session (see keptTitle in AgentsChat): one map for the
+// page, the list and the command palette naming an agent alike.
+export type ConvoTitles = Map<string, { title: string; pane: string; session: string }>
+export const convoTitles: ConvoTitles = new Map()
+// A row's title as its log was read, if still its: its pane not renamed since, its session the same.
+export function titleRead(r: AgentRow): string | undefined {
+  const k = convoTitles.get(r.key)
+  if (!k || paneTitle(r.a.title) !== k.pane) return undefined
+  return r.a.session && k.session && r.a.session !== k.session ? undefined : k.title
 }
 
 // A session as the last list read has it (null when it has none).

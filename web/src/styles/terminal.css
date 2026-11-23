@@ -1504,7 +1504,10 @@ button.convo-task-line:hover .convo-task-name { color: var(--term-fg); }
 /* Answering in the thread: the question, its choices, a line of text */
 .convo-ask {
   display: flex; flex-direction: column; gap: 10px; padding: 14px 16px; border-radius: var(--r-lg);
-  border: 1px solid var(--term-warn-text); background: var(--term-bg);
+  /* (In the composer's place, as one: its frame the composer's, not a warning's —
+     the header and the list say it waits, in amber. Workbench 11-23.) */
+  border: 1px solid var(--term-line-strong, var(--term-line)); background: var(--term-bg);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.08);
 }
 .convo-ask-q { font-weight: 600; }
 /* What it said before asking, as its screen shows it (its log has it only once answered) */
@@ -2678,6 +2681,8 @@ button.convo-queue-row.is-note:last-child { border-radius: 0 0 var(--r-lg) var(-
 /* (Its room taken back by the card: as tall as the screen allows, not cut to a scroll of its own.) */
 .convo-dock:has(.composer.is-asked) > .convo-dock-ask { max-height: min(64vh, 600px); }
 .convo-dock .composer.is-asked .agents-chat-why { margin-bottom: 0; }
+/* (The card is the composer there: "answer the question above first" under it says it twice.) */
+.term-root.wb-on .convo-dock .composer.is-asked .agents-chat-why { display: none; }
 .term-root .agents-chat-why.is-note { color: var(--term-fg-3); }
 /* The send and stop circle on a touch screen: 44 to touch, the circle 38 inside it, no ring drawn round it */
 @media (pointer: coarse) {

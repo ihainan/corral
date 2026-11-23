@@ -13,6 +13,18 @@ import { AgentGlyph } from './agentIcons'
 // message, if one is written, waits in its composer. See the gateway's apiNewAgent.
 
 export const NEW_AGENT = 'corral:new-agent' // (asked from the list: the page opens this)
+// Asked from elsewhere (the command palette), the agents' page perhaps not
+// there yet: kept until it is, and takes it as it comes.
+let newAgentAsked = false
+export function askNewAgent() {
+  newAgentAsked = true
+  window.dispatchEvent(new Event(NEW_AGENT))
+}
+export function takeNewAgentAsk(): boolean {
+  const v = newAgentAsked
+  newAgentAsked = false
+  return v
+}
 
 export interface NewSubagentParent {
   sessionId: string

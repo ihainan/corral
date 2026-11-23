@@ -20,6 +20,7 @@ import { preloadTerminal, RecordingPlayerPage, RecordingsPage, TerminalPage } fr
 import { TerminalTabs, useTabsMode } from './pages/TerminalTabs'
 import { draftsFor } from './terminal/drafts'
 import { Rail, StatusBar, useWorkbench } from './workbench'
+import { PaletteHost } from './palette'
 
 interface Session {
   boot: Bootstrap
@@ -151,6 +152,7 @@ export function App() {
         <PushSync userId={me?.must_change_password ? undefined : me?.id} />
         <UpdateNotice loaded={loadedVersion.current} />
         {me && !me.must_change_password && <SettingsModalHost />}
+        {me && !me.must_change_password && <PaletteHost />}
         {route(path, boot, me, tabs)}
       </ToastProvider>
     </SessionCtx.Provider>

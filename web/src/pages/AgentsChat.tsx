@@ -18,7 +18,7 @@ import { useCompletion } from '../terminal/Completion'
 import { PanelWindow } from '../terminal/PanelWindow'
 import { convoTarget, herdrTarget, InlineReply } from '../terminal/ReplyDialog'
 import { SessionOpDialog, type SessionOp } from '../terminal/sessionOps'
-import { NEW_AGENT, NewAgentDialog, type NewSubagentParent } from '../terminal/newAgent'
+import { NEW_AGENT, NewAgentDialog, takeNewAgentAsk, type NewSubagentParent } from '../terminal/newAgent'
 import { type CodexRewind, ForkDialog, RenameDialog, type RenameTarget } from '../terminal/agentOps'
 import { agentWho, ChimeCounter, chime, countsOf } from '../terminal/chime'
 import { AgentList, ListOrderMenu, CODEX_EFFORTS, ConversationView, glanceOf, type ConvoAgent, type ConvoLineageBar, type ConvoListRow, type ConvoPending, type ConvoSplitPane, type ConvoWent, type FileActs, type ModelOpt } from '../terminal/Conversation'
@@ -31,7 +31,7 @@ import { isLogPic, logPic, lookAt, PictureDialog, useDownload } from '../termina
 import { IMAGE_EXT, TextPreview } from '../terminal/textPreview'
 import { attach, ATTACH_LABEL, AttachStrip, PICTURE_PATH, takeOut, type Going } from '../terminal/attach'
 import { answerable, asking, callOut, useConversation, type ConvoEntry } from '../terminal/conversation'
-import { ackBg, answeredHerdr, expectSession, paneWaits, waitingTitle, isAgy, isCodex, isOpenCode, listAgents, paneName, paneTitle, readSessionsNow, readsLog, useRunningSessions, type AgentRow } from '../terminal/agents'
+import { ackBg, answeredHerdr, convoTitles, expectSession, paneWaits, waitingTitle, isAgy, isCodex, isOpenCode, listAgents, paneName, paneTitle, readSessionsNow, readsLog, useRunningSessions, type AgentRow } from '../terminal/agents'
 import { normalizeProjectPath, reorderPinned, type RowCmds } from '../terminal/agentOrder'
 import { conversationReadable, prefetchConversation } from '../terminal/conversation'
 import { holdTermMode, tmuxKey } from '../terminal/chatSend'
@@ -305,7 +305,7 @@ export function AgentsChat({ bar, active = true, onHead }: { bar?: ReactNode; ac
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
   // The titles of agents read here (Claude Code's own), for their rows once another is shown.
-  const titles = useRef<Titles>(new Map())
+  const titles = useRef<Titles>(convoTitles) // (the page's one map: the palette names agents by it too)
 
   // Agents closed from here: out of the list at once, before herdr's
   // summary says so (else the one shown would be waited for, or picked
@@ -398,7 +398,12 @@ export function AgentsChat({ bar, active = true, onHead }: { bar?: ReactNode; ac
   // its first message waiting in its composer.
   const [newAgent, setNewAgent] = useState<boolean | NewSubagentParent>(false)
   useEffect(() => {
-    const on = () => active && setNewAgent(true)
+    const on = () => {
+      if (!active) return
+      takeNewAgentAsk()
+      setNewAgent(true)
+    }
+    if (active && takeNewAgentAsk()) setNewAgent(true) // (asked before this page was there, or in front)
     window.addEventListener(NEW_AGENT, on)
     return () => window.removeEventListener(NEW_AGENT, on)
   }, [active])

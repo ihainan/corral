@@ -330,6 +330,8 @@ export function ConversationView({
     setWbSlot((was) => (was === slot ? was : slot))
   })
   const inWb = wbWide && !!wbSlot
+  const wbWideNow = useRef(wbWide)
+  wbWideNow.current = wbWide
   const [wide, setWide] = useState(false)
   const [viewW, setViewW] = useState(0)
   const [viewH, setViewH] = useState(0)
@@ -1348,7 +1350,7 @@ export function ConversationView({
       if (composing(e) || underDialog(e) || e.altKey) return
       // (Shift as some layouts need it for "/", as the German's.)
       const asked = mac ? e.key.toLowerCase() === 'k' && e.metaKey && !e.ctrlKey && !e.shiftKey : e.key === '/' && !e.ctrlKey && !e.metaKey && !editable(e.target)
-      if (!asked) return
+      if (!asked || (mac && wbWideNow.current)) return // (⌘K on the workbench: the command palette's)
       e.preventDefault()
       if (sideShownNow.current) setSearchAsked((n) => n + 1)
       else setPicking('search')
