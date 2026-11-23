@@ -4670,6 +4670,9 @@ export function AgentList({ rows, menus, onPicked, placed, query: given, onQuery
           // (One line a row, with a mouse: its state the dot on its icon's corner, and
           // "Background" said in its hover card, not in the line — workbench 11-23, plan 2.)
           const bgWords = flat ? '' : bgSaid
+          // (Its dot there: work left going but not seen to — a grey ring of its own, not
+          // a done's green or nothing; what waits on the person first — review of 11-23.)
+          const iconDot = !flat ? '' : failed ? 'failed' : r.bg === 'running' || r.cmds ? 'bg' : r.status === 'blocked' ? 'blocked' : r.bg === 'stale' ? 'stale' : mark
           const whenEl =
             since || bgWords || (!flat && mark) ? (
               <span className="convo-list-when">
@@ -4731,7 +4734,7 @@ export function AgentList({ rows, menus, onPicked, placed, query: given, onQuery
                 if (!e.defaultPrevented && hasMenu) menuKey(r.key)(e)
               }}
             >
-              <AgentIcon program={r.program} size={flat ? (isChild ? 14 : 16) : isChild ? 18 : 20} bare dot={flat && mark ? (mark as NonNullable<Parameters<typeof AgentIcon>[0]['dot']>) : undefined} />
+              <AgentIcon program={r.program} size={flat ? (isChild ? 14 : 16) : isChild ? 18 : 20} bare dot={iconDot ? (iconDot as NonNullable<Parameters<typeof AgentIcon>[0]['dot']>) : undefined} />
               {/* (Two lines a row, always: its name; where it is — the session's title,
                   which tells alike names apart — and when. A third only for what
                   waits on the person: what it asks, or messages not seen taken in.
