@@ -3850,16 +3850,28 @@ export function QuotaChip({ of }: { of: QuotaOf }) {
   )
     // (A window past its reset: 0% now, said so — left out, the bar jumped between panes, 11-23.)
     .filter(([, w]) => !!w)
-    .map(([name, w]) => [name, w!.resets_at > now ? w!.used : 0] as const)
+    .map(([name, w]) => [name, w!.resets_at > now ? w!.used : 0, w!.resets_at] as const)
   if (!wins.length) return failed ? <StatusItem title={t('quota.failed')}>{t('wb.quotaNone')}</StatusItem> : null
   const at = failed ? (seen?.lastAt ?? 0) / 1000 : shown?.updated_at
-  const title = [t('quota.title'), at ? t('wb.quotaAt', { at: quotaClock(at) }) : '', failed ? t('quota.failed') : ''].filter(Boolean).join(' · ')
+  // (Said as what it is — the plan's use, each window's used part as a bar —, its resets on hover: "This week 8%"
+  // alone read as nothing in particular, said the person, 11-23.)
+  const title = [
+    t('quota.title'),
+    ...wins.map(([name, used, end]) => t(name) + t('wb.quotaSep') + (end <= now ? t('quota.reset') : t('quota.used', { n: Math.round(used), at: resetClock(end) }))),
+    [at ? t('wb.quotaAt', { at: quotaClock(at) }) : '', failed ? t('quota.failed') : ''].filter(Boolean).join(' · '),
+  ].filter(Boolean).join('\n')
   return (
     <StatusItem title={title}>
       <span className={'wb-quota' + (failed ? ' is-stale' : '')}>
+        <span className="wb-quota-label">{t('wb.quotaLabel')}</span>
         {wins.map(([name, used]) => (
           <span key={name} className={'wb-quota-win' + quotaTone(used)}>
-            {t(name)} {Math.round(used)}%
+            <span>{t(name)}</span>
+            {/* (its words apart from the figure: the bar gone, they were one run of text, with no gap between) */}
+            <span className="wb-quota-bar" aria-hidden="true">
+              <span style={{ width: Math.min(100, Math.max(0, used)) + '%' }} />
+            </span>
+            {Math.round(used)}%
           </span>
         ))}
       </span>
@@ -3921,7 +3933,7 @@ function StatusFacts({ runsRef, of, meta, via, auth, quota }: { runsRef?: (el: H
       {meta?.branch && (
         <StatusItem title={t('convo.branch', { b: meta.branch }) + (ab && up ? ' · ' + [up.ahead ? t('card.ahead', { n: up.ahead }) : '', up.behind ? t('card.behind', { n: up.behind }) : ''].filter(Boolean).join(' ') + ' ' + up.upstream : '')}>
           <GitBranch size={12} aria-hidden="true" />
-          {meta.branch}
+          <span className="wb-status-branch">{meta.branch}</span>
           {ab && <span className="wb-status-ab">{ab}</span>}
         </StatusItem>
       )}

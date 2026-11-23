@@ -198,7 +198,18 @@ code, .mono { font-family: var(--font-mono); font-size: var(--fs-sub); }
 .wb-status-slot { display: contents; }
 .wb-status-ab { font-variant-numeric: tabular-nums; }
 .wb-status-runs { display: contents; }
-.wb-quota { display: inline-flex; gap: 10px; }
+.wb-quota { display: inline-flex; align-items: center; gap: 10px; }
+/* Short of room, the bar keeps each of its items whole (squeezed, a host's name and the branch's icon were cut
+   into): what is past its room is cut at the left part's end, the quota last of it; a long branch takes no more
+   than its share; narrower, the quota's bars go, then the quota (it is in the context's details too) — 11-23. */
+.wb-status-left .wb-status-item, .wb-status-left .convo-runs.in-status, .wb-status-counts { flex: none; }
+.wb-status-branch { max-width: 220px; overflow: hidden; text-overflow: ellipsis; }
+@media (max-width: 1099px) { .wb-quota-bar { display: none; } }
+@media (max-width: 959px) { .wb-status-item:has(> .wb-quota) { display: none; } }
+.wb-quota-win { display: inline-flex; align-items: center; gap: 6px; font-variant-numeric: tabular-nums; }
+/* (Each window's used part, as the design has it: a short bar, its colour the window's tone.) */
+.wb-quota-bar { width: 28px; height: 4px; border-radius: 999px; overflow: hidden; background: color-mix(in srgb, currentColor 22%, transparent); }
+.wb-quota-bar > span { display: block; height: 100%; border-radius: inherit; background: currentColor; }
 .wb-quota.is-stale { opacity: 0.6; }
 .wb-quota-win.is-warn { color: var(--wb-warn, var(--warn)); }
 .wb-quota-win.is-danger { color: var(--wb-danger, var(--danger)); font-weight: 500; }
