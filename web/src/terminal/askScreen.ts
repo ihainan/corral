@@ -50,33 +50,6 @@ function parseTabs(line: string): { label: string; answered: boolean }[] {
   return [...line.matchAll(re)].map((m) => ({ label: m[2].trim(), answered: m[1] !== '☐' }))
 }
 
-// Find the dialog's tab bar above the footer hint: take the first tab line
-// after the dialog's top divider rule (or previous footer hint) so checkboxes
-// inside the question body cannot hijack the tab bar.
-function findTabTop(lines: string[], hint: number): number {
-  let optEnd = hint
-  for (let i = hint - 1; i >= 0; i--) {
-    const t = lines[i].trim()
-    if (!t) continue
-    if (/^(?:\d{1,2}\.\s+)?Chat about this$/i.test(t)) continue
-    if (rule.test(lines[i])) {
-      optEnd = i
-    }
-    break
-  }
-  let start = 0
-  for (let i = optEnd - 1; i >= 0; i--) {
-    if (rule.test(lines[i]) || /Enter to select/.test(lines[i])) {
-      start = i + 1
-      break
-    }
-  }
-  for (let i = start; i < optEnd; i++) {
-    if (isTabLine(lines[i])) return i
-  }
-  return -1
-}
-
 // (Words that ran to their column's edge: what is beside them, a preview's
 // box, begins at most 4 spaces after.)
 const edge = (s: string) => {
@@ -145,7 +118,7 @@ function described(lines: string[]): ScreenOption[] {
 export function askLead(text: string): string[] {
   const lines = lastLines(text)
   const hint = lines.findLastIndex((l, i) => /Enter to select/.test(l) && /navigate/.test(l + ' ' + (lines[i + 1] ?? '')))
-  const top = hint >= 0 ? findTabTop(lines, hint) : -1
+  const top = lines.findLastIndex((l, i) => i < hint && isTabLine(l))
   if (hint < 0 || top < 0) return []
   // (The dialog's own rule over it, then the words; the person's message, ❯ or >, before them.)
   const over = lines.slice(0, top).findLastIndex((l) => rule.test(l))
@@ -196,9 +169,9 @@ const hintSegments = [
 const hintLine = (l: string) => {
   const s = l.trim()
   if (!s) return false
-  // Plan dialogs may append the plan file path after "ctrl+g to edit in Vim · ".
-  if (/^ctrl\+g to edit in Vim · \S+$/i.test(s)) return true
-  const parts = s.split(/\s*·\s*/)
+  // Plan dialogs may append a plan file path (which can contain spaces) after "ctrl+g to edit in Vim · ".
+  if (/^ctrl\+g to edit in Vim(?: · \S.*)?$/i.test(s)) return true
+  const parts = s.split(/\s*·\s*/).filter(Boolean)
   return parts.length > 0 && parts.every((p) => hintSegments.some((h) => h.test(p)))
 }
 const tailOK = (rest: string[]) => rest.length <= 4 && rest.every((l) => !l.trim() || /^[\s\u2500-\u257f]+$/.test(l) || hintLine(l))
@@ -296,7 +269,7 @@ export function readAskScreen(text: string): AskScreen {
   // A question: its tabs (or a lone one's header), the question, its choices
   // to the rule above "Chat about this", the key hints last.
   if (hint >= 0 && hint >= lines.length - 3) {
-    const top = findTabTop(lines, hint)
+    const top = lines.findLastIndex((l, i) => i < hint && isTabLine(l))
     if (top < 0) return { kind: 'unknown' }
     const tabs = parseTabs(lines[top])
     const body = lines.slice(top + 1, hint)

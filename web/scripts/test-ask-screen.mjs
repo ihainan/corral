@@ -148,15 +148,18 @@ await run('real21330Review', () => {
   assert.equal(reviewAsDrawn(r), true)
 })
 
-// 3. Review screen with known Claude Code footer hints
+// 3. Review screen with known Claude Code footer hints (including wrap right after "·")
 await run('reviewWithKnownHints', () => {
   const r2 = readAskScreen(i42Screen + '\n\nEnter to select · ↑/↓ to navigate · Esc to cancel')
   assert.equal(r2.kind, 'review')
   assert.equal(r2.answers.length, 2)
   assert.equal(reviewAsDrawn(r2), true)
 
-  const r3 = readAskScreen(i42Screen + '\n\nEnter to select · Tab/Arrow keys to navigate\nEsc to cancel')
-  assert.equal(r3.kind, 'review')
+  const r3 = readAskScreen(i42Screen + '\n\nEnter to select · Tab/Arrow keys to navigate ·\nEsc to cancel')
+  assert.equal(r3.kind, 'review', `wrapped footer ending with · must parse as review, got ${r3.kind}`)
+
+  const r3b = readAskScreen(i42Screen + '\n\nEnter to select · Tab/Arrow keys to navigate\n· Esc to cancel')
+  assert.equal(r3b.kind, 'review', `wrapped footer starting with · must parse as review, got ${r3b.kind}`)
 
   const r4 = readAskScreen(i42Screen + '\n\nEnter to confirm · Tab to switch questions · n to add notes · Esc to cancel')
   assert.equal(r4.kind, 'review')
@@ -638,6 +641,74 @@ await run('fix1-7-questionTitledReviewYourAnswers', () => {
   ])
   assert.equal(r.options.length, 3)
   assert.equal(r.own, 3)
+})
+
+// 18. [FIX3 #1] Footer wrapped right after "·" (repro/c1-wrapdot.txt)
+await run('fix3-1-wrapAfterDot', () => {
+  const wrapDot = [
+    '←  ☒ A  ☒ B  ✔ Submit  →',
+    '',
+    'Review your answers',
+    '',
+    ' │ ● Q one?',
+    '   → Yes',
+    '',
+    '❯ 1. Submit answers',
+    '  2. Cancel',
+    '',
+    'Enter to select · Tab/Arrow keys to navigate ·',
+    'Esc to cancel',
+  ].join('\n')
+  const r = readAskScreen(wrapDot)
+  assert.equal(r.kind, 'review', `c1-wrapdot.txt must parse as review, got ${r.kind}`)
+  assert.equal(r.answers.length, 1)
+})
+
+// 19. [FIX3 #2] Plan screen with ctrl+g plan file path (with and without spaces)
+await run('fix3-2-planFilePathWithSpaces', () => {
+  const makePlan = (path) =>
+    [
+      'Ready to code?',
+      '',
+      'Would you like to proceed?',
+      '❯ 1. Yes, clear context and auto-accept edits',
+      '  2. Yes, auto-accept edits',
+      '  3. Yes, manually approve edits',
+      '  4. Tell Claude what to change',
+      '',
+      `ctrl+g to edit in Vim · ${path}`,
+    ].join('\n')
+
+  const rNoSpace = readAskScreen(makePlan('~/.claude/plans/example.md'))
+  assert.equal(rNoSpace.kind, 'plan', `plan path without spaces must parse as plan, got ${rNoSpace.kind}`)
+  assert.equal(rNoSpace.options.length, 4)
+
+  const rWithSpace = readAskScreen(makePlan('/home/My Name/.claude/plans/example.md'))
+  assert.equal(rWithSpace.kind, 'plan', `plan path with spaces must parse as plan, got ${rWithSpace.kind}`)
+  assert.equal(rWithSpace.options.length, 4)
+})
+
+// 20. [FIX3 #3] Two tab bars in scrollback with no divider rule between them (repro/c3-oldtabs.txt)
+await run('fix3-3-latestTabBarWithoutDivider', () => {
+  const oldTabs = [
+    '←  ☒ Old  ☒ Earlier  ✔ Submit  →',
+    'Review your answers',
+    '  ● Old question?',
+    '    → Old answer',
+    '←  ☐ New  ☐ Next  ✔ Submit  →',
+    'New question?',
+    '❯ 1. Yes',
+    '  2. No',
+    '  3. Type something.',
+    'Enter to select · ↑/↓ to navigate · Esc to cancel',
+  ].join('\n')
+  const r = readAskScreen(oldTabs)
+  assert.equal(r.kind, 'question', `c3-oldtabs.txt must parse as question, got ${r.kind}`)
+  assert.deepEqual(r.tabs, [
+    { label: 'New', answered: false },
+    { label: 'Next', answered: false },
+  ])
+  assert.equal(r.question, 'New question?')
 })
 
 if (failures.length) {
