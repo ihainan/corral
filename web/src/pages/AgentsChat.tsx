@@ -31,7 +31,7 @@ import { isLogPic, logPic, lookAt, PictureDialog, useDownload } from '../termina
 import { IMAGE_EXT, TextPreview } from '../terminal/textPreview'
 import { attach, ATTACH_LABEL, AttachStrip, PICTURE_PATH, takeOut, type Going } from '../terminal/attach'
 import { answerable, asking, callOut, useConversation, type ConvoEntry } from '../terminal/conversation'
-import { ackBg, answeredHerdr, convoTitles, expectSession, paneWaits, waitingTitle, isAgy, isCodex, isOpenCode, listAgents, paneName, paneTitle, readSessionsNow, readsLog, useRunningSessions, type AgentRow } from '../terminal/agents'
+import { ackBg, answeredHerdr, convoTitles, expectSession, paneWaits, waitingTitle, isAgy, isCodex, isOpenCode, listAgents, paneName, paneTitle, readSessionsNow, readsLog, useRunningSessions, type AgentRow, type AgentStatus } from '../terminal/agents'
 import { normalizeProjectPath, reorderPinned, type RowCmds } from '../terminal/agentOrder'
 import { conversationReadable, prefetchConversation } from '../terminal/conversation'
 import { holdTermMode, tmuxKey } from '../terminal/chatSend'
@@ -109,6 +109,9 @@ const chatAddress = (e: { s: SessionInfo; pane?: string }) => {
   return '/agents?' + q
 }
 const PASTE_LINES = 12
+// A finished one not seen yet whose turn ended on an API error (a rate
+// limit, the server's error): told apart from one that finished well.
+const failedOf = (r: AgentRow, st: AgentStatus) => (!r.lost && !r.bg && st === 'done' && r.a.failed) || undefined
 // Someone at the window: it has the focus, and was touched — a key, the
 // pointer, a scroll — in the last minute. A finished agent shown on a screen
 // nobody is at is not looked at (workbench 11-23: a page left open on a
@@ -1404,7 +1407,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, keysActive, isSe
         const st = current && agent && !r.bg ? agent.status : r.status
         const parentKey = r.lost || !r.a.parent_pane ? undefined : agentKey(e.s, r.a.parent_pane)
         const sameWsParent = !!parentKey && wsByKey.get(parentKey) === r.wsId
-        return { key: e.key, ...labelOf(e, said, hosts, !!named, sameWsParent), now: r.lost || r.bg || st !== 'blocked' ? undefined : glanceOf(e.s.id, e.pane, st, r.a.since) || undefined /* (said only of one waiting on the person) */, program: r.a.agent, status: st, liveStatus: st, bg: r.lost ? undefined : r.bg, cmds: cmdsOf(r), since: r.lost ? undefined : r.bg ? r.a.bg_since : r.a.since, current, inSplit: !isSecondary && !!splitKey && e.key === splitKey, pinned: pinAt(e.key), projectKey: normalizeProjectPath(r.a.cwd), sessionGroup: sessionGroupOf(e, all), parentKey, lineageSource: r.lost ? undefined : r.a.lineage_source, onPick: () => onPick(e), menu: () => rowMenu.current(e) }
+        return { key: e.key, ...labelOf(e, said, hosts, !!named, sameWsParent), now: r.lost || r.bg || st !== 'blocked' ? undefined : glanceOf(e.s.id, e.pane, st, r.a.since) || undefined /* (said only of one waiting on the person) */, program: r.a.agent, status: st, liveStatus: st, bg: r.lost ? undefined : r.bg, failed: failedOf(r, st), model: r.lost ? undefined : r.a.model, cmds: cmdsOf(r), since: r.lost ? undefined : r.bg ? r.a.bg_since : r.a.since, current, inSplit: !isSecondary && !!splitKey && e.key === splitKey, pinned: pinAt(e.key), projectKey: normalizeProjectPath(r.a.cwd), sessionGroup: sessionGroupOf(e, all), parentKey, lineageSource: r.lost ? undefined : r.a.lineage_source, onPick: () => onPick(e), menu: () => rowMenu.current(e) }
       }
       const title = (current && agent?.title) || keptTitle(titles, e) || `${e.s.host_name} · ${sessionWhich(e.s, all)}`
       return { key: e.key, title, where: whereOf(e, hosts), program: current ? agent?.program : undefined, status: current && agent ? agent.status : 'unknown', cmds: current ? agent?.cmds : tmuxCmdsOf(e), current, inSplit: !isSecondary && !!splitKey && e.key === splitKey, pinned: pinAt(e.key), sessionGroup: sessionGroupOf(e, all), onPick: () => onPick(e), menu: () => rowMenu.current(e) }
@@ -3511,7 +3514,7 @@ function PhoneList({ entries, all, titles, query, onQuery, onPick }: { entries: 
         const said = named || dirName(r.a.cwd) || r.a.agent
         const parentKey = r.lost || !r.a.parent_pane ? undefined : agentKey(e.s, r.a.parent_pane)
         const sameWsParent = !!parentKey && wsByKey.get(parentKey) === r.wsId
-        return { key: e.key, ...labelOf(e, said, hosts, !!named, sameWsParent), now: r.lost || r.bg || r.status !== 'blocked' ? undefined : glanceOf(e.s.id, e.pane, r.status, r.a.since) || undefined, program: r.a.agent, status: r.status, liveStatus: r.status, bg: r.lost ? undefined : r.bg, cmds: cmdsOf(r), since: r.lost ? undefined : r.bg ? r.a.bg_since : r.a.since, current: false, pinned: pinAt(e.key), projectKey: normalizeProjectPath(r.a.cwd), sessionGroup: sessionGroupOf(e, all), parentKey, lineageSource: r.lost ? undefined : r.a.lineage_source, onPick: () => onPick(e) }
+        return { key: e.key, ...labelOf(e, said, hosts, !!named, sameWsParent), now: r.lost || r.bg || r.status !== 'blocked' ? undefined : glanceOf(e.s.id, e.pane, r.status, r.a.since) || undefined, program: r.a.agent, status: r.status, liveStatus: r.status, bg: r.lost ? undefined : r.bg, failed: failedOf(r, r.status), model: r.lost ? undefined : r.a.model, cmds: cmdsOf(r), since: r.lost ? undefined : r.bg ? r.a.bg_since : r.a.since, current: false, pinned: pinAt(e.key), projectKey: normalizeProjectPath(r.a.cwd), sessionGroup: sessionGroupOf(e, all), parentKey, lineageSource: r.lost ? undefined : r.a.lineage_source, onPick: () => onPick(e) }
       }
       const title = keptTitle(titles, e) || `${e.s.host_name} · ${sessionWhich(e.s, all)}`
       return { key: e.key, title, where: whereOf(e, hosts), status: 'unknown', cmds: tmuxCmdsOf(e), current: false, pinned: pinAt(e.key), sessionGroup: sessionGroupOf(e, all), onPick: () => onPick(e) }

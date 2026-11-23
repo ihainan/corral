@@ -196,6 +196,7 @@ code, .mono { font-family: var(--font-mono); font-size: var(--fs-sub); }
 .wb-status-left { display: flex; align-items: center; gap: 14px; min-width: 0; overflow: hidden; }
 .wb-status-gap { flex: 1; }
 .wb-status-slot { display: contents; }
+.wb-status-ab { font-variant-numeric: tabular-nums; }
 .wb-quota { display: inline-flex; gap: 10px; }
 .wb-quota.is-stale { opacity: 0.6; }
 .wb-quota-win.is-warn { color: var(--wb-warn, var(--warn)); }

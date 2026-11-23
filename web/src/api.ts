@@ -330,6 +330,10 @@ export interface HerdrAgent {
   bg?: 'checking' | 'none' | 'running' | 'unknown'
   bg_n?: number
   bg_since?: number
+  // Claude Code done or idle: the kind of the API error its turn ended on ("rate_limit", "server_error", …).
+  failed?: string
+  // Claude Code: the model its last turn read was answered by (once one has been read).
+  model?: string
   // Commands it left running in the background (done or idle): how many, the first listed.
   bg_cmds?: number
   bg_cmd_list?: { task: string; title?: string; since?: number; out?: string }[]

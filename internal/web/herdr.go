@@ -51,6 +51,15 @@ type herdrAgent struct {
 	Bg      string `json:"bg,omitempty"`
 	BgN     int    `json:"bg_n,omitempty"`
 	BgSince int64  `json:"bg_since,omitempty"`
+	// Failed: for a Claude Code agent done or idle, the kind of the API
+	// error its turn ended on, as Claude Code wrote it ("rate_limit",
+	// "server_error", …; "unknown" for one not named so); "" where it did
+	// not, or is not known (see failedIn).
+	Failed string `json:"failed,omitempty"`
+	// Model: for a Claude Code agent, the model its last turn read was
+	// answered by (see modelIn), kept while the pane runs the same agent
+	// session; "" until a turn of it has been read.
+	Model string `json:"model,omitempty"`
 	// BgCmds: for a Claude Code agent done or idle, how many commands it
 	// left running in the background, the first of them listed (see
 	// cmdProber); none where not known.

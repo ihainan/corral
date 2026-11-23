@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -70,6 +71,7 @@ type bgPane struct {
 	due     time.Time
 	settled chan struct{} // closed once it is no longer checking
 	said    string        // what the agent said last in the turn read (see lastSaidIn)
+	failed  string        // the API error the turn read ended on (see failedIn)
 }
 
 // bgProber is one herdr watcher's: of its Claude panes, what each left
@@ -78,9 +80,12 @@ type bgProber struct {
 	mu    sync.Mutex
 	panes map[string]*bgPane
 	taken map[string]string // agent session → the uuid of its last turn record taken
-	wake  chan struct{}
-	poke  func() // (the watcher's last summary goes again)
-	read  func(ctx context.Context, sessions []string, tail int) (map[string]bgRecord, error)
+	// models: pane → the model its agent session's last turn read was of,
+	// kept across its turns (a pane at work is not among panes).
+	models map[string]paneModel
+	wake   chan struct{}
+	poke   func() // (the watcher's last summary goes again)
+	read   func(ctx context.Context, sessions []string, tail int) (map[string]bgRecord, error)
 	// back: told of a pane whose subagents a look of the prober's own found
 	// back, no turn's end told meanwhile (two changes in one snapshot): the
 	// "finished" held back goes.
@@ -89,13 +94,17 @@ type bgProber struct {
 
 // bgRecord is a log's last turn record: its uuid, and the subagents out.
 type bgRecord struct {
-	uuid string
-	n    int
-	said string // (the agent's last words before the record: lastSaidIn)
+	uuid   string
+	n      int
+	said   string // (the agent's last words before the record: lastSaidIn)
+	failed string // (the API error the turn ended on: failedIn)
+	model  string // (the model its last answer was of: modelIn)
 }
 
+type paneModel struct{ session, model string }
+
 func newBgProber(read func(context.Context, []string, int) (map[string]bgRecord, error)) *bgProber {
-	return &bgProber{panes: map[string]*bgPane{}, taken: map[string]string{}, wake: make(chan struct{}, 1), read: read}
+	return &bgProber{panes: map[string]*bgPane{}, taken: map[string]string{}, models: map[string]paneModel{}, wake: make(chan struct{}, 1), read: read}
 }
 
 // consider: pane's agent is in status (in round, of agent session session):
@@ -194,8 +203,14 @@ func (p *bgProber) decorate(sum *herdrSummary) {
 	for i := range sum.Workspaces {
 		for j := range sum.Workspaces[i].Agents {
 			a := &sum.Workspaces[i].Agents[j]
+			if m, ok := p.models[a.PaneID]; ok && a.Session != "" && m.session == a.Session {
+				a.Model = m.model
+			}
 			if b := p.panes[a.PaneID]; b != nil && (a.Session == "" || b.session == a.Session) {
 				a.Bg, a.BgN, a.BgSince = b.state, b.n, b.since
+				if b.state == bgNone {
+					a.Failed = b.failed // (with subagents out, its turn is not over: not failed yet)
+				}
 			}
 		}
 	}
@@ -276,6 +291,22 @@ func (p *bgProber) once(ctx context.Context) {
 			continue // (worked again, or another session, meanwhile: what was read is of before)
 		}
 		r, ok := got[b.session]
+		if err == nil && ok && r.model != "" {
+			if m := p.models[pane]; m.session != b.session || m.model != r.model {
+				p.models[pane] = paneModel{b.session, r.model}
+				changed = true
+			}
+		}
+		// (Not pruned by a summary: one sent again, of before a pane came, would take its model —
+		// review of 11-23. Bounded instead: those of panes not watched now go first; a pane's
+		// is told only while its session is the same, so one left of a pane gone says nothing.)
+		if len(p.models) > maxBgTaken {
+			for pn := range p.models {
+				if p.panes[pn] == nil && len(p.models) > maxBgTaken {
+					delete(p.models, pn)
+				}
+			}
+		}
 		was, have := p.taken[b.session]
 		switch {
 		case err != nil || !ok || r.uuid == "":
@@ -314,8 +345,8 @@ func (p *bgProber) once(ctx context.Context) {
 			if b.state == bgRunning && state == bgNone {
 				backs = append(backs, pane)
 			}
-			changed = changed || state != b.state || r.n != b.n
-			b.state, b.n, b.said = state, r.n, r.said
+			changed = changed || state != b.state || r.n != b.n || r.failed != b.failed
+			b.state, b.n, b.said, b.failed = state, r.n, r.said, r.failed
 			b.due = now.Add(bgRecheck)
 			b.settle()
 		}
@@ -446,6 +477,7 @@ func parseBgTails(out []byte) map[string]bgRecord {
 			}
 			at = i
 			rec.said = lastSaidIn(lines[:i])
+			rec.failed = failedIn(lines[:i])
 			break
 		}
 		// (Those back since, with no turn begun after — Claude Code at rest,
@@ -462,10 +494,41 @@ func parseBgTails(out []byte) map[string]bgRecord {
 			}
 			rec.n = max(rec.n-len(back), 0)
 		}
+		rec.model = modelIn(lines)
 		got[sid] = rec
 	}
 	return got
 }
+
+// modelIn: the model the last of the agent's own answers in lines was of
+// (message.model; not a subagent's, nor one Claude Code wrote itself —
+// "<synthetic>" —); "" where none, or a name not one.
+func modelIn(lines [][]byte) string {
+	for i := len(lines) - 1; i >= 0; i-- {
+		l := lines[i]
+		if !bytes.Contains(l, []byte(`"type":"assistant"`)) || !bytes.Contains(l, []byte(`"model"`)) {
+			continue
+		}
+		var r struct {
+			Type    string `json:"type"`
+			Side    bool   `json:"isSidechain"`
+			Message struct {
+				Model string `json:"model"`
+			} `json:"message"`
+		}
+		if json.Unmarshal(l, &r) != nil || r.Type != "assistant" || r.Side || r.Message.Model == "" || r.Message.Model == "<synthetic>" {
+			continue
+		}
+		if !modelID.MatchString(r.Message.Model) {
+			return ""
+		}
+		return r.Message.Model
+	}
+	return ""
+}
+
+// modelID: a model's id as an API names it ("claude-opus-5-5", "claude-sonnet-5-5[1m]", a provider's "us.anthropic.…", a Bedrock ARN: over 100 long).
+var modelID = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:@/\[\]-]{0,254}$`)
 
 // maxSaid: of the agent's last words, how much is kept (for an alert's
 // body: the start of them).
@@ -532,6 +595,68 @@ func lastSaidIn(lines [][]byte) string {
 	}
 	return ""
 }
+
+// failedIn: the kind of the API error a turn ended on, of lines (a log's
+// end up to the turn's record) — where the last of the agent's messages
+// since the person's last is one Claude Code wrote for an error
+// (isApiErrorMessage: a rate limit, the server's error, a login gone).
+// One it went on past (retried, answered) is not; nor a subagent's. ""
+// where none; "unknown" for a kind not named as one.
+func failedIn(lines [][]byte) string {
+	for i := len(lines) - 1; i >= 0; i-- {
+		l := lines[i]
+		isUser := bytes.Contains(l, []byte(`"type":"user"`))
+		if !isUser && !bytes.Contains(l, []byte(`"type":"assistant"`)) {
+			continue
+		}
+		var r struct {
+			Type    string `json:"type"`
+			Side    bool   `json:"isSidechain"`
+			Meta    bool   `json:"isMeta"`
+			APIErr  bool   `json:"isApiErrorMessage"`
+			Kind    string `json:"error"`
+			Message struct {
+				Content json.RawMessage `json:"content"`
+			} `json:"message"`
+		}
+		if json.Unmarshal(l, &r) != nil || r.Side {
+			continue
+		}
+		switch r.Type {
+		case "assistant":
+			if !r.APIErr {
+				return ""
+			}
+			if !errorKind.MatchString(r.Kind) {
+				return "unknown"
+			}
+			return r.Kind
+		case "user":
+			// (The person's own words: the turn is of after them. A tool's
+			// result, or a line Claude Code wrote itself, is looked past.)
+			if r.Meta {
+				continue
+			}
+			var words string
+			if json.Unmarshal(r.Message.Content, &words) == nil && words != "" {
+				return ""
+			}
+			var blocks []struct {
+				Type string `json:"type"`
+			}
+			_ = json.Unmarshal(r.Message.Content, &blocks)
+			for _, b := range blocks {
+				if b.Type == "text" {
+					return ""
+				}
+			}
+		}
+	}
+	return ""
+}
+
+// errorKind: the kind of an API error as Claude Code names them.
+var errorKind = regexp.MustCompile(`^[a-z][a-z0-9_]{0,39}$`)
 
 // endedIn is the subagents a log's line says ended (their task ids): a notice of
 // Claude Code's, as a queued command's attachment or a user row's words

@@ -2270,7 +2270,7 @@ export function ConversationView({
         {composer}
         {!inWb && runsAt(false)}
         {/* (The pane the keys go to says its branch and quota on the status bar.) */}
-        {inWb && kActive && wbSlot && createPortal(<StatusFacts meta={convo.status === 'ready' ? convo.meta : undefined} via={convo.bind?.via} auth={convo.bind?.auth} quota={convo.status === 'ready' ? quotaOf : undefined} />, wbSlot)}
+        {inWb && kActive && wbSlot && createPortal(<StatusFacts of={convo.status === 'ready' ? convo.of : undefined} meta={convo.status === 'ready' ? convo.meta : undefined} via={convo.bind?.via} auth={convo.bind?.auth} quota={convo.status === 'ready' ? quotaOf : undefined} />, wbSlot)}
       </div>
       </div>
       {splitShown && splitPane && (
@@ -3830,16 +3830,62 @@ export function QuotaChip({ of }: { of: QuotaOf }) {
   )
 }
 
+// Why a turn failed, in words: the kinds Claude Code names its API errors by.
+const FAILED_KINDS: Record<string, I18nKey> = {
+  rate_limit: 'convo.failed.rate_limit',
+  authentication_failed: 'convo.failed.authentication_failed',
+  billing_error: 'convo.failed.billing_error',
+  server_error: 'convo.failed.server_error',
+  invalid_request: 'convo.failed.invalid_request',
+}
+export const failedWhy = (kind: string) => t(FAILED_KINDS[kind] ?? 'convo.failed.unknown')
+
+// The branch's commits its upstream has not, and it has not of its upstream
+// (GET …/git, read on the host: kept 5 s by the gateway), for the status
+// bar: read as the branch changes, and once a minute while in sight.
+type Upstream = { upstream: string; ahead: number; behind: number }
+const UPSTREAM_EVERY = 60_000
+function useUpstream(of: string | undefined, branch: string | undefined): Upstream | null {
+  const [got, setGot] = useState<{ key: string; up: Upstream | null } | null>(null)
+  const key = of && branch ? of + ' ' + branch : ''
+  useEffect(() => {
+    if (!key || !of) return
+    const [sid, pane] = of.split(' ')
+    let ctl: AbortController | null = null
+    const read = () => {
+      if (document.hidden) return
+      ctl?.abort()
+      const c = (ctl = new AbortController())
+      api<{ repo: boolean; branch?: string; upstream?: string; ahead?: number; behind?: number }>('GET', `/api/sessions/${sid}/git` + (pane ? '?pane=' + encodeURIComponent(pane) : ''), undefined, { signal: c.signal, timeoutMs: 20000 }).then(
+        (g) => !c.signal.aborted && setGot({ key, up: g.repo && g.upstream && g.branch === branch ? { upstream: g.upstream, ahead: g.ahead ?? 0, behind: g.behind ?? 0 } : null }),
+        () => {},
+      )
+    }
+    read()
+    const timer = window.setInterval(read, UPSTREAM_EVERY)
+    document.addEventListener('visibilitychange', read)
+    return () => {
+      ctl?.abort()
+      window.clearInterval(timer)
+      document.removeEventListener('visibilitychange', read)
+    }
+  }, [key, of, branch])
+  return got && got.key === key ? got.up : null
+}
+
 // What the pane in front says on the workbench's status bar: its branch,
 // where its requests go, the subscription's quota.
-function StatusFacts({ meta, via, auth, quota }: { meta?: ConvoMeta; via?: string; auth?: string; quota?: QuotaOf }) {
+function StatusFacts({ of, meta, via, auth, quota }: { of?: string; meta?: ConvoMeta; via?: string; auth?: string; quota?: QuotaOf }) {
   const where = via || (auth === 'bedrock' ? 'Amazon Bedrock' : auth === 'vertex' ? 'Google Vertex AI' : '')
+  const up = useUpstream(of, meta?.branch)
+  const ab = up ? [up.ahead ? '↑' + up.ahead : '', up.behind ? '↓' + up.behind : ''].filter(Boolean).join(' ') : ''
   return (
     <>
       {meta?.branch && (
-        <StatusItem title={t('convo.branch', { b: meta.branch })}>
+        <StatusItem title={t('convo.branch', { b: meta.branch }) + (ab && up ? ' · ' + [up.ahead ? t('card.ahead', { n: up.ahead }) : '', up.behind ? t('card.behind', { n: up.behind }) : ''].filter(Boolean).join(' ') + ' ' + up.upstream : '')}>
           <GitBranch size={12} aria-hidden="true" />
           {meta.branch}
+          {ab && <span className="wb-status-ab">{ab}</span>}
         </StatusItem>
       )}
       {where && <StatusItem title={t('convo.viaHint', { host: where })}>{t('convo.via', { host: where })}</StatusItem>}
@@ -4406,12 +4452,16 @@ export function AgentList({ rows, menus, onPicked, placed, query: given, onQuery
             : r.crossParentTitle
               ? t('convo.lineage.fromParent', { name: r.crossParentTitle })
               : ''
-          const childSub = isChild ? [r.where, parentRef ? '↳ ' + parentRef : ''].filter(Boolean).join(' · ') : ''
+          // (A child's model first: what tells a parent's helpers apart — workbench 11-23.)
+          const childSub = isChild ? [r.model ? shortModelName(r.model) : '', r.where, parentRef ? '↳ ' + parentRef : ''].filter(Boolean).join(' · ') : ''
           const isSingleChild = isChild && !childSub
           // (Its state by one mark before its time — waits, works, done, work left
           // going — in the colour the tabs give it; no longer a dot on its icon's
           // corner, which had a tile drawn under it to sit on: redesign 11-23.)
-          const mark = r.bg === 'running' || r.cmds ? 'bg' : said ? r.status : ''
+          // (Done on an API error, not seen yet: in red, and why, as a third line — workbench 11-23.)
+          // (Before commands it left running: an error to see to over a dev server going on — review of 11-23.)
+          const failed = r.status === 'done' && !r.bg ? r.failed : undefined
+          const mark = failed ? 'failed' : r.bg === 'running' || r.cmds ? 'bg' : said ? r.status : ''
           const whenEl =
             since || bgSaid || mark ? (
               <span className="convo-list-when">
@@ -4458,7 +4508,7 @@ export function AgentList({ rows, menus, onPicked, placed, query: given, onQuery
             >
             <button
               type="button"
-              className={'convo-list-row is-' + r.status + (isNestedVisual ? ' is-nested' : '') + (isChild ? ' is-child' : '')}
+              className={'convo-list-row is-' + r.status + (failed ? ' is-failed' : '') + (isNestedVisual ? ' is-nested' : '') + (isChild ? ' is-child' : '')}
               aria-current={r.current || undefined}
               onClick={() => {
                 clearRowTip()
@@ -4500,8 +4550,9 @@ export function AgentList({ rows, menus, onPicked, placed, query: given, onQuery
                 {/* (Its status by its dot only, and its group: in words for a screen
                     reader, and shown where the system's colours take the dot's away.) */}
                 {/* (Commands it left running: at work in the background, as its group says — review batch4.) */}
-                {(said || r.bg || r.cmds) && <span className={'convo-list-status is-' + (r.cmds && r.status !== 'blocked' ? 'working' : r.status)}>{t(r.bg === 'running' ? 'convo.status.bg' : r.bg === 'stale' ? 'convo.status.bgStale' : r.cmds && r.status !== 'blocked' ? 'convo.status.bg' : (`convo.status.${r.status}` as I18nKey))}</span>}
+                {(said || r.bg || r.cmds) && <span className={'convo-list-status is-' + (r.cmds && r.status !== 'blocked' && !failed ? 'working' : r.status)}>{t(failed ? 'convo.status.failed' : r.bg === 'running' ? 'convo.status.bg' : r.bg === 'stale' ? 'convo.status.bgStale' : r.cmds && r.status !== 'blocked' ? 'convo.status.bg' : (`convo.status.${r.status}` as I18nKey))}</span>}
                 {r.status === 'blocked' && r.now && <span className="convo-list-now is-blocked">{r.now}</span>}
+                {failed && <span className="convo-list-now is-failed">{failedWhy(failed)}</span>}
               </span>
             </button>
             {(hasMenu || hasSub) && (

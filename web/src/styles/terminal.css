@@ -1920,6 +1920,8 @@ button.convo-queue-row.is-note:last-child { border-radius: 0 0 var(--r-lg) var(-
 .convo-list-sdot.is-blocked { background: var(--term-warn-text); }
 .convo-list-sdot.is-working { background: var(--term-accent-text); animation: agent-dot 1.6s ease-in-out infinite; }
 .convo-list-sdot.is-done { background: var(--term-ok-text); }
+.convo-list-sdot.is-failed { background: var(--term-danger-text); }
+.convo-list-row.is-failed .convo-list-when, .convo-list-now.is-failed { color: var(--term-danger-text); }
 .convo-list-sdot.is-bg { box-shadow: inset 0 0 0 1.5px var(--term-accent-text); }
 @media (prefers-reduced-motion: reduce) { .convo-list-sdot.is-working { animation: none; } }
 @media (forced-colors: active) {
