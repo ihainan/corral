@@ -1892,7 +1892,7 @@ export function ConversationView({
             </button>
           )}
           {side && !sideShown ? (
-            <button type="button" className="convo-bar-pick" aria-haspopup="dialog" aria-expanded={!!picking} aria-label={t('convo.pick')} title={barTip || undefined} onClick={() => setPicking(true)}>
+            <button type="button" className="convo-bar-pick" aria-haspopup="dialog" aria-expanded={!!picking} aria-label={t('convo.pick')} title={[barTip, t('convo.pickKey', { key: keySearch(wbWide) })].filter(Boolean).join('\n')} onClick={() => setPicking(true)}>
               {label}
             </button>
           ) : (
@@ -4453,11 +4453,37 @@ export function AgentList({ rows, menus, onPicked, placed, query: given, onQuery
   // (orderOut: its menu set by the caller in a row of its own — a phone's list
   // puts it beside New agent rather than alone on a line under it.)
   const showOrder = rows.length > 1 && !orderOut
+  // Up and Down from its search box go through the rows as they are shown, Return opens the one marked — the
+  // focus kept in the box, to go on typing; some words typed, the first found is marked (UI notes of 11-23:
+  // the list over a full-width conversation, "/" opened it, the keys then did nothing).
+  const [hi, setHi] = useState<string | null>(null)
+  const shownRows = (el: Element) => [...(el.closest('.convo-side, .convo-picker')?.querySelectorAll<HTMLButtonElement>('button.convo-list-row[data-row]') ?? [])]
+  const searchRef = useRef<HTMLElement | null>(null)
+  useLayoutEffect(() => {
+    const el = searchRef.current
+    setHi(query.trim() && el ? (shownRows(el)[0]?.dataset.row ?? null) : null)
+  }, [query])
+  const navKey = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    searchRef.current = e.currentTarget
+    if (composing(e.nativeEvent) || e.altKey || e.metaKey || e.ctrlKey) return
+    const all = shownRows(e.currentTarget)
+    if (!all.length) return
+    const at = all.findIndex((b) => b.dataset.row === hi)
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault()
+      const to = all[e.key === 'ArrowDown' ? (at + 1) % all.length : at <= 0 ? all.length - 1 : at - 1]
+      setHi(to.dataset.row ?? null)
+      to.scrollIntoView({ block: 'nearest' })
+    } else if (e.key === 'Enter' && at >= 0) {
+      e.preventDefault()
+      all[at].click()
+    }
+  }
   return (
     <>
       {(showBar || showOrder || showNew) && (
         <div className={'list-toolbar' + (showBar ? '' : ' is-compact')}>
-          {showBar && <ListSearch value={query} onChange={setQuery} focus={search} onLeft={onSearchLeft} hint={hint ? keySearch(wbList) : undefined} />}
+          {showBar && <ListSearch value={query} onChange={setQuery} focus={search} onLeft={onSearchLeft} hint={hint ? keySearch(wbList) : undefined} onNav={navKey} />}
           {showOrder && <ListOrderMenu />}
           {showNew && (
             <button
@@ -4643,7 +4669,8 @@ export function AgentList({ rows, menus, onPicked, placed, query: given, onQuery
             >
             <button
               type="button"
-              className={'convo-list-row is-' + r.status + (failed ? ' is-failed' : '') + (isNestedVisual ? ' is-nested' : '') + (isChild ? ' is-child' : '')}
+              className={'convo-list-row is-' + r.status + (failed ? ' is-failed' : '') + (isNestedVisual ? ' is-nested' : '') + (isChild ? ' is-child' : '') + (hi === r.key ? ' is-hi' : '')}
+              data-row={r.key}
               aria-current={r.current || undefined}
               onClick={() => {
                 clearRowTip()
@@ -5030,7 +5057,7 @@ function PageKeysHelp({ onClose, side }: { onClose: () => void; side: boolean })
   )
 }
 
-export function ListSearch({ value, onChange, focus, onLeft, hint }: { value: string; onChange: (v: string) => void; focus?: number; onLeft?: () => void; hint?: string }) {
+export function ListSearch({ value, onChange, focus, onLeft, hint, onNav }: { value: string; onChange: (v: string) => void; focus?: number; onLeft?: () => void; hint?: string; onNav?: (e: React.KeyboardEvent<HTMLInputElement>) => void }) {
   const ref = useRef<HTMLInputElement>(null)
   const [inside, setInside] = useState(false)
   // (The pointer pressed down in the list it heads, until it is let go:
@@ -5103,7 +5130,8 @@ export function ListSearch({ value, onChange, focus, onLeft, hint }: { value: st
         spellCheck={false}
         onChange={(e) => onChange(e.target.value)}
         onKeyDown={(e) => {
-          if (e.key !== 'Escape' || !value) return
+          onNav?.(e)
+          if (e.defaultPrevented || e.key !== 'Escape' || !value) return
           e.preventDefault()
           e.stopPropagation()
           e.nativeEvent.stopImmediatePropagation()
