@@ -152,14 +152,21 @@ html.term-mode body { position: fixed; inset: 0; }
   background: var(--term-chrome); border-top: 1px solid var(--term-line);
 }
 .composer-box { background: var(--term-key); border-radius: var(--r-lg); display: flex; flex-direction: column; }
-.term-root.light .composer-box { box-shadow: inset 0 0 0 1px var(--term-line); }
+/* (Framed by a hairline a step stronger than the page's, lifted a little: the
+   one place to type. Taking the focus, its frame darkens — not a blue frame
+   standing whenever the page is open, as the box has the focus all the while
+   it is: redesign 11-23.) */
+.term-root.light .composer-box { box-shadow: inset 0 0 0 1px var(--term-line-strong), 0 1px 2px rgba(16, 24, 40, 0.04), 0 4px 16px rgba(16, 24, 40, 0.05); }
+.term-root.dark .composer-box { box-shadow: inset 0 0 0 1px var(--term-input-line); }
 .composer-input {
   display: block; width: 100%; min-height: 44px; max-height: 40vh; resize: none; border: 0; background: transparent;
   padding: 11px 12px 4px; font: 16px/1.4 var(--font-ui); color: var(--term-fg);
 }
 .composer-input::placeholder { color: var(--term-fg-3); }
 .composer-input:focus { outline: none; box-shadow: none; }
-.composer-box:focus-within { box-shadow: 0 0 0 2px var(--accent); }
+.composer-box:focus-within, .term-root.light .composer-box:focus-within, .term-root.dark .composer-box:focus-within {
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--term-fg) 30%, var(--term-line-strong)), 0 1px 2px rgba(16, 24, 40, 0.04), 0 4px 16px rgba(16, 24, 40, 0.05);
+}
 /* Files put up for the message, over the box (11-13, as T3 Code and DeepSeek's
    harness show them): a picture a 56px tile of it, its × on its corner; any
    other file a card of its name and size; one going up, how far drawn on it;
@@ -197,6 +204,11 @@ html.term-mode body { position: fixed; inset: 0; }
 .term-root .composer-insert:hover { background: var(--term-hover); color: var(--term-fg); }
 .term-root .composer-insert:disabled { opacity: 0.4; }
 .composer-keys { margin-right: 8px; color: var(--term-fg-3); font-size: var(--fs-note); line-height: var(--lh-note); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+/* (Which key sends, said once something is typed: an empty box says nothing
+   it will not need yet. Kept in its place, so the tools do not move.) */
+/* (On the agents' page, none while the box is empty; a terminal's keeps them, as it
+   tells there how to take the suggestion the empty box shows.) */
+.convo-dock .composer-box:has(.composer-input:placeholder-shown) .composer-keys { visibility: hidden; }
 @media (max-width: 560px) { .composer-keys { display: none; } }
 .composer-send {
   width: 32px; height: 32px; border-radius: 50%; border: 0; display: grid; place-items: center; cursor: pointer;
@@ -430,13 +442,15 @@ html.kb-open .keybar { padding-bottom: 6px; }
     box-shadow: inset 0 0 0 1px var(--term-line);
   }
 }
-.term-tab-host { font-weight: 600; }
-.term-tab-which { color: var(--term-fg-3); }
+/* "101  herdr 2": the host quiet, the session's own name in the tab's colour,
+   set apart by room alone (redesign 11-23: no "·" between them). */
+.term-tab-host { font-weight: 400; color: var(--term-fg-3); }
+.term-tab-which { color: inherit; }
 /* Recorded: red words, a plain dot before them — no ground, no halo (11-05). */
 .term-rec { flex: none; display: inline-flex; align-items: center; gap: 6px; margin: 0 4px 0 12px; font-size: var(--fs-sub); line-height: var(--lh-sub); font-weight: 500; color: var(--term-danger-text); white-space: nowrap; }
 .term-rec::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
 .term-tab[aria-current="page"] .term-tab-title { color: var(--term-fg-2); }
-.term-tab-name { display: flex; min-width: 0; flex: 0 1 auto; white-space: nowrap; }
+.term-tab-name { display: flex; gap: 6px; min-width: 0; flex: 0 1 auto; white-space: nowrap; }
 /* A long name is cut, its host kept longest: the title gives way first,
    then the session's name, then the host (ux1101 T27). */
 .term-tab-host { flex: 0 0 auto; max-width: 100%; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
@@ -444,10 +458,19 @@ html.kb-open .keybar { padding-bottom: 6px; }
 .term-tab-title { flex: 0 100000 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--term-fg-3); font-weight: 400; }
 /* Agents waiting for you, and finished ones not looked at yet: an icon says
    which, in colours read at 4.5:1 on the bar of any scheme. */
-.term-tab-count { flex: none; display: inline-flex; align-items: center; gap: 2px; font: 600 12px/1 var(--font-ui); font-variant-numeric: tabular-nums; }
+.term-tab-count { flex: none; display: inline-flex; align-items: center; gap: 4px; font: 600 12px/1 var(--font-ui); font-variant-numeric: tabular-nums; }
+/* One mark for every state, its colour saying which: as the agents' list has them. */
+.term-tab-sdot { flex: none; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+/* (With the system's colours forced, one colour for every state: told apart by
+   shape instead — waiting filled, at work a ring, done a square.) */
+@media (forced-colors: active) {
+  .term-tab-sdot { forced-color-adjust: none; background: CanvasText; }
+  .term-tab-busy .term-tab-sdot { background: none; box-shadow: inset 0 0 0 1.5px CanvasText; }
+  .term-tab-done .term-tab-sdot { border-radius: 0; }
+}
 .term-tab-wait { color: var(--term-warn-text); }
 .term-tab-done { color: var(--term-ok-text); }
-.term-tab-busy { color: var(--term-fg-2); }
+.term-tab-busy { color: var(--term-accent-text); }
 .term-tab-dot { flex: none; width: 6px; height: 6px; border-radius: 50%; background: var(--term-fg-3); }
 .term-tab-dot.s-connecting, .term-tab-dot.s-reconnecting, .term-tab-dot.s-slow { background: var(--term-warn-text); }
 .term-tab-dot.s-offline, .term-tab-dot.s-full { background: var(--term-danger-text); }
@@ -639,11 +662,14 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 .convo-dock .composer { padding: 0; background: none; border-top: 0; }
 .convo-dock .composer > .convo-panelwin { margin-bottom: 8px; }
 .convo-dock .composer > .convo-panelwin .convo-panelwin-screen { max-height: min(32dvh, 300px); }
-.convo-dock .composer-box { background: var(--term-input, var(--term-bg)); border: 1px solid var(--term-input-line, var(--term-line)); }
-.term-root.dark .convo-dock .composer-box:focus-within { border-color: color-mix(in srgb, var(--term-accent-text) 70%, var(--term-line)); }
-.term-root.light .convo-dock .composer-box { box-shadow: none; }
+/* (A neutral frame and a soft shadow; with the focus, the frame darkens — the
+   box has the focus whenever the page is open, so an accent frame stood there
+   all the while: redesign 11-23.) */
+.convo-dock .composer-box { background: var(--term-input, var(--term-bg)); border: 1px solid var(--term-input-line, var(--term-line-strong)); }
+.term-root.light .convo-dock .composer-box { border-color: var(--term-line-strong); box-shadow: 0 1px 2px rgba(16, 24, 40, 0.04), 0 4px 16px rgba(16, 24, 40, 0.05); }
 .convo-dock .composer-box:focus-within,
-.term-root.light .convo-dock .composer-box:focus-within { border-color: color-mix(in srgb, var(--term-accent-text) 70%, var(--term-line)); box-shadow: 0 0 0 2px color-mix(in srgb, var(--term-accent-text) 12%, transparent); }
+.term-root.dark .convo-dock .composer-box:focus-within { border-color: color-mix(in srgb, var(--term-fg) 35%, var(--term-line-strong)); }
+.term-root.light .convo-dock .composer-box:focus-within { border-color: color-mix(in srgb, var(--term-fg) 30%, var(--term-line-strong)); box-shadow: 0 1px 2px rgba(16, 24, 40, 0.04), 0 4px 16px rgba(16, 24, 40, 0.05); }
 @media (max-width: 640px) { .convo-dock { padding-left: max(12px, env(safe-area-inset-left, 0px)); padding-right: max(12px, env(safe-area-inset-right, 0px)); } }
 .convo-runs { position: relative; display: flex; align-items: center; gap: 4px; min-width: 0; overflow: visible; min-height: 24px; margin-top: -4px; font-size: var(--fs-sub); line-height: var(--lh-sub); color: var(--term-fg-3); font-variant-numeric: tabular-nums; }
 .convo-runs-item {
@@ -940,8 +966,11 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 .convo-md :is(h3, h4, h5, h6) code { font-size: inherit; }
 /* A file's path in an answer: its code, underlined as something to open (a menu). */
 .md-path { display: inline; padding: 0; margin: 0; border: 0; background: none; font: inherit; color: inherit; cursor: pointer; text-align: inherit; }
-.md-path > code { text-decoration: underline dotted color-mix(in srgb, var(--term-accent-text) 60%, transparent); text-underline-offset: 3px; overflow-wrap: anywhere; }
-.md-path:hover > code { text-decoration-style: solid; }
+/* (A path that opens: in the link's colour, underlined when pointed at — not
+   a dotted line under every one in an answer: redesign 11-23.) */
+.md-path > code { color: var(--term-accent-text); text-decoration: none; text-underline-offset: 3px; overflow-wrap: anywhere; }
+.md-path:hover > code { text-decoration: underline; }
+@media (forced-colors: active) { .md-path > code { text-decoration: underline; } } /* (its colour gone: the underline tells it opens) */
 .md-path:focus-visible { outline: 2px solid var(--term-accent-text); outline-offset: 1px; border-radius: var(--r-xs); }
 .md-code { position: relative; background: var(--term-chrome); border: 1px solid var(--term-line); border-radius: var(--r); }
 .md-code pre { margin: 0; padding: 10px 12px; overflow-x: auto; font-family: var(--font-mono); font-size: var(--fs-sub); line-height: var(--lh-sub); tab-size: 4; }
@@ -1335,14 +1364,14 @@ button.gch-ut:hover { background: var(--term-hover); }
 @media (pointer: fine) {
   .convo-bar { gap: 6px; height: 40px; box-sizing: border-box; padding: 0 12px; }
   .convo-bar > .icon-btn, .convo-tray-head > .icon-btn { width: 28px; height: 28px; border-radius: var(--r-sm); }
-  .convo-bar-status { padding: 2px 6px; border-radius: var(--r-sm); background: none; color: var(--term-fg-2); }
-  .convo-bar-status.is-working, .convo-bar-status.is-done { color: var(--term-fg-2); }
-  .convo-bar-status.is-act:hover { background: var(--term-hover); color: var(--term-fg); }
 }
 .convo-bar-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--term-fg); font-weight: 600; font-size: var(--fs-ui); line-height: var(--lh-ui); }
+/* (Its state in words and a mark in its colour, on the bar's ground: no pill
+   behind it. The desktop's own rule for that stood before this one and lost
+   to it, so the pill stayed — redesign 11-23.) */
 .convo-bar-status {
-  flex: none; display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 999px;
-  --st: var(--term-fg-3); color: var(--term-fg-2); background: color-mix(in srgb, var(--st) 11%, transparent);
+  flex: none; display: inline-flex; align-items: center; gap: 6px; padding: 2px 6px; border-radius: var(--r-sm);
+  --st: var(--term-fg-3); color: var(--term-fg-2); background: none;
   font-size: var(--fs-note); line-height: var(--lh-note); font-weight: 500; font-variant-numeric: tabular-nums; white-space: nowrap;
 }
 /* (Its dot, in its colour; at work the spinner is in its place.) */
@@ -1356,7 +1385,7 @@ button.gch-ut:hover { background: var(--term-hover); }
 .convo-bar-status:empty { display: none; }
 /* (Commands left running: a press lists them, in the session card. 11-15) */
 .convo-bar-status.is-act { border: 0; font-family: inherit; cursor: pointer; }
-.convo-bar-status.is-act:hover { background: color-mix(in srgb, var(--st) 20%, transparent); color: var(--term-fg); }
+.convo-bar-status.is-act:hover { background: var(--term-hover); color: var(--term-fg); }
 .convo-bar-status.is-act:focus-visible { outline: 2px solid var(--term-accent-text); outline-offset: 2px; }
 @media (forced-colors: active) { .convo-bar-status { border: 1px solid CanvasText; } .convo-bar-status::before { background: CanvasText; } }
 .convo-waiting {
@@ -1392,8 +1421,8 @@ button.gch-ut:hover { background: var(--term-hover); }
 
 /* What went wrong: why the agent fell silent, or stopped mid-sentence */
 .convo-trouble {
-  display: flex; align-items: flex-start; gap: 8px; margin: 6px 0; padding: 8px 10px; border-radius: var(--r-lg);
-  background: color-mix(in srgb, var(--term-warn-text) 9%, var(--term-bg)); color: var(--term-fg-2); font-size: 13px; line-height: 19px;
+  display: flex; align-items: flex-start; gap: 10px; margin: 6px 0; padding: 10px 14px; border-radius: var(--r-lg);
+  border: 1px solid var(--term-line); background: none; color: var(--term-fg-2); font-size: var(--fs-sub); line-height: var(--lh-sub);
 }
 /* Formatted upstream API error card (e.g. Bedrock/Anthropic 4xx/5xx responses). */
 .convo-api-err {
@@ -1638,8 +1667,11 @@ button.convo-queue-row.is-note:last-child { border-radius: 0 0 var(--r-lg) var(-
 }
 /* (Its rows on its own surface: the one read lifted off it, as a card; a
    hover a shade of it.) */
-.term-root.light .convo-side { --term-side: var(--term-chrome); --term-row-hover: rgba(16, 24, 40, 0.045); --term-row-current: var(--term-bg); --row-lift: 0 0 0 1px rgba(16, 24, 40, 0.07); } /* (11-13: a hairline, no drop shadow — shadows are for what floats) */
-.term-root.dark .convo-side { --term-row-hover: rgba(255, 255, 255, 0.04); --term-row-current: rgba(255, 255, 255, 0.075); --row-lift: inset 0 0 0 1px rgba(255, 255, 255, 0.05); }
+/* (Redesign 11-23: the list is part of the page, on its ground, a hairline
+   between it and the thread; the chrome's tint is the tab bar's alone. The one
+   read is told by a tint and its heavier name: no card lifted off the list.) */
+.term-root.light .convo-side { --term-side: var(--term-bg); --term-row-hover: #f3f4f6; --term-row-current: #eaedf2; --row-lift: none; }
+.term-root.dark .convo-side { --term-side: var(--term-bg); --term-row-hover: rgba(255, 255, 255, 0.04); --term-row-current: rgba(255, 255, 255, 0.08); --row-lift: none; }
 /* (+ New agent and Search toolbar stay pinned at the top; only the agent list scrolls.) */
 .convo-side > * { flex-shrink: 0; }
 .convo-side > .convo-list-groups { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 2px 2px 4px 0; margin-right: -2px; }
@@ -1693,6 +1725,7 @@ button.convo-queue-row.is-note:last-child { border-radius: 0 0 var(--r-lg) var(-
 .list-order-btn:focus-visible { outline: 2px solid var(--term-accent-text); outline-offset: -2px; }
 .list-order-btn.is-active { color: var(--term-accent-text); background: color-mix(in srgb, var(--term-accent-text) 12%, transparent); }
 .agents-phone .list-order-btn { width: 40px; height: 40px; }
+.agents-phone-top .list-order-btn { flex: none; border-color: var(--term-line-strong); background: var(--term-bg); }
 .agents-list > .list-search { margin: 10px max(16px, env(safe-area-inset-right, 0px)) 4px max(16px, env(safe-area-inset-left, 0px)); height: 40px; }
 .convo-list-group { display: flex; flex-direction: column; gap: 4px; margin-bottom: 12px; }
 /* (Beside the thread, a step tighter: rows 2 apart, groups 8 — 11-13, the list read as bigger than it is. The phone's
@@ -1734,22 +1767,13 @@ button.convo-queue-row.is-note:last-child { border-radius: 0 0 var(--r-lg) var(-
 .convo-list-item.is-nested > .convo-list-actions { top: 4px; right: 4px; }
 /* Nested child agents under a parent row: subtle curved 1px tree guide aligned under parent icon center. */
 .convo-list-children {
-  --tree-line: color-mix(in srgb, var(--term-fg) 14%, transparent);
   display: flex; flex-direction: column; gap: 2px;
-  margin: 0 0 2px 24px; padding-left: 12px;
+  margin: 0 0 2px 28px;
 }
 .convo-list-tree .convo-list-children { margin-left: 20px; }
 .convo-list-item.is-child { position: relative; }
-.convo-list-item.is-child::before {
-  content: ''; position: absolute; left: -12px; top: -4px; width: 10px; height: 18px;
-  border-left: 1px solid var(--tree-line); border-bottom: 1px solid var(--tree-line);
-  border-bottom-left-radius: var(--r-sm); pointer-events: none;
-}
-.convo-list-item.is-child:first-child::before { top: -2px; height: 16px; }
-.convo-list-item.is-child:not(:last-child)::after {
-  content: ''; position: absolute; left: -12px; top: 10px; bottom: -4px;
-  border-left: 1px solid var(--tree-line); pointer-events: none;
-}
+/* (A child under its parent by its indent alone, its mark under the parent's
+   name: no lines drawn to join them — redesign 11-23.) */
 .convo-list-row.is-child { padding: 4px 8px; gap: 8px; }
 .convo-list-row.is-child .agent-icon { margin-top: 0; }
 .convo-list-row.is-child .convo-list-title { font-size: var(--fs-sub); line-height: var(--lh-sub); font-weight: 500; }
@@ -1758,13 +1782,13 @@ button.convo-queue-row.is-note:last-child { border-radius: 0 0 var(--r-lg) var(-
 .convo-list-item.is-child.is-single > .convo-list-actions { top: 2px; right: 4px; }
 .convo-list-subpill {
   display: inline-flex; align-items: center; gap: 2px; height: 20px; padding: 0 6px;
-  border: 0; border-radius: 999px;
-  background: color-mix(in srgb, var(--term-fg) 6%, transparent); color: var(--term-fg-3);
+  border: 0; border-radius: var(--r-sm);
+  background: none; color: var(--term-fg-3);
   font-size: var(--fs-note); line-height: var(--lh-note); font-weight: 500; font-variant-numeric: tabular-nums;
   cursor: pointer;
 }
 .convo-list-subpill:hover { background: color-mix(in srgb, var(--term-fg) 12%, transparent); color: var(--term-fg); }
-.convo-list-subpill.is-collapsed { color: var(--term-fg-2); background: color-mix(in srgb, var(--term-fg) 9%, transparent); }
+.convo-list-subpill.is-collapsed { color: var(--term-fg-2); }
 .convo-list-subpill:focus-visible { outline: 2px solid var(--term-accent-text); outline-offset: -2px; }
 .convo-list-parent-ref {
   min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
@@ -1853,7 +1877,20 @@ button.convo-queue-row.is-note:last-child { border-radius: 0 0 var(--r-lg) var(-
   flex: 0 1 auto; min-width: 0; font-size: var(--fs-ui); font-weight: 500; line-height: var(--lh-ui);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.convo-list-when { flex: none; margin-left: auto; min-width: 3.2em; text-align: end; font-size: var(--fs-note); line-height: var(--lh-note); color: var(--term-fg-3); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.convo-list-when { flex: none; margin-left: auto; min-width: 3.2em; display: inline-flex; align-items: center; justify-content: flex-end; gap: 6px; font-size: var(--fs-note); line-height: var(--lh-note); color: var(--term-fg-3); font-variant-numeric: tabular-nums; white-space: nowrap; }
+/* A row's state: one mark before its time, in the colours the tabs use —
+   waits for you, at work, done and not looked at, work left going. */
+.convo-list-sdot { flex: none; width: 6px; height: 6px; border-radius: 50%; }
+.convo-list-sdot.is-blocked { background: var(--term-warn-text); }
+.convo-list-sdot.is-working { background: var(--term-accent-text); animation: agent-dot 1.6s ease-in-out infinite; }
+.convo-list-sdot.is-done { background: var(--term-ok-text); }
+.convo-list-sdot.is-bg { box-shadow: inset 0 0 0 1.5px var(--term-accent-text); }
+@media (prefers-reduced-motion: reduce) { .convo-list-sdot.is-working { animation: none; } }
+@media (forced-colors: active) {
+  .convo-list-sdot, .convo-list-sdot.is-blocked, .convo-list-sdot.is-done { forced-color-adjust: none; background: CanvasText; animation: none; }
+  .convo-list-sdot.is-working, .convo-list-sdot.is-bg { background: none; box-shadow: inset 0 0 0 1.5px CanvasText; }
+  .convo-list-sdot.is-done { border-radius: 0; }
+}
 /* Its second line: where it is (the session's title, which tells alike names apart) and, at its end, when. One line. */
 /* (Its turn over, work of its left going: said by its time, in the dot's colour.) */
 .convo-list-bg { color: var(--term-accent-text); font-weight: 500; }
@@ -1946,8 +1983,6 @@ button.convo-queue-row.is-note:last-child { border-radius: 0 0 var(--r-lg) var(-
 @media (pointer: coarse) {
   .convo-list-row { padding: 10px 12px; }
   .convo-list-row.is-child { min-height: 44px; padding: 10px 10px; }
-  .convo-list-item.is-child::before { height: 24px; }
-  .convo-list-item.is-child:first-child::before { height: 22px; }
   .convo-list-item.is-child.is-single > .convo-list-actions { top: 8px; }
   .convo-list-actions { top: 8px; right: 10px; }
   .convo-list-subpill { position: relative; height: 22px; padding: 0 8px; }
@@ -1975,13 +2010,13 @@ button.convo-queue-row.is-note:last-child { border-radius: 0 0 var(--r-lg) var(-
 .convo-list-item.has-menu:has(:focus-visible) .convo-list-dots, .convo-list-item.is-menu .convo-list-dots { opacity: 1; pointer-events: auto; }
 .convo-list-item.has-menu:not(.has-children):has(:focus-visible) .convo-list-line:not(:has(.convo-list-when)), .convo-list-item.has-menu:not(.has-children).is-menu .convo-list-line:not(:has(.convo-list-when)) { padding-right: 26px; }
 .convo-list-item.has-children.has-menu:has(:focus-visible) .convo-list-line, .convo-list-item.has-children.is-menu .convo-list-line { padding-right: 64px; }
-.convo-list-item.is-child.is-single.has-menu:has(:focus-visible) .convo-list-when, .convo-list-item.is-child.is-single.is-menu .convo-list-when { opacity: 0; }
+.convo-list-item.is-child.is-single.has-menu:has(:focus-visible) .convo-list-when-t, .convo-list-item.is-child.is-single.is-menu .convo-list-when-t { opacity: 0; }
 .convo-list-item.is-menu > .convo-list-row:not([aria-current='true']) { background: var(--term-row-hover); --dot-ring: var(--term-row-hover); }
 @media (hover: hover) {
   .convo-list-item.has-menu:hover .convo-list-dots { opacity: 1; pointer-events: auto; }
   .convo-list-item.has-menu:not(.has-children):hover .convo-list-line:not(:has(.convo-list-when)) { padding-right: 26px; }
   .convo-list-item.has-children.has-menu:hover .convo-list-line { padding-right: 64px; }
-  .convo-list-item.is-child.is-single.has-menu:hover .convo-list-when { opacity: 0; }
+  .convo-list-item.is-child.is-single.has-menu:hover .convo-list-when-t { opacity: 0; }
   .convo-list-item.has-menu:hover > .convo-list-row:not([aria-current='true']) { background: var(--term-row-hover); --dot-ring: var(--term-row-hover); }
 }
 @media (hover: none) {
@@ -2057,7 +2092,8 @@ button.convo-queue-row.is-note:last-child { border-radius: 0 0 var(--r-lg) var(-
 .agents-list.agents-phone > .convo-list-groups { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding-bottom: calc(16px + env(safe-area-inset-bottom, 0px)); }
 .agents-phone-top { display: flex; gap: 8px; margin: 0 0 8px; }
 .convo-side-new.agents-phone-new { flex: 1; width: auto; min-width: 0; margin: 0; height: 40px; }
-.agents-phone-mine { flex: none; height: 40px; padding: 0 12px; border: 1px solid transparent; border-radius: var(--r); background: color-mix(in srgb, var(--term-fg) 5%, transparent); color: var(--term-fg-2); font: inherit; font-size: var(--fs-sub); line-height: var(--lh-sub); cursor: pointer; }
+/* (Framed as New agent beside it, one look for the row's buttons — redesign 11-23.) */
+.agents-phone-mine { flex: none; height: 40px; padding: 0 12px; border: 1px solid var(--term-line-strong); border-radius: var(--r); background: var(--term-bg); color: var(--term-fg-2); font: inherit; font-size: var(--fs-sub); line-height: var(--lh-sub); cursor: pointer; }
 .agents-phone-mine.is-on { border-color: var(--term-accent-text); background: color-mix(in srgb, var(--term-accent-text) 10%, transparent); color: var(--term-accent-text); font-weight: 500; }
 .agents-phone-mine:focus-visible { outline: 2px solid var(--term-accent-text); outline-offset: 1px; }
 .agents-phone .list-search { height: 40px; }
@@ -2118,6 +2154,9 @@ button.convo-queue-row.is-note:last-child { border-radius: 0 0 var(--r-lg) var(-
 }
 .agent-icon svg { transform: scale(0.88); }
 .agent-icon.is-plain { color: var(--term-fg-2); background: var(--term-key-active); }
+/* The mark alone (AgentIcon bare): no tile, its glyph the size given. */
+.agent-icon.is-bare, .agent-icon.is-bare.is-plain { background: none; border-radius: 0; }
+.agent-icon.is-bare svg { transform: none; }
 .agent-icon svg { display: block; }
 .agent-icon-dot {
   position: absolute; right: -2px; bottom: -2px; width: 8px; height: 8px; border-radius: 50%;
@@ -2190,9 +2229,13 @@ button.convo-queue-row.is-note:last-child { border-radius: 0 0 var(--r-lg) var(-
 /* (A window too low for its lines to be told apart: none.) */
 @container (min-width: 900px) { @media (hover: hover) and (pointer: fine) and (min-height: 520px) { .convo-rail { display: flex; } } }
 .convo-rail-tick { flex: 0 1 12px; min-height: 0; width: 100%; padding: 0; border: 0; background: none; cursor: pointer; display: flex; align-items: center; justify-content: center; }
-.convo-rail-tick::before { content: ''; width: 10px; height: 2px; border-radius: 1px; background: var(--term-line-strong); transition: width 0.12s, background-color 0.12s; }
-.convo-rail-tick:hover::before { width: 18px; background: var(--term-fg-3); }
-.convo-rail-tick.is-at::before { width: 18px; background: var(--term-accent-text); }
+/* (Faint at rest — the page's hairline — and plain to see once the pointer is
+   on the rail: a column of marks always as dark as the text drew the eye from
+   the thread beside it — redesign 11-23.) */
+.convo-rail-tick::before { content: ''; width: 8px; height: 2px; border-radius: 1px; background: var(--term-line); transition: width 0.12s, background-color 0.12s; }
+.convo-rail:hover .convo-rail-tick::before, .convo-rail:focus-within .convo-rail-tick::before { background: var(--term-line-strong); }
+.convo-rail-tick:hover::before, .convo-rail:hover .convo-rail-tick:hover::before { width: 18px; background: var(--term-fg-3); }
+.convo-rail-tick.is-at::before, .convo-rail:hover .convo-rail-tick.is-at::before { width: 18px; background: var(--term-accent-text); }
 .convo-rail-tip { position: absolute; right: calc(100% + 6px); transform: translateY(-50%); width: max-content; max-width: 280px; padding: 8px 10px; border-radius: var(--r); border: 1px solid var(--term-line); background: var(--term-pop); box-shadow: 0 4px 16px rgb(0 0 0 / 14%); pointer-events: none; display: flex; flex-direction: column; gap: 2px; }
 .convo-rail-when { font-size: var(--fs-note); line-height: var(--lh-note); color: var(--term-fg-3); }
 .convo-rail-text { font-size: var(--fs-sub); line-height: var(--lh-sub); color: var(--term-fg); display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; }
@@ -2292,9 +2335,11 @@ button.convo-queue-row.is-note:last-child { border-radius: 0 0 var(--r-lg) var(-
 .convo-event.is-peer .link-btn { margin-top: 2px; font-size: var(--fs-note); line-height: var(--lh-note); }
 @media (forced-colors: active) { .convo-event.is-peer { border: 1px solid CanvasText; } }
 .convo-event.is-notice .convo-trouble-head { color: var(--term-fg-3); }
-.convo-event.is-notice.is-warn { background: color-mix(in srgb, var(--term-warn-text) 9%, transparent); }
+/* (A warning said by its words' colour, on the plain ground framed by a hairline: no tinted block — redesign 11-23.) */
+.convo-event.is-notice.is-warn { background: none; box-shadow: inset 0 0 0 1px var(--term-line); }
 .convo-event.is-notice.is-warn .convo-trouble-head { color: var(--term-warn-text); }
-.convo-event.is-goal.is-met { background: color-mix(in srgb, var(--term-ok-text, #3fa45b) 9%, transparent); }
+.convo-event.is-goal.is-met { background: none; box-shadow: inset 0 0 0 1px var(--term-line); }
+.convo-event.is-goal.is-met .convo-trouble-head { color: var(--term-ok-text); }
 @media (forced-colors: active) { .convo-event.is-recap, .convo-event.is-goal, .convo-event.is-notice { border: 1px solid CanvasText; } }
 
 /* A new agent */
@@ -2347,7 +2392,7 @@ button.convo-queue-row.is-note:last-child { border-radius: 0 0 var(--r-lg) var(-
   .convo-side .convo-list-row { align-items: center; padding: 8px 10px; gap: 10px; border-radius: var(--r); }
   .convo-side .convo-list-row .agent-icon { margin-top: 0; }
   .convo-side .convo-list-row:has(.convo-list-now, .convo-list-parent-ref) { align-items: flex-start; }
-  .convo-side .convo-list-row:has(.convo-list-now, .convo-list-parent-ref) .agent-icon { margin-top: 4px; }
+  .convo-side .convo-list-row:has(.convo-list-now, .convo-list-parent-ref) .agent-icon { margin-top: 1px; }
   .convo-side .convo-list-row.is-nested:has(.convo-list-now, .convo-list-parent-ref) .agent-icon,
   .convo-side .convo-list-row.is-child:has(.convo-list-now, .convo-list-parent-ref) .agent-icon { margin-top: 2px; }
   .convo-side .convo-list-row.is-child .agent-icon-dot,
@@ -2361,8 +2406,6 @@ button.convo-queue-row.is-note:last-child { border-radius: 0 0 var(--r-lg) var(-
   }
   .convo-side .convo-list-text { gap: 2px; }
   .convo-side .convo-list-bg { color: var(--term-fg-2); font-weight: 400; }
-  .convo-side .convo-list-item.is-child:not(.is-single)::before { height: 28px; }
-  .convo-side .convo-list-item.is-child:not(.is-single):first-child::before { height: 26px; }
 }
 @media (pointer: coarse) {
   .convo-side-new { height: 44px; }

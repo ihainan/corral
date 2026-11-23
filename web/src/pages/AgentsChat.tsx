@@ -21,7 +21,7 @@ import { SessionOpDialog, type SessionOp } from '../terminal/sessionOps'
 import { NEW_AGENT, NewAgentDialog, type NewSubagentParent } from '../terminal/newAgent'
 import { type CodexRewind, ForkDialog, RenameDialog, type RenameTarget } from '../terminal/agentOps'
 import { agentWho, ChimeCounter, chime, countsOf } from '../terminal/chime'
-import { AgentList, CODEX_EFFORTS, ConversationView, glanceOf, type ConvoAgent, type ConvoLineageBar, type ConvoListRow, type ConvoPending, type ConvoSplitPane, type ConvoWent, type FileActs, type ModelOpt } from '../terminal/Conversation'
+import { AgentList, ListOrderMenu, CODEX_EFFORTS, ConversationView, glanceOf, type ConvoAgent, type ConvoLineageBar, type ConvoListRow, type ConvoPending, type ConvoSplitPane, type ConvoWent, type FileActs, type ModelOpt } from '../terminal/Conversation'
 import { saveTranslateConfig, useTranslateConfig } from '../terminal/thoughtTranslate'
 import { FilesDialog } from '../terminal/FilesDialog'
 import { PortsDialog } from '../terminal/PortsDialog'
@@ -3472,8 +3472,9 @@ function PhoneList({ entries, all, titles, query, onQuery, onPick }: { entries: 
         <button type="button" className={'agents-phone-mine' + (mine ? ' is-on' : '')} aria-pressed={mine} onClick={() => setMine(!mine)}>
           {t('agents.onlyMine')}
         </button>
+        {shown.length > 1 && <ListOrderMenu />}
       </div>
-      {shown.length === 0 && !query.trim() ? <p className="agents-list-none">{t('agents.noneMine')}</p> : <AgentList rows={shown} query={query} onQuery={onQuery} />}
+      {shown.length === 0 && !query.trim() ? <p className="agents-list-none">{t('agents.noneMine')}</p> : <AgentList rows={shown} query={query} onQuery={onQuery} orderOut />}
     </div>
   )
 }

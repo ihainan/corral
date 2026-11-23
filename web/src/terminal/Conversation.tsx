@@ -1650,7 +1650,7 @@ export function ConversationView({
   const others = rows.filter((r) => r.status === 'blocked' && !r.current)
   const label = (
     <>
-      {agent && <AgentIcon program={agent.program} size={22} />}
+      {agent && <AgentIcon program={agent.program} size={18} bare />}
       <span className="convo-bar-name">{name[0] || t('convo.title')}</span>
       {name[1] && <span className="convo-bar-where">{name[1]}</span>}
       {side && !sideShown && <ChevronDown size={14} className="convo-bar-chev" aria-hidden="true" />}
@@ -3939,7 +3939,7 @@ const SIDE_OPEN_KEY = 'corral.convo.sideOpen'
 const SIDE_FOLD_KEY = 'corral.convo.sideFold'
 const SIDE_PARENT_FOLD_KEY = 'corral.convo.parentFold'
 
-function ListOrderMenu() {
+export function ListOrderMenu() {
   const prefs = usePrefs()
   const active = prefs.sidebarGroup !== 'status' || prefs.sidebarSort !== 'recent' || prefs.pinFixedOrder || !prefs.sidebarNestChildren
   const tick = (on: boolean) => (on ? <Check size={15} /> : undefined)
@@ -3972,7 +3972,7 @@ function ListOrderMenu() {
   )
 }
 
-export function AgentList({ rows, menus, onPicked, placed, query: given, onQuery, search, showSearch, onSearchLeft, hint, compact, showNew }: { rows: ConvoListRow[]; menus?: boolean; onPicked?: () => void; placed?: Map<string, ConvoListRow>; query?: string; onQuery?: (q: string) => void; search?: number; showSearch?: boolean; onSearchLeft?: () => void; hint?: boolean; compact?: boolean; showNew?: boolean }) {
+export function AgentList({ rows, menus, onPicked, placed, query: given, onQuery, search, showSearch, onSearchLeft, hint, compact, showNew, orderOut }: { rows: ConvoListRow[]; menus?: boolean; onPicked?: () => void; placed?: Map<string, ConvoListRow>; query?: string; onQuery?: (q: string) => void; search?: number; showSearch?: boolean; onSearchLeft?: () => void; hint?: boolean; compact?: boolean; showNew?: boolean; orderOut?: boolean }) {
   // Its rows' menu (menus: the side list's; the switcher's rows have none):
   // one for the list, of the row it was opened on by its key, as that row
   // may go to another group meanwhile and be drawn anew; at its "more"
@@ -4139,7 +4139,9 @@ export function AgentList({ rows, menus, onPicked, placed, query: given, onQuery
   const inOrder = placed ? [...found].sort((a, b) => place(a) - place(b)) : found
   const groups = buildAgentGroups(inOrder.map(at), orderOpts)
   const showBar = rows.length > SEARCH_FROM || !!query || !!search || !!showSearch
-  const showOrder = rows.length > 1
+  // (orderOut: its menu set by the caller in a row of its own — a phone's list
+  // puts it beside New agent rather than alone on a line under it.)
+  const showOrder = rows.length > 1 && !orderOut
   return (
     <>
       {(showBar || showOrder || showNew) && (
@@ -4276,12 +4278,23 @@ export function AgentList({ rows, menus, onPicked, placed, query: given, onQuery
               : ''
           const childSub = isChild ? [r.where, parentRef ? '↳ ' + parentRef : ''].filter(Boolean).join(' · ') : ''
           const isSingleChild = isChild && !childSub
+          // (Its state by one mark before its time — waits, works, done, work left
+          // going — in the colour the tabs give it; no longer a dot on its icon's
+          // corner, which had a tile drawn under it to sit on: redesign 11-23.)
+          const mark = r.bg === 'running' || r.cmds ? 'bg' : said ? r.status : ''
           const whenEl =
-            since || bgSaid ? (
+            since || bgSaid || mark ? (
               <span className="convo-list-when">
-                {bgSaid && <span className={'convo-list-bg' + (bgSaid === 'stale' ? ' is-stale' : '')}>{t(bgSaid === 'bg' ? 'convo.list.bg' : 'convo.list.bgStale')}</span>}
-                {bgSaid && since && ' · '}
-                {since}
+                {mark && <span className={'convo-list-sdot is-' + mark} aria-hidden="true" />}
+                {/* (The words in their own span: a single-line child's menu button
+                    takes their place on hover or focus, and its mark stays.) */}
+                {(bgSaid || since) && (
+                  <span className="convo-list-when-t">
+                    {bgSaid && <span className={'convo-list-bg' + (bgSaid === 'stale' ? ' is-stale' : '')}>{t(bgSaid === 'bg' ? 'convo.list.bg' : 'convo.list.bgStale')}</span>}
+                    {bgSaid && since && ' · '}
+                    {since}
+                  </span>
+                )}
               </span>
             ) : null
           return (
@@ -4324,7 +4337,7 @@ export function AgentList({ rows, menus, onPicked, placed, query: given, onQuery
               }}
               onKeyDown={hasMenu ? menuKey(r.key) : undefined}
             >
-              <AgentIcon program={r.program} size={compact ? (isChild ? 20 : isNestedVisual ? 22 : 28) : isChild ? 20 : isNestedVisual ? 22 : 30} dot={r.bg === 'running' || r.cmds ? 'bg' : said ? (r.status as 'blocked' | 'working' | 'done') : undefined} />
+              <AgentIcon program={r.program} size={compact ? (isChild ? 16 : 18) : isChild ? 18 : 20} bare />
               {/* (Two lines a row, always: its name; where it is — the session's title,
                   which tells alike names apart — and when. A third only for what
                   waits on the person: what it asks, or messages not seen taken in.
@@ -4540,7 +4553,7 @@ export function AgentList({ rows, menus, onPicked, placed, query: given, onQuery
         return (
           <div className="convo-row-tip" role="tooltip" style={{ top, left }}>
             <div className="convo-row-tip-head">
-              <AgentIcon program={tipRow.program} size={22} />
+              <AgentIcon program={tipRow.program} size={18} bare />
               <div className="convo-row-tip-titles">
                 <div className="convo-row-tip-title">{tipRow.title}</div>
                 {tipRow.where && tipRow.where !== tipRow.title && <div className="convo-row-tip-sub">{tipRow.where}</div>}

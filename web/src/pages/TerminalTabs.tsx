@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Activity, ArrowLeftToLine, ArrowRightToLine, Bot, Check, ExternalLink, Link2, MessageCircleReply, Plus, X } from 'lucide-react'
+import { ArrowLeftToLine, ArrowRightToLine, Bot, ExternalLink, Link2, Plus, X } from 'lucide-react'
 import { AgentsChat } from './AgentsChat'
 import { api, authGen, choiceOf, probeBootstrap, type OpenChoice, type SessionInfo } from '../api'
 import { sessionWhich } from '../terminal/sessionName'
@@ -797,7 +797,7 @@ function TabBar(p: { tabs: SessionInfo[]; current: string; infos: Record<string,
         <span className="term-tab-name">{t('nav.agents')}</span>
         {waitingAll > 0 && (
           <span className="term-tab-count term-tab-wait" aria-label={t('herdr.waiting', { n: waitingAll })}>
-            <MessageCircleReply size={13} strokeWidth={2.25} aria-hidden="true" />
+            <span className="term-tab-sdot" aria-hidden="true" />
             {waitingAll}
           </span>
         )}
@@ -808,7 +808,7 @@ function TabBar(p: { tabs: SessionInfo[]; current: string; infos: Record<string,
         const name = s.host_name ? (
           <>
             <span className="term-tab-host">{s.host_name}</span>
-            <span className="term-tab-which">{'\u00a0· ' + which(s)}</span>
+            <span className="term-tab-which">{which(s)}</span>
           </>
         ) : (
           t('term.connecting')
@@ -861,22 +861,23 @@ function TabBar(p: { tabs: SessionInfo[]; current: string; infos: Record<string,
                 switcher, not on the tab: "host · which" is what tells tabs apart, 11-05.) */}
             {waiting > 0 && (
               <span className="term-tab-count term-tab-wait" aria-label={t('herdr.waiting', { n: waiting })}>
-                <MessageCircleReply size={13} strokeWidth={2.25} aria-hidden="true" />
+                <span className="term-tab-sdot" aria-hidden="true" />
                 {waiting}
               </span>
             )}
-            {/* Agents at work: a count as the others are, not a turning ring
-                that reads as the tab still loading (ux1101 T28). */}
+            {/* Agents at work: a dot and a count as the others are, not a turning
+                ring that reads as the tab still loading (ux1101 T28). One mark
+                for every state, its colour telling which (redesign 11-23). */}
             {working > 0 && (
               <span className="term-tab-count term-tab-busy" role="img" aria-label={t('herdr.working', { n: working })}>
-                <Activity size={13} strokeWidth={2.25} aria-hidden="true" />
+                <span className="term-tab-sdot" aria-hidden="true" />
                 {working}
               </span>
             )}
             {/* (Finished and not looked at yet, when none waits.) */}
             {waiting === 0 && done > 0 && (
               <span className="term-tab-count term-tab-done" aria-label={t('herdr.done', { n: done })}>
-                <Check size={13} strokeWidth={2.5} aria-hidden="true" />
+                <span className="term-tab-sdot" aria-hidden="true" />
                 {done}
               </span>
             )}

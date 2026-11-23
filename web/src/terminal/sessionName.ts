@@ -6,7 +6,7 @@ import { t } from '../i18n'
 // plain shells (of `all`) only when there are several.
 export function sessionWhich(s: SessionInfo, all: SessionInfo[]): string {
   if (s.persistence === 'tmux') return s.mux_session || 'tmux'
-  if (s.persistence === 'herdr') return s.mux_session && s.mux_session !== 'default' ? 'herdr · ' + s.mux_session : 'herdr'
+  if (s.persistence === 'herdr') return s.mux_session && s.mux_session !== 'default' ? 'herdr ' + s.mux_session : 'herdr'
   // (Numbered as they were opened, not by where their tabs are: a tab moved
   // keeps its name. Opened in one second, by their ids: in some order that stays.)
   const shells = all.filter((x) => x.host_id === s.host_id && x.persistence !== 'tmux' && x.persistence !== 'herdr').sort((a, b) => a.created_at - b.created_at || a.id.localeCompare(b.id))

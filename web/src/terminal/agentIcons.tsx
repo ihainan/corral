@@ -141,12 +141,15 @@ export function ModelGlyph({ model, desc, size = 14, className = 'convo-model-ic
   )
 }
 
-export function AgentIcon({ program, size = 28, dot }: { program?: string; size?: number; dot?: 'blocked' | 'working' | 'done' | 'bg' }) {
+// bare: the mark alone, at the size given, with no tile behind it — as the
+// agents' list and the conversation's bar draw it (redesign 11-23); a tile
+// only where the mark stands by itself.
+export function AgentIcon({ program, size = 28, dot, bare }: { program?: string; size?: number; dot?: 'blocked' | 'working' | 'done' | 'bg'; bare?: boolean }) {
   const m = agentMark(program)
-  const glyph = Math.round(size * 0.58)
+  const glyph = bare ? size : Math.round(size * 0.58)
   return (
     <span
-      className={'agent-icon' + (m?.color ? '' : ' is-plain')}
+      className={'agent-icon' + (m?.color ? '' : ' is-plain') + (bare ? ' is-bare' : '')}
       style={{ width: size, height: size, ['--agent-color' as string]: m?.color }}
       title={m?.name ?? program}
       {...(program ? { role: 'img', 'aria-label': m?.name ?? program } : { 'aria-hidden': true })}
