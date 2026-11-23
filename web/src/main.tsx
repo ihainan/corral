@@ -9,6 +9,7 @@ import { getLang } from './i18n'
 import { App } from './app'
 import { askEarly } from './api'
 import { preloadTerminal } from './pages/lazyPages'
+import { showKeyboardNumbers, usableHeight } from './keyboardCover'
 import './notifyopen' // listens from the start (see there)
 import { unlockChime } from './terminal/chime'
 
@@ -46,10 +47,11 @@ if ('serviceWorker' in navigator && location.protocol === 'https:') {
     // lost height is the keyboard.
     const keyboardUp = vv ? (vv.scale ?? 1) <= 1.01 && window.innerHeight - vv.height > 120 : false
     const de = document.documentElement.style
-    de.setProperty('--vv-h', `${Math.round(h)}px`)
+    de.setProperty('--vv-h', `${usableHeight(h, keyboardUp)}px`)
     de.setProperty('--vv-top', keyboardUp && vv ? `${Math.round(vv.offsetTop)}px` : '0px')
     // (The key bar then sits on the keyboard: no room kept for the home indicator.)
     document.documentElement.classList.toggle('kb-open', keyboardUp)
+    showKeyboardNumbers(keyboardUp)
   }
   apply()
   vv?.addEventListener('resize', apply)
