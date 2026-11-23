@@ -9,7 +9,7 @@ import { asHeld, buildAgentGroups, dayStart, FOLDED, foldAt, isLiveBlocked, list
 import { copyText, Dialog, DialogHead, isCoarse, Menu, MenuLayer, swallowNextClick, useToast, type MenuItem } from '../components/ui'
 import { saveFile } from '../saveFile'
 import { StatusItem, useWorkbench } from '../workbench'
-import { composing, foldAllKey, helpKey, jumpKey, onMac, sideKey, switchKey } from './pageKeys'
+import { composing, foldAllKey, helpKey, jumpKey, onMac, sideKey, switchKey, takenFromTerminal, terminalHasKeys } from './pageKeys'
 import { keepNames, keptNames, local } from '../storage'
 import { useFlip } from '../flip'
 import { CodeSpanOf, FileLinkOf, Markdown } from './markdown'
@@ -491,13 +491,17 @@ export function ConversationView({
   const sideRef = useRef(side)
   sideRef.current = side
   const prefsForKeys = usePrefs()
+  const prefsKeysFirst = useRef(prefsForKeys.keysFirst)
+  prefsKeysFirst.current = prefsForKeys.keysFirst
   const orderRef = useRef<OrderOpts>({ group: prefsForKeys.sidebarGroup, sort: prefsForKeys.sidebarSort, pinFixed: prefsForKeys.pinFixedOrder, nestChildren: prefsForKeys.sidebarNestChildren })
   orderRef.current = { group: prefsForKeys.sidebarGroup, sort: prefsForKeys.sidebarSort, pinFixed: prefsForKeys.pinFixedOrder, nestChildren: prefsForKeys.sidebarNestChildren }
   useEffect(() => {
     if (!active) return
     const onKey = (e: KeyboardEvent) => {
       const dir = switchKey(e)
-      if (!dir || underDialog(e)) return
+      // (⌥↑↓ in a terminal shown here — a card's live screen — and it first: the program's.)
+      if (!dir || underDialog(e) || terminalHasKeys(e, prefsKeysFirst.current)) return
+      if (!e.repeat) takenFromTerminal(e, mac ? '⌥↑↓' : 'Alt+↑↓', (m) => toast(m), (key) => t('keys.taken', { key }))
       const el = e.target as HTMLInputElement | null
       if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') && !el.classList.contains('xterm-helper-textarea') && el.value && !el.closest('.list-search')) return
       const q = shownQuery.current

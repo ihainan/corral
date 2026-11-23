@@ -4,6 +4,8 @@
 // a Mac (open a file); a few are kept that a browser has a little-used
 // meaning for and the web commonly takes (/, ⌥↑↓, ⌘K: see the help).
 
+import { local } from '../storage'
+
 export interface KeyLike {
   key: string
   ctrlKey: boolean
@@ -15,6 +17,22 @@ export interface KeyLike {
 }
 
 export const onMac = () => /Mac|iPhone|iPad/.test(navigator.platform)
+
+// A terminal focused and it first (the setting "keysFirst"): Corral's own
+// shortcuts that the terminal turns into input for its program — ⌥↑↓, as
+// escape sequences — let it have them. (Those of the window — ⌘ ones, the
+// tabs' Ctrl+Tab and Ctrl+Shift ones, Ctrl+, — are taken either way: in a
+// terminal they would only scroll it, or send nothing — review of W5.)
+export const terminalHasKeys = (e: Event, first: 'terminal' | 'corral' | undefined) =>
+  first !== 'corral' && e.target instanceof Element && !!e.target.closest('.xterm')
+// Corral first, one of them taken from a focused terminal: said once, how to give it back.
+export function takenFromTerminal(e: Event, key: string, say: (m: string) => void, words: (key: string) => string) {
+  if (!(e.target instanceof Element) || !e.target.closest('.xterm')) return
+  const k = 'corral.keyTaken.' + key
+  if (local.get(k)) return
+  local.set(k, '1')
+  say(words(key))
+}
 
 // An input method at work: some browsers say so only by keyCode 229 on the
 // first and last keys of a word.

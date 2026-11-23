@@ -109,6 +109,14 @@ const chatAddress = (e: { s: SessionInfo; pane?: string }) => {
   return '/agents?' + q
 }
 const PASTE_LINES = 12
+// Someone at the window: it has the focus, and was touched — a key, the
+// pointer, a scroll — in the last minute. A finished agent shown on a screen
+// nobody is at is not looked at (workbench 11-23: a page left open on a
+// desk had every agent it showed marked seen).
+const PRESENT_MS = 60000
+let lastInputAt = 0 // (none yet: a page loaded or brought back by itself is not someone at it)
+for (const ev of ['pointerdown', 'pointermove', 'keydown', 'wheel', 'touchstart'] as const) window.addEventListener(ev, () => (lastInputAt = Date.now()), { capture: true, passive: true })
+const someoneHere = () => document.hasFocus() && Date.now() - lastInputAt < PRESENT_MS
 const SEND_MS = 45000 // (the host may wait for another message to the pane to go first)
 const PRESS_MS = 20000
 // When Claude Code's suggestion is looked for after a turn ends (ms): it
@@ -1250,7 +1258,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, keysActive, isSe
   // and the person gone on meanwhile: it stayed "done" however often it was
   // opened.)
   const shownNone = convo.status === 'none' && Date.now() - freshSince >= NONE_SEEN_AFTER_MS
-  const doneHere = herdr && active && !document.hidden && (convo.status === 'ready' || convo.status === 'none') && !convo.failing && (convo.readAt() >= freshSince || shownNone) && row && !row.lost && row.status === 'done' && row.a.status === 'done' && !row.bg && row.a.bg !== 'checking' ? { pane: row.a.pane_id, round: row.a.round ?? 0, session: row.a.session ?? '', fresh: freshSince } : undefined
+  const doneHere = herdr && active && !document.hidden && someoneHere() && (convo.status === 'ready' || convo.status === 'none') && !convo.failing && (convo.readAt() >= freshSince || shownNone) && row && !row.lost && row.status === 'done' && row.a.status === 'done' && !row.bg && row.a.bg !== 'checking' ? { pane: row.a.pane_id, round: row.a.round ?? 0, session: row.a.session ?? '', fresh: freshSince } : undefined
   const doneKey = doneHere && JSON.stringify(doneHere)
   // (Done and in front, its fresh read not in yet: looked at again every 2s —
   // a read that brought nothing new draws nothing, so nothing else asks.)
@@ -1284,7 +1292,8 @@ function AgentChat({ cur, entries, all, titles, onPick, active, keysActive, isSe
       // (Whatever showed instead of a conversation — reading, none, a read
       // refused while the host was busy — is read afresh: only one shown is
       // left to the view's own rule.)
-      if (seenSent.current === doneVisit || convoStatus.current === 'ready' || Date.now() - began < NONE_SEEN_AFTER_MS) return
+      // (Nor where nobody was at the window as it went — hidden, say, with no one there.)
+      if (seenSent.current === doneVisit || convoStatus.current === 'ready' || Date.now() - began < NONE_SEEN_AFTER_MS || !someoneHere()) return
       seenIfNone(JSON.parse(doneVisit))
     }
   }, [doneVisit])

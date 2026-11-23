@@ -395,14 +395,23 @@ function SettingsWorkbench({ modal, initialCat, onClose }: { modal?: boolean; in
                 <Setting label={t('settings.general.scSettings')}>
                   <span className="sm-kbd">{isMac ? '⌘,' : 'Ctrl+,'}</span>
                 </Setting>
-                <Setting label={t('settings.general.scSearch')}>
-                  <span className="sm-kbd">{isMac ? '⌘K' : 'Ctrl+K'}</span>
+                <Setting label={t(isMac ? 'settings.general.scPalette' : 'settings.general.scSearch')}>
+                  <span className="sm-kbd">{isMac ? '⌘K' : '/'}</span>
                 </Setting>
                 <Setting label={t('settings.general.scSidebar')}>
                   <span className="sm-kbd">{isMac ? '⌘B' : 'Ctrl+B'}</span>
                 </Setting>
                 <Setting label={t('settings.general.scSwitch')}>
                   <span className="sm-kbd">{isMac ? '⌥↑↓' : 'Alt+↑↓'}</span>
+                </Setting>
+                {/* (Who has a key a terminal could use, a terminal focused: workbench 11-23.) */}
+                <Setting label={t('settings.general.keysFirst')} id="sm-keysfirst-l" hint={t(prefs.keysFirst === 'corral' ? 'settings.general.keysFirstCorralHint' : 'settings.general.keysFirstTermHint')}>
+                  <Seg
+                    labelledBy="sm-keysfirst-l"
+                    value={prefs.keysFirst}
+                    options={[['terminal', t('settings.general.keysFirstTerm')], ['corral', t('settings.general.keysFirstCorral')]]}
+                    onChange={(v) => setPrefs({ keysFirst: v })}
+                  />
                 </Setting>
                 <a className="setting setting-link" href="/THIRD-PARTY-NOTICES.txt" target="_blank" rel="noopener">
                   <span className="setting-label"><span>{t('settings.notices')}</span></span>

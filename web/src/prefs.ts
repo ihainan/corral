@@ -34,6 +34,9 @@ export interface Prefs {
   chime: 'off' | 'done' | 'all'
   chimeTone: 'bell' | 'soft' | 'ping'
   chimeBells: boolean
+  // With a terminal focused, whose keys are they: the terminal's (Corral's own shortcuts
+  // that a terminal could use let go) or Corral's (workbench 11-23).
+  keysFirst: 'terminal' | 'corral'
 }
 
 // A key of one's own: what it is called on the key bar, and what it sends
@@ -47,7 +50,7 @@ export const maxPinned = 20 // (as the server's maxPinned)
 
 // Phones get a slightly smaller default so common output fits without wrapping.
 const phone = window.matchMedia('(pointer: coarse) and (max-width: 599px)').matches
-const defaults: Prefs = { theme: 'system', termTheme: 'corral-dark', termThemeDark: 'corral-dark', termThemeLight: 'corral-light', fontSize: phone ? 13 : 14, keybar: true, optionIsMeta: true, webgl: false, remoteClipboard: true, tapKeyboard: false, composerEnter: 'send', customKeys: [], keyLayout: null, pinnedAgents: [], sidebarGroup: 'status', sidebarSort: 'recent', pinFixedOrder: false, sidebarNestChildren: true, chime: 'all', chimeTone: 'bell', chimeBells: true }
+const defaults: Prefs = { theme: 'system', termTheme: 'corral-dark', termThemeDark: 'corral-dark', termThemeLight: 'corral-light', fontSize: phone ? 13 : 14, keybar: true, optionIsMeta: true, webgl: false, remoteClipboard: true, tapKeyboard: false, composerEnter: 'send', customKeys: [], keyLayout: null, pinnedAgents: [], sidebarGroup: 'status', sidebarSort: 'recent', pinFixedOrder: false, sidebarNestChildren: true, chime: 'all', chimeTone: 'bell', chimeBells: true, keysFirst: 'terminal' }
 
 // The local copy is kept per account (several people may share a device);
 // until the account is known the last one used here paints the first frame.
@@ -249,6 +252,7 @@ function sanitize(raw: unknown): Partial<Prefs> {
   for (const k of ['termTheme', 'termThemeDark', 'termThemeLight'] as const) if (typeof o[k] === 'string' && /^[a-z0-9][a-z0-9-]{0,63}$/.test(o[k] as string)) out[k] = o[k] as string
   if (Number.isInteger(o.fontSize) && (o.fontSize as number) >= 9 && (o.fontSize as number) <= 28) out.fontSize = o.fontSize as number
   if (o.composerEnter === 'send' || o.composerEnter === 'newline') out.composerEnter = o.composerEnter
+  if (o.keysFirst === 'terminal' || o.keysFirst === 'corral') out.keysFirst = o.keysFirst
   if (o.chime === 'off' || o.chime === 'done' || o.chime === 'all') out.chime = o.chime
   if (o.chimeTone === 'bell' || o.chimeTone === 'soft' || o.chimeTone === 'ping') out.chimeTone = o.chimeTone
   if (o.sidebarGroup === 'status' || o.sidebarGroup === 'project' || o.sidebarGroup === 'session') out.sidebarGroup = o.sidebarGroup
