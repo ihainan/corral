@@ -4672,7 +4672,7 @@ export function AgentList({ rows, menus, onPicked, placed, query: given, onQuery
           const bgWords = flat ? '' : bgSaid
           // (Its dot there: work left going but not seen to — a grey ring of its own, not
           // a done's green or nothing; what waits on the person first — review of 11-23.)
-          const iconDot = !flat ? '' : failed ? 'failed' : r.bg === 'running' || r.cmds ? 'bg' : r.status === 'blocked' ? 'blocked' : r.bg === 'stale' ? 'stale' : mark
+          const iconDot = !flat ? '' : failed ? 'failed' : r.status === 'blocked' ? 'blocked' : r.bg === 'running' || r.cmds ? 'bg' : r.bg === 'stale' ? 'stale' : mark
           const whenEl =
             since || bgWords || (!flat && mark) ? (
               <span className="convo-list-when">

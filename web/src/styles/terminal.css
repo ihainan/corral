@@ -2896,23 +2896,19 @@ html.kb-open .convo-runs .convo-runs-pop.is-sheet { padding-bottom: 16px; }
 .convo-list-groups.is-flat .convo-list-actions > .convo-list-subpill:not(:focus-visible) {
   position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden; clip-path: inset(50%); opacity: 0; pointer-events: none;
 }
-.convo-list-groups.is-flat .convo-list-item.has-children .convo-list-line,
-.convo-list-groups.is-flat .convo-list-item.has-children.has-menu:hover .convo-list-line,
-.convo-list-groups.is-flat .convo-list-item.has-children.has-menu:has(:focus-visible) .convo-list-line,
-.convo-list-groups.is-flat .convo-list-item.has-children.is-menu .convo-list-line { padding-right: 0; }
-.convo-list-groups.is-flat .convo-list-item.has-children:has(.convo-list-subpill:focus-visible) .convo-list-line { padding-right: 40px; }
+/* Room kept at the line's end for the buttons over it, one value by the row's state (the
+   class written twice: above every older padding rule for these rows, hover or none):
+   none while a time is there to give way to the "⋯"; 28 for the "⋯" where there is none;
+   both buttons' width when the fold pill has the focus — review of 11-23. */
+.convo-list-groups.is-flat .convo-list-item { --room: 0px; }
+.convo-list-groups.is-flat .convo-list-item .convo-list-line.convo-list-line { padding-right: var(--room); }
+.convo-list-groups.is-flat .convo-list-item.has-menu:is(:hover, .is-menu, :has(:focus-visible)):not(:has(.convo-list-line > .convo-list-when)) { --room: 28px; }
+@media (hover: none) { .convo-list-groups.is-flat .convo-list-item.has-menu { --room: 28px; } }
+.convo-list-groups.is-flat .convo-list-item.has-children:has(.convo-list-subpill:focus-visible),
+.convo-list-groups.is-flat .convo-list-item.has-children.has-menu:is(:hover, .is-menu, :has(:focus-visible)):has(.convo-list-subpill:focus-visible) { --room: 80px; } /* (the second: above the 28 of a row with no time) */
 .convo-list-groups.is-flat .convo-list-item.has-menu:has(:focus-visible) .convo-list-when-t,
 .convo-list-groups.is-flat .convo-list-item.is-menu .convo-list-when-t,
 .convo-list-groups.is-flat .convo-list-item.has-children:has(.convo-list-subpill:focus-visible) .convo-list-when-t { opacity: 0; }
 @media (hover: hover) { .convo-list-groups.is-flat .convo-list-item.has-menu:hover .convo-list-when-t { opacity: 0; } }
 /* (Work left going, not seen to: a grey ring, apart from a done's green and an idle's nothing — review of 11-23.) */
 .convo-list-groups.is-flat .convo-list-row .agent-icon-dot.is-stale { background: var(--dot-ring); box-shadow: 0 0 0 1.5px var(--dot-ring), inset 0 0 0 1.5px var(--term-fg-3); }
-/* (No time to take the place of: room kept for the "⋯" whatever the row, a parent's too;
-   both its buttons, the fold pill focused — review of 11-23.) */
-.convo-list-groups.is-flat .convo-list-item.has-menu:has(:focus-visible) .convo-list-line:not(:has(.convo-list-when)),
-.convo-list-groups.is-flat .convo-list-item.has-menu.is-menu .convo-list-line:not(:has(.convo-list-when)) { padding-right: 28px; }
-@media (hover: hover) { .convo-list-groups.is-flat .convo-list-item.has-menu:hover .convo-list-line:not(:has(.convo-list-when)) { padding-right: 28px; } }
-@media (hover: none) {
-  .convo-list-groups.is-flat .convo-list-item.has-menu .convo-list-line { padding-right: 28px; }
-}
-.convo-list-groups.is-flat .convo-list-item.has-children:has(.convo-list-subpill:focus-visible) .convo-list-line { padding-right: 64px; }
