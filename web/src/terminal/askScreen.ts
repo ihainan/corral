@@ -37,18 +37,27 @@ const loneTabLine = /^\s*[☐☒]\s+\S.*$/
 const isMultiTabLine = (l: string) => multiTabLine.test(l) || submitTabLine.test(l)
 const isTabLine = (l: string) => isMultiTabLine(l) || loneTabLine.test(l)
 
-// The dialog's own tab bar, above the hint: Claude Code draws a rule right
-// over it, a lone question's "☐ Header" too (seen on 2.1.312 and 2.1.330),
-// and no line of a question's words follows one ("☐ Billing page" in its
-// body does not). The last tab line so drawn; where none is (the screen cut
-// above its rule), the latest tab line, as before (review E, 11-24).
+// The dialog's own tab bar, above the hint: the latest tab line. A bar of
+// several ("←  ☐ A  ☐ B  ✔ Submit  →") is never a question's words, so the
+// latest one is the dialog's, rule above it or not. A lone "☐ …" is a lone
+// question's header where Claude Code drew its rule right over it (seen on
+// 2.1.312 and 2.1.330); one with no rule over it may be a line of a
+// question's words ("☐ Billing page"): then the dialog's bar is the tab line
+// above it, unless something between ends a dialog — a rule, a choice, a
+// review page, key hints — so it is an earlier one's (review E, F; 11-24).
 function findTabTop(lines: string[], hint: number): number {
   const ruled = (i: number) => {
     for (let j = i - 1; j >= 0; j--) if (lines[j].trim()) return rule.test(lines[j])
     return false
   }
-  const top = lines.findLastIndex((l, i) => i < hint && isTabLine(l) && ruled(i))
-  return top >= 0 ? top : lines.findLastIndex((l, i) => i < hint && isTabLine(l))
+  const top = lines.findLastIndex((l, i) => i < hint && isTabLine(l))
+  if (top < 0 || isMultiTabLine(lines[top]) || ruled(top)) return top
+  for (let i = top - 1; i >= 0; i--) {
+    const l = lines[i]
+    if (rule.test(l) || optionLine.test(besideAt(l)) || /^\s*Review your answers\s*$/.test(l) || /Enter to select/.test(l)) break
+    if (isMultiTabLine(l) || (isTabLine(l) && ruled(i))) return i
+  }
+  return top
 }
 const ownLabel = /^Type something\.?$/
 const rule = /^\s*[─━╌]{8,}\s*$/

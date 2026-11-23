@@ -556,6 +556,14 @@ func TestCodexModelsCacheHostClockSkew(t *testing.T) {
 			t.Fatalf("skew %v: a 13-hour-old cache taken", skew)
 		}
 	}
+	// Clocks in step: the host's whole second and the command's own time are
+	// not a skew. A list read 0.4s before a failure stays before it.
+	fail := gw.Add(500 * time.Millisecond)
+	fetched := gw.Add(100 * time.Millisecond)
+	hostLine := []byte("now=" + strconv.FormatInt(gw.Unix(), 10) + "\n" + `{"fetched_at":"` + fetched.Format(time.RFC3339Nano) + `","models":[{"slug":"gpt-5.6","visibility":"list","supported_in_api":true}]}`)
+	if _, at, ok := parseCodexModelsCacheAt(hostLine, gw.Add(950*time.Millisecond)); !ok || !at.Equal(fetched) || at.After(fail) {
+		t.Fatalf("clocks in step: ok=%v at=%v, want %v (before the failure at %v)", ok, at, fetched, fail)
+	}
 	// No clock line: the gateway's clock for both, as before.
 	raw := []byte(`{"fetched_at":"` + gw.Add(-time.Minute).Format(time.RFC3339) + `","models":[{"slug":"a","visibility":"list"}]}`)
 	if _, at, ok := parseCodexModelsCacheAt(raw, gw); !ok || !at.Equal(gw.Add(-time.Minute)) {

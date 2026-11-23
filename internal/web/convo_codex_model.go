@@ -709,8 +709,19 @@ func parseCodexModelsCacheAt(out []byte, gatewayNow time.Time) ([]modelOpt, time
 	if !ok {
 		return nil, time.Time{}, false
 	}
-	return opts, fetchedAt.Add(gatewayNow.Sub(hostNow)), true
+	// The host's line is whole seconds, and the gateway's clock is read after
+	// the command ran: a difference that small is that, not the clocks', and
+	// shifting by it would move a list read just before a failure to after it
+	// (review F, 11-24).
+	skew := gatewayNow.Sub(hostNow)
+	if skew > -codexClockTolerance && skew < codexClockTolerance {
+		skew = 0
+	}
+	return opts, fetchedAt.Add(skew), true
 }
+
+// codexClockTolerance: clocks closer than this are taken as one (see parseCodexModelsCacheAt).
+const codexClockTolerance = 15 * time.Second
 
 // keptCodexModels serves a previously read Codex model list immediately
 // without driving Codex's interactive /model picker or running locateScan.

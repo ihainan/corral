@@ -779,6 +779,21 @@ await run('reviewE-tabBarUnderRule', () => {
   }
 })
 
+await run('reviewF-barOfSeveralAlwaysLatest', () => {
+  // The rule over the bar scrolled off; a "☐" line in the question's words.
+  const cut = ['←  ☐ Plan  ☐ Next  ✔ Submit  →', '', 'Which items should ship tonight?', '☐ Billing page', '  the rest waits', '', '❯ 1. Yes', '  2. No', '  3. Type something.', 'Enter to select · ↑/↓ to navigate · Esc to cancel']
+  const r1 = readAskScreen(cut.join('\n'))
+  assert.equal(r1.kind, 'question')
+  assert.deepEqual(r1.tabs.map((t) => t.label), ['Plan', 'Next'])
+  assert.ok(r1.question.startsWith('Which items should ship tonight?'), r1.question)
+  // An old bar under its rule, a newer one with none over it: the newer.
+  const two = [R, '←  ☒ Old  ☒ Earlier  ✔ Submit  →', 'Review your answers', '  ● Old question?', '    → Old answer', '←  ☐ New  ☐ Next  ✔ Submit  →', 'New question?', '❯ 1. Yes', '  2. No', '  3. Type something.', 'Enter to select · ↑/↓ to navigate · Esc to cancel']
+  const r2 = readAskScreen(two.join('\n'))
+  assert.equal(r2.kind, 'question')
+  assert.deepEqual(r2.tabs.map((t) => t.label), ['New', 'Next'])
+  assert.equal(r2.question, 'New question?')
+})
+
 if (failures.length) {
   console.error(`askScreen: ${failures.length} test(s) failed:`)
   for (const f of failures) console.error(' -', f)
