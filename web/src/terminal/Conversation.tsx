@@ -5208,6 +5208,9 @@ function Picker({ rows, onClose, searchFirst }: { rows: ConvoListRow[]; onClose:
     const onKey = (e: KeyboardEvent) => {
       // (Another dialog over it — the palette, settings —: its keys are that one's, Escape and Tab too. Review of 11-23.)
       if ([...document.querySelectorAll('[aria-modal="true"]')].some((d) => d !== box.current)) return
+      // (A menu of its own opened from it — the order's, put on the page —, the focus in it: its keys are the menu's.)
+      const at = document.activeElement
+      if (at && at !== document.body && box.current && !box.current.contains(at)) return
       // (Its search box with words in it: emptied first, see ListSearch.)
       const field = e.target as HTMLInputElement | null
       if (e.key === 'Escape' && field?.tagName === 'INPUT' && field.value && box.current?.contains(field)) return

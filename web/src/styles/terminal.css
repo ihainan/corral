@@ -2112,7 +2112,7 @@ button.convo-queue-row.is-note:last-child { border-radius: 0 0 var(--r-lg) var(-
 .convo-picker-title { padding: 4px 4px 8px 10px; font-weight: 600; font-size: var(--fs-h3); line-height: var(--lh-h3); display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 /* The list over the conversation, with a keyboard to hand: a quick switcher, as the palette (11-23). Its search the
    head, the order and "new" as the side list's icons beside it, the side list's rows, its keys at the foot. */
-.convo-picker.is-keyed { top: 44px; width: min(420px, calc(100% - 24px)); max-height: min(72%, 600px); padding: 0; box-shadow: 0 16px 48px rgba(0, 0, 0, 0.18), 0 2px 8px rgba(0, 0, 0, 0.08); }
+@media (min-width: 641px) { .convo-picker.is-keyed { top: 44px; width: min(420px, calc(100% - 24px)); max-height: min(72%, 600px); padding: 0; box-shadow: 0 16px 48px rgba(0, 0, 0, 0.18), 0 2px 8px rgba(0, 0, 0, 0.08); } } /* (narrower: the sheet from the bottom, as on a phone — review of 11-23) */
 .convo-picker.is-keyed > .list-toolbar { height: 48px; box-sizing: border-box; margin: 0; padding: 0 8px 0 16px; gap: 4px; border-bottom: 1px solid var(--term-line); }
 .convo-picker.is-keyed .list-search,
 .convo-picker.is-keyed .list-search:focus-within { flex: 1; height: 100%; padding: 0; gap: 10px; border: 0; border-radius: 0; background: none; }
