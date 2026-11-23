@@ -4308,6 +4308,10 @@ export function ListOrderMenu() {
 
 export function AgentList({ rows, menus, onPicked, placed, query: given, onQuery, search, showSearch, onSearchLeft, hint, compact, showNew, orderOut }: { rows: ConvoListRow[]; menus?: boolean; onPicked?: () => void; placed?: Map<string, ConvoListRow>; query?: string; onQuery?: (q: string) => void; search?: number; showSearch?: boolean; onSearchLeft?: () => void; hint?: boolean; compact?: boolean; showNew?: boolean; orderOut?: boolean }) {
   const wbList = useWorkbench()
+  // (With a mouse — the side list and the switcher, given compact —: one line a row,
+  // its name, the session's title in grey after it, its time; a second only for
+  // what waits on the person. The phone's list keeps its two lines to touch.)
+  const flat = !!compact
   // Its rows' menu (menus: the side list's; the switcher's rows have none):
   // one for the list, of the row it was opened on by its key, as that row
   // may go to another group meanwhile and be drawn anew; at its "more"
@@ -4566,7 +4570,7 @@ export function AgentList({ rows, menus, onPicked, placed, query: given, onQuery
         </div>
       )}
       {query.trim() && !found.length && <p className="list-search-none">{t('convo.searchNone')}</p>}
-      <div className="convo-list-groups" ref={groupsEl}>
+      <div className={'convo-list-groups' + (flat ? ' is-flat' : '')} ref={groupsEl}>
       {groups.map((g) => {
         const all: ConvoListRow[] = g.rows
           .map((p): ConvoListRow | undefined => {
@@ -4663,21 +4667,26 @@ export function AgentList({ rows, menus, onPicked, placed, query: given, onQuery
           // (Before commands it left running: an error to see to over a dev server going on — review of 11-23.)
           const failed = r.status === 'done' && !r.bg ? r.failed : undefined
           const mark = failed ? 'failed' : r.bg === 'running' || r.cmds ? 'bg' : said ? r.status : ''
+          // (One line a row, with a mouse: its state the dot on its icon's corner, and
+          // "Background" said in its hover card, not in the line — workbench 11-23, plan 2.)
+          const bgWords = flat ? '' : bgSaid
           const whenEl =
-            since || bgSaid || mark ? (
+            since || bgWords || (!flat && mark) ? (
               <span className="convo-list-when">
-                {mark && <span className={'convo-list-sdot is-' + mark} aria-hidden="true" />}
-                {/* (The words in their own span: a single-line child's menu button
+                {!flat && mark && <span className={'convo-list-sdot is-' + mark} aria-hidden="true" />}
+                {/* (The words in their own span: a single-line row's menu button
                     takes their place on hover or focus, and its mark stays.) */}
-                {(bgSaid || since) && (
+                {(bgWords || since) && (
                   <span className="convo-list-when-t">
-                    {bgSaid && <span className={'convo-list-bg' + (bgSaid === 'stale' ? ' is-stale' : '')}>{t(bgSaid === 'bg' ? 'convo.list.bg' : 'convo.list.bgStale')}</span>}
-                    {bgSaid && since && ' · '}
+                    {bgWords && <span className={'convo-list-bg' + (bgWords === 'stale' ? ' is-stale' : '')}>{t(bgWords === 'bg' ? 'convo.list.bg' : 'convo.list.bgStale')}</span>}
+                    {bgWords && since && ' · '}
                     {since}
                   </span>
                 )}
               </span>
             ) : null
+          const oneLine = flat || isSingleChild
+          const whereText = isChild ? childSub : r.where && r.where !== r.title ? r.where : ''
           return (
             <div
               key={r.key}
@@ -4722,7 +4731,7 @@ export function AgentList({ rows, menus, onPicked, placed, query: given, onQuery
                 if (!e.defaultPrevented && hasMenu) menuKey(r.key)(e)
               }}
             >
-              <AgentIcon program={r.program} size={compact ? (isChild ? 16 : 18) : isChild ? 18 : 20} bare />
+              <AgentIcon program={r.program} size={flat ? (isChild ? 14 : 16) : isChild ? 18 : 20} bare dot={flat && mark ? (mark as NonNullable<Parameters<typeof AgentIcon>[0]['dot']>) : undefined} />
               {/* (Two lines a row, always: its name; where it is — the session's title,
                   which tells alike names apart — and when. A third only for what
                   waits on the person: what it asks, or messages not seen taken in.
@@ -4743,9 +4752,28 @@ export function AgentList({ rows, menus, onPicked, placed, query: given, onQuery
                       <span className="sr-only">{t('convo.pinnedRow')}</span>
                     </span>
                   )}
-                  {isSingleChild && whenEl}
+                  {/* (Its subagents' count by its name, a tap folding them: the
+                      pill at the row's end stays, for the keyboard, shown when focused.) */}
+                  {flat && sub && (
+                    <span
+                      className={'convo-list-kids' + (sub.collapsed ? ' is-collapsed' : '')}
+                      aria-hidden="true"
+                      onClick={(e) => {
+                        e.preventDefault()
+                        e.stopPropagation()
+                        clearRowTip()
+                        sub.onToggle()
+                      }}
+                    >
+                      {sub.dot && <span className={'convo-list-gdot is-' + sub.dot} />}
+                      {sub.collapsed ? <ChevronRight size={11} /> : <ChevronDown size={11} />}
+                      {sub.count}
+                    </span>
+                  )}
+                  {flat && whereText && <span className="convo-list-where">{whereText}</span>}
+                  {oneLine && whenEl}
                 </span>
-                {!isSingleChild && (
+                {!oneLine && (
                   <span className="convo-list-meta">
                     <span className="convo-list-where">{isChild ? childSub : r.where || '\u00a0'}</span>
                     {whenEl}

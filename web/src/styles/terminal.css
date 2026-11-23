@@ -2840,3 +2840,68 @@ html.kb-open .convo-runs .convo-runs-pop.is-sheet { padding-bottom: 16px; }
 .page-keys-or { color: var(--fg-4); font-size: var(--fs-note); line-height: var(--lh-note); }
 .page-keys-note { margin: 0; padding: 10px 12px; border-radius: var(--r); background: var(--bg-subtle); font-size: var(--fs-note); line-height: var(--lh-note); color: var(--fg-3); }
 @media (max-width: 640px) { .convo-card-btn { display: none; } } /* (narrow: the session card from the ⋮ menu, as a sheet) */
+
+/* The agents' list with a mouse (side list and switcher): one line a row — its
+   name, the session's title in grey after it, its time at the end; a second line
+   only for what waits on the person (or failed). Its state a dot on its icon's
+   corner, its subagents hung from it on a hairline. Workbench 11-23, plan 2: the
+   two-line rows read as cards, not a list, and showed 8 of 17 in a screen. */
+.convo-list-groups.is-flat .convo-list-group { gap: 2px; margin-bottom: 4px; }
+.convo-list-groups.is-flat .convo-list-head { padding: 12px 10px 4px; }
+.convo-list-groups.is-flat .convo-list-head.is-section { padding: 12px 8px 4px 10px; }
+.convo-list-groups.is-flat .convo-list-head.is-section .convo-list-chev { opacity: 0; }
+.convo-list-groups.is-flat .convo-list-head.is-section:is(:hover, :focus-visible, .is-collapsed) .convo-list-chev { opacity: 1; }
+.convo-list-groups.is-flat .convo-list-row { align-items: center; gap: 8px; padding: 6px 10px; border-radius: var(--r-sm); }
+.convo-list-groups.is-flat .convo-list-row .agent-icon { margin-top: 0; }
+.convo-list-groups.is-flat .convo-list-row:has(.convo-list-now, .convo-list-parent-ref) { align-items: flex-start; }
+.convo-list-groups.is-flat .convo-list-row:has(.convo-list-now, .convo-list-parent-ref) .agent-icon { margin-top: 2px; }
+.convo-list-groups.is-flat .convo-list-text { gap: 2px; }
+.convo-list-groups.is-flat .convo-list-line { gap: 6px; align-items: baseline; }
+/* (Its name whole first, up to 70% of the line; the session's words give way.) */
+.convo-list-groups.is-flat .convo-list-line:has(> .convo-list-where) > .convo-list-title { max-width: 70%; }
+.convo-list-groups.is-flat .convo-list-line > .convo-list-where {
+  flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: var(--fs-sub); line-height: var(--lh-sub); color: var(--term-fg-3);
+}
+.convo-list-groups.is-flat .convo-list-line > .convo-list-split,
+.convo-list-groups.is-flat .convo-list-line > .convo-list-pin { margin-left: 0; }
+/* Its state on its icon's corner, ringed in the row's own shade (opaque, so the
+   ring hides the mark under it: the dark rows' shades are see-through). */
+.convo-list-groups.is-flat .convo-list-row { --dot-ring: var(--term-bg); }
+.convo-list-groups.is-flat .convo-list-row:hover,
+.convo-list-groups.is-flat .convo-list-item.is-menu > .convo-list-row { --dot-ring: color-mix(in srgb, var(--term-fg) 4%, var(--term-bg)); }
+.convo-list-groups.is-flat .convo-list-row[aria-current='true'] { --dot-ring: color-mix(in srgb, var(--term-fg) 8%, var(--term-bg)); }
+.convo-list-groups.is-flat .convo-list-row .agent-icon-dot { width: 7px; height: 7px; right: -2px; bottom: -2px; box-shadow: 0 0 0 1.5px var(--dot-ring); }
+.convo-list-groups.is-flat .convo-list-row .agent-icon-dot.is-bg { background: var(--dot-ring); box-shadow: 0 0 0 1.5px var(--dot-ring), inset 0 0 0 1.5px var(--term-accent-text); }
+.agent-icon-dot.is-failed { background: var(--term-danger-text); }
+/* Subagents: a line of 28, a step smaller, hung from the parent's icon by a hairline. */
+.convo-list-groups.is-flat .convo-list-children { margin: 0; gap: 0; }
+.convo-list-groups.is-flat .convo-list-item.is-child::before { content: ''; position: absolute; left: 17px; top: 0; bottom: 0; width: 1px; background: var(--term-line-strong); }
+.convo-list-groups.is-flat .convo-list-item.is-child:last-child::before { bottom: auto; height: 14px; }
+.convo-list-groups.is-flat .convo-list-item.is-child::after { content: ''; position: absolute; left: 17px; top: 14px; width: 10px; height: 1px; background: var(--term-line-strong); }
+.convo-list-groups.is-flat .convo-list-row.is-child { padding: 4px 10px 4px 32px; gap: 6px; }
+.convo-list-groups.is-flat .convo-list-row.is-child .convo-list-title { font-size: var(--fs-sub); line-height: var(--lh-sub); }
+/* Its subagents' count by its name: tapped, they fold. */
+.convo-list-kids {
+  flex: none; align-self: center; display: inline-flex; align-items: center; gap: 2px; height: 18px; padding: 0 4px;
+  border-radius: var(--r-xs); background: color-mix(in srgb, var(--term-fg) 6%, transparent); color: var(--term-fg-3);
+  font-size: var(--fs-note); line-height: var(--lh-note); font-weight: 500; font-variant-numeric: tabular-nums; cursor: pointer;
+}
+.convo-list-kids:hover { background: color-mix(in srgb, var(--term-fg) 12%, transparent); color: var(--term-fg); }
+.convo-list-kids.is-collapsed { color: var(--term-fg-2); }
+/* Its end: the menu button over its time (the time in its hover card), the fold
+   pill only for the keyboard, shown when focused. */
+.convo-list-groups.is-flat .convo-list-actions { top: 4px; right: 6px; }
+.convo-list-groups.is-flat .convo-list-item.is-child > .convo-list-actions { top: 2px; }
+.convo-list-groups.is-flat .convo-list-actions > .convo-list-subpill:not(:focus-visible) {
+  position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden; clip-path: inset(50%); opacity: 0; pointer-events: none;
+}
+.convo-list-groups.is-flat .convo-list-item.has-children .convo-list-line,
+.convo-list-groups.is-flat .convo-list-item.has-children.has-menu:hover .convo-list-line,
+.convo-list-groups.is-flat .convo-list-item.has-children.has-menu:has(:focus-visible) .convo-list-line,
+.convo-list-groups.is-flat .convo-list-item.has-children.is-menu .convo-list-line { padding-right: 0; }
+.convo-list-groups.is-flat .convo-list-item.has-children:has(.convo-list-subpill:focus-visible) .convo-list-line { padding-right: 40px; }
+.convo-list-groups.is-flat .convo-list-item.has-menu:has(:focus-visible) .convo-list-when-t,
+.convo-list-groups.is-flat .convo-list-item.is-menu .convo-list-when-t,
+.convo-list-groups.is-flat .convo-list-item.has-children:has(.convo-list-subpill:focus-visible) .convo-list-when-t { opacity: 0; }
+@media (hover: hover) { .convo-list-groups.is-flat .convo-list-item.has-menu:hover .convo-list-when-t { opacity: 0; } }

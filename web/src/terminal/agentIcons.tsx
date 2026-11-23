@@ -144,7 +144,7 @@ export function ModelGlyph({ model, desc, size = 14, className = 'convo-model-ic
 // bare: the mark alone, at the size given, with no tile behind it — as the
 // agents' list and the conversation's bar draw it (redesign 11-23); a tile
 // only where the mark stands by itself.
-export function AgentIcon({ program, size = 28, dot, bare }: { program?: string; size?: number; dot?: 'blocked' | 'working' | 'done' | 'bg'; bare?: boolean }) {
+export function AgentIcon({ program, size = 28, dot, bare }: { program?: string; size?: number; dot?: 'blocked' | 'working' | 'done' | 'bg' | 'failed'; bare?: boolean }) {
   const m = agentMark(program)
   const glyph = bare ? size : Math.round(size * 0.58)
   return (
