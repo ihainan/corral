@@ -5,7 +5,7 @@ import { t } from './i18n'
 import { navigate, usePath } from './router'
 import { Dialog } from './components/ui'
 import { useConnect } from './connect'
-import { isAgy, isCodex, listAgents, matchQuery, paneName, titleRead, useRunningSessions, type AgentRow } from './terminal/agents'
+import { listAgents, matchQuery, rowTitle, useRunningSessions, type AgentRow } from './terminal/agents'
 import { AgentIcon } from './terminal/agentIcons'
 import { askNewAgent } from './terminal/newAgent'
 import { openSettingsModal } from './pages/Settings'
@@ -82,7 +82,7 @@ function Palette({ onClose, onHost }: { onClose: () => void; onHost: (h: Host) =
       f()
     }
     const rows: AgentRow[] = sessions ? listAgents(sessions).rows : []
-    const titleOf = (r: AgentRow) => ((isCodex(r.a.agent) || isAgy(r.a.agent)) && r.a.thread_title) || titleRead(r) || paneName(r.a) || r.a.cwd.split('/').filter(Boolean).pop() || r.a.agent
+    const titleOf = rowTitle
     const agents = rows
       .filter((r) => matchQuery(q, titleOf(r), r.s.host_name, r.ws, r.a.cwd, r.a.agent))
       .slice(0, MOST.agents)

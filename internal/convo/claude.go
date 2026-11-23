@@ -840,7 +840,13 @@ func (c *Claude) line(b []byte) {
 		return
 	}
 	if r.GitBranch != nil {
-		c.meta.Branch, c.branchSaid = clip(*r.GitBranch, maxMeta), true
+		// ("HEAD": Claude Code's word where there is no branch — a folder
+		// that is no repository, a commit checked out —: none.)
+		br := *r.GitBranch
+		if br == "HEAD" {
+			br = ""
+		}
+		c.meta.Branch, c.branchSaid = clip(br, maxMeta), true
 	}
 	switch r.Type {
 	case "user", "assistant", "attachment", "system":

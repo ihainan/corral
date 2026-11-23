@@ -193,10 +193,11 @@ code, .mono { font-family: var(--font-mono); font-size: var(--fs-sub); }
   font-size: var(--fs-note); line-height: var(--lh-note); color: var(--wb-fg-3, var(--fg-3));
   white-space: nowrap; overflow: hidden;
 }
-.wb-status-left { display: flex; align-items: center; gap: 14px; min-width: 0; overflow: hidden; }
+.wb-status-left { display: flex; align-items: center; gap: 14px; min-width: 0; overflow: clip; } /* (clip, not hidden: a button in it focused scrolled it, its first mark pushed out — 11-23) */
 .wb-status-gap { flex: 1; }
 .wb-status-slot { display: contents; }
 .wb-status-ab { font-variant-numeric: tabular-nums; }
+.wb-status-mode { display: contents; }
 .wb-quota { display: inline-flex; gap: 10px; }
 .wb-quota.is-stale { opacity: 0.6; }
 .wb-quota-win.is-warn { color: var(--wb-warn, var(--warn)); }

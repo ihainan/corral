@@ -21,7 +21,7 @@ html.term-mode body { position: fixed; inset: 0; }
 }
 .term-root.wb-on { padding: 0 0 var(--wb-status) var(--wb-rail); }
 /* (Settings are the rail's there: the list's own way to them goes.) */
-.term-root.wb-on .convo-side-foot-settings { display: none; }
+.term-root.wb-on .convo-side-foot { display: none; } /* (settings: the rail's; the keys: the header's menu, and "?" — 11-23) */
 /* A tab in the back: laid out at the same size (so it keeps its grid and
    needs no refit), not seen, not reachable. */
 .term-root.inactive { visibility: hidden; pointer-events: none; }
@@ -730,6 +730,10 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 .convo-runs.in-head .convo-runs-pop.convo-modes { width: 300px; }
 .convo-runs.in-head .convo-runs-side-name { display: none; } /* (its icon and its title say it: the header has little room) */
 .convo-runs.in-head .convo-runs-pop.convo-modes { right: 0; left: auto; }
+/* (On the status bar: the mode's button as the bar's items, its menu opening upwards.) */
+.convo-runs.in-status { flex: none; position: relative; margin: 0; min-height: 0; gap: 0; font: inherit; color: inherit; }
+.convo-runs.in-status .convo-runs-item { height: 22px; padding: 0 6px; margin: 0 -6px; color: inherit; font: inherit; }
+.convo-runs.in-status .convo-runs-pop { position: fixed; top: auto; right: auto; width: 300px; max-width: calc(100vw - 24px); } /* (left and bottom: set as it opens, see Runs' fit) */
 .convo-gauge.is-full .convo-gauge-fill { stroke: var(--term-warn-text); }
 /* The composer's keys: said while one types, not over a box at rest. */
 .convo-dock .composer-keys { opacity: 0; transition: opacity 0.15s; }
@@ -1441,6 +1445,8 @@ button.gch-ut:hover { background: var(--term-hover); }
 @media (forced-colors: active) { .term-root .convo .convo-stop.btn-ghost { border: 1px solid ButtonText; } }
 .convo-bar-more { flex: none; align-self: center; margin: -4px -6px -4px 0; color: var(--term-fg-2); }
 .convo-bar-pick .convo-bar-name { flex: 0 1 auto; }
+/* (Short of room, the conversation's title under the name goes first: the name kept — 11-23, both cut alike before.) */
+.convo-bar-pick .convo-bar-where { flex-shrink: 999; }
 .convo-bar-pick .agent-icon { margin-right: 4px; --dot-ring: var(--term-bg); }
 /* The agents page: a tab as the sessions' are, first, never dragged. */
 .term-tab-agents { padding: 0 10px; }

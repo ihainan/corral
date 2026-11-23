@@ -1353,8 +1353,9 @@ export function ConversationView({
     const onKey = (e: KeyboardEvent) => {
       if (composing(e) || underDialog(e) || e.altKey) return
       // (Shift as some layouts need it for "/", as the German's.)
-      const asked = mac ? e.key.toLowerCase() === 'k' && e.metaKey && !e.ctrlKey && !e.shiftKey : e.key === '/' && !e.ctrlKey && !e.metaKey && !editable(e.target)
-      if (!asked || (mac && wbWideNow.current)) return // (⌘K on the workbench: the command palette's)
+      // (⌘K on the workbench: the command palette's — "/" for this, as elsewhere.)
+      const asked = mac && !wbWideNow.current ? e.key.toLowerCase() === 'k' && e.metaKey && !e.ctrlKey && !e.shiftKey : e.key === '/' && !e.ctrlKey && !e.metaKey && !editable(e.target)
+      if (!asked) return
       e.preventDefault()
       if (sideShownNow.current) setSearchAsked((n) => n + 1)
       else setPicking('search')
@@ -1765,10 +1766,14 @@ export function ConversationView({
     lineageChildren[0]
   // The model, how hard it thinks, the context, the mode: under the
   // composer, or on the workbench in the pane's header (11-23).
+  // (The status bar's place for the mode, of the pane in front: see Runs' modeAt.)
+  const [modeSlot, setModeSlot] = useState<HTMLElement | null>(null)
   const runsAt = (head: boolean) =>
     convo.status === 'ready' && convo.meta ? (
       <Runs
           head={head}
+          modeAt={head && inWb && kActive ? modeSlot : undefined}
+          modeQuiet={head && inWb && !kActive}
           meta={convo.meta}
           goal={convo.bind?.agent === 'codex' ? goal : undefined}
           active={active}
@@ -2270,7 +2275,7 @@ export function ConversationView({
         {composer}
         {!inWb && runsAt(false)}
         {/* (The pane the keys go to says its branch and quota on the status bar.) */}
-        {inWb && kActive && wbSlot && createPortal(<StatusFacts of={convo.status === 'ready' ? convo.of : undefined} meta={convo.status === 'ready' ? convo.meta : undefined} via={convo.bind?.via} auth={convo.bind?.auth} quota={convo.status === 'ready' ? quotaOf : undefined} />, wbSlot)}
+        {inWb && kActive && wbSlot && createPortal(<StatusFacts modeRef={setModeSlot} of={convo.status === 'ready' ? convo.of : undefined} meta={convo.status === 'ready' ? convo.meta : undefined} via={convo.bind?.via} auth={convo.bind?.auth} quota={convo.status === 'ready' ? quotaOf : undefined} />, wbSlot)}
       </div>
       </div>
       {splitShown && splitPane && (
@@ -3040,7 +3045,7 @@ function compactThreshold(window: number, agentKind?: string, observedPre?: numb
   return { at, pct: Math.round(ratio * 100), source: 'estimate' }
 }
 
-function Runs({ head, meta, goal, active, mode, model, effort, quota, via, auth, agentKind, compactPre, onSide }: { head?: boolean; meta: ConvoMeta; goal?: string; active: boolean; mode?: ModeSwitch; model?: ModelSwitch; effort?: EffortSwitch; quota?: QuotaOf; via?: string; auth?: string; agentKind?: string; compactPre?: number; onSide?: () => void }) {
+function Runs({ head, modeAt, modeQuiet, meta, goal, active, mode, model, effort, quota, via, auth, agentKind, compactPre, onSide }: { head?: boolean; modeAt?: HTMLElement | null; modeQuiet?: boolean; meta: ConvoMeta; goal?: string; active: boolean; mode?: ModeSwitch; model?: ModelSwitch; effort?: EffortSwitch; quota?: QuotaOf; via?: string; auth?: string; agentKind?: string; compactPre?: number; onSide?: () => void }) {
   const [open, setOpen] = useState<false | 'ctx' | 'model' | 'effort' | 'mode'>(false) // (which of its pop-ups)
   const [modelFilter, setModelFilter] = useState('')
   // (Another agent bound meanwhile — the pane's program changed: its model and effort menus, of the one before, closed;
@@ -3065,6 +3070,10 @@ function Runs({ head, meta, goal, active, mode, model, effort, quota, via, auth,
     if (!model?.busy) setGoing('')
   }, [model?.busy])
   const box = useRef<HTMLDivElement>(null)
+  // (On the workbench the mode is the status bar's, as the design has it: its
+  // button and menu put there, in a box of their own — 11-23.)
+  const modeBox = useRef<HTMLDivElement>(null)
+  const inside = (n: Node | null | undefined) => !!n && (!!box.current?.contains(n) || !!modeBox.current?.contains(n))
   const modelBtn = useRef<HTMLButtonElement>(null)
   const effortBtn = useRef<HTMLButtonElement>(null)
   const modeBtn = useRef<HTMLButtonElement>(null)
@@ -3080,14 +3089,14 @@ function Runs({ head, meta, goal, active, mode, model, effort, quota, via, auth,
   const listed = (open === 'model' && !!model?.list) || open === 'effort' || open === 'mode'
   useEffect(() => {
     // (Only where the focus still is with it: not taken back from where it went meanwhile.)
-    if (!listed || !box.current?.contains(document.activeElement)) return
+    if (!listed || !inside(document.activeElement)) return
     ;(menu.current?.querySelector<HTMLElement>('[aria-checked="true"]') ?? menu.current?.querySelector<HTMLElement>('button'))?.focus()
   }, [open, listed])
   const backDown = useRef(false)
   useEffect(() => {
     if (!open) return
     const away = (e: PointerEvent) => {
-      if (box.current?.contains(e.target as Node)) return
+      if (inside(e.target as Node)) return
       swallowNextClick()
       setOpen(false)
     }
@@ -3095,9 +3104,9 @@ function Runs({ head, meta, goal, active, mode, model, effort, quota, via, auth,
       if (e.key === 'Escape') {
         e.preventDefault()
         e.stopPropagation()
-        if (open === 'model' && box.current?.contains(document.activeElement)) modelBtn.current?.focus()
-        if (open === 'effort' && box.current?.contains(document.activeElement)) effortBtn.current?.focus()
-        if (open === 'mode' && box.current?.contains(document.activeElement)) modeBtn.current?.focus()
+        if (open === 'model' && inside(document.activeElement)) modelBtn.current?.focus()
+        if (open === 'effort' && inside(document.activeElement)) effortBtn.current?.focus()
+        if (open === 'mode' && inside(document.activeElement)) modeBtn.current?.focus()
         setOpen(false)
       } else if (open === 'model' && mergedNow.current && (e.key === 'ArrowLeft' || e.key === 'ArrowRight') && menu.current?.contains(document.activeElement)) {
         // (As in Claude Code's own picker: ← → for how hard it thinks, wherever the focus is in the list.)
@@ -3129,15 +3138,23 @@ function Runs({ head, meta, goal, active, mode, model, effort, quota, via, auth,
     if (!open) return
     const vv = window.visualViewport
     const fit = () => {
-      const pop = box.current?.querySelector<HTMLElement>('.convo-runs-pop')
-      if (!pop || !box.current) return
+      const holder = open === 'mode' && modeBox.current ? modeBox.current : box.current
+      const pop = holder?.querySelector<HTMLElement>('.convo-runs-pop')
+      if (!pop || !holder) return
       const seen = vv ? vv.height : window.innerHeight
       if (pop.classList.contains('is-sheet')) {
         pop.style.bottom = ''
         pop.style.maxHeight = Math.round(seen * 0.8) + 'px'
         return
       }
-      const at = box.current.getBoundingClientRect()
+      const at = holder.getBoundingClientRect()
+      if (holder === modeBox.current) {
+        // (From the status bar, whose left part cuts what goes past it: placed on the page, above the button.)
+        pop.style.left = Math.max(12, Math.min(at.left - 6, window.innerWidth - pop.offsetWidth - 12)) + 'px'
+        pop.style.bottom = Math.round(window.innerHeight - at.top + 6) + 'px'
+        pop.style.maxHeight = Math.max(0, at.top - (vv ? vv.offsetTop : 0) - 16) + 'px'
+        return
+      }
       // Each of them opens straight above this row, the composer under it
       // covered while it is open — one way for all four, where the
       // context's used to be kept clear of the composer and the three
@@ -3147,7 +3164,7 @@ function Runs({ head, meta, goal, active, mode, model, effort, quota, via, auth,
       pop.style.bottom = ''
       // (In the pane's header, on the workbench: below it, down to the bottom of what can be seen.)
       // (Not past its own pane either: split one over another, the lower pane would cover the rest.)
-      if (head) {
+      if (head && holder === box.current) {
         const pane = box.current.closest('.convo-main, .convo-split-pane')?.getBoundingClientRect()
         const end = Math.min(vv ? vv.offsetTop + vv.height : window.innerHeight, pane ? pane.bottom : Infinity)
         pop.style.maxHeight = Math.max(0, end - at.bottom - 16) + 'px'
@@ -3237,11 +3254,7 @@ function Runs({ head, meta, goal, active, mode, model, effort, quota, via, auth,
   const tick = used > 0 ? Math.min(1, compactThreshold(windows[0], agentKind, compactPre, meta.auto_compact).at / windows[0]) : 0
   // (Asking nothing before it acts: said in red where it is, not as any other mode — workbench 11-23.)
   const bypass = !collabNow && !mode?.agy && (mode?.now || meta.mode) === 'bypassPermissions'
-  const modelShowsEffort = !!shownEffort && !!shownModel && (merged || !model || !!(model.efforts && model.can) || !(effort?.can || effort?.busy))
-  return (
-    // (The focus gone elsewhere, as by Tab, while the model menu is open, the list read or not: closed.)
-    <div className={'convo-runs' + (used > 0 ? ' has-ctx' : '') + (head ? ' in-head' : '')} ref={box} onBlur={(e) => (open === 'model' || open === 'effort' || open === 'mode') && !box.current?.contains(e.relatedTarget as Node | null) && setOpen(false)}>
-      {(mode?.now || meta.mode || (mode?.codex && meta.collab) || (mode?.agy && mode.onPick)) &&
+  const modeEl = (mode?.now || meta.mode || (mode?.codex && meta.collab) || (mode?.agy && mode.onPick)) &&
         (mode?.onPick || mode?.busy ? (
           <button
             ref={modeBtn}
@@ -3262,7 +3275,67 @@ function Runs({ head, meta, goal, active, mode, model, effort, quota, via, auth,
           <span className={'convo-runs-item convo-runs-mode' + (bypass ? ' is-bypass' : '')} title={t('convo.modeHint')}>
             {shownMode}
           </span>
-        ))}
+        ))
+  const modePop = open === 'mode' && mode?.onPick && (
+        <div
+          className={"convo-runs-pop convo-models convo-modes" + (sheet ? " is-sheet" : "")}
+          role="menu"
+          aria-label={t('convo.modeTitle')}
+          ref={menu}
+          onBlur={(e) => !inside(e.relatedTarget as Node | null) && setOpen(false)} // (Tab out of it: closed)
+        >
+          {(mode.codex ? CODEX_MODES : mode.agy ? AGY_MODES : mode.opencode ? OPENCODE_MODES : PICKED_MODES).map((m) => {
+            const now = mode.codex ? collabNow === m : (mode.now || meta.mode || (mode.opencode ? 'build' : '')) === m
+            return (
+              <button
+                key={m}
+                type="button"
+                role="menuitemradio"
+                aria-checked={now}
+                className={'convo-models-item is-mode' + (m === 'bypassPermissions' ? ' is-risky' : '')}
+                onClick={() => {
+                  setOpen(false)
+                  modeBtn.current?.focus()
+                  mode.onPick!(m) // (the one ticked too: what is ticked may be past; there already, nothing is pressed)
+                }}
+              >
+                {(() => {
+                  const Ic = MODE_ICON[m]
+                  return <Ic size={16} className="convo-mode-ic" aria-hidden="true" />
+                })()}
+                <span className="convo-models-label">{mode.codex ? t(m === 'plan' ? 'convo.mode.plan' : 'convo.mode.codexDefault') : modeName(m)}</span>
+                <span className="convo-models-desc">{t(mode.codex ? (m === 'plan' ? 'convo.modeDesc.codexPlan' : 'convo.modeDesc.codexDefault') : (`convo.modeDesc.${m}` as I18nKey))}</span>
+                {now && <Check size={14} className="convo-mode-check" aria-hidden="true" />}
+              </button>
+            )
+          })}
+          {!mode.codex && !mode.opencode && <p className="convo-runs-note">{t('convo.modeNote')}</p>}
+        </div>
+      )
+  const modelShowsEffort = !!shownEffort && !!shownModel && (merged || !model || !!(model.efforts && model.can) || !(effort?.can || effort?.busy))
+  return (
+    <>
+    {modeAt &&
+      createPortal(
+        // (Its own box: the same rules of the focus and of Escape as the row's — see inside.)
+        <div className="convo-runs in-status" ref={modeBox} onBlur={(e) => open === 'mode' && !inside(e.relatedTarget as Node | null) && setOpen(false)}>
+          {modeEl}
+          {modePop}
+        </div>,
+        modeAt,
+      )}
+    {/* (The focus gone elsewhere, as by Tab, while the model menu is open, the list read or not: closed.) */}
+    <div className={'convo-runs' + (used > 0 ? ' has-ctx' : '') + (head ? ' in-head' : '')} ref={box} onBlur={(e) => (open === 'model' || open === 'effort' || open === 'mode') && !inside(e.relatedTarget as Node | null) && setOpen(false)}>
+      {/* (A pane not in front, on the workbench: its mode is said where it is, in front — but bypass, in red, always.) */}
+      {!modeAt &&
+        (!modeQuiet
+          ? modeEl
+          : bypass && (
+              // (Said only, not a button: pressed, the pane comes in front first and its button moves to the status bar — review of 11-23.)
+              <span className="convo-runs-item convo-runs-mode is-bypass" title={t('convo.modeHint')}>
+                {shownMode}
+              </span>
+            ))}
       {goal && (
         // (A Codex's goal: how it goes and what it has used, as its footer says.)
         <span className="convo-runs-item convo-runs-goal" title={goal}>
@@ -3412,7 +3485,7 @@ function Runs({ head, meta, goal, active, mode, model, effort, quota, via, auth,
           role="menu"
           aria-label={t('convo.model')}
           ref={menu}
-          onBlur={(e) => !box.current?.contains(e.relatedTarget as Node | null) && setOpen(false)} // (Tab out of it: closed)
+          onBlur={(e) => !inside(e.relatedTarget as Node | null) && setOpen(false)} // (Tab out of it: closed)
         >
           {model.list === null ? (
             <p className="convo-runs-note" role="status">{t(model.unread && !model.busy ? 'convo.modelUnread' : 'convo.modelReading')}</p>
@@ -3519,49 +3592,14 @@ function Runs({ head, meta, goal, active, mode, model, effort, quota, via, auth,
           })()}
         </div>
       )}
-      {open === 'mode' && mode?.onPick && (
-        <div
-          className={"convo-runs-pop convo-models convo-modes" + (sheet ? " is-sheet" : "")}
-          role="menu"
-          aria-label={t('convo.modeTitle')}
-          ref={menu}
-          onBlur={(e) => !box.current?.contains(e.relatedTarget as Node | null) && setOpen(false)} // (Tab out of it: closed)
-        >
-          {(mode.codex ? CODEX_MODES : mode.agy ? AGY_MODES : mode.opencode ? OPENCODE_MODES : PICKED_MODES).map((m) => {
-            const now = mode.codex ? collabNow === m : (mode.now || meta.mode || (mode.opencode ? 'build' : '')) === m
-            return (
-              <button
-                key={m}
-                type="button"
-                role="menuitemradio"
-                aria-checked={now}
-                className={'convo-models-item is-mode' + (m === 'bypassPermissions' ? ' is-risky' : '')}
-                onClick={() => {
-                  setOpen(false)
-                  modeBtn.current?.focus()
-                  mode.onPick!(m) // (the one ticked too: what is ticked may be past; there already, nothing is pressed)
-                }}
-              >
-                {(() => {
-                  const Ic = MODE_ICON[m]
-                  return <Ic size={16} className="convo-mode-ic" aria-hidden="true" />
-                })()}
-                <span className="convo-models-label">{mode.codex ? t(m === 'plan' ? 'convo.mode.plan' : 'convo.mode.codexDefault') : modeName(m)}</span>
-                <span className="convo-models-desc">{t(mode.codex ? (m === 'plan' ? 'convo.modeDesc.codexPlan' : 'convo.modeDesc.codexDefault') : (`convo.modeDesc.${m}` as I18nKey))}</span>
-                {now && <Check size={14} className="convo-mode-check" aria-hidden="true" />}
-              </button>
-            )
-          })}
-          {!mode.codex && !mode.opencode && <p className="convo-runs-note">{t('convo.modeNote')}</p>}
-        </div>
-      )}
+      {!modeAt && modePop}
       {open === 'effort' && effort && (
         <div
           className={"convo-runs-pop convo-models" + (sheet ? " is-sheet" : "")}
           role="menu"
           aria-label={t('convo.effort')}
           ref={menu}
-          onBlur={(e) => !box.current?.contains(e.relatedTarget as Node | null) && setOpen(false)} // (Tab out of it: closed)
+          onBlur={(e) => !inside(e.relatedTarget as Node | null) && setOpen(false)} // (Tab out of it: closed)
         >
           {EFFORTS.map((e) => (
             <button
@@ -3669,6 +3707,7 @@ function Runs({ head, meta, goal, active, mode, model, effort, quota, via, auth,
         </div>
       )}
     </div>
+    </>
   )
 }
 
@@ -3807,22 +3846,26 @@ export function QuotaChip({ of }: { of: QuotaOf }) {
   // (agy's by model family: of each window, the family that has used the most.)
   const groups = shown && 'groups' in shown ? shown.groups : undefined
   const most = (pick: (g: QuotaGroup) => ConvoQuotaWindow | undefined) =>
-    groups?.map(pick).filter((w): w is ConvoQuotaWindow => !!w && w.resets_at > now).sort((a, b) => b.used - a.used)[0]
+    // (One past its reset counts as 0: so said, not left out — 11-23.)
+    groups?.map(pick).filter((w): w is ConvoQuotaWindow => !!w).sort((a, b) => (b.resets_at > now ? b.used : 0) - (a.resets_at > now ? a.used : 0))[0]
   const wins = (
     [
       ['quota.fiveHour', shown?.five_hour ?? most((g) => g.five_hour)],
       ['quota.weekly', shown?.weekly ?? most((g) => g.weekly)],
     ] as const
-  ).filter(([, w]) => w && w.resets_at > now)
+  )
+    // (A window past its reset: 0% now, said so — left out, the bar jumped between panes, 11-23.)
+    .filter(([, w]) => !!w)
+    .map(([name, w]) => [name, w!.resets_at > now ? w!.used : 0] as const)
   if (!wins.length) return failed ? <StatusItem title={t('quota.failed')}>{t('wb.quotaNone')}</StatusItem> : null
   const at = failed ? (seen?.lastAt ?? 0) / 1000 : shown?.updated_at
   const title = [t('quota.title'), at ? t('wb.quotaAt', { at: quotaClock(at) }) : '', failed ? t('quota.failed') : ''].filter(Boolean).join(' · ')
   return (
     <StatusItem title={title}>
       <span className={'wb-quota' + (failed ? ' is-stale' : '')}>
-        {wins.map(([name, w]) => (
-          <span key={name} className={'wb-quota-win' + quotaTone(w!.used)}>
-            {t(name)} {Math.round(w!.used)}%
+        {wins.map(([name, used]) => (
+          <span key={name} className={'wb-quota-win' + quotaTone(used)}>
+            {t(name)} {Math.round(used)}%
           </span>
         ))}
       </span>
@@ -3875,7 +3918,7 @@ function useUpstream(of: string | undefined, branch: string | undefined): Upstre
 
 // What the pane in front says on the workbench's status bar: its branch,
 // where its requests go, the subscription's quota.
-function StatusFacts({ of, meta, via, auth, quota }: { of?: string; meta?: ConvoMeta; via?: string; auth?: string; quota?: QuotaOf }) {
+function StatusFacts({ modeRef, of, meta, via, auth, quota }: { modeRef?: (el: HTMLElement | null) => void; of?: string; meta?: ConvoMeta; via?: string; auth?: string; quota?: QuotaOf }) {
   const where = via || (auth === 'bedrock' ? 'Amazon Bedrock' : auth === 'vertex' ? 'Google Vertex AI' : '')
   const up = useUpstream(of, meta?.branch)
   const ab = up ? [up.ahead ? '↑' + up.ahead : '', up.behind ? '↓' + up.behind : ''].filter(Boolean).join(' ') : ''
@@ -3888,6 +3931,8 @@ function StatusFacts({ of, meta, via, auth, quota }: { of?: string; meta?: Convo
           {ab && <span className="wb-status-ab">{ab}</span>}
         </StatusItem>
       )}
+      {/* (The pane in front's permission mode, its button and menu: Runs puts them here.) */}
+      <span className="wb-status-mode" ref={modeRef} />
       {where && <StatusItem title={t('convo.viaHint', { host: where })}>{t('convo.via', { host: where })}</StatusItem>}
       {quota && <QuotaChip key={'codex' in quota ? 'codex' : quota.sid + ' ' + quota.session} of={quota} />}
     </>
@@ -4149,6 +4194,7 @@ export function ListOrderMenu() {
 }
 
 export function AgentList({ rows, menus, onPicked, placed, query: given, onQuery, search, showSearch, onSearchLeft, hint, compact, showNew, orderOut }: { rows: ConvoListRow[]; menus?: boolean; onPicked?: () => void; placed?: Map<string, ConvoListRow>; query?: string; onQuery?: (q: string) => void; search?: number; showSearch?: boolean; onSearchLeft?: () => void; hint?: boolean; compact?: boolean; showNew?: boolean; orderOut?: boolean }) {
+  const wbList = useWorkbench()
   // Its rows' menu (menus: the side list's; the switcher's rows have none):
   // one for the list, of the row it was opened on by its key, as that row
   // may go to another group meanwhile and be drawn anew; at its "more"
@@ -4322,7 +4368,7 @@ export function AgentList({ rows, menus, onPicked, placed, query: given, onQuery
     <>
       {(showBar || showOrder || showNew) && (
         <div className={'list-toolbar' + (showBar ? '' : ' is-compact')}>
-          {showBar && <ListSearch value={query} onChange={setQuery} focus={search} onLeft={onSearchLeft} hint={hint ? KEY_SEARCH : undefined} />}
+          {showBar && <ListSearch value={query} onChange={setQuery} focus={search} onLeft={onSearchLeft} hint={hint ? keySearch(wbList) : undefined} />}
           {showOrder && <ListOrderMenu />}
           {showNew && (
             <button
@@ -4799,8 +4845,9 @@ export const SEARCH_FROM = 5
 // The box an agents' list is searched with (see matchQuery). Escape in it
 // empties it first.
 // (⌘K on a Mac; elsewhere "/", as the browsers there keep Ctrl+K for their
-// own search: as the key is said.)
-const KEY_SEARCH = mac ? '⌘K' : '/'
+// own search: as the key is said. On a Mac's workbench ⌘K is the command
+// palette's: "/" there too — its box said ⌘K, which opened the palette, 11-23.)
+const keySearch = (wb: boolean) => (mac && !wb ? '⌘K' : '/')
 const KEY_SIDE = mac ? '⌘B' : 'Ctrl+B'
 
 // What the session card shows of the conversation as the page has it: the
@@ -4845,11 +4892,12 @@ function cardData(convo: Convo, list: Item[], mode?: ModeSwitch, effort?: Effort
 // The keys of this page, as this computer has them (plans/4a-shortcuts.md);
 // side: the list of agents beside it, with its own.
 function PageKeysHelp({ onClose, side }: { onClose: () => void; side: boolean }) {
+  const wb = useWorkbench()
   // (Each key in a box of its own; two that do the same, or go each way, apart: not a chord.)
   // In groups by where they act, each a heading over its rows.
   type Row = [string[], I18nKey]
   const groups: [I18nKey, Row[]][] = [
-    ...(side ? ([['pageKeys.gAgents', [[mac ? ['⌥↑', '⌥↓'] : ['Alt+↑', 'Alt+↓'], 'pageKeys.switch'], [[KEY_SEARCH], 'pageKeys.search'], [[KEY_SIDE], 'pageKeys.side']]]] as [I18nKey, Row[]][]) : []),
+    ...(side ? ([['pageKeys.gAgents', [[mac ? ['⌥↑', '⌥↓'] : ['Alt+↑', 'Alt+↓'], 'pageKeys.switch'], [[keySearch(wb)], 'pageKeys.search'], [[KEY_SIDE], 'pageKeys.side'], ...(mac && wb ? ([[['⌘K'], 'settings.general.scPalette']] as Row[]) : [])]]] as [I18nKey, Row[]][]) : []),
     ['pageKeys.gConvo', [[['[', ']'], 'pageKeys.jump'], ...(mac ? ([[['Ctrl+O'], 'pageKeys.fold']] as Row[]) : []), [['?'], 'pageKeys.help']]],
     [
       'pageKeys.gInput',

@@ -1,11 +1,12 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { memo, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { Bot, Film, KeyRound, LogOut, ScrollText, Search, Server, Settings, Users } from 'lucide-react'
 import { openPalette, PALETTE_KEY } from './palette'
 import { signOut, useSession } from './app'
 import { t } from './i18n'
-import { linkHandler, usePath } from './router'
-import { useWaitingCount } from './terminal/agents'
-import { MenuLayer, useToast } from './components/ui'
+import { linkHandler, navigate, usePath } from './router'
+import { countedAgents, rowTitle, useWaitingCount } from './terminal/agents'
+import { AgentIcon } from './terminal/agentIcons'
+import { MenuLayer, useToast, type MenuItem } from './components/ui'
 import { isDesktopSettings, openSettingsModal } from './pages/Settings'
 
 // The workbench: one frame round every page on a desktop or tablet (760 and
@@ -131,15 +132,41 @@ export function StatusBar({ children }: { children?: ReactNode }) {
   const parts: string[] = []
   if (counts.n) parts.push(t('wb.waitingN', { n: counts.n }))
   if (counts.working) parts.push(t('wb.workingN', { n: counts.working }))
+  // (Pressed: which they are — those waiting, then at work —, each to go to. As
+  // they were as it opened: redrawn by each read, it moved the focus back to its
+  // first, or kept those of before — review of 11-23.)
+  const [list, setList] = useState<{ at: DOMRect; items: MenuItem[]; note: string } | null>(null)
+  const btn = useRef<HTMLButtonElement>(null)
+  const trigger = useCallback(() => btn.current, [])
+  const close = useCallback(() => setList(null), [])
+  const items = (): MenuItem[] => {
+    const { waiting, working } = countedAgents()
+    const item = (r: (typeof waiting)[number], i: number, first: boolean): MenuItem => ({
+      label: rowTitle(r) + (r.s.host_name ? ' · ' + r.s.host_name : ''),
+      icon: <AgentIcon program={r.a.agent} size={16} bare />,
+      separator: first && i === 0,
+      onSelect: () => navigate('/agents?' + new URLSearchParams({ s: r.s.id, pane: r.a.pane_id })),
+    })
+    return [...waiting.map((r, i) => item(r, i, false)), ...working.map((r, i) => item(r, i, waiting.length > 0))]
+  }
   return (
     <footer className="wb-status" aria-label={t('wb.status')}>
       <div className="wb-status-left">{children}</div>
       <span className="wb-status-gap" />
       {parts.length > 0 && (
-        <span className={'wb-status-counts' + (counts.stale ? ' is-stale' : '')} title={counts.stale ? t('nav.waitingStale') : undefined}>
+        <button
+          type="button"
+          ref={btn}
+          className={'wb-status-counts wb-status-item is-btn' + (counts.stale ? ' is-stale' : '')}
+          title={counts.stale ? t('nav.waitingStale') : t('wb.countsList')}
+          aria-haspopup="menu"
+          aria-expanded={!!list}
+          onClick={(e) => setList({ at: e.currentTarget.getBoundingClientRect(), items: items(), note: parts.join(' · ') })}
+        >
           {parts.join(' · ')}
-        </span>
+        </button>
       )}
+      {list && <CountsMenu at={list.at} items={list.items} note={list.note} trigger={trigger} onClose={close} />}
     </footer>
   )
 }
@@ -163,3 +190,9 @@ export function StatusItem({ children, title, mark, onClick, tone }: { children:
     </span>
   )
 }
+
+// (Its anchor made once: a new one each draw would open it again.)
+const CountsMenu = memo(function CountsMenu({ at, items, note, trigger, onClose }: { at: DOMRect; items: MenuItem[]; note: string; trigger: () => HTMLElement | null; onClose: () => void }) {
+  const anchor = useMemo(() => new DOMRect(at.right, at.top - 4, 0, 0), [at])
+  return <MenuLayer label={t('wb.countsList')} note={note} anchor={anchor} at="point" sheet={false} trigger={trigger} items={items} onClose={onClose} />
+})

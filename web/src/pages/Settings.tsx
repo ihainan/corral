@@ -395,8 +395,13 @@ function SettingsWorkbench({ modal, initialCat, onClose }: { modal?: boolean; in
                 <Setting label={t('settings.general.scSettings')}>
                   <span className="sm-kbd">{isMac ? '⌘,' : 'Ctrl+,'}</span>
                 </Setting>
-                <Setting label={t(isMac ? 'settings.general.scPalette' : 'settings.general.scSearch')}>
-                  <span className="sm-kbd">{isMac ? '⌘K' : '/'}</span>
+                {isMac && (
+                  <Setting label={t('settings.general.scPalette')}>
+                    <span className="sm-kbd">⌘K</span>
+                  </Setting>
+                )}
+                <Setting label={t('settings.general.scSearch')}>
+                  <span className="sm-kbd">/</span>
                 </Setting>
                 <Setting label={t('settings.general.scSidebar')}>
                   <span className="sm-kbd">{isMac ? '⌘B' : 'Ctrl+B'}</span>

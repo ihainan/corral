@@ -254,6 +254,19 @@ export function waitingAgents(list: SessionInfo[]): number {
   return seen.size
 }
 
+// Those the status bar counts, as rows, for its list: waiting on the person
+// first, then at work (11-23: its "3 working" beside the list's "Working 1" —
+// pinned ones are not in that group — said nothing of which).
+export function countedAgents(): { waiting: AgentRow[]; working: AgentRow[] } {
+  const rows = lastList ? listAgents(lastList).rows.filter((r) => !r.lost) : []
+  return { waiting: rows.filter((r) => r.status === 'blocked'), working: rows.filter((r) => r.status === 'working') }
+}
+
+// What an agent is called where it is listed alone (the palette, the status
+// bar's list): a Codex's or Antigravity's thread, the conversation's title,
+// the pane's, its folder, its program.
+export const rowTitle = (r: AgentRow) => ((isCodex(r.a.agent) || isAgy(r.a.agent)) && r.a.thread_title) || titleRead(r) || paneName(r.a) || r.a.cwd.split('/').filter(Boolean).pop() || r.a.agent
+
 // Agents at work across the sessions, each once (the status bar's count).
 export function workingAgents(list: SessionInfo[]): number {
   const seen = new Set<string>()

@@ -340,6 +340,12 @@ func TestClaudeMeta(t *testing.T) {
 	if m := c.Meta(); m.Branch != "" {
 		t.Fatalf("no branch any more: %+v", m)
 	}
+	// ("HEAD": what Claude Code writes in a folder that is no repository, or
+	// at a commit — no branch either; a status bar said "HEAD", 11-23.)
+	c.Feed(lines(`{"type":"user","uuid":"u3","gitBranch":"HEAD","message":{"content":"not a repo"}}`))
+	if m := c.Meta(); m.Branch != "" {
+		t.Fatalf("HEAD taken as a branch: %+v", m)
+	}
 }
 
 func TestClaudeQueue(t *testing.T) {
