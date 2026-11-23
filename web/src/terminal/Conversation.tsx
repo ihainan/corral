@@ -1915,6 +1915,13 @@ export function ConversationView({
               <PanelLeft size={16} strokeWidth={1.75} aria-hidden="true" />
             </button>
           )}
+          {/* (Too narrow for the list beside, on the workbench — a tablet upright: the same button where it was, the
+              list as the picker — turned, it does not go from under the finger. 11-23) */}
+          {side && !wide && inWb && (
+            <button type="button" className="icon-btn convo-side-btn" aria-haspopup="dialog" aria-expanded={!!picking} onClick={() => setPicking(true)} aria-label={t('convo.pick')} title={t('convo.pick')}>
+              <PanelLeft size={16} strokeWidth={1.75} aria-hidden="true" />
+            </button>
+          )}
           {side && !sideShown ? (
             <button type="button" className="convo-bar-pick" aria-haspopup="dialog" aria-expanded={!!picking} aria-label={t('convo.pick')} title={[barTip, t('convo.pickKey', { key: keySearch(wbWide) })].filter(Boolean).join('\n')} onClick={() => setPicking(true)}>
               {label}
