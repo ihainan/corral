@@ -845,7 +845,7 @@ export function InlineReply({ target, onLoaded, resizedAt, active = true, held, 
         {state.kind === 'question' && asking ? (
           <AskPanel key={(asking.id ?? '') + ':' + askAt} call={asking} index={askAt} shown={state} target={target} drive={driven.drive} busy={busy} alive={stillHere} lead={lead} />
         ) : state.kind === 'review' ? (
-          <ReviewPanel shown={state} digest={screen.digest} target={target} drive={driven.drive} busy={busy} />
+          <ReviewPanel shown={state} digest={screen.digest} target={target} drive={driven.drive} busy={busy} alive={stillHere} />
         ) : state.kind === 'plan' && call ? (
           <PlanPanel call={call} shown={state} digest={screen.digest} target={target} drive={driven.drive} busy={busy} onScreen={() => setShown(true)} alive={stillHere} />
         ) : null}

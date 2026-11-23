@@ -28,6 +28,9 @@ const zhChoices: [RegExp, (m: RegExpExecArray) => string][] = [
   [/^No,? cancel$/i, () => '拒绝'],
   [/^Yes,? I trust this folder$/i, () => '是的，信任此文件夹'],
   [/^No,? exit$/i, () => '不信任，退出'],
+  // (AskUserQuestion review page.)
+  [/^Submit answers$/i, () => '提交回答'],
+  [/^Cancel$/i, () => '取消'],
   // (A plan put to the person.)
   [/^Yes,? and use auto mode$/i, () => '批准，并切到自动模式'],
   [/^Yes,? manually approve edits$/i, () => '批准，修改仍逐个确认'],

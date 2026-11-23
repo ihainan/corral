@@ -31,9 +31,13 @@ export type AskScreen =
   | { kind: 'unknown' }
 
 const optionLine = /^\s*(❯)?\s*(\d{1,2})\.\s+(?:\[( |✔)\]\s+)?(.*?)\s*$/
-const tabLine = /^\s*(?:←\s+)?((?:[☐☒]\s+\S.*?\s*)+)(?:✔\s+Submit\s+→)?\s*$/
+const tabLine = /^\s*(?:←\s+)?((?:[☐☒☑]\s+\S.*?\s*)+)(?:[✔✓]\s+Submit)?(?:\s*→)?\s*$/
 const ownLabel = /^Type something\.?$/
 const rule = /^\s*[─━╌]{8,}\s*$/
+const scrollNote = /^[↑↓]\s+\d+\s+more\s+lines?$/
+const cjk = /[\u3000-\u9fff\uff00-\uffef]/
+const joinWrapped = (a: string, b: string) => (!a ? b : cjk.test(a.slice(-1)) || cjk.test(b[0]) ? a + b : a + ' ' + b)
+const stripBar = (l: string) => l.replace(/^\s*\u2502\s?/, '').trim()
 
 // (Words that ran to their column's edge: what is beside them, a preview's
 // box, begins at most 4 spaces after.)
@@ -141,11 +145,77 @@ const whole = (o: ScreenOption[], cursorElsewhere = false) =>
 
 // (Lines after a menu that are its own: hints, its file. Anything else: the
 // menu is not the last thing on the screen, so not what a key would answer.)
-const hints = [/^\s*shift\+tab to approve with this feedback\s*$/i, /^\s*ctrl\+g to edit in Vim(?: · \S.*)?$/i, /^\s*Esc to cancel(?: · Tab to amend)?\s*$/i]
-const tailOK = (rest: string[]) => rest.length <= 3 && rest.every((l) => !l.trim() || /^[\s\u2500-\u257f]+$/.test(l) || hints.some((h) => h.test(l)))
+const hints = [
+  /^\s*shift\+tab to approve with this feedback\s*$/i,
+  /^\s*ctrl\+g to edit in Vim(?: · \S.*)?$/i,
+  /^\s*Esc to cancel(?: · Tab to amend)?\s*$/i,
+  /^\s*Enter to (?:select|confirm)\b.*$/i,
+  /^\s*(?:[↑↓←→/]+|Tab\/Arrow keys)\s+to navigate\b.*$/i,
+]
+const tailOK = (rest: string[]) => rest.length <= 4 && rest.every((l) => !l.trim() || /^[\s\u2500-\u257f]+$/.test(l) || hints.some((h) => h.test(l)))
+
+// Parse Claude Code's "Review your answers" page, which may appear with or
+// without "Ready to submit your answers?", with a leading "│" gutter and
+// multi-line wrapped questions/answers, scroll notes ("↑ 1 more line"), and
+// either no footer or "Enter to select · ... · Esc to cancel".
+function parseReview(lines: string[]): Extract<AskScreen, { kind: 'review' }> | null {
+  const review = lines.findLastIndex((l) => /^\s*Review your answers\s*$/.test(l))
+  if (review < 0) return null
+  const rest = lines.slice(review + 1)
+  // (A tab bar after "Review your answers" belongs to a newer question drawn below an old review in scrollback.)
+  if (rest.some((l) => tabLine.test(l))) return null
+  const ready = rest.findIndex((l) => /Ready to submit your answers\?/.test(l))
+  const firstOpt = rest.findIndex((l, i) => i > ready && optionLine.test(besideAt(l)))
+  if (firstOpt < 0) return null
+  const summaryEnd = ready >= 0 ? ready : firstOpt
+  const after = rest.slice(firstOpt)
+  const opts = options(after)
+  const last = after.findLastIndex((l) => optionLine.test(besideAt(l)))
+  if (!whole(opts) || !tailOK(after.slice(last + 1))) return null
+  const hasSubmitTab = lines.slice(Math.max(0, review - 4), review).some((l) => tabLine.test(l) && /[✔✓]\s+Submit/.test(l))
+  const isSubmitMenu = opts.length === 2 && /^Submit answers$/.test(opts[0].label) && /^Cancel$/.test(opts[1].label)
+  if (ready < 0 && !hasSubmitTab && !isSubmitMenu) return null
+
+  const summary = rest.slice(0, summaryEnd)
+  const answers: { question: string; answer: string }[] = []
+  let cur: { question: string; answer: string; mode: 'q' | 'a' } | null = null
+  const flush = () => {
+    if (cur && cur.question && cur.answer) answers.push({ question: cur.question, answer: cur.answer })
+    cur = null
+  }
+  for (const raw of summary) {
+    const l = stripBar(raw)
+    if (!l || scrollNote.test(l) || /not answered all questions/i.test(l)) {
+      continue
+    }
+    const q = /^[●•]\s+(.*\S)\s*$/.exec(l)
+    if (q) {
+      flush()
+      cur = { question: q[1], answer: '', mode: 'q' }
+      continue
+    }
+    const a = /^→\s+(.*\S)\s*$/.exec(l)
+    if (a && cur) {
+      cur.answer = a[1]
+      cur.mode = 'a'
+      continue
+    }
+    if (cur) {
+      if (cur.mode === 'q') cur.question = joinWrapped(cur.question, l)
+      else cur.answer = joinWrapped(cur.answer, l)
+    }
+  }
+  flush()
+  const incomplete = summary.some((l) => /not answered all questions/i.test(l))
+  return { kind: 'review', answers, incomplete, options: opts }
+}
 
 export function readAskScreen(text: string): AskScreen {
   const lines = lastLines(text)
+  // Check the review page first so a review screen carrying both the tab bar
+  // and "Enter to select · ... navigate ..." is not hijacked as a question.
+  const reviewed = parseReview(lines)
+  if (reviewed) return reviewed
   // (The key hints, last: wrapped on a narrow screen.)
   const hint = lines.findLastIndex((l, i) => /Enter to select/.test(l) && /navigate/.test(l + ' ' + (lines[i + 1] ?? '')))
   // A question: its tabs (or a lone one's header), the question, its choices
@@ -153,44 +223,34 @@ export function readAskScreen(text: string): AskScreen {
   if (hint >= 0 && hint >= lines.length - 3) {
     const top = lines.findLastIndex((l, i) => i < hint && tabLine.test(l))
     if (top < 0) return { kind: 'unknown' }
-    const tabs = [...lines[top].matchAll(/([☐☒])\s+(\S.*?)(?=\s{2,}[☐☒✔]|\s*$)/g)].map((m) => ({ label: m[2].trim(), answered: m[1] === '☒' }))
+    const tabs = [...lines[top].matchAll(/([☐☒☑])\s+(\S.*?)(?=\s+[☐☒☑✔✓]|\s+→\s*$|\s*$)/g)].map((m) => ({ label: m[2].trim(), answered: m[1] !== '☐' }))
     const body = lines.slice(top + 1, hint)
-    const end = body.findIndex((l) => rule.test(l))
-    const block = end >= 0 ? body.slice(0, end) : body
-    const first = block.findIndex((l) => optionLine.test(besideAt(l)))
+    const first = body.findIndex((l) => optionLine.test(besideAt(l)))
     if (first <= 0) return { kind: 'unknown' }
+    const headLines = body.slice(0, first)
+    if (headLines.some((l) => /^\s*Review your answers\s*$/.test(l))) return { kind: 'unknown' }
+    const afterFirst = body.slice(first)
+    const end = afterFirst.findIndex((l) => rule.test(l))
+    const optBlock = end >= 0 ? afterFirst.slice(0, end) : afterFirst
     // (A long question is drawn with a bar at its left, "│", on each line.)
-    const question = block
-      .slice(0, first)
-      .map((l) => l.replace(/^\s*\u2502\s?/, '').trim())
-      .filter(Boolean)
+    const question = headLines
+      .filter((l) => !rule.test(l))
+      .map(stripBar)
+      .filter((l) => !!l && !scrollNote.test(l))
       .join(' ')
-    const besideNow = block.slice(first).some((l) => /\s{3,}[\u2500-\u257f]/.test(l)) || block.some((l) => /Notes: press n/.test(l))
-    const opts = besideNow ? options(block.slice(first), true) : described(block.slice(first))
-    const sub = block.slice(first).find((l) => /^\s*(❯\s*)?Submit\s*$/.test(l))
+    const besideNow = optBlock.some((l) => /\s{3,}[\u2500-\u257f]/.test(l)) || optBlock.some((l) => /Notes: press n/.test(l))
+    let opts = besideNow ? options(optBlock, true) : described(optBlock)
+    // (Some versions draw "Chat about this" after "Type something." without a divider rule.)
+    if (opts.length >= 2 && /^Chat about this$/i.test(opts[opts.length - 1].label) && ownLabel.test(opts[opts.length - 2].label)) {
+      opts = opts.slice(0, -1)
+    }
+    const sub = optBlock.find((l) => /^\s*(❯\s*)?Submit\s*$/.test(l))
     if (!question || !whole(opts, !!sub && /❯/.test(sub))) return { kind: 'unknown' }
     const own = opts.find((o) => ownLabel.test(o.label))?.n
     const multi = opts.some((o) => o.ticked !== undefined)
     const beside = besideNow
     // (Tabs of one question shown as one: a lone question.)
     return { kind: 'question', tabs: tabs.length > 1 ? tabs : [], question, options: opts, ...(own ? { own } : {}), multi, beside, ...(sub ? { submit: { cursor: /❯/.test(sub) } } : {}) }
-  }
-  const review = lines.findLastIndex((l) => /^\s*Review your answers\s*$/.test(l))
-  if (review >= 0) {
-    const rest = lines.slice(review + 1)
-    const ready = rest.findIndex((l) => /Ready to submit your answers\?/.test(l))
-    if (ready < 0) return { kind: 'unknown' }
-    const answers: { question: string; answer: string }[] = []
-    for (let i = 0; i < ready; i++) {
-      const q = /^\s*●\s+(.*\S)\s*$/.exec(rest[i])
-      const a = q ? /^\s*→\s+(.*\S)\s*$/.exec(rest[i + 1] ?? '') : null
-      if (q && a) answers.push({ question: q[1], answer: a[1] })
-    }
-    const after = rest.slice(ready + 1)
-    const opts = options(after)
-    const last = after.findLastIndex((l) => optionLine.test(besideAt(l)))
-    if (!whole(opts) || !tailOK(after.slice(last + 1))) return { kind: 'unknown' }
-    return { kind: 'review', answers, incomplete: rest.slice(0, ready).some((l) => /not answered all questions/.test(l)), options: opts }
   }
   // (Codex's plan put to the person — plan mode, 0.167: "Implement this
   // plan?", its choices marked "›", what each does beside it, its keys

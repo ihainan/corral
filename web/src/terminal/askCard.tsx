@@ -43,7 +43,12 @@ export function askOn(call: ConvoTool | undefined, s: AskScreen): number {
     // the same: the terminal is shown instead.)
     const nos = (x: string) => x.replace(/\s+/g, '')
     const whole = (o: (typeof shown)[number], asked: string) => !!nos(asked) && nos(o.label + (o.under ?? '')) === nos(asked)
-    return shown.length === a.options.length && shown.every((o, i) => o.n === i + 1 && (s.beside ? whole(o, labels[i]) : sameLabel(o.label, labels[i], labels, o.cut)))
+    const wrappedLabel = (o: (typeof shown)[number], asked: string) => {
+      const a = nos(asked)
+      const l = nos(o.label)
+      return !!l && !!o.desc && a.startsWith(l) && nos(o.label + o.desc).startsWith(a) && labels.filter((x) => nos(x).startsWith(l)).length === 1
+    }
+    return shown.length === a.options.length && shown.every((o, i) => o.n === i + 1 && (s.beside ? whole(o, labels[i]) : sameLabel(o.label, labels[i], labels, o.cut) || wrappedLabel(o, labels[i])))
   })
   // (Two questions alike: which one this is cannot be told.)
   return at >= 0 && asks.filter((a) => sameQ(a.question, s.question)).length === 1 ? at : -1
@@ -397,21 +402,43 @@ export function OwnBox({ label, busy, onGo, hint, keep }: { label: string; busy:
   )
 }
 
+// Moves to choice n on the review page (by ↑↓), then Enter — works even when
+// digit shortcuts do not auto-submit on tabbed AskUserQuestion dialogs.
+export async function pickReview(target: ReplyTarget, now: Screen, n: number): Promise<Screen> {
+  let s = now
+  for (let guard = 0; guard < 4; guard++) {
+    const r = at(s)
+    if (r.kind !== 'review') throw new Unsure()
+    const cur = r.options.find((o) => o.cursor)?.n
+    if (cur === n) break
+    if (cur === undefined) throw new Unsure()
+    const d = n - cur
+    const keys = Array(Math.min(4, Math.abs(d))).fill(d > 0 ? 'down' : 'up')
+    const want = cur + (d > 0 ? keys.length : -keys.length)
+    s = await step(target, s, keys, (x) => x.kind === 'review' && x.options.find((o) => o.cursor)?.n === want)
+  }
+  const r = at(s)
+  if (r.kind !== 'review' || r.options.find((o) => o.cursor)?.n !== n) throw new Unsure()
+  return step(target, s, ['enter'], (x) => x.kind !== 'review')
+}
+
 // The page that reviews the answers before they go: as the screen says it.
-export function ReviewPanel({ shown, digest, target, drive, busy }: { shown: Extract<AskScreen, { kind: 'review' }>; digest: string; target: ReplyTarget; drive: Drive; busy: boolean }) {
+export function ReviewPanel({ shown, digest, target, drive, busy, alive }: { shown: Extract<AskScreen, { kind: 'review' }>; digest: string; target: ReplyTarget; drive: Drive; busy: boolean; alive: () => boolean }) {
   return (
     <div className="convo-ask-structured">
       <div className="convo-ask-q">{t('ask.review')}</div>
       {shown.incomplete && <p className="convo-ask-hint is-warn">{t('ask.incomplete')}</p>}
-      <dl className="convo-ask-answers">
-        {shown.answers.map((a, i) => (
-          <div key={i}>
-            <dt>{a.question}</dt>
-            <dd>{a.answer}</dd>
-          </div>
-        ))}
-      </dl>
-      <Choices digest={digest} options={shown.options} busy={busy} onPick={(n) => drive((now) => step(target, now, [String(n)], (x) => x.kind !== 'review'))} />
+      {shown.answers.length > 0 && (
+        <dl className="convo-ask-answers">
+          {shown.answers.map((a, i) => (
+            <div key={i}>
+              <dt>{a.question}</dt>
+              <dd>{a.answer}</dd>
+            </div>
+          ))}
+        </dl>
+      )}
+      <Choices digest={digest} options={shown.options} busy={busy} onPick={(n) => drive((now) => pickReview(withAlive(target, alive), now, n))} />
     </div>
   )
 }
