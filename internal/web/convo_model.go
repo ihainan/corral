@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ihainan/corral/internal/herdr"
 	"github.com/ihainan/corral/internal/sshx"
 	"github.com/ihainan/corral/internal/term"
 )
@@ -783,14 +784,41 @@ func (s *Server) convoModel(w http.ResponseWriter, ctx context.Context, sess *te
 		turn := release
 		release = func() { done(); turn() }
 	}
+	if codex && target == "" {
+		// Fast path for Codex model listing: serve cached list if present (e.g.
+		// from SQLite before codexModelFronts warmed), else read Codex's own
+		// models_cache.json in one SSH call without driving /model page-by-page.
+		if s.keptCodexModelsFor(w, ctx, sess.HostID, via, auth, outcome, reason) {
+			release()
+			return
+		}
+		if cached := s.readCodexModelsCache(ctx, sess, pid); len(cached) > 0 {
+			s.noteCodexModels(ctx, sess.HostID, via, auth, cached)
+			release()
+			*outcome, *reason = "read", "models_cache"
+			writeJSON(w, http.StatusOK, map[string]any{"models": cached, "kept": true})
+			return
+		}
+	}
 	var running sync.WaitGroup // (steps whose command may still run on the host)
 	// The default model as it is now, put back after if changed (see withModel).
-	sctx, scancel := context.WithTimeout(ctx, 10*time.Second)
-	saved, none, err := readSettings(sctx, sess)
-	if codex {
-		saved, none, err = readCodexConfig(sctx, sess)
+	// Listing Codex models (target == "") never writes config.toml, so skip the
+	// extra before/after config reads when falling back to /model.
+	var (
+		saved []byte
+		none  bool
+		err   error
+	)
+	checkConfig := !codex || target != ""
+	if checkConfig {
+		sctx, scancel := context.WithTimeout(ctx, 10*time.Second)
+		if codex {
+			saved, none, err = readCodexConfig(sctx, sess)
+		} else {
+			saved, none, err = readSettings(sctx, sess)
+		}
+		scancel()
 	}
-	scancel()
 	was, had, perr := settingsModel(saved, none)
 	// (And the default effort: the picker's ←/→ are taken by "s" for this
 	// session only, but a Claude Code that saved it — 2.1.293 fixed one that
@@ -808,7 +836,7 @@ func (s *Server) convoModel(w http.ResponseWriter, ctx context.Context, sess *te
 		writeError(w, http.StatusBadGateway, "settings", "Claude Code's settings could not be read: nothing done")
 		return
 	}
-	checked := false
+	checked := !checkConfig
 	// (Claude Code's picker on a narrow pane: read with the terminal held
 	// roomy, see roomyPane; put back once the last step has ended.)
 	unroomy := func() {}
@@ -817,6 +845,9 @@ func (s *Server) convoModel(w http.ResponseWriter, ctx context.Context, sess *te
 	}
 	// restore: changed says it had changed; err that it could not be put back.
 	restore := func() (changed bool, err error) {
+		if !checkConfig {
+			return false, nil
+		}
 		rctx, rcancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
 		defer rcancel()
 		if codex {
@@ -938,6 +969,16 @@ func (s *Server) convoModel(w http.ResponseWriter, ctx context.Context, sess *te
 	}
 	// (Codex's: the screen whole and its digest; keys pressed only on it.)
 	look := func() (string, string, error) {
+		if sess.Persistence == "herdr" && socket != "" {
+			if c, derr := herdr.DialWait(ctx, sess.Client(), socket, 2*time.Second); derr == nil {
+				text, rerr := c.ReadPaneSource(ctx, pane, "visible", 0)
+				c.Close()
+				if rerr == nil {
+					shown, digest, _ := screenOf([]byte(text))
+					return shown, digest, nil
+				}
+			}
+		}
 		running.Add(1)
 		res, err := sshx.Exec(ctx, sess.Client(), convoScreenCommand(sess.Persistence, pane, socket), 512<<10, sshx.ExecOptions{Release: running.Done})
 		if err != nil {

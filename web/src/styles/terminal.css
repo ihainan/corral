@@ -824,6 +824,12 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 .convo-models-apply-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .convo-runs-ctx:hover, .convo-runs-ctx[aria-expanded='true'] { background: var(--term-hover); color: var(--term-fg); }
 .convo-runs-ctx:focus-visible { outline: 2px solid var(--term-accent-text); outline-offset: 1px; }
+.convo-pop-portal { display: contents; }
+.convo-runs-pop.is-portal:not(.is-sheet) { position: fixed; top: auto; right: auto; z-index: 30; width: 320px; max-width: calc(100vw - 24px); }
+.convo-runs-pop.is-portal.convo-modes:not(.is-sheet) { width: 300px; }
+.convo-models-err { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; padding: 4px 8px; }
+.convo-models-err .convo-runs-note { margin: 0; }
+.convo-models-retry { flex: none; }
 .convo-runs-pop {
   position: absolute; right: 0; bottom: calc(100% + 6px); z-index: 3; width: min(320px, 100%); padding: 12px 14px;
   border: 1px solid var(--term-line-strong, var(--term-line)); border-radius: var(--r-lg); background: var(--term-pop, var(--term-bg)); color: var(--term-fg);
@@ -2771,11 +2777,11 @@ button.convo-queue-row.is-note:last-child { border-radius: 0 0 var(--r-lg) var(-
 /* Its pop-ups on a narrow screen: from the bottom, over the page dimmed */
 .convo-runs-back { position: fixed; inset: 0; z-index: 20; background: rgba(0, 0, 0, 0.28); cursor: pointer; touch-action: manipulation; -webkit-tap-highlight-color: transparent; outline: none; }
 .term-root.dark .convo-runs-back { background: rgba(0, 0, 0, 0.55); }
-.convo-runs .convo-runs-pop.is-sheet {
+.convo-runs-pop.is-sheet {
   position: fixed; left: 0; right: 0; bottom: 0; z-index: 21; width: 100%; border-radius: var(--r-xl) var(--r-xl) 0 0; border-bottom: 0;
   padding: 14px 16px max(16px, env(safe-area-inset-bottom, 0px)); font-size: var(--fs-ui); line-height: var(--lh-ui);
 }
-html.kb-open .convo-runs .convo-runs-pop.is-sheet { padding-bottom: 16px; }
+html.kb-open .convo-runs-pop.is-sheet { padding-bottom: 16px; }
 /* The switcher over a dark page: the page behind dimmed as much as over a light one */
 .term-root.dark .convo-picker-back { background: rgba(0, 0, 0, 0.55); }
 /* The floating ways about the thread: out of the way while the person scrolls */
@@ -2821,7 +2827,7 @@ html.kb-open .convo-runs .convo-runs-pop.is-sheet { padding-bottom: 16px; }
    (the first time it is shown: ReplyDialog useFreshAsk) fade in. All shut
    at once, as the others do. */
 .convo-picker, .convo-runs-pop { animation: pop 0.14s var(--ease); }
-.convo-runs .convo-runs-pop.is-sheet, .sc-panel { animation: rise 0.2s var(--ease); }
+.convo-runs-pop.is-sheet, .sc-panel { animation: rise 0.2s var(--ease); }
 @media (max-width: 640px) { .convo-picker { animation: rise 0.2s var(--ease); } }
 .convo-latest { animation: fade 0.1s var(--ease); }
 .convo-ask.is-new { animation: fade 0.16s var(--ease); }

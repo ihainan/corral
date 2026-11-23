@@ -328,6 +328,7 @@ func codexModelFlow(do, undo codexIO, model, effort string) (opts []modelOpt, er
 	}
 	var models []modelOpt
 	for windows := 0; ; windows++ {
+		foundTarget := false
 		for _, opt := range pk.options {
 			if opt.N > maxCodexModels || opt.N > len(models)+1 {
 				return out(errNoPicker)
@@ -339,8 +340,11 @@ func codexModelFlow(do, undo codexIO, model, effort string) (opts []modelOpt, er
 			} else {
 				models = append(models, opt)
 			}
+			if model != "" && strings.EqualFold(opt.Label, model) {
+				foundTarget = true
+			}
 		}
-		if !pk.below {
+		if foundTarget || !pk.below {
 			break
 		}
 		if windows >= maxCodexModels || len(models) >= maxCodexModels {
@@ -383,7 +387,7 @@ func codexModelFlow(do, undo codexIO, model, effort string) (opts []modelOpt, er
 		}
 		return p, nil
 	}
-	if _, err := moveTo(pk, models, func(o modelOpt) bool { return o.Label == model }, isModels); err != nil {
+	if _, err := moveTo(pk, models, func(o modelOpt) bool { return strings.EqualFold(o.Label, model) }, isModels); err != nil {
 		return out(err)
 	}
 	if err := do.press([]string{"yes"}, "", digest); err != nil {
@@ -484,6 +488,119 @@ func (s *Server) forgetCodexModels(ctx context.Context, hostID int64, via, auth 
 	}
 }
 
+const codexModelsCacheMax = 4<<20 + 64
+
+// codexModelsCacheCommand reads Codex's own models_cache.json from the
+// process's CODEX_HOME (falling back to $CODEX_HOME or $HOME/.codex). When
+// python3 is present, it strips the large per-model instructions_template
+// fields on the host so only a few kilobytes cross SSH. Exits 3 when absent.
+func codexModelsCacheCommand(pid int64) string {
+	script := `h="${CODEX_HOME:-$HOME/.codex}"
+if [ -n "$1" ] && [ "$1" -gt 0 ] 2>/dev/null && [ -r "/proc/$1/environ" ]; then
+  eh=$(tr '\0\n' '\n\001' <"/proc/$1/environ" 2>/dev/null | sed -n 's/^CODEX_HOME=//p' | head -n 1)
+  [ -n "$eh" ] && h=$eh
+fi
+f="$h/models_cache.json"
+[ -f "$f" ] || exit 3
+if command -v python3 >/dev/null 2>&1; then
+  python3 - "$f" <<'PY'
+import json, sys
+with open(sys.argv[1], "r", encoding="utf-8") as fh:
+    data = json.load(fh)
+models = []
+for m in data.get("models") or []:
+    if not isinstance(m, dict):
+        continue
+    models.append({
+        "slug": m.get("slug") or "",
+        "display_name": m.get("display_name") or "",
+        "description": m.get("description") or "",
+        "visibility": m.get("visibility") or "",
+        "priority": m.get("priority", 0),
+    })
+json.dump({"models": models}, sys.stdout, separators=(",", ":"))
+PY
+else
+  head -c 4194305 "$f"
+fi`
+	return "sh -c " + sshx.QuoteShell(script) + " corral " + sshx.QuoteShell(strconv.FormatInt(pid, 10))
+}
+
+// parseCodexModelsCache extracts visible Codex picker models from
+// models_cache.json, ordered stably by ascending priority (matching Codex CLI).
+func parseCodexModelsCache(raw []byte) []modelOpt {
+	var doc struct {
+		Models []struct {
+			Slug        string `json:"slug"`
+			DisplayName string `json:"display_name"`
+			Description string `json:"description"`
+			Visibility  string `json:"visibility"`
+			Priority    int    `json:"priority"`
+		} `json:"models"`
+	}
+	if len(raw) == 0 || json.Unmarshal(raw, &doc) != nil || len(doc.Models) == 0 {
+		return nil
+	}
+	type item struct {
+		opt      modelOpt
+		priority int
+	}
+	var items []item
+	for _, m := range doc.Models {
+		vis := strings.TrimSpace(m.Visibility)
+		if vis != "" && !strings.EqualFold(vis, "list") {
+			continue
+		}
+		label := strings.TrimSpace(m.DisplayName)
+		if label == "" {
+			label = strings.TrimSpace(m.Slug)
+		}
+		if label == "" {
+			continue
+		}
+		items = append(items, item{
+			opt:      modelOpt{Label: label, Desc: strings.TrimSpace(m.Description)},
+			priority: m.Priority,
+		})
+	}
+	if len(items) == 0 {
+		return nil
+	}
+	slices.SortStableFunc(items, func(a, b item) int {
+		switch {
+		case a.priority < b.priority:
+			return -1
+		case a.priority > b.priority:
+			return 1
+		default:
+			return 0
+		}
+	})
+	seen := make(map[string]struct{}, len(items))
+	out := make([]modelOpt, 0, len(items))
+	for _, it := range items {
+		k := strings.ToLower(it.opt.Label)
+		if _, dup := seen[k]; dup {
+			continue
+		}
+		seen[k] = struct{}{}
+		out = append(out, it.opt)
+	}
+	return out
+}
+
+// readCodexModelsCache reads Codex's on-disk models_cache.json over SSH in one
+// fast call (avoiding driving the interactive /model TUI page-by-page).
+func (s *Server) readCodexModelsCache(ctx context.Context, sess *term.Session, pid int64) []modelOpt {
+	cctx, cancel := context.WithTimeout(ctx, 6*time.Second)
+	defer cancel()
+	out, err := sshx.Output(cctx, sess.Client(), codexModelsCacheCommand(pid), codexModelsCacheMax)
+	if err != nil || len(out) > 4<<20 {
+		return nil
+	}
+	return parseCodexModelsCache(out)
+}
+
 // keptCodexModels serves a previously read Codex model list immediately
 // without driving Codex's interactive /model picker or running locateScan.
 func (s *Server) keptCodexModels(w http.ResponseWriter, ctx context.Context, sess *term.Session, pane string, pid, start int64, sid string, outcome, reason *string) bool {
@@ -497,7 +614,13 @@ func (s *Server) keptCodexModels(w http.ResponseWriter, ctx context.Context, ses
 		codexModelFronts.Delete(fk)
 		return false
 	}
-	key := codexModelStoreKey(f.hostID, f.via, f.auth)
+	return s.keptCodexModelsFor(w, ctx, f.hostID, f.via, f.auth, outcome, reason)
+}
+
+// keptCodexModelsFor serves a cached Codex model list for (hostID, via, auth)
+// from memory or SQLite.
+func (s *Server) keptCodexModelsFor(w http.ResponseWriter, ctx context.Context, hostID int64, via, auth string, outcome, reason *string) bool {
+	key := codexModelStoreKey(hostID, via, auth)
 	codexModelsCacheMu.Lock()
 	ent, hit := codexModelsCache[key]
 	codexModelsCacheMu.Unlock()

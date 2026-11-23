@@ -3,6 +3,7 @@ package web
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"strings"
 	"testing"
 
@@ -297,5 +298,69 @@ func TestCodexModelFlow(t *testing.T) {
 	scr := f.screen()
 	if !codexPickerOpen(strings.Replace(scr, "1. ", "1) ", 1)) || parseCodexPicker(strings.Replace(scr, "1. ", "1) ", 1)).ok {
 		t.Fatalf("a picker not read as known, its footer there")
+	}
+}
+
+func TestCodexModelSwitchCaseInsensitiveAndEarlyStop(t *testing.T) {
+	codexSettleGap = 0
+	// Case-insensitive match (e.g. slug/display_name casing differences) and
+	// early stop on page 1 without scrolling through every subsequent page.
+	f := &fakeCodexPicker{t: t, page: 2}
+	io := codexIO{f.look, f.press}
+	if _, err := codexModelFlow(io, io, "gpt-6.1-sol", "High"); err != nil || f.set != 1 {
+		t.Fatalf("case-insensitive switch: err=%v set=%d pressed=%v", err, f.set, f.pressed)
+	}
+	if strings.Contains(strings.Join(f.pressed, " "), "1:down") {
+		t.Fatalf("scrolled past page 1 when target was already on page 1: %v", f.pressed)
+	}
+}
+
+func TestParseCodexModelsCache(t *testing.T) {
+	raw := []byte(`{
+		"fetched_at": "2026-11-23T14:00:00Z",
+		"models": [
+			{"slug": "gpt-4o-audio", "display_name": "gpt-4o-audio", "description": "Routed via Sub2API", "visibility": "list", "priority": 50},
+			{"slug": "hidden-model", "display_name": "Hidden", "description": "Should not appear", "visibility": "hide", "priority": 0},
+			{"slug": "gpt-6.1-sol", "display_name": "GPT-6.1-Sol", "description": "Latest workhorse", "visibility": "list", "priority": 1},
+			{"slug": "gpt-6.1-sol-dup", "display_name": "gpt-6.1-sol", "description": "Duplicate casing", "visibility": "list", "priority": 2},
+			{"slug": "slug-only", "display_name": "", "description": "Fallback to slug", "visibility": "list", "priority": 5}
+		]
+	}`)
+	opts := parseCodexModelsCache(raw)
+	if len(opts) != 3 {
+		t.Fatalf("got %d models, want 3: %+v", len(opts), opts)
+	}
+	if opts[0].Label != "GPT-6.1-Sol" || opts[0].Desc != "Latest workhorse" {
+		t.Fatalf("first model: %+v", opts[0])
+	}
+	if opts[1].Label != "slug-only" || opts[2].Label != "gpt-4o-audio" {
+		t.Fatalf("ordering: %+v", opts)
+	}
+	if got := parseCodexModelsCache([]byte(`{"models":[]}`)); got != nil {
+		t.Fatalf("empty models should return nil: %+v", got)
+	}
+	if got := parseCodexModelsCache([]byte(`not json`)); got != nil {
+		t.Fatalf("invalid json should return nil: %+v", got)
+	}
+}
+
+func TestCodexModelsCacheCommand(t *testing.T) {
+	dir := t.TempDir()
+	cache := `{"models":[{"slug":"gpt-6.1-sol","display_name":"GPT-6.1-Sol","description":"Fast","visibility":"list","priority":0,"model_messages":{"instructions_template":"` + strings.Repeat("x", 20000) + `"}},{"slug":"secret","display_name":"Secret","visibility":"hide","priority":0}]}`
+	if err := os.WriteFile(dir+"/models_cache.json", []byte(cache), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c := exec.Command("sh", "-c", codexModelsCacheCommand(0))
+	c.Env = append(os.Environ(), "CODEX_HOME="+dir)
+	out, err := c.Output()
+	if err != nil {
+		t.Fatalf("codexModelsCacheCommand failed: %v", err)
+	}
+	opts := parseCodexModelsCache(out)
+	if len(opts) != 1 || opts[0].Label != "GPT-6.1-Sol" || opts[0].Desc != "Fast" {
+		t.Fatalf("parsed output: %+v (raw %d bytes)", opts, len(out))
+	}
+	if _, err := exec.LookPath("python3"); err == nil && len(out) > 2048 {
+		t.Fatalf("expected python3 extractor to strip instructions_template, got %d bytes", len(out))
 	}
 }

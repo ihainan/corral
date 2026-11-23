@@ -3000,7 +3000,7 @@ export const CODEX_EFFORTS = Object.keys(EFFORT_WORDS)
 // that never arrives leaves the menu saying it is still reading, for as
 // long as it is left open.
 // (byLog: the list is one the gateway kept, with no word of which it is on — marked by the log's model, see rowByLog.)
-export type ModelSwitch = { list: ModelOpt[] | null; now?: string; fresh: boolean; busy: boolean; can: boolean; unread?: boolean; byLog?: boolean; onOpen: () => void; onPick: (label: string, effort?: string) => void; efforts?: string[]; of?: string }
+export type ModelSwitch = { list: ModelOpt[] | null; now?: string; fresh: boolean; busy: boolean; can: boolean; unread?: boolean; error?: string; byLog?: boolean; onOpen: () => void; onRetry?: () => void; onPick: (label: string, effort?: string) => void; efforts?: string[]; of?: string }
 
 // How hard the agent is asked to think (Claude Code's /effort), for the
 // session only. The levels are its slider's, in its order.
@@ -3110,6 +3110,7 @@ function Runs({ head, statusAt, modelAt, quiet, meta, goal, active, mode, model,
   }, [model?.busy])
   const box = useRef<HTMLDivElement>(null)
   const modelBox = useRef<HTMLDivElement>(null)
+  const popHost = useRef<HTMLDivElement>(null)
   // (Its composer's place, while that is shown: hidden — a question in its place, the terminal panel over it — or
   // not there, null, and the model's and the mode's are the status bar's, as before; a bypass then in its header.
   // Review of 11-23: sent into a hidden box, the mode was nowhere.)
@@ -3132,10 +3133,11 @@ function Runs({ head, statusAt, modelAt, quiet, meta, goal, active, mode, model,
       ;(which === 'model' ? modelBtn : which === 'effort' ? effortBtn : modeBtn).current?.focus()
     })
   }, [modelAt])
-  const inside = (n: Node | null | undefined) => !!n && (!!box.current?.contains(n) || !!modelBox.current?.contains(n))
+  const inside = (n: Node | null | undefined) => !!n && (!!box.current?.contains(n) || !!modelBox.current?.contains(n) || !!popHost.current?.contains(n))
   const ctxBtn = useRef<HTMLButtonElement>(null)
   const modelBtn = useRef<HTMLButtonElement>(null)
   const effortBtn = useRef<HTMLButtonElement>(null)
+  const effortModelBtn = useRef<HTMLButtonElement>(null)
   const modeBtn = useRef<HTMLButtonElement>(null)
   if (open && !active) setOpen(false) // (behind a terminal tab: its Escape is the terminal's)
   if (open && quiet && open !== 'model' && open !== 'effort' && !(open === 'mode' && modeToComposer)) setOpen(false) // (its pane no longer in front: its row gone from the status bar — review of 11-23; the model's and the mode's are its composer's)
@@ -3195,43 +3197,48 @@ function Runs({ head, statusAt, modelAt, quiet, meta, goal, active, mode, model,
   useLayoutEffect(() => {
     if (open) setSheet(matchMedia('(max-width: 640px)').matches)
   }, [open])
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!open) return
     const vv = window.visualViewport
     const fit = () => {
       const holder = (open === 'model' || open === 'effort' || (open === 'mode' && modeToComposer)) && modelBox.current ? modelBox.current : box.current
-      const pop = holder?.querySelector<HTMLElement>('.convo-runs-pop')
+      const pop = popHost.current?.querySelector<HTMLElement>('.convo-runs-pop')
       if (!pop || !holder) return
       const seen = vv ? vv.height : window.innerHeight
       if (pop.classList.contains('is-sheet')) {
+        pop.style.left = ''
+        pop.style.top = ''
         pop.style.bottom = ''
         pop.style.maxHeight = Math.round(seen * 0.8) + 'px'
         return
       }
-      const at = holder.getBoundingClientRect()
-      if (statusAt || holder === modelBox.current) {
-        // (From the status bar, whose left part cuts what goes past it: placed on the page, above the button that opened it.)
-        const by = (open === 'model' ? modelBtn : open === 'effort' ? effortBtn : open === 'mode' ? modeBtn : ctxBtn).current?.getBoundingClientRect() ?? at
-        pop.style.left = Math.max(12, Math.min(by.left - 6, window.innerWidth - pop.offsetWidth - 12)) + 'px'
-        pop.style.bottom = Math.round(window.innerHeight - by.top + 6) + 'px'
-        pop.style.maxHeight = Math.max(0, by.top - (vv ? vv.offsetTop : 0) - 16) + 'px'
-        return
+      const anchor = (open === 'model' ? (modelBtn.current ?? effortModelBtn.current) : open === 'effort' ? effortBtn.current : open === 'mode' ? modeBtn.current : ctxBtn.current) ?? holder
+      const by = anchor.getBoundingClientRect()
+      const vl = vv ? vv.offsetLeft : 0
+      const vt = vv ? vv.offsetTop : 0
+      const vw = vv ? vv.width : window.innerWidth
+      const vh = vv ? vv.height : window.innerHeight
+      const pad = 12
+      const gap = 6
+      const w = pop.offsetWidth || (open === 'mode' ? 300 : 320)
+      const alignRight = open === 'ctx' || (toComposer && (open === 'model' || open === 'effort'))
+      const wantLeft = alignRight ? by.right - w : by.left
+      const maxLeft = Math.max(vl + pad, vl + vw - w - pad)
+      pop.style.left = Math.round(Math.max(vl + pad, Math.min(wantLeft, maxLeft))) + 'px'
+      const roomAbove = by.top - vt - gap - pad
+      const pane = head && !statusAt && holder === box.current ? box.current?.closest('.convo-main, .convo-split-pane')?.getBoundingClientRect() : undefined
+      const end = Math.min(vt + vh, pane ? pane.bottom : Infinity)
+      const roomBelow = end - by.bottom - gap - pad
+      const below = (head && !statusAt && holder === box.current) || (roomAbove < 120 && roomBelow > roomAbove)
+      if (below) {
+        pop.style.top = Math.round(by.bottom + gap) + 'px'
+        pop.style.bottom = 'auto'
+        pop.style.maxHeight = Math.max(0, Math.round(roomBelow)) + 'px'
+      } else {
+        pop.style.top = 'auto'
+        pop.style.bottom = Math.round(window.innerHeight - by.top + gap) + 'px'
+        pop.style.maxHeight = Math.max(0, Math.round(roomAbove)) + 'px'
       }
-      // Each of them opens straight above this row, the composer under it
-      // covered while it is open — one way for all four, where the
-      // context's used to be kept clear of the composer and the three
-      // menus were not. (It is the room they have: kept clear, the
-      // context's details had the least room of the four and the most to
-      // say.)
-      pop.style.bottom = ''
-      // (In the pane's header, on the workbench: below it, down to the bottom of what can be seen.)
-      // (Not past its own pane either: split one over another, the lower pane would cover the rest.)
-      if (head && holder === box.current) {
-        const pane = box.current.closest('.convo-main, .convo-split-pane')?.getBoundingClientRect()
-        const end = Math.min(vv ? vv.offsetTop + vv.height : window.innerHeight, pane ? pane.bottom : Infinity)
-        pop.style.maxHeight = Math.max(0, end - at.bottom - 16) + 'px'
-      }
-      else pop.style.maxHeight = Math.max(0, Math.min(at.top - (vv ? vv.offsetTop : 0), seen) - 16) + 'px'
     }
     fit()
     vv?.addEventListener('resize', fit)
@@ -3242,7 +3249,7 @@ function Runs({ head, statusAt, modelAt, quiet, meta, goal, active, mode, model,
       vv?.removeEventListener('scroll', fit)
       window.removeEventListener('resize', fit)
     }
-  }, [open, sheet, head, statusAt, modelAt])
+  }, [open, sheet, head, statusAt, modelAt, modeToComposer, model?.list, model?.unread, model?.busy, model?.error, modelFilter, effortsOf])
   // Where its requests go, when that is not the model maker's own door:
   // the host, or, for Amazon's and Google's, which have no address of their
   // own to show, their name. "" is the quiet case, most of them.
@@ -3340,7 +3347,7 @@ function Runs({ head, statusAt, modelAt, quiet, meta, goal, active, mode, model,
         ))
   const modePop = open === 'mode' && mode?.onPick && (
         <div
-          className={"convo-runs-pop convo-models convo-modes" + (sheet ? " is-sheet" : "")}
+          className={'convo-runs-pop convo-models convo-modes is-portal' + (sheet ? ' is-sheet' : '')}
           role="menu"
           aria-label={t('convo.modeTitle')}
           ref={menu}
@@ -3453,6 +3460,7 @@ function Runs({ head, statusAt, modelAt, quiet, meta, goal, active, mode, model,
           ) : model?.efforts && model.can ? (
             // (A Codex's: chosen with its model, in its menu — opened from here too.)
             <button
+              ref={effortModelBtn}
               type="button"
               className="convo-runs-item convo-runs-effort is-switch"
               aria-expanded={open === 'model'}
@@ -3477,14 +3485,25 @@ function Runs({ head, statusAt, modelAt, quiet, meta, goal, active, mode, model,
     <>
       {open === 'model' && model && (
         <div
-          className={"convo-runs-pop convo-models" + (sheet ? " is-sheet" : "")}
+          className={'convo-runs-pop convo-models is-portal' + (sheet ? ' is-sheet' : '')}
           role="menu"
           aria-label={t('convo.model')}
           ref={menu}
           onBlur={(e) => !inside(e.relatedTarget as Node | null) && setOpen(false)} // (Tab out of it: closed)
         >
           {model.list === null ? (
-            <p className="convo-runs-note" role="status">{t(model.unread && !model.busy ? 'convo.modelUnread' : 'convo.modelReading')}</p>
+            model.unread && !model.busy ? (
+              <div className="convo-models-err" role="status">
+                <p className="convo-runs-note">{model.error || t('convo.modelUnread')}</p>
+                {model.onRetry && (
+                  <button type="button" className="btn btn-sm convo-models-retry" onClick={model.onRetry}>
+                    {t('common.retry')}
+                  </button>
+                )}
+              </div>
+            ) : (
+              <p className="convo-runs-note" role="status">{t('convo.modelReading')}</p>
+            )
           ) : (
             <>
               {model.list.length > 10 && (
@@ -3590,7 +3609,7 @@ function Runs({ head, statusAt, modelAt, quiet, meta, goal, active, mode, model,
       )}
       {open === 'effort' && effort && (
         <div
-          className={"convo-runs-pop convo-models" + (sheet ? " is-sheet" : "")}
+          className={'convo-runs-pop convo-models is-portal' + (sheet ? ' is-sheet' : '')}
           role="menu"
           aria-label={t('convo.effort')}
           ref={menu}
@@ -3618,96 +3637,8 @@ function Runs({ head, statusAt, modelAt, quiet, meta, goal, active, mode, model,
       )}
     </>
   )
-  const modelPart =
-    modelAt &&
-    createPortal(
-      // (Its own box: the same rules of the focus and of Escape as the row's — see inside.)
-      <div className="convo-runs in-composer" ref={modelBox} onBlur={(e) => (open === 'model' || open === 'effort' || open === 'mode') && !inside(e.relatedTarget as Node | null) && setOpen(false)}>
-        {modeEl}
-        {modelChips}
-        {modelPops}
-        {modePop}
-      </div>,
-      modelAt,
-    )
-  // (A pane not in front, on the workbench: what it runs is said when it is in front, on the status bar — but a
-  // bypass, in red, always: in its composer, else in its header. Said only there, not a button: pressed, the pane
-  // comes in front first and the status bar has the button — review of 11-23.)
-  if (quiet)
-    return (
-      <>
-        {modelPart}
-        {bypass && !modeToComposer && (
-          <div className="convo-runs in-head is-bypass-mark">
-            <span className="convo-runs-item convo-runs-mode is-bypass" title={t('convo.modeHint')}>
-              {shownMode}
-            </span>
-          </div>
-        )}
-      </>
-    )
-  if (statusAt === null) return <>{modelPart}</> // (the status bar's place not there yet)
-  const row = (
-    // (The focus gone elsewhere, as by Tab, while the model menu is open, the list read or not: closed.)
-    <div className={'convo-runs' + (used > 0 ? ' has-ctx' : '') + (statusAt ? ' in-status' : head ? ' in-head' : '')} ref={box} onBlur={(e) => (open === 'model' || open === 'effort' || open === 'mode') && !inside(e.relatedTarget as Node | null) && setOpen(false)}>
-      {!modeToComposer && modeEl}
-      {goal && (
-        // (A Codex's goal: how it goes and what it has used, as its footer says.)
-        <span className="convo-runs-item convo-runs-goal" title={goal}>
-          {goalSaid(goal)}
-        </span>
-      )}
-      {onSide && (
-        // (A side question (/btw): the thread's own, beside the composer — a Claude Code's.)
-        <button type="button" className="convo-runs-item convo-runs-side is-switch" onClick={onSide} aria-label={t('side.item')} title={t('side.note')}>
-          <MessageCircleQuestion size={13} aria-hidden="true" />
-          <span className="convo-runs-side-name">{t('side.item')}</span>
-        </button>
-      )}
-      {!head && <span className="spacer" />}
-      {/* (In the header the branch and where requests go are the status bar's.) */}
-      {meta.branch && !head && (
-        <span className="convo-runs-item convo-runs-branch" title={t('convo.branch', { b: meta.branch })}>
-          <GitBranch size={13} aria-hidden="true" />
-          <span className="convo-runs-branch-name">{meta.branch}</span>
-        </span>
-      )}
-      {!toComposer && modelChips}
-      {/* Where its requests go, when that is somewhere of the person's own
-          choosing: the host and nothing else of the address. */}
-      {where && !head && (
-        <span className="convo-runs-item convo-runs-via" title={t('convo.viaHint', { host: where })}>
-          {t('convo.via', { host: where })}
-        </span>
-      )}
-      {used > 0 && (
-        <button ref={ctxBtn} type="button" className="convo-runs-item convo-runs-ctx" aria-expanded={open === 'ctx'} aria-label={t('convo.ctxLabel', { n: tokens(used) })} title={t('convo.ctxLabel', { n: tokens(used) })} onClick={() => setOpen(open === 'ctx' ? false : 'ctx')}>
-          <Gauge part={full} tick={tick} />
-          {tokens(used)}
-        </button>
-      )}
-      {open && sheet && (
-        <div
-          className="convo-runs-back"
-          aria-hidden="true"
-          tabIndex={-1}
-          onPointerDown={(e) => {
-            e.stopPropagation()
-            backDown.current = true
-          }}
-          onClick={(e) => {
-            e.preventDefault()
-            e.stopPropagation()
-            if (!backDown.current) return
-            backDown.current = false
-            setOpen(false)
-          }}
-        />
-      )}
-      {!toComposer && modelPops}
-      {!modeToComposer && modePop}
-      {open === 'ctx' && (
-        <div className={'convo-runs-pop' + (sheet ? ' is-sheet' : '')} role="dialog" aria-label={t('convo.ctxTitle')}>
+  const ctxPop = open === 'ctx' && (
+        <div className={'convo-runs-pop is-portal' + (sheet ? ' is-sheet' : '')} role="dialog" aria-label={t('convo.ctxTitle')}>
           {/* Blocks of one look each (11-14: three kinds of heading, a count
               said twice, a long note under every bar): this session — how
               full, of what window, the model, its last answer — then the
@@ -3790,6 +3721,112 @@ function Runs({ head, statusAt, modelAt, quiet, meta, goal, active, mode, model,
           {/* (No cost read yet: nothing said — a line saying "no usage" under the context's count read as if that count were none.) */}
           {meta.cost && <CostPart cost={meta.cost} />}
         </div>
+      )
+  // Portal open pop-ups to .term-root (outside .convo-dock / .convo whose
+  // container-type: inline-size traps position: fixed, and outside split panes'
+  // overflow: hidden) so viewport coordinates always anchor flush to the chip.
+  const popRoot = open ? ((modelBox.current ?? box.current)?.closest('.term-root') as HTMLElement | null) ?? (typeof document !== 'undefined' ? document.body : null) : null
+  const popPortal =
+    open &&
+    popRoot &&
+    createPortal(
+      <div className="convo-pop-portal" ref={popHost}>
+        {sheet && (
+          <div
+            className="convo-runs-back"
+            aria-hidden="true"
+            tabIndex={-1}
+            onPointerDown={(e) => {
+              e.stopPropagation()
+              backDown.current = true
+            }}
+            onClick={(e) => {
+              e.preventDefault()
+              e.stopPropagation()
+              if (!backDown.current) return
+              backDown.current = false
+              setOpen(false)
+            }}
+          />
+        )}
+        {modelPops}
+        {modePop}
+        {ctxPop}
+      </div>,
+      popRoot,
+    )
+  const modelPart =
+    modelAt &&
+    createPortal(
+      // (Its own box: the same rules of the focus and of Escape as the row's — see inside.)
+      <div className="convo-runs in-composer" ref={modelBox} onBlur={(e) => (open === 'model' || open === 'effort' || open === 'mode') && !inside(e.relatedTarget as Node | null) && setOpen(false)}>
+        {modeEl}
+        {modelChips}
+      </div>,
+      modelAt,
+    )
+  // (A pane not in front, on the workbench: what it runs is said when it is in front, on the status bar — but a
+  // bypass, in red, always: in its composer, else in its header. Said only there, not a button: pressed, the pane
+  // comes in front first and the status bar has the button — review of 11-23.)
+  if (quiet)
+    return (
+      <>
+        {modelPart}
+        {popPortal}
+        {bypass && !modeToComposer && (
+          <div className="convo-runs in-head is-bypass-mark">
+            <span className="convo-runs-item convo-runs-mode is-bypass" title={t('convo.modeHint')}>
+              {shownMode}
+            </span>
+          </div>
+        )}
+      </>
+    )
+  if (statusAt === null)
+    return (
+      <>
+        {modelPart}
+        {popPortal}
+      </>
+    ) // (the status bar's place not there yet)
+  const row = (
+    // (The focus gone elsewhere, as by Tab, while the model menu is open, the list read or not: closed.)
+    <div className={'convo-runs' + (used > 0 ? ' has-ctx' : '') + (statusAt ? ' in-status' : head ? ' in-head' : '')} ref={box} onBlur={(e) => (open === 'model' || open === 'effort' || open === 'mode') && !inside(e.relatedTarget as Node | null) && setOpen(false)}>
+      {!modeToComposer && modeEl}
+      {goal && (
+        // (A Codex's goal: how it goes and what it has used, as its footer says.)
+        <span className="convo-runs-item convo-runs-goal" title={goal}>
+          {goalSaid(goal)}
+        </span>
+      )}
+      {onSide && (
+        // (A side question (/btw): the thread's own, beside the composer — a Claude Code's.)
+        <button type="button" className="convo-runs-item convo-runs-side is-switch" onClick={onSide} aria-label={t('side.item')} title={t('side.note')}>
+          <MessageCircleQuestion size={13} aria-hidden="true" />
+          <span className="convo-runs-side-name">{t('side.item')}</span>
+        </button>
+      )}
+      {!head && <span className="spacer" />}
+      {/* (In the header the branch and where requests go are the status bar's.) */}
+      {meta.branch && !head && (
+        <span className="convo-runs-item convo-runs-branch" title={t('convo.branch', { b: meta.branch })}>
+          <GitBranch size={13} aria-hidden="true" />
+          <span className="convo-runs-branch-name">{meta.branch}</span>
+        </span>
+      )}
+      {!toComposer && modelChips}
+      {/* Where its requests go, when that is somewhere of the person's own
+          choosing: the host and nothing else of the address. */}
+      {where && !head && (
+        <span className="convo-runs-item convo-runs-via" title={t('convo.viaHint', { host: where })}>
+          {t('convo.via', { host: where })}
+        </span>
+      )}
+      {used > 0 && (
+        <button ref={ctxBtn} type="button" className="convo-runs-item convo-runs-ctx" aria-expanded={open === 'ctx'} aria-label={t('convo.ctxLabel', { n: tokens(used) })} title={t('convo.ctxLabel', { n: tokens(used) })} onClick={() => setOpen(open === 'ctx' ? false : 'ctx')}>
+          <Gauge part={full} tick={tick} />
+          {tokens(used)}
+        </button>
       )}
     </div>
   )
@@ -3797,6 +3834,7 @@ function Runs({ head, statusAt, modelAt, quiet, meta, goal, active, mode, model,
     <>
       {modelPart}
       {statusAt ? createPortal(row, statusAt) : row}
+      {popPortal}
     </>
   )
 }

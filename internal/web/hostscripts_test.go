@@ -21,8 +21,9 @@ func TestHostScriptsParse(t *testing.T) {
 		"screen joined": convoScreenJoinedCommand("tmux", "%1", ""),
 		"tails":         convoTailsCommand([]string{"/home/u/.claude/projects/-w/a.jsonl"}),
 		"title":         convoTitleCommand("/home/u/.claude/projects/-w/a.jsonl", "11111111-2222-4333-8444-555555555501", 4096),
-		"complete":      completeCommand("/home/u/proj"),
-		"opencode read": ocQueryCommand("/home/u/.local/share/opencode/opencode.db", "tail", "ses_x"),
+		"complete":           completeCommand("/home/u/proj"),
+		"opencode read":      ocQueryCommand("/home/u/.local/share/opencode/opencode.db", "tail", "ses_x"),
+		"codex models cache": codexModelsCacheCommand(123),
 	}
 	for name, cmd := range cmds {
 		// (Read, not run: "sh -n", a script's quoting undone by the shell

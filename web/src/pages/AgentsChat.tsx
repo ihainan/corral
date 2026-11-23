@@ -1468,7 +1468,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, keysActive, isSe
     if (e.code === 'agent_waiting' && agent?.dialog) return t('agents.dialogOpen')
     // (Of these the gateway says only in English: said here.)
     if (e.code === 'refused') return t('convo.err.refused')
-    if (e.code === 'picker') return t('convo.err.picker')
+    if (e.code === 'picker') return t(codex ? 'convo.err.codexPicker' : 'convo.err.picker')
     if (e.code === 'default_changed') return t('convo.err.defaultChanged')
     if (e.code === 'default_settling') return t('convo.err.defaultSettling')
     if (e.code === 'default_pending') return t('convo.err.defaultPending')
@@ -1574,7 +1574,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, keysActive, isSe
   // The model, switched from a menu of what Claude Code's picker offers (read
   // when it opens, through the picker: see convo_model.go), for this session
   // only. Only while it is at rest: the picker takes over its input.
-  const [models, setModels] = useState<{ list: ModelOpt[] | null; bind: string; at?: number; unread?: boolean; byLog?: boolean } | null>(null)
+  const [models, setModels] = useState<{ list: ModelOpt[] | null; bind: string; at?: number; unread?: boolean; error?: string; byLog?: boolean } | null>(null)
   const [modelBusy, setModelBusy] = useState(false)
   // (Said once: a switch here left the default of new sessions changed, as
   // where its request was given up and it was found after.)
@@ -1640,14 +1640,15 @@ function AgentChat({ cur, entries, all, titles, onPick, active, keysActive, isSe
       .finally(() => setEffortBusy(false))
   }
 
-  const modelCacheKey = agy ? `agy:${cur.s.host_id}` : opencode ? `oc:${cur.s.host_id}` : bindKey
-  const openModels = () => {
+  const modelCacheKey = agy ? `agy:${cur.s.host_id}` : opencode ? `oc:${cur.s.host_id}` : codex ? `codex:${cur.s.host_id}:${convo.bind?.via ?? ''}:${convo.bind?.auth ?? ''}` : bindKey
+  const openModels = (force = false) => {
     if (!convo.bind || modelBusy) return
     const now = Date.now()
-    if (models && models.bind === bindKey && models.list && now - (models.at ?? 0) < MODEL_CACHE_MS) return
-    const hit = keptModelCache.get(modelCacheKey)
+    if (!force && models && models.bind === bindKey && models.list && now - (models.at ?? 0) < MODEL_CACHE_MS) return
+    if (force) keptModelCache.delete(modelCacheKey)
+    const hit = !force ? keptModelCache.get(modelCacheKey) : undefined
     if (hit && now - hit.at < MODEL_CACHE_MS) {
-      setModels({ list: hit.list, bind: bindKey, at: hit.at, byLog: hit.byLog || agy || opencode })
+      setModels({ list: hit.list, bind: bindKey, at: hit.at, byLog: hit.byLog || agy || opencode || codex })
       return
     }
     const bind = bindKey
@@ -1667,8 +1668,9 @@ function AgentChat({ cur, entries, all, titles, onPick, active, keysActive, isSe
       .catch((e) => {
         // (Said in the menu as well as in the toast: left on "reading" it
         // would look as though the picker were still being waited for.)
-        setModels((m) => (m?.bind === bind ? { list: null, bind, unread: true } : m))
-        toast(refusal(e), true)
+        const why = refusal(e)
+        setModels((m) => (m?.bind === bind ? { list: null, bind, unread: true, error: why } : m))
+        toast(why, true)
       })
       .finally(() => setModelBusy(false))
   }
@@ -3309,7 +3311,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, keysActive, isSe
       onSendNow={canPress && (!notClaude || agy) ? () => press('now') : undefined}
       sendNow={said?.what === 'now' && said.bind === bindKey ? said.text : undefined}
       mode={{ now: modeNow?.bind === bindKey ? modeNow.mode : undefined, busy: modeBusy, onPick: canMode ? pickMode : undefined, codex, agy, opencode }}
-      model={canModel || modelBusy ? { list: models?.bind === bindKey ? models.list : null, now: modelNow?.bind === bindKey ? modelNow.model : undefined, unread: models?.bind === bindKey && !!models.unread, byLog: models?.bind === bindKey && !!models.byLog, fresh: !!models?.at && Date.now() - models.at < 60000, busy: modelBusy, can: canModel, onOpen: openModels, onPick: pickModel, of: bindKey, ...(codex ? { efforts: CODEX_EFFORTS } : {}) } : undefined}
+      model={canModel || modelBusy ? { list: models?.bind === bindKey ? models.list : null, now: modelNow?.bind === bindKey ? modelNow.model : undefined, unread: models?.bind === bindKey && !!models.unread, error: models?.bind === bindKey ? models.error : undefined, byLog: models?.bind === bindKey && !!models.byLog, fresh: !!models?.at && Date.now() - models.at < 60000, busy: modelBusy, can: canModel, onOpen: () => openModels(false), onRetry: () => openModels(true), onPick: pickModel, of: bindKey, ...(codex ? { efforts: CODEX_EFFORTS } : {}) } : undefined}
       effort={{ now: effortNow?.bind === bindKey ? effortNow.effort : undefined, busy: effortBusy, can: canEffort, onPick: pickEffort }}
       lead={lead}
       more={more}
