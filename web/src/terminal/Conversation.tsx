@@ -5206,6 +5206,8 @@ function Picker({ rows, onClose, searchFirst }: { rows: ConvoListRow[]; onClose:
     if (searchFirst) box.current?.querySelector<HTMLInputElement>('.list-search input')?.focus()
     else (box.current?.querySelector<HTMLElement>('[aria-current="true"]') ?? box.current?.querySelector<HTMLElement>('button'))?.focus()
     const onKey = (e: KeyboardEvent) => {
+      // (Another dialog over it — the palette, settings —: its keys are that one's, Escape and Tab too. Review of 11-23.)
+      if ([...document.querySelectorAll('[aria-modal="true"]')].some((d) => d !== box.current)) return
       // (Its search box with words in it: emptied first, see ListSearch.)
       const field = e.target as HTMLInputElement | null
       if (e.key === 'Escape' && field?.tagName === 'INPUT' && field.value && box.current?.contains(field)) return
