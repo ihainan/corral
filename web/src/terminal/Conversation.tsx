@@ -1,6 +1,6 @@
 import { createContext, Fragment, memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
-import { Activity, ArrowDown, ArrowDownAZ, ArrowUp, ArrowUpDown, Bot, Check, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, ChevronsDownUp, ChevronsUpDown, Clock, Columns2, Copy, Cpu, Download, Eye, FilePen, FileText, Folder, FolderOpen, Gauge as GaugeIcon, GitBranch, GitFork, Hand, Image as ImageIcon, ImageOff, Info, Keyboard, ListChecks, ListOrdered, Loader, LogOut, MessageCircleQuestion, MessagesSquare, MoreHorizontal, MoreVertical, PanelLeft, PanelRight, Pin, Plus, Radar, RotateCw, Search, Server, Settings, ShieldOff, Sparkles, SquarePlus, SquareTerminal, Target, TextCursorInput, TriangleAlert, X } from 'lucide-react'
+import { Activity, ArrowDown, History, ArrowDownAZ, ArrowUp, ArrowUpDown, Bot, Check, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, ChevronsDownUp, ChevronsUpDown, Clock, Columns2, Copy, Cpu, Download, Eye, FilePen, FileText, Folder, FolderOpen, Gauge as GaugeIcon, GitBranch, GitFork, Hand, Image as ImageIcon, ImageOff, Info, Keyboard, ListChecks, ListOrdered, Loader, LogOut, MessageCircleQuestion, MessagesSquare, MoreHorizontal, MoreVertical, PanelLeft, PanelRight, Pin, Plus, Radar, RotateCw, Search, Server, Settings, ShieldOff, Sparkles, SquarePlus, SquareTerminal, Target, TextCursorInput, TriangleAlert, X } from 'lucide-react'
 import { t, getLang, type I18nKey } from '../i18n'
 import { api } from '../api'
 import { setPrefs, usePrefs } from '../prefs'
@@ -272,6 +272,7 @@ export function ConversationView({
   goal,
   retrying,
   reviewing,
+  onHostHistory,
 }: {
   convo: Convo
   agent: ConvoAgent | null
@@ -313,6 +314,7 @@ export function ConversationView({
   goal?: string // (a Codex's goal, as its footer last said it: "Pursuing goal (141K / 200K)")
   retrying?: { n: number; of: number; why?: string } | null // (a Codex's screen says its request failed and is tried again: its log silent meanwhile)
   reviewing?: string // (a Codex's approvals reviewer looks at this command now: its screen's word)
+  onHostHistory?: () => void // (what was sent anywhere on the host: in the header's menu — the composer's history button is a touch screen's only)
 }) {
   const kActive = keysActive ?? active
   const working = agent?.status === 'working'
@@ -1769,11 +1771,13 @@ export function ConversationView({
   // a pane behind says only a bypass, in its header (11-23: the header was
   // too full for the name, said the person).
   const [runsSlot, setRunsSlot] = useState<HTMLElement | null>(null)
+  const [modelSlot, setModelSlot] = useState<HTMLElement | null>(null) // (in the composer: see ComposerModelSlot)
   const runsAt = (head: boolean) =>
     convo.status === 'ready' && convo.meta ? (
       <Runs
           head={head}
           statusAt={head && inWb && kActive ? runsSlot : undefined}
+          modelAt={head && inWb ? modelSlot : undefined}
           quiet={head && inWb && !kActive}
           meta={convo.meta}
           goal={convo.bind?.agent === 'codex' ? goal : undefined}
@@ -1988,6 +1992,7 @@ export function ConversationView({
                 { label: t('convoSearch.item'), icon: <Search size={16} />, group: t('menu.group.find'), onSelect: () => setSearching(true) },
                 ...(convo.of && (convo.bind?.agent === 'claude' || convo.bind?.agent === 'codex' || convo.bind?.agent === 'agy') ? [{ label: t('turns.item'), icon: <ListOrdered size={16} />, onSelect: () => (setSearching(false), setTurnsShown(true)) }] : []),
                 ...(sideBind ? [{ label: t('side.item'), icon: <MessageCircleQuestion size={16} />, onSelect: () => setBtwShown(sideIdent) }] : []),
+                ...(onHostHistory ? [{ label: t('hostHistory.open'), icon: <History size={16} />, onSelect: onHostHistory }] : []),
                 ...(hideDesktopLineage && lineageBar?.onNewSubagent ? [{ label: t('convo.lineage.newSubagent'), icon: <Plus size={16} />, onSelect: () => lineageBar.onNewSubagent?.() }] : []),
                 // (All steps opened or folded: the menu's, as Ctrl+O is a Mac's only.)
                 { label: t(allOpen === 0 ? 'pageKeys.openAll' : allOpen === 1 ? 'pageKeys.openFull' : 'pageKeys.foldAll'), icon: allOpen === 2 ? <ChevronsDownUp size={16} /> : <ChevronsUpDown size={16} />, keys: mac ? ['Ctrl+O'] : undefined, disabled: !list.length, onSelect: toggleAllOpen },
@@ -2273,7 +2278,7 @@ export function ConversationView({
             openSub={!convo.bind?.agent || convo.bind.agent === 'claude' || convo.bind.agent === 'codex' || convo.bind.agent === 'agy' ? openSub : undefined}
           />
         )}
-        {composer}
+        <ComposerSlotOf.Provider value={inWb ? setModelSlot : null}>{composer}</ComposerSlotOf.Provider>
         {!inWb && runsAt(false)}
         {/* (The pane the keys go to says its branch and quota on the status bar.) */}
         {inWb && kActive && wbSlot && createPortal(<StatusFacts runsRef={setRunsSlot} of={convo.status === 'ready' ? convo.of : undefined} meta={convo.status === 'ready' ? convo.meta : undefined} via={convo.bind?.via} auth={convo.bind?.auth} quota={convo.status === 'ready' ? quotaOf : undefined} />, wbSlot)}
@@ -3046,7 +3051,15 @@ function compactThreshold(window: number, agentKind?: string, observedPre?: numb
   return { at, pct: Math.round(ratio * 100), source: 'estimate' }
 }
 
-function Runs({ head, statusAt, quiet, meta, goal, active, mode, model, effort, quota, via, auth, agentKind, compactPre, onSide }: { head?: boolean; statusAt?: HTMLElement | null; quiet?: boolean; meta: ConvoMeta; goal?: string; active: boolean; mode?: ModeSwitch; model?: ModelSwitch; effort?: EffortSwitch; quota?: QuotaOf; via?: string; auth?: string; agentKind?: string; compactPre?: number; onSide?: () => void }) {
+// The composer's place for its pane's model (the workbench's): the page
+// builds the composer, the conversation it is put in fills this.
+const ComposerSlotOf = createContext<((el: HTMLElement | null) => void) | null>(null)
+export function ComposerModelSlot() {
+  const set = useContext(ComposerSlotOf)
+  return set ? <span className="composer-model" ref={set} /> : null
+}
+
+function Runs({ head, statusAt, modelAt, quiet, meta, goal, active, mode, model, effort, quota, via, auth, agentKind, compactPre, onSide }: { head?: boolean; statusAt?: HTMLElement | null; modelAt?: HTMLElement | null; quiet?: boolean; meta: ConvoMeta; goal?: string; active: boolean; mode?: ModeSwitch; model?: ModelSwitch; effort?: EffortSwitch; quota?: QuotaOf; via?: string; auth?: string; agentKind?: string; compactPre?: number; onSide?: () => void }) {
   const [open, setOpen] = useState<false | 'ctx' | 'model' | 'effort' | 'mode'>(false) // (which of its pop-ups)
   const [modelFilter, setModelFilter] = useState('')
   // (Another agent bound meanwhile — the pane's program changed: its model and effort menus, of the one before, closed;
@@ -3071,13 +3084,15 @@ function Runs({ head, statusAt, quiet, meta, goal, active, mode, model, effort, 
     if (!model?.busy) setGoing('')
   }, [model?.busy])
   const box = useRef<HTMLDivElement>(null)
-  const inside = (n: Node | null | undefined) => !!n && !!box.current?.contains(n)
+  const modelBox = useRef<HTMLDivElement>(null)
+  const toComposer = modelAt !== undefined // (null: its place there not yet mounted)
+  const inside = (n: Node | null | undefined) => !!n && (!!box.current?.contains(n) || !!modelBox.current?.contains(n))
   const ctxBtn = useRef<HTMLButtonElement>(null)
   const modelBtn = useRef<HTMLButtonElement>(null)
   const effortBtn = useRef<HTMLButtonElement>(null)
   const modeBtn = useRef<HTMLButtonElement>(null)
   if (open && !active) setOpen(false) // (behind a terminal tab: its Escape is the terminal's)
-  if (open && quiet) setOpen(false) // (its pane no longer in front: its row gone from the status bar — review of 11-23)
+  if (open && quiet && open !== 'model' && open !== 'effort') setOpen(false) // (its pane no longer in front: its row gone from the status bar — review of 11-23; the model's are its composer's)
   if (open === 'model' && !model?.can) setOpen(false) // (it works now: no switching)
   if (open === 'effort' && !effort?.can) setOpen(false)
   if (open === 'mode' && !mode?.onPick) setOpen(false)
@@ -3138,7 +3153,7 @@ function Runs({ head, statusAt, quiet, meta, goal, active, mode, model, effort, 
     if (!open) return
     const vv = window.visualViewport
     const fit = () => {
-      const holder = box.current
+      const holder = (open === 'model' || open === 'effort') && modelBox.current ? modelBox.current : box.current
       const pop = holder?.querySelector<HTMLElement>('.convo-runs-pop')
       if (!pop || !holder) return
       const seen = vv ? vv.height : window.innerHeight
@@ -3148,7 +3163,7 @@ function Runs({ head, statusAt, quiet, meta, goal, active, mode, model, effort, 
         return
       }
       const at = holder.getBoundingClientRect()
-      if (statusAt) {
+      if (statusAt || holder === modelBox.current) {
         // (From the status bar, whose left part cuts what goes past it: placed on the page, above the button that opened it.)
         const by = (open === 'model' ? modelBtn : open === 'effort' ? effortBtn : open === 'mode' ? modeBtn : ctxBtn).current?.getBoundingClientRect() ?? at
         pop.style.left = Math.max(12, Math.min(by.left - 6, window.innerWidth - pop.offsetWidth - 12)) + 'px'
@@ -3181,7 +3196,7 @@ function Runs({ head, statusAt, quiet, meta, goal, active, mode, model, effort, 
       vv?.removeEventListener('scroll', fit)
       window.removeEventListener('resize', fit)
     }
-  }, [open, sheet, head, statusAt])
+  }, [open, sheet, head, statusAt, modelAt])
   // Where its requests go, when that is not the model maker's own door:
   // the host, or, for Amazon's and Google's, which have no address of their
   // own to show, their name. "" is the quiet case, most of them.
@@ -3314,43 +3329,11 @@ function Runs({ head, statusAt, quiet, meta, goal, active, mode, model, effort, 
         </div>
       )
   const modelShowsEffort = !!shownEffort && !!shownModel && (merged || !model || !!(model.efforts && model.can) || !(effort?.can || effort?.busy))
-  // (A pane not in front, on the workbench: what it runs is said when it is in front, on the status bar — but a
-  // bypass, in red, always. Said only, not a button: pressed, the pane comes in front first and the status bar
-  // has the button — review of 11-23.)
-  if (quiet)
-    return bypass ? (
-      <div className="convo-runs in-head">
-        <span className="convo-runs-item convo-runs-mode is-bypass" title={t('convo.modeHint')}>
-          {shownMode}
-        </span>
-      </div>
-    ) : null
-  if (statusAt === null) return null // (the status bar's place not there yet)
-  const row = (
-    // (The focus gone elsewhere, as by Tab, while the model menu is open, the list read or not: closed.)
-    <div className={'convo-runs' + (used > 0 ? ' has-ctx' : '') + (statusAt ? ' in-status' : head ? ' in-head' : '')} ref={box} onBlur={(e) => (open === 'model' || open === 'effort' || open === 'mode') && !inside(e.relatedTarget as Node | null) && setOpen(false)}>
-      {modeEl}
-      {goal && (
-        // (A Codex's goal: how it goes and what it has used, as its footer says.)
-        <span className="convo-runs-item convo-runs-goal" title={goal}>
-          {goalSaid(goal)}
-        </span>
-      )}
-      {onSide && (
-        // (A side question (/btw): the thread's own, beside the composer — a Claude Code's.)
-        <button type="button" className="convo-runs-item convo-runs-side is-switch" onClick={onSide} aria-label={t('side.item')} title={t('side.note')}>
-          <MessageCircleQuestion size={13} aria-hidden="true" />
-          <span className="convo-runs-side-name">{t('side.item')}</span>
-        </button>
-      )}
-      {!head && <span className="spacer" />}
-      {/* (In the header the branch and where requests go are the status bar's.) */}
-      {meta.branch && !head && (
-        <span className="convo-runs-item convo-runs-branch" title={t('convo.branch', { b: meta.branch })}>
-          <GitBranch size={13} aria-hidden="true" />
-          <span className="convo-runs-branch-name">{meta.branch}</span>
-        </span>
-      )}
+  // The model and how hard it thinks: on the workbench in the composer, by its
+  // send button, as T3 Code and Orca have it (the person, 11-23) — each pane's
+  // in its own, in front or not; its menus open upwards from there.
+  const modelChips = (
+    <>
       {meta.model &&
         (model ? (
           <button
@@ -3442,37 +3425,10 @@ function Runs({ head, statusAt, quiet, meta, goal, active, mode, model, effort, 
             <span className="convo-runs-item convo-runs-effort" title={t('convo.effort') + ': ' + effortName(level)}><EffortSaid level={level} /></span>
           )
         })()}
-      {/* Where its requests go, when that is somewhere of the person's own
-          choosing: the host and nothing else of the address. */}
-      {where && !head && (
-        <span className="convo-runs-item convo-runs-via" title={t('convo.viaHint', { host: where })}>
-          {t('convo.via', { host: where })}
-        </span>
-      )}
-      {used > 0 && (
-        <button ref={ctxBtn} type="button" className="convo-runs-item convo-runs-ctx" aria-expanded={open === 'ctx'} aria-label={t('convo.ctxLabel', { n: tokens(used) })} title={t('convo.ctxLabel', { n: tokens(used) })} onClick={() => setOpen(open === 'ctx' ? false : 'ctx')}>
-          <Gauge part={full} tick={tick} />
-          {tokens(used)}
-        </button>
-      )}
-      {open && sheet && (
-        <div
-          className="convo-runs-back"
-          aria-hidden="true"
-          tabIndex={-1}
-          onPointerDown={(e) => {
-            e.stopPropagation()
-            backDown.current = true
-          }}
-          onClick={(e) => {
-            e.preventDefault()
-            e.stopPropagation()
-            if (!backDown.current) return
-            backDown.current = false
-            setOpen(false)
-          }}
-        />
-      )}
+    </>
+  )
+  const modelPops = (
+    <>
       {open === 'model' && model && (
         <div
           className={"convo-runs-pop convo-models" + (sheet ? " is-sheet" : "")}
@@ -3586,7 +3542,6 @@ function Runs({ head, statusAt, quiet, meta, goal, active, mode, model, effort, 
           })()}
         </div>
       )}
-      {modePop}
       {open === 'effort' && effort && (
         <div
           className={"convo-runs-pop convo-models" + (sheet ? " is-sheet" : "")}
@@ -3615,6 +3570,94 @@ function Runs({ head, statusAt, quiet, meta, goal, active, mode, model, effort, 
           <p className="convo-runs-note">{t('convo.effortOnly')}</p>
         </div>
       )}
+    </>
+  )
+  const modelPart =
+    modelAt &&
+    createPortal(
+      // (Its own box: the same rules of the focus and of Escape as the row's — see inside.)
+      <div className="convo-runs in-composer" ref={modelBox} onBlur={(e) => (open === 'model' || open === 'effort') && !inside(e.relatedTarget as Node | null) && setOpen(false)}>
+        {modelChips}
+        {modelPops}
+      </div>,
+      modelAt,
+    )
+  // (A pane not in front, on the workbench: what it runs is said when it is in front, on the status bar — but a
+  // bypass, in red, always. Said only, not a button: pressed, the pane comes in front first and the status bar
+  // has the button — review of 11-23.)
+  if (quiet)
+    return (
+      <>
+        {modelPart}
+        {bypass && (
+          <div className="convo-runs in-head">
+            <span className="convo-runs-item convo-runs-mode is-bypass" title={t('convo.modeHint')}>
+              {shownMode}
+            </span>
+          </div>
+        )}
+      </>
+    )
+  if (statusAt === null) return <>{modelPart}</> // (the status bar's place not there yet)
+  const row = (
+    // (The focus gone elsewhere, as by Tab, while the model menu is open, the list read or not: closed.)
+    <div className={'convo-runs' + (used > 0 ? ' has-ctx' : '') + (statusAt ? ' in-status' : head ? ' in-head' : '')} ref={box} onBlur={(e) => (open === 'model' || open === 'effort' || open === 'mode') && !inside(e.relatedTarget as Node | null) && setOpen(false)}>
+      {modeEl}
+      {goal && (
+        // (A Codex's goal: how it goes and what it has used, as its footer says.)
+        <span className="convo-runs-item convo-runs-goal" title={goal}>
+          {goalSaid(goal)}
+        </span>
+      )}
+      {onSide && (
+        // (A side question (/btw): the thread's own, beside the composer — a Claude Code's.)
+        <button type="button" className="convo-runs-item convo-runs-side is-switch" onClick={onSide} aria-label={t('side.item')} title={t('side.note')}>
+          <MessageCircleQuestion size={13} aria-hidden="true" />
+          <span className="convo-runs-side-name">{t('side.item')}</span>
+        </button>
+      )}
+      {!head && <span className="spacer" />}
+      {/* (In the header the branch and where requests go are the status bar's.) */}
+      {meta.branch && !head && (
+        <span className="convo-runs-item convo-runs-branch" title={t('convo.branch', { b: meta.branch })}>
+          <GitBranch size={13} aria-hidden="true" />
+          <span className="convo-runs-branch-name">{meta.branch}</span>
+        </span>
+      )}
+      {!toComposer && modelChips}
+      {/* Where its requests go, when that is somewhere of the person's own
+          choosing: the host and nothing else of the address. */}
+      {where && !head && (
+        <span className="convo-runs-item convo-runs-via" title={t('convo.viaHint', { host: where })}>
+          {t('convo.via', { host: where })}
+        </span>
+      )}
+      {used > 0 && (
+        <button ref={ctxBtn} type="button" className="convo-runs-item convo-runs-ctx" aria-expanded={open === 'ctx'} aria-label={t('convo.ctxLabel', { n: tokens(used) })} title={t('convo.ctxLabel', { n: tokens(used) })} onClick={() => setOpen(open === 'ctx' ? false : 'ctx')}>
+          <Gauge part={full} tick={tick} />
+          {tokens(used)}
+        </button>
+      )}
+      {open && sheet && (
+        <div
+          className="convo-runs-back"
+          aria-hidden="true"
+          tabIndex={-1}
+          onPointerDown={(e) => {
+            e.stopPropagation()
+            backDown.current = true
+          }}
+          onClick={(e) => {
+            e.preventDefault()
+            e.stopPropagation()
+            if (!backDown.current) return
+            backDown.current = false
+            setOpen(false)
+          }}
+        />
+      )}
+      {!toComposer && modelPops}
+      {modePop}
       {open === 'ctx' && (
         <div className={'convo-runs-pop' + (sheet ? ' is-sheet' : '')} role="dialog" aria-label={t('convo.ctxTitle')}>
           {/* Blocks of one look each (11-14: three kinds of heading, a count
@@ -3702,7 +3745,12 @@ function Runs({ head, statusAt, quiet, meta, goal, active, mode, model, effort, 
       )}
     </div>
   )
-  return statusAt ? createPortal(row, statusAt) : row
+  return (
+    <>
+      {modelPart}
+      {statusAt ? createPortal(row, statusAt) : row}
+    </>
+  )
 }
 
 // The subscription's quota (5 hours, the week), as Claude Code keeps it on
@@ -3853,8 +3901,8 @@ export function QuotaChip({ of }: { of: QuotaOf }) {
     .map(([name, w]) => [name, w!.resets_at > now ? w!.used : 0, w!.resets_at] as const)
   if (!wins.length) return failed ? <StatusItem title={t('quota.failed')}>{t('wb.quotaNone')}</StatusItem> : null
   const at = failed ? (seen?.lastAt ?? 0) / 1000 : shown?.updated_at
-  // (Said as what it is — the plan's use, each window's used part as a bar —, its resets on hover: "This week 8%"
-  // alone read as nothing in particular, said the person, 11-23.)
+  // (Said as Orca's bottom bar says it, as the person asked (11-23): used, whose plan (its agent's mark), each
+  // window's part and how long until it resets — "This week 8%" alone read as nothing in particular. More on hover.)
   const title = [
     t('quota.title'),
     ...wins.map(([name, used, end]) => t(name) + t('wb.quotaSep') + (end <= now ? t('quota.reset') : t('quota.used', { n: Math.round(used), at: resetClock(end) }))),
@@ -3863,15 +3911,16 @@ export function QuotaChip({ of }: { of: QuotaOf }) {
   return (
     <StatusItem title={title}>
       <span className={'wb-quota' + (failed ? ' is-stale' : '')}>
-        <span className="wb-quota-label">{t('wb.quotaLabel')}</span>
-        {wins.map(([name, used]) => (
+        <span className="wb-quota-label">
+          {t('wb.quotaLabel')}
+          <AgentIcon program={codex ? 'codex' : 'agent' in of && of.agent === 'agy' ? 'antigravity' : 'claude'} size={12} bare />
+        </span>
+        {wins.map(([name, used, end]) => (
           <span key={name} className={'wb-quota-win' + quotaTone(used)}>
+            {/* (each in its own box: as one run of text there was no gap between them) */}
             <span>{t(name)}</span>
-            {/* (its words apart from the figure: the bar gone, they were one run of text, with no gap between) */}
-            <span className="wb-quota-bar" aria-hidden="true">
-              <span style={{ width: Math.min(100, Math.max(0, used)) + '%' }} />
-            </span>
-            {Math.round(used)}%
+            <span>{Math.round(used)}%</span>
+            {end > now && <span className="wb-quota-until">{untilShort(end - now)}</span>}
           </span>
         ))}
       </span>
@@ -3962,6 +4011,16 @@ function quotaClock(sec: number) {
   // month short: spelt out, an English date ran the line it is on to two
   // — "resets November 15 Sun 22:59" — while "11月15日" never did.)
   return d.toDateString() === new Date().toDateString() ? time : [d.toLocaleDateString(getLang(), { month: 'short', day: 'numeric' }), d.toLocaleDateString(getLang(), { weekday: 'short' }), time].join(' ')
+}
+
+// untilShort: how long until a window resets, in its two largest units ("6d 19h", "1h 20m", "12m").
+function untilShort(sec: number) {
+  const m = Math.max(1, Math.round(sec / 60))
+  const d = Math.floor(m / 1440)
+  const h = Math.floor((m % 1440) / 60)
+  const min = m % 60
+  // (A unit of nothing is left out: "3d", not "3d 0h".)
+  return d ? (h ? t('wb.untilDH', { d, h }) : t('wb.untilD', { d })) : h ? (min ? t('wb.untilHM', { h, m: min }) : t('wb.untilH', { h })) : t('wb.untilM', { m: min })
 }
 
 // resetClock: when a window of the quota comes back, as a line that fits

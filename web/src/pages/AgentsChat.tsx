@@ -21,7 +21,7 @@ import { SessionOpDialog, type SessionOp } from '../terminal/sessionOps'
 import { NEW_AGENT, NewAgentDialog, takeNewAgentAsk, type NewSubagentParent } from '../terminal/newAgent'
 import { type CodexRewind, ForkDialog, RenameDialog, type RenameTarget } from '../terminal/agentOps'
 import { agentWho, ChimeCounter, chime, countsOf } from '../terminal/chime'
-import { AgentList, ListOrderMenu, CODEX_EFFORTS, ConversationView, glanceOf, type ConvoAgent, type ConvoLineageBar, type ConvoListRow, type ConvoPending, type ConvoSplitPane, type ConvoWent, type FileActs, type ModelOpt } from '../terminal/Conversation'
+import { AgentList, ListOrderMenu, CODEX_EFFORTS, ComposerModelSlot, ConversationView, glanceOf, type ConvoAgent, type ConvoLineageBar, type ConvoListRow, type ConvoPending, type ConvoSplitPane, type ConvoWent, type FileActs, type ModelOpt } from '../terminal/Conversation'
 import { saveTranslateConfig, useTranslateConfig } from '../terminal/thoughtTranslate'
 import { FilesDialog } from '../terminal/FilesDialog'
 import { PortsDialog } from '../terminal/PortsDialog'
@@ -446,6 +446,19 @@ export function AgentsChat({ bar, active = true, onHead }: { bar?: ReactNode; ac
       setFocusedPane('primary')
     }
   }, [splitKey, cur, sessions, entries])
+  // Another agent put in front, the split's other side not set with it (picked in
+  // the list, a notification, the address, back): the split was of the one
+  // before — closed. Set together (swapped, opened beside its parent), kept.
+  // (The split stayed on, of another agent, said the person — 11-23.)
+  const splitSeen = useRef<{ cur?: string; split: string | null }>({ split: null })
+  useEffect(() => {
+    const was = splitSeen.current
+    splitSeen.current = { cur: cur?.key ?? was.cur, split: splitKey } // (through none, as one not read yet: the one before kept — review of 11-23)
+    if (splitKey && was.cur && cur && cur.key !== was.cur && cur.key !== splitKey && splitKey === was.split) {
+      setSplitKey(null)
+      setFocusedPane('primary')
+    }
+  }, [cur?.key, splitKey]) // eslint-disable-line react-hooks/exhaustive-deps
   const openSplit = (e: Entry) => {
     if (!cur) {
       choose(e)
@@ -2340,7 +2353,9 @@ function AgentChat({ cur, entries, all, titles, onPick, active, keysActive, isSe
   // (Its name cut to what the box's width holds: a placeholder of one line,
   // however long the name, and all of it where there is room.)
   const fieldW = useWidth(field)
-  const placeholder = suggestion ?? (to ? fitLine(field.current, fieldW, (name) => t(steers ? 'convo.toPlaceholderSteer' : 'convo.toPlaceholder', { name }), to) : t('term.composerPlaceholder'))
+  // (With a keyboard and room for it, the keys of what its two buttons did — gone there: T3 Code's way, the person's ask of 11-23.)
+  const keysSaid = !steers && fieldW >= 480 && matchMedia(KEYED_COMPOSER).matches // (as the buttons go: the same query — a touch laptop used with its trackpad too)
+  const placeholder = suggestion ?? (to ? fitLine(field.current, fieldW, (name) => t(steers ? 'convo.toPlaceholderSteer' : keysSaid ? 'convo.toPlaceholderKeys' : 'convo.toPlaceholder', { name }), to) : t('term.composerPlaceholder'))
   useComposerFit(field, draft, placeholder)
   // Why it cannot send now, if it cannot.
   // (Waiting for an answer, a message's Enter could take an option of its
@@ -2644,14 +2659,14 @@ function AgentChat({ cur, entries, all, titles, onPick, active, keysActive, isSe
               { label: t('hostHistory.open'), separator: sentHistory().length > 0, onSelect: () => setHostHistory(true) },
             ]}
             button={(open, toggle) => (
-              <button type="button" className="icon-btn" aria-expanded={open} onClick={toggle} aria-label={t('term.history')} title={t('term.history') + (isTouch ? '' : ' (↑)')}>
+              <button type="button" className="icon-btn composer-history-btn" aria-expanded={open} onClick={toggle} aria-label={t('term.history')} title={t('term.history') + (isTouch ? '' : ' (↑)')}>
                 <History size={18} />
               </button>
             )}
           />
           <button
             type="button"
-            className="icon-btn"
+            className="icon-btn composer-slash-btn"
             aria-haspopup="listbox"
             aria-expanded={completion.open && draft.trimStart().startsWith('/')}
             onMouseDown={(e) => e.preventDefault()} // (the box keeps the focus, and the list open)
@@ -2707,6 +2722,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, keysActive, isSe
               <Square size={14} fill="currentColor" strokeWidth={0} />
             </button>
           )}
+          <ComposerModelSlot />
           {stopShown ? (
             <button type="button" className="composer-send is-stop" onClick={() => press('stop')} aria-label={t('convo.stop')} title={t('convo.stop') + (isTouch ? '' : ' (Esc)')}>
               <Square size={14} fill="currentColor" strokeWidth={0} />
@@ -3209,6 +3225,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, keysActive, isSe
     >
     {dragOver && <div className="term-drop">{t('term.dropHint')}</div>}
     <ConversationView
+      onHostHistory={() => setHostHistory(true)}
       convo={convo}
       agent={agent}
       compacting={compacting}
@@ -3449,6 +3466,9 @@ function useWidth(ref: { current: HTMLElement | null }): number {
 // A line made of words around a name, the name cut short (an ellipsis at
 // its end) so that the line fits the field's width in its own font.
 let measurer: CanvasRenderingContext2D | null = null
+// (Wide, a mouse and keyboard: the composer's history and commands are their keys, ↑ and /, said in its placeholder.)
+const KEYED_COMPOSER = '(min-width: 760px) and (hover: hover) and (pointer: fine)'
+
 function fitLine(el: HTMLElement | null, width: number, make: (name: string) => string, name: string): string {
   const whole = make(name)
   const chars = [...name]

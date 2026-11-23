@@ -213,6 +213,13 @@ html.term-mode body { position: fixed; inset: 0; }
 .composer-tools { display: flex; align-items: center; gap: 2px; height: 40px; padding: 0 4px 4px; }
 .composer-tools-full { display: contents; }
 .composer-plus { display: none; }
+/* (Wide, with a mouse and keyboard: history and commands are ↑ and /, said in the placeholder — their buttons
+   gone, as T3 Code has it (11-23). A touch screen keeps them: it has no such keys.) */
+@media (min-width: 760px) and (hover: hover) and (pointer: fine) { .composer-history-btn, .composer-slash-btn { display: none; } }
+/* (The pane's model and how hard it thinks, by send, on the workbench: Runs puts them here.) */
+.composer-model { display: contents; }
+.convo-runs.in-composer { flex: none; display: flex; align-items: center; gap: 2px; margin: 0 4px 0 0; min-height: 0; font-size: var(--fs-note); line-height: var(--lh-note); }
+.convo-runs.in-composer .convo-runs-pop { position: fixed; top: auto; right: auto; width: 320px; max-width: calc(100vw - 24px); } /* (left and bottom: set as it opens, see Runs' fit) */
 /* (A phone: one "+" for the attachment, the commands and what was sent before.) */
 @media (max-width: 759.98px) {
   .composer-plus { display: contents; }
@@ -633,10 +640,14 @@ html.term-dark .overlay, html.term-dark .menu, html.term-dark .toast {
   .convo-split-grip.is-col::after { top: 7px; left: 0; right: 0; }
   .convo-bar-split-act { width: 36px; height: 36px; }
 }
-.convo-split-pane { flex: 1; min-width: 0; position: relative; display: flex; border-left: 1px solid var(--term-line); overflow: hidden; }
-.convo-split-pane.is-col { border-left: 0; border-top: 1px solid var(--term-line); }
-.convo-panes.is-compact-col > .convo-main:not(.is-focused) .convo-runs,
-.convo-panes.is-compact-col > .convo-split-pane:not(.is-focused) .convo-runs { display: none; }
+/* (Where one pane ends and the other begins, and which has the keys: a firmer line between them, and the one
+   in front marked along its header's top — the two read as one page, said the person, 11-23.) */
+.convo-split-pane { flex: 1; min-width: 0; position: relative; display: flex; border-left: 1px solid var(--term-line-strong); overflow: hidden; }
+.convo-split-pane.is-col { border-left: 0; border-top: 1px solid var(--term-line-strong); }
+.convo-panes.is-split > .convo-main.is-focused > .convo-bar,
+.convo-panes.is-split > .convo-split-pane.is-focused .convo-bar { box-shadow: inset 0 2px 0 var(--term-accent-text); }
+.convo-panes.is-compact-col > .convo-main:not(.is-focused) .convo-runs:not(.in-composer),
+.convo-panes.is-compact-col > .convo-split-pane:not(.is-focused) .convo-runs:not(.in-composer) { display: none; } /* (its composer's model kept: review of 11-23) */
 .convo-panes.is-split-col .convo-col { padding: 12px 16px 16px; }
 .convo-panes.is-split { --split-dim: color-mix(in srgb, var(--term-chrome) 55%, var(--term-bg)); }
 .convo-panes.is-split > .convo-main:not(.is-focused),
