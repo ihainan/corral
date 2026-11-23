@@ -813,6 +813,9 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
   box-shadow: 0 10px 28px rgba(0, 0, 0, 0.22); font-size: var(--fs-sub); line-height: var(--lh-sub);
   /* (Long, as with a session's usage by many models: it scrolls, never past the top of the view.) */
   max-height: min(70vh, calc(100dvh - 140px)); overflow-y: auto; overscroll-behavior: contain;
+  /* (Its own wrapping and weight, whatever it is put in: from the status bar, which keeps to one line,
+     the modes' descriptions ran out of it uncut — 11-23.) */
+  white-space: normal; font-weight: 400; text-align: start;
 }
 .convo-runs-row { display: flex; justify-content: space-between; gap: 16px; padding: 3px 0; font-variant-numeric: tabular-nums; }
 .convo-runs-row > :first-child { color: var(--term-fg-3); flex: none; }
