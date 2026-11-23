@@ -218,9 +218,11 @@ html.term-mode body { position: fixed; inset: 0; }
 @media (min-width: 760px) and (hover: hover) and (pointer: fine) { .composer-history-btn, .composer-slash-btn { display: none; } }
 /* (The pane's model and how hard it thinks, by send, on the workbench: Runs puts them here.) */
 .composer-model { display: contents; }
-.convo-runs.in-composer { flex: none; display: flex; align-items: center; gap: 2px; margin: 0 4px 0 0; min-height: 0; font-size: var(--fs-note); line-height: var(--lh-note); }
+.convo-runs.in-composer { flex: 0 1 auto; min-width: 0; display: flex; align-items: center; gap: 2px; margin: 0 4px 0 0; min-height: 0; font-size: var(--fs-note); line-height: var(--lh-note); }
 .convo-runs.in-composer .convo-runs-pop { position: fixed; top: auto; right: auto; width: 320px; max-width: calc(100vw - 24px); } /* (left and bottom: set as it opens, see Runs' fit) */
 .convo-runs.in-composer .convo-runs-pop.convo-modes { width: 300px; }
+.convo-runs.in-composer .convo-runs-mode { flex: 0 1 auto; min-width: 0; } /* (a narrow pane: its words cut, the send button kept in — review of 11-23) */
+.convo-runs-mode-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* (A phone: one "+" for the attachment, the commands and what was sent before.) */
 @media (max-width: 759.98px) {
   .composer-plus { display: contents; }
@@ -860,6 +862,9 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 .convo-runs-row.is-narrow-only { display: none; }
 @container convo-dock (max-width: 680px) {
   .convo-runs-side-name { display: none; }
+}
+@container convo-dock (max-width: 520px) {
+  .composer-keys { display: none; } /* (the room the model and the mode need, by the send button: a hint cut to "Return …" said nothing) */
 }
 @container convo-dock (max-width: 560px) {
   .convo-runs.has-ctx .convo-runs-via { display: none; }

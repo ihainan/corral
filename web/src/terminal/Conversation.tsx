@@ -3055,9 +3055,9 @@ function compactThreshold(window: number, agentKind?: string, observedPre?: numb
 // The composer's place for its pane's model (the workbench's): the page
 // builds the composer, the conversation it is put in fills this.
 const ComposerSlotOf = createContext<((el: HTMLElement | null) => void) | null>(null)
-export function ComposerModelSlot() {
+export function ComposerModelSlot({ shown }: { shown: boolean }) {
   const set = useContext(ComposerSlotOf)
-  return set ? <span className="composer-model" ref={set} /> : null
+  return set && shown ? <span className="composer-model" ref={set} /> : null // (hidden, as by is-held, is-asked, is-paneled: none)
 }
 
 function Runs({ head, statusAt, modelAt, quiet, meta, goal, active, mode, model, effort, quota, via, auth, agentKind, compactPre, onSide }: { head?: boolean; statusAt?: HTMLElement | null; modelAt?: HTMLElement | null; quiet?: boolean; meta: ConvoMeta; goal?: string; active: boolean; mode?: ModeSwitch; model?: ModelSwitch; effort?: EffortSwitch; quota?: QuotaOf; via?: string; auth?: string; agentKind?: string; compactPre?: number; onSide?: () => void }) {
@@ -3086,10 +3086,13 @@ function Runs({ head, statusAt, modelAt, quiet, meta, goal, active, mode, model,
   }, [model?.busy])
   const box = useRef<HTMLDivElement>(null)
   const modelBox = useRef<HTMLDivElement>(null)
-  const toComposer = modelAt !== undefined // (null: its place there not yet mounted)
-  // (The permission mode too, beside the model, where its composer is there — as Claude Code says it under its own
-  // box, and T3 Code and Codex's app in theirs: what the next message may do. No composer: the status bar's, as before.)
-  const modeToComposer = !!modelAt
+  // (Its composer's place, while that is shown: hidden — a question in its place, the terminal panel over it — or
+  // not there, null, and the model's and the mode's are the status bar's, as before; a bypass then in its header.
+  // Review of 11-23: sent into a hidden box, the mode was nowhere.)
+  const toComposer = !!modelAt
+  // (The permission mode too, beside the model — as Claude Code says it under its own box, and T3 Code and
+  // Codex's app in theirs: what the next message may do.)
+  const modeToComposer = toComposer
   const inside = (n: Node | null | undefined) => !!n && (!!box.current?.contains(n) || !!modelBox.current?.contains(n))
   const ctxBtn = useRef<HTMLButtonElement>(null)
   const modelBtn = useRef<HTMLButtonElement>(null)
@@ -3288,12 +3291,12 @@ function Runs({ head, statusAt, modelAt, quiet, meta, goal, active, mode, model,
             onClick={() => !mode.busy && setOpen(open === 'mode' ? false : 'mode')} // (not disabled while busy: the focus it has stays)
           >
             {mode.busy ? <span className="convo-spin" aria-hidden="true" /> : null}
-            {mode.busy ? t('convo.modeSwitching') : shownMode}
+            <span className="convo-runs-mode-name">{mode.busy ? t('convo.modeSwitching') : shownMode}</span>
             {!mode.busy && <ChevronsUpDown size={12} aria-hidden="true" />}
           </button>
         ) : (
           <span className={'convo-runs-item convo-runs-mode' + (bypass ? ' is-bypass' : '')} title={t('convo.modeHint')}>
-            {shownMode}
+            <span className="convo-runs-mode-name">{shownMode}</span>
           </span>
         ))
   const modePop = open === 'mode' && mode?.onPick && (

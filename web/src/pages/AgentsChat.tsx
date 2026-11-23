@@ -2722,7 +2722,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, keysActive, isSe
               <Square size={14} fill="currentColor" strokeWidth={0} />
             </button>
           )}
-          <ComposerModelSlot />
+          <ComposerModelSlot shown={!(waits && agent?.status === 'blocked') && !askHides && !panelOpen} />
           {stopShown ? (
             <button type="button" className="composer-send is-stop" onClick={() => press('stop')} aria-label={t('convo.stop')} title={t('convo.stop') + (isTouch ? '' : ' (Esc)')}>
               <Square size={14} fill="currentColor" strokeWidth={0} />
