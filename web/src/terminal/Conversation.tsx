@@ -1765,15 +1765,16 @@ export function ConversationView({
     lineageChildren.find((c) => c.status === 'done') ??
     lineageChildren[0]
   // The model, how hard it thinks, the context, the mode: under the
-  // composer, or on the workbench in the pane's header (11-23).
-  // (The status bar's place for the mode, of the pane in front: see Runs' modeAt.)
-  const [modeSlot, setModeSlot] = useState<HTMLElement | null>(null)
+  // composer, or on the workbench the status bar's — of the pane in front;
+  // a pane behind says only a bypass, in its header (11-23: the header was
+  // too full for the name, said the person).
+  const [runsSlot, setRunsSlot] = useState<HTMLElement | null>(null)
   const runsAt = (head: boolean) =>
     convo.status === 'ready' && convo.meta ? (
       <Runs
           head={head}
-          modeAt={head && inWb && kActive ? modeSlot : undefined}
-          modeQuiet={head && inWb && !kActive}
+          statusAt={head && inWb && kActive ? runsSlot : undefined}
+          quiet={head && inWb && !kActive}
           meta={convo.meta}
           goal={convo.bind?.agent === 'codex' ? goal : undefined}
           active={active}
@@ -1785,7 +1786,7 @@ export function ConversationView({
           auth={convo.bind?.auth}
           agentKind={convo.bind?.agent ?? agent?.program}
           compactPre={convo.entries.findLast((e) => e.role === 'note' && (e.parts[0]?.event?.kind === 'compact' || e.parts[0]?.event?.kind === 'idle_compact') && (e.parts[0]?.event?.pre ?? 0) > 0)?.parts[0]?.event?.pre}
-          onSide={sideBind ? () => setBtwShown(sideIdent) : undefined}
+          onSide={sideBind && !head ? () => setBtwShown(sideIdent) : undefined} // (on the workbench: in the header's menu)
         />
     ) : null
   return (
@@ -2135,7 +2136,7 @@ export function ConversationView({
           model={convo.meta?.model}
           onClose={() => {
             setBtwShown('')
-            requestAnimationFrame(() => root.current?.querySelector<HTMLElement>('.convo-runs-side')?.focus())
+            requestAnimationFrame(() => (root.current?.querySelector<HTMLElement>('.convo-runs-side') ?? root.current?.querySelector<HTMLElement>('.convo-bar-more'))?.focus()) // (on the workbench: the header's menu, where it was asked from)
           }}
         />
       )}
@@ -2275,7 +2276,7 @@ export function ConversationView({
         {composer}
         {!inWb && runsAt(false)}
         {/* (The pane the keys go to says its branch and quota on the status bar.) */}
-        {inWb && kActive && wbSlot && createPortal(<StatusFacts modeRef={setModeSlot} of={convo.status === 'ready' ? convo.of : undefined} meta={convo.status === 'ready' ? convo.meta : undefined} via={convo.bind?.via} auth={convo.bind?.auth} quota={convo.status === 'ready' ? quotaOf : undefined} />, wbSlot)}
+        {inWb && kActive && wbSlot && createPortal(<StatusFacts runsRef={setRunsSlot} of={convo.status === 'ready' ? convo.of : undefined} meta={convo.status === 'ready' ? convo.meta : undefined} via={convo.bind?.via} auth={convo.bind?.auth} quota={convo.status === 'ready' ? quotaOf : undefined} />, wbSlot)}
       </div>
       </div>
       {splitShown && splitPane && (
@@ -3045,7 +3046,7 @@ function compactThreshold(window: number, agentKind?: string, observedPre?: numb
   return { at, pct: Math.round(ratio * 100), source: 'estimate' }
 }
 
-function Runs({ head, modeAt, modeQuiet, meta, goal, active, mode, model, effort, quota, via, auth, agentKind, compactPre, onSide }: { head?: boolean; modeAt?: HTMLElement | null; modeQuiet?: boolean; meta: ConvoMeta; goal?: string; active: boolean; mode?: ModeSwitch; model?: ModelSwitch; effort?: EffortSwitch; quota?: QuotaOf; via?: string; auth?: string; agentKind?: string; compactPre?: number; onSide?: () => void }) {
+function Runs({ head, statusAt, quiet, meta, goal, active, mode, model, effort, quota, via, auth, agentKind, compactPre, onSide }: { head?: boolean; statusAt?: HTMLElement | null; quiet?: boolean; meta: ConvoMeta; goal?: string; active: boolean; mode?: ModeSwitch; model?: ModelSwitch; effort?: EffortSwitch; quota?: QuotaOf; via?: string; auth?: string; agentKind?: string; compactPre?: number; onSide?: () => void }) {
   const [open, setOpen] = useState<false | 'ctx' | 'model' | 'effort' | 'mode'>(false) // (which of its pop-ups)
   const [modelFilter, setModelFilter] = useState('')
   // (Another agent bound meanwhile — the pane's program changed: its model and effort menus, of the one before, closed;
@@ -3070,14 +3071,13 @@ function Runs({ head, modeAt, modeQuiet, meta, goal, active, mode, model, effort
     if (!model?.busy) setGoing('')
   }, [model?.busy])
   const box = useRef<HTMLDivElement>(null)
-  // (On the workbench the mode is the status bar's, as the design has it: its
-  // button and menu put there, in a box of their own — 11-23.)
-  const modeBox = useRef<HTMLDivElement>(null)
-  const inside = (n: Node | null | undefined) => !!n && (!!box.current?.contains(n) || !!modeBox.current?.contains(n))
+  const inside = (n: Node | null | undefined) => !!n && !!box.current?.contains(n)
+  const ctxBtn = useRef<HTMLButtonElement>(null)
   const modelBtn = useRef<HTMLButtonElement>(null)
   const effortBtn = useRef<HTMLButtonElement>(null)
   const modeBtn = useRef<HTMLButtonElement>(null)
   if (open && !active) setOpen(false) // (behind a terminal tab: its Escape is the terminal's)
+  if (open && quiet) setOpen(false) // (its pane no longer in front: its row gone from the status bar — review of 11-23)
   if (open === 'model' && !model?.can) setOpen(false) // (it works now: no switching)
   if (open === 'effort' && !effort?.can) setOpen(false)
   if (open === 'mode' && !mode?.onPick) setOpen(false)
@@ -3138,7 +3138,7 @@ function Runs({ head, modeAt, modeQuiet, meta, goal, active, mode, model, effort
     if (!open) return
     const vv = window.visualViewport
     const fit = () => {
-      const holder = open === 'mode' && modeBox.current ? modeBox.current : box.current
+      const holder = box.current
       const pop = holder?.querySelector<HTMLElement>('.convo-runs-pop')
       if (!pop || !holder) return
       const seen = vv ? vv.height : window.innerHeight
@@ -3148,11 +3148,12 @@ function Runs({ head, modeAt, modeQuiet, meta, goal, active, mode, model, effort
         return
       }
       const at = holder.getBoundingClientRect()
-      if (holder === modeBox.current) {
-        // (From the status bar, whose left part cuts what goes past it: placed on the page, above the button.)
-        pop.style.left = Math.max(12, Math.min(at.left - 6, window.innerWidth - pop.offsetWidth - 12)) + 'px'
-        pop.style.bottom = Math.round(window.innerHeight - at.top + 6) + 'px'
-        pop.style.maxHeight = Math.max(0, at.top - (vv ? vv.offsetTop : 0) - 16) + 'px'
+      if (statusAt) {
+        // (From the status bar, whose left part cuts what goes past it: placed on the page, above the button that opened it.)
+        const by = (open === 'model' ? modelBtn : open === 'effort' ? effortBtn : open === 'mode' ? modeBtn : ctxBtn).current?.getBoundingClientRect() ?? at
+        pop.style.left = Math.max(12, Math.min(by.left - 6, window.innerWidth - pop.offsetWidth - 12)) + 'px'
+        pop.style.bottom = Math.round(window.innerHeight - by.top + 6) + 'px'
+        pop.style.maxHeight = Math.max(0, by.top - (vv ? vv.offsetTop : 0) - 16) + 'px'
         return
       }
       // Each of them opens straight above this row, the composer under it
@@ -3180,7 +3181,7 @@ function Runs({ head, modeAt, modeQuiet, meta, goal, active, mode, model, effort
       vv?.removeEventListener('scroll', fit)
       window.removeEventListener('resize', fit)
     }
-  }, [open, sheet, head])
+  }, [open, sheet, head, statusAt])
   // Where its requests go, when that is not the model maker's own door:
   // the host, or, for Amazon's and Google's, which have no address of their
   // own to show, their name. "" is the quiet case, most of them.
@@ -3313,29 +3314,22 @@ function Runs({ head, modeAt, modeQuiet, meta, goal, active, mode, model, effort
         </div>
       )
   const modelShowsEffort = !!shownEffort && !!shownModel && (merged || !model || !!(model.efforts && model.can) || !(effort?.can || effort?.busy))
-  return (
-    <>
-    {modeAt &&
-      createPortal(
-        // (Its own box: the same rules of the focus and of Escape as the row's — see inside.)
-        <div className="convo-runs in-status" ref={modeBox} onBlur={(e) => open === 'mode' && !inside(e.relatedTarget as Node | null) && setOpen(false)}>
-          {modeEl}
-          {modePop}
-        </div>,
-        modeAt,
-      )}
-    {/* (The focus gone elsewhere, as by Tab, while the model menu is open, the list read or not: closed.) */}
-    <div className={'convo-runs' + (used > 0 ? ' has-ctx' : '') + (head ? ' in-head' : '')} ref={box} onBlur={(e) => (open === 'model' || open === 'effort' || open === 'mode') && !inside(e.relatedTarget as Node | null) && setOpen(false)}>
-      {/* (A pane not in front, on the workbench: its mode is said where it is, in front — but bypass, in red, always.) */}
-      {!modeAt &&
-        (!modeQuiet
-          ? modeEl
-          : bypass && (
-              // (Said only, not a button: pressed, the pane comes in front first and its button moves to the status bar — review of 11-23.)
-              <span className="convo-runs-item convo-runs-mode is-bypass" title={t('convo.modeHint')}>
-                {shownMode}
-              </span>
-            ))}
+  // (A pane not in front, on the workbench: what it runs is said when it is in front, on the status bar — but a
+  // bypass, in red, always. Said only, not a button: pressed, the pane comes in front first and the status bar
+  // has the button — review of 11-23.)
+  if (quiet)
+    return bypass ? (
+      <div className="convo-runs in-head">
+        <span className="convo-runs-item convo-runs-mode is-bypass" title={t('convo.modeHint')}>
+          {shownMode}
+        </span>
+      </div>
+    ) : null
+  if (statusAt === null) return null // (the status bar's place not there yet)
+  const row = (
+    // (The focus gone elsewhere, as by Tab, while the model menu is open, the list read or not: closed.)
+    <div className={'convo-runs' + (used > 0 ? ' has-ctx' : '') + (statusAt ? ' in-status' : head ? ' in-head' : '')} ref={box} onBlur={(e) => (open === 'model' || open === 'effort' || open === 'mode') && !inside(e.relatedTarget as Node | null) && setOpen(false)}>
+      {modeEl}
       {goal && (
         // (A Codex's goal: how it goes and what it has used, as its footer says.)
         <span className="convo-runs-item convo-runs-goal" title={goal}>
@@ -3456,7 +3450,7 @@ function Runs({ head, modeAt, modeQuiet, meta, goal, active, mode, model, effort
         </span>
       )}
       {used > 0 && (
-        <button type="button" className="convo-runs-item convo-runs-ctx" aria-expanded={open === 'ctx'} aria-label={t('convo.ctxLabel', { n: tokens(used) })} title={t('convo.ctxLabel', { n: tokens(used) })} onClick={() => setOpen(open === 'ctx' ? false : 'ctx')}>
+        <button ref={ctxBtn} type="button" className="convo-runs-item convo-runs-ctx" aria-expanded={open === 'ctx'} aria-label={t('convo.ctxLabel', { n: tokens(used) })} title={t('convo.ctxLabel', { n: tokens(used) })} onClick={() => setOpen(open === 'ctx' ? false : 'ctx')}>
           <Gauge part={full} tick={tick} />
           {tokens(used)}
         </button>
@@ -3592,7 +3586,7 @@ function Runs({ head, modeAt, modeQuiet, meta, goal, active, mode, model, effort
           })()}
         </div>
       )}
-      {!modeAt && modePop}
+      {modePop}
       {open === 'effort' && effort && (
         <div
           className={"convo-runs-pop convo-models" + (sheet ? " is-sheet" : "")}
@@ -3707,8 +3701,8 @@ function Runs({ head, modeAt, modeQuiet, meta, goal, active, mode, model, effort
         </div>
       )}
     </div>
-    </>
   )
+  return statusAt ? createPortal(row, statusAt) : row
 }
 
 // The subscription's quota (5 hours, the week), as Claude Code keeps it on
@@ -3918,7 +3912,7 @@ function useUpstream(of: string | undefined, branch: string | undefined): Upstre
 
 // What the pane in front says on the workbench's status bar: its branch,
 // where its requests go, the subscription's quota.
-function StatusFacts({ modeRef, of, meta, via, auth, quota }: { modeRef?: (el: HTMLElement | null) => void; of?: string; meta?: ConvoMeta; via?: string; auth?: string; quota?: QuotaOf }) {
+function StatusFacts({ runsRef, of, meta, via, auth, quota }: { runsRef?: (el: HTMLElement | null) => void; of?: string; meta?: ConvoMeta; via?: string; auth?: string; quota?: QuotaOf }) {
   const where = via || (auth === 'bedrock' ? 'Amazon Bedrock' : auth === 'vertex' ? 'Google Vertex AI' : '')
   const up = useUpstream(of, meta?.branch)
   const ab = up ? [up.ahead ? '↑' + up.ahead : '', up.behind ? '↓' + up.behind : ''].filter(Boolean).join(' ') : ''
@@ -3931,8 +3925,8 @@ function StatusFacts({ modeRef, of, meta, via, auth, quota }: { modeRef?: (el: H
           {ab && <span className="wb-status-ab">{ab}</span>}
         </StatusItem>
       )}
-      {/* (The pane in front's permission mode, its button and menu: Runs puts them here.) */}
-      <span className="wb-status-mode" ref={modeRef} />
+      {/* (The pane in front's mode, model, context — buttons and menus: Runs puts them here.) */}
+      <span className="wb-status-runs" ref={runsRef} />
       {where && <StatusItem title={t('convo.viaHint', { host: where })}>{t('convo.via', { host: where })}</StatusItem>}
       {quota && <QuotaChip key={'codex' in quota ? 'codex' : quota.sid + ' ' + quota.session} of={quota} />}
     </>

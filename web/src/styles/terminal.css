@@ -730,10 +730,13 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 .convo-runs.in-head .convo-runs-pop.convo-modes { width: 300px; }
 .convo-runs.in-head .convo-runs-side-name { display: none; } /* (its icon and its title say it: the header has little room) */
 .convo-runs.in-head .convo-runs-pop.convo-modes { right: 0; left: auto; }
-/* (On the status bar: the mode's button as the bar's items, its menu opening upwards.) */
-.convo-runs.in-status { flex: none; position: relative; margin: 0; min-height: 0; gap: 0; font: inherit; color: inherit; }
+/* (On the status bar, the pane in front's: its mode, model, context as the bar's items, their menus opening upwards.) */
+.convo-runs.in-status { flex: none; position: relative; margin: 0; min-height: 0; gap: 14px; font: inherit; color: inherit; }
 .convo-runs.in-status .convo-runs-item { height: 22px; padding: 0 6px; margin: 0 -6px; color: inherit; font: inherit; }
-.convo-runs.in-status .convo-runs-pop { position: fixed; top: auto; right: auto; width: 300px; max-width: calc(100vw - 24px); } /* (left and bottom: set as it opens, see Runs' fit) */
+.convo-runs.in-status > :last-child { margin-right: 0; } /* (its hover's tint not cut by the bar's edge) */
+.convo-runs.in-status .convo-runs-goal { display: block; max-width: 200px; overflow: hidden; text-overflow: ellipsis; } /* (its row does not shrink: what is past the bar's room is cut at its end, nothing over another) */
+.convo-runs.in-status .convo-runs-pop { position: fixed; top: auto; right: auto; width: 320px; max-width: calc(100vw - 24px); } /* (left and bottom: set as it opens, see Runs' fit) */
+.convo-runs.in-status .convo-runs-pop.convo-modes { width: 300px; }
 .convo-gauge.is-full .convo-gauge-fill { stroke: var(--term-warn-text); }
 /* The composer's keys: said while one types, not over a box at rest. */
 .convo-dock .composer-keys { opacity: 0; transition: opacity 0.15s; }
