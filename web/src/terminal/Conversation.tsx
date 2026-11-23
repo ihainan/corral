@@ -1894,7 +1894,8 @@ export function ConversationView({
               <>
                 {working && !convo.failing && !stop && <span className="convo-spin" aria-hidden="true" />}
                 {convo.failing ? (
-                  t('convo.paused', { time: clockMs(convo.okAt) })
+                  // (A phone with the banner under the header says it there: here only the dot.)
+                  <span className={convo.status === 'ready' ? 'convo-paused-words' : undefined}>{t('convo.paused', { time: clockMs(convo.okAt) })}</span>
                 ) : (
                   stop || (
                     <>
@@ -2170,6 +2171,14 @@ export function ConversationView({
           <span className="convo-nudge-text">{others.length > 1 ? t('convo.othersWaitingMany', { n: others.length, m: others.length - 1, title: others[0].title }) : t('convo.othersWaiting', { n: 1, title: others[0].title })}</span>
           <ChevronRight size={15} aria-hidden="true" />
         </button>
+      )}
+      {/* (A phone: its header has no room to say it — what is shown is of then, not now. The
+          desktop's header says "not updating · last …" already: workbench 11-23.) */}
+      {convo.failing && convo.status === 'ready' && (
+        <p className="convo-offline" role="status">
+          <TriangleAlert size={14} aria-hidden="true" />
+          {t('convo.offline', { time: clockMs(convo.okAt) })}
+        </p>
       )}
       <div className="convo-scroll-wrap">
         <div className="convo-scroll" ref={box}>

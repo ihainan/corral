@@ -694,6 +694,9 @@ html.modal-open, html.modal-open body { overflow: hidden; }
 .sheet-list { display: flex; flex-direction: column; margin: -4px -8px 0; }
 .sheet-list .menu-item { min-height: 52px; font-size: var(--fs-body); line-height: var(--lh-body); padding: 0 12px; }
 .sheet-list .menu-item svg { width: 18px; height: 18px; }
+/* (Where a row has no icon of its own, its words in line with those that do.) */
+.menu-ic-gap { flex: none; width: 16px; }
+.sheet-list .menu-ic-gap { width: 18px; }
 .sheet-heading { font-size: var(--fs-sub); line-height: var(--lh-sub); color: var(--fg-2); font-weight: 500; padding: 0 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* (A short screen: rows of 44, and Cancel a step apart from the last of them — ux1101 T21.) */
 @media (max-height: 700px) and (pointer: coarse) {

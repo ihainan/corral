@@ -2605,6 +2605,27 @@ function AgentChat({ cur, entries, all, titles, onPick, active, keysActive, isSe
           }}
         />
         <div className="composer-tools">
+          {/* (A phone: the three as one "+", its menu a sheet of large rows — workbench 11-23.) */}
+          <span className="composer-plus">
+            <Menu
+              label={t('composer.more')}
+              items={() => {
+                const recent = [...sentHistory()].reverse().slice(0, 5)
+                return [
+                  { label: t('term.upload'), icon: <Paperclip size={16} />, onSelect: () => fileRef.current?.click() },
+                  { label: t('term.commands'), icon: <SquareSlash size={16} />, onSelect: pressCommands },
+                  ...recent.map((h, i) => ({ label: h.trim().replace(/\s*\n\s*/g, ' ⏎ ').slice(0, 80), icon: i === 0 ? <History size={16} /> : <span className="menu-ic-gap" aria-hidden="true" />, separator: i === 0, onSelect: () => putBack(h) })),
+                  { label: t('hostHistory.open'), icon: recent.length ? <span className="menu-ic-gap" aria-hidden="true" /> : <History size={16} />, separator: recent.length === 0, onSelect: () => setHostHistory(true) },
+                ]
+              }}
+              button={(open, toggle) => (
+                <button type="button" className="icon-btn" aria-expanded={open} aria-haspopup="menu" onClick={toggle} aria-label={t('composer.more')} title={t('composer.more')}>
+                  <Plus size={20} />
+                </button>
+              )}
+            />
+          </span>
+          <span className="composer-tools-full">
           <button type="button" className="icon-btn" onClick={() => fileRef.current?.click()} aria-label={t('term.upload')} title={t('term.upload')}>
             <Paperclip size={18} />
           </button>
@@ -2637,6 +2658,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, keysActive, isSe
           >
             <SquareSlash size={18} />
           </button>
+          </span>
           {hostHistory && (
             <HostHistoryDialog
               sid={sid}
