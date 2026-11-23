@@ -4464,6 +4464,22 @@ export function AgentList({ rows, menus, onPicked, placed, query: given, onQuery
     const el = toolbarRef.current
     setHi(query.trim() && el ? (shownRows(el)[0]?.dataset.row ?? null) : null)
   }, [query])
+  // (On a row itself — the list opened by its button puts the focus on the one shown —: Up and Down go to the
+  // row before or after, Return opens it as a button does; Up from the first, back to the search box. The person
+  // after the first fix, 11-23: opened, the keys did nothing.)
+  const rowNav = (e: React.KeyboardEvent<HTMLButtonElement>) => {
+    if ((e.key !== 'ArrowDown' && e.key !== 'ArrowUp') || e.altKey || e.metaKey || e.ctrlKey || e.shiftKey) return
+    const all = shownRows(e.currentTarget)
+    const at = all.indexOf(e.currentTarget)
+    if (at < 0) return
+    e.preventDefault()
+    e.stopPropagation() // (not the conversation's own keys, which scroll it)
+    const field = toolbarRef.current?.querySelector<HTMLInputElement>('.list-search input')
+    if (e.key === 'ArrowUp' && at === 0 && field) return field.focus()
+    const to = all[e.key === 'ArrowDown' ? (at + 1) % all.length : (at - 1 + all.length) % all.length]
+    to.focus()
+    to.scrollIntoView({ block: 'nearest' })
+  }
   const navKey = (e: React.KeyboardEvent<HTMLInputElement>) => {
     if (composing(e.nativeEvent) || e.altKey || e.metaKey || e.ctrlKey) return
     const all = shownRows(e.currentTarget)
@@ -4677,7 +4693,10 @@ export function AgentList({ rows, menus, onPicked, placed, query: given, onQuery
                 onPicked?.()
                 r.onPick() // (of the one shown: nothing, or the end of a switch to another; the list may be of before)
               }}
-              onKeyDown={hasMenu ? menuKey(r.key) : undefined}
+              onKeyDown={(e) => {
+                rowNav(e)
+                if (!e.defaultPrevented && hasMenu) menuKey(r.key)(e)
+              }}
             >
               <AgentIcon program={r.program} size={compact ? (isChild ? 16 : 18) : isChild ? 18 : 20} bare />
               {/* (Two lines a row, always: its name; where it is — the session's title,
