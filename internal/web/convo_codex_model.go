@@ -1,6 +1,7 @@
 package web
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -549,6 +550,7 @@ if [ -n "$1" ] && [ "$1" -gt 0 ] 2>/dev/null && [ -r "/proc/$1/environ" ]; then
 fi
 f="$h/models_cache.json"
 [ -f "$f" ] || exit 3
+printf 'now=%s\n' "$(date +%s)"
 if command -v python3 >/dev/null 2>&1; then
   sz=$(wc -c <"$f" 2>/dev/null | tr -d '[:space:]') || exit 3
   [ -n "$sz" ] && [ "$sz" -gt 0 ] && [ "$sz" -le 4194304 ] 2>/dev/null || exit 3
@@ -680,7 +682,34 @@ func (s *Server) readCodexModelsCache(ctx context.Context, sess *term.Session, p
 	if err != nil || len(out) > 4<<20 {
 		return nil, time.Time{}, false
 	}
-	return parseCodexModelsCache(out, time.Now())
+	return parseCodexModelsCacheAt(out, time.Now())
+}
+
+// parseCodexModelsCacheAt reads the command's output: its host's clock first
+// ("now=<unix seconds>"), then the cache. fetched_at is written by that host's
+// clock, so its age is judged by that clock, and it is told in the gateway's
+// (shifted by the two clocks' difference) to be held against a switch's
+// failure time, which is the gateway's — a host's clock ahead or behind no
+// longer lets a list the switch refused back in, or keeps a newer one out
+// (review E, 11-24). Without that line, the gateway's clock for both.
+func parseCodexModelsCacheAt(out []byte, gatewayNow time.Time) ([]modelOpt, time.Time, bool) {
+	hostNow := gatewayNow
+	if rest, ok := bytes.CutPrefix(out, []byte("now=")); ok {
+		line, body, found := bytes.Cut(rest, []byte("\n"))
+		if !found {
+			return nil, time.Time{}, false
+		}
+		sec, err := strconv.ParseInt(strings.TrimSpace(string(line)), 10, 64)
+		if err != nil || sec <= 0 {
+			return nil, time.Time{}, false
+		}
+		hostNow, out = time.Unix(sec, 0), body
+	}
+	opts, fetchedAt, ok := parseCodexModelsCache(out, hostNow)
+	if !ok {
+		return nil, time.Time{}, false
+	}
+	return opts, fetchedAt.Add(gatewayNow.Sub(hostNow)), true
 }
 
 // keptCodexModels serves a previously read Codex model list immediately

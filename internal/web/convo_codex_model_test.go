@@ -1,6 +1,7 @@
 package web
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -8,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -466,12 +468,15 @@ func TestCodexModelsCacheCommand(t *testing.T) {
 	if err != nil {
 		t.Fatalf("codexModelsCacheCommand failed: %v", err)
 	}
-	opts, fetchedAt, ok := parseCodexModelsCache(out, now.Add(time.Minute))
+	if !bytes.HasPrefix(out, []byte("now=")) {
+		t.Fatalf("output does not start with the host's clock: %q", out[:min(len(out), 40)])
+	}
+	opts, fetchedAt, ok := parseCodexModelsCacheAt(out, time.Now())
 	if !ok || len(opts) != 1 || opts[0].Label != "GPT-5.6 (Sol)" || opts[0].Slug != "gpt-5.6" || opts[0].Desc != "Fast" {
 		t.Fatalf("parsed output: ok=%v %+v (raw %d bytes)", ok, opts, len(out))
 	}
-	if !fetchedAt.Equal(now) {
-		t.Fatalf("fetchedAt = %v, want %v", fetchedAt, now)
+	if d := fetchedAt.Sub(now); d < -2*time.Second || d > 2*time.Second {
+		t.Fatalf("fetchedAt = %v, want about %v", fetchedAt, now)
 	}
 	if _, err := exec.LookPath("python3"); err == nil && len(out) > 2048 {
 		t.Fatalf("expected python3 extractor to strip instructions_template, got %d bytes", len(out))
@@ -488,11 +493,12 @@ func TestCodexModelsCacheCommand(t *testing.T) {
 	if err != nil {
 		t.Fatalf("codexModelsCacheCommand (supported_in_api=false) failed: %v", err)
 	}
+	_, body, found := bytes.Cut(out, []byte("\n"))
 	var rawCheck map[string]any
-	if json.Unmarshal(out, &rawCheck) != nil {
+	if !found || json.Unmarshal(body, &rawCheck) != nil {
 		t.Fatalf("invalid json from extractor: %q", string(out))
 	}
-	if _, _, ok := parseCodexModelsCache(out, now.Add(time.Minute)); ok {
+	if _, _, ok := parseCodexModelsCacheAt(out, time.Now()); ok {
 		t.Fatalf("expected supported_in_api=false to be preserved and rejected")
 	}
 
@@ -523,6 +529,42 @@ func TestCodexModelsCacheCommand(t *testing.T) {
 		_, err = c.Output()
 		if !errors.As(err, &ee) || ee.ExitCode() != 3 {
 			t.Fatalf("newline in CODEX_HOME: got err=%v, want exit 3", err)
+		}
+	}
+}
+
+// A host's clock off the gateway's: fetched_at is aged by the host's clock and
+// told in the gateway's, so a switch's failure (gateway time) keeps refusing
+// the list read before it, and lets one read after it in (review E, 11-24).
+func TestCodexModelsCacheHostClockSkew(t *testing.T) {
+	gw := time.Date(2026, 11, 24, 12, 0, 0, 0, time.UTC)
+	out := func(hostNow, fetched time.Time) []byte {
+		return []byte("now=" + strconv.FormatInt(hostNow.Unix(), 10) + "\n" + `{"fetched_at":"` + fetched.Format(time.RFC3339) + `","models":[{"slug":"gpt-5.6","visibility":"list","supported_in_api":true}]}`)
+	}
+	for _, skew := range []time.Duration{-30 * time.Minute, 0, 30 * time.Minute} {
+		host := gw.Add(skew)
+		// Read 10 minutes ago by the host's clock: 10 minutes ago by the gateway's.
+		_, at, ok := parseCodexModelsCacheAt(out(host, host.Add(-10*time.Minute)), gw)
+		if !ok || !at.Equal(gw.Add(-10*time.Minute)) {
+			t.Fatalf("skew %v: ok=%v at=%v, want %v", skew, ok, at, gw.Add(-10*time.Minute))
+		}
+		// 11 hours old by the host's clock: still in its 12; 13: not, whatever the gateway's clock says.
+		if _, _, ok := parseCodexModelsCacheAt(out(host, host.Add(-11*time.Hour)), gw); !ok {
+			t.Fatalf("skew %v: an 11-hour-old cache refused", skew)
+		}
+		if _, _, ok := parseCodexModelsCacheAt(out(host, host.Add(-13*time.Hour)), gw); ok {
+			t.Fatalf("skew %v: a 13-hour-old cache taken", skew)
+		}
+	}
+	// No clock line: the gateway's clock for both, as before.
+	raw := []byte(`{"fetched_at":"` + gw.Add(-time.Minute).Format(time.RFC3339) + `","models":[{"slug":"a","visibility":"list"}]}`)
+	if _, at, ok := parseCodexModelsCacheAt(raw, gw); !ok || !at.Equal(gw.Add(-time.Minute)) {
+		t.Fatalf("no clock line: ok=%v at=%v", ok, at)
+	}
+	// A clock line that is not one: refused.
+	for _, bad := range []string{"now=x\n{}", "now=123", "now=-5\n{}"} {
+		if _, _, ok := parseCodexModelsCacheAt([]byte(bad), gw); ok {
+			t.Fatalf("%q taken", bad)
 		}
 	}
 }
