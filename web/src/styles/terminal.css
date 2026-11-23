@@ -220,6 +220,7 @@ html.term-mode body { position: fixed; inset: 0; }
 .composer-model { display: contents; }
 .convo-runs.in-composer { flex: none; display: flex; align-items: center; gap: 2px; margin: 0 4px 0 0; min-height: 0; font-size: var(--fs-note); line-height: var(--lh-note); }
 .convo-runs.in-composer .convo-runs-pop { position: fixed; top: auto; right: auto; width: 320px; max-width: calc(100vw - 24px); } /* (left and bottom: set as it opens, see Runs' fit) */
+.convo-runs.in-composer .convo-runs-pop.convo-modes { width: 300px; }
 /* (A phone: one "+" for the attachment, the commands and what was sent before.) */
 @media (max-width: 759.98px) {
   .composer-plus { display: contents; }

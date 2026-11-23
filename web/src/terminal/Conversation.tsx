@@ -1767,9 +1767,10 @@ export function ConversationView({
     lineageChildren.find((c) => c.status === 'done') ??
     lineageChildren[0]
   // The model, how hard it thinks, the context, the mode: under the
-  // composer, or on the workbench the status bar's — of the pane in front;
-  // a pane behind says only a bypass, in its header (11-23: the header was
-  // too full for the name, said the person).
+  // composer, or on the workbench the status bar's — of the pane in front —,
+  // but the model and the mode in each pane's composer, by its send button
+  // (11-23: the header was too full for the name, said the person; the model
+  // and the mode are what the next message is sent with).
   const [runsSlot, setRunsSlot] = useState<HTMLElement | null>(null)
   const [modelSlot, setModelSlot] = useState<HTMLElement | null>(null) // (in the composer: see ComposerModelSlot)
   const runsAt = (head: boolean) =>
@@ -3086,13 +3087,16 @@ function Runs({ head, statusAt, modelAt, quiet, meta, goal, active, mode, model,
   const box = useRef<HTMLDivElement>(null)
   const modelBox = useRef<HTMLDivElement>(null)
   const toComposer = modelAt !== undefined // (null: its place there not yet mounted)
+  // (The permission mode too, beside the model, where its composer is there — as Claude Code says it under its own
+  // box, and T3 Code and Codex's app in theirs: what the next message may do. No composer: the status bar's, as before.)
+  const modeToComposer = !!modelAt
   const inside = (n: Node | null | undefined) => !!n && (!!box.current?.contains(n) || !!modelBox.current?.contains(n))
   const ctxBtn = useRef<HTMLButtonElement>(null)
   const modelBtn = useRef<HTMLButtonElement>(null)
   const effortBtn = useRef<HTMLButtonElement>(null)
   const modeBtn = useRef<HTMLButtonElement>(null)
   if (open && !active) setOpen(false) // (behind a terminal tab: its Escape is the terminal's)
-  if (open && quiet && open !== 'model' && open !== 'effort') setOpen(false) // (its pane no longer in front: its row gone from the status bar — review of 11-23; the model's are its composer's)
+  if (open && quiet && open !== 'model' && open !== 'effort' && !(open === 'mode' && modeToComposer)) setOpen(false) // (its pane no longer in front: its row gone from the status bar — review of 11-23; the model's and the mode's are its composer's)
   if (open === 'model' && !model?.can) setOpen(false) // (it works now: no switching)
   if (open === 'effort' && !effort?.can) setOpen(false)
   if (open === 'mode' && !mode?.onPick) setOpen(false)
@@ -3153,7 +3157,7 @@ function Runs({ head, statusAt, modelAt, quiet, meta, goal, active, mode, model,
     if (!open) return
     const vv = window.visualViewport
     const fit = () => {
-      const holder = (open === 'model' || open === 'effort') && modelBox.current ? modelBox.current : box.current
+      const holder = (open === 'model' || open === 'effort' || (open === 'mode' && modeToComposer)) && modelBox.current ? modelBox.current : box.current
       const pop = holder?.querySelector<HTMLElement>('.convo-runs-pop')
       if (!pop || !holder) return
       const seen = vv ? vv.height : window.innerHeight
@@ -3576,20 +3580,22 @@ function Runs({ head, statusAt, modelAt, quiet, meta, goal, active, mode, model,
     modelAt &&
     createPortal(
       // (Its own box: the same rules of the focus and of Escape as the row's — see inside.)
-      <div className="convo-runs in-composer" ref={modelBox} onBlur={(e) => (open === 'model' || open === 'effort') && !inside(e.relatedTarget as Node | null) && setOpen(false)}>
+      <div className="convo-runs in-composer" ref={modelBox} onBlur={(e) => (open === 'model' || open === 'effort' || open === 'mode') && !inside(e.relatedTarget as Node | null) && setOpen(false)}>
+        {modeEl}
         {modelChips}
         {modelPops}
+        {modePop}
       </div>,
       modelAt,
     )
   // (A pane not in front, on the workbench: what it runs is said when it is in front, on the status bar — but a
-  // bypass, in red, always. Said only, not a button: pressed, the pane comes in front first and the status bar
-  // has the button — review of 11-23.)
+  // bypass, in red, always: in its composer, else in its header. Said only there, not a button: pressed, the pane
+  // comes in front first and the status bar has the button — review of 11-23.)
   if (quiet)
     return (
       <>
         {modelPart}
-        {bypass && (
+        {bypass && !modeToComposer && (
           <div className="convo-runs in-head">
             <span className="convo-runs-item convo-runs-mode is-bypass" title={t('convo.modeHint')}>
               {shownMode}
@@ -3602,7 +3608,7 @@ function Runs({ head, statusAt, modelAt, quiet, meta, goal, active, mode, model,
   const row = (
     // (The focus gone elsewhere, as by Tab, while the model menu is open, the list read or not: closed.)
     <div className={'convo-runs' + (used > 0 ? ' has-ctx' : '') + (statusAt ? ' in-status' : head ? ' in-head' : '')} ref={box} onBlur={(e) => (open === 'model' || open === 'effort' || open === 'mode') && !inside(e.relatedTarget as Node | null) && setOpen(false)}>
-      {modeEl}
+      {!modeToComposer && modeEl}
       {goal && (
         // (A Codex's goal: how it goes and what it has used, as its footer says.)
         <span className="convo-runs-item convo-runs-goal" title={goal}>
@@ -3657,7 +3663,7 @@ function Runs({ head, statusAt, modelAt, quiet, meta, goal, active, mode, model,
         />
       )}
       {!toComposer && modelPops}
-      {modePop}
+      {!modeToComposer && modePop}
       {open === 'ctx' && (
         <div className={'convo-runs-pop' + (sheet ? ' is-sheet' : '')} role="dialog" aria-label={t('convo.ctxTitle')}>
           {/* Blocks of one look each (11-14: three kinds of heading, a count
