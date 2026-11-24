@@ -2024,6 +2024,15 @@ button.convo-queue-row.is-note:last-child { border-radius: 0 0 var(--r-lg) var(-
   font-size: var(--fs-note); line-height: var(--lh-note); overflow-wrap: anywhere;
 }
 .convo-row-tip-wait svg { flex: none; margin-top: 2px; }
+.convo-row-tip-wait.is-failed { background: color-mix(in srgb, var(--term-danger-text) 10%, transparent); color: var(--term-danger-text); }
+/* (What it is at, in its own words or its step: plain, two lines at most — doc UI item 9, 11-24.) */
+.convo-row-tip-glance {
+  display: flex; align-items: flex-start; gap: 8px; min-width: 0;
+  font-size: var(--fs-note); line-height: var(--lh-note); color: var(--term-fg-2);
+}
+/* (Its mark as wide as the lines' below, the head icon's 18: marks and words in line — as doc UI item 7 asked.) */
+.convo-row-tip-glance svg { flex: none; width: 18px; margin-top: 2px; color: var(--term-fg-3); }
+.convo-row-tip-glance span { min-width: 0; overflow: hidden; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow-wrap: anywhere; }
 .convo-row-tip-meta { display: flex; flex-direction: column; gap: 4px; padding-top: 6px; border-top: 1px solid var(--term-line); }
 /* (Each line's mark drawn 12 but given the head icon's 18 of width, and its gap: the marks centred under that
    icon, the words in line with the title's — doc UI item 7, 11-24.) */

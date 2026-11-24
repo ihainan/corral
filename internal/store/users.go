@@ -597,14 +597,19 @@ func boolInt(b bool) int {
 const MaxAvatarBytes = 200 << 10
 
 // SetAvatar keeps the picture (its type already checked by the caller) and
-// returns when it was set.
+// returns its version: when it was set, in milliseconds, and always past the
+// one before — it names the picture's address, so two set within the same
+// moment must not share one (review of 11-24: by the second, the second
+// picture kept the first's address, and the browser the first picture).
 func (s *Store) SetAvatar(ctx context.Context, userID int64, mime string, image []byte) (int64, error) {
-	now := s.unix()
-	_, err := s.db.ExecContext(ctx,
+	var at int64
+	err := s.db.QueryRowContext(ctx,
 		`INSERT INTO user_avatars (user_id, mime, image, updated_at) VALUES (?, ?, ?, ?)
-		 ON CONFLICT(user_id) DO UPDATE SET mime = excluded.mime, image = excluded.image, updated_at = excluded.updated_at`,
-		userID, mime, image, now)
-	return now, err
+		 ON CONFLICT(user_id) DO UPDATE SET mime = excluded.mime, image = excluded.image,
+		   updated_at = MAX(excluded.updated_at, user_avatars.updated_at + 1)
+		 RETURNING updated_at`,
+		userID, mime, image, s.now().UnixMilli()).Scan(&at)
+	return at, err
 }
 
 // Avatar: the picture and its type; ErrNotFound where there is none.

@@ -83,6 +83,11 @@ func TestAvatar(t *testing.T) {
 		t.Fatalf("set: %d %s", res.StatusCode, b)
 	}
 	at := strconv.Itoa(int(admin.do("GET", "/api/me", nil).json()["avatar_at"].(float64)))
+	// Set again at once, it has a new version all the same: its address names it.
+	if res, b := admin.raw("PUT", "/api/me/avatar", "image/png", pic, true); res.StatusCode != 200 || strings.Contains(string(b), `"avatar_at":`+at+`,`) || strings.Contains(string(b), `"avatar_at":`+at+`}`) {
+		t.Fatalf("set again: %d %s (was %s)", res.StatusCode, b, at)
+	}
+	at = strconv.Itoa(int(admin.do("GET", "/api/me", nil).json()["avatar_at"].(float64)))
 
 	// Another account sees it; one signed out does not.
 	bob := h.member(admin, "bob")

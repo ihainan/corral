@@ -1447,14 +1447,6 @@ export function ConversationView({
     setDockBigState(v)
     keepDock({ big: v })
   }
-  // (Where the bar's ⓘ is hidden — a phone's width, terminal.css —: the session's card from the ⋮ menu.)
-  const [narrow, setNarrow] = useState(() => window.matchMedia('(max-width: 640px)').matches)
-  useEffect(() => {
-    const mq = window.matchMedia('(max-width: 640px)')
-    const on = () => setNarrow(mq.matches)
-    mq.addEventListener('change', on)
-    return () => mq.removeEventListener('change', on)
-  }, [])
   const dockBtn = useRef<HTMLButtonElement>(null)
   // (Another agent in the pane — its process or session: the card's last tap,
   // its base the last one's repository's, is not this one's — review, 11-15.)
@@ -2041,9 +2033,10 @@ export function ConversationView({
                 ...(hideDesktopLineage && lineageBar?.onNewSubagent ? [{ label: t('convo.lineage.newSubagent'), icon: <Plus size={16} />, onSelect: () => lineageBar.onNewSubagent?.() }] : []),
                 // (All steps opened or folded: the menu's, as Ctrl+O is a Mac's only.)
                 { label: t(allOpen === 0 ? 'pageKeys.openAll' : allOpen === 1 ? 'pageKeys.openFull' : 'pageKeys.foldAll'), icon: allOpen === 2 ? <ChevronsDownUp size={16} /> : <ChevronsUpDown size={16} />, keys: mac ? ['Ctrl+O'] : undefined, disabled: !list.length, onSelect: toggleAllOpen },
-                // (Only where the bar has no ⓘ of its own for it — beside the dock's button, a way to its info tab;
-                // on a phone, where the ⓘ is hidden. Doc item 38, 11-24: the menu said again what the button next to it does.)
-                ...(convo.of && convo.status === 'ready' && (dockable || narrow)
+                // (Only where the bar shows no ⓘ for it, as the menu opens: beside the dock's button, a way to its info
+                // tab; a phone's width or a split, where terminal.css hides the ⓘ. Doc item 38, 11-24: the menu said
+                // again what the button next to it does; review of 11-24: then a phone, a split, had no way to it.)
+                ...(convo.of && convo.status === 'ready' && (dockable || !cardBtn.current?.offsetParent)
                   ? [{
                       label: t('card.open'),
                       icon: <Info size={16} />,
@@ -5057,6 +5050,10 @@ export function AgentList({ rows, menus, onPicked, placed, query: given, onQuery
                     : ''
         const tipParent = tipRow.parentKey ? rows.find((p) => p.key === tipRow.parentKey)?.title : ''
         const cmds = tipRow.cmds?.list ?? []
+        // (More of it, doc UI item 9, 11-24: what it is at — the step under way, or how its answer begins —, the
+        // model that answered, why its turn failed. What waits on the person is said above already.)
+        const tipGlance = tipRow.status !== 'blocked' ? (tipRow.glance?.() ?? '') : ''
+        const tipModel = tipRow.model ? modelName(tipRow.model) : ''
         const cardW = 320
         const vw = typeof window !== 'undefined' ? window.innerWidth : 1280
         const vh = typeof window !== 'undefined' ? window.innerHeight : 800
@@ -5078,7 +5075,19 @@ export function AgentList({ rows, menus, onPicked, placed, query: given, onQuery
                 <span>{tipRow.now}</span>
               </div>
             )}
-            {(tipParent || tipRow.sessionGroup || tipRow.projectKey || tipSince) && (
+            {tipGlance && (
+              <div className="convo-row-tip-glance">
+                <Activity size={13} aria-hidden="true" />
+                <span>{tipGlance}</span>
+              </div>
+            )}
+            {tipRow.failed && (
+              <div className="convo-row-tip-wait is-failed">
+                <TriangleAlert size={13} aria-hidden="true" />
+                <span>{failedWhy(tipRow.failed)}</span>
+              </div>
+            )}
+            {(tipParent || tipRow.sessionGroup || tipRow.projectKey || tipSince || tipModel) && (
               <div className="convo-row-tip-meta">
                 {tipParent && (
                   <div className="convo-row-tip-row">
@@ -5097,6 +5106,12 @@ export function AgentList({ rows, menus, onPicked, placed, query: given, onQuery
                   <div className="convo-row-tip-row">
                     <Folder size={12} aria-hidden="true" />
                     <span className="convo-row-tip-val is-mono">{tipRow.projectKey}</span>
+                  </div>
+                )}
+                {tipModel && (
+                  <div className="convo-row-tip-row">
+                    <Cpu size={12} aria-hidden="true" />
+                    <span className="convo-row-tip-val">{tipModel}</span>
                   </div>
                 )}
               </div>

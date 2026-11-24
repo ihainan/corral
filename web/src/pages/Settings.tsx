@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import { ArrowLeft, Bot, Brain, ChevronDown, ChevronRight, Film, Keyboard, KeyRound, Languages, LogOut, Minus, Plus, ScrollText, Search, SlidersHorizontal, SquareTerminal, User, Users, X } from 'lucide-react'
 import { disablePush, enablePush, pushState, syncPush, type PushState } from '../push'
-import { api, ApiError, errorText, type Me } from '../api'
+import { api, ApiError, authGen, errorText, type Me } from '../api'
 import { getLang, hasKey, setLang, t, type I18nKey, type Lang } from '../i18n'
 import { setPrefs, usePrefs } from '../prefs'
 import { linkHandler, navigate } from '../router'
@@ -15,7 +15,7 @@ import { playChime } from '../terminal/chime'
 import { setScreenReader, useScreenReader } from '../terminal/screenReader'
 import { saveTranslateConfig, testTranslateConfig, TRANSLATE_LANGS, useTranslateConfig, type TranslateConfig, type TranslateMode } from '../terminal/thoughtTranslate'
 import { Markdown } from '../terminal/markdown'
-import { Avatar, squareAvatar } from '../components/Avatar'
+import { Avatar, AvatarTooLarge, squareAvatar } from '../components/Avatar'
 
 // Desktop Settings modal event: opens the two-column native-style Settings
 // dialog over the current workspace (preserving live agents & terminals).
@@ -1228,7 +1228,7 @@ function TranslateConfigDialog({ config, onClose }: { config: TranslateConfig | 
 // small square in the browser (squareAvatar) and only then sent. preview: shown
 // in the row itself — the dialog's account part has it in its head already.
 function AvatarSetting({ preview }: { preview: boolean }) {
-  const { me, setMe } = useSession()
+  const { me, patchMe } = useSession()
   const toast = useToast()
   const input = useRef<HTMLInputElement>(null)
   const [busy, setBusy] = useState(false)
@@ -1237,14 +1237,19 @@ function AvatarSetting({ preview }: { preview: boolean }) {
     if (!f || busy) return
     setBusy(true)
     try {
+      // (Of the account it was chosen for: one signed out meanwhile, another in, is not sent it — review of 11-24.)
+      const gen = authGen()
       let pic: Blob
       try {
         pic = await squareAvatar(f)
-      } catch {
-        toast(t('settings.avatarUnreadable'), true)
+      } catch (err) {
+        if (gen === authGen()) toast(t(err instanceof AvatarTooLarge ? 'settings.avatarTooLarge' : 'settings.avatarUnreadable'), true)
         return
       }
-      setMe(await api<Me>('PUT', '/api/me/avatar', pic))
+      if (gen !== authGen()) return
+      const m = await api<Me>('PUT', '/api/me/avatar', pic)
+      if (gen !== authGen()) return
+      patchMe({ avatar_at: m.avatar_at })
       toast(t('settings.avatarSaved'))
     } catch (err) {
       toast(errorText(err), true)
@@ -1257,7 +1262,10 @@ function AvatarSetting({ preview }: { preview: boolean }) {
     if (busy) return
     setBusy(true)
     try {
-      setMe(await api<Me>('DELETE', '/api/me/avatar'))
+      const gen = authGen()
+      await api<Me>('DELETE', '/api/me/avatar')
+      if (gen !== authGen()) return
+      patchMe({ avatar_at: undefined })
       toast(t('settings.avatarRemoved'))
     } catch (err) {
       toast(errorText(err), true)
@@ -1282,7 +1290,7 @@ function AvatarSetting({ preview }: { preview: boolean }) {
 }
 
 function ProfileSetting({ onDirty }: { onDirty: (dirty: boolean) => void }) {
-  const { me, setMe } = useSession()
+  const { me, patchMe } = useSession()
   const toast = useToast()
   const [display, setDisplay] = useState(me?.display_name ?? '')
   const [busy, setBusy] = useState(false)
@@ -1293,8 +1301,9 @@ function ProfileSetting({ onDirty }: { onDirty: (dirty: boolean) => void }) {
     if (busy || !dirty) return
     setBusy(true)
     try {
+      const gen = authGen()
       const m = await api<Me>('PUT', '/api/me', { display_name: display })
-      setMe(m)
+      if (gen === authGen()) patchMe({ display_name: m.display_name }) // (its name only: a picture set meanwhile stays)
       toast(t('settings.saved'))
     } catch (err) {
       toast(errorText(err), true)

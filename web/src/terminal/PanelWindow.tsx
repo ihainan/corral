@@ -274,7 +274,8 @@ export function PanelWindow({ sid, active, press, onSettled, toast, live, onFull
     [allowNotice, loaded, lines],
   )
   const usePty = !!paneId && !ptyFailed && (!needNoticeCheck || rawView || (loaded && !notice) || (lookGaveUp && !loaded))
-  const waitingLook = !!paneId && !ptyFailed && needNoticeCheck && !loaded && !lookGaveUp
+  // (Counted only while it is in front: one behind is not read — its look waits — and would go to the terminal unread.)
+  const waitingLook = active && !!paneId && !ptyFailed && needNoticeCheck && !loaded && !lookGaveUp
   useEffect(() => {
     if (!waitingLook) return
     const timer = setTimeout(() => setLookGaveUp(true), NOTICE_LOOK_MS)

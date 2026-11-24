@@ -30,6 +30,7 @@ export interface ConvoListRow {
   bg?: 'running' | 'stale' // (its turn over, subagents still out)
   model?: string // (the model its last turn was answered by, where known: said on a child's row)
   failed?: string // (done, not seen yet: the API error its turn ended on — workbench 11-23)
+  glance?: () => string // (what it is at — the step under way, or how its answer begins —, read only when its card is shown: doc UI item 9, 11-24)
   cmds?: RowCmds // (its turn over: commands it left running in the background)
   since?: number // (unix ms) when its status last changed
   current: boolean

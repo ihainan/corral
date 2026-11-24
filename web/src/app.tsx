@@ -26,6 +26,9 @@ interface Session {
   boot: Bootstrap
   me: Me | null
   setMe: (m: Me | null) => void
+  // patchMe: some fields of the signed-in account, over what is known of it now — an answer
+  // to one change (its picture, its name) does not undo another made meanwhile (review of 11-24).
+  patchMe: (p: Partial<Me>) => void
 }
 
 const SessionCtx = createContext<Session>(null!)
@@ -68,6 +71,12 @@ export function App() {
     meRef.current = m
     setMeState(m)
   }, [])
+  const patchMe = useCallback(
+    (p: Partial<Me>) => {
+      if (meRef.current) setMe({ ...meRef.current, ...p })
+    },
+    [setMe],
+  )
   useEffect(() => {
     const onStorage = (e: StorageEvent) => e.key === AUTH_EVENT && location.reload()
     window.addEventListener('storage', onStorage)
@@ -147,7 +156,7 @@ export function App() {
   if (!boot) return <Booting />
 
   return (
-    <SessionCtx.Provider value={{ boot, me, setMe }}>
+    <SessionCtx.Provider value={{ boot, me, setMe, patchMe }}>
       <ToastProvider>
         <PushSync userId={me?.must_change_password ? undefined : me?.id} />
         <UpdateNotice loaded={loadedVersion.current} />
