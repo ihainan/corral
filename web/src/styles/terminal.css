@@ -438,7 +438,7 @@ html.kb-open .keybar { padding-bottom: 6px; }
   border: 0; border-radius: var(--r) var(--r) 0 0; background: none; color: var(--term-fg-2); font: 500 13px/1 var(--font-ui); cursor: pointer;
   user-select: none; -webkit-user-select: none; -webkit-touch-callout: none;
 }
-.term-tabs:not(.agent-tabs) .term-tab { flex-basis: 220px; max-width: 240px; } /* (a host and a session's name) */
+.term-tabs:not(.agent-tabs) .term-tab { flex-basis: 220px; min-width: 120px; max-width: 240px; } /* (a host and a session's name, and its counts) */
 .term-tab + .term-tab::before { content: ''; position: absolute; left: 0; top: 50%; width: 1px; height: 14px; margin-top: -7px; background: var(--term-line); pointer-events: none; }
 .term-tab:hover::before, .term-tab:hover + .term-tab::before,
 .term-tab[aria-current="page"]::before, .term-tab[aria-current="page"] + .term-tab::before,
@@ -448,7 +448,7 @@ html.kb-open .keybar { padding-bottom: 6px; }
    the close's room always kept (the tab does not grow as it shows), shown
    on the tab in front, the one under the pointer, or reached by keys (11-14). */
 .term-tab.has-x { padding: 0 6px 0 0; cursor: default; }
-.term-tab-main { display: flex; align-items: center; gap: 6px; flex: 1 1 auto; min-width: 0; height: 100%; padding: 0 4px 0 12px; border: 0; border-radius: var(--r) var(--r) 0 0; background: none; color: inherit; font: inherit; cursor: pointer; }
+.term-tab-main { display: flex; align-items: center; gap: 6px; flex: 1 1 auto; min-width: 0; overflow: hidden; height: 100%; padding: 0 4px 0 12px; border: 0; border-radius: var(--r) var(--r) 0 0; background: none; color: inherit; font: inherit; cursor: pointer; }
 .term-tab-main:focus-visible, .term-tab-x:focus-visible { outline: none; box-shadow: inset 0 0 0 2px var(--term-accent-text); }
 .term-tab-x { flex: none; display: grid; place-items: center; width: 20px; height: 20px; padding: 0; border: 0; border-radius: var(--r-sm); background: none; color: var(--term-fg-3); cursor: pointer; opacity: 0; }
 .term-tab-x:hover { background: var(--term-key-active); color: var(--term-fg); }
@@ -466,7 +466,7 @@ html.kb-open .keybar { padding-bottom: 6px; }
 .term-tabs.dragging, .term-tabs.dragging .term-tab { cursor: grabbing; }
 .term-tabs.dragging .term-tab:not(.held) { transition: transform 0.15s ease; }
 .term-tabs.dragging .term-tab:not(.held):hover:not([aria-current="page"]) { background: none; color: var(--term-fg-2); }
-.term-tab.held { z-index: 1; color: var(--term-fg); box-shadow: 0 2px 8px rgb(0 0 0 / 0.28); }
+.term-tab.held { z-index: 2; color: var(--term-fg); box-shadow: 0 2px 8px rgb(0 0 0 / 0.28); }
 .term-tab.held:not([aria-current="page"]) { background: var(--term-hover); }
 /* The tab in front: the page's ground, its edges in the page's line. */
 .term-tab[aria-current="page"],
@@ -477,6 +477,9 @@ html.kb-open .keybar { padding-bottom: 6px; }
 @media (pointer: fine) {
   .term-tab { font-size: var(--fs-sub); line-height: var(--lh-sub); }
 }
+/* (By a finger, or with the system's colours, which drop its ground and edges: told by its weight too, and there by a border.) */
+@media (pointer: coarse) { .term-tab[aria-current="page"] { font-weight: 600; } }
+@media (forced-colors: active) { .term-tab[aria-current="page"] { font-weight: 600; border: 1px solid CanvasText; border-bottom: 0; } }
 /* "101  herdr 2": the host quiet, the session's own name in the tab's colour,
    set apart by room alone (redesign 11-23: no "·" between them). */
 .term-tab-host { font-weight: 400; color: var(--term-fg-3); }

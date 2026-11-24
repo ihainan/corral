@@ -163,7 +163,8 @@ export function AgentTabBar(p: {
                 <span className="term-tab-name">{v.title}</span>
               </button>
               {/* (Its state and its close in one place: see terminal.css.) */}
-              <span className="term-tab-end">
+              {/* (A tap on its state goes to the tab, as on its name: the tab's button has the keys.) */}
+              <span className="term-tab-end" onClick={(e) => !(e.target as Element).closest('.term-tab-x') && !dragged() && !front && p.onGo(v.tab)}>
                 {!v.ended && dot(v.status) && (
                   <span className={'term-tab-count ' + dot(v.status)} role="img" aria-label={statusWord(v.status)}>
                     <span className="term-tab-sdot" aria-hidden="true" />

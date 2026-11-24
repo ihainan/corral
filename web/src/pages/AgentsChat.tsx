@@ -510,7 +510,12 @@ export function AgentsChat({ bar, active = true, onHead }: { bar?: ReactNode; ac
   // top-bottom ('col') layouts, plus 'auto' (switches to top-bottom on portrait
   // or narrow screens so portrait tablets/monitors & phones can split cleanly).
   // (As the tab in front had them: else the first keeping wrote none over its split.)
-  const initFront = init.current.tabs.find((x) => x.id === init.current!.front)
+  // (Only when what is shown is that tab's agent: an address naming another
+  // puts that one in its place, the split going as it does. Review of 11-25.)
+  const initFront = ((f) => {
+    const q = new URLSearchParams(location.search)
+    return f && (!q.get('s') || (q.get('s') === f.s && (q.get('pane') ?? '') === (f.pane ?? ''))) ? f : undefined
+  })(init.current.tabs.find((x) => x.id === init.current!.front))
   const [splitKey, setSplitKey] = useState<string | null>(initFront?.split ?? null)
   const [focusedPane, setFocusedPane] = useState<'primary' | 'secondary'>(initFront?.split ? (initFront.focus ?? 'primary') : 'primary')
   const [splitDir, setSplitDir] = useState<'auto' | 'row' | 'col'>(() => {
@@ -531,11 +536,12 @@ export function AgentsChat({ bar, active = true, onHead }: { bar?: ReactNode; ac
       return
     }
     if (!sessions || sessions.some((x) => x.persistence === 'herdr' && (x.meta?.t !== 'herdr' || x.meta.lost))) return
+    if (!cur || waiting || holding) return // (the one it is beside waited for: so is it — a gateway restarting lists none)
     if (!entries.some((e) => e.key === splitKey)) {
       setSplitKey(null)
       setFocusedPane('primary')
     }
-  }, [splitKey, cur, sessions, entries])
+  }, [splitKey, cur, sessions, entries, waiting, holding])
   // Another agent put in front, the split's other side not set with it (picked in
   // the list, a notification, the address, back): the split was of the one
   // before — closed. Set together (swapped, opened beside its parent), kept.
@@ -604,11 +610,13 @@ export function AgentsChat({ bar, active = true, onHead }: { bar?: ReactNode; ac
     if (activeRef.current) navigate(chatAddress(p), true, history.state) // (the terminals' page in front: not taken from it)
   }
   fromOther.current = (l) => {
+    const was = tabsRef.current.find((x) => x.id === frontRef.current)
     putTabs(l)
     const f = l.find((x) => x.id === frontRef.current)
-    if (!f) return // (closed there: see below)
-    if (f.key !== shownNow.current) goTab(f)
-    else if ((f.split ?? null) !== splitKey) {
+    if (!f || !was) return // (closed there: see below)
+    // (Only a change there of this tab's own: another's, or none, leaves what is shown — one ended stays so.)
+    if (f.key !== was.key) goTab(f)
+    else if ((f.split ?? null) !== (was.split ?? null) && (f.split ?? null) !== splitKey) {
       splitSeen.current = { cur: f.key, split: f.split ?? null }
       setSplitKey(f.split ?? null)
       setFocusedPane(f.split ? (f.focus ?? 'primary') : 'primary')
@@ -919,7 +927,7 @@ export function AgentsChat({ bar, active = true, onHead }: { bar?: ReactNode; ac
   // A tab's agent not in the list said ended only once it has been missing a
   // while (a gateway restarting lists none for a moment: review of 11-25).
   const missingSince = useRef(new Map<string, number>())
-  const [, setMissTick] = useState(0)
+  const [missTick, setMissTick] = useState(0)
   const missingKeys = sessions && !summariesMissing ? tabs.filter((x) => !entries.some((e) => e.key === x.key)).map((x) => x.key) : []
   const missingSig = missingKeys.join('\n')
   useEffect(() => {
@@ -932,7 +940,7 @@ export function AgentsChat({ bar, active = true, onHead }: { bar?: ReactNode; ac
     const timer = setTimeout(() => setMissTick((n) => n + 1), due + 50)
     return () => clearTimeout(timer)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [missingSig])
+  }, [missingSig, missTick]) // (each due in its turn: the next one set once the first has come)
   const longMissing = (k: string) => {
     const at = missingSince.current.get(k)
     return at !== undefined && Date.now() - at >= MISSING_MS

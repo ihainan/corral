@@ -4579,7 +4579,7 @@ export function AgentList({ rows, menus, onPicked, placed, query: given, onQuery
   // focus kept in the box, to go on typing; some words typed, the first found is marked (UI notes of 11-23:
   // the list over a full-width conversation, "/" opened it, the keys then did nothing).
   const [hi, setHi] = useState<string | null>(null)
-  const shownRows = (el: Element) => [...(el.closest('.convo-side, .convo-picker')?.querySelectorAll<HTMLButtonElement>('button.convo-list-row[data-row]') ?? [])]
+  const shownRows = (el: Element) => [...(el.closest('.convo-side, .convo-picker, .agents-chat-pick')?.querySelectorAll<HTMLButtonElement>('button.convo-list-row[data-row]') ?? [])]
   // (Where its rows are found from: its toolbar, there from the first draw — words pasted in, or given, mark too. Review of 11-23.)
   const toolbarRef = useRef<HTMLDivElement>(null)
   useLayoutEffect(() => {
@@ -5273,7 +5273,7 @@ export function ListSearch({ value, onChange, focus, onLeft, hint, onNav }: { va
   const down = useRef<number | null>(null)
   const leaving = useRef(0) // (which leaving a wait is for: the latest only)
   useEffect(() => {
-    const list = ref.current?.closest('.convo-side, .convo-picker')
+    const list = ref.current?.closest('.convo-side, .convo-picker, .agents-chat-pick') // (the agents' page with none shown: its list is the switcher)
     if (!list) return
     const on = (e: Event) => (down.current = (e as PointerEvent).pointerId)
     const off = (e: Event) => {
