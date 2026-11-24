@@ -1794,6 +1794,7 @@ button.convo-queue-row.is-note:last-child { border-radius: 0 0 var(--r-lg) var(-
 .list-toolbar { display: flex; align-items: center; gap: 6px; margin: 0 0 8px; }
 .list-toolbar.is-compact { justify-content: flex-end; margin-bottom: 2px; }
 .list-toolbar > .list-search { flex: 1; min-width: 0; margin: 0; }
+.list-toolbar-end { display: contents; } /* (its buttons laid out as the toolbar's own, but on the phone: there one group) */
 .list-order-btn {
   flex: none; width: 36px; height: 36px; border: 1px solid transparent; border-radius: var(--r);
   background: color-mix(in srgb, var(--term-fg) 5%, transparent); color: var(--term-fg-2);
@@ -2201,6 +2202,11 @@ button.convo-queue-row.is-note:last-child { border-radius: 0 0 var(--r-lg) var(-
 .agents-phone-mine.is-on { background: color-mix(in srgb, var(--term-accent-text) 12%, transparent); color: var(--term-accent-text); font-weight: 500; }
 .agents-phone-mine:focus-visible { outline: 2px solid var(--term-accent-text); outline-offset: -2px; }
 .agents-phone .list-search { height: 40px; }
+/* (The chip, order and + beside the search: on a narrow phone, or the chip's words longer, they go under it, to the
+   right, rather than squeeze its words to nothing — 0px at 320 in English, 67 at 390. Review of 11-24.) */
+.agents-phone .list-toolbar { flex-wrap: wrap; row-gap: 4px; }
+.agents-phone .list-toolbar > .list-search { flex: 1 1 200px; }
+.agents-phone .list-toolbar > .list-toolbar-end { display: flex; flex: none; align-items: center; gap: 4px; margin-left: auto; }
 .agents-list-top {
   position: sticky; top: 0; z-index: 1; display: flex; align-items: center; gap: 8px;
   padding: 10px max(16px, env(safe-area-inset-right, 0px)) 10px max(16px, env(safe-area-inset-left, 0px));

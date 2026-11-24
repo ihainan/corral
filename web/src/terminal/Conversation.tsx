@@ -4601,22 +4601,25 @@ export function AgentList({ rows, menus, onPicked, placed, query: given, onQuery
       {(showBar || showOrder || showNew || tools) && (
         <div className={'list-toolbar' + (showBar ? '' : ' is-compact')} ref={toolbarRef}>
           {showBar && <ListSearch value={query} onChange={setQuery} focus={search} onLeft={onSearchLeft} hint={hint ? keySearch(wbList) : undefined} onNav={navKey} />}
-          {tools}
-          {showOrder && <ListOrderMenu />}
-          {showNew && (
-            <button
-              type="button"
-              className="icon-btn list-new-btn"
-              aria-label={t('newAgent.title')}
-              title={t('newAgent.title')}
-              onClick={() => {
-                onPicked?.()
-                window.dispatchEvent(new Event(NEW_AGENT))
-              }}
-            >
-              <Plus size={15} strokeWidth={2} aria-hidden="true" />
-            </button>
-          )}
+          {/* (One group, to go under the search together where a narrow list wraps them: the phone's.) */}
+          <div className="list-toolbar-end">
+            {tools}
+            {showOrder && <ListOrderMenu />}
+            {showNew && (
+              <button
+                type="button"
+                className="icon-btn list-new-btn"
+                aria-label={t('newAgent.title')}
+                title={t('newAgent.title')}
+                onClick={() => {
+                  onPicked?.()
+                  window.dispatchEvent(new Event(NEW_AGENT))
+                }}
+              >
+                <Plus size={15} strokeWidth={2} aria-hidden="true" />
+              </button>
+            )}
+          </div>
         </div>
       )}
       {hiddenBlocked.length > 0 && (
