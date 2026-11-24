@@ -21,7 +21,7 @@ import { SessionOpDialog, type SessionOp } from '../terminal/sessionOps'
 import { NEW_AGENT, NewAgentDialog, takeNewAgentAsk, type NewSubagentParent } from '../terminal/newAgent'
 import { type CodexRewind, ForkDialog, RenameDialog, type RenameTarget } from '../terminal/agentOps'
 import { agentWho, ChimeCounter, chime, countsOf } from '../terminal/chime'
-import { AgentList, ListOrderMenu, CODEX_EFFORTS, ComposerModelSlot, ConversationView, glanceOf, type ConvoAgent, type ConvoLineageBar, type ConvoListRow, type ConvoPending, type ConvoSplitPane, type ConvoWent, type FileActs, type ModelOpt } from '../terminal/Conversation'
+import { AgentList, CODEX_EFFORTS, ComposerModelSlot, ConversationView, glanceOf, type ConvoAgent, type ConvoLineageBar, type ConvoListRow, type ConvoPending, type ConvoSplitPane, type ConvoWent, type FileActs, type ModelOpt } from '../terminal/Conversation'
 import { saveTranslateConfig, useTranslateConfig } from '../terminal/thoughtTranslate'
 import { FilesDialog } from '../terminal/FilesDialog'
 import { PortsDialog } from '../terminal/PortsDialog'
@@ -3559,17 +3559,20 @@ function PhoneList({ entries, all, titles, query, onQuery, onPick }: { entries: 
   }, [])
   return (
     <div className="agents-list agents-phone" ref={box}>
-      <div className="agents-phone-top">
-        <button type="button" className="convo-side-new agents-phone-new" onClick={() => window.dispatchEvent(new Event(NEW_AGENT))}>
-          <Plus size={16} aria-hidden="true" />
-          <span>{t('newAgent.title')}</span>
-        </button>
-        <button type="button" className={'agents-phone-mine' + (mine ? ' is-on' : '')} aria-pressed={mine} onClick={() => setMine(!mine)}>
-          {t('agents.onlyMine')}
-        </button>
-        {shown.length > 1 && <ListOrderMenu />}
-      </div>
-      {shown.length === 0 && !query.trim() ? <p className="agents-list-none">{t('agents.noneMine')}</p> : <AgentList rows={shown} query={query} onQuery={onQuery} orderOut />}
+      {/* (Its toolbar as the side list's: search, "waiting on me", the order, new — one row of small buttons. 11-24) */}
+      <AgentList
+        rows={shown}
+        query={query}
+        onQuery={onQuery}
+        compact
+        showNew
+        tools={
+          <button type="button" className={'agents-phone-mine' + (mine ? ' is-on' : '')} aria-pressed={mine} onClick={() => setMine(!mine)}>
+            {t('agents.onlyMine')}
+          </button>
+        }
+        empty={<p className="agents-list-none">{t('agents.noneMine')}</p>}
+      />
     </div>
   )
 }

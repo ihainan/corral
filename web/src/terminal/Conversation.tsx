@@ -1829,8 +1829,7 @@ export function ConversationView({
       <div className="convo-workspace">
       {sideShown && (
         <nav className="convo-side" aria-label={t('convo.agents')} style={{ width: sideWidth }} ref={sideEl}>
-          {isTouchOnly && <NewAgentRow />}
-          <AgentList rows={rows} menus query={sideQuery} onQuery={setSideQuery} search={searchAsked} onSearchLeft={() => setSearchAsked(0)} hint={!isTouchOnly} compact={!isTouchOnly} showNew={!isTouchOnly} />
+          <AgentList rows={rows} menus query={sideQuery} onQuery={setSideQuery} search={searchAsked} onSearchLeft={() => setSearchAsked(0)} hint={!isTouchOnly} compact showNew />
           {!isTouchOnly && (
             <div className="convo-side-foot">
               <button type="button" className="icon-btn convo-side-foot-ic convo-side-foot-settings" onClick={() => openSettingsModal('chat')} aria-label={t('nav.settings')} title={`${t('nav.settings')} (${mac ? '⌘,' : 'Ctrl+,'})`}>
@@ -4381,11 +4380,12 @@ export function ListOrderMenu() {
   )
 }
 
-export function AgentList({ rows, menus, onPicked, placed, query: given, onQuery, search, showSearch, onSearchLeft, hint, compact, showNew, orderOut }: { rows: ConvoListRow[]; menus?: boolean; onPicked?: () => void; placed?: Map<string, ConvoListRow>; query?: string; onQuery?: (q: string) => void; search?: number; showSearch?: boolean; onSearchLeft?: () => void; hint?: boolean; compact?: boolean; showNew?: boolean; orderOut?: boolean }) {
+export function AgentList({ rows, menus, onPicked, placed, query: given, onQuery, search, showSearch, onSearchLeft, hint, compact, showNew, tools, empty }: { rows: ConvoListRow[]; menus?: boolean; onPicked?: () => void; placed?: Map<string, ConvoListRow>; query?: string; onQuery?: (q: string) => void; search?: number; showSearch?: boolean; onSearchLeft?: () => void; hint?: boolean; compact?: boolean; showNew?: boolean; tools?: ReactNode; empty?: ReactNode }) {
   const wbList = useWorkbench()
-  // (With a mouse — the side list and the switcher, given compact —: one line a row,
-  // its name, the session's title in grey after it, its time; a second only for
-  // what waits on the person. The phone's list keeps its two lines to touch.)
+  // (compact: one line a row, its name, the session's title in grey after it, its
+  // time; a second only for what waits on the person. Every list since 11-24, a
+  // touch screen's too, its rows then 44 high to touch — the person liked the
+  // desktop's; the touch ones showed half as many.)
   const flat = !!compact
   // Its rows' menu (menus: the side list's; the switcher's rows have none):
   // one for the list, of the row it was opened on by its key, as that row
@@ -4553,9 +4553,7 @@ export function AgentList({ rows, menus, onPicked, placed, query: given, onQuery
   const inOrder = placed ? [...found].sort((a, b) => place(a) - place(b)) : found
   const groups = buildAgentGroups(inOrder.map(at), orderOpts)
   const showBar = rows.length > SEARCH_FROM || !!query || !!search || !!showSearch
-  // (orderOut: its menu set by the caller in a row of its own — a phone's list
-  // puts it beside New agent rather than alone on a line under it.)
-  const showOrder = rows.length > 1 && !orderOut
+  const showOrder = rows.length > 1
   // Up and Down from its search box go through the rows as they are shown, Return opens the one marked — the
   // focus kept in the box, to go on typing; some words typed, the first found is marked (UI notes of 11-23:
   // the list over a full-width conversation, "/" opened it, the keys then did nothing).
@@ -4600,9 +4598,10 @@ export function AgentList({ rows, menus, onPicked, placed, query: given, onQuery
   }
   return (
     <>
-      {(showBar || showOrder || showNew) && (
+      {(showBar || showOrder || showNew || tools) && (
         <div className={'list-toolbar' + (showBar ? '' : ' is-compact')} ref={toolbarRef}>
           {showBar && <ListSearch value={query} onChange={setQuery} focus={search} onLeft={onSearchLeft} hint={hint ? keySearch(wbList) : undefined} onNav={navKey} />}
+          {tools}
           {showOrder && <ListOrderMenu />}
           {showNew && (
             <button
@@ -4645,6 +4644,7 @@ export function AgentList({ rows, menus, onPicked, placed, query: given, onQuery
         </div>
       )}
       {query.trim() && !found.length && <p className="list-search-none">{t('convo.searchNone')}</p>}
+      {!rows.length && !query.trim() && empty}
       <div className={'convo-list-groups' + (flat ? ' is-flat' : '')} ref={groupsEl}>
       {groups.map((g) => {
         const all: ConvoListRow[] = g.rows
@@ -4779,7 +4779,8 @@ export function AgentList({ rows, menus, onPicked, placed, query: given, onQuery
                 (isSingleChild ? ' is-single' : '')
               }
               onMouseEnter={(e) => {
-                if (!rowMenu) scheduleRowTip(r.key, e.currentTarget)
+                // (Not on a touch screen: a tap sends one too, and the card would stay over the list.)
+                if (!rowMenu && !isTouchOnly) scheduleRowTip(r.key, e.currentTarget)
               }}
               onMouseLeave={clearRowTip}
               onContextMenu={
@@ -4809,7 +4810,7 @@ export function AgentList({ rows, menus, onPicked, placed, query: given, onQuery
                 if (!e.defaultPrevented && hasMenu) menuKey(r.key)(e)
               }}
             >
-              <AgentIcon program={r.program} size={flat ? (isChild ? 14 : 16) : isChild ? 18 : 20} bare dot={iconDot ? (iconDot as NonNullable<Parameters<typeof AgentIcon>[0]['dot']>) : undefined} />
+              <AgentIcon program={r.program} size={flat ? (isChild ? (isTouchOnly ? 16 : 14) : isTouchOnly ? 18 : 16) : isChild ? 18 : 20} bare dot={iconDot ? (iconDot as NonNullable<Parameters<typeof AgentIcon>[0]['dot']>) : undefined} />
               {/* (Two lines a row, always: its name; where it is — the session's title,
                   which tells alike names apart — and when. A third only for what
                   waits on the person: what it asks, or messages not seen taken in.
@@ -5363,8 +5364,7 @@ function Picker({ rows, onClose, searchFirst }: { rows: ConvoListRow[]; onClose:
             </button>
           </div>
         )}
-        {isTouchOnly && <NewAgentRow onPicked={onClose} />}
-        <AgentList rows={rows} placed={first} onPicked={onClose} showSearch={searchFirst || !isTouchOnly} compact={!isTouchOnly} showNew={!isTouchOnly} />
+        <AgentList rows={rows} placed={first} onPicked={onClose} showSearch={searchFirst || !isTouchOnly} compact showNew />
         {!isTouchOnly && (
           <div className="convo-picker-foot" aria-hidden="true">
             <span>
@@ -5386,23 +5386,6 @@ function Picker({ rows, onClose, searchFirst }: { rows: ConvoListRow[]; onClose:
 
 // "New agent", as a row of the list it heads: its plus where the agents'
 // icons are, its words where their titles are.
-function NewAgentRow({ onPicked }: { onPicked?: () => void }) {
-  return (
-    <button
-      type="button"
-      className="convo-side-new"
-      onClick={() => {
-        onPicked?.()
-        window.dispatchEvent(new Event(NEW_AGENT))
-      }}
-    >
-      <span className="convo-side-new-icon" aria-hidden="true">
-        <Plus size={16} />
-      </span>
-      {t('newAgent.title')}
-    </button>
-  )
-}
 
 // The agent's task list, over the composer while some of it is left: one
 // line (how far, what now) that opens to all of it. Folded at first on

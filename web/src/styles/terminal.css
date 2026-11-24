@@ -1802,7 +1802,6 @@ button.convo-queue-row.is-note:last-child { border-radius: 0 0 var(--r-lg) var(-
 .list-order-btn:focus-visible { outline: 2px solid var(--term-accent-text); outline-offset: -2px; }
 .list-order-btn.is-active { color: var(--term-accent-text); background: color-mix(in srgb, var(--term-accent-text) 12%, transparent); }
 .agents-phone .list-order-btn { width: 40px; height: 40px; }
-.agents-phone-top .list-order-btn { flex: none; border-color: var(--term-line-strong); background: var(--term-bg); }
 .agents-list > .list-search { margin: 10px max(16px, env(safe-area-inset-right, 0px)) 4px max(16px, env(safe-area-inset-left, 0px)); height: 40px; }
 .convo-list-group { display: flex; flex-direction: column; gap: 4px; margin-bottom: 12px; }
 /* (Beside the thread, a step tighter: rows 2 apart, groups 8 — 11-13, the list read as bigger than it is. The phone's
@@ -2196,12 +2195,11 @@ button.convo-queue-row.is-note:last-child { border-radius: 0 0 var(--r-lg) var(-
 .agents-list.agents-phone { display: flex; flex-direction: column; overflow: hidden; padding: 8px max(12px, env(safe-area-inset-right, 0px)) 0 max(12px, env(safe-area-inset-left, 0px)); }
 .agents-list.agents-phone > * { flex-shrink: 0; }
 .agents-list.agents-phone > .convo-list-groups { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding-bottom: calc(16px + env(safe-area-inset-bottom, 0px)); }
-.agents-phone-top { display: flex; gap: 8px; margin: 0 0 8px; }
-.convo-side-new.agents-phone-new { flex: 1; width: auto; min-width: 0; margin: 0; height: 40px; }
 /* (Framed as New agent beside it, one look for the row's buttons — redesign 11-23.) */
-.agents-phone-mine { flex: none; height: 40px; padding: 0 12px; border: 1px solid var(--term-line-strong); border-radius: var(--r); background: var(--term-bg); color: var(--term-fg-2); font: inherit; font-size: var(--fs-sub); line-height: var(--lh-sub); cursor: pointer; }
-.agents-phone-mine.is-on { border-color: var(--term-accent-text); background: color-mix(in srgb, var(--term-accent-text) 10%, transparent); color: var(--term-accent-text); font-weight: 500; }
-.agents-phone-mine:focus-visible { outline: 2px solid var(--term-accent-text); outline-offset: 1px; }
+/* "Waiting on me" in a phone list's toolbar: a small chip by the order and new buttons (11-24). */
+.agents-phone-mine { flex: none; height: 32px; padding: 0 10px; border: 0; border-radius: var(--r); background: color-mix(in srgb, var(--term-fg) 5%, transparent); color: var(--term-fg-2); font: inherit; font-size: var(--fs-sub); line-height: var(--lh-sub); white-space: nowrap; cursor: pointer; }
+.agents-phone-mine.is-on { background: color-mix(in srgb, var(--term-accent-text) 12%, transparent); color: var(--term-accent-text); font-weight: 500; }
+.agents-phone-mine:focus-visible { outline: 2px solid var(--term-accent-text); outline-offset: -2px; }
 .agents-phone .list-search { height: 40px; }
 .agents-list-top {
   position: sticky; top: 0; z-index: 1; display: flex; align-items: center; gap: 8px;
@@ -2448,19 +2446,6 @@ button.convo-queue-row.is-note:last-child { border-radius: 0 0 var(--r-lg) var(-
 .convo-event.is-goal.is-met .convo-trouble-head { color: var(--term-ok-text); }
 @media (forced-colors: active) { .convo-event.is-recap, .convo-event.is-goal, .convo-event.is-notice { border: 1px solid CanvasText; } }
 
-/* A new agent */
-/* "New agent": a row of the list it heads, its plus where the agents' icons
-   are and its words where their titles are (the search box under it lined
-   up the same way) */
-.convo-side-new {
-  flex: none; display: flex; align-items: center; justify-content: center; gap: 8px; width: calc(100% - 4px); height: 36px; margin: 2px 2px 10px; padding: 0 10px;
-  border: 1px solid var(--term-line-strong); border-radius: var(--r); background: var(--term-bg); color: var(--term-fg); font: 500 var(--fs-ui)/var(--lh-ui) var(--font-ui); cursor: pointer;
-}
-/* (A button that looks it — framed, its words centred — not a row of the list under it.) */
-.convo-side-new-icon { flex: none; display: flex; justify-content: center; color: var(--term-fg); }
-.convo-side-new:hover { background: var(--term-row-hover); }
-.convo-side-new:hover .convo-side-new-icon { color: var(--term-fg); }
-.convo-side-new:focus-visible { outline: 2px solid var(--term-accent-text); outline-offset: -2px; }
 .convo-side .list-search, .convo-picker .list-search, .agents-phone .list-search { margin: 0 0 8px; height: 36px; padding: 0 4px 0 9px; gap: 10px; }
 .convo-side .list-toolbar > .list-search, .convo-picker .list-toolbar > .list-search, .agents-phone .list-toolbar > .list-search { margin: 0; }
 /* (The side list's search: a faint field at rest, framed once in it — under the button, not a second frame beside it.) */
@@ -2514,7 +2499,6 @@ button.convo-queue-row.is-note:last-child { border-radius: 0 0 var(--r-lg) var(-
   .convo-side .convo-list-bg { color: var(--term-fg-2); font-weight: 400; }
 }
 @media (pointer: coarse) {
-  .convo-side-new { height: 44px; }
   .convo-side .list-search, .convo-picker .list-search, .agents-phone .list-search { padding-left: 11px; } /* (as the rows, 12 there) */
 }
 .new-agent { display: flex; flex-direction: column; gap: 14px; }
@@ -2924,3 +2908,28 @@ html.kb-open .convo-runs-pop.is-sheet { padding-bottom: 16px; }
 @media (hover: hover) { .convo-list-groups.is-flat .convo-list-item.has-menu:hover .convo-list-when-t { opacity: 0; } }
 /* (Work left going, not seen to: a grey ring, apart from a done's green and an idle's nothing — review of 11-23.) */
 .convo-list-groups.is-flat .convo-list-row .agent-icon-dot.is-stale { background: var(--dot-ring); box-shadow: 0 0 0 1.5px var(--dot-ring), inset 0 0 0 1.5px var(--term-fg-3); }
+
+/* The same one-line lists on a touch screen (11-24: the person liked the desktop's; the touch rows, 63 high and two
+   lines, showed half as many): rows 44 high to touch, the toolbar's buttons borderless and 40 square, the row's menu
+   always shown (nothing hovers) with its time kept before it, the subagents' hairline hung from the bigger icon. */
+@media (pointer: coarse) {
+  .list-toolbar { min-height: 44px; gap: 4px; }
+  .list-toolbar .list-order-btn, .list-toolbar .list-new-btn { flex: none; width: 40px; height: 40px; border: 0; border-radius: var(--r); background: none; color: var(--term-fg-2); }
+  .list-toolbar .list-new-btn { color: var(--term-accent-text); }
+  .list-toolbar .list-order-btn.is-active { background: var(--term-hover); color: var(--term-fg); }
+  .list-toolbar :is(.list-order-btn, .list-new-btn):focus-visible { outline: 2px solid var(--term-accent-text); outline-offset: -2px; }
+  .convo-list-groups.is-flat .convo-list-head { padding: 14px 10px 6px; }
+  .convo-list-groups.is-flat .convo-list-head.is-section .convo-list-chev { opacity: 1; }
+  .convo-list-groups.is-flat .convo-list-row { min-height: 44px; padding: 12px 10px; gap: 10px; }
+  .convo-list-groups.is-flat .convo-list-row.is-child { padding: 12px 10px 12px 32px; gap: 8px; }
+  .convo-list-groups.is-flat .convo-list-item.is-child::before { left: 19px; }
+  .convo-list-groups.is-flat .convo-list-item.is-child:last-child::before { height: 22px; }
+  .convo-list-groups.is-flat .convo-list-item.is-child::after { left: 19px; top: 22px; width: 12px; }
+  .convo-list-groups.is-flat .convo-list-actions, .convo-list-groups.is-flat .convo-list-item.is-child > .convo-list-actions { top: 6px; right: 6px; }
+  .convo-list-groups.is-flat .convo-list-dots { width: 32px; height: 32px; }
+  /* (Room for the button at all times, a tapped row's hover and an open menu too: the time stays by it.) */
+  .convo-list-groups.is-flat .convo-list-item.has-menu.has-menu:is(*, :hover, :has(:focus-visible), .is-menu) .convo-list-line { padding-right: 32px; }
+  .convo-list-groups.is-flat .convo-list-item.has-menu:is(:has(:focus-visible), .is-menu) .convo-list-when-t { opacity: 1; }
+  .convo-list-kids { position: relative; height: 22px; padding: 0 6px; }
+  .convo-list-kids::after { content: ''; position: absolute; inset: -11px -6px; }
+}
