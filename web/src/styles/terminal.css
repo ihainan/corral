@@ -2927,9 +2927,12 @@ html.kb-open .convo-runs-pop.is-sheet { padding-bottom: 16px; }
   .convo-list-groups.is-flat .convo-list-item.is-child::after { left: 19px; top: 22px; width: 12px; }
   .convo-list-groups.is-flat .convo-list-actions, .convo-list-groups.is-flat .convo-list-item.is-child > .convo-list-actions { top: 6px; right: 6px; }
   .convo-list-groups.is-flat .convo-list-dots { width: 32px; height: 32px; }
-  /* (Room for the button at all times, a tapped row's hover and an open menu too: the time stays by it.) */
-  .convo-list-groups.is-flat .convo-list-item.has-menu.has-menu:is(*, :hover, :has(:focus-visible), .is-menu) .convo-list-line { padding-right: 32px; }
-  .convo-list-groups.is-flat .convo-list-item.has-menu:is(:has(:focus-visible), .is-menu) .convo-list-when-t { opacity: 1; }
+  /* (Room for the button at all times, a tapped row's hover and an open menu too: the time stays by it. Not
+     while the subagent count has the keyboard's focus: then both buttons' 80 above, the time giving way. The
+     :not(:has()) also lifts these over the hiding rule above, a list with :has() that Chrome weighs whole
+     as its heaviest selector, 0,7,0.) */
+  .convo-list-groups.is-flat .convo-list-item.has-menu.has-menu:is(*, :hover, :has(:focus-visible), .is-menu):not(:has(.convo-list-subpill:focus-visible)) .convo-list-line { padding-right: 32px; }
+  .convo-list-groups.is-flat .convo-list-item.has-menu:is(:has(:focus-visible), .is-menu):not(:has(.convo-list-subpill:focus-visible)) .convo-list-when-t { opacity: 1; }
   .convo-list-kids { position: relative; height: 22px; padding: 0 6px; }
   .convo-list-kids::after { content: ''; position: absolute; inset: -11px -6px; }
 }
