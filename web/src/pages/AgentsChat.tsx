@@ -39,6 +39,7 @@ import { camesAfter, containedInMessage, isCommand, pairSent, sameMessage, squee
 import { viewRefusal } from '../terminal/sendView'
 import { agentKey, sessionWhich } from '../terminal/sessionName'
 import { Rail, StatusBar, StatusItem, useWorkbench } from '../workbench'
+import { AgentTabBar, askPickInTab, isTabsKey, newTabId, OPEN_PICKER, readFront, readTabs, takePickInTab, writeFront, writeTabs, type AgentTab, type PickHow, type TabView } from './agentTabs'
 import { agentMark } from '../terminal/agentIcons'
 import { useComposerFit } from '../terminal/autosize'
 import { keyboardIsUp } from '../keyboard'
@@ -104,12 +105,14 @@ const ESC_HELD = '[aria-modal="true"], [role="menu"], [role="dialog"], .convo-se
 // What is left without the "/" the commands button put in, or null when a word has been typed on to it.
 const unslash = (s: string) => (s === '/' ? '' : s.startsWith('/ ') ? s.slice(2) : null)
 const fromList = () => !!(history.state as { agentsFromList?: boolean } | null)?.agentsFromList
-const chatAddress = (e: { s: SessionInfo; pane?: string }) => {
-  const q = new URLSearchParams({ s: e.s.id })
+const chatAddress = (e: { s: SessionInfo | string; pane?: string }) => {
+  const q = new URLSearchParams({ s: typeof e.s === 'string' ? e.s : e.s.id })
   if (e.pane) q.set('pane', e.pane)
   return '/agents?' + q
 }
 const PASTE_LINES = 12
+// An installed app's window: the tab keys are taken there only (a browser keeps them for its own tabs).
+const standalone = window.matchMedia('(display-mode: standalone)').matches || (navigator as { standalone?: boolean }).standalone === true
 // A finished one not seen yet whose turn ended on an API error (a rate
 // limit, the server's error): told apart from one that finished well.
 const failedOf = (r: AgentRow, st: AgentStatus) => (!r.lost && !r.bg && st === 'done' && r.a.failed) || undefined
@@ -179,10 +182,13 @@ function carry(): Carried {
   return carried
 }
 
-function readPick(): Pick | null {
+// The pick an address names; none named, the fallback: the tab in front's
+// (see agentTabs.tsx), or with no tabs ever kept the one last shown ('last').
+function readPick(fallback: Pick | null | 'last' = 'last'): Pick | null {
   const q = new URLSearchParams(location.search)
   const s = q.get('s')
   if (s && /^[0-9a-f]+$/.test(s)) return { s, pane: q.get('pane') ?? undefined }
+  if (fallback !== 'last') return fallback
   try {
     const p = JSON.parse(local.get(LAST) ?? 'null')
     if (p && typeof p.s === 'string') return { s: p.s, pane: typeof p.pane === 'string' ? p.pane : undefined, key: typeof p.key === 'string' ? p.key : undefined }
@@ -297,7 +303,56 @@ export function AgentsChat({ bar, active = true, onHead }: { bar?: ReactNode; ac
     if (!bar) waitingTitle(waitingN, sessions)
   }, [bar, waitingN, sessions])
   useEffect(() => () => void (!bar && waitingTitle(null)), [bar])
-  const [pick, setPick] = useState<Pick | null>(readPick)
+  // The tabs (agentTabs.tsx): the conversations open, the one in front shown.
+  // Kept for the account signed in; none ever kept, the page opens as it did
+  // before tabs (the one last shown, else the first) and that is the first tab.
+  const user = useSession().me?.id ?? 0
+  const init = useRef<{ tabs: AgentTab[]; front: string | null; ever: boolean } | null>(null)
+  if (!init.current) {
+    const k = readTabs(user)
+    const l = k ?? []
+    const f = readFront()
+    init.current = { tabs: l, front: l.find((x) => x.id === f)?.id ?? l[0]?.id ?? null, ever: k !== null }
+  }
+  const [tabs, setTabs] = useState<AgentTab[]>(init.current.tabs)
+  const [front, setFront] = useState<string | null>(init.current.front)
+  const tabsRef = useRef(tabs)
+  tabsRef.current = tabs
+  const frontRef = useRef(front)
+  frontRef.current = front
+  // (Set at once, for what follows in the same act: the state comes with the next drawing.)
+  const putTabs = (l: AgentTab[]) => {
+    tabsRef.current = l
+    setTabs(l)
+  }
+  const putFront = (id: string | null) => {
+    frontRef.current = id
+    setFront(id)
+  }
+  const hadTabs = useRef(init.current.ever) // (once there were tabs, none is none: the first agent is not put in)
+  if (tabs.length) hadTabs.current = true
+  const frontTab = tabs.find((x) => x.id === front)
+  const tabPick = (x: AgentTab): Pick => ({ s: x.s, pane: x.pane, key: x.key })
+  const frontPick = () => {
+    const f = tabsRef.current.find((x) => x.id === frontRef.current)
+    return f ? tabPick(f) : hadTabs.current ? null : 'last'
+  }
+  useEffect(() => {
+    if (hadTabs.current) writeTabs(user, tabs)
+  }, [tabs, user])
+  useEffect(() => writeFront(front), [front])
+  // Another window of this account changed them: as it left them (the one in front here kept, if still there).
+  useEffect(() => {
+    const on = (e: StorageEvent) => {
+      if (!isTabsKey(e.key)) return
+      const l = readTabs(user)
+      if (l) putTabs(l)
+    }
+    window.addEventListener('storage', on)
+    return () => window.removeEventListener('storage', on)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user])
+  const [pick, setPick] = useState<Pick | null>(() => readPick(init.current!.front ? tabPick(init.current!.tabs.find((x) => x.id === init.current!.front)!) : init.current!.ever ? null : 'last'))
   // The entry key of the one picked last (an address names only its session and pane).
   const pickKey = useRef<Pick | null>(pick?.key ? pick : null)
   const keyOf = (p: Pick) => (pickKey.current && pickKey.current.s === p.s && (pickKey.current.pane ?? '') === (p.pane ?? '') ? pickKey.current.key : p.key)
@@ -387,12 +442,33 @@ export function AgentsChat({ bar, active = true, onHead }: { bar?: ReactNode; ac
     const timer = setTimeout(() => setGaveUp(true), 15000)
     return () => clearTimeout(timer)
   }, [waiting, holding, pick?.s, pick?.pane]) // (another waited for: its own while)
-  const cur = picked ?? kept ?? (sessions && !waiting && !holding ? entries[0] : undefined)
+  // (The first only where no tab ever was: once there were, none open is an empty page, and one ended stays so.)
+  const cur = picked ?? kept ?? (sessions && !waiting && !holding && !hadTabs.current && !tabs.length ? entries[0] : undefined)
+  // The pick not found, nor waited for: of the tab in front, it ended (said so,
+  // the tab kept till closed); else (an address naming one gone) the tab in front again.
+  const unresolved = !!sessions && !!pick && !cur && !waiting && !holding
+  const pickIsFront = !!frontTab && !!pick && (keyOf(pick) === frontTab.key || (pick.s === frontTab.s && (pick.pane ?? '') === (frontTab.pane ?? '')))
+  const ended = unresolved && pickIsFront
   useEffect(() => {
     lastCur.current = cur
     if (cur && !(stack && screen === 'list')) shownKey.current = cur.key // (a phone's list: none of them is in front)
   })
-  const choose = (e: Entry) => {
+  // Gone to: as said by how — a new tab ('tab'), beside the one shown
+  // ('split'), else in the tab in front. Open already in a tab, that tab is
+  // gone to instead (see the tabs' keeping below: one agent, one tab).
+  const choose = (e: Entry, how?: PickHow) => {
+    if (how === 'split') return openSplit(e)
+    if (how === 'tab' && !stack) {
+      const open = tabsRef.current.find((x) => x.key === e.key || x.split === e.key)
+      if (open) return goTab(open, open.split === e.key ? 'secondary' : undefined)
+      const tab: AgentTab = { id: newTabId(), key: e.key, s: e.s.id, pane: e.pane }
+      const l = [...tabsRef.current]
+      l.splice(l.findIndex((x) => x.id === frontRef.current) + 1, 0, tab)
+      putTabs(l)
+      putFront(tab.id)
+      setSplitKey(null)
+      setFocusedPane('primary')
+    }
     setPick({ s: e.s.id, pane: e.pane, key: e.key })
     pickKey.current = { s: e.s.id, pane: e.pane, key: e.key }
     try {
@@ -460,11 +536,117 @@ export function AgentsChat({ bar, active = true, onHead }: { bar?: ReactNode; ac
       setFocusedPane('primary')
     }
   }, [cur?.key, splitKey]) // eslint-disable-line react-hooks/exhaustive-deps
+  // The tab in front keeps what is beside it (each tab its own split: 11-24).
+  // (Before the keeping below, which reads it.)
+  useEffect(() => {
+    const id = frontRef.current
+    const l = tabsRef.current
+    const f = l.find((x) => x.id === id)
+    if (!f || ((f.split ?? null) === splitKey && (f.focus ?? 'primary') === focusedPane)) return
+    putTabs(l.map((x) => (x.id === id ? { ...x, split: splitKey ?? undefined, focus: splitKey ? focusedPane : undefined } : x)))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [splitKey, focusedPane])
+  // The tabs kept with what is shown, however it came to be shown (picked in
+  // the list, an address, an alert, back and forward): one agent, one tab —
+  // shown in the tab in front, that tab is of it; open in another tab, that
+  // tab comes to the front; beside the one shown in a tab, that tab, its
+  // focus there; else it takes the tab in front's place (what was beside
+  // that goes, as it did), or is the first tab.
+  useEffect(() => {
+    if (!cur || (stack && screen === 'list')) return
+    const l = tabsRef.current
+    const f = l.find((x) => x.id === frontRef.current)
+    if (f && f.key === cur.key) {
+      if (f.s !== cur.s.id || (f.pane ?? '') !== (cur.pane ?? '')) putTabs(l.map((x) => (x.id === f.id ? { ...x, s: cur.s.id, pane: cur.pane } : x)))
+      return
+    }
+    const other = l.find((x) => x.key === cur.key)
+    if (other) return goTab(other)
+    const beside = l.find((x) => x.split === cur.key)
+    if (beside && entries.some((e) => e.key === beside.key)) return goTab(beside, 'secondary')
+    if (f) putTabs(l.map((x) => (x.id === f.id ? { ...x, key: cur.key, s: cur.s.id, pane: cur.pane, title: undefined, program: undefined } : x)))
+    else {
+      const tab: AgentTab = { id: newTabId(), key: cur.key, s: cur.s.id, pane: cur.pane }
+      putTabs([...l, tab])
+      putFront(tab.id)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cur?.key, cur?.s.id, cur?.pane, screen])
+  // A tab to the front: its agent shown, with what was beside it.
+  const goTab = (x: AgentTab, focus?: 'primary' | 'secondary') => {
+    putFront(x.id)
+    setSplitKey(x.split ?? null)
+    setFocusedPane(focus ?? (x.split ? (x.focus ?? 'primary') : 'primary'))
+    const p = tabPick(x)
+    setPick(p)
+    pickKey.current = p
+    setGaveUp(false)
+    named.current = false
+    try {
+      local.set(LAST, JSON.stringify(p))
+    } catch {
+      /* not kept */
+    }
+    navigate(chatAddress(p), true, history.state)
+  }
+  // Tabs closed (their agents go on): the one in front closed, the next to its
+  // right comes, else the one to its left; none left, an empty page.
+  const closeTabs = (ids: ReadonlySet<string>) => {
+    const l = tabsRef.current
+    const at = l.findIndex((x) => x.id === frontRef.current)
+    putTabs(l.filter((x) => !ids.has(x.id)))
+    if (!frontRef.current || !ids.has(frontRef.current)) return
+    const next = l.slice(at + 1).find((x) => !ids.has(x.id)) ?? l.slice(0, Math.max(at, 0)).reverse().find((x) => !ids.has(x.id))
+    if (next) return goTab(next)
+    putFront(null)
+    setSplitKey(null)
+    setFocusedPane('primary')
+    setPick(null)
+    pickKey.current = null
+    navigate('/agents', true, history.state)
+  }
+  const moveTab = (id: string, to: number) => {
+    const l = [...tabsRef.current]
+    const from = l.findIndex((x) => x.id === id)
+    if (from < 0 || to < 0 || to >= l.length || from === to) return
+    l.splice(to, 0, l.splice(from, 1)[0])
+    putTabs(l)
+  }
+  // (The tab in front gone from the list — closed in another window —: the first, or none.)
+  useEffect(() => {
+    if (!front || tabs.some((x) => x.id === front)) return
+    if (tabs[0]) goTab(tabs[0])
+    else closeTabs(new Set([front]))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tabs, front])
+  // An address naming an agent not there (an alert of one gone): said so, and the tab in front shown again.
+  useEffect(() => {
+    if (!active || !unresolved || pickIsFront) return
+    if (named.current) toast(t('agents.namedGone'))
+    named.current = false
+    const f = tabsRef.current.find((x) => x.id === frontRef.current)
+    if (f) goTab(f)
+    else {
+      setPick(null)
+      pickKey.current = null
+      navigate('/agents', true, history.state)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [active, unresolved, pickIsFront])
+  // A new tab: the quick switcher, its pick opened in one (none shown, the page's list is there already).
+  const newTab = () => {
+    if (!cur) return
+    askPickInTab()
+    window.dispatchEvent(new Event(OPEN_PICKER))
+  }
   const openSplit = (e: Entry) => {
     if (!cur) {
       choose(e)
       return
     }
+    // (Open in another tab: that tab, not a second view of it.)
+    const elsewhere = tabsRef.current.find((x) => x.id !== frontRef.current && (x.key === e.key || x.split === e.key))
+    if (elsewhere) return goTab(elsewhere, elsewhere.split === e.key ? 'secondary' : undefined)
     if (e.key === cur.key) {
       setFocusedPane('primary')
       return
@@ -485,6 +667,8 @@ export function AgentsChat({ bar, active = true, onHead }: { bar?: ReactNode; ac
     if (!cur || !splitEntry) return
     const prevCur = cur
     const prevSplit = splitEntry
+    // (The tab is of the other now, the one shown beside it: as it is, not gone to as another.)
+    putTabs(tabsRef.current.map((x) => (x.id === frontRef.current ? { ...x, key: prevSplit.key, s: prevSplit.s.id, pane: prevSplit.pane, split: prevCur.key, title: undefined, program: undefined } : x)))
     choose(prevSplit)
     setSplitKey(prevCur.key)
   }
@@ -495,7 +679,9 @@ export function AgentsChat({ bar, active = true, onHead }: { bar?: ReactNode; ac
     setFocusedPane('primary')
     choose(target)
   }
-  const chooseFromList = (e: Entry) => {
+  const chooseFromList = (e: Entry, how?: PickHow) => {
+    if (!how && takePickInTab()) how = 'tab' // (picked in the switcher ⌘T opened)
+    if (how) return choose(e, how)
     if (splitEntry && e.key === splitEntry.key) {
       setFocusedPane('secondary')
       return
@@ -571,7 +757,7 @@ export function AgentsChat({ bar, active = true, onHead }: { bar?: ReactNode; ac
     const follow = () => {
       if (location.pathname !== '/agents') return
       named.current = !!new URLSearchParams(location.search).get('s')
-      const p = readPick()
+      const p = readPick(frontPick())
       setPick((was) => (was && p && was.s === p.s && (was.pane ?? '') === (p.pane ?? '') ? was : p))
       setGaveUp(false)
       if (stack) setScreen(new URLSearchParams(location.search).get('s') ? 'chat' : 'list')
@@ -698,9 +884,90 @@ export function AgentsChat({ bar, active = true, onHead }: { bar?: ReactNode; ac
     }
   }, [])
 
+  // What each tab says: its agent's name, program and state as the list has them; one gone, as it was last.
+  const summariesMissing = !!sessions?.some(summaryMissing)
+  const tabViews: TabView[] = tabs.map((x) => {
+    const e = entries.find((en) => en.key === x.key)
+    const r = e?.row
+    let title = x.title ?? ''
+    if (e && r) {
+      const named = ((isCodex(r.a.agent) || isAgy(r.a.agent)) && r.a.thread_title) || keptTitle(titles.current, e) || paneName(r.a)
+      title = labelOf(e, named || dirName(r.a.cwd) || r.a.agent, hostCount(entries), !!named).title
+    } else if (e) title = keptTitle(titles.current, e) || x.title || `${e.s.host_name} · ${sessionWhich(e.s, sessions ?? [])}` // (a tmux agent out of front: no title in the list, so as last shown)
+    const inFront = x.id === front
+    return {
+      tab: x,
+      title: title || t('nav.agents'),
+      program: r?.a.agent ?? x.program,
+      status: r?.status ?? 'unknown',
+      ended: !e && !!sessions && !summariesMissing && !(inFront && (waiting || holding)),
+      address: chatAddress(x),
+    }
+  })
+  // (Its name and program kept with it: what it says once its agent is gone.)
+  const viewsKey = tabViews.map((v) => (entries.some((e) => e.key === v.tab.key) ? `${v.tab.id}\t${v.title}\t${v.program ?? ''}` : '')).join('\n')
+  useEffect(() => {
+    const l = tabsRef.current
+    const next = l.map((x) => {
+      const v = tabViews.find((w) => w.tab.id === x.id)
+      return v && entries.some((e) => e.key === x.key) && (v.title !== x.title || v.program !== x.program) ? { ...x, title: v.title, program: v.program } : x
+    })
+    if (next.some((x, i) => x !== l[i])) putTabs(next)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [viewsKey])
+  // The tab keys, in an installed app's window (a browser keeps them for its
+  // own tabs), as the terminals' page has them: Ctrl+Tab and Ctrl+Shift+Tab
+  // the next and previous; on a Mac ⌘1…⌘8 by place, ⌘9 the last, ⌘⇧[ ⌘⇧]; ⌘T
+  // (Ctrl+Shift+T elsewhere) a new tab; Ctrl+Shift+PageUp and PageDown move
+  // the one in front. No key closes one (⌘W is the window's).
+  useEffect(() => {
+    if (!active || !bar || stack || !standalone) return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.altKey || e.isComposing || e.keyCode === 229 || document.querySelector('[aria-modal="true"]')) return
+      const l = tabsRef.current
+      const at = l.findIndex((x) => x.id === frontRef.current)
+      const plain = /^[\x21-\x7e]$/.test(e.key)
+      const isT = e.key.toLowerCase() === 't' || (!plain && e.code === 'KeyT')
+      const bracket = e.key === '{' || (!plain && e.code === 'BracketLeft') ? -1 : e.key === '}' || (!plain && e.code === 'BracketRight') ? 1 : 0
+      const step = (d: number) => () => l.length > 1 && at >= 0 && goTab(l[(at + d + l.length) % l.length])
+      let act: (() => void) | null = null
+      if (e.key === 'Tab' && e.ctrlKey && !e.metaKey) act = step(e.shiftKey ? -1 : 1)
+      else if (e.ctrlKey && e.shiftKey && !e.metaKey && (e.key === 'PageUp' || e.key === 'PageDown')) act = () => at >= 0 && moveTab(l[at].id, at + (e.key === 'PageUp' ? -1 : 1))
+      else if (isMac && e.metaKey && !e.ctrlKey) {
+        const digit = /^Digit([1-9])$/.exec(e.code)
+        if (isT && !e.shiftKey) act = newTab
+        else if (digit && !e.shiftKey) {
+          const n = Number(digit[1])
+          const to = n === 9 ? l[l.length - 1] : l[n - 1]
+          act = () => to && to.id !== frontRef.current && goTab(to)
+        } else if (bracket && e.shiftKey) act = step(bracket)
+      } else if (!isMac && e.ctrlKey && e.shiftKey && !e.metaKey && isT) act = newTab
+      if (!act) return
+      e.preventDefault()
+      e.stopPropagation()
+      if (!e.repeat) act()
+    }
+    window.addEventListener('keydown', onKey, true)
+    return () => window.removeEventListener('keydown', onKey, true)
+  })
   let body: ReactNode
   if (stack && screen === 'list' && sessions !== null && entries.length)
     body = <PhoneList entries={entries} all={sessions} titles={titles.current} query={sideQuery} onQuery={setSideQuery} onPick={choose} />
+  else if (!cur && !stack && sessions !== null && !waiting && !holding && entries.length && (ended || (hadTabs.current && !frontTab)))
+    // No tab open, or the one in front's agent ended: said so, the list to open one from (its pick: in this tab).
+    body = (
+      <div className="agents-chat-pick">
+        <div className="agents-chat-pick-note">
+          <p>{t(ended ? 'agentTabs.endedNote' : 'agentTabs.closedNote')}</p>
+          {ended && frontTab && (
+            <button type="button" className="btn btn-ghost" onClick={() => closeTabs(new Set([frontTab.id]))}>
+              {t('agentTabs.close')}
+            </button>
+          )}
+        </div>
+        <PhoneList entries={entries} all={sessions} titles={titles.current} query={sideQuery} onQuery={setSideQuery} onPick={choose} />
+      </div>
+    )
   else if (!cur || (stack && screen === 'list')) {
     const held = holding && !(stack && screen === 'list') // (a phone's list waits for none)
     body = (
@@ -734,7 +1001,8 @@ export function AgentsChat({ bar, active = true, onHead }: { bar?: ReactNode; ac
           entries={entries}
           all={sessions ?? []}
           titles={titles.current}
-          onPick={(e) => {
+          onPick={(e, how) => {
+            if (how === 'tab') return choose(e, 'tab')
             if (e.key === cur.key) setFocusedPane('primary')
             else openSplit(e)
           }}
@@ -777,6 +1045,7 @@ export function AgentsChat({ bar, active = true, onHead }: { bar?: ReactNode; ac
         all={sessions ?? []}
         titles={titles.current}
         onPick={chooseFromList}
+        onOpenTab={stack ? undefined : (e) => choose(e, 'tab')}
         active={active}
         keysActive={active && (!splitEntry || focusedPane === 'primary')}
         splitPane={secondaryNode ? { node: secondaryNode, focused: focusedPane, onFocus: setFocusedPane, dir: splitDir, onDirToggle: toggleSplitDir } : undefined}
@@ -841,6 +1110,7 @@ export function AgentsChat({ bar, active = true, onHead }: { bar?: ReactNode; ac
             </button>
           )}
           {bar}
+          {!stack && <AgentTabBar views={tabViews} front={front} onGo={goTab} onClose={(x) => closeTabs(new Set([x.id]))} onCloseMany={(l) => closeTabs(new Set(l.map((x) => x.id)))} onMove={moveTab} onNew={newTab} newKey={standalone ? (isMac ? '⌘T' : 'Ctrl+Shift+T') : undefined} />}
         </header>
       ) : stack && screen === 'chat' && cur ? null : stack && screen === 'chat' ? (
         // (A phone's conversation, none shown in it: back to the list, as from one.)
@@ -1065,7 +1335,7 @@ const tmuxCmdsOf = (e: Entry): RowCmds | undefined => {
 
 // The conversation of one agent, and what is sent to it. Keyed by the
 // agent: nothing of another's (its draft, what was sent, a stop) carries over.
-function AgentChat({ cur, entries, all, titles, onPick, active, keysActive, isSecondary, primaryKey, splitPane, splitKey, splitDir, onSplitDirToggle, onSplitOpen, onSplitParentChild, onSplitClose, onSplitSwap, onSplitExpand, onNewSubagent, onHead, toast, composerEnter, sent, setSent, sending, setSending, draft: shownDraft, setDraftShown, used, lead, onClosed, onStarted, query, onQuery }: {
+function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysActive, isSecondary, primaryKey, splitPane, splitKey, splitDir, onSplitDirToggle, onSplitOpen, onSplitParentChild, onSplitClose, onSplitSwap, onSplitExpand, onNewSubagent, onHead, toast, composerEnter, sent, setSent, sending, setSending, draft: shownDraft, setDraftShown, used, lead, onClosed, onStarted, query, onQuery }: {
   onHead?: (h: AgentsHead | null) => void
   cur: Entry
   entries: Entry[]
@@ -1083,7 +1353,8 @@ function AgentChat({ cur, entries, all, titles, onPick, active, keysActive, isSe
   onStarted: (s: SessionInfo, pane: string, first: string, parent?: NewSubagentParent) => void // (a copy of one started: gone to, its first message in its composer)
   query: string // the side list's search
   onQuery: (q: string) => void
-  onPick: (e: Entry) => void
+  onPick: (e: Entry, how?: PickHow) => void
+  onOpenTab?: (e: Entry) => void
   active: boolean
   keysActive?: boolean
   isSecondary?: boolean
@@ -1421,10 +1692,10 @@ function AgentChat({ cur, entries, all, titles, onPick, active, keysActive, isSe
         const st = current && agent && !r.bg ? agent.status : r.status
         const parentKey = r.lost || !r.a.parent_pane ? undefined : agentKey(e.s, r.a.parent_pane)
         const sameWsParent = !!parentKey && wsByKey.get(parentKey) === r.wsId
-        return { key: e.key, ...labelOf(e, said, hosts, !!named, sameWsParent), now: r.lost || r.bg || st !== 'blocked' ? undefined : glanceOf(e.s.id, e.pane, st, r.a.since) || undefined /* (said only of one waiting on the person) */, program: r.a.agent, status: st, liveStatus: st, bg: r.lost ? undefined : r.bg, failed: failedOf(r, st), model: r.lost ? undefined : r.a.model, glance: r.lost || r.bg ? undefined : () => glanceOf(e.s.id, e.pane, st, r.a.since), cmds: cmdsOf(r), since: r.lost ? undefined : r.bg ? r.a.bg_since : r.a.since, current, inSplit: !isSecondary && !!splitKey && e.key === splitKey, pinned: pinAt(e.key), projectKey: normalizeProjectPath(r.a.cwd), sessionGroup: sessionGroupOf(e, all), parentKey, lineageSource: r.lost ? undefined : r.a.lineage_source, onPick: () => onPick(e), menu: () => rowMenu.current(e) }
+        return { key: e.key, ...labelOf(e, said, hosts, !!named, sameWsParent), now: r.lost || r.bg || st !== 'blocked' ? undefined : glanceOf(e.s.id, e.pane, st, r.a.since) || undefined /* (said only of one waiting on the person) */, program: r.a.agent, status: st, liveStatus: st, bg: r.lost ? undefined : r.bg, failed: failedOf(r, st), model: r.lost ? undefined : r.a.model, glance: r.lost || r.bg ? undefined : () => glanceOf(e.s.id, e.pane, st, r.a.since), cmds: cmdsOf(r), since: r.lost ? undefined : r.bg ? r.a.bg_since : r.a.since, current, inSplit: !isSecondary && !!splitKey && e.key === splitKey, pinned: pinAt(e.key), projectKey: normalizeProjectPath(r.a.cwd), sessionGroup: sessionGroupOf(e, all), parentKey, lineageSource: r.lost ? undefined : r.a.lineage_source, onPick: (how) => onPick(e, how), menu: () => rowMenu.current(e) }
       }
       const title = (current && agent?.title) || keptTitle(titles, e) || `${e.s.host_name} · ${sessionWhich(e.s, all)}`
-      return { key: e.key, title, where: whereOf(e, hosts), program: current ? agent?.program : undefined, status: current && agent ? agent.status : 'unknown', cmds: current ? agent?.cmds : tmuxCmdsOf(e), current, inSplit: !isSecondary && !!splitKey && e.key === splitKey, pinned: pinAt(e.key), sessionGroup: sessionGroupOf(e, all), onPick: () => onPick(e), menu: () => rowMenu.current(e) }
+      return { key: e.key, title, where: whereOf(e, hosts), program: current ? agent?.program : undefined, status: current && agent ? agent.status : 'unknown', cmds: current ? agent?.cmds : tmuxCmdsOf(e), current, inSplit: !isSecondary && !!splitKey && e.key === splitKey, pinned: pinAt(e.key), sessionGroup: sessionGroupOf(e, all), onPick: (how) => onPick(e, how), menu: () => rowMenu.current(e) }
     })
     return placedAs ? out.map((r) => (r.current ? { ...r, placeAs: placedAs } : r)) : out
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -2991,6 +3262,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, keysActive, isSe
   // (Claude Code's own commands on it are not there: they are of the one
   // shown, its process known.)
   rowMenu.current = (e) => [
+    onOpenTab && e.key !== cur.key ? { label: t('agentTabs.newTab'), icon: <Plus size={16} />, onSelect: () => onOpenTab(e) } : null,
     { label: t('convo.showTerminal'), icon: <SquareTerminal size={16} />, onSelect: terminalOf(e) },
     splitRowItem(e),
     pinItem(e.key),

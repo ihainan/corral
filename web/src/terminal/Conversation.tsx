@@ -5,6 +5,7 @@ import { t, getLang, type I18nKey } from '../i18n'
 import { api } from '../api'
 import { setPrefs, usePrefs } from '../prefs'
 import { openSettingsModal } from '../pages/Settings'
+import { dropPickInTab, OPEN_PICKER } from '../pages/agentTabs'
 import { asHeld, buildAgentGroups, dayStart, FOLDED, foldAt, isLiveBlocked, listOrder, pinned, type ConvoListRow, type OrderOpts, type RowCmds } from './agentOrder'
 import { copyText, Dialog, DialogHead, isCoarse, Menu, MenuLayer, swallowNextClick, useToast, type MenuItem } from '../components/ui'
 import { saveFile } from '../saveFile'
@@ -1389,6 +1390,17 @@ export function ConversationView({
     window.addEventListener('keydown', onKey, true)
     return () => window.removeEventListener('keydown', onKey, true)
   }, [active, side])
+  // The agents' page's ⌘T (a new tab): the quick switcher opened, its pick to open in one. Closed without a
+  // pick, the ask goes with it.
+  useEffect(() => {
+    if (!active || !side) return
+    const on = () => setPicking('search') // (the dialog, even with the list beside open: its pick is the new tab's)
+    window.addEventListener(OPEN_PICKER, on)
+    return () => window.removeEventListener(OPEN_PICKER, on)
+  }, [active, side])
+  useEffect(() => {
+    if (!picking) dropPickInTab()
+  }, [picking])
   // ⌘B (Ctrl+B elsewhere): the list beside folded or opened, as its button
   // does; where it fits beside. Typing too, not in a terminal (tmux's prefix).
   // (Folded with the focus in it: the focus to its button, not lost.)
@@ -2218,7 +2230,7 @@ export function ConversationView({
       )}
       {!sideShown && others.length > 0 && (
         // (Another agent waits: one tap to it, where the list is not in view.)
-        <button type="button" className="convo-nudge" onClick={others[0].onPick}>
+        <button type="button" className="convo-nudge" onClick={() => others[0].onPick()}>
           <span className="convo-nudge-text">{others.length > 1 ? t('convo.othersWaitingMany', { n: others.length, m: others.length - 1, title: others[0].title }) : t('convo.othersWaiting', { n: 1, title: others[0].title })}</span>
           <ChevronRight size={15} aria-hidden="true" />
         </button>
@@ -4812,10 +4824,21 @@ export function AgentList({ rows, menus, onPicked, placed, query: given, onQuery
               className={'convo-list-row is-' + r.status + (failed ? ' is-failed' : '') + (isNestedVisual ? ' is-nested' : '') + (isChild ? ' is-child' : '') + (hi === r.key ? ' is-hi' : '')}
               data-row={r.key}
               aria-current={r.current || undefined}
-              onClick={() => {
+              onClick={(e) => {
                 clearRowTip()
                 onPicked?.()
-                r.onPick() // (of the one shown: nothing, or the end of a switch to another; the list may be of before)
+                // (of the one shown: nothing, or the end of a switch to another; the list may be of before. With ⌘ or
+                // Ctrl a new tab, with ⌥ or Alt beside it — 11-24, as Claude Code's desktop app and Slack.)
+                r.onPick(e.metaKey || e.ctrlKey ? 'tab' : e.altKey ? 'split' : undefined)
+              }}
+              // (The middle button: a new tab, as a link's. Held down, it would start the page's scrolling.)
+              onMouseDown={(e) => e.button === 1 && e.preventDefault()}
+              onAuxClick={(e) => {
+                if (e.button !== 1) return
+                e.preventDefault()
+                clearRowTip()
+                onPicked?.()
+                r.onPick('tab')
               }}
               onKeyDown={(e) => {
                 rowNav(e)

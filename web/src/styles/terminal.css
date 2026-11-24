@@ -2201,6 +2201,12 @@ button.convo-queue-row.is-note:last-child { border-radius: 0 0 var(--r-lg) var(-
   text-align: center; color: var(--term-fg-2); font: var(--fs-ui)/var(--lh-ui) var(--font-ui);
 }
 .agents-chat-empty p { margin: 0; }
+/* No agent tab open, or the one in front's agent ended: a line saying so over the list to open one from. */
+.agents-chat-pick { flex: 1; min-height: 0; display: flex; flex-direction: column; width: 100%; max-width: 720px; margin: 0 auto; }
+.agents-chat-pick-note { flex: none; display: flex; align-items: center; gap: 12px; padding: 16px 16px 8px; color: var(--term-fg-2); font: var(--fs-ui)/var(--lh-ui) var(--font-ui); }
+.agents-chat-pick-note p { flex: 1; margin: 0; }
+/* An agent's tab whose agent ended: its name quiet. */
+.term-tab.is-ended .term-tab-name { color: var(--term-fg-3); }
 /* A list not refreshed: said in one quiet line over the page, not over the conversation. */
 .agents-chat-stale {
   margin: 0; padding: 6px 16px; flex: none; color: var(--term-fg-2); background: var(--term-chrome);

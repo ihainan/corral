@@ -398,7 +398,7 @@ function Shell({ active, children }: { active: NavKey; children: ReactNode }) {
       </nav>
       <div className="content">{children}</div>
       <nav className="tabbar" aria-label={t('nav.main')}>
-        {main.map((i) => (
+        {side.map((i) => (
           <a key={i.key} className="tab" href={i.href} onClick={linkHandler(i.href)} aria-current={i.key === tabActive ? 'page' : undefined} aria-label={named(i)}>
             <span className="tab-icon">
               {i.icon}
