@@ -106,6 +106,7 @@ const EXEMPT = [
   /\.sc-|\.complete-/,            // the completion panel: its rows are a height, set out above
   /\.kl-chip\b|\.reply-key\b|\.convo-ask-key\b|\.herdr-count\b/, // a badge: one glyph centred in a box, line 1
   /\.wb-rail-badge\b/,             // a count on the rail's icon: 16 high, sized to the icon, not a line of text
+  /\.term-page-badge\b/,           // the same count on the page switch that stands in for the rail (700-760 wide)
   /\.tab\b/,                      // a strip of tabs, as the terminal's own
   /\.picture-path\b/,             // a path in mono, sized to sit under the picture's name
   /\.convo-ask-label\b/,          // 22: with 11 above and below it, a choice is 44 to press

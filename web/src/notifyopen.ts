@@ -21,7 +21,7 @@ export function takeTabs(f: ((url: URL) => boolean) | null) {
 }
 export const agentsAddress = (u: URL) => u.pathname === '/agents'
 const takeElsewhere = (u: URL) => {
-  if (/^\/(t|w)\//.test(location.pathname) || location.pathname === '/login' || document.querySelector('[aria-modal="true"]')) return false
+  if (/^\/(t|w)\//.test(location.pathname) || location.pathname === '/t' || location.pathname === '/login' || document.querySelector('[aria-modal="true"]')) return false
   if (!agentsAddress(u) && !/^\/t\/[0-9a-f]+$/.test(u.pathname)) return false
   navigate(u.pathname + u.search)
   return true

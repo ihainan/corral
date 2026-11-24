@@ -1,5 +1,5 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { Bot, Film, KeyRound, LogOut, ScrollText, Search, Server, Settings, Users } from 'lucide-react'
+import { Bot, Film, KeyRound, LogOut, ScrollText, Search, Server, Settings, SquareTerminal, Users } from 'lucide-react'
 import { openPalette, PALETTE_KEY } from './palette'
 import { signOut, useSession } from './app'
 import { t } from './i18n'
@@ -28,7 +28,7 @@ export function useWorkbench(): boolean {
   return m
 }
 
-export type RailKey = 'agents' | 'hosts' | 'keys' | 'settings' | 'recordings' | 'users' | 'audit'
+export type RailKey = 'agents' | 'terminals' | 'hosts' | 'keys' | 'settings' | 'recordings' | 'users' | 'audit'
 
 export function Rail({ active }: { active?: RailKey }) {
   const { me, setMe, boot } = useSession()
@@ -41,6 +41,8 @@ export function Rail({ active }: { active?: RailKey }) {
   const meBtn = useRef<HTMLButtonElement>(null) // (this rail's: another page's, hidden, has one too)
   const items: { key: RailKey; href: string; label: string; icon: ReactNode }[] = [
     { key: 'agents', href: '/agents', label: t('nav.agents'), icon: <Bot size={19} strokeWidth={1.75} /> },
+    // (The terminals' page, apart from the agents' since 11-24: the terminal last in front there.)
+    { key: 'terminals', href: '/t', label: t('nav.terminals'), icon: <SquareTerminal size={19} strokeWidth={1.75} /> },
     { key: 'hosts', href: '/', label: t('nav.hosts'), icon: <Server size={19} strokeWidth={1.75} /> },
     { key: 'keys', href: '/keys', label: t('nav.keys'), icon: <KeyRound size={19} strokeWidth={1.75} /> },
     ...(boot.recordings ? [{ key: 'recordings' as const, href: '/recordings', label: t('nav.recordings'), icon: <Film size={19} strokeWidth={1.75} /> }] : []),

@@ -114,7 +114,9 @@ function Palette({ onClose, onHost }: { onClose: () => void; onHost: (h: Host) =
       [
       { key: 'c new', group: 'commands', icon: <Plus size={16} aria-hidden="true" />, title: t('palette.newAgent'), go: go(() => (path === '/agents' ? askNewAgent() : (askNewAgent(), navigate('/agents')))) },
       { key: 'c agents', group: 'commands', icon: <Bot size={16} strokeWidth={1.75} aria-hidden="true" />, title: t('palette.toAgents'), go: go(() => navigate('/agents')) },
-      { key: 'c hosts', group: 'commands', icon: <SquareTerminal size={16} strokeWidth={1.75} aria-hidden="true" />, title: t('palette.toHosts'), go: go(() => navigate('/')) },
+      // (The terminals' page: where there are tabs, 700 and up.)
+      ...(matchMedia('(min-width: 700px)').matches ? [{ key: 'c terms', group: 'commands', icon: <SquareTerminal size={16} strokeWidth={1.75} aria-hidden="true" />, title: t('palette.toTerminals'), go: go(() => navigate('/t')) }] : []),
+      { key: 'c hosts', group: 'commands', icon: <Server size={16} strokeWidth={1.75} aria-hidden="true" />, title: t('palette.toHosts'), go: go(() => navigate('/')) },
       { key: 'c keys', group: 'commands', icon: <KeyRound size={16} strokeWidth={1.75} aria-hidden="true" />, title: t('palette.toKeys'), go: go(() => navigate('/keys')) },
       { key: 'c settings', group: 'commands', icon: <Settings size={16} strokeWidth={1.75} aria-hidden="true" />, title: t('palette.settings'), hint: mac ? '⌘,' : 'Ctrl+,', go: go(() => openSettingsModal()) },
       ] as Item[]

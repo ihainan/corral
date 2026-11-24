@@ -202,7 +202,8 @@ function openPage(url) {
       // first, then any other. Nothing is loaded again, no terminal's
       // connection ends (tabs: it shows as one of them).
       // (A watched session's page is not asked: it keeps its connection.)
-      const app = (c) => path(c).startsWith('/t/') || path(c) === '/agents'
+      // (The terminals' page itself, /t, is one too: the same frame, 11-24.)
+      const app = (c) => path(c).startsWith('/t/') || path(c) === '/t' || path(c) === '/agents'
       const asked = list.filter((c) => !path(c).startsWith('/w/'))
       return firstAccepting([...asked.filter(app), ...asked.filter((c) => !app(c))], url.href).then(({ taker, declined }) => {
         if (taker) return taker.focus()
@@ -210,7 +211,7 @@ function openPage(url) {
         // and did not say no (a dialog up, terminals in its tabs: all would
         // be lost), goes there: one whose page did not answer at all (not
         // started yet, say).
-        const free = list.find((c) => 'navigate' in c && !path(c).startsWith('/t/') && !path(c).startsWith('/w/') && !declined.has(c))
+        const free = list.find((c) => 'navigate' in c && !path(c).startsWith('/t/') && path(c) !== '/t' && !path(c).startsWith('/w/') && !declined.has(c))
         if (free) return free.focus().then(() => free.navigate(url.href))
         return self.clients.openWindow(url.href)
       })

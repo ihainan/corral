@@ -2993,7 +2993,7 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
           {fresh.dialogs}
         </>
       )}
-      {wbOn && <Rail />}
+      {wbOn && <Rail active="terminals" />}
       {wbOn && (
         <StatusBar>
           <StatusItem mark={statusClass === 's-open' ? 'on' : statusClass === 's-ended' ? 'off' : 'trouble'} title={statusText}>

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { ArrowLeftToLine, ArrowRightToLine, Bot, ExternalLink, Link2, Plus, X } from 'lucide-react'
+import { ArrowLeftToLine, ArrowRightToLine, Bot, ChevronLeft, ExternalLink, Link2, Plus, Server, SquareTerminal, X } from 'lucide-react'
 import { AgentsChat, type AgentsHead } from './AgentsChat'
 import { AgentIcon } from '../terminal/agentIcons'
 import { api, authGen, choiceOf, probeBootstrap, type OpenChoice, type SessionInfo } from '../api'
@@ -14,11 +14,20 @@ import { estimateSize, useConnect } from '../connect'
 import type { TabInfo } from './Terminal'
 import { TerminalPage } from './lazyPages'
 import { NewTabDialog } from '../terminal/NewSessionDialog'
+import { chromeVars, corralDark, corralLight } from '../terminal/themes'
+import { isDark, usePrefs } from '../prefs'
+import { Rail, StatusBar, useWorkbench } from '../workbench'
 
 // Tabs where there is room for them: desktops and tablets (an iPad with a
 // keyboard switches with Ctrl+Tab too). Phones keep the session switcher.
 const TABS_QUERY = '(min-width: 700px)'
 export const AGENTS = 'agents' // (TerminalTabs' current for the agents page)
+// (TerminalTabs' current for the terminals' page itself, /t: the terminal last in
+// front there, else the first; none running, a page that says so.)
+export const TERMINALS = 'terminals'
+// The terminal last in front, for /t (the rail's way to the terminals: 11-24,
+// the terminals a page of their own, apart from the agents').
+let lastTerminal: string | null = null
 export function useTabsMode(): boolean {
   const [m, setM] = useState(() => window.matchMedia(TABS_QUERY).matches)
   useEffect(() => {
@@ -179,11 +188,17 @@ function moveTab(list: SessionInfo[], id: string, to: number) {
   writeOrder(order)
 }
 
-// current: the session in front, or "agents" (the agents page, a tab of its own).
+// The agents' page and the terminals' (11-24: two pages, each its own row of
+// tabs — the terminals no longer tabs of the agents' page, nor it one of
+// theirs), kept in one frame: going from one to the other leaves the other's
+// terminals connected and its conversation as it was, as the tabs did.
+// current: the session in front, "agents" (the agents page) or "terminals" (/t).
 export function TerminalTabs({ current }: { current: string }) {
   const agents = current === AGENTS
+  const termId = agents || current === TERMINALS ? null : current // (the terminal in front, if one is)
+  if (termId) lastTerminal = termId
   const [sessions, setSessions] = useState<SessionInfo[] | null>(null)
-  const [mounted, setMounted] = useState<string[]>(current === AGENTS ? [] : [current])
+  const [mounted, setMounted] = useState<string[]>(termId ? [termId] : [])
   const [agentsSeen, setAgentsSeen] = useState(agents)
   if (agents && !agentsSeen) setAgentsSeen(true)
   const [infos, setInfos] = useState<Record<string, TabInfo>>({})
@@ -317,15 +332,15 @@ export function TerminalTabs({ current }: { current: string }) {
   // The current one moves to the end of the mounted list; the oldest is let go.
   const mountedAt = useRef(new Map<string, number>())
   useEffect(() => {
-    if (current === AGENTS) return // (no terminal of its own: the others stay as they are)
-    if (!mountedAt.current.has(current)) mountedAt.current.set(current, Date.now())
+    if (!termId) return // (no terminal of its own: the others stay as they are)
+    if (!mountedAt.current.has(termId)) mountedAt.current.set(termId, Date.now())
     setMounted((m) => {
-      const next = [...m.filter((x) => x !== current), current]
+      const next = [...m.filter((x) => x !== termId), termId]
       const kept = next.length > MAX_MOUNTED ? next.slice(next.length - MAX_MOUNTED) : next
       for (const id of next) if (!kept.includes(id)) mountedAt.current.delete(id)
       return kept
     })
-  }, [current])
+  }, [termId])
   // A mounted session that ended goes (unless shown): one missing from a list
   // asked for after it was opened (an older list may simply not have it yet).
   useEffect(() => {
@@ -357,8 +372,16 @@ export function TerminalTabs({ current }: { current: string }) {
   // has it (just opened) or after it ended (its end is shown).
   const tabs = useMemo(() => {
     const list = sessions ?? []
-    return current === AGENTS || list.some((s) => s.id === current) ? list : [...list, { id: current, host_id: 0, host_name: '', title: '' } as SessionInfo]
-  }, [sessions, current])
+    return !termId || list.some((s) => s.id === termId) ? list : [...list, { id: termId, host_id: 0, host_name: '', title: '' } as SessionInfo]
+  }, [sessions, termId])
+
+  // The terminals' page itself (/t): the terminal last in front there, else
+  // the first; none running, it stays, saying so.
+  useEffect(() => {
+    if (current !== TERMINALS || !sessions?.length) return
+    const to = sessions.find((s) => s.id === lastTerminal) ?? sessions[0]
+    navigate('/t/' + to.id, true)
+  }, [current, sessions])
 
   // A tab moved by the user: its place is kept, and the bar shows it there now.
   const sessionsRef = useRef(sessions)
@@ -375,16 +398,15 @@ export function TerminalTabs({ current }: { current: string }) {
     setSessions(next)
   }, [])
 
-  // (The agents page first, as the bar shows it.)
+  // (Within the page in front: the terminals' tabs go round among themselves.)
   const go = useCallback(
     (dir: 1 | -1) => {
-      const ids = [AGENTS, ...tabs.map((s) => s.id)]
-      const i = ids.indexOf(current)
+      const ids = tabs.map((s) => s.id)
+      const i = termId ? ids.indexOf(termId) : -1
       if (ids.length < 2 || i < 0) return
-      const to = ids[(i + dir + ids.length) % ids.length]
-      navigate(to === AGENTS ? '/agents' : '/t/' + to, true)
+      navigate('/t/' + ids[(i + dir + ids.length) % ids.length], true)
     },
-    [tabs, current],
+    [tabs, termId],
   )
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -401,24 +423,26 @@ export function TerminalTabs({ current }: { current: string }) {
       let act: (() => void) | null = null
       // (In an installed app only, as the rest: in a browser's tab the
       // browser has Ctrl+Tab; where it did not, the program would lose it.)
-      if (standalone && e.key === 'Tab' && e.ctrlKey && !e.metaKey) {
-        if (tabs.length >= 1) act = () => go(e.shiftKey ? -1 : 1)
-      } else if (standalone && e.ctrlKey && e.shiftKey && !e.metaKey && (e.key === 'PageUp' || e.key === 'PageDown')) {
+      // (The terminals' keys on their page; the agents' page has one tab yet, and keeps them as a page does.)
+      const terms = current !== AGENTS
+      if (standalone && terms && e.key === 'Tab' && e.ctrlKey && !e.metaKey) {
+        if (tabs.length >= 2 && termId) act = () => go(e.shiftKey ? -1 : 1)
+      } else if (standalone && terms && e.ctrlKey && e.shiftKey && !e.metaKey && (e.key === 'PageUp' || e.key === 'PageDown')) {
         // (At either end it goes nowhere, and the program does not get it either.)
-        const i = tabs.findIndex((s) => s.id === current && s.host_id !== 0)
+        const i = tabs.findIndex((s) => s.id === termId && s.host_id !== 0)
         const to = i + (e.key === 'PageUp' ? -1 : 1)
-        act = () => i >= 0 && to >= 0 && to < tabs.filter((s) => s.host_id !== 0).length && move(current, to)
-      } else if (standalone && isMac && e.metaKey && !e.ctrlKey) {
+        act = () => termId && i >= 0 && to >= 0 && to < tabs.filter((s) => s.host_id !== 0).length && move(termId, to)
+      } else if (standalone && terms && isMac && e.metaKey && !e.ctrlKey) {
         const digit = /^Digit([1-9])$/.exec(e.code)
         if (isT && !e.shiftKey) act = () => setNewOpen(true)
         else if (digit && !e.shiftKey) {
-          // (As the bar shows them, the agents page first.)
-          const ids = [AGENTS, ...tabs.map((s) => s.id)]
+          // (As the bar shows them.)
+          const ids = tabs.map((s) => s.id)
           const n = Number(digit[1])
           const to = n === 9 ? ids[ids.length - 1] : ids[n - 1]
-          act = () => to && to !== current && navigate(to === AGENTS ? '/agents' : '/t/' + to, true)
+          act = () => to && to !== termId && navigate('/t/' + to, true)
         } else if (bracket && e.shiftKey) act = () => go(bracket as 1 | -1)
-      } else if (standalone && !isMac && e.ctrlKey && e.shiftKey && !e.metaKey && isT) act = () => setNewOpen(true)
+      } else if (standalone && terms && !isMac && e.ctrlKey && e.shiftKey && !e.metaKey && isT) act = () => setNewOpen(true)
       if (!act) return
       // Before the terminal's own listeners: the program never sees it.
       e.preventDefault()
@@ -429,7 +453,7 @@ export function TerminalTabs({ current }: { current: string }) {
     }
     window.addEventListener('keydown', onKey, true)
     return () => window.removeEventListener('keydown', onKey, true)
-  }, [go, move, tabs, current])
+  }, [go, move, tabs, current, termId])
 
   // A notification of another session (tapped while this window shows
   // tabs) opens as its tab here, with what its address asks for (?reply=).
@@ -459,7 +483,8 @@ export function TerminalTabs({ current }: { current: string }) {
   }, [dialogs])
 
   // A session the user ended: its neighbour (the next tab, else the one
-  // before) comes to the front, or the host list when it was the last.
+  // before) comes to the front, or the terminals' page, saying none runs,
+  // when it was the last (still in this frame: not the hosts' page).
   // (Read when it happens: the confirmation holds an older copy of this.)
   const tabsRef = useRef(tabs)
   tabsRef.current = tabs
@@ -469,7 +494,7 @@ export function TerminalTabs({ current }: { current: string }) {
     const rest = tabs.filter((s) => s.id !== id && s.host_id !== 0)
     const next = rest[Math.min(Math.max(i, 0), rest.length - 1)]
     setSessions((l) => l && l.filter((s) => s.id !== id))
-    navigate(next ? '/t/' + next.id : '/', true)
+    navigate(next ? '/t/' + next.id : '/t', true)
     load()
   }
 
@@ -478,15 +503,17 @@ export function TerminalTabs({ current }: { current: string }) {
   // (Several at once, from a tab's menu: the others, or those to its right.)
   const [closingMany, setClosingMany] = useState<{ keep: SessionInfo; list: SessionInfo[] } | null>(null)
   const bar = <TabBar tabs={tabs} current={current} infos={infos} head={head} onNew={() => setNewOpen(true)} onMove={move} onClose={setClosing} onCloseMany={(keep, list) => setClosingMany({ keep, list })} />
+  // (Both pages' bars as they are, for the frame's way between them; the one not in front is the other's.)
   // (The tab shown is drawn in the same frame as the one left goes: not a
   // frame later, once the effect above has mounted it — a frame of neither,
   // the page's own background, flashed between them.)
-  const drawn = current !== AGENTS && !mounted.includes(current) ? [...mounted, current] : mounted
+  const drawn = termId && !mounted.includes(termId) ? [...mounted, termId] : mounted
   return (
     <>
       {drawn.map((id) => (
         <TerminalPage key={id} id={id} active={id === current} tabs={bar} onInfo={onInfo} onEnd={() => endTab(id)} />
       ))}
+      {current === TERMINALS && <TerminalsHome bar={bar} none={sessions?.length === 0} onNew={() => setNewOpen(true)} />}
       {/* (Kept once shown, as the terminals are: what it is sending, and what was sent, stay.) */}
       {agentsSeen && <AgentsChat bar={bar} active={agents} onHead={setHead} />}
       {newOpen && (
@@ -750,12 +777,16 @@ function TabBar(p: { tabs: SessionInfo[]; current: string; infos: Record<string,
   }
   const menuTab = menu && p.tabs.find((x) => x.id === menu.id)
   const ref = useRef<HTMLElement>(null)
+  // Which page's tabs: the agents' (its one tab, the conversation in front) or the terminals'.
+  const agentsPage = p.current === AGENTS
+  const shown = agentsPage ? [] : p.tabs
+  const wb = useWorkbench()
   // (The tab of a session just opened, not in the list yet, stays last.)
-  const movable = p.tabs.filter((s) => s.host_id !== 0).map((s) => s.id)
+  const movable = shown.filter((s) => s.host_id !== 0).map((s) => s.id)
   const { drag, onPointerDown, offset, dragged, moved } = useTabDrag(ref, movable, p.current, p.onMove)
   // The current tab is scrolled into view when it changes, or the tabs do
   // (moved by a key too; not by a drag: the tab dragged is where it was let go).
-  const order = p.tabs.map((s) => s.id).join()
+  const order = shown.map((s) => s.id).join()
   useEffect(() => {
     if (moved.current) {
       moved.current = false
@@ -790,12 +821,24 @@ function TabBar(p: { tabs: SessionInfo[]; current: string; infos: Record<string,
   const waitingAll = waitingAgents(p.tabs)
   return (
     <>
-    <nav className={'term-tabs' + (drag ? ' dragging' : '') + fade} aria-label={t('tabs.label')} ref={ref}>
+    {/* (Where no rail is — 700 to 760 wide —, the way between the two pages: what the rail does wider.) */}
+    {!wb && (
+      <div className="term-pages" role="group" aria-label={t('tabs.pages')}>
+        <button type="button" className="term-page" aria-current={agentsPage ? 'page' : undefined} onClick={() => !agentsPage && navigate('/agents')} title={t('nav.agents')} aria-label={waitingAll > 0 ? `${t('nav.agents')}，${t('nav.waitingN', { n: waitingAll })}` : t('nav.agents')}>
+          <Bot size={15} aria-hidden="true" />
+          {waitingAll > 0 && <span className="term-page-badge" aria-hidden="true">{waitingAll > 99 ? '99+' : waitingAll}</span>}
+        </button>
+        <button type="button" className="term-page" aria-current={agentsPage ? undefined : 'page'} onClick={() => agentsPage && navigate('/t')} title={t('nav.terminals')} aria-label={t('nav.terminals')}>
+          <SquareTerminal size={15} aria-hidden="true" />
+        </button>
+      </div>
+    )}
+    <nav className={'term-tabs' + (drag ? ' dragging' : '') + fade} aria-label={t(agentsPage ? 'tabs.agentsLabel' : 'tabs.label')} ref={ref}>
+      {agentsPage && (
       <button
         type="button"
         className="term-tab term-tab-agents"
-        aria-current={p.current === AGENTS ? 'page' : undefined}
-        onClick={() => p.current !== AGENTS && navigate('/agents')}
+        aria-current="page"
         title={p.head ? t('tabs.agentsHead', { title: p.head.title }) : t('nav.agents')}
       >
         {/* (The conversation in front, by its name and program: the list beside it
@@ -809,7 +852,8 @@ function TabBar(p: { tabs: SessionInfo[]; current: string; infos: Record<string,
           </span>
         )}
       </button>
-      {p.tabs.map((s) => {
+      )}
+      {shown.map((s) => {
         const info = p.infos[s.id]
         // (Its host kept as long as it fits: what follows gives way first — ux1101 T27.)
         const name = s.host_name ? (
@@ -917,11 +961,51 @@ function TabBar(p: { tabs: SessionInfo[]; current: string; infos: Record<string,
         onClose={() => setMenu(null)}
       />
     )}
-    {/* (Outside the tabs that scroll: always in sight — ux1101 N2.) */}
+    {/* (Outside the tabs that scroll: always in sight — ux1101 N2. A terminal's: the agents' page opens its own.) */}
+    {!agentsPage && (
     <button type="button" className="icon-btn term-tab-new" onClick={p.onNew} aria-label={t('tabs.new')} aria-keyshortcuts={standalone ? (isMac ? 'Meta+T' : 'Control+Shift+T') : undefined} title={standalone ? `${t('tabs.new')} (${newTabKey})` : t('tabs.new')}>
         <Plus size={17} />
       </button>
+    )}
     </>
+  )
+}
+
+// The terminals' page with none of them in front (/t): while the list is
+// read, nothing; none running, says so, with the ways to one.
+function TerminalsHome({ bar, none, onNew }: { bar: React.ReactNode; none: boolean; onNew: () => void }) {
+  const wb = useWorkbench()
+  usePrefs() // (drawn again when the theme changes, the system's included)
+  const scheme = isDark() ? corralDark : corralLight
+  return (
+    <div className={'term-root terms-home ' + (scheme.dark ? 'dark' : 'light') + (wb ? ' wb-on' : '')} style={chromeVars(scheme) as React.CSSProperties}>
+      <header className="term-bar">
+        {/* (The way back to the hosts is the rail's, on the workbench.) */}
+        {!wb && (
+          <button type="button" className="icon-btn" onClick={() => navigate('/')} aria-label={t('term.backToHosts')} title={t('term.backToHosts')}>
+            <ChevronLeft size={20} />
+          </button>
+        )}
+        {bar}
+      </header>
+      <div className="term-body">
+        {none && (
+          <div className="agents-chat-empty">
+            <p>{t('terms.none')}</p>
+            <button type="button" className="btn btn-primary" onClick={onNew}>
+              <Plus size={16} aria-hidden="true" />
+              {t('tabs.new')}
+            </button>
+            <button type="button" className="btn btn-ghost" onClick={() => navigate('/')}>
+              <Server size={16} aria-hidden="true" />
+              {t('agents.toHosts')}
+            </button>
+          </div>
+        )}
+      </div>
+      {wb && <Rail active="terminals" />}
+      {wb && <StatusBar />}
+    </div>
   )
 }
 

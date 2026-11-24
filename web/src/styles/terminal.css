@@ -506,6 +506,17 @@ html.kb-open .keybar { padding-bottom: 6px; }
 .term-tab-dot.s-connecting, .term-tab-dot.s-reconnecting, .term-tab-dot.s-slow { background: var(--term-warn-text); }
 .term-tab-dot.s-offline, .term-tab-dot.s-full { background: var(--term-danger-text); }
 .term-tab-new { flex: none; width: 30px; height: 30px; color: var(--term-fg-2); }
+/* The way between the agents' page and the terminals' where no rail is (700 to
+   760 wide): two icons, the page in front marked as a tab in front is. */
+.term-pages { flex: none; display: flex; align-items: center; gap: 2px; margin-left: 4px; padding-right: 6px; border-right: 1px solid var(--term-line); }
+.term-page { position: relative; display: grid; place-items: center; width: 30px; height: 30px; padding: 0; border: 0; border-radius: var(--r-sm); background: none; color: var(--term-fg-3); cursor: pointer; }
+.term-page:hover { background: var(--term-hover); color: var(--term-fg); }
+.term-page:focus-visible { outline: none; box-shadow: inset 0 0 0 2px var(--term-accent-text); }
+.term-page[aria-current='page'] { background: var(--term-bg); color: var(--term-fg); box-shadow: inset 0 0 0 1px var(--term-line); }
+/* (As the rail's count is drawn: the rail is what this stands for.) */
+.term-page-badge { position: absolute; top: -2px; right: -3px; min-width: 16px; height: 16px; padding: 0 4px; border-radius: 999px; font-size: 10px; line-height: 16px; font-weight: 600; font-variant-numeric: tabular-nums; text-align: center; color: var(--term-chrome); background: var(--term-warn-text); }
+@media (forced-colors: active) { .term-page-badge { forced-color-adjust: none; background: Highlight; color: HighlightText; } }
+@media (pointer: coarse) { .term-page { width: 40px; height: 40px; } }
 /* (A finger's: 40 high in the 44 bar — ux1101 T31.) */
 @media (pointer: coarse) { .term-tab, .term-tab-new { height: 40px; } .term-tab-new { width: 40px; } }
 
@@ -2184,7 +2195,7 @@ button.convo-queue-row.is-note:last-child { border-radius: 0 0 var(--r-lg) var(-
 
 /* The agents page: the conversation view on the whole page (a tab of its own with tabs) */
 .agents-chat-title { padding: 0 6px; font: 600 var(--fs-h3)/var(--lh-h3) var(--font-ui); color: var(--term-fg); }
-.agents-chat .term-body { display: flex; flex-direction: column; }
+.agents-chat .term-body, .terms-home .term-body { display: flex; flex-direction: column; }
 .agents-chat-empty {
   margin: auto; max-width: 44ch; padding: 24px 16px; display: flex; flex-direction: column; align-items: center; gap: 12px;
   text-align: center; color: var(--term-fg-2); font: var(--fs-ui)/var(--lh-ui) var(--font-ui);

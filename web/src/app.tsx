@@ -2,7 +2,7 @@ import { createContext, useCallback, useContext, useEffect, useRef, useState, ty
 import { forgetConversations } from './terminal/conversation'
 import { appBadge, forgetSessions, useWaitingCount } from './terminal/agents'
 import { forgetColours } from './terminal/Code'
-import { Bot, ChevronLeft, Film, KeyRound, LogOut, ScrollText, Server, Settings, Users } from 'lucide-react'
+import { Bot, ChevronLeft, Film, KeyRound, LogOut, ScrollText, Server, Settings, SquareTerminal, Users } from 'lucide-react'
 import { api, ApiError, bumpAuthGen, setUnauthorizedHandler, type Bootstrap, type Me } from './api'
 import { applyDefaultLanguage, t } from './i18n'
 import { freezePrefs, resetPrefsSession, sendPendingPrefs, syncPrefsFromServer } from './prefs'
@@ -17,7 +17,7 @@ import { KeysPage } from './pages/Keys'
 import { isDesktopSettings, OPEN_SETTINGS, openSettingsModal, SettingsDialog, SettingsPage, type SettingsCatId } from './pages/Settings'
 import { AdminUsersPage, AdminAuditPage } from './pages/Admin'
 import { preloadTerminal, RecordingPlayerPage, RecordingsPage, TerminalPage } from './pages/lazyPages'
-import { TerminalTabs, useTabsMode } from './pages/TerminalTabs'
+import { TERMINALS, TerminalTabs, useTabsMode } from './pages/TerminalTabs'
 import { draftsFor } from './terminal/drafts'
 import { Rail, StatusBar, useWorkbench } from './workbench'
 import { PaletteHost } from './palette'
@@ -174,7 +174,7 @@ function SettingsModalHost() {
   const pathRef = useRef(path)
   pathRef.current = path
   const defaultCatForPath = (): SettingsCatId =>
-    pathRef.current === '/agents' ? 'chat' : pathRef.current.startsWith('/t/') ? 'terminal' : 'general'
+    pathRef.current === '/agents' ? 'chat' : pathRef.current.startsWith('/t/') || pathRef.current === '/t' ? 'terminal' : 'general'
   useEffect(() => {
     const onOpen = (e: Event) => {
       if (!isDesktopSettings()) return
@@ -245,10 +245,12 @@ function route(path: string, boot: Bootstrap, me: Me | null, tabs: boolean): Rea
   if (!me) return <Redirect to={boot.setup_needed ? '/setup' : '/login?next=' + encodeURIComponent(path + location.search)} />
 
   if ((m = match('/t/:id', path))) return tabs ? <TerminalTabs current={m.id} /> : <TerminalPage key={m.id} id={m.id} />
+  // (The terminals' page, a terminal's tab in front or none running; a phone has no such page: its hosts list has them.)
+  if (path === '/t') return tabs ? <TerminalTabs current={TERMINALS} /> : <Redirect to="/" />
   if ((m = match('/w/:id', path))) return <TerminalPage key={'w' + m.id} id={m.id} watch />
   if ((m = match('/recordings/:id', path))) return <RecordingPlayerPage key={m.id} id={m.id} />
   if (path === '/recordings') return <Shell active="recordings"><RecordingsPage /></Shell>
-  // (With tabs, a tab of its own: the terminals stay open behind it.)
+  // (With tabs, in the frame the terminals' page has too: they stay open behind it.)
   if (path === '/agents') return tabs ? <TerminalTabs current="agents" /> : <AgentsChat />
   if (path === '/' || path === '/hosts') return <Shell active="hosts"><HostsPage /></Shell>
   if (path === '/hosts/new') return <Shell active="hosts"><HostEditPage /></Shell>
@@ -267,7 +269,7 @@ function nextPath(): string {
   return n && n.startsWith('/') && !n.startsWith('//') ? n : '/'
 }
 
-type NavKey = 'hosts' | 'agents' | 'keys' | 'settings' | 'recordings' | 'users' | 'audit'
+type NavKey = 'hosts' | 'agents' | 'terminals' | 'keys' | 'settings' | 'recordings' | 'users' | 'audit'
 
 // signOut ends the browser session. The push subscription of this device is
 // removed first, so the next person signing in here does not get the previous
@@ -317,6 +319,9 @@ function Shell({ active, children }: { active: NavKey; children: ReactNode }) {
     { key: 'keys', href: '/keys', label: t('nav.keys'), icon: <KeyRound size={17} strokeWidth={1.75} /> },
     { key: 'settings', href: '/settings', label: t('nav.settings'), icon: <Settings size={17} strokeWidth={1.75} /> },
   ]
+  // The terminals' page: where there are tabs (700 and up); a phone's terminals are its hosts list's.
+  const tabsMode = useTabsMode()
+  const side: typeof main = tabsMode ? [...main.slice(0, 2), { key: 'terminals', href: '/t', label: t('nav.terminals'), icon: <SquareTerminal size={17} strokeWidth={1.75} /> }, ...main.slice(2)] : main
   // Recordings: only where sessions are recorded; on phones under Settings.
   const extra: typeof main = boot.recordings
     ? [{ key: 'recordings', href: '/recordings', label: t('nav.recordings'), icon: <Film size={17} strokeWidth={1.75} /> }]
@@ -380,7 +385,7 @@ function Shell({ active, children }: { active: NavKey; children: ReactNode }) {
           <BrandMark />
           <span className="label">{t('app.name')}</span>
         </a>
-        {main.map(item)}
+        {side.map(item)}
         {extra.map(item)}
         {admin.length > 0 && <div className="nav-group">{t('nav.admin')}</div>}
         {admin.map(item)}
