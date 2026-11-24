@@ -45,10 +45,12 @@ type meView struct {
 	HasPassword bool `json:"has_password"`
 	// SSO: its bindings to single sign-on (where asked for: Settings).
 	SSO []*store.OIDCIdentity `json:"sso,omitempty"`
+	// AvatarAt: its picture's time (0: none; GET /api/users/{id}/avatar?v=…).
+	AvatarAt int64 `json:"avatar_at,omitempty"`
 }
 
 func viewMe(u *store.User) *meView {
-	return &meView{ID: u.ID, Username: u.Username, DisplayName: u.DisplayName, Role: u.Role, TOTP: u.TOTP, MustChangePassword: u.MustChangePassword, HasPassword: u.HasPassword()}
+	return &meView{ID: u.ID, Username: u.Username, DisplayName: u.DisplayName, Role: u.Role, TOTP: u.TOTP, MustChangePassword: u.MustChangePassword, HasPassword: u.HasPassword(), AvatarAt: u.AvatarAt}
 }
 
 func (s *Server) apiBootstrap(w http.ResponseWriter, r *http.Request) {

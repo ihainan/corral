@@ -9,6 +9,7 @@ export interface Me {
   must_change_password?: boolean // an administrator set the password: choose one's own first
   has_password?: boolean // false: single sign-on is its only way in
   sso?: SSOIdentity[] // its bindings to single sign-on (GET /api/me)
+  avatar_at?: number // when its picture was set (none: it has none — its initial is shown)
 }
 
 // An account's binding to an identity of the single sign-on provider.
@@ -245,8 +246,9 @@ export async function api<T>(method: string, path: string, body?: unknown, opts:
           method,
           credentials: 'same-origin',
           signal: ctl.signal,
-          headers: body !== undefined ? { 'Content-Type': 'application/json' } : undefined,
-          body: body !== undefined ? JSON.stringify(body) : undefined,
+          // (A Blob goes as its own bytes — an account's picture —, anything else as JSON.)
+          headers: body === undefined ? undefined : { 'Content-Type': body instanceof Blob ? body.type || 'application/octet-stream' : 'application/json' },
+          body: body === undefined ? undefined : body instanceof Blob ? body : JSON.stringify(body),
         })
       // (One answered with a refusal is asked again: it may be of a moment
       // before — a password changed since, say.)

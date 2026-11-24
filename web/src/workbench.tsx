@@ -7,6 +7,7 @@ import { linkHandler, navigate, usePath } from './router'
 import { countedAgents, rowTitle, useWaitingCount } from './terminal/agents'
 import { AgentIcon } from './terminal/agentIcons'
 import { MenuLayer, useToast, type MenuItem } from './components/ui'
+import { Avatar } from './components/Avatar'
 import { isDesktopSettings, openSettingsModal } from './pages/Settings'
 
 // The workbench: one frame round every page on a desktop or tablet (760 and
@@ -104,9 +105,7 @@ export function Rail({ active }: { active?: RailKey }) {
         aria-expanded={!!account}
         onClick={(e) => setAccount(e.currentTarget.getBoundingClientRect())}
       >
-        <span className="wb-rail-avatar" aria-hidden="true">
-          {(name.trim()[0] ?? '?').toUpperCase()}
-        </span>
+        <Avatar id={me?.id} at={me?.avatar_at} name={name} className="wb-rail-avatar" />
       </button>
       {account && (
         <MenuLayer

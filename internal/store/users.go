@@ -24,6 +24,9 @@ type User struct {
 	// The password was set by an administrator: the account must choose its
 	// own before anything else (see the web server's request guard).
 	MustChangePassword bool `json:"must_change_password"`
+	// AvatarAt: when its picture was last set (unix seconds; 0: none) — the
+	// picture's address carries it, so a new one is fetched, an old one cached.
+	AvatarAt int64 `json:"avatar_at,omitempty"`
 
 	passwordHash string
 	failedLogins int
@@ -37,13 +40,13 @@ func (u *User) IsAdmin() bool        { return u.Role == RoleAdmin }
 
 var ErrUsernameTaken = errors.New("username taken")
 
-const userCols = `id, username, display_name, password_hash, role, disabled, failed_logins, locked_until, created_at, password_changed_at, totp_ciphertext IS NOT NULL, must_change_password`
+const userCols = `id, username, display_name, password_hash, role, disabled, failed_logins, locked_until, created_at, password_changed_at, totp_ciphertext IS NOT NULL, must_change_password, COALESCE((SELECT updated_at FROM user_avatars WHERE user_id = users.id), 0)`
 
 func scanUser(row interface{ Scan(...any) error }) (*User, error) {
 	u := &User{}
 	var disabled, mustChange int
 	err := row.Scan(&u.ID, &u.Username, &u.DisplayName, &u.passwordHash, &u.Role, &disabled,
-		&u.failedLogins, &u.lockedUntil, &u.CreatedAt, &u.PasswordChangedAt, &u.TOTP, &mustChange)
+		&u.failedLogins, &u.lockedUntil, &u.CreatedAt, &u.PasswordChangedAt, &u.TOTP, &mustChange, &u.AvatarAt)
 	if err != nil {
 		return nil, notFound(err)
 	}
@@ -585,4 +588,32 @@ func boolInt(b bool) int {
 		return 1
 	}
 	return 0
+}
+
+// Avatars -------------------------------------------------------------------
+
+// MaxAvatarBytes: what a picture may weigh once the browser has made it small
+// (256 square, JPEG: tens of kilobytes); more is refused, not shrunk here.
+const MaxAvatarBytes = 200 << 10
+
+// SetAvatar keeps the picture (its type already checked by the caller) and
+// returns when it was set.
+func (s *Store) SetAvatar(ctx context.Context, userID int64, mime string, image []byte) (int64, error) {
+	now := s.unix()
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO user_avatars (user_id, mime, image, updated_at) VALUES (?, ?, ?, ?)
+		 ON CONFLICT(user_id) DO UPDATE SET mime = excluded.mime, image = excluded.image, updated_at = excluded.updated_at`,
+		userID, mime, image, now)
+	return now, err
+}
+
+// Avatar: the picture and its type; ErrNotFound where there is none.
+func (s *Store) Avatar(ctx context.Context, userID int64) (mime string, image []byte, updatedAt int64, err error) {
+	err = s.db.QueryRowContext(ctx, `SELECT mime, image, updated_at FROM user_avatars WHERE user_id = ?`, userID).Scan(&mime, &image, &updatedAt)
+	return mime, image, updatedAt, notFound(err)
+}
+
+func (s *Store) DeleteAvatar(ctx context.Context, userID int64) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM user_avatars WHERE user_id = ?`, userID)
+	return err
 }

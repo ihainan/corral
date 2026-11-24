@@ -15,6 +15,7 @@ import { playChime } from '../terminal/chime'
 import { setScreenReader, useScreenReader } from '../terminal/screenReader'
 import { saveTranslateConfig, testTranslateConfig, TRANSLATE_LANGS, useTranslateConfig, type TranslateConfig, type TranslateMode } from '../terminal/thoughtTranslate'
 import { Markdown } from '../terminal/markdown'
+import { Avatar, squareAvatar } from '../components/Avatar'
 
 // Desktop Settings modal event: opens the two-column native-style Settings
 // dialog over the current workspace (preserving live agents & terminals).
@@ -557,12 +558,13 @@ function SettingsWorkbench({ modal, initialCat, onClose }: { modal?: boolean; in
               <h2>{t('settings.account')}</h2>
               <div className="settings-group">
                 <div className="sm-profile-banner">
-                  <span className="sm-avatar" aria-hidden="true">{(me?.display_name || me?.username || '?').slice(0, 1).toUpperCase()}</span>
+                  <Avatar id={me?.id} at={me?.avatar_at} name={me?.display_name || me?.username || '?'} className="sm-avatar" />
                   <div className="sm-profile-meta">
                     <span className="sm-profile-name">{me?.display_name || me?.username}</span>
                     <span className="hint">@{me?.username}{me?.role === 'admin' ? ' · Admin' : ''}</span>
                   </div>
                 </div>
+                <AvatarSetting preview={false} />
                 <ProfileSetting onDirty={setProfileDirty} />
               </div>
             </section>
@@ -889,6 +891,7 @@ export function SettingsPage() {
       <section className="section">
         <h2>{t('settings.account')}</h2>
         <div className="settings-group">
+          <AvatarSetting preview />
           <ProfileSetting onDirty={setProfileDirty} />
           <PasswordSetting />
           {boot?.oidc?.enabled && <SSOSetting />}
@@ -1221,6 +1224,63 @@ function TranslateConfigDialog({ config, onClose }: { config: TranslateConfig | 
 }
 
 // The display name, edited in place; Save shows once it differs.
+// The account's picture (doc UI item 6, 11-24): chosen from the device, made a
+// small square in the browser (squareAvatar) and only then sent. preview: shown
+// in the row itself — the dialog's account part has it in its head already.
+function AvatarSetting({ preview }: { preview: boolean }) {
+  const { me, setMe } = useSession()
+  const toast = useToast()
+  const input = useRef<HTMLInputElement>(null)
+  const [busy, setBusy] = useState(false)
+  const has = !!me?.avatar_at
+  const send = async (f: File | undefined) => {
+    if (!f || busy) return
+    setBusy(true)
+    try {
+      let pic: Blob
+      try {
+        pic = await squareAvatar(f)
+      } catch {
+        toast(t('settings.avatarUnreadable'), true)
+        return
+      }
+      setMe(await api<Me>('PUT', '/api/me/avatar', pic))
+      toast(t('settings.avatarSaved'))
+    } catch (err) {
+      toast(errorText(err), true)
+    } finally {
+      setBusy(false)
+      if (input.current) input.current.value = '' // (the same file chosen again is a change too)
+    }
+  }
+  const remove = async () => {
+    if (busy) return
+    setBusy(true)
+    try {
+      setMe(await api<Me>('DELETE', '/api/me/avatar'))
+      toast(t('settings.avatarRemoved'))
+    } catch (err) {
+      toast(errorText(err), true)
+    } finally {
+      setBusy(false)
+    }
+  }
+  return (
+    <Setting label={t('settings.avatar')} hint={t('settings.avatarHint')}>
+      {preview && <Avatar id={me?.id} at={me?.avatar_at} name={me?.display_name || me?.username || '?'} className="sm-avatar" />}
+      <input ref={input} type="file" accept="image/*" hidden onChange={(e) => void send(e.target.files?.[0])} />
+      <button type="button" className="btn" disabled={busy} onClick={() => input.current?.click()}>
+        {t(has ? 'settings.avatarChange' : 'settings.avatarSet')}
+      </button>
+      {has && (
+        <button type="button" className="btn" disabled={busy} onClick={() => void remove()}>
+          {t('settings.avatarRemove')}
+        </button>
+      )}
+    </Setting>
+  )
+}
+
 function ProfileSetting({ onDirty }: { onDirty: (dirty: boolean) => void }) {
   const { me, setMe } = useSession()
   const toast = useToast()
