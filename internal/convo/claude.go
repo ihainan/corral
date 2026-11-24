@@ -1120,7 +1120,7 @@ func (c *Claude) user(r *claudeRow) {
 		}
 		if r.IsCompactSummary {
 			c.compacted()
-			c.add(r, RoleSummary, []Part{textPart(KindText, s)})
+			c.add(r, RoleSummary, []Part{textPart(KindText, compactSummaryText(s))})
 			return
 		}
 		if sh, ok := shellOutput(s); ok {
@@ -1223,6 +1223,11 @@ func (c *Claude) user(r *claudeRow) {
 	}
 	if r.IsCompactSummary { // (the summary written as a session was compacted, as blocks)
 		c.compacted()
+		for i := range parts {
+			if parts[i].Kind == KindText {
+				parts[i].Text = compactSummaryText(parts[i].Text) // (its wrapping off, as the string's)
+			}
+		}
 		c.add(r, RoleSummary, parts)
 		return
 	}
