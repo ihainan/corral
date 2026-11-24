@@ -161,15 +161,18 @@ export function AgentTabBar(p: {
               <button type="button" className="term-tab-main" aria-current={front ? 'page' : undefined} onClick={() => !dragged() && !front && p.onGo(v.tab)}>
                 <AgentIcon program={v.program} size={15} bare />
                 <span className="term-tab-name">{v.title}</span>
+              </button>
+              {/* (Its state and its close in one place: see terminal.css.) */}
+              <span className="term-tab-end">
                 {!v.ended && dot(v.status) && (
                   <span className={'term-tab-count ' + dot(v.status)} role="img" aria-label={statusWord(v.status)}>
                     <span className="term-tab-sdot" aria-hidden="true" />
                   </span>
                 )}
-              </button>
-              <button type="button" className="term-tab-x" aria-label={t('agentTabs.closeTab', { name: v.title })} title={t('agentTabs.close')} onPointerDown={(e) => e.stopPropagation()} onClick={() => p.onClose(v.tab)}>
-                <X size={14} aria-hidden="true" />
-              </button>
+                <button type="button" className="term-tab-x" aria-label={t('agentTabs.closeTab', { name: v.title })} title={t('agentTabs.close')} onPointerDown={(e) => e.stopPropagation()} onClick={() => p.onClose(v.tab)}>
+                  <X size={14} aria-hidden="true" />
+                </button>
+              </span>
             </div>
           )
         })}

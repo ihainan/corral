@@ -427,51 +427,55 @@ html.kb-open .keybar { padding-bottom: 6px; }
 .term-tab-note-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* (A key or a shortcut reached by the keyboard: shown, inside it — the bar scrolls and clips what is outside — review.) */
 .term-root .kb-key:focus-visible, .term-root.light .kb-key:focus-visible, .term-root .sc-item:focus-visible, .term-root.light .sc-item:focus-visible { outline: none; box-shadow: inset 0 0 0 2px var(--term-accent-text); }
+/* The tabs sit on the bar's floor, as a browser's: the one in front is of a
+   piece with the page under it (its ground, a hairline on three sides, none
+   under it — it covers the bar's own line), the others text on the bar, a
+   hairline between them, all of one width that gives way as they grow many
+   (11-25: the floating pill read as a button, not a tab). */
+.term-tabs { align-self: stretch; align-items: flex-end; gap: 0; margin-bottom: -1px; padding: 4px 2px 0; }
 .term-tab {
-  display: flex; align-items: center; gap: 6px; flex: none; min-width: 0; max-width: 320px; height: 30px; padding: 0 12px;
-  border: 0; border-radius: var(--r); background: none; color: var(--term-fg-3); font: 500 13px/1 var(--font-ui); cursor: pointer;
+  position: relative; display: flex; align-items: center; gap: 6px; flex: 0 1 200px; min-width: 72px; max-width: 200px; height: 100%; padding: 0 12px;
+  border: 0; border-radius: var(--r) var(--r) 0 0; background: none; color: var(--term-fg-2); font: 500 13px/1 var(--font-ui); cursor: pointer;
   user-select: none; -webkit-user-select: none; -webkit-touch-callout: none;
 }
+.term-tabs:not(.agent-tabs) .term-tab { flex-basis: 220px; max-width: 240px; } /* (a host and a session's name) */
+.term-tab + .term-tab::before { content: ''; position: absolute; left: 0; top: 50%; width: 1px; height: 14px; margin-top: -7px; background: var(--term-line); pointer-events: none; }
+.term-tab:hover::before, .term-tab:hover + .term-tab::before,
+.term-tab[aria-current="page"]::before, .term-tab[aria-current="page"] + .term-tab::before,
+.term-tab.held::before, .term-tab.held + .term-tab::before { opacity: 0; }
 .term-tab:hover { background: var(--term-hover); color: var(--term-fg); }
 /* A session's tab: the button that goes to it, and its close beside it —
    the close's room always kept (the tab does not grow as it shows), shown
    on the tab in front, the one under the pointer, or reached by keys (11-14). */
-.term-tab.has-x { padding: 0 4px 0 0; cursor: default; }
-.term-tab-main { display: flex; align-items: center; gap: 6px; flex: 0 1 auto; min-width: 0; height: 100%; padding: 0 2px 0 12px; border: 0; border-radius: var(--r); background: none; color: inherit; font: inherit; cursor: pointer; }
+.term-tab.has-x { padding: 0 6px 0 0; cursor: default; }
+.term-tab-main { display: flex; align-items: center; gap: 6px; flex: 1 1 auto; min-width: 0; height: 100%; padding: 0 4px 0 12px; border: 0; border-radius: var(--r) var(--r) 0 0; background: none; color: inherit; font: inherit; cursor: pointer; }
 .term-tab-main:focus-visible, .term-tab-x:focus-visible { outline: none; box-shadow: inset 0 0 0 2px var(--term-accent-text); }
 .term-tab-x { flex: none; display: grid; place-items: center; width: 20px; height: 20px; padding: 0; border: 0; border-radius: var(--r-sm); background: none; color: var(--term-fg-3); cursor: pointer; opacity: 0; }
 .term-tab-x:hover { background: var(--term-key-active); color: var(--term-fg); }
-.term-tab:hover > .term-tab-x, .term-tab[aria-current='page'] > .term-tab-x, .term-tab-x:focus-visible { opacity: 1; }
+.term-tab:hover > .term-tab-x, .term-tab[aria-current='page'] > .term-tab-x, .term-tab-x:focus-visible,
+.term-tab:hover .term-tab-end > .term-tab-x, .term-tab[aria-current='page'] .term-tab-end > .term-tab-x { opacity: 1; }
+/* An agent's state and its close share one place: the state, till the
+   pointer is on it or it is in front (whose state the page says). */
+.term-tab-end { flex: none; display: grid; place-items: center; width: 20px; height: 20px; }
+.term-tab-end > * { grid-area: 1 / 1; }
+.term-tab:hover .term-tab-end > .term-tab-count, .term-tab[aria-current='page'] .term-tab-end > .term-tab-count, .term-tab-end:focus-within > .term-tab-count { visibility: hidden; }
 .term-tabs.dragging .term-tab-x { opacity: 0; }
-@media (hover: none) { .term-tab:not([aria-current='page']) > .term-tab-x { display: none; } .term-tab.has-x:not([aria-current='page']) { padding-right: 10px; } }
+@media (hover: none) { .term-tab:not([aria-current='page']) > .term-tab-x, .term-tab:not([aria-current='page']) .term-tab-end > .term-tab-x { display: none; } .term-tab.has-x:not([aria-current='page']) { padding-right: 10px; } }
 /* A tab dragged to another place: it is lifted (over the others, which make
    room for it as it passes), and keeps its own colour on them. */
 .term-tabs.dragging, .term-tabs.dragging .term-tab { cursor: grabbing; }
 .term-tabs.dragging .term-tab:not(.held) { transition: transform 0.15s ease; }
-.term-tabs.dragging .term-tab:not(.held):hover:not([aria-current="page"]) { background: none; color: var(--term-fg-3); }
-.term-tab.held { position: relative; z-index: 1; color: var(--term-fg); box-shadow: 0 2px 8px rgb(0 0 0 / 0.28); }
+.term-tabs.dragging .term-tab:not(.held):hover:not([aria-current="page"]) { background: none; color: var(--term-fg-2); }
+.term-tab.held { z-index: 1; color: var(--term-fg); box-shadow: 0 2px 8px rgb(0 0 0 / 0.28); }
 .term-tab.held:not([aria-current="page"]) { background: var(--term-hover); }
-/* The tab in front: crisp surface pill with subtle hairline ring so it stands
-   out clearly in both light and dark themes; the Agents tab uses a soft accent
-   tint when active. */
-.term-tab[aria-current="page"] {
-  background: var(--term-bg); color: var(--term-fg); font-weight: 600;
-  box-shadow: inset 0 0 0 1px var(--term-line), 0 1px 2px rgb(0 0 0 / 0.06);
+/* The tab in front: the page's ground, its edges in the page's line. */
+.term-tab[aria-current="page"],
+.term-tab[aria-current="page"]:hover {
+  z-index: 1; background: var(--term-bg); color: var(--term-fg);
+  box-shadow: inset 1px 0 0 var(--term-line), inset -1px 0 0 var(--term-line), inset 0 1px 0 var(--term-line);
 }
-.term-tab-agents[aria-current="page"] {
-  background: var(--term-accent-soft); color: var(--term-accent-text);
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--term-accent-text) 28%, var(--term-line));
-}
-.term-tab-agents[aria-current="page"]:hover { background: var(--term-accent-soft); color: var(--term-accent-text); }
 @media (pointer: fine) {
-  .term-tab { height: 26px; padding: 0 10px; border-radius: var(--r-sm); font-size: var(--fs-sub); line-height: var(--lh-sub); }
-  .term-tab-main { padding: 0 2px 0 10px; border-radius: var(--r-sm); }
-  .term-tab[aria-current="page"],
-  .term-tab-agents[aria-current="page"],
-  .term-tab-agents[aria-current="page"]:hover {
-    background: var(--term-bg); color: var(--term-fg); font-weight: 500;
-    box-shadow: inset 0 0 0 1px var(--term-line);
-  }
+  .term-tab { font-size: var(--fs-sub); line-height: var(--lh-sub); }
 }
 /* "101  herdr 2": the host quiet, the session's own name in the tab's colour,
    set apart by room alone (redesign 11-23: no "·" between them). */
@@ -482,6 +486,7 @@ html.kb-open .keybar { padding-bottom: 6px; }
 .term-rec::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
 .term-tab[aria-current="page"] .term-tab-title { color: var(--term-fg-2); }
 .term-tab-name { display: flex; gap: 6px; min-width: 0; flex: 0 1 auto; white-space: nowrap; }
+.agent-tabs .term-tab-name { display: block; flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; } /* (its words alone: cut with an ellipsis as the tab narrows) */
 /* A long name is cut, its host kept longest: the title gives way first,
    then the session's name, then the host (ux1101 T27). */
 .term-tab-host { flex: 0 0 auto; max-width: 100%; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
@@ -506,6 +511,7 @@ html.kb-open .keybar { padding-bottom: 6px; }
 .term-tab-dot.s-connecting, .term-tab-dot.s-reconnecting, .term-tab-dot.s-slow { background: var(--term-warn-text); }
 .term-tab-dot.s-offline, .term-tab-dot.s-full { background: var(--term-danger-text); }
 .term-tab-new { flex: none; width: 30px; height: 30px; color: var(--term-fg-2); }
+.term-tabs ~ .term-tab-new { margin-top: 4px; } /* (level with the tabs' words: they sit 4px down, on the bar's floor) */
 /* The way between the agents' page and the terminals' where no rail is (700 to
    760 wide): two icons, the page in front marked as a tab in front is. */
 .term-pages { flex: none; display: flex; align-items: center; gap: 2px; margin-left: 4px; padding-right: 6px; border-right: 1px solid var(--term-line); }
@@ -1497,8 +1503,6 @@ button.gch-ut:hover { background: var(--term-hover); }
 .convo-bar-pick .convo-bar-where { flex-shrink: 999; }
 .convo-bar-pick .agent-icon { margin-right: 4px; --dot-ring: var(--term-bg); }
 /* The agents page: a tab as the sessions' are, first, never dragged. */
-.term-tab-agents { padding: 0 10px; }
-.term-tab-agents svg { flex: none; }
 
 /* A message typed into the pane that has not turned up in the log: what
    its screen said when it did not */
