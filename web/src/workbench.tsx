@@ -112,7 +112,9 @@ export function Rail({ active }: { active?: RailKey }) {
         <MenuLayer
           label={t('wb.account', { name })}
           note={name} // (the popover shows no heading: who is signed in, said above the act)
-          anchor={new DOMRect(account.right + 4, account.top, 0, 0)}
+          // (From its bottom corner: at the rail's foot the menu goes up, so its foot meets the avatar's, beside
+          // it — not over the settings button above, as it did from the top. Doc UI item 5, 11-24.)
+          anchor={new DOMRect(account.right + 4, account.bottom, 0, 0)}
           at="point"
           sheet={false}
           trigger={() => meBtn.current}

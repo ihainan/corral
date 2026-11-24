@@ -289,9 +289,8 @@ function InlineTranslateCard({ onDirty }: { onDirty: (d: boolean) => void }) {
           <div className="sm-card-foot-msg">
             {testState && (
               <span className={testState.ok ? 'sm-test-ok' : 'sm-test-err'} title={testState.ok ? testState.sample : testState.error}>
-                {testState.ok
-                  ? t('settings.translateTestOk', { ms: testState.latency ?? 0 }) + (testState.sample ? ` · ${previewTitleOf(testState.sample)}` : '')
-                  : testState.error}
+                {/* (The sample's words only in the tooltip: run on after "Connected" with no label they read as noise — doc item 43, 11-24.) */}
+                {testState.ok ? t('settings.translateTestOk', { ms: testState.latency ?? 0 }) : testState.error}
               </span>
             )}
           </div>
