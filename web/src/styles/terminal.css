@@ -1154,9 +1154,11 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
   background: color-mix(in srgb, var(--term-fg) 4%, var(--term-bg)); color: var(--term-fg-2);
 }
 .convo-thinking-summary-head {
-  display: inline-flex; align-items: center; gap: 6px; margin-bottom: 4px;
+  display: flex; align-items: center; gap: 6px; margin-bottom: 4px;
   font-size: var(--fs-note); line-height: var(--lh-note); font-weight: 500; color: var(--term-accent-text);
 }
+.convo-thinking-summary-head > .convo-thinking-status { margin-left: auto; padding-left: 12px; font-weight: 400; }
+.convo-thinking-summary-head:last-child { margin-bottom: 0; } /* (only the head yet, while summarizing) */
 .convo-thinking-summary p:last-child, .convo-thinking-summary ul:last-child, .convo-thinking-summary ol:last-child { margin-bottom: 0; }
 .convo-work-body > .convo-note { margin: 4px 0; }
 /* What a rewind took back: a quiet line; what it was, faded, behind it. */

@@ -7132,9 +7132,10 @@ function Thinking({ text, live }: { text: string; live?: boolean }) {
                   <div className="convo-thinking-summary-head">
                     <Sparkles size={12} aria-hidden="true" />
                     <span>{t('convo.translate.summaryLabel')}</span>
+                    {/* (Its state in the head's own line, at its end: not run on after the label's words.) */}
+                    {tr.status === 'loading' && <span className="convo-thinking-status">{t('convo.translate.summarizing')}</span>}
+                    {tr.status === 'error' && <span className="convo-thinking-status" title={tr.error}>{t('convo.translate.failed')}</span>}
                   </div>
-                  {tr.status === 'loading' && <span className="convo-thinking-status">{t('convo.translate.summarizing')}</span>}
-                  {tr.status === 'error' && <span className="convo-thinking-status" title={tr.error}>{t('convo.translate.failed')}</span>}
                   {translated && <Markdown text={tr.text!} />}
                 </div>
               )}
