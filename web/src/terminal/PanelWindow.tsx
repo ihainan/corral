@@ -97,7 +97,10 @@ export function PanelWindow({ sid, active, press, onSettled, toast, live, onFull
   const [said, setSaid] = useState('')
   const [ptyFailed, setPtyFailed] = useState(false)
   const allowNotice = !live || !!live.canNotice
-  const needNoticeCheck = !!live?.canNotice
+  // (Wherever a notice may be shown as a card, the screen is read once before the live terminal takes over: the
+  // panel opened from a conversation, not only the reply's. Since the PTY stream, 96d9b7c, that one went straight
+  // to the terminal, and Claude Code's "Enter to continue" notices were left as a raw screen — doc item 44, 11-24.)
+  const needNoticeCheck = allowNotice
   const paneId = String(press().pane ?? '')
   useEffect(() => {
     setPtyFailed(false)
