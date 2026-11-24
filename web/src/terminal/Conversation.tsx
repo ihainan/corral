@@ -17,7 +17,7 @@ import { codeRef, type LineSpan } from './paths'
 import { Hunks } from './hunks'
 import { ChangesView, type ChangesAgainst } from './changesView'
 import { SideQuestion } from './sideQuestion'
-import { Dock, DOCK_BIG, dockKept, keepDock, type DockSink, type DockTab, type DockTerminal, type FilesAsk } from './dock'
+import { Dock, dockKept, keepDock, type DockSink, type DockTab, type DockTerminal, type FilesAsk } from './dock'
 import { useSubConvo } from './subagent'
 import { useSubScan, type SubScanAgent } from './subscan'
 import { NEW_AGENT } from './newAgent'
@@ -1440,16 +1440,20 @@ export function ConversationView({
   const [dockStart, setDockStart] = useState<{ against: ChangesAgainst; base?: string; n: number } | undefined>()
   // (Over the whole of the thread's column, for a screen wider than the dock: kept, as the dock's being open is — for
   // every agent, and when it is shut and opened again; only its own button, or Esc, takes it back. Doc item 39, 11-24.)
+  // (Read as each agent comes in, not said live to the other conversation of a split: expanded there, the
+  // one beside it — its width the split's whole — went over it, its own button under it. Review of 11-24.)
   const [dockBig, setDockBigState] = useState(() => dockKept().big)
   const setDockBig = (v: boolean) => {
     setDockBigState(v)
     keepDock({ big: v })
-    window.dispatchEvent(new CustomEvent<boolean>(DOCK_BIG, { detail: v }))
   }
+  // (Where the bar's ⓘ is hidden — a phone's width, terminal.css —: the session's card from the ⋮ menu.)
+  const [narrow, setNarrow] = useState(() => window.matchMedia('(max-width: 640px)').matches)
   useEffect(() => {
-    const on = (e: Event) => setDockBigState((e as CustomEvent<boolean>).detail === true)
-    window.addEventListener(DOCK_BIG, on)
-    return () => window.removeEventListener(DOCK_BIG, on)
+    const mq = window.matchMedia('(max-width: 640px)')
+    const on = () => setNarrow(mq.matches)
+    mq.addEventListener('change', on)
+    return () => mq.removeEventListener('change', on)
   }, [])
   const dockBtn = useRef<HTMLButtonElement>(null)
   // (Another agent in the pane — its process or session: the card's last tap,
@@ -1460,6 +1464,7 @@ export function ConversationView({
   useEffect(() => {
     setDockStart(undefined)
     setFilesAsk(undefined)
+    setDockBigState(dockKept().big)
   }, [convo.of, bindIdent])
   const dockHere = dockable && !!convo.of && convo.status === 'ready'
   const toFiles = useRef<(a: Omit<FilesAsk, 'n'>) => void>(() => {})
@@ -2036,9 +2041,9 @@ export function ConversationView({
                 ...(hideDesktopLineage && lineageBar?.onNewSubagent ? [{ label: t('convo.lineage.newSubagent'), icon: <Plus size={16} />, onSelect: () => lineageBar.onNewSubagent?.() }] : []),
                 // (All steps opened or folded: the menu's, as Ctrl+O is a Mac's only.)
                 { label: t(allOpen === 0 ? 'pageKeys.openAll' : allOpen === 1 ? 'pageKeys.openFull' : 'pageKeys.foldAll'), icon: allOpen === 2 ? <ChevronsDownUp size={16} /> : <ChevronsUpDown size={16} />, keys: mac ? ['Ctrl+O'] : undefined, disabled: !list.length, onSelect: toggleAllOpen },
-                // (Only where the bar has no ⓘ of its own for it — beside the dock's button, a way to its info tab.
-                // Doc item 38, 11-24: the menu said again what the button next to it does.)
-                ...(convo.of && convo.status === 'ready' && dockable
+                // (Only where the bar has no ⓘ of its own for it — beside the dock's button, a way to its info tab;
+                // on a phone, where the ⓘ is hidden. Doc item 38, 11-24: the menu said again what the button next to it does.)
+                ...(convo.of && convo.status === 'ready' && (dockable || narrow)
                   ? [{
                       label: t('card.open'),
                       icon: <Info size={16} />,

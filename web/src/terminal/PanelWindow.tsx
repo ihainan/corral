@@ -22,6 +22,9 @@ const EVERY_LIVE = 350
 const ESC_AGAIN = 1000
 const QUEUE = 16
 const FAILS = 4
+// (The look for a notice before the live terminal, at most this long: not read by then — the host busy,
+// slow — the terminal as it was before the look, not "loading" till it answers. Review of 11-24.)
+const NOTICE_LOOK_MS = 4000
 
 // (Shift+Tab: under a plan, it approves.)
 const settles = (k: string) => k === 'enter' || k === 'space' || k === 'shift+tab' || /^[0-9]$/.test(k)
@@ -102,8 +105,10 @@ export function PanelWindow({ sid, active, press, onSettled, toast, live, onFull
   // to the terminal, and Claude Code's "Enter to continue" notices were left as a raw screen — doc item 44, 11-24.)
   const needNoticeCheck = allowNotice
   const paneId = String(press().pane ?? '')
+  const [lookGaveUp, setLookGaveUp] = useState(false)
   useEffect(() => {
     setPtyFailed(false)
+    setLookGaveUp(false)
   }, [sid, paneId])
   const fullAction = live?.onFull ?? onFull
   // What became of the last key, said by the keys (a key sent said for a moment;
@@ -268,7 +273,13 @@ export function PanelWindow({ sid, active, press, onSettled, toast, live, onFull
     () => (allowNotice && loaded ? readNoticeDialog(lines.map((runs) => runs.map((r) => r.text).join(''))) : null),
     [allowNotice, loaded, lines],
   )
-  const usePty = !!paneId && !ptyFailed && (!needNoticeCheck || rawView || (loaded && !notice))
+  const usePty = !!paneId && !ptyFailed && (!needNoticeCheck || rawView || (loaded && !notice) || (lookGaveUp && !loaded))
+  const waitingLook = !!paneId && !ptyFailed && needNoticeCheck && !loaded && !lookGaveUp
+  useEffect(() => {
+    if (!waitingLook) return
+    const timer = setTimeout(() => setLookGaveUp(true), NOTICE_LOOK_MS)
+    return () => clearTimeout(timer)
+  }, [waitingLook])
 
   // Read over and over while it is open and seen; skipped whenever the live
   // WebSocket PTY (PaneTerminal) is handling the terminal directly.

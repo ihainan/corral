@@ -38,9 +38,8 @@ export type DockTerminal = { can: boolean; press: () => Record<string, unknown>;
 // The person's: kept in this browser (none there — private, blocked: as at first).
 const KEY = 'corral.dock'
 // (big: expanded over the thread's column — kept too, for every agent: one setting of the browser's, as its being
-// open is; doc item 39, 11-24. Said on the window to the other conversations on the page, a split's.)
+// open is; doc item 39, 11-24. Read by each conversation as an agent comes in, not said live to a split's other.)
 type Kept = { open: boolean; tab: DockTab; width: number; big: boolean }
-export const DOCK_BIG = 'corral:dock-big'
 export const DOCK_W = { min: 320, max: 720, at: 420 }
 export function dockKept(): Kept {
   try {
