@@ -1247,7 +1247,8 @@ function AvatarSetting({ preview }: { preview: boolean }) {
         return
       }
       if (gen !== authGen()) return
-      const m = await api<Me>('PUT', '/api/me/avatar', pic)
+      // (Not waited on for ever: one stuck left the button off, the picker never opened again.)
+      const m = await api<Me>('PUT', '/api/me/avatar', pic, { timeoutMs: 30000 })
       if (gen !== authGen()) return
       patchMe({ avatar_at: m.avatar_at })
       toast(t('settings.avatarSaved'))
@@ -1263,7 +1264,7 @@ function AvatarSetting({ preview }: { preview: boolean }) {
     setBusy(true)
     try {
       const gen = authGen()
-      await api<Me>('DELETE', '/api/me/avatar')
+      await api<Me>('DELETE', '/api/me/avatar', undefined, { timeoutMs: 30000 })
       if (gen !== authGen()) return
       patchMe({ avatar_at: undefined })
       toast(t('settings.avatarRemoved'))
@@ -1276,10 +1277,12 @@ function AvatarSetting({ preview }: { preview: boolean }) {
   return (
     <Setting label={t('settings.avatar')} hint={t('settings.avatarHint')}>
       {preview && <Avatar id={me?.id} at={me?.avatar_at} name={me?.display_name || me?.username || '?'} className="sm-avatar" />}
-      <input ref={input} type="file" accept="image/*" hidden onChange={(e) => void send(e.target.files?.[0])} />
-      <button type="button" className="btn" disabled={busy} onClick={() => input.current?.click()}>
+      {/* (A label round the file input, not a button clicking a hidden one: the browser's own way to its
+          picker — a click made by script is not let open it everywhere; user report of 11-24, "no picker".) */}
+      <label className={'btn avatar-pick' + (busy ? ' is-busy' : '')} aria-disabled={busy || undefined}>
+        <input ref={input} type="file" accept="image/*" className="sr-only" disabled={busy} onChange={(e) => void send(e.target.files?.[0])} />
         {t(has ? 'settings.avatarChange' : 'settings.avatarSet')}
-      </button>
+      </label>
       {has && (
         <button type="button" className="btn" disabled={busy} onClick={() => void remove()}>
           {t('settings.avatarRemove')}

@@ -363,6 +363,10 @@ code, .mono { font-family: var(--font-mono); font-size: var(--fs-sub); }
 .btn svg { color: var(--fg-2); }
 .btn:hover { background: var(--bg-hover); text-decoration: none; }
 .btn:disabled { opacity: 0.5; cursor: default; }
+/* (The avatar's picker: a label round its file input, drawn as a button; its focus that of the input in it.) */
+.avatar-pick { cursor: pointer; }
+.avatar-pick.is-busy { opacity: 0.5; cursor: default; pointer-events: none; }
+.avatar-pick:has(input:focus-visible) { box-shadow: var(--focus); }
 /* (A primary button off: plainly off, not a paler blue that still looks pressable — ux1101 PG-17.) */
 .btn-primary:disabled, .btn-primary:disabled:hover { opacity: 1; background: var(--bg-subtle); border-color: var(--line); color: var(--fg-3); }
 .btn-primary { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); }
