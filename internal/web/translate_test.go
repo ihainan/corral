@@ -239,7 +239,7 @@ func TestTranslateSummarizeMode(t *testing.T) {
 		lastSys = sysMsg
 		mu.Unlock()
 		prefix := "译文："
-		if strings.Contains(sysMsg, "讲人话") {
+		if strings.Contains(sysMsg, "大白话") {
 			prefix = "总结："
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -303,8 +303,11 @@ func TestTranslateSummarizeMode(t *testing.T) {
 	mu.Lock()
 	sys := lastSys
 	mu.Unlock()
-	if !strings.Contains(sys, "讲人话") {
-		t.Fatalf("expected colloquial Chinese summarize prompt, got %q", sys)
+	// (Short and without internal names unless the name is the point — doc item 46, 11-24.)
+	for _, want := range []string{"大白话", "不超过 60 个字", "少用代号"} {
+		if !strings.Contains(sys, want) {
+			t.Fatalf("expected the short plain-language summarize prompt (%s), got %q", want, sys)
+		}
 	}
 
 	// Second summarize call hits SQLite cache (0 new LLM calls).
