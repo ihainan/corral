@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState, type ReactNode } from 'react'
-import { ArrowDown, ArrowLeftRight, ArrowUp, ArrowUpDown, ArrowUpToLine, ChevronLeft, CircleStop, Code2, Columns2, Copy, Eye, FoldVertical, GitBranch, GitFork, Globe, History, Languages, ListPlus, Maximize2, MessageSquarePlus, Paperclip, Pencil, Pin, PinOff, Plus, Power, Rows2, Sparkles, Square, SquareSlash, SquareTerminal, TextCursorInput, Unlink, X, Zap } from 'lucide-react'
+import { ArrowDown, ArrowLeftRight, ArrowUp, ArrowUpDown, ArrowUpToLine, ChevronLeft, CircleStop, Code2, Columns2, Copy, Eye, FoldVertical, GitBranch, GitFork, Globe, History, Languages, ListPlus, Maximize2, MessageSquarePlus, Paperclip, Pencil, Pin, PinOff, Plus, Power, Rows2, Square, SquareSlash, SquareTerminal, TextCursorInput, Unlink, X, Zap } from 'lucide-react'
 import { api, ApiError, authGen, errorText, onAuthChange, uploadFile, type SessionInfo } from '../api'
 import { useSession } from '../app'
 import { t, type I18nKey } from '../i18n'
@@ -3002,23 +3002,15 @@ function AgentChat({ cur, entries, all, titles, onPick, active, keysActive, isSe
     closable(e) ? { label: t('agents.close'), icon: <Power size={16} />, danger: true, separator: true, onSelect: () => setClosing(e) } : null,
   ]
   const { config: translateCfg } = useTranslateConfig()
-  const toggleTranslate = () => {
-    const next = !translateCfg?.enabled
-    void saveTranslateConfig({ enabled: next }).then(
+  // (Thinking translation off, or on as a literal translation or as the original with a plain summary: one row of
+  // the menu, the three as a segmented control — it was two items. Doc item 38, 11-24.)
+  const setTranslate = (want: 'off' | 'translate' | 'summarize') => {
+    void saveTranslateConfig(want === 'off' ? { enabled: false } : { enabled: true, mode: want }).then(
       (saved) => {
-        if (saved.enabled && !saved.has_key && !/^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(?::\d+)?\b/i.test(saved.base_url)) {
-          toast(t('convo.translate.needKey'))
-        } else {
-          toast(t(saved.enabled ? 'convo.translate.enabled' : 'convo.translate.disabled'))
-        }
+        if (!saved.enabled) toast(t('convo.translate.disabled'))
+        else if (!saved.has_key && !/^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(?::\d+)?\b/i.test(saved.base_url)) toast(t('convo.translate.needKey'))
+        else toast(t(saved.mode === 'summarize' ? 'convo.translate.modeSummarizeOn' : 'convo.translate.modeTranslateOn'))
       },
-      (e) => toast(errorText(e), true),
-    )
-  }
-  const toggleTranslateMode = () => {
-    const nextMode = translateCfg?.mode === 'summarize' ? 'translate' : 'summarize'
-    void saveTranslateConfig({ mode: nextMode }).then(
-      (saved) => toast(t(saved.mode === 'summarize' ? 'convo.translate.modeSummarizeOn' : 'convo.translate.modeTranslateOn')),
       (e) => toast(errorText(e), true),
     )
   }
@@ -3067,18 +3059,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, keysActive, isSe
         ]
       : []),
     { label: t('convo.showTerminal'), icon: <SquareTerminal size={16} />, group: t('menu.group.agent'), separator: isSecondary && (!!onSplitSwap || !!onSplitExpand), onSelect: openTerminal },
-    canCliZoom
-      ? {
-          label: t('convo.cliZoom'),
-          icon: <Maximize2 size={16} />,
-          onSelect: () => {
-            void api('POST', `/api/sessions/${encodeURIComponent(cur.s.id)}/herdr`, { action: 'zoom_pane_toggle', target: cur.row!.a.pane_id }).then(
-              () => toast(t('card.cliZoomDone')),
-              (e) => toast(errorText(e), true),
-            )
-          },
-        }
-      : null,
+    // (Toggle zoom in the CLI: in the session card's, not here as well — doc item 38.)
     canCliSwap
       ? {
           label: t('convo.cliSwap'),
@@ -3104,14 +3085,15 @@ function AgentChat({ cur, entries, all, titles, onPick, active, keysActive, isSe
     newSubagentItem(cur),
     renameItem(cur),
     unlinkItem(cur),
-    { label: t(translateCfg?.enabled ? 'convo.translate.off' : 'convo.translate.on'), icon: <Languages size={16} />, onSelect: toggleTranslate },
-    translateCfg?.enabled
-      ? {
-          label: t(translateCfg.mode === 'summarize' ? 'convo.translate.toTranslate' : 'convo.translate.toSummarize'),
-          icon: <Sparkles size={16} />,
-          onSelect: toggleTranslateMode,
-        }
-      : null,
+    ((on, sum) => ({
+      label: t('convo.translate.menu'),
+      icon: <Languages size={16} />,
+      actions: [
+        { label: t('convo.translate.offLong'), text: t('convo.translate.offShort'), on: !on, onSelect: () => on && setTranslate('off') },
+        { label: t('convo.translate.literalLong'), text: t('convo.translate.literalShort'), on: on && !sum, onSelect: () => (!on || sum) && setTranslate('translate') },
+        { label: t('convo.translate.summaryLong'), text: t('convo.translate.summaryShort'), on: on && sum, onSelect: () => (!on || !sum) && setTranslate('summarize') },
+      ],
+    }))(!!translateCfg?.enabled, translateCfg?.mode === 'summarize'),
     boot.forwarding ? { label: t('ports.title'), icon: <Globe size={16} />, separator: true, onSelect: () => setPortsOpen(true) } : null,
     boot.code ? { label: t('code.open'), icon: <Code2 size={16} />, separator: !boot.forwarding, onSelect: () => code.open(cur.s.host_id, cur.s.host_name) } : null,
     boot.code && code.running[cur.s.host_id] ? { label: t('code.stop'), icon: <CircleStop size={16} />, onSelect: () => code.stop(cur.s.host_id) } : null,
@@ -3120,23 +3102,27 @@ function AgentChat({ cur, entries, all, titles, onPick, active, keysActive, isSe
       bound ? { label: t(codex && o === 'clear' ? 'ops.clear.itemCodex' : `ops.${o}.item`), icon: OP_ICONS[o], separator: i === 0, group: i === 0 ? t('menu.group.convo') : undefined, disabled: !canOps, title: canOps ? undefined : t('ops.onlyIdle'), hint: canOps || i < opsOf.length - 1 ? undefined : t(opsOf.length > 1 ? 'ops.onlyIdleGroup' : 'ops.onlyIdle'), onSelect: () => convo.bind && setOp({ op: o, bind: convo.bind, key: bindKey }) } : null,
     ),
     // (A Codex's commands that only show something in its terminal: run, then its terminal shown here.)
-    ...(codex && bound
-      ? CODEX_LOOKS.map(([cmd, key], i): MenuItem => ({
-          label: t(key),
+    // (Codex's commands that only show something in its terminal: one row, each its command — they were four.)
+    codex && bound
+      ? {
+          label: t('ops.codexLooks'),
           icon: <SquareTerminal size={16} />,
-          separator: i === 0,
-          disabled: !canOps,
-          title: canOps ? undefined : t('ops.onlyIdle'),
-          onSelect: () => {
-            const b = convo.bind
-            if (!b) return
-            runOp(b, cmd).then(
-              () => setLiveOf(bindKey),
-              (e) => toast(refusal(e), true),
-            )
-          },
-        }))
-      : []),
+          separator: true,
+          actions: CODEX_LOOKS.map(([cmd, key]) => ({
+            label: t(key) + (canOps ? '' : ' · ' + t('ops.onlyIdle')),
+            text: cmd,
+            disabled: !canOps,
+            onSelect: () => {
+              const b = convo.bind
+              if (!b) return
+              runOp(b, cmd).then(
+                () => setLiveOf(bindKey),
+                (e) => toast(refusal(e), true),
+              )
+            },
+          })),
+        }
+      : null,
     // (Its session's id, as the agent's own resume takes it: claude --resume, codex resume.)
     ((sess) =>
       sess && sess !== NO_SESSION

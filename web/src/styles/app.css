@@ -697,6 +697,10 @@ html.modal-open, html.modal-open body { overflow: hidden; }
 .sheet-list .menu-act-btn { width: 38px; height: 34px; }
 .sheet-list .menu-act-btn svg { width: 17px; height: 17px; }
 @media (pointer: coarse) { .menu-act-btn { width: 36px; height: 34px; } }
+/* (Words, a segmented control's: as wide as they are; the one chosen raised, as a segment on — doc item 38, 11-24.) */
+.menu-act-btn.is-text { width: auto; padding: 0 8px; font: inherit; font-size: var(--fs-sub); line-height: var(--lh-sub); white-space: nowrap; }
+.menu-act-btn.is-on { background: var(--surface); color: var(--fg); font-weight: 500; box-shadow: 0 0 0 1px var(--line); }
+.menu-act-btn.is-on:hover:not(:disabled) { background: var(--surface); }
 .menu-item.danger, .menu-item.danger svg { color: var(--danger); }
 .menu hr, .sheet-list hr { border: 0; border-top: 1px solid var(--line); margin: 4px 6px; }
 .menu-note { padding: 6px 10px 8px; color: var(--fg-3); font-size: var(--fs-note); line-height: var(--lh-note); }

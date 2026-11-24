@@ -369,7 +369,9 @@ export interface MenuItem {
   trail?: ReactNode // trailing adornment at the right edge (e.g. active checkmark alongside a leading icon)
   group?: string // a small heading over it: the first of a group of items of one kind
   // Inline action buttons on the right of a single menu row (e.g. pinned order: top / up / down).
-  actions?: { label: string; icon: ReactNode; disabled?: boolean; onSelect: () => void }[]
+  // (text: a word instead of an icon, as a segmented control's; on: the one chosen now, of a choice of several — a
+  // menuitemradio, checked or not.)
+  actions?: { label: string; icon?: ReactNode; text?: string; on?: boolean; disabled?: boolean; onSelect: () => void }[]
 }
 
 // Sent on the window to close every open menu (a terminal tab sent to the back).
@@ -468,8 +470,9 @@ function MenuEntry({ item, close }: { item: MenuItem; close: () => void }) {
               <button
                 key={idx}
                 type="button"
-                className="menu-act-btn"
-                role="menuitem"
+                className={'menu-act-btn' + (a.text ? ' is-text' : '') + (a.on ? ' is-on' : '')}
+                role={a.on === undefined ? 'menuitem' : 'menuitemradio'}
+                aria-checked={a.on}
                 disabled={a.disabled}
                 aria-label={a.label}
                 title={a.label}
@@ -478,7 +481,7 @@ function MenuEntry({ item, close }: { item: MenuItem; close: () => void }) {
                   a.onSelect()
                 }}
               >
-                {a.icon}
+                {a.icon ?? a.text}
               </button>
             ))}
           </span>
