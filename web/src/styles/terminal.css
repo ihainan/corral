@@ -2853,7 +2853,7 @@ html.kb-open .convo-runs-pop.is-sheet { padding-bottom: 16px; }
 .convo-list-groups.is-flat .convo-list-head.is-section { padding: 12px 8px 4px 10px; }
 .convo-list-groups.is-flat .convo-list-head.is-section .convo-list-chev { opacity: 0; }
 .convo-list-groups.is-flat .convo-list-head.is-section:is(:hover, :focus-visible, .is-collapsed) .convo-list-chev { opacity: 1; }
-.convo-list-groups.is-flat .convo-list-row { align-items: center; gap: 8px; padding: 6px 10px; border-radius: var(--r-sm); }
+.convo-list-groups.is-flat .convo-list-row { align-items: center; gap: 8px; padding: 8px 10px; border-radius: var(--r-sm); } /* (36 high: 32 read as crowded, 11-24) */
 .convo-list-groups.is-flat .convo-list-row .agent-icon { margin-top: 0; }
 .convo-list-groups.is-flat .convo-list-row:has(.convo-list-now, .convo-list-parent-ref) { align-items: flex-start; }
 .convo-list-groups.is-flat .convo-list-row:has(.convo-list-now, .convo-list-parent-ref) .agent-icon { margin-top: 2px; }
@@ -2864,7 +2864,11 @@ html.kb-open .convo-runs-pop.is-sheet { padding-bottom: 16px; }
 .convo-list-groups.is-flat .convo-list-line > .convo-list-where {
   flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   font-size: var(--fs-sub); line-height: var(--lh-sub); color: var(--term-fg-3);
+  container: where / inline-size;
 }
+.convo-list-where-t { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* (Less room than two or three of its letters: none of it, not a lone "≨" or "(" that reads as noise — 11-24.) */
+@container where (max-width: 2.5em) { .convo-list-where-t { opacity: 0; } }
 .convo-list-groups.is-flat .convo-list-line > .convo-list-split,
 .convo-list-groups.is-flat .convo-list-line > .convo-list-pin { margin-left: 0; }
 /* Its state on its icon's corner, ringed in the row's own shade (opaque, so the
@@ -2876,12 +2880,12 @@ html.kb-open .convo-runs-pop.is-sheet { padding-bottom: 16px; }
 .convo-list-groups.is-flat .convo-list-row .agent-icon-dot { width: 7px; height: 7px; right: -2px; bottom: -2px; box-shadow: 0 0 0 1.5px var(--dot-ring); }
 .convo-list-groups.is-flat .convo-list-row .agent-icon-dot.is-bg { background: var(--dot-ring); box-shadow: 0 0 0 1.5px var(--dot-ring), inset 0 0 0 1.5px var(--term-accent-text); }
 .agent-icon-dot.is-failed { background: var(--term-danger-text); }
-/* Subagents: a line of 28, a step smaller, hung from the parent's icon by a hairline. */
+/* Subagents: a line of 32, a step smaller, hung from the parent's icon by a hairline. */
 .convo-list-groups.is-flat .convo-list-children { margin: 0; gap: 0; }
 .convo-list-groups.is-flat .convo-list-item.is-child::before { content: ''; position: absolute; left: 17px; top: 0; bottom: 0; width: 1px; background: var(--term-line-strong); }
-.convo-list-groups.is-flat .convo-list-item.is-child:last-child::before { bottom: auto; height: 14px; }
-.convo-list-groups.is-flat .convo-list-item.is-child::after { content: ''; position: absolute; left: 17px; top: 14px; width: 10px; height: 1px; background: var(--term-line-strong); }
-.convo-list-groups.is-flat .convo-list-row.is-child { padding: 4px 10px 4px 32px; gap: 6px; }
+.convo-list-groups.is-flat .convo-list-item.is-child:last-child::before { bottom: auto; height: 16px; }
+.convo-list-groups.is-flat .convo-list-item.is-child::after { content: ''; position: absolute; left: 17px; top: 16px; width: 10px; height: 1px; background: var(--term-line-strong); }
+.convo-list-groups.is-flat .convo-list-row.is-child { padding: 6px 10px 6px 32px; gap: 6px; }
 .convo-list-groups.is-flat .convo-list-row.is-child .convo-list-title { font-size: var(--fs-sub); line-height: var(--lh-sub); }
 /* Its subagents' count by its name: tapped, they fold. */
 .convo-list-kids {
@@ -2893,8 +2897,8 @@ html.kb-open .convo-runs-pop.is-sheet { padding-bottom: 16px; }
 .convo-list-kids.is-collapsed { color: var(--term-fg-2); }
 /* Its end: the menu button over its time (the time in its hover card), the fold
    pill only for the keyboard, shown when focused. */
-.convo-list-groups.is-flat .convo-list-actions { top: 4px; right: 6px; }
-.convo-list-groups.is-flat .convo-list-item.is-child > .convo-list-actions { top: 2px; }
+.convo-list-groups.is-flat .convo-list-actions { top: 6px; right: 6px; }
+.convo-list-groups.is-flat .convo-list-item.is-child > .convo-list-actions { top: 4px; }
 .convo-list-groups.is-flat .convo-list-actions > .convo-list-subpill:not(:focus-visible) {
   position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden; clip-path: inset(50%); opacity: 0; pointer-events: none;
 }

@@ -4852,7 +4852,7 @@ export function AgentList({ rows, menus, onPicked, placed, query: given, onQuery
                       {sub.count}
                     </span>
                   )}
-                  {flat && whereText && <span className="convo-list-where">{whereText}</span>}
+                  {flat && whereText && <span className="convo-list-where"><span className="convo-list-where-t">{whereText}</span></span>}
                   {oneLine && whenEl}
                 </span>
                 {!oneLine && (
