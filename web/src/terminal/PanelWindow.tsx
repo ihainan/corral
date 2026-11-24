@@ -90,6 +90,7 @@ const runStyle = (r: AnsiRun): React.CSSProperties => {
 // (onLeave: where F6 takes the focus from its screen — the dock's tabs; none: its own head's first button.)
 // (who: the program the keys go to, as named to the person ("Claude Code"); onComposer: the message box, gone back to.)
 export type PanelLive = { onClose?: () => void; onFull?: () => void; note?: string; letters?: boolean; onLeave?: () => void; who?: string; onComposer?: () => void; canNotice?: boolean; onNoticeSent?: () => void }
+const PTY_TRIES = 2
 export function PanelWindow({ sid, active, press, onSettled, toast, live, onFull }: { live?: PanelLive; sid: string; active: boolean; press: () => Record<string, unknown>; onSettled: () => void; toast: (s: string, bad?: boolean) => void; onFull?: () => void }) {
   const [screen, setScreen] = useState({ text: '', digest: '' })
   const [loaded, setLoaded] = useState(false)
@@ -106,10 +107,21 @@ export function PanelWindow({ sid, active, press, onSettled, toast, live, onFull
   const needNoticeCheck = allowNotice
   const paneId = String(press().pane ?? '')
   const [lookGaveUp, setLookGaveUp] = useState(false)
+  // (The live terminal not opened: tried again, twice, before the screen is read instead — come back to its
+  // tab, the connection it had may not be let go yet, 409. Each coming back, tried afresh. Plans/agent-tabs 4.4.)
+  const [ptyTry, setPtyTry] = useState(0)
+  const retry = useRef<ReturnType<typeof setTimeout>>(undefined)
   useEffect(() => {
     setPtyFailed(false)
     setLookGaveUp(false)
+    setPtyTry(0)
+    return () => clearTimeout(retry.current)
   }, [sid, paneId])
+  const ptyFellBack = () => {
+    clearTimeout(retry.current)
+    if (ptyTry >= PTY_TRIES) return setPtyFailed(true)
+    retry.current = setTimeout(() => setPtyTry((n) => n + 1), 500 * (ptyTry + 1))
+  }
   const fullAction = live?.onFull ?? onFull
   // What became of the last key, said by the keys (a key sent said for a moment;
   // one not sent, or not taken, till the next) — set only when it changes, so
@@ -379,6 +391,7 @@ export function PanelWindow({ sid, active, press, onSettled, toast, live, onFull
   if (usePty) {
     return (
       <PaneTerminal
+        key={ptyTry}
         sid={sid}
         pane={paneId}
         active={active}
@@ -386,7 +399,7 @@ export function PanelWindow({ sid, active, press, onSettled, toast, live, onFull
         fullAction={fullAction}
         backToCard={allowNotice && notice && rawView ? () => setRawView(false) : undefined}
         onSettled={onSettled}
-        onFallback={() => setPtyFailed(true)}
+        onFallback={ptyFellBack}
       />
     )
   }

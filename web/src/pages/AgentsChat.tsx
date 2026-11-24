@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState, type ReactNode } from 'react'
+import { Activity, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState, type ReactNode } from 'react'
 import { ArrowDown, ArrowLeftRight, ArrowUp, ArrowUpDown, ArrowUpToLine, ChevronLeft, CircleStop, Code2, Columns2, Copy, Eye, FoldVertical, GitBranch, GitFork, Globe, History, Languages, ListPlus, Maximize2, MessageSquarePlus, Paperclip, Pencil, Pin, PinOff, Plus, Power, Rows2, Square, SquareSlash, SquareTerminal, TextCursorInput, Unlink, X, Zap } from 'lucide-react'
 import { api, ApiError, authGen, errorText, onAuthChange, uploadFile, type SessionInfo } from '../api'
 import { useSession } from '../app'
@@ -39,6 +39,7 @@ import { camesAfter, containedInMessage, isCommand, pairSent, sameMessage, squee
 import { viewRefusal } from '../terminal/sendView'
 import { agentKey, sessionWhich } from '../terminal/sessionName'
 import { pickKey as isPickKey } from '../terminal/pageKeys'
+import { firstShown } from '../shown'
 import { Rail, StatusBar, StatusItem, useWorkbench } from '../workbench'
 import { AgentTabBar, askPickInTab, isTabsKey, newTabId, OPEN_PICKER, readFront, readTabs, takePickInTab, writeFront, writeTabs, type AgentTab, type PickHow, type TabView } from './agentTabs'
 import { agentMark } from '../terminal/agentIcons'
@@ -279,6 +280,8 @@ export function makeRoom(pins: string[], here: Set<string>, max: number): string
 export interface AgentsHead { title: string; program?: string; status: string }
 // (How long a tab's agent is missing from the list before the tab says it ended: as the one in front is waited for.)
 const MISSING_MS = 15000
+// (How many tabs' conversations are kept drawn: plans/agent-tabs.md 4.4 — a safety valve, not a limit on tabs.)
+const DRAWN_MAX = 20
 
 export function AgentsChat({ bar, active = true, onHead }: { bar?: ReactNode; active?: boolean; onHead?: (h: AgentsHead | null) => void }) {
   const toast = useToast()
@@ -668,6 +671,7 @@ export function AgentsChat({ bar, active = true, onHead }: { bar?: ReactNode; ac
   }, [active, unresolved, pickIsFront])
   // A new tab: the quick switcher, its pick opened in one (none shown, the page's list is there already).
   const pickList = useRef<HTMLDivElement>(null)
+  const drawn = useRef(new Map<string, { el: ReactNode; key: string; seen: number }>())
   const newTab = () => {
     if (!cur) {
       // (None shown: the page's list is the switcher — its first row focused (↑↓ and Return), its pick in this tab.)
@@ -1159,6 +1163,28 @@ export function AgentsChat({ bar, active = true, onHead }: { bar?: ReactNode; ac
     )
   }
 
+  // The tabs' conversations kept drawn (phase 3 of plans/agent-tabs.md): the
+  // one in front with what is beside it, and each looked at since, hidden, so
+  // going back to it is at once, as it was left. Past DRAWN_MAX, the one not
+  // looked at longest — not one waiting for an answer — is let go (back to it,
+  // it is made again from the conversations' cache).
+  const drawnFront = !stack && front && cur ? front : null // (its record catches up with what is shown a drawing later: not made again meanwhile)
+  if (drawnFront) {
+    const d = drawn.current.get(drawnFront)
+    if (d && d.key !== cur!.key + ' ' + cur!.s.id) drawn.current.delete(drawnFront) // (another agent in it now: that one's, anew)
+    drawn.current.set(drawnFront, { el: body, key: cur!.key + ' ' + cur!.s.id, seen: Date.now() })
+  }
+  for (const id of [...drawn.current.keys()]) {
+    const x = tabs.find((y) => y.id === id)
+    // (Closed, or of another agent now — as another window changed it —: let go.)
+    if (!x || (id !== drawnFront && !drawn.current.get(id)!.key.startsWith(x.key + ' '))) drawn.current.delete(id)
+  }
+  if (drawn.current.size > DRAWN_MAX) {
+    const waitingOn = new Set(tabViews.filter((v) => v.status === 'blocked').map((v) => v.tab.id))
+    const old = [...drawn.current].filter(([id]) => id !== drawnFront && !waitingOn.has(id)).sort((a, b) => a[1].seen - b[1].seen)
+    for (const [id] of old.slice(0, drawn.current.size - DRAWN_MAX)) drawn.current.delete(id)
+  }
+
   // (The workbench's rail and status bar: with the tabs, 760 and up.)
   const wbOn = wb && !!bar && !stack
   return (
@@ -1239,7 +1265,16 @@ export function AgentsChat({ bar, active = true, onHead }: { bar?: ReactNode; ac
           )}
         </p>
       )}
-      <div className="term-body">{body}</div>
+      <div className="term-body">
+        {[...drawn.current].map(([id, v]) => (
+          // (The tab in front shown as just made; the others as they were last, hidden: their effects — reading, timers,
+          // a live terminal — stopped by React, their state and drawing kept, nothing made again as the list changes.)
+          <Activity key={id} mode={id === drawnFront ? 'visible' : 'hidden'}>
+            {id === drawnFront ? body : v.el}
+          </Activity>
+        ))}
+        {!drawnFront && body}
+      </div>
       {wbOn && <Rail active="agents" />}
       {wbOn && (
         <StatusBar>
@@ -2950,7 +2985,7 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
             // (Escape stops it, as in its terminal: from an empty box only, where it has no words to
             // take back, and no panel over the page is what it would be meant for.)
             // (A key held: for what it first closed, not on to stopping it.)
-            if (e.key === 'Escape' && !e.repeat && !e.shiftKey && !e.altKey && !e.metaKey && !e.ctrlKey && stopShown && !document.querySelector(ESC_HELD)) {
+            if (e.key === 'Escape' && !e.repeat && !e.shiftKey && !e.altKey && !e.metaKey && !e.ctrlKey && stopShown && !firstShown(ESC_HELD)) {
               e.preventDefault()
               press('stop')
               return

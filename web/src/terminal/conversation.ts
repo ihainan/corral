@@ -349,7 +349,7 @@ interface Kept {
   a: Omit<Answer, 'entries' | 'gen' | 'rev' | 'reset' | 'more'>
 }
 const kept = new Map<string, Kept>()
-const KEEP = 12
+const KEEP = 20 // (as many as the agents' page keeps drawn: see its tabs)
 const keyOf = (session: string, pane?: string) => session + ' ' + (pane ?? '')
 function remember(key: string, gen: number, rev: number, byseq: Map<number, ConvoEntry>, a: Answer) {
   const { entries: _e, gen: _g, rev: _r, reset: _x, more: _m, ...facts } = a

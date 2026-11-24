@@ -11,6 +11,7 @@ import { copyText, Dialog, DialogHead, isCoarse, Menu, MenuLayer, swallowNextCli
 import { saveFile } from '../saveFile'
 import { StatusItem, useWorkbench } from '../workbench'
 import { composing, foldAllKey, helpKey, jumpKey, onMac, pickKey, sideKey, switchKey, takenFromTerminal, terminalHasKeys } from './pageKeys'
+import { firstShown } from '../shown'
 import { keepNames, keptNames, local } from '../storage'
 import { useFlip } from '../flip'
 import { CodeSpanOf, FileLinkOf, Markdown } from './markdown'
@@ -1976,11 +1977,11 @@ export function ConversationView({
                     setBgCmd(null)
                     setDockTab('info')
                     setDockOpen(true)
-                    window.setTimeout(() => document.querySelector('.convo-tray-info [data-sec="running"]')?.scrollIntoView({ block: 'nearest' }), 80)
+                    window.setTimeout(() => firstShown('.convo-tray-info [data-sec="running"]')?.scrollIntoView({ block: 'nearest' }), 80)
                     return
                   }
                   setCard(card ? '' : cardMode())
-                  if (!card) window.setTimeout(() => document.querySelector('.scard [data-sec="running"]')?.scrollIntoView({ block: 'nearest' }), 80)
+                  if (!card) window.setTimeout(() => firstShown('.scard [data-sec="running"]')?.scrollIntoView({ block: 'nearest' }), 80)
                 }}
               >
                 {says}
@@ -4418,7 +4419,7 @@ export function AgentList({ rows, menus, onPicked, placed, query: given, onQuery
   useEffect(() => {
     if (rowMenu && (!menuRow || !dotsOf(rowMenu.key))) setRowMenu(null)
   })
-  const dotsOf = (key: string) => document.querySelector<HTMLElement>(`.convo-list-dots[data-key="${CSS.escape(key)}"]`)
+  const dotsOf = (key: string) => firstShown<HTMLElement>(`.convo-list-dots[data-key="${CSS.escape(key)}"]`) // (not its copy in a tab behind)
   const closeMenu = useCallback(() => setRowMenu(null), [])
   const menuTrigger = useCallback(() => (rowMenu ? dotsOf(rowMenu.key) : null), [rowMenu])
   const openMenu = (key: string, at?: { x: number; y: number }) => {
@@ -4459,7 +4460,7 @@ export function AgentList({ rows, menus, onPicked, placed, query: given, onQuery
     // since.)
     forget()
     const a = document.activeElement
-    if (!f.el?.isConnected && (!a || a === document.body) && !modalNow()) (dotsOf(f.key) ?? document.querySelector<HTMLElement>('.convo-side .convo-list-row'))?.focus({ preventScroll: true })
+    if (!f.el?.isConnected && (!a || a === document.body) && !modalNow()) (dotsOf(f.key) ?? firstShown<HTMLElement>('.convo-side .convo-list-row'))?.focus({ preventScroll: true })
   }, [])
   const forget = () => {
     if (refocus.current) clearInterval(refocus.current.timer)
