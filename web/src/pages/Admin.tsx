@@ -171,6 +171,19 @@ export function AdminUsersPage() {
   const desk = useDeskPages()
   const [sel, setSel] = useState<number | null>(null)
   const pageEl = useRef<HTMLElement>(null)
+  // (The one chosen gone from what is shown — enabled under 「已停用」, say — its menu with it and the keys on nothing:
+  // the row now in its place chosen, the keys on it. Review of UI 12.)
+  const selAt = useRef(-1)
+  useEffect(() => {
+    if (!desk || sel === null) return
+    const i = shownUsers.findIndex((u) => u.id === sel)
+    if (i >= 0) return void (selAt.current = i)
+    if (document.activeElement && document.activeElement !== document.body) return
+    const u = shownUsers[Math.min(selAt.current, shownUsers.length - 1)]
+    if (!u) return
+    setSel(u.id)
+    pageEl.current?.querySelector<HTMLElement>(`tr[data-user="${u.id}"]`)?.focus()
+  })
   if (desk) {
     const at = shownUsers.findIndex((u) => u.id === sel)
     const go = (i: number) => {

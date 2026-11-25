@@ -93,8 +93,11 @@ export function RecordingsPage() {
         setChoices({ hosts: l.hosts ?? [], owners: l.owners ?? [] })
         const full = l.recordings.length === PAGE
         // (A span of days is today's, read again: what was kept may be of
-        // days now out of it — review cd07bb9. Read whole instead.)
-        const merged = keep && listRef.current && f.span === 'all' ? overKept(l.recordings, listRef.current.recordings, !full) : null
+        // days now out of it — review cd07bb9 —: those left out, the rest kept
+        // with the pages read, as with no span — the row come back to among them: review of UI 12.)
+        const from = spanFrom(f.span)
+        const prev = listRef.current ? listRef.current.recordings.filter((r) => r.started_at >= from) : []
+        const merged = keep && listRef.current ? overKept(l.recordings, prev, !full) : null
         if (merged && merged !== l.recordings) setList({ ...l, recordings: merged })
         else {
           setList(l)
@@ -102,7 +105,11 @@ export function RecordingsPage() {
         }
         // (Back from a recording: the row opened kept in sight as the newer come in above it.)
         if (keep && back?.opened)
-          requestAnimationFrame(() => document.querySelector(`[data-rec="${CSS.escape(back.opened)}"]`)?.scrollIntoView({ block: 'center' }))
+          requestAnimationFrame(() => {
+            const row = document.querySelector<HTMLElement>(`[data-rec="${CSS.escape(back.opened)}"]`)
+            row?.scrollIntoView({ block: 'center' })
+            if (row?.tagName === 'TR' && (!document.activeElement || document.activeElement === document.body)) row.focus({ preventScroll: true }) // (the keys back on it: review of UI 12)
+          })
       })
       .catch(() => n === seq.current && !keep && setFailed(true))
       .finally(() => n === seq.current && setRefreshing(false))
@@ -125,7 +132,9 @@ export function RecordingsPage() {
   // (Back from a recording: the row opened, in sight again.)
   useEffect(() => {
     if (!back?.opened) return
-    document.querySelector(`[data-rec="${CSS.escape(back.opened)}"]`)?.scrollIntoView({ block: 'center' })
+    const row = document.querySelector<HTMLElement>(`[data-rec="${CSS.escape(back.opened)}"]`)
+    row?.scrollIntoView({ block: 'center' })
+    if (row?.tagName === 'TR') row.focus({ preventScroll: true }) // (a table's row: the keys back on it)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
   const loadMore = async () => {
