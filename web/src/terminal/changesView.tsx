@@ -107,9 +107,15 @@ export function useChanges(sid: string, pane: string, start: ChangesAgainst) {
     setFolded(new Map())
     setAlone(new Map())
   }, [sid, pane, against, again])
+  // (Which reading each file read alone was asked in.)
+  const aloneOf = useRef(new Map<string, number>())
   useEffect(() => {
-    gen.current++
+    const g = ++gen.current
     const ctl = new AbortController()
+    const older = (m: Map<string, ChangedFile | 'loading' | string>, only?: 'loading') => {
+      const keep = [...m].filter(([p, v]) => aloneOf.current.get(p) === g || (only && v !== only))
+      return keep.length === m.size ? m : new Map(keep)
+    }
     setError('')
     api<Changes>('GET', `/api/sessions/${sid}/git/changes?` + new URLSearchParams({ pane, against }).toString(), undefined, { signal: ctl.signal, timeoutMs: 25000 }).then(
       (c) => {
@@ -117,12 +123,12 @@ export function useChanges(sid: string, pane: string, start: ChangesAgainst) {
         setRead(c)
         // (Read again — shown again from a tab behind —: a file read alone is of the last reading, maybe older
         // than this one, and one asked then is answered into nothing: read alone again on asking — review 6.)
-        setAlone((m) => (m.size ? new Map() : m))
+        setAlone((m) => older(m)) // (not one asked since this reading began: it is of it — review 7)
       },
       (e) => {
         if (ctl.signal.aborted) return
         setError(failText(e))
-        setAlone((m) => ([...m.values()].includes('loading') ? new Map([...m].filter(([, v]) => v !== 'loading')) : m))
+        setAlone((m) => older(m, 'loading'))
       },
     )
     return () => ctl.abort()
@@ -153,6 +159,7 @@ export function useChanges(sid: string, pane: string, start: ChangesAgainst) {
   const loadAlone = (f0: ChangedFile) => {
     const n = gen.current
     const path = f0.path
+    aloneOf.current.set(path, n)
     put(setAlone, path, 'loading')
     const q = new URLSearchParams({ pane, against, path })
     if (f0.from) q.set('from', f0.from)

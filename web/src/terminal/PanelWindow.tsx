@@ -241,7 +241,7 @@ export function PanelWindow({ sid, active, press, onSettled, toast, live, onFull
               }
             }
           }
-          if (k === 'esc' || settlesHere(k)) setTimeout(() => onSettledNow.current(), 700)
+          if (k === 'esc' || settlesHere(k)) setTimeout(() => a.alive && onSettledNow.current(), 700) // (not for a view gone meanwhile: review 7)
         } catch (e) {
           a.queue.length = 0 // (what was pressed after it was meant for what this would have shown)
           a.stale = true

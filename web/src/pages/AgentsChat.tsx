@@ -39,7 +39,7 @@ import { camesAfter, containedInMessage, isCommand, pairSent, sameMessage, squee
 import { viewRefusal } from '../terminal/sendView'
 import { agentKey, sessionWhich } from '../terminal/sessionName'
 import { pickKey as isPickKey } from '../terminal/pageKeys'
-import { firstShown, keptBox, KeptView, letGoBox, modalShown, useEffectOnChange, useShownAt, type KeptBox } from '../shown'
+import { firstShown, hideBox, keptBox, KeptPart, KeptView, letGoBox, modalShown, useEffectOnChange, useShownAt, useWhenGone, type KeptBox } from '../shown'
 import { Rail, StatusBar, StatusItem, useWorkbench } from '../workbench'
 import { AgentTabBar, askPickInTab, isTabsKey, newTabId, OPEN_PICKER, readFront, readTabs, takePickInTab, writeFront, writeTabs, type AgentTab, type PickHow, type TabView } from './agentTabs'
 import { agentMark } from '../terminal/agentIcons'
@@ -1098,6 +1098,7 @@ export function AgentsChat({ bar, active = true, onHead }: { bar?: ReactNode; ac
     const secondaryNode = splitEntry ? (() => {
       const sk = splitEntry.key
       return (
+        <KeptPart name={'split ' + sk + ' ' + splitEntry.s.id}>
         <AgentChat
           key={'split ' + sk + ' ' + splitEntry.s.id}
           cur={splitEntry}
@@ -1138,6 +1139,7 @@ export function AgentsChat({ bar, active = true, onHead }: { bar?: ReactNode; ac
             if (splitKey === key) closeSplit()
           }}
         />
+        </KeptPart>
       )
     })() : null
     body = (
@@ -1201,7 +1203,17 @@ export function AgentsChat({ bar, active = true, onHead }: { bar?: ReactNode; ac
     const d = drawn.current.get(drawnFront)
     const same = !!d && d.key === cur!.key + ' ' + cur!.s.id
     if (d && !same) letGo(drawnFront) // (another agent in it now: that one's, anew)
-    drawn.current.set(drawnFront, { el: body, key: cur!.key + ' ' + cur!.s.id, seen: Date.now(), box: same ? d!.box : keptBox() })
+    const box = same ? d!.box : keptBox()
+    drawn.current.set(drawnFront, { el: body, key: cur!.key + ' ' + cur!.s.id, seen: Date.now(), box })
+    // (The conversation beside it changed while it was behind — from another window —: the one that was there goes
+    // now, its own box let go — review 7.)
+    const beside = splitEntry ? 'split ' + splitEntry.key + ' ' + splitEntry.s.id : null
+    for (const [name, kid] of box.kids)
+      if (name !== beside) {
+        box.kids.delete(name)
+        kid.hidden = false
+        goneBoxes.current.push(kid)
+      }
   }
   for (const id of [...drawn.current.keys()]) {
     const x = tabs.find((y) => y.id === id)
@@ -1214,7 +1226,7 @@ export function AgentsChat({ bar, active = true, onHead }: { bar?: ReactNode; ac
     const old = [...drawn.current].filter(([id]) => id !== drawnFront && !waitingOn.has(id)).sort((a, b) => a[1].seen - b[1].seen)
     for (const [id] of old.slice(0, drawn.current.size - DRAWN_MAX)) letGo(id)
   }
-  for (const [id, v] of drawn.current) v.box.hidden = id !== drawnFront
+  for (const [id, v] of drawn.current) hideBox(v.box, id !== drawnFront)
 
   // (The workbench's rail and status bar: with the tabs, 760 and up.)
   const wbOn = wb && !!bar && !stack
@@ -2463,14 +2475,16 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
   // (Another agent shown, or the page left: what goes up is stopped, its path having nowhere to go.)
   const alive = useRef(true)
   const upAbort = useRef<AbortController | null>(null)
+  const kept = useWhenGone()
   useEffect(() => {
     alive.current = true
-    return () => {
-      alive.current = false
-      upAbort.current?.abort()
-      // (Sent to a tab behind, its state kept: what was going goes up again when shown — else none moved on. Review of 11-25.)
-      setUps((l) => (l.some((x) => x.state === 'going') ? l.map((x) => (x.state === 'going' ? { ...x, state: 'wait' as const, p: 0, abort: undefined } : x)) : l))
-    }
+    kept.back()
+    // (Sent to a tab behind: what is going goes on up, the next after it — review 7; let go from there, stopped.)
+    return () =>
+      kept.gone(() => {
+        alive.current = false
+        upAbort.current?.abort()
+      })
   }, [])
   const upload = (files: File[]) => {
     const forKey = draftKey // (its path is for this agent's draft only)

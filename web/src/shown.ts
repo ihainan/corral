@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useLayoutEffect, useRef, type DependencyList } from 'react'
+import { createContext, createElement, useContext, useEffect, useLayoutEffect, useRef, type DependencyList, type ReactNode } from 'react'
 
 // The agents' page keeps the tabs not in front drawn but hidden (React's
 // <Activity>: display: none on them, their portals' too). What is looked for
@@ -52,9 +52,23 @@ export function useEffectOnChange(fn: () => void, deps: DependencyList) {
 // on to its end — an answer, a key, a file going up — and is not stopped as
 // for a view closed (plans/agent-tabs.md 4.4: what was sent may finish).
 // Elsewhere (no kept tabs) a view is never hidden.
-export type KeptBox = { hidden: boolean; later: Map<object, () => void> }
+// (kids: the parts of a view that may go while it is behind — the conversation beside it, changed from another
+// window —, each with its own box: let go when it goes, not only with the whole.)
+export type KeptBox = { hidden: boolean; later: Map<object, () => void>; kids: Map<string, KeptBox> }
 export const KeptView = createContext<KeptBox | null>(null)
-export const keptBox = (): KeptBox => ({ hidden: false, later: new Map() })
+export const keptBox = (hidden = false): KeptBox => ({ hidden, later: new Map(), kids: new Map() })
+export function hideBox(box: KeptBox, hidden: boolean) {
+  box.hidden = hidden
+  for (const k of box.kids.values()) hideBox(k, hidden)
+}
+// A part of a kept view with a box of its own (named: another part in its place is another box).
+export function KeptPart({ name, children }: { name: string; children: ReactNode }) {
+  const box = useContext(KeptView)
+  if (!box) return children
+  let mine = box.kids.get(name)
+  if (!mine) box.kids.set(name, (mine = keptBox(box.hidden)))
+  return createElement(KeptView.Provider, { value: mine }, children)
+}
 // The view of a box let go for good: shown, its effects clean up as for any
 // view closed; hidden, they were cleaned up already as it went behind (React
 // runs them no more), so what they put off is done now.
@@ -63,6 +77,8 @@ export function letGoBox(box: KeptBox) {
   const l = [...box.later.values()]
   box.later.clear()
   for (const f of l) f()
+  for (const k of box.kids.values()) letGoBox(k)
+  box.kids.clear()
 }
 
 // What stops what a view sent, from an effect's cleanup: done at once for a
