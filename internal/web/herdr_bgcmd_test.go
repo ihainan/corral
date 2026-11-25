@@ -136,12 +136,13 @@ func TestCmdProberTells(t *testing.T) {
 		p.decorate(&s)
 		return s.Workspaces[0].Agents[0]
 	}
-	// Working: not looked at, nothing told.
+	// Working: looked at (for what it sets going in the background, UI item 8), but none
+	// of these is one its log says it did: nothing told.
 	p.consider("w1:p1", "claude", "working", cmdSess)
-	select {
-	case <-scans:
-		t.Fatal("looked at while working")
-	case <-time.After(150 * time.Millisecond):
+	<-scans
+	<-poked
+	if a := sum(); a.BgCmds != 0 {
+		t.Fatalf("told while working: %d", a.BgCmds)
 	}
 	p.consider("w1:p1", "claude", "done", cmdSess)
 	<-scans

@@ -32,6 +32,7 @@ export interface ConvoListRow {
   failed?: string // (done, not seen yet: the API error its turn ended on — workbench 11-23)
   glance?: () => string // (what it is at — the step under way, or how its answer begins —, read only when its card is shown: doc UI item 9, 11-24)
   cmds?: RowCmds // (its turn over: commands it left running in the background)
+  tasks?: RowTask[] // (what it set going in the background, at work or not: hung under its row — UI item 8, 11-25)
   since?: number // (unix ms) when its status last changed
   current: boolean
   inSplit?: boolean // currently shown in the right split pane
@@ -58,6 +59,28 @@ export interface ConvoListRow {
 export interface RowCmds {
   n: number
   list: { task?: string; title?: string; since?: number; out?: string }[]
+}
+
+// One thing an agent set going in the background, as its row lists them: a
+// subagent sent off (live: at work) or a command; what it is (a subagent's
+// description, a command's words), since when (unix ms), and, of a command,
+// where its output goes.
+export interface RowTask {
+  kind: 'agent' | 'cmd'
+  id: string
+  name: string
+  since?: number
+  out?: string
+  live?: boolean
+}
+
+// rowTasks: those of an agent's subagents and commands, the subagents first.
+export function rowTasks(agents?: { id: string; what?: string; since?: number }[], cmds?: RowCmds): RowTask[] | undefined {
+  const l: RowTask[] = [
+    ...(agents ?? []).map((a): RowTask => ({ kind: 'agent', id: a.id, name: a.what || '', since: a.since, live: true })),
+    ...(cmds?.list ?? []).filter((c) => c.task).map((c): RowTask => ({ kind: 'cmd', id: c.task!, name: c.title || '', since: c.since, out: c.out })),
+  ]
+  return l.length ? l : undefined
 }
 
 export interface AgentGroup {

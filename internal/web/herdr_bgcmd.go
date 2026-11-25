@@ -55,6 +55,9 @@ type bgCmd struct {
 	// Out: the file its output goes to (none for a Monitor's), for the page
 	// to show its end, as of one the log told of.
 	Out string `json:"out,omitempty"`
+	// quiet: a Monitor's — in the background by its nature, whatever the
+	// agent's log says (see bgTaskIDs). (Not sent.)
+	quiet bool
 }
 
 type cmdProber struct {
@@ -64,12 +67,20 @@ type cmdProber struct {
 	// (Codex's: what they left running checked against the host), by
 	// their session; looked for while read (see readAt), not after.
 	read map[string]cmdPane
-	cmds map[string][]bgCmd // agent session → its commands, as last found
+	// working: the Claude panes at work — what they set going in the
+	// background meanwhile (a dev server begun, a subagent sent off) is told
+	// too, for the side list (UI item 8, 11-25).
+	working map[string]cmdPane
+	cmds    map[string][]bgCmd   // agent session → its commands, as last found
+	subs    map[string][]bgAgent // agent session → its subagents at work in the background, as last found (see parseBgSubScan)
 	at   time.Time          // when they were found (zero: not known)
 	soon time.Time          // a look due soon (a pane came to done or idle)
 	wake chan struct{}
 	poke func()
-	scan func(ctx context.Context) (cmds map[string][]bgCmd, whole bool, err error)
+	scan func(ctx context.Context, working []string) (cmds map[string][]bgCmd, subs map[string][]bgAgent, bgIDs map[string]map[string]bool, whole bool, err error)
+	// bgIDs: of the sessions at work, the tasks found set going in the
+	// background, as its log says (kept while it is at work).
+	bgIDs map[string]map[string]bool
 
 	every, soonBy, kept time.Duration // (cmdEvery, cmdSoon, cmdKept)
 	// forget: a pane not considered again for this long is no longer looked
@@ -87,7 +98,21 @@ type cmdPane struct {
 }
 
 func newCmdProber(scan func(context.Context) (map[string][]bgCmd, bool, error)) *cmdProber {
-	return &cmdProber{ended: map[string]cmdPane{}, wake: make(chan struct{}, 1), scan: scan, every: cmdEvery, soonBy: cmdSoon, kept: cmdKept}
+	var both func(context.Context, []string) (map[string][]bgCmd, map[string][]bgAgent, map[string]map[string]bool, bool, error)
+	if scan != nil {
+		both = func(ctx context.Context, _ []string) (map[string][]bgCmd, map[string][]bgAgent, map[string]map[string]bool, bool, error) {
+			c, whole, err := scan(ctx)
+			return c, nil, nil, whole, err
+		}
+	}
+	return newCmdSubProber(both)
+}
+
+// newCmdSubProber: one whose look tells the subagents at work as well, and,
+// of the sessions at work (working: those it is given), which commands are
+// in the background.
+func newCmdSubProber(scan func(ctx context.Context, working []string) (map[string][]bgCmd, map[string][]bgAgent, map[string]map[string]bool, bool, error)) *cmdProber {
+	return &cmdProber{ended: map[string]cmdPane{}, working: map[string]cmdPane{}, bgIDs: map[string]map[string]bool{}, wake: make(chan struct{}, 1), scan: scan, every: cmdEvery, soonBy: cmdSoon, kept: cmdKept}
 }
 
 func (p *cmdProber) setPoke(f func()) {
@@ -101,6 +126,23 @@ func (p *cmdProber) consider(pane, agent, status, session string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	ended := status == herdr.StatusDone || status == herdr.StatusIdle
+	if status == herdr.StatusWorking && strings.Contains(strings.ToLower(agent), "claude") && convoUUID.MatchString(session) {
+		delete(p.ended, pane)
+		session = strings.ToLower(session)
+		if was, ok := p.working[pane]; ok && was.session == session {
+			was.told = time.Now()
+			p.working[pane] = was
+			return
+		}
+		p.working[pane] = cmdPane{session: session, from: time.Now(), told: time.Now()}
+		p.soon = time.Now().Add(p.soonBy)
+		select {
+		case p.wake <- struct{}{}:
+		default:
+		}
+		return
+	}
+	delete(p.working, pane)
 	if a := strings.ToLower(agent); !ended || !(strings.Contains(a, "claude") || strings.Contains(a, "codex") || strings.Contains(a, "agy") || strings.Contains(a, "antigravity")) || !convoUUID.MatchString(session) {
 		delete(p.ended, pane)
 		return
@@ -178,6 +220,21 @@ func (p *cmdProber) decorate(sum *herdrSummary) {
 			if c := p.ofLocked(a.PaneID, a.Session); len(c) > 0 {
 				a.BgCmds, a.BgCmdList = len(c), c[:min(len(c), maxCmdsShown)]
 			}
+			// (At work: those it set going in the background only — not what it runs in front now.)
+			if e, ok := p.working[a.PaneID]; ok && (a.Session == "" || strings.ToLower(a.Session) == e.session) && !p.at.Before(e.from) {
+				var quiet []bgCmd
+				for _, c := range p.cmds[e.session] {
+					if c.quiet || p.bgIDs[e.session][c.Task] {
+						quiet = append(quiet, c)
+					}
+				}
+				if len(quiet) > 0 {
+					a.BgCmds, a.BgCmdList = len(quiet), quiet[:min(len(quiet), maxCmdsShown)]
+				}
+			}
+			if sess := p.paneSessionLocked(a.PaneID, a.Session); sess != "" {
+				a.BgAgentList = subsShown(p.subs[sess], a.Status, a.Bg, a.BgN)
+			}
 		}
 	}
 }
@@ -191,6 +248,20 @@ func (p *cmdProber) of(pane, session string) []bgCmd {
 		return nil
 	}
 	return p.ofLocked(pane, session)
+}
+
+// paneSessionLocked: the agent session pane's Claude Code is watched for (at
+// work, or done or idle), where what was found is of after it came to that;
+// "" else.
+func (p *cmdProber) paneSessionLocked(pane, session string) string {
+	e, ok := p.working[pane]
+	if !ok {
+		e, ok = p.ended[pane]
+	}
+	if !ok || (session != "" && strings.ToLower(session) != e.session) || p.at.Before(e.from) {
+		return ""
+	}
+	return e.session
 }
 
 func (p *cmdProber) ofLocked(pane, session string) []bgCmd {
@@ -209,7 +280,7 @@ func (p *cmdProber) run(ctx context.Context) {
 	for {
 		p.mu.Lock()
 		wait := time.Hour
-		if len(p.ended) > 0 || len(p.read) > 0 {
+		if len(p.ended) > 0 || len(p.read) > 0 || len(p.working) > 0 {
 			next := last.Add(p.every)
 			if !p.soon.IsZero() && p.soon.Before(next) {
 				next = p.soon
@@ -239,7 +310,19 @@ func (p *cmdProber) run(ctx context.Context) {
 				delete(p.read, sid)
 			}
 		}
-		due := len(p.ended) > 0 || len(p.read) > 0
+		due := len(p.ended) > 0 || len(p.read) > 0 || len(p.working) > 0
+		var working []string
+		for _, e := range p.working {
+			if !slices.Contains(working, e.session) {
+				working = append(working, e.session)
+			}
+		}
+		// (Those of a session no longer at work go: done or idle, all its commands are told.)
+		for s := range p.bgIDs {
+			if !slices.Contains(working, s) {
+				delete(p.bgIDs, s)
+			}
+		}
 		if !p.soon.After(began) {
 			p.soon = time.Time{} // (else it is due still: one coming to done or idle since the last)
 		}
@@ -249,24 +332,43 @@ func (p *cmdProber) run(ctx context.Context) {
 		}
 		last = began
 		sctx, cancel := context.WithTimeout(ctx, 15*time.Second)
-		found, whole, err := p.scan(sctx)
+		found, subs, ids, whole, err := p.scan(sctx, working)
 		cancel()
 		p.mu.Lock()
 		changed := false
-		if err != nil || !whole {
-			// (Not known, or not all of it: nothing told, rather than what was.)
-			changed = !p.at.IsZero()
-			p.at, p.cmds = time.Time{}, nil
-		} else {
-			changed = p.at.IsZero() || !sameCmds(p.cmds, found)
-			// (Or the same, but now told of a pane it was not before: one
-			// come to done or idle after the last look began.)
-			for _, e := range p.ended {
-				if p.at.Before(e.from) && !began.Before(e.from) && len(found[e.session]) > 0 {
+		for s, l := range ids {
+			if !slices.Contains(working, s) {
+				continue
+			}
+			if p.bgIDs[s] == nil {
+				p.bgIDs[s] = map[string]bool{}
+			}
+			for id := range l {
+				if !p.bgIDs[s][id] && len(p.bgIDs[s]) < 256 {
+					p.bgIDs[s][id] = true
 					changed = true
 				}
 			}
-			p.at, p.cmds = began, found // (as of when the look began)
+		}
+		if err != nil || !whole {
+			// (Not known, or not all of it: nothing told, rather than what was.)
+			changed = !p.at.IsZero()
+			p.at, p.cmds, p.subs = time.Time{}, nil, nil
+		} else {
+			changed = p.at.IsZero() || !sameCmds(p.cmds, found) || !sameSubs(p.subs, subs)
+			// (Or the same, but now told of a pane it was not before: one
+			// come to done or idle after the last look began.)
+			for _, e := range p.ended {
+				if p.at.Before(e.from) && !began.Before(e.from) && (len(found[e.session]) > 0 || len(subs[e.session]) > 0) {
+					changed = true
+				}
+			}
+			for _, e := range p.working {
+				if p.at.Before(e.from) && !began.Before(e.from) && (len(found[e.session]) > 0 || len(subs[e.session]) > 0) {
+					changed = true
+				}
+			}
+			p.at, p.cmds, p.subs = began, found, subs // (as of when the look began)
 		}
 		poke := p.poke
 		p.mu.Unlock()
@@ -300,9 +402,38 @@ func sameCmds(a, b map[string][]bgCmd) bool {
 // ones, -u: whose each is, is looked at here). Not this script itself,
 // which names Claude Code's program too (its children, its subshells, run
 // as Claude Code's shell would: "&& eval '" … "pwd -P >| "). Fixed script.
-func cmdScanCommand() string {
-	script := `btime=$(sed -n 's/^btime \([0-9]*\)$/\1/p' /proc/stat 2>/dev/null); hz=$(getconf CLK_TCK 2>/dev/null)
+func cmdScanCommand(working ...string) string {
+	script := `for s in "$@"; do
+  # (Of an agent at work, the commands it set going in the background, as its log tells — the
+  # whole of it: one begun an hour ago counts —; a command run in front writes its output to a
+  # task's file too, and is not one. A grep of a log of 200 MB: some 50 ms.)
+  for f in "$HOME"/.claude/projects/*/"$s".jsonl; do
+    [ -f "$f" ] || continue
+    grep -o '"backgroundTaskId":"[A-Za-z0-9_-]*"' "$f" | tail -n 256 | sort -u | sed "s/^\"backgroundTaskId\":\"\(.*\)\"$/bgid\t$s\t\1/"
+    break
+  done
+done
+btime=$(sed -n 's/^btime \([0-9]*\)$/\1/p' /proc/stat 2>/dev/null); hz=$(getconf CLK_TCK 2>/dev/null)
 printf 'clock\t%s\t%s\n' "$btime" "$hz"
+# (Subagents sent off in the background whose log was written to in the last
+# six hours, with what their meta says: the account's, across projects.)
+find "$HOME"/.claude/projects -mindepth 4 -maxdepth 4 -path '*/subagents/agent-*.jsonl' -mmin -360 2>/dev/null | {
+  i=0
+  while IFS= read -r j; do
+    m=${j%.jsonl}.meta.json
+    [ -f "$m" ] || continue
+    meta=$(head -c 4096 "$m" 2>/dev/null | tr '\n\t' '  ')
+    case $meta in *'"requestShape":"background"'*) ;; *) continue;; esac
+    case $meta in *'"finished":true'*) continue;; esac
+    [ "$i" -lt 64 ] || break
+    i=$((i + 1))
+    s=${j%/subagents/*}; s=${s##*/}
+    id=${j##*/agent-}; id=${id%.jsonl}
+    t=$(stat -c %Y "$m" 2>/dev/null || date -r "$m" +%s 2>/dev/null)
+    v=$(head -c 65536 "$j" 2>/dev/null | grep -o '"version":"[0-9.]*"' | head -n 1 | cut -d'"' -f4)
+    printf 'sub\t%s\t%s\t%s\t%s\t%s\n' "$s" "$id" "$t" "$v" "$meta"
+  done
+}
 if command -v pgrep >/dev/null 2>&1; then
   claudes=$( { pgrep -x claude; pgrep -f '[c]laude-code/cli'; pgrep -x codex; pgrep -x agy; } 2>/dev/null | sort -u | grep -vx "$$")
   kids=$(for c in $claudes; do
@@ -366,8 +497,35 @@ for k in $kids; do
   esac
 done
 exit 0`
-	return "sh -c " + sshx.QuoteShell(script) + " corral"
+	cmd := "sh -c " + sshx.QuoteShell(script) + " corral"
+	for _, s := range working {
+		if convoUUID.MatchString(s) {
+			cmd += " " + sshx.QuoteShell(s)
+		}
+	}
+	return cmd
 }
+
+// parseBgIDs reads the "bgid" lines of what cmdScanCommand printed: of each
+// agent session at work, the tasks its log says it set going in the
+// background.
+func parseBgIDs(out string) map[string]map[string]bool {
+	got := map[string]map[string]bool{}
+	for _, line := range strings.Split(out, "\n") {
+		f := strings.Split(line, "\t")
+		if len(f) != 3 || f[0] != "bgid" || !convoUUID.MatchString(f[1]) || !cmdTaskID.MatchString(f[2]) {
+			continue
+		}
+		s := strings.ToLower(f[1])
+		if got[s] == nil {
+			got[s] = map[string]bool{}
+		}
+		got[s][f[2]] = true
+	}
+	return got
+}
+
+var cmdTaskID = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 
 // cmdEvalAwk: what follows the first "&& eval '" of a line (Claude Code's
 // shell runs the command so, after setting itself up; the command may hold
@@ -461,7 +619,7 @@ func parseCmdScan(out string) (cmds map[string][]bgCmd, whole bool) {
 			} else {
 				continue
 			}
-			all = append(all, found{session: strings.ToLower(session), cmd: bgCmd{Task: task, Title: cmdTitle(f[4]), Out: out}, start: start})
+			all = append(all, found{session: strings.ToLower(session), cmd: bgCmd{Task: task, Title: cmdTitle(f[4]), Out: out, quiet: strings.HasPrefix(task, "monitor-")}, start: start})
 		}
 	}
 	if btime <= 0 {

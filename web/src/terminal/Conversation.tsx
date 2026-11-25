@@ -1,3 +1,4 @@
+import { askTask, taskTaken, TASK_ASK_FOR, type TaskAsked } from './bgTaskOpen'
 import { createContext, Fragment, memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { Activity, ArrowDown, History, ArrowDownAZ, ArrowUp, ArrowUpDown, Bot, Check, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, ChevronsDownUp, ChevronsUpDown, Clock, Columns2, Copy, Cpu, Download, Eye, FilePen, FileText, Folder, FolderOpen, Gauge as GaugeIcon, GitBranch, GitFork, Hand, Image as ImageIcon, ImageOff, Info, Keyboard, ListChecks, ListOrdered, Loader, LogOut, MessageCircleQuestion, MessagesSquare, MoreHorizontal, MoreVertical, PanelLeft, PanelRight, Pin, Plus, Radar, RotateCw, Search, Server, Settings, ShieldOff, Sparkles, SquarePlus, SquareTerminal, Target, TextCursorInput, TriangleAlert, X } from 'lucide-react'
@@ -6,7 +7,7 @@ import { api } from '../api'
 import { setPrefs, usePrefs } from '../prefs'
 import { openSettingsModal } from '../pages/Settings'
 import { dropPickInTab, OPEN_PICKER } from '../pages/agentTabs'
-import { asHeld, buildAgentGroups, dayStart, FOLDED, foldAt, isLiveBlocked, listOrder, pinned, type ConvoListRow, type OrderOpts, type RowCmds } from './agentOrder'
+import { asHeld, buildAgentGroups, dayStart, FOLDED, foldAt, isLiveBlocked, listOrder, pinned, type ConvoListRow, type OrderOpts, type RowCmds, type RowTask } from './agentOrder'
 import { copyText, Dialog, DialogHead, isCoarse, Menu, MenuLayer, swallowNextClick, useToast, type MenuItem } from '../components/ui'
 import { saveFile } from '../saveFile'
 import { StatusItem, useWorkbench } from '../workbench'
@@ -236,6 +237,7 @@ export interface ConvoSplitPane {
 export function ConversationView({
   convo,
   agent,
+  taskAsked,
   pending,
   onReply,
   ask,
@@ -278,6 +280,7 @@ export function ConversationView({
 }: {
   convo: Convo
   agent: ConvoAgent | null
+  taskAsked?: TaskAsked | null // (a task its side-list row hangs under it, tapped: opened once the conversation is shown — UI item 8)
   pending: ConvoPending[]
   onReply?: () => void // (the agent waits for an answer: a bar to open the reply)
   ask?: ReactNode // (it waits, and is answered here: over the composer)
@@ -688,6 +691,16 @@ export function ConversationView({
     setSubs(null)
     setBgCmd(r)
   }, [])
+  // A task its side-list row hangs under it, tapped (UI item 8, 11-25): opened as one
+  // of its own lists would, once the conversation is shown — by the view in front only.
+  useEffect(() => {
+    if (!taskAsked || !active || convo.status !== 'ready' || !convo.of) return
+    taskTaken(taskAsked.n)
+    if (Date.now() - taskAsked.at > TASK_ASK_FOR) return
+    const t = taskAsked.task
+    if (t.kind === 'agent') openSub({ agent: t.id, title: t.name || undefined })
+    else openCmd({ id: t.id, kind: 'cmd', what: t.name, cmd: t.name || undefined, out: t.out, ts: t.since ? new Date(t.since).toISOString() : undefined })
+  }, [taskAsked, active, convo.status, convo.of, openSub, openCmd])
   // What it left running in the background, as its processes on the host
   // say (its turn over; not said while it asks something): the bar counts
   // them, the card lists them, and each opens as one of the log's would.
@@ -2453,7 +2466,7 @@ export function ConversationView({
         <BgPanel
           key={bgCmd.id}
           of={convo.of}
-          r={convo.running?.find((x) => x.id === bgCmd.id) ?? bgCmd}
+          r={((k) => (k && !k.out && bgCmd.out ? { ...k, out: bgCmd.out } : k ?? bgCmd))(convo.running?.find((x) => x.id === bgCmd.id))} /* (the file its output goes to, as the host told it, where the log did not: one opened from the side list) */
           gone={!convo.running?.some((x) => x.id === bgCmd.id) && !hostCmds?.list.some((c) => c.task === bgCmd.id)}
           nav={workNav(bgCmd.id)}
           onClose={() => setBgCmd(null)}
@@ -4389,6 +4402,9 @@ function stamp(r: ConvoListRow, now: number): string {
 const SIDE_OPEN_KEY = 'corral.convo.sideOpen'
 const SIDE_FOLD_KEY = 'corral.convo.sideFold'
 const SIDE_PARENT_FOLD_KEY = 'corral.convo.parentFold'
+// Which agents' background tasks are opened out under their rows (UI item 8): kept on this device.
+const SIDE_TASKS_OPEN_KEY = 'corral.convo.tasksOpen'
+const TASKS_SHOWN = 6 // listed opened out, before "N more"
 
 export function ListOrderMenu() {
   const prefs = usePrefs()
@@ -4421,6 +4437,15 @@ export function ListOrderMenu() {
       )}
     />
   )
+}
+
+// How long a background task has run, short, for its line in the side list: 6 min, 1 h 12 min.
+function shortFor(ms: number): string {
+  const m = Math.floor(Math.max(ms, 0) / 60000)
+  if (m < 1) return t('convo.bgTasks.dur.now')
+  if (m < 60) return t('convo.bgTasks.dur.m', { m })
+  if (m < 48 * 60) return t('convo.bgTasks.dur.hm', { h: Math.floor(m / 60), m: m % 60 })
+  return t('convo.bgTasks.dur.d', { d: Math.floor(m / 1440) })
 }
 
 export function AgentList({ rows, menus, onPicked, placed, query: given, onQuery, search, showSearch, onSearchLeft, hint, compact, showNew, tools, empty }: { rows: ConvoListRow[]; menus?: boolean; onPicked?: () => void; placed?: Map<string, ConvoListRow>; query?: string; onQuery?: (q: string) => void; search?: number; showSearch?: boolean; onSearchLeft?: () => void; hint?: boolean; compact?: boolean; showNew?: boolean; tools?: ReactNode; empty?: ReactNode }) {
@@ -4565,6 +4590,15 @@ export function AgentList({ rows, menus, onPicked, placed, query: given, onQuery
     setFoldedNow((f) => {
       const next = f.includes(id) ? f.filter((x) => x !== id) : [...f, id]
       keepNames(SIDE_FOLD_KEY, next)
+      return next
+    })
+  // (Background tasks hung under an agent's row: shut by default, opened out by a tap — UI item 8, 11-25.)
+  const [tasksOpen, setTasksOpenNow] = useState<string[]>(() => keptNames(SIDE_TASKS_OPEN_KEY))
+  const [tasksAll, setTasksAll] = useState<string[]>([])
+  const toggleTasks = (key: string) =>
+    setTasksOpenNow((f) => {
+      const next = f.includes(key) ? f.filter((x) => x !== key) : [...f, key].slice(-200)
+      keepNames(SIDE_TASKS_OPEN_KEY, next)
       return next
     })
   const toggleParentFolded = (key: string) =>
@@ -4811,7 +4845,7 @@ export function AgentList({ rows, menus, onPicked, placed, query: given, onQuery
             ) : null
           const oneLine = flat || isSingleChild
           const whereText = isChild ? childSub : r.where && r.where !== r.title ? r.where : ''
-          return (
+          const item = (
             <div
               key={r.key}
               data-flip={'r:' + r.key}
@@ -4957,6 +4991,73 @@ export function AgentList({ rows, menus, onPicked, placed, query: given, onQuery
                 )}
               </span>
             )}
+            </div>
+          )
+          return r.tasks ? (
+            <Fragment key={r.key}>
+              {item}
+              {bgTasks(r, r.tasks, isChild)}
+            </Fragment>
+          ) : (
+            item
+          )
+        }
+        // What it set going in the background, under its row (UI item 8, 11-25, as Orca hangs
+        // an agent's children): shut, a strip of their marks and how many; opened out, one
+        // line each — its mark, what it is, how long it has run —, a tap opening it in the
+        // agent's conversation. Gone with the last of them.
+        const bgTasks = (r: ConvoListRow, tasks: RowTask[], isChild: boolean) => {
+          const opened = tasksOpen.includes(r.key)
+          const agents = tasks.filter((x) => x.kind === 'agent').length
+          const cmds = tasks.length - agents
+          const words = [
+            agents ? t(agents === 1 ? 'convo.bgTasks.agents1' : 'convo.bgTasks.agents', { n: agents }) : '',
+            cmds ? t(cmds === 1 ? 'convo.bgTasks.cmds1' : 'convo.bgTasks.cmds', { n: cmds }) : '',
+          ].filter(Boolean).join(t('convo.bgTasks.and'))
+          const all = tasksAll.includes(r.key)
+          const shown = all ? tasks : tasks.slice(0, TASKS_SHOWN)
+          return (
+            <div className={'convo-bgtasks' + (isChild ? ' is-child' : '')} data-flip={'t:' + r.key}>
+              <button
+                type="button"
+                className={'convo-bgsum' + (opened ? ' is-open' : '')}
+                aria-expanded={opened}
+                aria-label={t('convo.bgTasks.toggle', { name: r.title, what: words })}
+                onClick={() => toggleTasks(r.key)}
+              >
+                <span className="convo-bgsum-dots" aria-hidden="true">
+                  {tasks.slice(0, 3).map((x, i) => <span key={i} className={'convo-bgdot' + (x.live ? ' is-live' : '')} />)}
+                </span>
+                <span className="convo-bgsum-t">{t('convo.bgTasks.sum', { what: words })}</span>
+                <ChevronRight size={12} className="convo-bgsum-chev" aria-hidden="true" />
+              </button>
+              {opened && (
+                <div className="convo-bgrows">
+                  {shown.map((x) => (
+                    <button
+                      key={x.kind + x.id}
+                      type="button"
+                      className="convo-bgrow"
+                      title={x.name || undefined}
+                      onClick={() => {
+                        clearRowTip()
+                        onPicked?.()
+                        askTask(r.key, x)
+                        r.onPick()
+                      }}
+                    >
+                      <span className={'convo-bgdot' + (x.live ? ' is-live' : '')} aria-hidden="true" />
+                      <span className={'convo-bgrow-n' + (x.kind === 'cmd' ? ' is-cmd' : '')}>{x.name || t(x.kind === 'cmd' ? 'convo.bgCmd' : 'convo.bgTasks.agent')}</span>
+                      {x.since && <span className="convo-bgrow-d">{shortFor(now - x.since)}</span>}
+                    </button>
+                  ))}
+                  {!all && tasks.length > TASKS_SHOWN && (
+                    <button type="button" className="convo-bgrow is-more" onClick={() => setTasksAll((a) => [...a, r.key])}>
+                      <span className="convo-bgrow-n">{t('convo.bgTasks.more', { n: tasks.length - TASKS_SHOWN })}</span>
+                    </button>
+                  )}
+                </div>
+              )}
             </div>
           )
         }

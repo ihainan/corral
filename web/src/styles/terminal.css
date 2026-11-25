@@ -1868,6 +1868,48 @@ button.convo-queue-row.is-note:last-child { border-radius: 0 0 var(--r-lg) var(-
   margin: 0 0 2px 28px;
 }
 .convo-list-tree .convo-list-children { margin-left: 20px; }
+/* What an agent set going in the background, under its row (UI item 8, 11-25, as Orca hangs an
+   agent's children): shut, a strip — their marks, how many, a chevron —; opened out, one line each
+   hung from a thin line. Its left edge under the row's name: 10 (row's padding) + 20 (icon) + 10 (gap);
+   one-line rows 10 + 16 + 8; a child's under its own name. */
+.convo-bgtasks { display: flex; flex-direction: column; margin: 0 6px 4px 40px; }
+.convo-bgtasks.is-child { margin-left: 34px; }
+.convo-list-groups.is-flat .convo-bgtasks { margin-left: 34px; }
+.convo-list-groups.is-flat .convo-bgtasks.is-child { margin-left: 52px; }
+.convo-bgsum {
+  display: flex; align-items: center; gap: 6px; height: 24px; padding: 0 8px; border: 0; border-radius: var(--r-sm);
+  background: color-mix(in srgb, var(--term-fg) 4%, transparent); color: var(--term-fg-3);
+  font-family: inherit; font-size: var(--fs-note); line-height: var(--lh-note); text-align: left; cursor: pointer;
+}
+@media (hover: hover) { .convo-bgsum:hover { background: color-mix(in srgb, var(--term-fg) 8%, transparent); color: var(--term-fg-2); } } /* (not on a touch screen: a tap would leave it so) */
+.convo-bgsum:focus-visible, .convo-bgrow:focus-visible { outline: 2px solid var(--term-accent-text); outline-offset: -2px; }
+.convo-bgsum-dots { display: inline-flex; gap: 4px; }
+.convo-bgsum-t { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.convo-bgsum-chev { flex: none; transition: transform .12s; }
+.convo-bgsum.is-open .convo-bgsum-chev { transform: rotate(90deg); }
+.convo-bgdot { flex: none; width: 6px; height: 6px; border-radius: 50%; background: var(--term-fg-3); opacity: .55; }
+.convo-bgdot.is-live { background: var(--term-accent-text); opacity: 1; }
+.convo-bgrows { position: relative; display: flex; flex-direction: column; margin-top: 2px; padding-left: 10px; }
+.convo-bgrows::before { content: ""; position: absolute; left: 0; top: 2px; bottom: 6px; width: 1px; background: var(--term-line-strong); }
+.convo-bgrow {
+  display: flex; align-items: center; gap: 8px; height: 26px; padding: 0 8px 0 4px; border: 0; border-radius: var(--r-sm);
+  background: none; color: var(--term-fg); font-family: inherit; font-size: var(--fs-sub); line-height: var(--lh-sub); text-align: left; cursor: pointer;
+}
+@media (hover: hover) { .convo-bgrow:hover { background: var(--term-row-hover); } }
+.convo-bgrow-n { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
+.convo-bgrow-n.is-cmd { font-family: var(--font-mono); font-weight: 400; color: var(--term-fg-2); }
+.convo-bgrow-d { flex: none; color: var(--term-fg-3); font-size: var(--fs-note); line-height: var(--lh-note); font-variant-numeric: tabular-nums; }
+.convo-bgrow.is-more { color: var(--term-fg-3); }
+.convo-bgrow.is-more .convo-bgrow-n { font-weight: 400; }
+@media (pointer: coarse) {
+  .convo-bgsum { height: 32px; }
+  .convo-bgrow { height: 40px; }
+}
+@media (prefers-reduced-motion: reduce) { .convo-bgsum-chev { transition: none; } }
+@media (forced-colors: active) {
+  .convo-bgdot, .convo-bgdot.is-live { forced-color-adjust: none; background: CanvasText; opacity: 1; }
+  .convo-bgrows::before { background: CanvasText; }
+}
 .convo-list-item.is-child { position: relative; }
 /* (A child under its parent by its indent alone, its mark under the parent's
    name: no lines drawn to join them — redesign 11-23.) */

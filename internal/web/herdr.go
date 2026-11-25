@@ -65,6 +65,11 @@ type herdrAgent struct {
 	// cmdProber); none where not known.
 	BgCmds    int     `json:"bg_cmds,omitempty"`
 	BgCmdList []bgCmd `json:"bg_cmd_list,omitempty"`
+	// (While a Claude Code agent is at work, BgCmds and BgCmdList tell those
+	// commands it set going in the background, not what it runs in front.)
+	// BgAgentList: for a Claude Code agent, the subagents it sent off in the
+	// background still at it, the latest first (see parseBgSubScan, subsShown).
+	BgAgentList []bgAgent `json:"bg_agent_list,omitempty"`
 	// Tab: the tab it is in, its name, and how many tabs its workspace
 	// has; Label: the name the pane was given, if one was (pane.rename).
 	Tab      string `json:"tab,omitempty"`
@@ -795,13 +800,13 @@ func (s *Server) watchHerdr(sess *term.Session, h *store.Host) {
 	lineage := s.newLineageTracker(sess, server, socket, name)
 	s.herdrSocks.setLineage(sess.ID, lineage)
 	go bg.run(ctx)
-	cmds := newCmdProber(func(ctx context.Context) (map[string][]bgCmd, bool, error) {
-		out, err := sshx.Output(ctx, sess.Client(), cmdScanCommand(), cmdScanMax)
+	cmds := newCmdSubProber(func(ctx context.Context, working []string) (map[string][]bgCmd, map[string][]bgAgent, map[string]map[string]bool, bool, error) {
+		out, err := sshx.Output(ctx, sess.Client(), cmdScanCommand(working...), cmdScanMax)
 		if err != nil {
-			return nil, false, err
+			return nil, nil, nil, false, err
 		}
 		got, whole := parseCmdScan(string(out))
-		return got, whole, nil
+		return got, parseBgSubScan(string(out)), parseBgIDs(string(out)), whole, nil
 	})
 	s.herdrSocks.setCmds(sess.ID, cmds)
 	go cmds.run(ctx)

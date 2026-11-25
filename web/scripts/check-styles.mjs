@@ -91,6 +91,7 @@ const EXEMPT = [
   /\.convo-runs-bar\b/, /\.convo-rail-tick\b/, /\.attach-/, /\.claude-card-head\b/,
   /\.input-eye/, /\.brand\b/, /\.auth\b/,
   // Spacing measured from something that is not the scale. Each says what.
+  /\.convo-bgtasks\b/,             // 34 and 52: under the agent's name, past its row's padding, icon and gap (one-line rows; a child's)
   /\.complete-item\b/,            // 8.5 and 11.5 against a 13px/1.3 line: rows of exactly 34 and 40
   /\.convo-summary summary\b|\.convo-bar-pick\b/,  // -11 for the same reason, against min-height 44
   /\.convo-ask-opt\b/,            // 11 above and below a 22px line: a choice is 44 to press

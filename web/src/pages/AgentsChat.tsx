@@ -1,3 +1,4 @@
+import { useTaskAsked } from '../terminal/bgTaskOpen'
 import { Activity, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState, type ReactNode } from 'react'
 import { ArrowDown, ArrowLeftRight, ArrowUp, ArrowUpDown, ArrowUpToLine, ChevronLeft, CircleStop, Code2, Columns2, Copy, Eye, FoldVertical, GitBranch, GitFork, Globe, History, Languages, ListPlus, Maximize2, MessageSquarePlus, Paperclip, Pencil, Pin, PinOff, Plus, Power, Rows2, Square, SquareSlash, SquareTerminal, TextCursorInput, Unlink, X, Zap } from 'lucide-react'
 import { api, ApiError, authGen, errorText, onAuthChange, uploadFile, type SessionInfo } from '../api'
@@ -32,7 +33,7 @@ import { IMAGE_EXT, TextPreview } from '../terminal/textPreview'
 import { attach, ATTACH_LABEL, AttachStrip, PICTURE_PATH, takeOut, type Going } from '../terminal/attach'
 import { answerable, asking, callOut, useConversation, type ConvoEntry } from '../terminal/conversation'
 import { ackBg, answeredHerdr, convoTitles, expectSession, paneWaits, waitingTitle, isAgy, isCodex, isOpenCode, listAgents, paneName, paneTitle, readSessionsNow, readsLog, useRunningSessions, type AgentRow, type AgentStatus } from '../terminal/agents'
-import { normalizeProjectPath, reorderPinned, type RowCmds } from '../terminal/agentOrder'
+import { normalizeProjectPath, reorderPinned, rowTasks, type RowCmds, type RowTask } from '../terminal/agentOrder'
 import { conversationReadable, prefetchConversation } from '../terminal/conversation'
 import { holdTermMode, tmuxKey } from '../terminal/chatSend'
 import { camesAfter, containedInMessage, isCommand, pairSent, sameMessage, squeezed, type Submission } from '../terminal/sentSeen'
@@ -267,6 +268,16 @@ function cmdsOf(r: AgentRow): RowCmds | undefined {
   const a = r.a
   if (r.lost || !a.bg_cmds || (a.status !== 'done' && a.status !== 'idle')) return undefined
   return { n: a.bg_cmds, list: (a.bg_cmd_list ?? []).map((c) => ({ task: c.task, title: c.title, since: c.since, out: c.out })) }
+}
+
+// What it set going in the background, to hang under its row (UI item 8,
+// 11-25): its subagents still out and its commands — at work, those the
+// gateway found it set going in the background; done or idle, all it left
+// running. Not while it waits on the person (nothing is told of it then).
+function tasksOf(r: AgentRow): RowTask[] | undefined {
+  const a = r.a
+  if (r.lost || a.status === 'blocked') return undefined
+  return rowTasks(a.bg_agent_list, a.bg_cmds ? { n: a.bg_cmds, list: a.bg_cmd_list ?? [] } : undefined)
 }
 
 // Pins kept to at most max: those of agents not on the list let go, the
@@ -1535,6 +1546,8 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
   const kActive = keysActive ?? active
   const download = useDownload() // (a host file saved, and said so: picture.tsx)
   const { boot } = useSession()
+  // (A task its side-list row hangs under it, tapped: for the conversation to open — UI item 8.)
+  const taskAsked = useTaskAsked(cur.key)
   const [portsOpen, setPortsOpen] = useState(false)
   const [shareOpen, setShareOpen] = useState(false)
   const code = useCode()
@@ -1853,10 +1866,10 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
         const st = current && agent && !r.bg ? agent.status : r.status
         const parentKey = r.lost || !r.a.parent_pane ? undefined : agentKey(e.s, r.a.parent_pane)
         const sameWsParent = !!parentKey && wsByKey.get(parentKey) === r.wsId
-        return { key: e.key, ...labelOf(e, said, hosts, !!named, sameWsParent), now: r.lost || r.bg || st !== 'blocked' ? undefined : glanceOf(e.s.id, e.pane, st, r.a.since) || undefined /* (said only of one waiting on the person) */, program: r.a.agent, status: st, liveStatus: st, bg: r.lost ? undefined : r.bg, failed: failedOf(r, st), model: r.lost ? undefined : r.a.model, glance: r.lost || r.bg ? undefined : () => glanceOf(e.s.id, e.pane, st, r.a.since), cmds: cmdsOf(r), since: r.lost ? undefined : r.bg ? r.a.bg_since : r.a.since, current, inSplit: !isSecondary && !!splitKey && e.key === splitKey, pinned: pinAt(e.key), projectKey: normalizeProjectPath(r.a.cwd), sessionGroup: sessionGroupOf(e, all), parentKey, lineageSource: r.lost ? undefined : r.a.lineage_source, onPick: (how) => onPick(e, how), menu: () => rowMenu.current(e) }
+        return { key: e.key, ...labelOf(e, said, hosts, !!named, sameWsParent), now: r.lost || r.bg || st !== 'blocked' ? undefined : glanceOf(e.s.id, e.pane, st, r.a.since) || undefined /* (said only of one waiting on the person) */, program: r.a.agent, status: st, liveStatus: st, bg: r.lost ? undefined : r.bg, failed: failedOf(r, st), model: r.lost ? undefined : r.a.model, glance: r.lost || r.bg ? undefined : () => glanceOf(e.s.id, e.pane, st, r.a.since), cmds: cmdsOf(r), tasks: tasksOf(r), since: r.lost ? undefined : r.bg ? r.a.bg_since : r.a.since, current, inSplit: !isSecondary && !!splitKey && e.key === splitKey, pinned: pinAt(e.key), projectKey: normalizeProjectPath(r.a.cwd), sessionGroup: sessionGroupOf(e, all), parentKey, lineageSource: r.lost ? undefined : r.a.lineage_source, onPick: (how) => onPick(e, how), menu: () => rowMenu.current(e) }
       }
       const title = (current && agent?.title) || keptTitle(titles, e) || `${e.s.host_name} · ${sessionWhich(e.s, all)}`
-      return { key: e.key, title, where: whereOf(e, hosts), program: current ? agent?.program : undefined, status: current && agent ? agent.status : 'unknown', cmds: current ? agent?.cmds : tmuxCmdsOf(e), current, inSplit: !isSecondary && !!splitKey && e.key === splitKey, pinned: pinAt(e.key), sessionGroup: sessionGroupOf(e, all), onPick: (how) => onPick(e, how), menu: () => rowMenu.current(e) }
+      return { key: e.key, title, where: whereOf(e, hosts), program: current ? agent?.program : undefined, status: current && agent ? agent.status : 'unknown', cmds: current ? agent?.cmds : tmuxCmdsOf(e), tasks: rowTasks(undefined, current ? agent?.cmds : tmuxCmdsOf(e)), current, inSplit: !isSecondary && !!splitKey && e.key === splitKey, pinned: pinAt(e.key), sessionGroup: sessionGroupOf(e, all), onPick: (how) => onPick(e, how), menu: () => rowMenu.current(e) }
     })
     return placedAs ? out.map((r) => (r.current ? { ...r, placeAs: placedAs } : r)) : out
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -3673,6 +3686,7 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
       onHostHistory={() => setHostHistory(true)}
       convo={convo}
       agent={agent}
+      taskAsked={taskAsked}
       compacting={compacting}
       goal={goalNote?.bind === bindKey ? goalNote.g : undefined}
       retrying={retrying}
@@ -3979,10 +3993,10 @@ function PhoneList({ entries, all, titles, query, onQuery, onPick }: { entries: 
         const said = named || dirName(r.a.cwd) || r.a.agent
         const parentKey = r.lost || !r.a.parent_pane ? undefined : agentKey(e.s, r.a.parent_pane)
         const sameWsParent = !!parentKey && wsByKey.get(parentKey) === r.wsId
-        return { key: e.key, ...labelOf(e, said, hosts, !!named, sameWsParent), now: r.lost || r.bg || r.status !== 'blocked' ? undefined : glanceOf(e.s.id, e.pane, r.status, r.a.since) || undefined, program: r.a.agent, status: r.status, liveStatus: r.status, bg: r.lost ? undefined : r.bg, failed: failedOf(r, r.status), model: r.lost ? undefined : r.a.model, glance: r.lost || r.bg ? undefined : () => glanceOf(e.s.id, e.pane, r.status, r.a.since), cmds: cmdsOf(r), since: r.lost ? undefined : r.bg ? r.a.bg_since : r.a.since, current: false, pinned: pinAt(e.key), projectKey: normalizeProjectPath(r.a.cwd), sessionGroup: sessionGroupOf(e, all), parentKey, lineageSource: r.lost ? undefined : r.a.lineage_source, onPick: () => onPick(e) }
+        return { key: e.key, ...labelOf(e, said, hosts, !!named, sameWsParent), now: r.lost || r.bg || r.status !== 'blocked' ? undefined : glanceOf(e.s.id, e.pane, r.status, r.a.since) || undefined, program: r.a.agent, status: r.status, liveStatus: r.status, bg: r.lost ? undefined : r.bg, failed: failedOf(r, r.status), model: r.lost ? undefined : r.a.model, glance: r.lost || r.bg ? undefined : () => glanceOf(e.s.id, e.pane, r.status, r.a.since), cmds: cmdsOf(r), tasks: tasksOf(r), since: r.lost ? undefined : r.bg ? r.a.bg_since : r.a.since, current: false, pinned: pinAt(e.key), projectKey: normalizeProjectPath(r.a.cwd), sessionGroup: sessionGroupOf(e, all), parentKey, lineageSource: r.lost ? undefined : r.a.lineage_source, onPick: () => onPick(e) }
       }
       const title = keptTitle(titles, e) || `${e.s.host_name} · ${sessionWhich(e.s, all)}`
-      return { key: e.key, title, where: whereOf(e, hosts), status: 'unknown', cmds: tmuxCmdsOf(e), current: false, pinned: pinAt(e.key), sessionGroup: sessionGroupOf(e, all), onPick: () => onPick(e) }
+      return { key: e.key, title, where: whereOf(e, hosts), status: 'unknown', cmds: tmuxCmdsOf(e), tasks: rowTasks(undefined, tmuxCmdsOf(e)), current: false, pinned: pinAt(e.key), sessionGroup: sessionGroupOf(e, all), onPick: () => onPick(e) }
     })
   }, [entries, titles, all, pins, onPick])
   const shown = mine ? rows.filter((r) => r.status === 'blocked' || r.status === 'done') : rows
