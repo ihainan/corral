@@ -90,12 +90,23 @@ export function useWhenGone(): { gone: (fn: () => void) => void; back: () => voi
   const now = useRef(box)
   now.current = box
   const me = useRef({}).current
+  // (Done at the end of the task, not in it: React's development replay cleans an effect up and sets it going
+  // again at once — set going again, what it put off is dropped — review 10.)
+  const pending = useRef<(() => void) | null>(null)
   return useRef({
     gone: (fn: () => void) => {
       const b = now.current
-      if (b?.hidden) b.later.set(me, fn)
-      else fn()
+      if (b?.hidden) return void b.later.set(me, fn)
+      pending.current = fn
+      queueMicrotask(() => {
+        if (pending.current !== fn) return
+        pending.current = null
+        fn()
+      })
     },
-    back: () => void now.current?.later.delete(me),
+    back: () => {
+      pending.current = null
+      now.current?.later.delete(me)
+    },
   }).current
 }

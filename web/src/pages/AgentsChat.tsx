@@ -1221,6 +1221,11 @@ export function AgentsChat({ bar, active = true, onHead }: { bar?: ReactNode; ac
     const x = tabs.find((y) => y.id === id)
     // (Closed, or of another agent now — as another window changed it —: let go.)
     if (!x || (id !== drawnFront && !next.get(id)!.key.startsWith(x.key + ' '))) letGo(id)
+    // (Behind, the conversation beside it changed or closed there: the one that was, let go now, not once shown — review 10.)
+    else if (id !== drawnFront) {
+      const box = next.get(id)!.box
+      for (const [name, kid] of box.kids) if (!x.split || !name.startsWith('split ' + x.split + ' ')) kidsGone.push([box, name, kid])
+    }
   }
   if (next.size > DRAWN_MAX) {
     const blocked = (k?: string) => !!k && entries.find((e) => e.key === k)?.row?.status === 'blocked'
@@ -2451,7 +2456,8 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
   const insertNow = useRef<{ key: string; insert: (text: string) => void } | null>(null)
   const insert = (text: string) => {
     const el = field.current
-    const d = el ? el.value : draft
+    // (No box — its tab behind —: the draft as kept, not as last drawn — one gone through history then shown — review 10.)
+    const d = el ? el.value : getDraft(draftKey)
     // (Where the person is typing; else — a file come up after a tap elsewhere, a retry — at its end.)
     const typing = !!el && document.activeElement === el
     const a = typing ? el.selectionStart : d.length
@@ -2467,7 +2473,9 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
       f.setSelectionRange(a + text.length, a + text.length)
     })
   }
-  insertNow.current = { key: draftKey, insert } // (with the draft it goes into: the one its file was for, or none — review 9)
+  // (With the draft it goes into: the one its file was for, or none — review 9; as committed, not as a drawing left
+  // unfinished had it — review 10.)
+  useLayoutEffect(() => void (insertNow.current = { key: draftKey, insert }))
   // Files (picked, pasted, dropped) go up to the host one at a time, each
   // path then put in the draft for the agent to read (not sent: there is
   // more to say, as a rule). Sending waits for them. 11-13: taken in while
