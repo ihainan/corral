@@ -93,7 +93,9 @@ const runStyle = (r: AnsiRun): React.CSSProperties => {
 // (main: the conversation's whole place, its terminal view — no head of its own, the person's terminal scheme and size. UI 14, 11-25.)
 export type PanelLive = { onClose?: () => void; onFull?: () => void; note?: string; letters?: boolean; onLeave?: () => void; who?: string; onComposer?: () => void; canNotice?: boolean; onNoticeSent?: () => void; main?: boolean }
 const PTY_TRIES = 2
-export function PanelWindow({ sid, active, press, onSettled, toast, live, onFull }: { live?: PanelLive; sid: string; active: boolean; press: () => Record<string, unknown>; onSettled: () => void; toast: (s: string, bad?: boolean) => void; onFull?: () => void }) {
+// active: in sight (its screen read, said when old); keys: whether it may take the keys as it comes — not so the side
+// of a split without them (review of 36e1069). Unsaid, as active.
+export function PanelWindow({ sid, active, keys, press, onSettled, toast, live, onFull }: { live?: PanelLive; sid: string; active: boolean; keys?: boolean; press: () => Record<string, unknown>; onSettled: () => void; toast: (s: string, bad?: boolean) => void; onFull?: () => void }) {
   const [screen, setScreen] = useState({ text: '', digest: '' })
   const [loaded, setLoaded] = useState(false)
   const [pumping, setPumping] = useState(false)
@@ -331,8 +333,8 @@ export function PanelWindow({ sid, active, press, onSettled, toast, live, onFull
     // (A panel opened on purpose takes the keys. The terminal shown by itself
     // does not: what is being typed in the box goes on going there, a key in
     // the terminal only once the person has gone to it.)
-    if (active && !isCoarse() && !isLive.current && !usePty) box.current?.focus({ preventScroll: true })
-  }, [active, loaded, rawView, usePty])
+    if ((keys ?? active) && !isCoarse() && !isLive.current && !usePty) box.current?.focus({ preventScroll: true })
+  }, [active, keys, loaded, rawView, usePty])
 
   // Whether what is shown may be old: not read for STALE while it is looked at
   // and no key is going or waiting (the looks wait for those) — counted from
@@ -407,7 +409,7 @@ export function PanelWindow({ sid, active, press, onSettled, toast, live, onFull
         key={ptyTry}
         sid={sid}
         pane={paneId}
-        active={active}
+        active={keys ?? active}
         live={live}
         fullAction={fullAction}
         backToCard={allowNotice && notice && rawView ? () => setRawView(false) : undefined}

@@ -150,6 +150,11 @@ const TERM_VIEWS_KEY = 'corral.termViews'
 const TERM_VIEWS_MAX = 100
 const TERM_VIEW_MIN = 900
 const TERM_VIEWS_EVENT = 'corral:term-views'
+// (One list for every conversation of this page, kept where it lasts too: where that cannot be written — private
+// browsing, storage off or full — the page's own still switches. Not followed from another window: there it would take
+// the same pane's one direct connection from the window in use — review of 36e1069.)
+let termViewsNow: string[] | null = null
+const termViewsList = () => (termViewsNow ??= keptNames(TERM_VIEWS_KEY))
 const SIDE_W = 288
 const SIDE_W_MIN = 220
 const SIDE_W_MAX = 520
@@ -355,16 +360,11 @@ export function ConversationView({
   // this device, a new one in its conversation. Only where it is wide (TERM_VIEW_MIN) and its terminal can be had.
   // (Read from where it is kept, and again when another view of this page or another window changes it: each
   // conversation's own copy would put back what another took out — review of c2ae00c.)
-  const [termViews, setTermViews] = useState<string[]>(() => keptNames(TERM_VIEWS_KEY))
+  const [termViews, setTermViews] = useState<string[]>(termViewsList)
   useEffect(() => {
-    const again = () => setTermViews(keptNames(TERM_VIEWS_KEY))
-    const fromElsewhere = (e: StorageEvent) => e.key === TERM_VIEWS_KEY && again()
+    const again = () => setTermViews(termViewsList())
     window.addEventListener(TERM_VIEWS_EVENT, again)
-    window.addEventListener('storage', fromElsewhere)
-    return () => {
-      window.removeEventListener(TERM_VIEWS_EVENT, again)
-      window.removeEventListener('storage', fromElsewhere)
-    }
+    return () => window.removeEventListener(TERM_VIEWS_EVENT, again)
   }, [])
   const canTermView = !!dockTerminal?.can && !!viewOf && !!convo.of && viewW >= TERM_VIEW_MIN
   const termShown = canTermView && termViews.includes(viewOf!)
@@ -373,20 +373,24 @@ export function ConversationView({
   const focusBack = useRef(false)
   const showTermView = (on: boolean) => {
     if (!viewOf || !canTermView) return
-    const next = [...keptNames(TERM_VIEWS_KEY).filter((k) => k !== viewOf), ...(on ? [viewOf] : [])].slice(-TERM_VIEWS_MAX)
+    const next = [...termViewsList().filter((k) => k !== viewOf), ...(on ? [viewOf] : [])].slice(-TERM_VIEWS_MAX)
+    termViewsNow = next
     keepNames(TERM_VIEWS_KEY, next)
-    setTermViews(next)
-    window.dispatchEvent(new Event(TERM_VIEWS_EVENT))
+    window.dispatchEvent(new Event(TERM_VIEWS_EVENT)) // (this view's too)
     if (!on) focusBack.current = true
   }
   // Back in the conversation — by hand, or the window made narrower under its terminal, the keys lost with it —: the
   // keys to its message box, its draft as it was; where that is not shown (a question's card, a panel of the agent's
   // in its place), to what is; else the bar's switch. (Review of c2ae00c.)
   const wasTerm = useRef(termShown)
+  const comeBackNow = useRef(() => {}) // (comeBack, made further on)
   useEffect(() => {
     const was = wasTerm.current
     wasTerm.current = termShown
     if (!was || termShown) return
+    // (What came under the terminal: marked, as coming back from another tab — not taken as read by the list's
+    // pin to its end as the message box comes back under it: review of 36e1069.)
+    if (activeNow.current) comeBackNow.current()
     const lost = !document.activeElement || document.activeElement === document.body
     if (!focusBack.current && !lost) return
     focusBack.current = false
@@ -394,6 +398,8 @@ export function ConversationView({
     requestAnimationFrame(() => {
       const m = mainEl.current
       if (!m) return
+      // (Something there taken the keys already — a panel's terminal, as it came: left with them.)
+      if (document.activeElement && document.activeElement !== document.body && m.querySelector('.convo-dock')?.contains(document.activeElement)) return
       const seen = (e: Element | null | undefined): e is HTMLElement => !!e && e.getClientRects().length > 0
       const box = m.querySelector<HTMLElement>('.convo-dock .composer-input')
       const other = [...m.querySelectorAll<HTMLElement>('.convo-dock button:not([disabled]), .convo-dock textarea, .convo-dock input')].find(seen)
@@ -972,6 +978,7 @@ export function ConversationView({
     setUnreadAfter(seen.seq)
     if (stuck.current) toUnread.current = { after: seen.seq, until: Date.now() + 8000, readAt: (o.of && leftRead.get(o.of)) || seen.at }
   }, [])
+  comeBackNow.current = comeBack
   const wasActive = useRef(active)
   useEffect(() => {
     if (!active) keepPlace()
@@ -2437,7 +2444,8 @@ export function ConversationView({
             <PanelWindow
               key={'main ' + convo.of + ' ' + bindIdent}
               sid={convo.of.split(' ')[0]}
-              active={kActive}
+              active={active}
+              keys={kActive}
               press={dockTerminal.press}
               onSettled={convo.refresh}
               toast={toast}

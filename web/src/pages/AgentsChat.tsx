@@ -1,5 +1,5 @@
 import { useTaskAsked } from '../terminal/bgTaskOpen'
-import { Activity, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState, type ReactNode } from 'react'
+import { useCallback, Activity, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState, type ReactNode } from 'react'
 import { ArrowDown, ArrowLeftRight, ArrowUp, ArrowUpDown, ArrowUpToLine, ChevronLeft, CircleStop, Code2, Columns2, Copy, Eye, FoldVertical, GitBranch, GitFork, Globe, History, Languages, ListPlus, Maximize2, MessageSquarePlus, Paperclip, Pencil, Pin, PinOff, Plus, Power, Rows2, Square, SquareSlash, SquareTerminal, Link2, TextCursorInput, Unlink, X, Zap } from 'lucide-react'
 import { api, ApiError, authGen, errorText, onAuthChange, uploadFile, type SessionInfo } from '../api'
 import { useSession } from '../app'
@@ -2402,6 +2402,13 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
     [],
   )
   const field = useRef<HTMLTextAreaElement>(null)
+  // (The box as it is now: taken out under the terminal view and made anew as it goes — its width and its height
+  // measured again on the new one: review of 36e1069.)
+  const [fieldEl, setFieldEl] = useState<HTMLTextAreaElement | null>(null)
+  const fieldRef = useCallback((el: HTMLTextAreaElement | null) => {
+    field.current = el
+    setFieldEl(el)
+  }, [])
   const completion = useCompletion({ sessionId: sid, field, draft, setDraft, agent: row?.a.agent ?? convo.bind?.agent ?? (agy ? 'agy' : codex ? 'codex' : 'claude'), pane: herdr ? cur.pane : convo.bind?.pane })
   // The commands button: a "/" put where a command goes, for the list that opens on one (the
   // same as typed: typing on narrows it). With words in the box it goes in front of them, the
@@ -2822,11 +2829,11 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
   // Enter does: it says so.)
   const steers = convo.bind?.agent === 'codex' && agent?.status === 'working'
   // (Not its name: said by the bar above and its tab — the person's ask of 11-25, doc UI item 16.)
-  const fieldW = useWidth(field)
+  const fieldW = useWidth(fieldEl)
   // (With a keyboard and room for it, the keys of what its two buttons did — gone there: T3 Code's way, the person's ask of 11-23.)
   const keysSaid = !steers && fieldW >= 480 && matchMedia(KEYED_COMPOSER).matches // (as the buttons go: the same query — a touch laptop used with its trackpad too)
   const placeholder = suggestion ?? (to ? t(steers ? 'convo.toPlaceholderSteer' : keysSaid ? 'convo.toPlaceholderKeys' : 'convo.toPlaceholder') : t('term.composerPlaceholder'))
-  useComposerFit(field, draft, placeholder)
+  useComposerFit(field, draft, placeholder, !!fieldEl)
   // Why it cannot send now, if it cannot.
   // (Waiting for an answer, a message's Enter could take an option of its
   // question, or of a permission it asks: the answer first.)
@@ -3020,7 +3027,7 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
           onCancel={cancelUp}
         />
         <textarea
-          ref={field}
+          ref={fieldRef}
           className="composer-input"
           value={draft}
           aria-label={t('term.composer')}
@@ -3970,17 +3977,16 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
 }
 
 // An element's inner width, as it changes (0 till it is laid out).
-function useWidth(ref: { current: HTMLElement | null }): number {
+function useWidth(el: HTMLElement | null): number {
   const [w, setW] = useState(0)
   useLayoutEffect(() => {
-    const el = ref.current
     if (!el) return
     const look = () => setW(el.clientWidth)
     look()
     const ro = new ResizeObserver(look)
     ro.observe(el)
     return () => ro.disconnect()
-  }, [ref])
+  }, [el])
   return w
 }
 
