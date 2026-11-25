@@ -111,6 +111,7 @@ export interface ConvoAgent {
   bg?: 'running' | 'stale' | 'checking' // (its turn over: subagents still out, or that being read for; see agents.ts)
   dialog?: boolean // (Claude Code has a dialog of its own open, a picker or /usage, say: not a question to answer here)
   cmds?: RowCmds // (its turn over: commands it left running in the background)
+  tasks?: RowTask[] // (what it set going in the background, as the gateway found on the host: its side-list row's)
   other?: string // the program in the pane, when it is not Claude Code
   program?: string // the program in the pane, for its icon
 }
@@ -2451,7 +2452,7 @@ export function ConversationView({
           of={convo.of}
           sub={subs[subs.length - 1]}
           depth={subs.length}
-          live={(a) => !!convo.running?.some((r) => r.kind === 'agent' && r.id === a)}
+          live={(a) => !!convo.running?.some((r) => r.kind === 'agent' && r.id === a) || !!agent?.tasks?.some((x) => x.kind === 'agent' && x.id === a) /* (one whose sending is before what the view read of its log: as the side list has it — review of 11-25) */}
           nav={subs.length === 1 ? workNav(subs[0].agent) : undefined}
           onOpen={(s) => setSubs((cur) => [...(cur ?? []), s])}
           onBack={() => setSubs((cur) => (cur && cur.length > 1 ? cur.slice(0, -1) : null))}
@@ -2467,7 +2468,7 @@ export function ConversationView({
           key={bgCmd.id}
           of={convo.of}
           r={((k) => (k && !k.out && bgCmd.out ? { ...k, out: bgCmd.out } : k ?? bgCmd))(convo.running?.find((x) => x.id === bgCmd.id))} /* (the file its output goes to, as the host told it, where the log did not: one opened from the side list) */
-          gone={!convo.running?.some((x) => x.id === bgCmd.id) && !hostCmds?.list.some((c) => c.task === bgCmd.id)}
+          gone={!convo.running?.some((x) => x.id === bgCmd.id) && !hostCmds?.list.some((c) => c.task === bgCmd.id) && !agent?.tasks?.some((x) => x.kind === 'cmd' && x.id === bgCmd.id)}
           nav={workNav(bgCmd.id)}
           onClose={() => setBgCmd(null)}
           active={active}

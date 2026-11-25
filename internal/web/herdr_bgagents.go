@@ -17,8 +17,9 @@ import (
 // it was sent ("requestShape":"background"), and, once it is over,
 // "finished":true (written since 2.1.302; before, not at all: none of those is
 // told, rather than every one it ever sent). Read in the same look as the
-// commands (cmdScanCommand): only those whose log was written to in the last
-// six hours, so one of a Claude Code gone (never marked finished) drops out.
+// commands (cmdScanCommand), of the sessions watched only: those whose log was
+// written to in the last six hours, so one of a Claude Code gone (never marked
+// finished) drops out.
 
 // bgAgent is a subagent at work in the background: its id (what its log is
 // named by, for its conversation to be read), what it was sent for, and when
@@ -34,8 +35,9 @@ const maxSubsShown = 8 // listed per agent
 // subMinVersion: the first Claude Code that marks a subagent finished.
 var subMinVersion = [3]int{2, 1, 302}
 
-// parseBgSubScan reads the "sub" lines of what cmdScanCommand printed: each
-// agent session's subagents at work in the background, the latest sent first.
+// parseBgSubScan reads the "sub" lines of what cmdScanCommand printed (those
+// of the sessions it was given: at most subsScanned each): each agent
+// session's subagents at work in the background, the latest sent first.
 func parseBgSubScan(out string) map[string][]bgAgent {
 	got := map[string][]bgAgent{}
 	for _, line := range strings.Split(out, "\n") {
@@ -43,14 +45,12 @@ func parseBgSubScan(out string) map[string][]bgAgent {
 		if len(f) != 6 || f[0] != "sub" || !convoUUID.MatchString(f[1]) || !convo.SubagentID(f[2]) || !versionAtLeast(f[4], subMinVersion) {
 			continue
 		}
+		// (Sent in the background and not finished, as the script told by its meta; of it, what it
+		// was sent for only — cut short, not read: then said without.)
 		var m struct {
 			Description string `json:"description"`
-			Shape       string `json:"requestShape"`
-			Finished    bool   `json:"finished"`
 		}
-		if json.Unmarshal([]byte(f[5]), &m) != nil || m.Shape != "background" || m.Finished {
-			continue
-		}
+		_ = json.Unmarshal([]byte(f[5]), &m)
 		a := bgAgent{ID: f[2], What: cmdTitle(m.Description)}
 		if t, err := strconv.ParseInt(f[3], 10, 64); err == nil && t > 0 && t < 1<<40 {
 			a.Since = t * 1000

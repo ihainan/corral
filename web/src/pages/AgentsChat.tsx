@@ -1659,7 +1659,7 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
     // its session file says it waits. Of this pane's process only, and of
     // Claude Code's: no other agent says so.)
     const dialog = ownCC && status !== 'blocked' && convo.agentStatus === 'waiting' && !answerable(convo.waitingFor)
-    return { where: row.ws === '~' ? '' : row.ws, title, status, bg, dialog, cmds: cmdsOf(row), other: readsLog(row.a.agent) ? undefined : row.a.agent, program: row.a.agent }
+    return { where: row.ws === '~' ? '' : row.ws, title, status, bg, dialog, cmds: cmdsOf(row), tasks: tasksOf(row), other: readsLog(row.a.agent) ? undefined : row.a.agent, program: row.a.agent }
   }, [herdr, row, convo.bind, convo.agentStatus, convo.waitingFor, convo.bgCmds, convo.failing, convoTitle, convo.entries])
   // (The tab of the agents' page says which conversation is in front.)
   useEffect(() => {

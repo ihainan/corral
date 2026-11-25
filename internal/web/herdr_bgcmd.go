@@ -42,8 +42,8 @@ const (
 )
 
 const (
-	maxCmdsShown = 8 // listed per agent (all are counted; the card lists each, 11-15)
-	cmdScanMax   = 128 << 10
+	maxCmdsShown = 8         // listed per agent (all are counted; the card lists each, 11-15)
+	cmdScanMax   = 512 << 10 // (with the subagents out and the background ids of those at work: review of 11-25)
 )
 
 // bgCmd is a command running in the background: its task, what it runs
@@ -73,13 +73,13 @@ type cmdProber struct {
 	working map[string]cmdPane
 	cmds    map[string][]bgCmd   // agent session → its commands, as last found
 	subs    map[string][]bgAgent // agent session → its subagents at work in the background, as last found (see parseBgSubScan)
-	at   time.Time          // when they were found (zero: not known)
-	soon time.Time          // a look due soon (a pane came to done or idle)
-	wake chan struct{}
-	poke func()
-	scan func(ctx context.Context, working []string) (cmds map[string][]bgCmd, subs map[string][]bgAgent, bgIDs map[string]map[string]bool, whole bool, err error)
-	// bgIDs: of the sessions at work, the tasks found set going in the
-	// background, as its log says (kept while it is at work).
+	at      time.Time            // when they were found (zero: not known)
+	soon    time.Time            // a look due soon (a pane came to done or idle)
+	wake    chan struct{}
+	poke    func()
+	scan    func(ctx context.Context, watched []string) (cmds map[string][]bgCmd, subs map[string][]bgAgent, bgIDs map[string]map[string]bool, whole bool, err error)
+	// bgIDs: of the sessions at work, which of their commands running the
+	// last look found their log says they set going in the background.
 	bgIDs map[string]map[string]bool
 
 	every, soonBy, kept time.Duration // (cmdEvery, cmdSoon, cmdKept)
@@ -111,7 +111,7 @@ func newCmdProber(scan func(context.Context) (map[string][]bgCmd, bool, error)) 
 // newCmdSubProber: one whose look tells the subagents at work as well, and,
 // of the sessions at work (working: those it is given), which commands are
 // in the background.
-func newCmdSubProber(scan func(ctx context.Context, working []string) (map[string][]bgCmd, map[string][]bgAgent, map[string]map[string]bool, bool, error)) *cmdProber {
+func newCmdSubProber(scan func(ctx context.Context, watched []string) (map[string][]bgCmd, map[string][]bgAgent, map[string]map[string]bool, bool, error)) *cmdProber {
 	return &cmdProber{ended: map[string]cmdPane{}, working: map[string]cmdPane{}, bgIDs: map[string]map[string]bool{}, wake: make(chan struct{}, 1), scan: scan, every: cmdEvery, soonBy: cmdSoon, kept: cmdKept}
 }
 
@@ -311,16 +311,16 @@ func (p *cmdProber) run(ctx context.Context) {
 			}
 		}
 		due := len(p.ended) > 0 || len(p.read) > 0 || len(p.working) > 0
-		var working []string
+		// (The sessions it is for: at work, "w:", their background commands told apart; at rest, "s:".)
+		var watched []string
 		for _, e := range p.working {
-			if !slices.Contains(working, e.session) {
-				working = append(working, e.session)
+			if !slices.Contains(watched, "w:"+e.session) {
+				watched = append(watched, "w:"+e.session)
 			}
 		}
-		// (Those of a session no longer at work go: done or idle, all its commands are told.)
-		for s := range p.bgIDs {
-			if !slices.Contains(working, s) {
-				delete(p.bgIDs, s)
+		for _, e := range p.ended {
+			if !slices.Contains(watched, "s:"+e.session) && !slices.Contains(watched, "w:"+e.session) {
+				watched = append(watched, "s:"+e.session)
 			}
 		}
 		if !p.soon.After(began) {
@@ -332,30 +332,22 @@ func (p *cmdProber) run(ctx context.Context) {
 		}
 		last = began
 		sctx, cancel := context.WithTimeout(ctx, 15*time.Second)
-		found, subs, ids, whole, err := p.scan(sctx, working)
+		found, subs, ids, whole, err := p.scan(sctx, watched)
 		cancel()
 		p.mu.Lock()
-		changed := false
-		for s, l := range ids {
-			if !slices.Contains(working, s) {
-				continue
-			}
-			if p.bgIDs[s] == nil {
-				p.bgIDs[s] = map[string]bool{}
-			}
-			for id := range l {
-				if !p.bgIDs[s][id] && len(p.bgIDs[s]) < 256 {
-					p.bgIDs[s][id] = true
-					changed = true
-				}
-			}
+		// (What this look found, in place of the last's: one ended, or of a session no longer at
+		// work, goes with it — review of 11-25.)
+		if ids == nil {
+			ids = map[string]map[string]bool{}
 		}
+		changed := !sameIDs(p.bgIDs, ids)
+		p.bgIDs = ids
 		if err != nil || !whole {
 			// (Not known, or not all of it: nothing told, rather than what was.)
-			changed = !p.at.IsZero()
+			changed = changed || !p.at.IsZero()
 			p.at, p.cmds, p.subs = time.Time{}, nil, nil
 		} else {
-			changed = p.at.IsZero() || !sameCmds(p.cmds, found) || !sameSubs(p.subs, subs)
+			changed = changed || p.at.IsZero() || !sameCmds(p.cmds, found) || !sameSubs(p.subs, subs)
 			// (Or the same, but now told of a pane it was not before: one
 			// come to done or idle after the last look began.)
 			for _, e := range p.ended {
@@ -376,6 +368,23 @@ func (p *cmdProber) run(ctx context.Context) {
 			poke()
 		}
 	}
+}
+
+func sameIDs(a, b map[string]map[string]bool) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, v := range a {
+		if len(v) != len(b[k]) {
+			return false
+		}
+		for id := range v {
+			if !b[k][id] {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func sameCmds(a, b map[string][]bgCmd) bool {
@@ -402,38 +411,37 @@ func sameCmds(a, b map[string][]bgCmd) bool {
 // ones, -u: whose each is, is looked at here). Not this script itself,
 // which names Claude Code's program too (its children, its subshells, run
 // as Claude Code's shell would: "&& eval '" … "pwd -P >| "). Fixed script.
-func cmdScanCommand(working ...string) string {
-	script := `for s in "$@"; do
-  # (Of an agent at work, the commands it set going in the background, as its log tells — the
-  # whole of it: one begun an hour ago counts —; a command run in front writes its output to a
-  # task's file too, and is not one. A grep of a log of 200 MB: some 50 ms.)
-  for f in "$HOME"/.claude/projects/*/"$s".jsonl; do
-    [ -f "$f" ] || continue
-    grep -o '"backgroundTaskId":"[A-Za-z0-9_-]*"' "$f" | tail -n 256 | sort -u | sed "s/^\"backgroundTaskId\":\"\(.*\)\"$/bgid\t$s\t\1/"
+func cmdScanCommand(watched ...string) string {
+	script := `btime=$(sed -n 's/^btime \([0-9]*\)$/\1/p' /proc/stat 2>/dev/null); hz=$(getconf CLK_TCK 2>/dev/null)
+printf 'clock\t%s\t%s\n' "$btime" "$hz"
+# (Of each session watched — "w:<id>" at work, "s:<id>" at rest —, its subagents sent off in the
+# background whose log was written to in the last six hours, not marked finished: what its meta
+# says it was sent for. At most ` + strconv.Itoa(subsScanned) + ` a session.)
+for a in "$@"; do
+  s=${a#?:}
+  for d in "$HOME"/.claude/projects/*/"$s"/subagents; do
+    [ -d "$d" ] || continue
+    find "$d" -maxdepth 1 -name 'agent-*.jsonl' -mmin -360 2>/dev/null | {
+      i=0
+      while IFS= read -r j; do
+        m=${j%.jsonl}.meta.json
+        [ -f "$m" ] || continue
+        meta=$(head -c 8192 "$m" 2>/dev/null | tr '\n\t' '  ')
+        case $meta in *'"requestShape":"background"'*) ;; *) continue;; esac
+        case $meta in *'"finished":true'*) continue;; esac
+        [ "$i" -lt ` + strconv.Itoa(subsScanned) + ` ] || break
+        i=$((i + 1))
+        id=${j##*/agent-}; id=${id%.jsonl}
+        t=$(stat -c %Y "$m" 2>/dev/null || date -r "$m" +%s 2>/dev/null)
+        v=$(head -c 65536 "$j" 2>/dev/null | grep -o '"version":"[0-9.]*"' | head -n 1 | cut -d'"' -f4)
+        w=$(printf '%s' "$meta" | grep -oE '"description":"([^"\\]|\\.)*"' | head -n 1 | head -c 600)
+        printf 'sub\t%s\t%s\t%s\t%s\t{%s}\n' "$s" "$id" "$t" "$v" "$w"
+      done
+    }
     break
   done
 done
-btime=$(sed -n 's/^btime \([0-9]*\)$/\1/p' /proc/stat 2>/dev/null); hz=$(getconf CLK_TCK 2>/dev/null)
-printf 'clock\t%s\t%s\n' "$btime" "$hz"
-# (Subagents sent off in the background whose log was written to in the last
-# six hours, with what their meta says: the account's, across projects.)
-find "$HOME"/.claude/projects -mindepth 4 -maxdepth 4 -path '*/subagents/agent-*.jsonl' -mmin -360 2>/dev/null | {
-  i=0
-  while IFS= read -r j; do
-    m=${j%.jsonl}.meta.json
-    [ -f "$m" ] || continue
-    meta=$(head -c 4096 "$m" 2>/dev/null | tr '\n\t' '  ')
-    case $meta in *'"requestShape":"background"'*) ;; *) continue;; esac
-    case $meta in *'"finished":true'*) continue;; esac
-    [ "$i" -lt 64 ] || break
-    i=$((i + 1))
-    s=${j%/subagents/*}; s=${s##*/}
-    id=${j##*/agent-}; id=${id%.jsonl}
-    t=$(stat -c %Y "$m" 2>/dev/null || date -r "$m" +%s 2>/dev/null)
-    v=$(head -c 65536 "$j" 2>/dev/null | grep -o '"version":"[0-9.]*"' | head -n 1 | cut -d'"' -f4)
-    printf 'sub\t%s\t%s\t%s\t%s\t%s\n' "$s" "$id" "$t" "$v" "$meta"
-  done
-}
+seen=
 if command -v pgrep >/dev/null 2>&1; then
   claudes=$( { pgrep -x claude; pgrep -f '[c]laude-code/cli'; pgrep -x codex; pgrep -x agy; } 2>/dev/null | sort -u | grep -vx "$$")
   kids=$(for c in $claudes; do
@@ -475,7 +483,7 @@ for k in $kids; do
       fi;;
     esac;;
   esac
-  [ "$n" -lt 256 ] || { echo more; exit 0; }
+  [ "$n" -lt 256 ] || { echo more; break; }
   n=$((n + 1))
   st=$(sed 's/^.*) //' "/proc/$k/stat" 2>/dev/null | cut -d' ' -f20)
   case $l in
@@ -483,6 +491,7 @@ for k in $kids; do
   *) t=$(tr '\0\n\t' '   ' <"/proc/$k/cmdline" 2>/dev/null | awk -v "m=&& eval '" '` + cmdEvalAwk + `' | head -c 400);;
   esac
   printf 'cmd\t%s\t%s\t%s\t%s\n' "$k" "$st" "$(printf '%s' "$l" | tr '\t\n' '  ')" "$t"
+  case $l in */tasks/*.output*) x=${l##*/tasks/}; seen="$seen ${x%%.output*}";; esac
   case $l in
   codex:*)
     # (Its parents, a few up: a command in Codex's sandbox is told by
@@ -496,15 +505,39 @@ for k in $kids; do
     printf 'anc\t%s\t%s\n' "$k" "${anc#,}";;
   esac
 done
+# (Of a session at work, which of the commands found running its log says it set going in the
+# background — the whole log: one begun an hour ago counts; a command run in front writes to a
+# task's file too, and is not one. A grep of a log of 200 MB: some 50 ms.)
+for a in "$@"; do
+  case $a in w:*) ;; *) continue;; esac
+  [ -n "$seen" ] || break
+  s=${a#w:}
+  for f in "$HOME"/.claude/projects/*/"$s".jsonl; do
+    [ -f "$f" ] || continue
+    grep -o '"backgroundTaskId":"[A-Za-z0-9_-]*"' "$f" | sed 's/^"backgroundTaskId":"//; s/"$//' | sort -u | while IFS= read -r id; do
+      case " $seen " in *" $id "*) printf 'bgid\t%s\t%s\n' "$s" "$id";; esac
+    done
+    break
+  done
+done
 exit 0`
 	cmd := "sh -c " + sshx.QuoteShell(script) + " corral"
-	for _, s := range working {
-		if convoUUID.MatchString(s) {
-			cmd += " " + sshx.QuoteShell(s)
+	n := 0
+	for _, a := range watched {
+		if (strings.HasPrefix(a, "w:") || strings.HasPrefix(a, "s:")) && convoUUID.MatchString(a[2:]) && n < maxWatchedScanned {
+			cmd += " " + sshx.QuoteShell(a)
+			n++
 		}
 	}
 	return cmd
 }
+
+// subsScanned: of a session, how many subagents out its look tells at most;
+// maxWatchedScanned: how many sessions a look is given.
+const (
+	subsScanned       = 16
+	maxWatchedScanned = 48
+)
 
 // parseBgIDs reads the "bgid" lines of what cmdScanCommand printed: of each
 // agent session at work, the tasks its log says it set going in the

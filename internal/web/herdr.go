@@ -800,8 +800,8 @@ func (s *Server) watchHerdr(sess *term.Session, h *store.Host) {
 	lineage := s.newLineageTracker(sess, server, socket, name)
 	s.herdrSocks.setLineage(sess.ID, lineage)
 	go bg.run(ctx)
-	cmds := newCmdSubProber(func(ctx context.Context, working []string) (map[string][]bgCmd, map[string][]bgAgent, map[string]map[string]bool, bool, error) {
-		out, err := sshx.Output(ctx, sess.Client(), cmdScanCommand(working...), cmdScanMax)
+	cmds := newCmdSubProber(func(ctx context.Context, watched []string) (map[string][]bgCmd, map[string][]bgAgent, map[string]map[string]bool, bool, error) {
+		out, err := sshx.Output(ctx, sess.Client(), cmdScanCommand(watched...), cmdScanMax)
 		if err != nil {
 			return nil, nil, nil, false, err
 		}
