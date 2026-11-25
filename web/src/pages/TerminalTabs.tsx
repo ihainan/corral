@@ -602,11 +602,11 @@ function TabBar(p: { tabs: SessionInfo[]; current: string; infos: Record<string,
   const shown = p.tabs
   // (The tab of a session just opened, not in the list yet, stays last.)
   const movable = shown.filter((s) => s.host_id !== 0).map((s) => s.id)
-  const { drag, onPointerDown, offset, dragged, moved } = useTabDrag(ref, movable, p.current, p.onMove)
+  const { drag, onPointerDown, offset, dragged, moved, dropped } = useTabDrag(ref, movable, p.current, p.onMove)
   // The current tab is scrolled into view when it changes, or the tabs do
   // (moved by a key too; not by a drag: the tab dragged is where it was let go).
   const order = shown.map((s) => s.id).join()
-  useTabSlide(ref, order, () => moved.current || !!drag)
+  useTabSlide(ref, order, dropped, !!drag)
   useEffect(() => {
     if (moved.current) {
       moved.current = false

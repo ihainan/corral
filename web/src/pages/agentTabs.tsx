@@ -86,9 +86,9 @@ export function AgentTabBar(p: {
   const toast = useToast()
   const ref = useRef<HTMLElement>(null)
   const ids = p.views.map((v) => v.tab.id)
-  const { drag, onPointerDown, offset, dragged, moved } = useTabDrag(ref, ids, p.front ?? '', p.onMove)
+  const { drag, onPointerDown, offset, dragged, moved, dropped } = useTabDrag(ref, ids, p.front ?? '', p.onMove)
   const order = ids.join()
-  useTabSlide(ref, order, () => moved.current || !!drag)
+  useTabSlide(ref, order, dropped, !!drag)
   useEffect(() => {
     if (moved.current) {
       moved.current = false

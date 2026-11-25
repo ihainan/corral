@@ -26,9 +26,10 @@ const DRAG_EDGE_PX = 32
 // so it is where it was last drawn, the window since resized or not.
 const SLIDE_MS = 180
 const SLIDE_ID = 'corral-tab-slide'
+const DROP_SETTLE_MS = 1000
 // (A drag begun mid-slide: the slides stopped, so the tabs are measured, and drawn, where they are placed.)
 const stopSlides = (el: HTMLElement) => el.getAnimations?.({ subtree: true }).forEach((a) => a.id === SLIDE_ID && a.cancel())
-export function useTabSlide(nav: React.RefObject<HTMLElement | null>, order: string, still: () => boolean) {
+export function useTabSlide(nav: React.RefObject<HTMLElement | null>, order: string, dropped: React.RefObject<number>, dragging: boolean) {
   const was = useRef<{ order: string; at: Map<string, number> } | null>(null)
   useLayoutEffect(() => {
     const el = nav.current
@@ -39,7 +40,12 @@ export function useTabSlide(nav: React.RefObject<HTMLElement | null>, order: str
     const at = new Map(tabs.map((x) => [x.dataset.tab ?? '', x.offsetLeft]))
     const before = was.current
     was.current = { order, at }
-    if (!before || before.order === order || still() || matchMedia('(prefers-reduced-motion: reduce)').matches) return
+    if (!before || before.order === order) return
+    // (The first new order after a drop, when it comes — a render or two later, the page's own
+    // list updated —: the one it made, drawn there already. Once, and only soon after.)
+    const byDrop = performance.now() - dropped.current < DROP_SETTLE_MS
+    dropped.current = 0
+    if (byDrop || dragging || matchMedia('(prefers-reduced-motion: reduce)').matches) return
     for (const x of tabs) {
       const from = before.at.get(x.dataset.tab ?? '')
       const to = at.get(x.dataset.tab ?? '')
@@ -79,11 +85,13 @@ export function useTabDrag(nav: React.RefObject<HTMLElement | null>, ids: string
     hold?: number
     frame?: number
     dead?: boolean // let go of before the release (see drop)
+    drawnAt?: number // where its tab was drawn as it was pressed (client)
     stop: () => void
     drop: () => void
   } | null>(null)
   const endedAt = useRef(0)
   const moved = useRef(false) // a drop changed the order (and the bar is not to scroll for it)
+  const dropped = useRef(0) // when a drop changed the order (performance.now): the tabs are not to slide into it
 
   const update = () => {
     const d = cur.current
@@ -123,7 +131,11 @@ export function useTabDrag(nav: React.RefObject<HTMLElement | null>, ids: string
     const d = cur.current
     const el = nav.current
     if (!d || !el) return
+    // (Grabbed mid-slide: the slide stopped, the tab is where it is placed — the grip kept, as far
+    // from its edge as when pressed: by where it was drawn then, not now, the slide gone on since.)
+    const held = el.querySelectorAll<HTMLElement>('.term-tab[data-place]')[d.from]
     stopSlides(el)
+    const off = held && d.drawnAt !== undefined ? d.drawnAt - held.getBoundingClientRect().left : 0
     const box = el.getBoundingClientRect()
     const tabs = [...el.querySelectorAll<HTMLElement>('.term-tab[data-place]')].map((t) => {
       const r = t.getBoundingClientRect()
@@ -133,7 +145,7 @@ export function useTabDrag(nav: React.RefObject<HTMLElement | null>, ids: string
     d.on = true
     d.tabs = tabs
     d.gap = parseFloat(getComputedStyle(el).columnGap) || 0
-    d.at = d.x0 - box.left + el.scrollLeft
+    d.at = d.x0 - off - box.left + el.scrollLeft
     update()
     d.frame = requestAnimationFrame(scrollAtEnds)
   }
@@ -156,6 +168,7 @@ export function useTabDrag(nav: React.RefObject<HTMLElement | null>, ids: string
       if (d.on || d.dead) endedAt.current = performance.now()
       if (d.on && d.to !== undefined && d.to !== d.from) {
         moved.current = true
+        dropped.current = performance.now()
         onMove(d.id, d.to)
       }
       d.stop()
@@ -192,7 +205,8 @@ export function useTabDrag(nav: React.RefObject<HTMLElement | null>, ids: string
       if (d.frame) cancelAnimationFrame(d.frame)
       setDrag(null)
     }
-    cur.current = { id, from, pointer, x0: e.clientX, x: e.clientX, on: false, stop, drop }
+    const drawnAt = nav.current?.querySelectorAll<HTMLElement>('.term-tab[data-place]')[from]?.getBoundingClientRect().left
+    cur.current = { id, from, pointer, x0: e.clientX, x: e.clientX, on: false, drawnAt, stop, drop }
     window.addEventListener('pointermove', move)
     window.addEventListener('pointerup', up)
     window.addEventListener('pointercancel', cancel)
@@ -233,6 +247,6 @@ export function useTabDrag(nav: React.RefObject<HTMLElement | null>, ids: string
   }
   // A click that ends a drag is not one.
   const dragged = () => performance.now() - endedAt.current < 400
-  return { drag, onPointerDown, offset, dragged, moved }
+  return { drag, onPointerDown, offset, dragged, moved, dropped }
 }
 
