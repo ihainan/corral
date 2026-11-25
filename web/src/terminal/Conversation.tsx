@@ -150,11 +150,13 @@ const TERM_VIEWS_KEY = 'corral.termViews'
 const TERM_VIEWS_MAX = 100
 const TERM_VIEW_MIN = 900
 const TERM_VIEWS_EVENT = 'corral:term-views'
-// (One list for every conversation of this page, kept where it lasts too: where that cannot be written — private
-// browsing, storage off or full — the page's own still switches. Not followed from another window: there it would take
-// the same pane's one direct connection from the window in use — review of 36e1069.)
+// (One list for every conversation of this page — what it shows —, and the one kept where it lasts: each switch made
+// to both, the kept one read first — another window's switches kept in it, not put back by this page's copy —; where it
+// cannot be written (private browsing, storage off or full) the page's own still switches. Not followed from another
+// window: there it would take the same pane's one direct connection from the window in use. Reviews of 36e1069, 5bee264.)
 let termViewsNow: string[] | null = null
 const termViewsList = () => (termViewsNow ??= keptNames(TERM_VIEWS_KEY))
+const withView = (l: string[], k: string, on: boolean) => [...l.filter((x) => x !== k), ...(on ? [k] : [])].slice(-TERM_VIEWS_MAX)
 const SIDE_W = 288
 const SIDE_W_MIN = 220
 const SIDE_W_MAX = 520
@@ -373,9 +375,8 @@ export function ConversationView({
   const focusBack = useRef(false)
   const showTermView = (on: boolean) => {
     if (!viewOf || !canTermView) return
-    const next = [...termViewsList().filter((k) => k !== viewOf), ...(on ? [viewOf] : [])].slice(-TERM_VIEWS_MAX)
-    termViewsNow = next
-    keepNames(TERM_VIEWS_KEY, next)
+    termViewsNow = withView(termViewsList(), viewOf, on)
+    keepNames(TERM_VIEWS_KEY, withView(keptNames(TERM_VIEWS_KEY), viewOf, on))
     window.dispatchEvent(new Event(TERM_VIEWS_EVENT)) // (this view's too)
     if (!on) focusBack.current = true
   }
@@ -384,13 +385,18 @@ export function ConversationView({
   // in its place), to what is; else the bar's switch. (Review of c2ae00c.)
   const wasTerm = useRef(termShown)
   const comeBackNow = useRef(() => {}) // (comeBack, made further on)
+  // (What came under the terminal: marked, as coming back from another tab — before the list's own layout effect
+  // further on takes all of it as read, a short one at its end as it comes back: reviews of 36e1069, 5bee264.)
+  const wasTermL = useRef(termShown)
+  useLayoutEffect(() => {
+    const was = wasTermL.current
+    wasTermL.current = termShown
+    if (was && !termShown && activeNow.current) comeBackNow.current()
+  }, [termShown])
   useEffect(() => {
     const was = wasTerm.current
     wasTerm.current = termShown
     if (!was || termShown) return
-    // (What came under the terminal: marked, as coming back from another tab — not taken as read by the list's
-    // pin to its end as the message box comes back under it: review of 36e1069.)
-    if (activeNow.current) comeBackNow.current()
     const lost = !document.activeElement || document.activeElement === document.body
     if (!focusBack.current && !lost) return
     focusBack.current = false
