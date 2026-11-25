@@ -109,18 +109,22 @@ export function PanelWindow({ sid, active, press, onSettled, toast, live, onFull
   const [lookGaveUp, setLookGaveUp] = useState(false)
   // (The live terminal not opened: tried again, twice, before the screen is read instead — come back to its
   // tab, the connection it had may not be let go yet, 409. Each coming back, tried afresh. Plans/agent-tabs 4.4.)
+  // (The tries counted apart from the terminal's key: counted afresh as it is shown again, the terminal it has
+  // not made again for that — else each coming back opened one more connection. Review of 11-25.)
   const [ptyTry, setPtyTry] = useState(0)
+  const tries = useRef(0)
   const retry = useRef<ReturnType<typeof setTimeout>>(undefined)
   useEffect(() => {
     setPtyFailed(false)
     setLookGaveUp(false)
-    setPtyTry(0)
+    tries.current = 0
     return () => clearTimeout(retry.current)
   }, [sid, paneId])
   const ptyFellBack = () => {
     clearTimeout(retry.current)
-    if (ptyTry >= PTY_TRIES) return setPtyFailed(true)
-    retry.current = setTimeout(() => setPtyTry((n) => n + 1), 500 * (ptyTry + 1))
+    if (tries.current >= PTY_TRIES) return setPtyFailed(true)
+    tries.current++
+    retry.current = setTimeout(() => setPtyTry((n) => n + 1), 500 * tries.current)
   }
   const fullAction = live?.onFull ?? onFull
   // What became of the last key, said by the keys (a key sent said for a moment;

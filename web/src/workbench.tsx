@@ -22,6 +22,7 @@ export function useWorkbench(): boolean {
   useEffect(() => {
     const mq = window.matchMedia(WB_QUERY)
     const on = () => setM(mq.matches)
+    on() // (shown again from a tab behind: the width may have changed meanwhile)
     mq.addEventListener('change', on)
     return () => mq.removeEventListener('change', on)
   }, [])

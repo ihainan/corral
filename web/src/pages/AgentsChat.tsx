@@ -39,7 +39,7 @@ import { camesAfter, containedInMessage, isCommand, pairSent, sameMessage, squee
 import { viewRefusal } from '../terminal/sendView'
 import { agentKey, sessionWhich } from '../terminal/sessionName'
 import { pickKey as isPickKey } from '../terminal/pageKeys'
-import { firstShown } from '../shown'
+import { firstShown, modalShown, useEffectOnChange, useShownAt } from '../shown'
 import { Rail, StatusBar, StatusItem, useWorkbench } from '../workbench'
 import { AgentTabBar, askPickInTab, isTabsKey, newTabId, OPEN_PICKER, readFront, readTabs, takePickInTab, writeFront, writeTabs, type AgentTab, type PickHow, type TabView } from './agentTabs'
 import { agentMark } from '../terminal/agentIcons'
@@ -986,7 +986,7 @@ export function AgentsChat({ bar, active = true, onHead }: { bar?: ReactNode; ac
   useEffect(() => {
     if (!active || !bar || stack || !standalone) return
     const onKey = (e: KeyboardEvent) => {
-      if (e.altKey || e.isComposing || e.keyCode === 229 || document.querySelector('[aria-modal="true"]')) return
+      if (e.altKey || e.isComposing || e.keyCode === 229 || modalShown()) return
       const l = tabsRef.current
       const at = l.findIndex((x) => x.id === frontRef.current)
       const plain = /^[\x21-\x7e]$/.test(e.key)
@@ -1018,7 +1018,7 @@ export function AgentsChat({ bar, active = true, onHead }: { bar?: ReactNode; ac
   useEffect(() => {
     if (!active || stack || cur) return
     const onKey = (e: KeyboardEvent) => {
-      if (!isPickKey(e, isMac) || e.defaultPrevented || document.querySelector('[aria-modal="true"]')) return
+      if (!isPickKey(e, isMac) || e.defaultPrevented || modalShown()) return
       const box = pickList.current?.querySelector<HTMLElement>('input, .convo-list-row')
       if (!box) return
       e.preventDefault()
@@ -1168,7 +1168,9 @@ export function AgentsChat({ bar, active = true, onHead }: { bar?: ReactNode; ac
   // going back to it is at once, as it was left. Past DRAWN_MAX, the one not
   // looked at longest — not one waiting for an answer — is let go (back to it,
   // it is made again from the conversations' cache).
-  const drawnFront = !stack && front && cur ? front : null // (its record catches up with what is shown a drawing later: not made again meanwhile)
+  // (In the tab of its agent — gone to another tab from the list, the tab in front is set a drawing later: that
+  // one's kept view is not taken for it — else the tab in front, whose record catches up a drawing later.)
+  const drawnFront = !stack && front && cur ? (tabs.find((x) => x.key === cur.key)?.id ?? front) : null
   if (drawnFront) {
     const d = drawn.current.get(drawnFront)
     if (d && d.key !== cur!.key + ' ' + cur!.s.id) drawn.current.delete(drawnFront) // (another agent in it now: that one's, anew)
@@ -1180,7 +1182,8 @@ export function AgentsChat({ bar, active = true, onHead }: { bar?: ReactNode; ac
     if (!x || (id !== drawnFront && !drawn.current.get(id)!.key.startsWith(x.key + ' '))) drawn.current.delete(id)
   }
   if (drawn.current.size > DRAWN_MAX) {
-    const waitingOn = new Set(tabViews.filter((v) => v.status === 'blocked').map((v) => v.tab.id))
+    const blocked = (k?: string) => !!k && entries.find((e) => e.key === k)?.row?.status === 'blocked'
+    const waitingOn = new Set(tabs.filter((x) => blocked(x.key) || blocked(x.split)).map((x) => x.id)) // (its agent or the one beside it)
     const old = [...drawn.current].filter(([id]) => id !== drawnFront && !waitingOn.has(id)).sort((a, b) => a[1].seen - b[1].seen)
     for (const [id] of old.slice(0, drawn.current.size - DRAWN_MAX)) drawn.current.delete(id)
   }
@@ -1555,7 +1558,7 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
     setViewing(null)
     setReading(null)
   }, [active])
-  useEffect(() => {
+  useEffectOnChange(() => {
     setFilesAt(null)
     setViewing(null)
     setReading(null)
@@ -1647,7 +1650,8 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
   const shownSince = useRef({ key: '', at: 0 })
   const visit = [cur.key, cur.s.id, row?.a.round ?? 0, row?.a.session ?? ''].join(' ')
   if (shownSince.current.key !== visit) shownSince.current = { key: visit, at: Date.now() }
-  const freshSince = Math.max(shownSince.current.at, visibleAt)
+  const shownAt = useShownAt() // (shown again from a tab behind: a read before then is not of this showing)
+  const freshSince = Math.max(shownSince.current.at, visibleAt, shownAt)
   // (One whose conversation cannot be read — a Codex that keeps no log
   // open, say — shows only that, whatever a read brings: in front a moment,
   // it is looked at. Not waited for a read, which can take seconds there,
@@ -2242,8 +2246,15 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
     const ended = wasWorking.current && !working
     wasWorking.current = working
     if (!ended) return
-    const tm = setTimeout(() => setSent((ps) => ps.map((p) => (p.queued && p.state === 'waiting' && ofThis(p.bind) ? { ...p, look: 'looking' as const, looked: true, relook: (p.relook ?? 0) + 1 } : p))), 1500)
-    return () => clearTimeout(tm)
+    let done = false
+    const tm = setTimeout(() => {
+      done = true
+      setSent((ps) => ps.map((p) => (p.queued && p.state === 'waiting' && ofThis(p.bind) ? { ...p, look: 'looking' as const, looked: true, relook: (p.relook ?? 0) + 1 } : p)))
+    }, 1500)
+    return () => {
+      clearTimeout(tm)
+      if (!done) wasWorking.current = true // (not looked yet, as a tab behind: looked when shown again)
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [working, codex, bindKey])
   const shownSent = sent.filter((p) => ofThis(p.bind))
@@ -2379,7 +2390,7 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
     if (!kActive || !hasKeyboardPointer()) return
     const frame = requestAnimationFrame(() => {
       const at = document.activeElement
-      if ((!at || at === document.body) && !document.querySelector('[aria-modal="true"]')) field.current?.focus()
+      if ((!at || at === document.body) && !modalShown()) field.current?.focus()
     })
     return () => cancelAnimationFrame(frame)
   }, [kActive])
@@ -2429,6 +2440,8 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
     return () => {
       alive.current = false
       upAbort.current?.abort()
+      // (Sent to a tab behind, its state kept: what was going goes up again when shown — else none moved on. Review of 11-25.)
+      setUps((l) => (l.some((x) => x.state === 'going') ? l.map((x) => (x.state === 'going' ? { ...x, state: 'wait' as const, p: 0, abort: undefined } : x)) : l))
     }
   }, [])
   const upload = (files: File[]) => {

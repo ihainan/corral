@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { modalShown } from '../shown'
 import { ArrowLeftToLine, ArrowRightToLine, Bot, ChevronLeft, ExternalLink, Link2, Plus, Server, SquareTerminal, X } from 'lucide-react'
 import { AgentsChat } from './AgentsChat'
 import { api, authGen, choiceOf, probeBootstrap, type OpenChoice, type SessionInfo } from '../api'
@@ -420,7 +421,7 @@ export function TerminalTabs({ current }: { current: string }) {
     const onKey = (e: KeyboardEvent) => {
       // (Not under a dialog: it keeps the keys and the focus.)
       // (Nor while an input method composes: the key is its.)
-      if (e.altKey || e.isComposing || e.keyCode === 229 || document.querySelector('[aria-modal="true"]')) return
+      if (e.altKey || e.isComposing || e.keyCode === 229 || modalShown()) return
       // T and the brackets by the character the layout gives (Dvorak's T is
       // where QWERTY has K), by the key's place only where it gives none
       // (Cyrillic). The digits by place: a French keyboard's ⌘1 is ⌘&, as in
@@ -467,7 +468,7 @@ export function TerminalTabs({ current }: { current: string }) {
   // tabs) opens as its tab here, with what its address asks for (?reply=).
   useEffect(() => {
     takeTabs((u) => {
-      if (!(/^\/t\/[0-9a-f]+$/.test(u.pathname) || agentsAddress(u)) || document.querySelector('[aria-modal="true"]')) return false
+      if (!(/^\/t\/[0-9a-f]+$/.test(u.pathname) || agentsAddress(u)) || modalShown()) return false
       if (u.searchParams.get('convo') === '1') {
         // (An address from before the agents page: there, at that agent.)
         const to = new URLSearchParams({ s: u.pathname.slice(3) })

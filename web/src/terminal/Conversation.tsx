@@ -11,7 +11,7 @@ import { copyText, Dialog, DialogHead, isCoarse, Menu, MenuLayer, swallowNextCli
 import { saveFile } from '../saveFile'
 import { StatusItem, useWorkbench } from '../workbench'
 import { composing, foldAllKey, helpKey, jumpKey, onMac, pickKey, sideKey, switchKey, takenFromTerminal, terminalHasKeys } from './pageKeys'
-import { firstShown } from '../shown'
+import { firstShown, isShown, modalShown, useEffectOnChange, useOnHide } from '../shown'
 import { keepNames, keptNames, local } from '../storage'
 import { useFlip } from '../flip'
 import { CodeSpanOf, FileLinkOf, Markdown } from './markdown'
@@ -480,6 +480,11 @@ export function ConversationView({
   // press puts the focus there again.)
   const [searchAsked, setSearchAsked] = useState(0)
   const unpick = useCallback(() => setPicking(false), [])
+  // (Its view sent to a tab behind — kept, its props as they were: the switcher closed, and ⌘T's ask with it.)
+  useOnHide(() => {
+    setPicking(false)
+    dropPickInTab()
+  })
   const pickingNow = useRef(picking)
   pickingNow.current = picking
   useEffect(() => {
@@ -828,6 +833,17 @@ export function ConversationView({
     if (was?.of) keepAt(was.of, { gen: was.gen, stuck: stuck.current, anchors: anchors.current, noted: notedList.current, opened: openedNow.current, allOpen: allOpenNow.current, unfolded: unfoldedNow.current })
   }, [])
   useLayoutEffect(() => {
+    // (The same conversation shown again — from a tab behind, its state kept —: only where it was put back, as
+    // display: none lost its scroll; what is open and unfolded stays. Review of 11-25.)
+    if (shownOf.current && shownOf.current.of === convo.of && shownOf.current.gen === convo.gen) {
+      const p = convo.of ? places.get(convo.of) : undefined
+      if (stuck.current || !p || p.stuck || !p.anchors.length) pin()
+      else {
+        anchors.current = p.anchors
+        restoring.current = p
+      }
+      return
+    }
     if (shownOf.current?.of !== convo.of) keepPlace()
     shownOf.current = { of: convo.of, gen: convo.gen }
     const seen = convo.of ? reads.get(convo.of) : undefined
@@ -1382,7 +1398,7 @@ export function ConversationView({
       e.preventDefault()
       e.stopPropagation()
       if (!e.repeat && !mac) takenFromTerminal(e, 'Ctrl+P', (m) => toast(m), (key) => t('keys.taken', { key }))
-      const others = [...document.querySelectorAll('[aria-modal="true"]')].some((d) => !d.classList.contains('convo-picker')) || (!pickingNow.current && document.documentElement.classList.contains('modal-open'))
+      const others = [...document.querySelectorAll('[aria-modal="true"]')].some((d) => isShown(d) && !d.classList.contains('convo-picker')) || (!pickingNow.current && document.documentElement.classList.contains('modal-open'))
       if (others) return
       if (pickingNow.current) setPicking(false)
       else if (sideShownNow.current) setSearchAsked((n) => n + 1)
@@ -1444,6 +1460,7 @@ export function ConversationView({
   useEffect(() => {
     const mq = window.matchMedia('(min-width: 768px)')
     const on = () => setDockable(mq.matches)
+    on() // (shown again from a tab behind: the width may have changed meanwhile)
     mq.addEventListener('change', on)
     return () => mq.removeEventListener('change', on)
   }, [])
@@ -1466,7 +1483,7 @@ export function ConversationView({
   const bindIdent = convo.bind ? [convo.bind.pid, convo.bind.start, convo.bind.session].join(' ') : ''
   // (The Files tab asked for a file or a folder: by the page's file acts, while there is a dock.)
   const [filesAsk, setFilesAsk] = useState<FilesAsk | undefined>()
-  useEffect(() => {
+  useEffectOnChange(() => {
     setDockStart(undefined)
     setFilesAsk(undefined)
     setDockBigState(dockKept().big)
@@ -1515,7 +1532,7 @@ export function ConversationView({
     if (!kActive) return
     const onKey = (e: KeyboardEvent) => {
       // (Nor over a menu that is open: it would open under it.)
-      if (!helpKey(e) || editable(e.target) || underDialog(e) || document.querySelector('[role="menu"]')) return
+      if (!helpKey(e) || editable(e.target) || underDialog(e) || modalShown('[role="menu"]')) return
       e.preventDefault()
       setKeysShown('key')
     }
@@ -2755,7 +2772,7 @@ function BgPanel({ of, r, gone, nav, onClose, active }: { of: string; r: ConvoRu
     const onKey = (e: KeyboardEvent) => {
       const el = e.target as HTMLElement | null
       if (e.key !== 'Escape' || (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') && !el.classList.contains('xterm-helper-textarea'))) return
-      if (document.querySelector('[aria-modal="true"], [role="menu"]')) return
+      if (modalShown('[aria-modal="true"], [role="menu"]')) return
       e.preventDefault()
       e.stopPropagation()
       onClose()
@@ -2959,7 +2976,7 @@ function shortModelName(id: string): string {
 }
 
 // A key for a dialog open over the page (or already taken): not the page's.
-const underDialog = (e: KeyboardEvent) => e.defaultPrevented || !!document.querySelector('[aria-modal="true"]')
+const underDialog = (e: KeyboardEvent) => e.defaultPrevented || modalShown()
 
 // The windows a conversation may fill, where which one is not known (a
 // model the gateway does not know): how full it is is said of both.
@@ -5161,7 +5178,7 @@ export function AgentList({ rows, menus, onPicked, placed, query: given, onQuery
 }
 
 // (A dialog open over the page.)
-const modalNow = () => document.querySelector('[role="dialog"][aria-modal="true"]')
+const modalNow = () => firstShown('[role="dialog"][aria-modal="true"]')
 
 // A list of agents longer than this has a search box over it.
 export const SEARCH_FROM = 5
@@ -5372,7 +5389,7 @@ function Picker({ rows, onClose, searchFirst }: { rows: ConvoListRow[]; onClose:
     else (box.current?.querySelector<HTMLElement>('[aria-current="true"]') ?? box.current?.querySelector<HTMLElement>('button'))?.focus()
     const onKey = (e: KeyboardEvent) => {
       // (Another dialog over it — the palette, settings —: its keys are that one's, Escape and Tab too. Review of 11-23.)
-      if ([...document.querySelectorAll('[aria-modal="true"]')].some((d) => d !== box.current)) return
+      if ([...document.querySelectorAll('[aria-modal="true"]')].some((d) => d !== box.current && isShown(d))) return
       // (A menu of its own opened from it — the order's, put on the page —, the focus in it: its keys are the menu's.)
       const at = document.activeElement
       if (at && at !== document.body && box.current && !box.current.contains(at)) return
@@ -6095,7 +6112,7 @@ function SubPanel({ of, sub, depth, live, nav, onOpen, onBack, onClose, active, 
     const onKey = (e: KeyboardEvent) => {
       const el = e.target as HTMLElement | null
       if (e.key !== 'Escape' || (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') && !el.classList.contains('xterm-helper-textarea'))) return
-      if (document.querySelector('[aria-modal="true"], [role="menu"]')) return
+      if (modalShown('[aria-modal="true"], [role="menu"]')) return
       e.preventDefault()
       e.stopPropagation()
       if (depth > 1) onBack()
@@ -6312,7 +6329,7 @@ const places = new Map<string, Place>()
 function keepAt(of: string, p: Place) {
   places.delete(of)
   places.set(of, p)
-  while (places.size > 12) places.delete(places.keys().next().value!)
+  while (places.size > 20) places.delete(places.keys().next().value!) // (as many as the agents' page keeps drawn)
 }
 
 // Where an item begins in the log (its first entry's seq). (A key's seq with
@@ -7418,7 +7435,7 @@ function ChangesPanel({ edits, focus, onClose, active, onCopy }: { edits: Edits;
     const onKey = (e: KeyboardEvent) => {
       const el = e.target as HTMLElement | null
       if (e.key !== 'Escape' || (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') && !el.classList.contains('xterm-helper-textarea'))) return
-      if (document.querySelector('[aria-modal="true"], [role="menu"]')) return
+      if (modalShown('[aria-modal="true"], [role="menu"]')) return
       e.preventDefault()
       e.stopPropagation()
       onClose()

@@ -1,4 +1,5 @@
 import { Fragment, useContext, useEffect, useLayoutEffect, useRef, useState, type FormEvent } from 'react'
+import { modalShown } from '../shown'
 import { MessageCircleReply, RotateCw } from 'lucide-react'
 import { api, ApiError, errorText, type HerdrAgent } from '../api'
 import { t } from '../i18n'
@@ -540,7 +541,7 @@ function useAnswerKeys(on: boolean, ready: boolean, keys: string[], held: (() =>
       const el = e.target as HTMLElement | null
       const typing = !!el && !el.classList.contains('xterm-helper-textarea') && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT' || el.isContentEditable)
       // (The changes panel open over this conversation: it may cover the card, and Esc is its.)
-      if (typing || document.querySelector('[aria-modal="true"], [role="menu"], [role="dialog"]') || card.current?.closest('.convo')?.querySelector('.convo-panel')) return
+      if (typing || modalShown('[aria-modal="true"], [role="menu"], [role="dialog"]') || card.current?.closest('.convo')?.querySelector('.convo-panel')) return
       // (Only with the card in hand, its focus in it: not a key pressed for
       // the page, the card out of sight.)
       if (card.current && !card.current.contains(document.activeElement)) return
