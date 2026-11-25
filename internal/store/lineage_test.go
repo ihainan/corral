@@ -354,3 +354,44 @@ func TestUpgradeIdentityCannotResurrectUnlink(t *testing.T) {
 		t.Fatalf("expected row to stay rejected, got %+v", rows)
 	}
 }
+
+// A manual relink under the same parent after the child's agent session changed binds the new session (review of
+// 11dd0f0: it kept the old one and reported success, the edge hidden as not this occupant's).
+func TestManualRelinkSameParentTakesNewSession(t *testing.T) {
+	st, err := OpenMemory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	ctx := context.Background()
+	base := AgentLineage{OwnerID: 1, HostID: 1, Server: "s", ChildPane: "w1:p2", ChildTermID: "term-2", ParentPane: "w1:p1", ParentTermID: "term-1", Source: LineageManual}
+	first := base
+	first.ChildSession, first.ParentSession = "cs1", "ps1"
+	if _, err := st.UpsertAgentLineage(ctx, first); err != nil {
+		t.Fatal(err)
+	}
+	again := base
+	again.ChildSession, again.ParentSession = "cs2", "ps2"
+	if changed, err := st.UpsertAgentLineage(ctx, again); err != nil || !changed {
+		t.Fatalf("manual relink must rebind: changed=%v err=%v", changed, err)
+	}
+	rows, _ := st.ListAgentLineage(ctx, 1, 1, "s")
+	if len(rows) != 1 || rows[0].ChildSession != "cs2" || rows[0].ParentSession != "ps2" {
+		t.Fatalf("expected cs2/ps2, got %+v", rows)
+	}
+	// An empty field in a manual link still keeps the bound one.
+	blank := base
+	if _, err := st.UpsertAgentLineage(ctx, blank); err != nil {
+		t.Fatal(err)
+	}
+	rows, _ = st.ListAgentLineage(ctx, 1, 1, "s")
+	if len(rows) != 1 || rows[0].ChildSession != "cs2" || rows[0].ParentSession != "ps2" {
+		t.Fatalf("blank manual fields must keep bound ones, got %+v", rows)
+	}
+	// An automatic source under the same parent still cannot rebind it.
+	auto := base
+	auto.ChildSession, auto.Source = "cs3", LineageToolLog
+	if changed, _ := st.UpsertAgentLineage(ctx, auto); changed {
+		t.Fatal("automatic source must not rebind a bound child session")
+	}
+}

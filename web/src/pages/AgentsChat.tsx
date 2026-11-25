@@ -3445,7 +3445,10 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
   const linkParentsOf = (e: Entry): LinkPane[] => {
     const r = e.row
     if (!r) return []
-    const same = entries.filter((x) => x.s.id === e.s.id && x.row && !x.row.lost)
+    // (Of the same herdr: one host's, one herdr session's — the list's own grouping, agentKey; one agent may be
+    // listed under another of the gateway's connections to it than this one.)
+    const herdrOf = (s: SessionInfo) => `${s.host_id}|${!s.mux_session || s.mux_session === 'default' ? '' : s.mux_session}`
+    const same = entries.filter((x) => herdrOf(x.s) === herdrOf(e.s) && x.row && !x.row.lost)
     const byPane = new Map(same.map((x) => [x.row!.a.pane_id, x]))
     const under = (x: Entry) => {
       const seen = new Set<string>()

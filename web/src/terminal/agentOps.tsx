@@ -253,7 +253,7 @@ export function LinkParentDialog({ sessionId, child, parents, onClose, onLinked 
       onLinked(p)
       onClose()
     } catch (err) {
-      setError(err instanceof ApiError && err.code === 'lineage_cycle' ? t('convo.lineage.linkCycle') : errorText(err))
+      setError(errorText(err))
       setBusy(false)
     }
   }

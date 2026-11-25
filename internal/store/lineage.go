@@ -249,19 +249,20 @@ func (s *Store) UpsertAgentLineage(ctx context.Context, row AgentLineage) (bool,
 		}
 
 		if sameParent {
-			// Preserve already-bound non-empty identity fields; only fill missing ones.
-			if existing.ChildTermID != "" {
-				merged.ChildTermID = existing.ChildTermID
+			// Preserve already-bound non-empty identity fields; only fill missing ones. A manual link is made
+			// against the panes as they are now (the handler read their live identity), so its own non-empty
+			// fields win: relinking a child whose agent session changed under the same parent must bind the new
+			// session, or the edge stays hidden while the person is told it was made.
+			keep := func(old, cur string) string {
+				if old != "" && (!isManual || cur == "") {
+					return old
+				}
+				return cur
 			}
-			if existing.ChildSession != "" {
-				merged.ChildSession = existing.ChildSession
-			}
-			if existing.ParentTermID != "" {
-				merged.ParentTermID = existing.ParentTermID
-			}
-			if existing.ParentSession != "" {
-				merged.ParentSession = existing.ParentSession
-			}
+			merged.ChildTermID = keep(existing.ChildTermID, merged.ChildTermID)
+			merged.ChildSession = keep(existing.ChildSession, merged.ChildSession)
+			merged.ParentTermID = keep(existing.ParentTermID, merged.ParentTermID)
+			merged.ParentSession = keep(existing.ParentSession, merged.ParentSession)
 			if merged.EvidenceKey == "" {
 				merged.EvidenceKey = existing.EvidenceKey
 			}
