@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
-import { ChevronRight, KeyRound, KeySquare, MoreHorizontal, ScrollText, Search, Send, Shield, Smartphone, Unlink, UserCheck, UserPlus, UserX } from 'lucide-react'
+import { ChevronRight, X, KeyRound, KeySquare, MoreHorizontal, ScrollText, Search, Send, Shield, Smartphone, Unlink, UserCheck, UserPlus, UserX } from 'lucide-react'
 import { api, ApiError, errorText, type AdminUser, type AuditEntry } from '../api'
 import { t } from '../i18n'
 import { PhoneBack, useSession } from '../app'
 import { auditAction, auditDetail, auditTarget, byDay, clockText, sessionHosts, spanFrom, whenText, type DaySpan } from './pageText'
 import { Confirm, CopyButton, Dialog, EmptyState, Field, LoadError, Menu, useToast } from '../components/ui'
+import { useDeskPages } from '../workbench'
 
 type UserFilter = 'all' | 'admin' | 'disabled' | 'no2fa'
 const USER_FILTERS: UserFilter[] = ['all', 'admin', 'disabled', 'no2fa']
@@ -494,13 +495,11 @@ export function AdminAuditPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
   const hosts = useMemo(() => sessionHosts(entries ?? []), [entries])
-  return (
-    <main className="page">
-      <div className="page-head">
-        <PhoneBack />
-        <h1>{t('admin.audit')}</h1>
-      </div>
-      <div className="page-tools audit-tools">
+  const desk = useDeskPages()
+  const [sel, setSel] = useState<number | null>(null)
+  const pageEl = useRef<HTMLElement>(null)
+  const filters = (
+    <>
         <select className="select" value={filter.user} onChange={(e) => narrow({ ...filter, user: Number(e.target.value) })} aria-label={t('audit.byUser')}>
           <option value={0}>{t('audit.allUsers')}</option>
           {users.map((u) => <option key={u.id} value={u.id}>{u.display_name && u.display_name !== u.username ? `${u.display_name}（${u.username}）` : u.username}</option>)}
@@ -511,7 +510,137 @@ export function AdminAuditPage() {
         <select className="select" value={filter.span} onChange={(e) => narrow({ ...filter, span: e.target.value as DaySpan })} aria-label={t('audit.bySpan')}>
           {(['all', 'today', '7d', '30d'] as const).map((sp) => <option key={sp} value={sp}>{t(`span.${sp}` as const)}</option>)}
         </select>
+    </>
+  )
+  // A desktop's (UI 12): the filters in the toolbar, one line an entry — its details a column of their own, cut
+  // short, all of it beside the table for the one chosen (a click, ↑↓); the header and each day's row kept in sight.
+  if (desk) {
+    const flat = entries ?? []
+    const at = flat.findIndex((e) => e.id === sel)
+    const chosen = at >= 0 ? flat[at] : null
+    const go = (i: number) => {
+      const e = flat[Math.max(0, Math.min(flat.length - 1, i))]
+      if (!e) return
+      setSel(e.id)
+      pageEl.current?.querySelector<HTMLElement>(`tr[data-entry="${e.id}"]`)?.focus()
+    }
+    const full = (e: AuditEntry) => {
+      const target = auditTarget(e.target, hosts)
+      return [
+        [t('audit.time'), new Date(e.ts * 1000).toLocaleString()],
+        [t('audit.user'), e.username || '—'],
+        [t('audit.action'), auditAction(e.action) + (auditAction(e.action) !== e.action ? `（${e.action}）` : '')],
+        [t('audit.target'), [target, target !== e.target ? e.target : ''].filter(Boolean).join('\n') || '—'],
+        [t('audit.detail'), auditDetail(e.detail, true).join('\n') || '—'],
+        [t('audit.ip'), e.ip || '—'],
+      ]
+    }
+    return (
+      <main className="page page-desk" ref={pageEl}>
+        <div className="desk-bar">
+          <h1>{t('admin.audit')}</h1>
+          <div className="spacer" />
+          <div className="desk-filters">{filters}</div>
+        </div>
+        <div className="desk-body">
+          {entries === null && failed ? (
+            <LoadError onRetry={() => load()} />
+          ) : entries === null ? (
+            <p className="loading">{t('common.loading')}</p>
+          ) : entries.length === 0 && filtered ? (
+            <p className="page-none">
+              {t('audit.noMatch')}{' '}
+              <button type="button" className="link-btn" onClick={() => narrow({ user: 0, kind: '', span: 'all' })}>{t('common.clearFilters')}</button>
+            </p>
+          ) : entries.length === 0 ? (
+            <EmptyState icon={<ScrollText size={20} strokeWidth={1.75} />} title={t('admin.auditEmpty')} />
+          ) : null}
+        </div>
+        {entries && entries.length > 0 && (
+          <div className="desk-split">
+            <div className="desk-split-main">
+              <table className="desk-table desk-audit">
+                <thead>
+                  <tr>
+                    <th className="desk-col-time">{t('audit.time')}</th>
+                    <th className="desk-col-user">{t('audit.user')}</th>
+                    <th className="desk-col-act">{t('audit.action')}</th>
+                    <th className="desk-col-target">{t('audit.target')}</th>
+                    <th>{t('audit.detail')}</th>
+                    <th className="desk-col-ip">{t('audit.ip')}</th>
+                  </tr>
+                </thead>
+                {byDay(entries, (e) => e.ts).map((g) => (
+                  <tbody
+                    key={g.key}
+                    onKeyDown={(ev) => {
+                      if ((ev.target as HTMLElement).tagName !== 'TR') return
+                      if (ev.key === 'ArrowDown' || ev.key === 'ArrowUp') {
+                        ev.preventDefault()
+                        go(at < 0 ? 0 : at + (ev.key === 'ArrowDown' ? 1 : -1))
+                      } else if (ev.key === 'Escape' && sel !== null) {
+                        ev.preventDefault()
+                        setSel(null)
+                      }
+                    }}
+                  >
+                    <tr className="desk-group">
+                      <th colSpan={6} scope="colgroup">{g.heading}</th>
+                    </tr>
+                    {g.items.map((e) => {
+                      const detail = auditDetail(e.detail)
+                      const target = auditTarget(e.target, hosts)
+                      const on = e.id === sel
+                      return (
+                        <tr key={e.id} data-entry={e.id} className={on ? 'is-sel' : undefined} aria-selected={on} tabIndex={on || (at < 0 && e.id === flat[0].id) ? 0 : -1} onClick={() => setSel(on ? null : e.id)} onFocus={() => setSel(e.id)}>
+                          <td className="tnum desk-dim" title={new Date(e.ts * 1000).toLocaleString()}>{clockText(e.ts)}</td>
+                          <td><span className="desk-ellipsis" title={e.username}>{e.username || '—'}</span></td>
+                          <td><span className="desk-ellipsis" title={e.action}>{auditAction(e.action)}</span></td>
+                          <td><span className="desk-ellipsis" title={e.target}>{target || '—'}</span></td>
+                          <td className="desk-dim"><span className="desk-ellipsis" title={auditDetail(e.detail, true).join('\n') || undefined}>{detail.join(' · ')}</span></td>
+                          <td className="tnum desk-dim"><span className="desk-ellipsis" title={e.ip}>{e.ip}</span></td>
+                        </tr>
+                      )
+                    })}
+                  </tbody>
+                ))}
+              </table>
+              {more && (
+                <div className="desk-more">
+                  <button className="btn desk-btn" disabled={loading} onClick={() => load(entries[entries.length - 1].id)}>{t('admin.loadMore')}</button>
+                </div>
+              )}
+            </div>
+            {chosen && (
+              <aside className="desk-aside" aria-label={t('audit.entry')}>
+                <div className="desk-aside-head">
+                  <h2>{auditAction(chosen.action)}</h2>
+                  <button type="button" className="icon-btn" onClick={() => setSel(null)} aria-label={t('common.close')} title={t('common.close')}>
+                    <X size={16} />
+                  </button>
+                </div>
+                <dl className="desk-aside-list">
+                  {full(chosen).map(([k, v]) => (
+                    <div key={k}>
+                      <dt>{k}</dt>
+                      <dd>{v}</dd>
+                    </div>
+                  ))}
+                </dl>
+              </aside>
+            )}
+          </div>
+        )}
+      </main>
+    )
+  }
+  return (
+    <main className="page">
+      <div className="page-head">
+        <PhoneBack />
+        <h1>{t('admin.audit')}</h1>
       </div>
+      <div className="page-tools audit-tools">{filters}</div>
       {entries === null && failed ? (
         <LoadError onRetry={() => load()} />
       ) : entries === null ? (
