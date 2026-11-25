@@ -77,8 +77,8 @@ export function letGoBox(box: KeptBox) {
   const l = [...box.later.values()]
   box.later.clear()
   for (const f of l) f()
+  // (Its parts kept on it: React's development replay of a page's effects lets go and takes it again — review 9.)
   for (const k of box.kids.values()) letGoBox(k)
-  box.kids.clear()
 }
 
 // What stops what a view sent, from an effect's cleanup: done at once for a

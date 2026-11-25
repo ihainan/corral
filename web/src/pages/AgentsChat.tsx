@@ -679,9 +679,8 @@ export function AgentsChat({ bar, active = true, onHead }: { bar?: ReactNode; ac
   // (Let go for good: its effects cleaned up as for a view closed — what it sent stopped. One shown cleans up as
   // it goes, in the commit; one hidden had cleaned up already, putting off the stopping: done here, just after.)
   useLayoutEffect(() => {
-    const w = drawing.current
+    const w = drawing.current // (kept, not taken: done again — as React's development replay does — it does the same)
     if (!w) return
-    drawing.current = null
     drawn.current = w.next
     for (const [id, v] of w.next) hideBox(v.box, id !== w.front)
     for (const b of w.gone) letGoBox(b)
@@ -1229,9 +1228,8 @@ export function AgentsChat({ bar, active = true, onHead }: { bar?: ReactNode; ac
     const old = [...next].filter(([id]) => id !== drawnFront && !waitingOn.has(id)).sort((a, b) => a[1].seen - b[1].seen)
     for (const [id] of old.slice(0, next.size - DRAWN_MAX)) letGo(id)
   }
-  // (Which are hidden, as this drawing has them — set again by its commit, should another drawing have been left
-  // unfinished meanwhile: a view's cleanups, in the commit, go by it.)
-  for (const [id, v] of next) hideBox(v.box, id !== drawnFront)
+  // (Which are hidden: set by the commit only — a drawing left unfinished sets nothing a commit of a part alone
+  // would go by, review 9. Set there before the views' effects are cleaned up: useWhenGone's are passive.)
   drawing.current = { next, gone: goneBoxes, kidsGone, front: drawnFront }
 
   // (The workbench's rail and status bar: with the tabs, 760 and up.)
@@ -2450,7 +2448,7 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
   insertPathNow.current = insertPath
   const dockSink = useMemo(() => ({ set: (s: DockSink | null) => void (dock.current = s), insert: (p: string) => insertPathNow.current(p) }), [])
   // (From what finishes later — a file gone up, behind or not —: the box as it is now, not as it was when it began — review 8.)
-  const insertNow = useRef<(text: string) => void>(() => {})
+  const insertNow = useRef<{ key: string; insert: (text: string) => void } | null>(null)
   const insert = (text: string) => {
     const el = field.current
     const d = el ? el.value : draft
@@ -2469,7 +2467,7 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
       f.setSelectionRange(a + text.length, a + text.length)
     })
   }
-  insertNow.current = insert
+  insertNow.current = { key: draftKey, insert } // (with the draft it goes into: the one its file was for, or none — review 9)
   // Files (picked, pasted, dropped) go up to the host one at a time, each
   // path then put in the draft for the agent to read (not sent: there is
   // more to say, as a rule). Sending waits for them. 11-13: taken in while
@@ -2522,7 +2520,9 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
         const quoted = r.prefix === '@' ? geminiPath(r.path) : shellPath(r.path)
         if (lastKey.current !== u.forKey) return
         // (In the draft as a label, a chip over the box; sent as the path.)
-        if (quoted) insertNow.current(attach(u.file, r.path, quoted, cur.s.host_id) + ' ')
+        const into = insertNow.current
+        if (!into || into.key !== u.forKey) return
+        if (quoted) into.insert(attach(u.file, r.path, quoted, cur.s.host_id) + ' ')
         else toast(r.path)
       },
       (e) => {
