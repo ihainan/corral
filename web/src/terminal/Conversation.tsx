@@ -149,6 +149,7 @@ const SIDE_W_KEY = 'corral.convoSideWidth'
 const TERM_VIEWS_KEY = 'corral.termViews'
 const TERM_VIEWS_MAX = 100
 const TERM_VIEW_MIN = 900
+const TERM_VIEWS_EVENT = 'corral:term-views'
 const SIDE_W = 288
 const SIDE_W_MIN = 220
 const SIDE_W_MAX = 520
@@ -352,17 +353,54 @@ export function ConversationView({
   const [viewH, setViewH] = useState(0)
   // Its terminal in the conversation's place (UI 14, 11-25; Orca's chat/terminal switch): kept for each agent, on
   // this device, a new one in its conversation. Only where it is wide (TERM_VIEW_MIN) and its terminal can be had.
+  // (Read from where it is kept, and again when another view of this page or another window changes it: each
+  // conversation's own copy would put back what another took out — review of c2ae00c.)
   const [termViews, setTermViews] = useState<string[]>(() => keptNames(TERM_VIEWS_KEY))
+  useEffect(() => {
+    const again = () => setTermViews(keptNames(TERM_VIEWS_KEY))
+    const fromElsewhere = (e: StorageEvent) => e.key === TERM_VIEWS_KEY && again()
+    window.addEventListener(TERM_VIEWS_EVENT, again)
+    window.addEventListener('storage', fromElsewhere)
+    return () => {
+      window.removeEventListener(TERM_VIEWS_EVENT, again)
+      window.removeEventListener('storage', fromElsewhere)
+    }
+  }, [])
   const canTermView = !!dockTerminal?.can && !!viewOf && !!convo.of && viewW >= TERM_VIEW_MIN
   const termShown = canTermView && termViews.includes(viewOf!)
-  // (Back in the conversation: the keys to its message box, its draft as it was.)
+  const termShownNow = useRef(termShown)
+  termShownNow.current = termShown
+  const focusBack = useRef(false)
   const showTermView = (on: boolean) => {
     if (!viewOf || !canTermView) return
-    const next = [...termViews.filter((k) => k !== viewOf), ...(on ? [viewOf] : [])].slice(-TERM_VIEWS_MAX)
-    setTermViews(next)
+    const next = [...keptNames(TERM_VIEWS_KEY).filter((k) => k !== viewOf), ...(on ? [viewOf] : [])].slice(-TERM_VIEWS_MAX)
     keepNames(TERM_VIEWS_KEY, next)
-    if (!on) requestAnimationFrame(() => root.current?.querySelector<HTMLElement>('.composer-input')?.focus())
+    setTermViews(next)
+    window.dispatchEvent(new Event(TERM_VIEWS_EVENT))
+    if (!on) focusBack.current = true
   }
+  // Back in the conversation — by hand, or the window made narrower under its terminal, the keys lost with it —: the
+  // keys to its message box, its draft as it was; where that is not shown (a question's card, a panel of the agent's
+  // in its place), to what is; else the bar's switch. (Review of c2ae00c.)
+  const wasTerm = useRef(termShown)
+  useEffect(() => {
+    const was = wasTerm.current
+    wasTerm.current = termShown
+    if (!was || termShown) return
+    const lost = !document.activeElement || document.activeElement === document.body
+    if (!focusBack.current && !lost) return
+    focusBack.current = false
+    if (!kActive) return
+    requestAnimationFrame(() => {
+      const m = mainEl.current
+      if (!m) return
+      const seen = (e: Element | null | undefined): e is HTMLElement => !!e && e.getClientRects().length > 0
+      const box = m.querySelector<HTMLElement>('.convo-dock .composer-input')
+      const other = [...m.querySelectorAll<HTMLElement>('.convo-dock button:not([disabled]), .convo-dock textarea, .convo-dock input')].find(seen)
+      const bar = m.querySelector<HTMLElement>('.convo-viewseg-btn.is-on') ?? m.querySelector<HTMLElement>('.convo-bar-more')
+      ;(seen(box) ? box : other ?? bar)?.focus()
+    })
+  }, [termShown, kActive])
   const termToggle = useRef(() => {})
   termToggle.current = () => showTermView(!termShown)
   useEffect(() => {
@@ -853,7 +891,7 @@ export function ConversationView({
   const markRead = useCallback(() => {
     const el = box.current
     const o = ofNow.current
-    if (!el || !o.of || !o.last || !activeNow.current || document.hidden) return
+    if (!el || !o.of || !o.last || !activeNow.current || document.hidden || termShownNow.current) return
     if (el.scrollHeight - el.scrollTop - el.clientHeight < 48) readUpTo(o.of, o.gen, o.last)
   }, [])
   // Back to one read before (its entries kept, of the same reading of its
@@ -2332,21 +2370,10 @@ export function ConversationView({
           {t('convo.offline', { time: clockMs(convo.okAt) })}
         </p>
       )}
-      {termShown && dockTerminal && convo.of && (
-        <div className="convo-termview">
-          <PanelWindow
-            key={'main ' + convo.of + ' ' + bindIdent}
-            sid={convo.of.split(' ')[0]}
-            active={active}
-            press={dockTerminal.press}
-            onSettled={convo.refresh}
-            toast={toast}
-            live={{ main: true, onFull: dockTerminal.onFull, letters: dockTerminal.letters, who: convo.bind?.agent === 'claude' ? 'Claude Code' : agentName(convo.bind?.agent) }}
-          />
-        </div>
-      )}
-      {/* (The conversation kept while its terminal is shown in its place — where it was read to, its draft — only hidden.) */}
-      <div className="convo-scroll-wrap" hidden={termShown}>
+      {/* (Its terminal shown in its place: the thread kept under it, unseen — where it was read to stays —; the dock
+          below, the composer and the live screens it may hold, not there at all: one connection to the pane, the
+          terminal's. Review of c2ae00c.) */}
+      <div className={'convo-scroll-wrap' + (termShown ? ' is-term' : '')}>
         <div className="convo-scroll" ref={box}>
           <div className="convo-col" ref={col}>
             <ShowTerminal.Provider value={onShowTerminal}>
@@ -2405,8 +2432,29 @@ export function ConversationView({
             {t('convo.latest')}
           </button>
         )}
+        {termShown && dockTerminal && convo.of && (
+          <div className="convo-termview">
+            <PanelWindow
+              key={'main ' + convo.of + ' ' + bindIdent}
+              sid={convo.of.split(' ')[0]}
+              active={kActive}
+              press={dockTerminal.press}
+              onSettled={convo.refresh}
+              toast={toast}
+              live={{
+                main: true,
+                onFull: dockTerminal.onFull,
+                letters: dockTerminal.letters,
+                who: convo.bind?.agent === 'claude' ? 'Claude Code' : agentName(convo.bind?.agent),
+                // (F6 out of it: to the bar's switch, as the dock's terminal goes to its tabs.)
+                onLeave: () => (mainEl.current?.querySelector<HTMLElement>('.convo-viewseg-btn.is-on') ?? mainEl.current?.querySelector<HTMLElement>('.convo-bar-more'))?.focus(),
+              }}
+            />
+          </div>
+        )}
       </div>
-      <div className="convo-dock" hidden={termShown}>
+      {!termShown && (
+      <div className="convo-dock">
         {convo.status === 'ready' && convo.tasks && <Tasks tasks={convo.tasks} fold={!!ask} />}
         {/* (Asked from the screen: also where its log is not read.) */}
         {(convo.status === 'ready' || convo.status === 'none') && ask && (
@@ -2435,9 +2483,10 @@ export function ConversationView({
         )}
         <ComposerSlotOf.Provider value={inWb ? setModelSlot : null}>{composer}</ComposerSlotOf.Provider>
         {!inWb && runsAt(false)}
-        {/* (The pane the keys go to says its branch and quota on the status bar.) */}
-        {inWb && kActive && wbSlot && createPortal(<StatusFacts runsRef={setRunsSlot} of={convo.status === 'ready' ? convo.of : undefined} meta={convo.status === 'ready' ? convo.meta : undefined} via={convo.bind?.via} auth={convo.bind?.auth} quota={convo.status === 'ready' ? quotaOf : undefined} />, wbSlot)}
       </div>
+      )}
+      {/* (The pane the keys go to says its branch and quota on the status bar — in its terminal view too.) */}
+      {inWb && kActive && wbSlot && createPortal(<StatusFacts runsRef={setRunsSlot} of={convo.status === 'ready' ? convo.of : undefined} meta={convo.status === 'ready' ? convo.meta : undefined} via={convo.bind?.via} auth={convo.bind?.auth} quota={convo.status === 'ready' ? quotaOf : undefined} />, wbSlot)}
       </div>
       {splitShown && splitPane && (
         <>
