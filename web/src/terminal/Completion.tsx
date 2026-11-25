@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useId, useRef, useState } from 'react'
 import { api } from '../api'
 import { t } from '../i18n'
 import { apply, suggest, tokenAt, type Agent, type Completions, type Suggestion, type Token } from './complete'
@@ -111,7 +111,7 @@ export function useCompletion(p: {
   }
 
   // The field names the list and the option chosen, for screen readers.
-  const listId = 'complete-' + p.sessionId
+  const listId = 'complete-' + useId().replace(/:/g, '') // (its own: another composer's, kept in a tab behind, has one too)
   // (The one chosen with the keys stays in view: a short window shows only some.)
   useEffect(() => {
     if (items.length > 0) document.getElementById(`${listId}-${cur}`)?.scrollIntoView({ block: 'nearest' })

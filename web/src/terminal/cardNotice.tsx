@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useEffectOnChange } from '../shown'
 import { ChevronDown, ChevronRight } from 'lucide-react'
 import { api, ApiError, errorText } from '../api'
 import { t, type I18nKey } from '../i18n'
@@ -54,9 +55,12 @@ export function useClaudeCard(sid: string, key: string, turnKey: string, body: (
   )
   useEffect(() => () => looker.stop(), [looker])
   // Another conversation: nothing of the last one's.
-  useEffect(() => {
+  // (Another conversation's: none of the last one's — not as it is shown again from a tab behind, the card kept.)
+  useEffectOnChange(() => {
     setCard(null)
     setStale(false)
+  }, [key])
+  useEffect(() => {
     looker.bind(key)
     const onSeen = () => looker.shown()
     document.addEventListener('visibilitychange', onSeen)

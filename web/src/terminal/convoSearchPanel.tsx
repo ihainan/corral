@@ -33,11 +33,12 @@ export function ConvoSearchPanel({ list, of, onGo, older, onOlder, onClose }: { 
   // in changes otherwise, at most every 2 s, a search under way let finish
   // (not on every word the agent writes, nor put off while it writes on).
   const first = list.length ? itemKey(list[0]) : ''
-  const sched = useRef({ query: '', timer: 0, stop: () => {}, running: false, dirty: false, at: 0 })
+  const sched = useRef({ query: '', of: null as string | null, timer: 0, stop: () => {}, running: false, cut: false, dirty: false, at: 0 }) // (of: the log last searched; cut: a search stopped before its end)
   const runNow = () => {
     const s = sched.current
     s.timer = 0
     s.running = true
+    s.cut = false
     s.dirty = false
     s.at = Date.now()
     s.stop = search(listNow.current, s.query, (h, more) => {
@@ -59,12 +60,19 @@ export function ConvoSearchPanel({ list, of, onGo, older, onOlder, onClose }: { 
     s.timer = 0
     s.stop()
     s.running = false
+    const changed = s.query !== q.trim() || s.of !== of
     s.query = q.trim()
-    setHits(null) // (of another search, or another log: not to be gone to)
-    setAt(-1)
-    if (s.query) s.timer = window.setTimeout(runNow, 250)
+    s.of = of
+    // (Of another search, or another log: not to be gone to. The same, shown again from a tab behind: where it was
+    // kept, the search run again only if it was cut short.)
+    if (changed) {
+      setHits(null)
+      setAt(-1)
+    }
+    if (s.query && (changed || s.dirty || s.cut)) s.timer = window.setTimeout(runNow, 250)
     return () => {
       clearTimeout(s.timer)
+      if (s.running || s.timer) s.cut = true
       s.timer = 0
       s.stop()
       s.running = false

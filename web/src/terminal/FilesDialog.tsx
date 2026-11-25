@@ -1,4 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState, type FormEvent } from 'react'
+import { useEffectOnChange, useHiddenNow } from '../shown'
 import { ArrowUp, Check, Clock, Copy, Download, Eye, FileQuestion, Folder, FolderPlus, House, Image as ImageIcon, LocateFixed, MoreHorizontal, Pencil, PencilLine, RotateCw, Search, SquareTerminal, Trash2, Upload, X } from 'lucide-react'
 import { FileTypeIcon } from './fileIcons'
 import { api, ApiError, errorText, postFile, type FileEntry, type FileListing } from '../api'
@@ -127,9 +128,12 @@ function FilesPanel({ sessionId, start, reveal, onPath, onInsert, onClose, docke
   // The file asked to be shown: marked while its folder is the one listed.
   const marked = reveal ? { dir: cleanPath(parent(reveal)), name: reveal.slice(reveal.lastIndexOf('/') + 1) } : null
   const markedSaid = useRef(false)
+  const hiddenNow = useHiddenNow()
   useEffect(() => {
     alive.current = true
     return () => {
+      // (Sent to a tab behind: kept — its uploads go on to their end, the queue with them; shown again, as left.)
+      if (hiddenNow()) return
       // Late answers of this panel are ignored, uploads still running stop,
       // and a question left open counts as "no".
       alive.current = false
@@ -216,11 +220,11 @@ function FilesPanel({ sessionId, start, reveal, onPath, onInsert, onClose, docke
     }
   }
 
-  useEffect(() => {
+  // (Another session's: listed from where it starts. Not as it is shown again from a tab behind — where it was gone to stays.)
+  useEffectOnChange(() => {
     if (marked) void load(marked.dir, true)
     else if (start) void load(start, true)
     else void goTerminalFolder(true)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId])
   // (Asked again, the browser kept: gone to, a file to show marked anew.)
   const went = useRef(go)

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
+import { useHiddenNow } from '../shown'
 import { Code2 } from 'lucide-react'
 import { api, ApiError, errorText } from '../api'
 import { getLang, hasKey, t } from '../i18n'
@@ -71,7 +72,8 @@ export function useCode() {
     cur?.ctl.abort()
     if (closeTab) cur?.win?.close()
   }
-  useEffect(() => () => endTask(true), [])
+  const hiddenNow = useHiddenNow()
+  useEffect(() => () => void (!hiddenNow() && endTask(true)), []) // (sent to a tab behind: the opening goes on)
 
   const markRunning = (hostId: number, on: boolean) => setRunning((r) => ({ ...r, [hostId]: on }))
 

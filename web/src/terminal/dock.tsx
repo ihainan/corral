@@ -7,7 +7,7 @@
 // counts; whether it is open, its tab and its width are the person's (kept
 // in this browser); what each tab shows is per conversation, kept while the
 // page is.
-import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react'
+import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react'
 import { FolderOpen, GitCompareArrows, Info, Maximize2, Minimize2, SquareTerminal, X } from 'lucide-react'
 import { api } from '../api'
 import { t } from '../i18n'
@@ -134,6 +134,7 @@ export function Dock({
   toast: (s: string, bad?: boolean) => void
 }) {
   usePrefs()
+  const uid = useId() // (its tabs' and panels' ids its own: another agent's dock, kept in a tab behind, or the split's, has its own)
   const sid = of.split(' ')[0]
   const [filesShown, setFilesShown] = useState(tab === 'files')
   useEffect(() => {
@@ -203,11 +204,11 @@ export function Dock({
               key={k}
               type="button"
               role="tab"
-              id={'dock-tab-' + k}
+              id={uid + 'tab-' + k}
               data-tab={k}
               className="convo-tray-tab"
               aria-selected={tab === k}
-              aria-controls={'dock-panel-' + k}
+              aria-controls={uid + 'panel-' + k}
               tabIndex={tab === k ? 0 : -1}
               onClick={() => onTab(k)}
             >
@@ -227,11 +228,11 @@ export function Dock({
       </div>
       {/* (Files kept once shown — its folder, an upload going — while another tab is: hidden, not gone.) */}
       {filesShown && (
-        <div className="convo-tray-body" role="tabpanel" id="dock-panel-files" aria-labelledby="dock-tab-files" hidden={tab !== 'files'}>
+        <div className="convo-tray-body" role="tabpanel" id={uid + 'panel-files'} aria-labelledby={uid + 'tab-files'} hidden={tab !== 'files'}>
           <DockFiles key={of + ' ' + ident} of={of} mem={of + ' ' + ident} sid={sid} pane={pane} ask={ask} onInsert={onInsert} active={active && tab === 'files'} />
         </div>
       )}
-      <div className="convo-tray-body" role="tabpanel" id={'dock-panel-' + tab} aria-labelledby={'dock-tab-' + tab} hidden={tab === 'files'}>
+      <div className="convo-tray-body" role="tabpanel" id={tab === 'files' ? undefined : uid + 'panel-' + tab} aria-labelledby={tab === 'files' ? undefined : uid + 'tab-' + tab} hidden={tab === 'files'}>
         {tab === 'files' ? null : tab === 'info' ? (
           info ? (
             <div className="convo-tray-info">

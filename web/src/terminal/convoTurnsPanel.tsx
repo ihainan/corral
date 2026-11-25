@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { useEffectOnChange } from '../shown'
 import { hhmm } from './convoTime'
 import { X } from 'lucide-react'
 import { api } from '../api'
@@ -43,12 +44,16 @@ export function ConvoTurnsPanel({
   const [want, setWant] = useState<{ turn: Turn; batches: number } | null>(null)
   const [note, setNote] = useState('')
   // (Read, and read on while it says there is more, a second apart.)
-  useEffect(() => {
-    let stopped = false
-    let timer = 0
+  // (Another log's: none of the last one's, nor where it was on the way to — not as it is shown again from a tab
+  // behind: read again, its list and its way kept.)
+  useEffectOnChange(() => {
     setTurns(null)
     setWant(null)
     setNote('')
+  }, [sessionId, pane, gen])
+  useEffect(() => {
+    let stopped = false
+    let timer = 0
     const load = () => {
       const qs = new URLSearchParams(pane ? { pane } : {})
       api<Answer>('GET', `/api/sessions/${sessionId}/conversation/turns?` + qs.toString())

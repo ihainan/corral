@@ -474,7 +474,7 @@ export function ConversationView({
   const [bgCmd, setBgCmd] = useState<ConvoRunning | null>(null) // (a background command's details, open)
   // (Another agent shown: its own commands, none of the one before's open.)
   const agentOf = convo.bind ? `${convo.bind.pane}|${convo.bind.pid}|${convo.bind.start}|${convo.bind.session}` : ''
-  useEffect(() => setBgCmd(null), [agentOf])
+  useEffectOnChange(() => setBgCmd(null), [agentOf])
   // ⌘K (Ctrl+K): the list's search box, shown and in focus; where the list
   // is not beside the thread, the switcher, its box first. (A count: each
   // press puts the focus there again.)
@@ -837,11 +837,15 @@ export function ConversationView({
     // display: none lost its scroll; what is open and unfolded stays. Review of 11-25.)
     if (shownOf.current && shownOf.current.of === convo.of && shownOf.current.gen === convo.gen) {
       const p = convo.of ? places.get(convo.of) : undefined
-      if (stuck.current || !p || p.stuck || !p.anchors.length) pin()
-      else {
+      if (stuck.current || !p || p.stuck || !p.anchors.length) {
+        stuck.current = true // (at its end: kept there as more comes)
+        setAway(false)
+        pin()
+      } else {
         anchors.current = p.anchors
         restoring.current = p
       }
+      comeBack() // (what came while it was behind: marked as on coming back to it — its active stayed true, frozen)
       return
     }
     if (shownOf.current?.of !== convo.of) keepPlace()
@@ -1516,7 +1520,7 @@ export function ConversationView({
     setDockWState(v)
     keepDock({ width: v })
   }
-  useEffect(() => setGitChanges(null), [convo.of]) // (another agent's: not this one's changes)
+  useEffectOnChange(() => setGitChanges(null), [convo.of]) // (another agent's: not this one's changes)
   const cardBtn = useRef<HTMLButtonElement>(null)
   if (card && !active) setCard('') // (behind a terminal tab: shut)
   // (Over the thread under its button where the button is shown; else — narrow, the button hidden — a sheet.
@@ -6329,7 +6333,7 @@ const places = new Map<string, Place>()
 function keepAt(of: string, p: Place) {
   places.delete(of)
   places.set(of, p)
-  while (places.size > 20) places.delete(places.keys().next().value!) // (as many as the agents' page keeps drawn)
+  while (places.size > 40) places.delete(places.keys().next().value!) // (as many as the agents' page keeps drawn: 20 tabs, each of two)
 }
 
 // Where an item begins in the log (its first entry's seq). (A key's seq with

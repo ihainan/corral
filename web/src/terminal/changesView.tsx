@@ -7,6 +7,7 @@
 // Opened from those counts on the card. A file's diff folds: one too long
 // starts folded, as do those past a first screenful or so of lines; one
 // the host's cap left out is read alone on asking.
+import { useEffectOnChange } from '../shown'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { ChevronRight, Eye, FolderOpen, GitCompareArrows, RotateCw } from 'lucide-react'
 import { api, ApiError } from '../api'
@@ -100,13 +101,16 @@ export function useChanges(sid: string, pane: string, start: ChangesAgainst) {
   const put = <V,>(set: (f: (m: Map<string, V>) => Map<string, V>) => void, k: string, v: V) => set((m) => new Map(m).set(k, v))
   // (A file read alone answers into the reading it was asked in, not a later one — another tab's.)
   const gen = useRef(0)
+  // (What was folded and read alone is of these changes: let go when they are others, not as shown again from a tab behind.)
+  useEffectOnChange(() => {
+    setRead(null)
+    setFolded(new Map())
+    setAlone(new Map())
+  }, [sid, pane, against, again])
   useEffect(() => {
     gen.current++
     const ctl = new AbortController()
     setError('')
-    setRead(null)
-    setFolded(new Map())
-    setAlone(new Map())
     api<Changes>('GET', `/api/sessions/${sid}/git/changes?` + new URLSearchParams({ pane, against }).toString(), undefined, { signal: ctl.signal, timeoutMs: 25000 }).then(
       (c) => !ctl.signal.aborted && setRead(c),
       (e) => !ctl.signal.aborted && setError(failText(e)),

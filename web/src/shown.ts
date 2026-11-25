@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, type DependencyList } from 'react'
+import { createContext, useContext, useEffect, useLayoutEffect, useRef, type DependencyList } from 'react'
 
 // The agents' page keeps the tabs not in front drawn but hidden (React's
 // <Activity>: display: none on them, their portals' too). What is looked for
@@ -45,4 +45,15 @@ export function useEffectOnChange(fn: () => void, deps: DependencyList) {
     fn()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, deps)
+}
+
+// Whether the view is being sent to a tab behind (kept) rather than let go:
+// set by the agents' page on each kept tab's box, read as an effect is cleaned
+// up. Hidden, what was sent goes on to its end — an answer, a key, a file
+// going up — and is not stopped as for a view closed (plans/agent-tabs.md 4.4:
+// what was sent may finish). Elsewhere (no kept tabs) always false.
+export const KeptView = createContext<{ hidden: boolean } | null>(null)
+export function useHiddenNow(): () => boolean {
+  const box = useContext(KeptView)
+  return () => !!box?.hidden
 }

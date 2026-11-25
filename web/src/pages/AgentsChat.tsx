@@ -39,7 +39,7 @@ import { camesAfter, containedInMessage, isCommand, pairSent, sameMessage, squee
 import { viewRefusal } from '../terminal/sendView'
 import { agentKey, sessionWhich } from '../terminal/sessionName'
 import { pickKey as isPickKey } from '../terminal/pageKeys'
-import { firstShown, modalShown, useEffectOnChange, useShownAt } from '../shown'
+import { firstShown, KeptView, modalShown, useEffectOnChange, useShownAt } from '../shown'
 import { Rail, StatusBar, StatusItem, useWorkbench } from '../workbench'
 import { AgentTabBar, askPickInTab, isTabsKey, newTabId, OPEN_PICKER, readFront, readTabs, takePickInTab, writeFront, writeTabs, type AgentTab, type PickHow, type TabView } from './agentTabs'
 import { agentMark } from '../terminal/agentIcons'
@@ -671,7 +671,21 @@ export function AgentsChat({ bar, active = true, onHead }: { bar?: ReactNode; ac
   }, [active, unresolved, pickIsFront])
   // A new tab: the quick switcher, its pick opened in one (none shown, the page's list is there already).
   const pickList = useRef<HTMLDivElement>(null)
-  const drawn = useRef(new Map<string, { el: ReactNode; key: string; seen: number }>())
+  const drawn = useRef(new Map<string, { el: ReactNode; key: string; seen: number; box: { hidden: boolean } }>())
+  // (Let go for good: its effects cleaned up as for a view closed — what it sent stopped.)
+  const letGo = (id: string) => {
+    const d = drawn.current.get(id)
+    if (d) d.box.hidden = false
+    drawn.current.delete(id)
+  }
+  // (The page itself going — wider or narrower than 700, a sign-out —: each kept view let go with it, its layout
+  // cleanups before their effects', so these see it.)
+  useLayoutEffect(
+    () => () => {
+      for (const v of drawn.current.values()) v.box.hidden = false
+    },
+    [],
+  )
   const newTab = () => {
     if (!cur) {
       // (None shown: the page's list is the switcher — its first row focused (↑↓ and Return), its pick in this tab.)
@@ -1173,20 +1187,22 @@ export function AgentsChat({ bar, active = true, onHead }: { bar?: ReactNode; ac
   const drawnFront = !stack && front && cur ? (tabs.find((x) => x.key === cur.key)?.id ?? front) : null
   if (drawnFront) {
     const d = drawn.current.get(drawnFront)
-    if (d && d.key !== cur!.key + ' ' + cur!.s.id) drawn.current.delete(drawnFront) // (another agent in it now: that one's, anew)
-    drawn.current.set(drawnFront, { el: body, key: cur!.key + ' ' + cur!.s.id, seen: Date.now() })
+    const same = !!d && d.key === cur!.key + ' ' + cur!.s.id
+    if (d && !same) letGo(drawnFront) // (another agent in it now: that one's, anew)
+    drawn.current.set(drawnFront, { el: body, key: cur!.key + ' ' + cur!.s.id, seen: Date.now(), box: same ? d!.box : { hidden: false } })
   }
   for (const id of [...drawn.current.keys()]) {
     const x = tabs.find((y) => y.id === id)
     // (Closed, or of another agent now — as another window changed it —: let go.)
-    if (!x || (id !== drawnFront && !drawn.current.get(id)!.key.startsWith(x.key + ' '))) drawn.current.delete(id)
+    if (!x || (id !== drawnFront && !drawn.current.get(id)!.key.startsWith(x.key + ' '))) letGo(id)
   }
   if (drawn.current.size > DRAWN_MAX) {
     const blocked = (k?: string) => !!k && entries.find((e) => e.key === k)?.row?.status === 'blocked'
     const waitingOn = new Set(tabs.filter((x) => blocked(x.key) || blocked(x.split)).map((x) => x.id)) // (its agent or the one beside it)
     const old = [...drawn.current].filter(([id]) => id !== drawnFront && !waitingOn.has(id)).sort((a, b) => a[1].seen - b[1].seen)
-    for (const [id] of old.slice(0, drawn.current.size - DRAWN_MAX)) drawn.current.delete(id)
+    for (const [id] of old.slice(0, drawn.current.size - DRAWN_MAX)) letGo(id)
   }
+  for (const [id, v] of drawn.current) v.box.hidden = id !== drawnFront
 
   // (The workbench's rail and status bar: with the tabs, 760 and up.)
   const wbOn = wb && !!bar && !stack
@@ -1273,7 +1289,7 @@ export function AgentsChat({ bar, active = true, onHead }: { bar?: ReactNode; ac
           // (The tab in front shown as just made; the others as they were last, hidden: their effects — reading, timers,
           // a live terminal — stopped by React, their state and drawing kept, nothing made again as the list changes.)
           <Activity key={id} mode={id === drawnFront ? 'visible' : 'hidden'}>
-            {id === drawnFront ? body : v.el}
+            <KeptView.Provider value={v.box}>{id === drawnFront ? body : v.el}</KeptView.Provider>
           </Activity>
         ))}
         {!drawnFront && body}
