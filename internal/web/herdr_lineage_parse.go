@@ -679,6 +679,7 @@ func (e *lineageExtractor) classifyHerdrCommands(rawCmd string) []herdrCmdIntent
 	if cmd == "" || len(cmd) > 16384 || !strings.Contains(cmd, "herdr") {
 		return nil
 	}
+	whole := cmd // (heredoc bodies and all: the pane ids it names are never a creation's)
 	// Reject fallback `||`, and self-spoofed result types in the command text
 	// (heredoc bodies included: checked before they are cut out below).
 	if strings.Contains(cmd, "||") {
@@ -704,6 +705,13 @@ func (e *lineageExtractor) classifyHerdrCommands(rawCmd string) []herdrCmdIntent
 	stmts, ok := splitShellStatements(cmd)
 	if !ok || len(stmts) == 0 || len(stmts) > 32 {
 		return nil
+	}
+	// A loop's first statement as the shell runs it: without its `do` (else an
+	// `export HERDR_SOCKET_PATH=...` there was not seen by the checks below).
+	for i, st := range stmts {
+		if strings.HasPrefix(st, "do ") || strings.HasPrefix(st, "do\t") || strings.HasPrefix(st, "do\n") {
+			stmts[i] = strings.TrimSpace(st[3:])
+		}
 	}
 
 	// Reject entire script if any statement invokes a remote host or container.
@@ -732,7 +740,7 @@ func (e *lineageExtractor) classifyHerdrCommands(rawCmd string) []herdrCmdIntent
 	}
 
 	var cmdPanes map[string]bool
-	if matches := herdrPaneTokenRe.FindAllStringSubmatch(cmd, -1); len(matches) > 0 {
+	if matches := herdrPaneTokenRe.FindAllStringSubmatch(whole, -1); len(matches) > 0 {
 		cmdPanes = make(map[string]bool, len(matches))
 		for _, m := range matches {
 			cmdPanes[m[1]] = true
@@ -740,20 +748,37 @@ func (e *lineageExtractor) classifyHerdrCommands(rawCmd string) []herdrCmdIntent
 	}
 
 	var out []herdrCmdIntent
-	times := 1 // within `for x in a b c; do ... done` over literal words: once per word
+	// Loops: their counts, outermost first (see forLoopWords); a creation inside counts their product.
+	var loops []int
 	for _, st := range stmts {
-		if n, ok := forLoopWords(st); ok {
-			times = n
+		if n, isLoop, ok := forLoopWords(st); !ok {
+			return nil
+		} else if isLoop {
+			loops = append(loops, n)
 			continue
 		}
-		if st == "done" || strings.HasPrefix(st, "done ") || strings.HasPrefix(st, "done;") {
-			times = 1
+		switch w := firstWord(st); w {
+		case "while", "until", "select":
+			loops = append(loops, 0)
 			continue
-		}
-		if st == "do" {
+		case "done":
+			if st != "done" || len(loops) == 0 {
+				return nil // (a pipe or a redirection after it, or none open)
+			}
+			loops = loops[:len(loops)-1]
 			continue
+		case "do":
+			continue
+		case "continue", "break":
+			if len(loops) > 0 {
+				return nil
+			}
 		}
-		st = strings.TrimPrefix(st, "do ")
+		times := 1
+		for _, n := range loops {
+			times *= n
+		}
+		times = min(times, maxLoopWords*maxLoopWords)
 		// Unwrap simple variable capture: VAR=$(herdr ...) or export VAR=$(herdr ...)
 		candidates := []string{st}
 		if inner, captured := unwrapCommandSubAssign(st); captured {
@@ -769,102 +794,221 @@ func (e *lineageExtractor) classifyHerdrCommands(rawCmd string) []herdrCmdIntent
 			}
 		}
 	}
+	if len(loops) > 0 {
+		return nil // (a loop never closed)
+	}
 	return out
 }
 
-// A loop run as many times as it has literal words: `for x in a c` (as Claude
-// Code writes to open a tab per worktree: Chat 47, 11-25 — only the first of
-// two was found). Any other list ($(...), globs, $vars, more than
-// maxLoopWords) is not counted: the loop's commands are counted once, as before.
+// Loops (Chat 47, 11-25: `for x in a c; do herdr tab create ...; done` opened two
+// tabs; one was found). A creation inside `for v in w1 w2 ...` over literal words
+// counts once per word, nested loops multiplying; over any other list once, as
+// before; inside while/until/select loops not at all (they may run no times).
+// A script is not read where the loop could run its creation fewer times than
+// counted, or have its output replaced: `continue`/`break`, anything after a
+// `done` (a pipe, a redirection), unbalanced do/done, or a loop variable naming a
+// herdr setting (for HERDR_SOCKET_PATH in ...).
 const maxLoopWords = 8
 
-var forLoopRe = regexp.MustCompile(`^for\s+[A-Za-z_][A-Za-z0-9_]*\s+in\s+(.+)$`)
+var forLoopRe = regexp.MustCompile(`^for\s+([A-Za-z_][A-Za-z0-9_]*)\s+in(?:\s+(.*))?$`)
 var loopWordRe = regexp.MustCompile(`^[A-Za-z0-9._/:+-]+$`)
 
-func forLoopWords(stmt string) (int, bool) {
+// forLoopWords: for a `for v in ...` statement, how many times its body runs
+// as counted (see above), and false where the script is not to be read.
+func forLoopWords(stmt string) (n int, isLoop, ok bool) {
 	m := forLoopRe.FindStringSubmatch(strings.TrimSpace(stmt))
 	if m == nil {
-		return 0, false
+		return 0, false, true
 	}
-	words := strings.Fields(m[1])
-	if len(words) == 0 || len(words) > maxLoopWords {
-		return 1, true
+	if strings.HasPrefix(m[1], "HERDR") {
+		return 0, true, false
+	}
+	words := strings.Fields(m[2])
+	if len(words) > maxLoopWords {
+		return 1, true, true
 	}
 	for _, w := range words {
 		if !loopWordRe.MatchString(w) {
-			return 1, true
+			return 1, true, true
 		}
 	}
-	return len(words), true
+	return len(words), true, true
+}
+
+func firstWord(stmt string) string {
+	f := strings.Fields(stmt)
+	if len(f) == 0 {
+		return ""
+	}
+	return f[0]
 }
 
 // stripInertHeredocs cuts the bodies out of a script's heredocs (a file written
 // with cat > f <<'EOF', a python3 - <<'EOF' edit), so the herdr commands after
-// them are read (Chat 47, 11-25: a tab opened after two was never found).
-// Not where a body names herdr (it might run it, or print what it would say),
-// none is fed to a shell, a remote or herdr itself, each has its end line, and
-// an unquoted one (<<EOF, whose body the shell expands) runs nothing in it: no
-// ` or $(; else ok is false and the script is not read, as before.
-var heredocRe = regexp.MustCompile(`<<(-?)[ \t]*(['"]?)([A-Za-z_][A-Za-z0-9_]*)(['"]?)`)
+// them are read (Chat 47, 11-25: a tab opened after two was never found). The
+// script is scanned as the shell reads it — quotes, comments and escapes kept
+// apart, so a "<<" in a string or a comment is none — and is not read (ok
+// false) where:
+//   - a here-string (<<<) or a delimiter not a plain word (E"OF", $X) is used;
+//   - a body has no end line equal to its whole delimiter (<<-: tabs before it);
+//   - a body names herdr, or, unquoted (<<EOF, which the shell expands), runs
+//     anything (` or $();
+//   - the line it is on feeds a shell, a remote, herdr or the like, in any of its
+//     stages (cat <<'EOF' | sh), or goes on to the next line (| or \ at its end).
+//
+// (What a body may still do, run by python3 for one, is what a python3 -c may:
+// print a fake result. That is not new here; the checks on the output are.)
+var heredocDelimRe = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
 
-var heredocRunners = map[string]bool{"sh": true, "bash": true, "zsh": true, "dash": true, "ksh": true, "fish": true, "ssh": true, "docker": true, "kubectl": true, "podman": true, "herdr": true, "eval": true, "source": true, "xargs": true, "sudo": true, "su": true, "env": true, "exec": true}
+var heredocRunners = map[string]bool{"sh": true, "bash": true, "zsh": true, "dash": true, "ksh": true, "fish": true, "ssh": true, "docker": true, "kubectl": true, "podman": true, "herdr": true, "eval": true, "source": true, ".": true, "xargs": true, "sudo": true, "su": true, "env": true, "exec": true, "nohup": true, "timeout": true, "nice": true, "time": true, "watch": true, "parallel": true, "tmux": true, "screen": true}
+
+type pendingHeredoc struct {
+	delim  string
+	tabs   bool
+	quoted bool
+}
 
 func stripInertHeredocs(cmd string) (string, bool) {
-	lines := strings.Split(cmd, "\n")
-	var out []string
-	for i := 0; i < len(lines); i++ {
-		line := lines[i]
-		ms := heredocRe.FindAllStringSubmatchIndex(line, -1)
-		if ms == nil {
-			if strings.Contains(line, "<<") {
-				return "", false // (<<< or a form not known: not read)
+	// (A script of CRLF lines as the shell reads it: each line's CR, and its delimiter's, alike.)
+	cmd = strings.ReplaceAll(cmd, "\r\n", "\n")
+	if strings.Contains(cmd, "\r") {
+		return "", false
+	}
+	var out strings.Builder
+	var line strings.Builder // the current line as kept (operators cut out), for its stages' check
+	var pending []pendingHeredoc
+	var quote byte
+	escaped := false
+	wordStart := true
+	n := len(cmd)
+	for i := 0; i < n; i++ {
+		c := cmd[i]
+		switch {
+		case escaped:
+			escaped = false
+		case quote == '\'':
+			if c == '\'' {
+				quote = 0
 			}
-			out = append(out, line)
+		case quote == '"':
+			if c == '\\' {
+				escaped = true
+			} else if c == '"' {
+				quote = 0
+			}
+		case c == '\\':
+			escaped = true
+		case c == '\'' || c == '"':
+			quote = c
+		case c == '#' && wordStart:
+			// A comment: through the end of its line, kept as it is.
+			for i < n && cmd[i] != '\n' {
+				out.WriteByte(cmd[i])
+				line.WriteByte(cmd[i])
+				i++
+			}
+			i-- // (the newline, read next)
+			wordStart = false
+			continue
+		case c == '<' && i+1 < n && cmd[i+1] == '<':
+			if i+2 < n && cmd[i+2] == '<' {
+				return "", false // a here-string
+			}
+			j := i + 2
+			tabs := j < n && cmd[j] == '-'
+			if tabs {
+				j++
+			}
+			for j < n && (cmd[j] == ' ' || cmd[j] == '\t') {
+				j++
+			}
+			k := j
+			for k < n && !strings.ContainsRune(" \t\n;|&<>()", rune(cmd[k])) {
+				k++
+			}
+			word := cmd[j:k]
+			quoted := false
+			if len(word) >= 2 && (word[0] == '\'' || word[0] == '"') && word[len(word)-1] == word[0] {
+				word, quoted = word[1:len(word)-1], true
+			}
+			if !heredocDelimRe.MatchString(word) {
+				return "", false
+			}
+			pending = append(pending, pendingHeredoc{delim: word, tabs: tabs, quoted: quoted})
+			i = k - 1
+			wordStart = false
+			continue
+		case c == '\n' && len(pending) > 0:
+			if !heredocLineInert(line.String()) {
+				return "", false
+			}
+			out.WriteByte('\n')
+			line.Reset()
+			// The bodies, one after another, as the shell reads them.
+			rest := cmd[i+1:]
+			for _, h := range pending {
+				found := false
+				for len(rest) > 0 || !found {
+					if rest == "" {
+						return "", false
+					}
+					l, after, _ := strings.Cut(rest, "\n")
+					rest = after
+					cmpTo := l
+					if h.tabs {
+						cmpTo = strings.TrimLeft(l, "\t")
+					}
+					if cmpTo == h.delim {
+						found = true
+						break
+					}
+					if strings.Contains(l, "herdr") || (!h.quoted && (strings.Contains(l, "`") || strings.Contains(l, "$("))) {
+						return "", false
+					}
+				}
+			}
+			pending = nil
+			i = n - len(rest) - 1
+			wordStart = true
 			continue
 		}
-		// Who reads it: the first word of the pipeline stage the << is in.
-		for _, m := range ms {
-			stage := line[:m[0]]
-			if j := strings.LastIndexAny(stage, "|;&("); j >= 0 {
-				stage = stage[j+1:]
-			}
-			f := strings.Fields(stage)
-			for len(f) > 0 && simpleEnvAssignRe.MatchString(f[0]) {
-				f = f[1:]
-			}
-			if len(f) == 0 || heredocRunners[baseCmdName(f[0])] {
-				return "", false
-			}
+		out.WriteByte(c)
+		if c == '\n' {
+			line.Reset()
+		} else {
+			line.WriteByte(c)
 		}
-		out = append(out, heredocRe.ReplaceAllString(line, ""))
-		// The bodies, one after another, as the shell reads them.
-		for _, m := range ms {
-			tabs := line[m[2]:m[3]] == "-"
-			if line[m[4]:m[5]] != line[m[8]:m[9]] {
-				return "", false
-			}
-			end := line[m[6]:m[7]]
-			quoted := line[m[4]:m[5]] != ""
-			found := false
-			for i++; i < len(lines); i++ {
-				l := lines[i]
-				if tabs {
-					l = strings.TrimLeft(l, "\t")
-				}
-				if l == end {
-					found = true
-					break
-				}
-				if strings.Contains(lines[i], "herdr") || (!quoted && (strings.Contains(lines[i], "`") || strings.Contains(lines[i], "$("))) {
-					return "", false
-				}
-			}
-			if !found {
-				return "", false
-			}
+		wordStart = quote == 0 && !escaped && strings.ContainsRune(" \t\n;|&()", rune(c))
+	}
+	if quote != 0 || escaped {
+		return "", false
+	}
+	if len(pending) > 0 {
+		return "", false // (no body at all: the script ended on its operator's line)
+	}
+	return out.String(), true
+}
+
+// heredocLineInert: the line a heredoc is opened on (its operators cut out) feeds
+// none of its stages to a shell or the like, and does not go on to the next line.
+func heredocLineInert(line string) bool {
+	t := strings.TrimSpace(line)
+	if strings.HasSuffix(t, "|") || strings.HasSuffix(t, "&") || strings.HasSuffix(t, "\\") || strings.HasSuffix(t, "(") {
+		return false
+	}
+	for _, stage := range regexp.MustCompile(`\|\|?|&&?|;|\(|\)`).Split(t, -1) {
+		f := strings.Fields(stage)
+		for len(f) > 0 && simpleEnvAssignRe.MatchString(f[0]) {
+			f = f[1:]
+		}
+		if len(f) == 0 {
+			continue
+		}
+		if heredocRunners[baseCmdName(f[0])] || f[0] == "do" && len(f) > 1 && heredocRunners[baseCmdName(f[1])] {
+			return false
 		}
 	}
-	return strings.Join(out, "\n"), true
+	return true
 }
 
 func stmtHasHerdrListing(stmt string) bool {
