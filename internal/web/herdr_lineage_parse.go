@@ -679,12 +679,25 @@ func (e *lineageExtractor) classifyHerdrCommands(rawCmd string) []herdrCmdIntent
 	if cmd == "" || len(cmd) > 16384 || !strings.Contains(cmd, "herdr") {
 		return nil
 	}
-	// Reject heredocs, backticks, fallback `||`, and self-spoofed result types in the command text.
-	if strings.Contains(cmd, "<<") || strings.Contains(cmd, "`") || strings.Contains(cmd, "||") {
+	// Reject fallback `||`, and self-spoofed result types in the command text
+	// (heredoc bodies included: checked before they are cut out below).
+	if strings.Contains(cmd, "||") {
 		return nil
 	}
 	if strings.Contains(cmd, "workspace_created") || strings.Contains(cmd, "tab_created") ||
 		strings.Contains(cmd, "pane_info") || strings.Contains(cmd, "pane_split") {
+		return nil
+	}
+	// Heredocs: their bodies cut out, the rest read as before — only where no body
+	// names herdr and none is fed to a shell or a remote (see stripInertHeredocs).
+	if strings.Contains(cmd, "<<") {
+		var ok bool
+		if cmd, ok = stripInertHeredocs(cmd); !ok {
+			return nil
+		}
+	}
+	// Backticks: none, but within a quoted heredoc's body (cut out above: words there, run by nothing).
+	if strings.Contains(cmd, "`") {
 		return nil
 	}
 
@@ -727,7 +740,20 @@ func (e *lineageExtractor) classifyHerdrCommands(rawCmd string) []herdrCmdIntent
 	}
 
 	var out []herdrCmdIntent
+	times := 1 // within `for x in a b c; do ... done` over literal words: once per word
 	for _, st := range stmts {
+		if n, ok := forLoopWords(st); ok {
+			times = n
+			continue
+		}
+		if st == "done" || strings.HasPrefix(st, "done ") || strings.HasPrefix(st, "done;") {
+			times = 1
+			continue
+		}
+		if st == "do" {
+			continue
+		}
+		st = strings.TrimPrefix(st, "do ")
 		// Unwrap simple variable capture: VAR=$(herdr ...) or export VAR=$(herdr ...)
 		candidates := []string{st}
 		if inner, captured := unwrapCommandSubAssign(st); captured {
@@ -737,11 +763,108 @@ func (e *lineageExtractor) classifyHerdrCommands(rawCmd string) []herdrCmdIntent
 			if intent, ok := e.classifyPipeline(cand, envOverrides); ok {
 				intent.cmdPanes = cmdPanes
 				intent.hasListing = hasListing
-				out = append(out, intent)
+				for range times {
+					out = append(out, intent)
+				}
 			}
 		}
 	}
 	return out
+}
+
+// A loop run as many times as it has literal words: `for x in a c` (as Claude
+// Code writes to open a tab per worktree: Chat 47, 11-25 — only the first of
+// two was found). Any other list ($(...), globs, $vars, more than
+// maxLoopWords) is not counted: the loop's commands are counted once, as before.
+const maxLoopWords = 8
+
+var forLoopRe = regexp.MustCompile(`^for\s+[A-Za-z_][A-Za-z0-9_]*\s+in\s+(.+)$`)
+var loopWordRe = regexp.MustCompile(`^[A-Za-z0-9._/:+-]+$`)
+
+func forLoopWords(stmt string) (int, bool) {
+	m := forLoopRe.FindStringSubmatch(strings.TrimSpace(stmt))
+	if m == nil {
+		return 0, false
+	}
+	words := strings.Fields(m[1])
+	if len(words) == 0 || len(words) > maxLoopWords {
+		return 1, true
+	}
+	for _, w := range words {
+		if !loopWordRe.MatchString(w) {
+			return 1, true
+		}
+	}
+	return len(words), true
+}
+
+// stripInertHeredocs cuts the bodies out of a script's heredocs (a file written
+// with cat > f <<'EOF', a python3 - <<'EOF' edit), so the herdr commands after
+// them are read (Chat 47, 11-25: a tab opened after two was never found).
+// Not where a body names herdr (it might run it, or print what it would say),
+// none is fed to a shell, a remote or herdr itself, each has its end line, and
+// an unquoted one (<<EOF, whose body the shell expands) runs nothing in it: no
+// ` or $(; else ok is false and the script is not read, as before.
+var heredocRe = regexp.MustCompile(`<<(-?)[ \t]*(['"]?)([A-Za-z_][A-Za-z0-9_]*)(['"]?)`)
+
+var heredocRunners = map[string]bool{"sh": true, "bash": true, "zsh": true, "dash": true, "ksh": true, "fish": true, "ssh": true, "docker": true, "kubectl": true, "podman": true, "herdr": true, "eval": true, "source": true, "xargs": true, "sudo": true, "su": true, "env": true, "exec": true}
+
+func stripInertHeredocs(cmd string) (string, bool) {
+	lines := strings.Split(cmd, "\n")
+	var out []string
+	for i := 0; i < len(lines); i++ {
+		line := lines[i]
+		ms := heredocRe.FindAllStringSubmatchIndex(line, -1)
+		if ms == nil {
+			if strings.Contains(line, "<<") {
+				return "", false // (<<< or a form not known: not read)
+			}
+			out = append(out, line)
+			continue
+		}
+		// Who reads it: the first word of the pipeline stage the << is in.
+		for _, m := range ms {
+			stage := line[:m[0]]
+			if j := strings.LastIndexAny(stage, "|;&("); j >= 0 {
+				stage = stage[j+1:]
+			}
+			f := strings.Fields(stage)
+			for len(f) > 0 && simpleEnvAssignRe.MatchString(f[0]) {
+				f = f[1:]
+			}
+			if len(f) == 0 || heredocRunners[baseCmdName(f[0])] {
+				return "", false
+			}
+		}
+		out = append(out, heredocRe.ReplaceAllString(line, ""))
+		// The bodies, one after another, as the shell reads them.
+		for _, m := range ms {
+			tabs := line[m[2]:m[3]] == "-"
+			if line[m[4]:m[5]] != line[m[8]:m[9]] {
+				return "", false
+			}
+			end := line[m[6]:m[7]]
+			quoted := line[m[4]:m[5]] != ""
+			found := false
+			for i++; i < len(lines); i++ {
+				l := lines[i]
+				if tabs {
+					l = strings.TrimLeft(l, "\t")
+				}
+				if l == end {
+					found = true
+					break
+				}
+				if strings.Contains(lines[i], "herdr") || (!quoted && (strings.Contains(lines[i], "`") || strings.Contains(lines[i], "$("))) {
+					return "", false
+				}
+			}
+			if !found {
+				return "", false
+			}
+		}
+	}
+	return strings.Join(out, "\n"), true
 }
 
 func stmtHasHerdrListing(stmt string) bool {
