@@ -24,17 +24,22 @@ import { isDesktopSettings, openSettingsModal } from './pages/Settings'
 // colours: a terminal's scheme reaches them through --wb-* (terminal.css).
 
 const WB_QUERY = '(min-width: 760px)'
-export function useWorkbench(): boolean {
-  const [m, setM] = useState(() => window.matchMedia(WB_QUERY).matches)
+function useMedia(query: string): boolean {
+  const [m, setM] = useState(() => window.matchMedia(query).matches)
   useEffect(() => {
-    const mq = window.matchMedia(WB_QUERY)
+    const mq = window.matchMedia(query)
     const on = () => setM(mq.matches)
     on() // (shown again from a tab behind: the width may have changed meanwhile)
     mq.addEventListener('change', on)
     return () => mq.removeEventListener('change', on)
-  }, [])
+  }, [query])
   return m
 }
+export const useWorkbench = (): boolean => useMedia(WB_QUERY)
+// The pages laid out as a desktop app's (UI 12, 11-25): a toolbar, content from the left, tables — 900 wide and up,
+// a tablet turned too; a phone's and an upright tablet's as they were. (app.css: the same width, .page-desk.)
+const DESK_QUERY = '(min-width: 900px)'
+export const useDeskPages = (): boolean => useMedia(DESK_QUERY)
 
 export type RailKey = 'agents' | 'terminals' | 'hosts' | 'keys' | 'settings' | 'recordings' | 'users' | 'audit'
 

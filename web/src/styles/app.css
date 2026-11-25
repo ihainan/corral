@@ -1631,3 +1631,60 @@ details.adv > .form { margin-top: 16px; }
 .sm-profile-name { font-size: var(--fs-ui); line-height: var(--lh-ui); font-weight: 600; color: var(--fg); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sm-empty { margin: 0; padding: 12px 10px; font-size: var(--fs-sub); line-height: var(--lh-sub); color: var(--fg-3); }
 @media (pointer: coarse) { .key-file-btn { height: 36px; top: -8px; } }
+
+/* The pages as a desktop app's (UI 12, 11-25; workbench.tsx useDeskPages, the same 900): a 40px toolbar as the
+   conversation's bar — the page's name and count, its search, its main button at the right —, the content from the
+   left edge, not a centred column; lists as tables, a row 32 high (44 by touch), chosen and opened as a desktop's. */
+.page.page-desk { max-width: none; margin: 0; padding: 0 0 48px; gap: 0; --h-btn: 28px; }
+.desk-bar {
+  position: sticky; top: 0; z-index: 3; flex: none; display: flex; align-items: center; gap: 8px; height: 40px; box-sizing: border-box;
+  padding: 0 12px 0 16px; border-bottom: 1px solid var(--line); background: var(--bg);
+}
+.desk-bar h1 { font-size: var(--fs-ui); line-height: var(--lh-ui); font-weight: 600; }
+.desk-n { color: var(--fg-3); font-size: var(--fs-sub); line-height: var(--lh-sub); font-variant-numeric: tabular-nums; }
+.desk-search.page-search { flex: 0 1 240px; height: 28px; padding: 0 8px; gap: 6px; border-color: var(--line); border-radius: var(--r-sm); background: var(--bg-subtle); }
+.desk-search.page-search input { font-size: var(--fs-sub); line-height: var(--lh-sub); }
+.desk-btn { padding: 0 10px; border-radius: var(--r-sm); font-size: var(--fs-sub); line-height: var(--lh-sub); }
+/* (The running sessions: a strip under the bar, one pill each; none, no strip.) */
+.desk-strip { display: flex; align-items: center; gap: 12px; padding: 8px 16px; border-bottom: 1px solid var(--line); background: var(--bg-subtle); min-width: 0; }
+.desk-strip-label { flex: none; font-size: var(--fs-note); line-height: var(--lh-note); font-weight: 600; color: var(--fg-2); }
+.desk-strip-list { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 8px; min-width: 0; }
+.live-row.is-pill { border-color: var(--line); border-radius: var(--r); background: var(--bg); max-width: 360px; }
+.live-row.is-pill .live-link { border-radius: var(--r); }
+.live-row.is-pill .live-info { flex-direction: row; align-items: center; gap: 10px; padding: 4px 32px 4px 10px; }
+.live-row.is-pill .live-title { gap: 8px; flex: 0 1 auto; }
+.live-row.is-pill .live-mark { display: none; }
+.live-row.is-pill .live-which { font-size: var(--fs-sub); line-height: var(--lh-sub); }
+.live-row.is-pill .live-host { font-size: var(--fs-note); line-height: var(--lh-note); }
+.live-row.is-pill .live-sub { -webkit-line-clamp: unset; flex: 0 1 auto; }
+.live-row.is-pill .live-close { top: 2px; right: 2px; width: 28px; height: 28px; }
+.desk-body { display: flex; flex-direction: column; gap: 16px; padding: 16px; }
+.desk-body:empty { display: none; }
+/* (A table filling the width, the columns keeping the time in the name's line of sight: UI 12.) */
+.desk-table { width: 100%; border-collapse: collapse; table-layout: fixed; font-size: var(--fs-sub); line-height: var(--lh-sub); }
+.desk-table th {
+  position: sticky; top: 40px; z-index: 2; text-align: left; font-weight: 500; font-size: var(--fs-note); line-height: var(--lh-note);
+  color: var(--fg-3); padding: 6px 12px; border-bottom: 1px solid var(--line); background: var(--bg); white-space: nowrap;
+}
+.desk-table td { height: 32px; padding: 0 12px; border-bottom: 1px solid var(--line); white-space: nowrap; overflow: hidden; color: var(--fg); }
+@media (pointer: coarse) { .desk-table td { height: 44px; } }
+.desk-table th:first-child, .desk-table td:first-child { padding-left: 16px; }
+.desk-table tbody tr { cursor: default; }
+.desk-table tbody tr:hover td { background: var(--bg-hover); }
+.desk-table tbody tr.is-sel td { background: var(--bg-active); }
+.desk-table tbody tr:focus { outline: none; }
+.desk-table tbody tr:focus-visible td { background: var(--accent-soft); box-shadow: inset 0 1px 0 var(--accent), inset 0 -1px 0 var(--accent); }
+.desk-name { display: flex; align-items: center; gap: 8px; min-width: 0; font-weight: 500; }
+.desk-name .host-mark { width: 20px; height: 20px; border-radius: var(--r-xs, 4px); font-size: var(--fs-note); line-height: var(--lh-note); letter-spacing: 0; }
+.desk-ellipsis { display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.desk-mono { font-family: var(--font-mono); color: var(--fg-2); }
+.desk-dim { color: var(--fg-3); }
+.desk-sort { display: inline-flex; align-items: center; gap: 4px; padding: 0; border: 0; background: none; color: inherit; font: inherit; cursor: pointer; }
+.desk-sort:hover, .desk-sort[aria-pressed='true'] { color: var(--fg); }
+.desk-table .desk-col-name { width: 28%; }
+.desk-table .desk-col-state { width: 22%; }
+.desk-table .desk-col-recent { width: 120px; }
+.desk-table .desk-col-menu { width: 44px; padding: 0 8px; text-align: right; }
+.desk-table .desk-col-menu .icon-btn { width: 28px; height: 28px; opacity: 0; }
+.desk-table tr:hover .desk-col-menu .icon-btn, .desk-table tr.is-sel .desk-col-menu .icon-btn, .desk-table .desk-col-menu .icon-btn[aria-expanded='true'] { opacity: 1; }
+@media (hover: none) { .desk-table .desk-col-menu .icon-btn { opacity: 1; } }

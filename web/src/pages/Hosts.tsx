@@ -11,6 +11,7 @@ import { useCode } from '../terminal/CodeDialog'
 import { noteSessions, sessionAgents, waitingAgents } from '../terminal/agents'
 import { sessionWhich } from '../terminal/sessionName'
 import { local } from '../storage'
+import { useDeskPages } from '../workbench'
 
 const HOST_ORDER = 'corral.hostOrder'
 const HOST_SEARCH_FROM = 6 // (hosts: more than this, and a search shows)
@@ -148,6 +149,15 @@ export function HostsPage() {
   // search or a sort, the person's own.
   const pageEl = useRef<HTMLElement>(null)
   useFlip(pageEl, needle + '|' + order)
+  const desk = useDeskPages()
+  const [sel, setSel] = useState<number | null>(null)
+  const hostMenu = (h: Host) => [
+    { label: t('common.edit'), icon: <Pencil size={16} />, href: `/hosts/${h.id}/edit`, onSelect: () => navigate(`/hosts/${h.id}/edit`) },
+    boot.code && h.auth !== 'ask' ? { label: t('code.open'), icon: <Code2 size={16} />, onSelect: () => code.open(h.id, h.name) } : null,
+    boot.code && code.running[h.id] ? { label: t('code.stop'), icon: <CircleStop size={16} />, onSelect: () => code.stop(h.id) } : null,
+    { label: t('host.delete'), icon: <Trash2 size={16} />, danger: true, separator: true, onSelect: () => deleteHost(h) },
+  ]
+  const hostAddr = (h: Host) => `${h.username}@${h.address}${h.port !== 22 ? ':' + h.port : ''}${h.jump_host_id ? ' · ' + t('host.via', { name: hosts?.find((x) => x.id === h.jump_host_id)?.name ?? '?' }) : ''}`
   // Others' sessions this user may watch: under the running ones, not past
   // all the hosts (pages-1105 2.6) — and shown with no host of one's own too.
   const sharedSection = (
@@ -168,6 +178,171 @@ export function HostsPage() {
           </ul>
         </section>
   )
+  // A desktop's (UI 12): a toolbar — the page's name and count, the search, adding one; the running sessions a strip
+  // under it; the hosts a table, a row chosen by a click or ↑↓, opened by a double click or Return, its menu at its
+  // ⋯ or by a right click.
+  if (desk) {
+    const at = shownHosts.findIndex((h) => h.id === sel)
+    const rowEl = (id: number) => pageEl.current?.querySelector<HTMLElement>(`tr[data-host="${id}"]`)
+    const go = (i: number) => {
+      const h = shownHosts[Math.max(0, Math.min(shownHosts.length - 1, i))]
+      if (!h) return
+      setSel(h.id)
+      rowEl(h.id)?.focus()
+    }
+    return (
+      <main className="page page-desk" ref={pageEl}>
+        <div className="desk-bar">
+          <h1>{t('hosts.title')}</h1>
+          {hosts && hosts.length > 0 && <span className="desk-n">{hosts.length}</span>}
+          <div className="spacer" />
+          {sessFailed && (
+            <button className="link-btn quiet-note" onClick={refreshSessions}>{t('hosts.sessionsStale')}</button>
+          )}
+          {hosts && hosts.length > 0 && (
+            <label className="page-search desk-search">
+              <Search size={15} aria-hidden="true" />
+              <input type="search" value={q} onChange={(e) => setQ(e.target.value)} placeholder={t('hosts.search')} aria-label={t('hosts.searchLong')} />
+            </label>
+          )}
+          {!empty && (
+            <a className="btn desk-btn" href="/hosts/new" onClick={linkHandler('/hosts/new')}>
+              <Plus size={15} />
+              {t('hosts.add')}
+            </a>
+          )}
+        </div>
+        {running.length > 0 && (
+          <section className="desk-strip" aria-labelledby="live-title">
+            <h2 id="live-title" className="desk-strip-label">{t('hosts.running')}</h2>
+            <ul className="desk-strip-list">
+              {running.map((s) => (
+                <LiveCard key={s.id} s={s} all={running} stale={sessFailed} hue={hues.get(s.host_id)} onClose={(label) => closeSession(s, label)} pill />
+              ))}
+            </ul>
+          </section>
+        )}
+        <div className="desk-body">
+          {failed && <LoadError onRetry={load} text={t('hosts.loadFailed')} />}
+          {hosts === null && !failed && <p className="loading">{t('common.loading')}</p>}
+          {(shared.length > 0 || sharedFailed) && sharedSection}
+          {empty && (
+            <EmptyState
+              icon={<Server size={20} strokeWidth={1.75} />}
+              title={t('hosts.empty.title')}
+              body={t('hosts.empty.body')}
+              action={
+                <a className="btn btn-primary" href="/hosts/new" onClick={linkHandler('/hosts/new')}>
+                  <Plus size={16} />
+                  {t('hosts.add')}
+                </a>
+              }
+            />
+          )}
+          {hosts && hosts.length > 0 && shownHosts.length === 0 && (
+            <p className="page-none">
+              {t('hosts.noMatch')}{' '}
+              <button type="button" className="link-btn" onClick={() => setQ('')}>{t('common.clearSearch')}</button>
+            </p>
+          )}
+        </div>
+        {shownHosts.length > 0 && (
+          <table className="desk-table" aria-label={t('hosts.all')}>
+            <thead>
+              <tr>
+                {(['name', 'addr', 'state', 'recent'] as const).map((c) => {
+                  const sortable = c === 'name' || c === 'recent'
+                  const label = t(c === 'name' ? 'hosts.col.name' : c === 'addr' ? 'hosts.col.addr' : c === 'state' ? 'hosts.col.state' : 'hosts.col.recent')
+                  return (
+                    <th key={c} className={'desk-col-' + c} aria-sort={sortable && order === c ? (c === 'recent' ? 'descending' : 'ascending') : undefined}>
+                      {sortable ? (
+                        <button type="button" className="desk-sort" aria-pressed={order === c} title={t(c === 'name' ? 'hosts.orderName' : 'hosts.orderRecent')} onClick={() => (setOrder(c), local.set(HOST_ORDER, c))}>
+                          {label}
+                          {order === c && <ChevronDown size={13} aria-hidden="true" />}
+                        </button>
+                      ) : (
+                        label
+                      )}
+                    </th>
+                  )
+                })}
+                <th className="desk-col-menu"><span className="sr-only">{t('common.more')}</span></th>
+              </tr>
+            </thead>
+            <tbody
+              onKeyDown={(e) => {
+                if (e.target !== e.currentTarget && (e.target as HTMLElement).tagName !== 'TR') return
+                if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+                  e.preventDefault()
+                  go(at < 0 ? 0 : at + (e.key === 'ArrowDown' ? 1 : -1))
+                } else if (e.key === 'Home' || e.key === 'End') {
+                  e.preventDefault()
+                  go(e.key === 'Home' ? 0 : shownHosts.length - 1)
+                } else if (e.key === 'Enter' && at >= 0) {
+                  e.preventDefault()
+                  void connect(shownHosts[at])
+                }
+              }}
+            >
+              {shownHosts.map((h, i) => {
+                const st = hostState(h.id)
+                const on = h.id === sel
+                return (
+                  <tr
+                    key={h.id}
+                    data-host={h.id}
+                    className={on ? 'is-sel' : undefined}
+                    aria-selected={on}
+                    tabIndex={on || (at < 0 && i === 0) ? 0 : -1}
+                    title={t('hosts.rowHint')}
+                    onClick={() => setSel(h.id)}
+                    onFocus={() => setSel(h.id)}
+                    onDoubleClick={() => busyHost !== h.id && void connect(h)}
+                    onContextMenu={(e) => {
+                      e.preventDefault()
+                      setSel(h.id)
+                      e.currentTarget.querySelector<HTMLElement>('.desk-col-menu .icon-btn')?.click()
+                    }}
+                  >
+                    <td className="desk-col-name">
+                      <span className="desk-name">
+                        <HostMark name={h.name} hue={hues.get(h.id)} />
+                        <span className="desk-ellipsis">{h.name}</span>
+                      </span>
+                    </td>
+                    <td className="desk-col-addr desk-mono"><span className="desk-ellipsis">{hostAddr(h)}</span></td>
+                    <td className="desk-col-state">
+                      {st && (
+                        <span className={'host-card-state ' + (st.wait ? 'is-wait' : 'is-run')}>
+                          <span className={'dot ' + (st.wait ? 'warn' : 'ok')} aria-hidden="true" />
+                          {st.text}
+                        </span>
+                      )}
+                    </td>
+                    <td className="desk-col-recent desk-dim">{busyHost === h.id ? t('hosts.connecting') : h.last_connected_at ? relTime(h.last_connected_at) : ''}</td>
+                    <td className="desk-col-menu" onDoubleClick={(e) => e.stopPropagation()}>
+                      <Menu
+                        label={h.name}
+                        button={(open, toggle) => (
+                          <button className="icon-btn" tabIndex={-1} aria-label={`${t('common.more')}：${h.name}`} aria-expanded={open} onClick={toggle}>
+                            <MoreHorizontal size={16} />
+                          </button>
+                        )}
+                        items={() => hostMenu(h)}
+                      />
+                    </td>
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
+        )}
+        {confirm}
+        {dialogs}
+        {code.dialog}
+      </main>
+    )
+  }
   return (
     <main className="page" ref={pageEl}>
       <div className="page-head">
@@ -299,12 +474,7 @@ export function HostsPage() {
                           <MoreHorizontal size={18} />
                         </button>
                       )}
-                      items={() => [
-                        { label: t('common.edit'), icon: <Pencil size={16} />, href: `/hosts/${h.id}/edit`, onSelect: () => navigate(`/hosts/${h.id}/edit`) },
-                        boot.code && h.auth !== 'ask' ? { label: t('code.open'), icon: <Code2 size={16} />, onSelect: () => code.open(h.id, h.name) } : null,
-                        boot.code && code.running[h.id] ? { label: t('code.stop'), icon: <CircleStop size={16} />, onSelect: () => code.stop(h.id) } : null,
-                        { label: t('host.delete'), icon: <Trash2 size={16} />, danger: true, separator: true, onSelect: () => deleteHost(h) },
-                      ]}
+                      items={() => hostMenu(h)}
                     />
                   </div>
                 </li>
@@ -352,7 +522,7 @@ function HostMark({ name, hue }: { name: string; hue: number | undefined }) {
 // 1.4); herdr agents waiting for an answer said first, in their colour. Their
 // state when herdr was lost since, or the list could not be read just now
 // (stale), is not told as now: it is said to be unknown (1.2).
-function LiveCard({ s, all, stale, hue, onClose }: { s: SessionInfo; all: SessionInfo[]; stale: boolean; hue: number | undefined; onClose: (label: string) => void }) {
+function LiveCard({ s, all, stale, hue, onClose, pill }: { s: SessionInfo; all: SessionInfo[]; stale: boolean; hue: number | undefined; onClose: (label: string) => void; pill?: boolean }) {
   const which = sessionWhich(s, all)
   const ag = sessionAgents(s)
   const unknown = !!ag && (ag.lost || stale)
@@ -367,7 +537,7 @@ function LiveCard({ s, all, stale, hue, onClose }: { s: SessionInfo; all: Sessio
   const label = `${which}${s.title ? ' · ' + s.title : ''}`
   const dot = unknown ? 'unknown' : waiting > 0 ? 'warn' : 'ok'
   return (
-    <li className="live-row" data-flip={'l:' + s.id} data-flip-in="">
+    <li className={'live-row' + (pill ? ' is-pill' : '')} data-flip={'l:' + s.id} data-flip-in="">
       <a className="live-link" href={'/t/' + s.id} onClick={linkHandler('/t/' + s.id)} aria-label={`${s.host_name}：${label}`} aria-describedby={'ld-' + s.id} title={s.title || undefined}>
         <span className="live-info">
           {/* (A session, not a host: a terminal's mark, the session named first, its
