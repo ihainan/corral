@@ -1,8 +1,10 @@
 import { useEffect, useRef, useState, type DragEvent, type FormEvent } from 'react'
-import { Check, ChevronRight, Copy, FileUp, Import, KeyRound, MoreHorizontal, Plus, Trash2 } from 'lucide-react'
-import { api, ApiError, errorText, type KeyCred } from '../api'
+import { Check, ChevronRight, Copy, FileUp, Import, KeyRound, MoreHorizontal, Plus, Trash2, X } from 'lucide-react'
+import { api, ApiError, errorText, type Host, type KeyCred } from '../api'
 import { relTime, t } from '../i18n'
 import { Confirm, CopyButton, Dialog, EmptyState, Field, LoadError, Menu, copyText } from '../components/ui'
+import { useDeskPages } from '../workbench'
+import { linkHandler } from '../router'
 
 // "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5…Jk0q4"
 function shortKey(k: string) {
@@ -29,6 +31,213 @@ export function KeysPage() {
 
   const generate = () => setDialog(<GenerateDialog onClose={() => setDialog(null)} onDone={() => load()} />)
   const importKey = () => setDialog(<ImportDialog onClose={() => setDialog(null)} onDone={load} />)
+  const keyMenu = (k: KeyCred) => [
+    {
+      label: t('common.delete'),
+      icon: <Trash2 size={16} />,
+      danger: true,
+      onSelect: () =>
+        setDialog(
+          <Confirm
+            title={t('common.delete')}
+            body={t('keys.deleteConfirm', { name: k.name })}
+            confirm={t('common.delete')}
+            danger
+            onClose={() => setDialog(null)}
+            onConfirm={async () => {
+              await api('DELETE', '/api/credentials/' + k.id)
+              load()
+            }}
+          />,
+        ),
+    },
+  ]
+
+  // A desktop's (UI 12): a toolbar, the keys a table — its fingerprint as ssh-keygen -l shows it, and how many of
+  // one's hosts sign in with it (read from the hosts: none said while they are not read) —; the one chosen (a click,
+  // ↑↓) beside it, whole, with those hosts.
+  const desk = useDeskPages()
+  const [hosts, setHosts] = useState<Host[] | null>(null)
+  const [sel, setSel] = useState<number | null>(null)
+  const pageEl = useRef<HTMLElement>(null)
+  useEffect(() => {
+    if (desk && keys) api<Host[]>('GET', '/api/hosts').then(setHosts, () => {})
+  }, [desk, keys])
+  if (desk) {
+    const list = keys ?? []
+    const at = list.findIndex((k) => k.id === sel)
+    const chosen = at >= 0 ? list[at] : null
+    const usedBy = (id: number) => (hosts ?? []).filter((h) => h.auth === 'key' && h.credential_id === id)
+    const go = (i: number) => {
+      const k = list[Math.max(0, Math.min(list.length - 1, i))]
+      if (!k) return
+      setSel(k.id)
+      pageEl.current?.querySelector<HTMLElement>(`tr[data-key="${k.id}"]`)?.focus()
+    }
+    return (
+      <main className="page page-desk" ref={pageEl}>
+        <div className="desk-bar">
+          <h1>{t('keys.title')}</h1>
+          {list.length > 0 && <span className="desk-n">{list.length}</span>}
+          <div className="spacer" />
+          {list.length > 0 && (
+            <>
+              <button className="btn desk-btn" onClick={importKey}>
+                <Import size={15} />
+                {t('keys.import')}
+              </button>
+              <button className="btn desk-btn" onClick={generate}>
+                <Plus size={15} />
+                {t('keys.generate')}
+              </button>
+            </>
+          )}
+        </div>
+        <div className="desk-body">
+          {failed && <LoadError onRetry={load} />}
+          {keys === null && !failed && <p className="loading">{t('common.loading')}</p>}
+          {keys && keys.length === 0 && (
+            <EmptyState
+              icon={<KeyRound size={20} strokeWidth={1.75} />}
+              title={t('keys.empty')}
+              body={t('keys.emptyBody')}
+              action={
+                <div className="btn-row">
+                  <button className="btn btn-primary" onClick={generate}>
+                    <Plus size={16} />
+                    {t('keys.generate')}
+                  </button>
+                  <button className="btn" onClick={importKey}>
+                    <Import size={16} />
+                    {t('keys.import')}
+                  </button>
+                </div>
+              }
+            />
+          )}
+        </div>
+        {list.length > 0 && (
+          <div className="desk-split">
+            <div className="desk-split-main">
+              <table className="desk-table desk-keys" aria-label={t('keys.title')}>
+                <thead>
+                  <tr>
+                    <th className="desk-col-name">{t('keys.col.name')}</th>
+                    <th>{t('keys.col.fingerprint')}</th>
+                    <th className="desk-col-when">{t('keys.col.created')}</th>
+                    <th className="desk-col-count">{t('keys.col.hosts')}</th>
+                    <th className="desk-col-menu"><span className="sr-only">{t('common.more')}</span></th>
+                  </tr>
+                </thead>
+                <tbody
+                  onKeyDown={(e) => {
+                    if ((e.target as HTMLElement).tagName !== 'TR') return
+                    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+                      e.preventDefault()
+                      go(at < 0 ? 0 : at + (e.key === 'ArrowDown' ? 1 : -1))
+                    } else if (e.key === 'Home' || e.key === 'End') {
+                      e.preventDefault()
+                      go(e.key === 'Home' ? 0 : list.length - 1)
+                    } else if (e.key === 'Escape' && sel !== null) {
+                      e.preventDefault()
+                      setSel(null)
+                    }
+                  }}
+                >
+                  {list.map((k, i) => {
+                    const on = k.id === sel
+                    return (
+                      <tr
+                        key={k.id}
+                        data-key={k.id}
+                        className={on ? 'is-sel' : undefined}
+                        aria-selected={on}
+                        tabIndex={on || (at < 0 && i === 0) ? 0 : -1}
+                        onClick={() => setSel(k.id)}
+                        onFocus={() => setSel(k.id)}
+                        onContextMenu={(e) => {
+                          e.preventDefault()
+                          setSel(k.id)
+                          e.currentTarget.querySelector<HTMLElement>('.desk-col-menu .icon-btn')?.click()
+                        }}
+                      >
+                        <td className="desk-col-name">
+                          <span className="desk-name">
+                            <KeyRound className="desk-icon" size={15} strokeWidth={1.75} aria-hidden="true" />
+                            <span className="desk-ellipsis">{k.name}</span>
+                          </span>
+                        </td>
+                        <td className="desk-mono desk-dim"><span className="desk-ellipsis" title={k.fingerprint || k.public_key}>{k.fingerprint || shortKey(k.public_key)}</span></td>
+                        <td className="desk-dim" title={new Date(k.created_at * 1000).toLocaleString()}>{relTime(k.created_at)}</td>
+                        <td className="tnum desk-dim">{hosts ? usedBy(k.id).length : ''}</td>
+                        <td className="desk-col-menu" onClick={(e) => e.stopPropagation()}>
+                          <Menu
+                            label={k.name}
+                            button={(o, toggle) => (
+                              <button className="icon-btn" tabIndex={-1} aria-label={`${t('common.more')}：${k.name}`} aria-expanded={o} onClick={toggle}>
+                                <MoreHorizontal size={16} />
+                              </button>
+                            )}
+                            items={() => keyMenu(k)}
+                          />
+                        </td>
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
+            </div>
+            {chosen && (
+              <aside className="desk-aside" aria-label={chosen.name}>
+                <div className="desk-aside-head">
+                  <h2>{chosen.name}</h2>
+                  <button type="button" className="icon-btn" onClick={() => setSel(null)} aria-label={t('common.close')} title={t('common.close')}>
+                    <X size={16} />
+                  </button>
+                </div>
+                <dl className="desk-aside-list">
+                  <div>
+                    <dt>{t('keys.col.fingerprint')}</dt>
+                    <dd className="desk-mono">{chosen.fingerprint || '—'}</dd>
+                  </div>
+                  <div>
+                    <dt>{t('keys.publicKey')}</dt>
+                    <dd>
+                      <div className="pubkey"><code>{chosen.public_key}</code></div>
+                      <CopyButton text={chosen.public_key} label={t('keys.copyPublic')} />
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>{t('keys.col.created')}</dt>
+                    <dd>{new Date(chosen.created_at * 1000).toLocaleString()}</dd>
+                  </div>
+                  <div>
+                    <dt>{t('keys.usedBy')}</dt>
+                    <dd>
+                      {hosts === null ? (
+                        '…'
+                      ) : usedBy(chosen.id).length === 0 ? (
+                        t('keys.usedByNone')
+                      ) : (
+                        <ul className="desk-aside-links">
+                          {usedBy(chosen.id).map((h) => (
+                            <li key={h.id}>
+                              <a href={`/hosts/${h.id}/edit`} onClick={linkHandler(`/hosts/${h.id}/edit`)}>{h.name}</a>
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                    </dd>
+                  </div>
+                </dl>
+              </aside>
+            )}
+          </div>
+        )}
+        {dialog}
+      </main>
+    )
+  }
 
   return (
     <main className="page">
@@ -94,27 +303,7 @@ export function KeysPage() {
                         <MoreHorizontal size={18} />
                       </button>
                     )}
-                    items={() => [
-                      {
-                        label: t('common.delete'),
-                        icon: <Trash2 size={16} />,
-                        danger: true,
-                        onSelect: () =>
-                          setDialog(
-                            <Confirm
-                              title={t('common.delete')}
-                              body={t('keys.deleteConfirm', { name: k.name })}
-                              confirm={t('common.delete')}
-                              danger
-                              onClose={() => setDialog(null)}
-                              onConfirm={async () => {
-                                await api('DELETE', '/api/credentials/' + k.id)
-                                load()
-                              }}
-                            />,
-                          ),
-                      },
-                    ]}
+                    items={() => keyMenu(k)}
                   />
                 </div>
               </div>

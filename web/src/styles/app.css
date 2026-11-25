@@ -1677,8 +1677,8 @@ details.adv > .form { margin-top: 16px; }
 .desk-name { display: flex; align-items: center; gap: 8px; min-width: 0; font-weight: 500; }
 .desk-name .host-mark { width: 20px; height: 20px; border-radius: var(--r-xs, 4px); font-size: var(--fs-note); line-height: var(--lh-note); letter-spacing: 0; }
 .desk-ellipsis { display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.desk-mono { font-family: var(--font-mono); color: var(--fg-2); }
-.desk-dim { color: var(--fg-3); }
+.desk-mono, .desk-table td.desk-mono { font-family: var(--font-mono); color: var(--fg-2); }
+.desk-dim, .desk-table td.desk-dim { color: var(--fg-3); }
 .desk-sort { display: inline-flex; align-items: center; gap: 4px; padding: 0; border: 0; background: none; color: inherit; font: inherit; cursor: pointer; }
 .desk-sort:hover, .desk-sort[aria-pressed='true'] { color: var(--fg); }
 .desk-table .desk-col-name { width: 28%; }
@@ -1733,3 +1733,23 @@ details.adv > .form { margin-top: 16px; }
   .sm-body .section + .section { padding-top: 16px; border-top: 1px solid var(--line); }
   .sm-body .settings-group .sm-card-foot { margin-top: 8px; border: 1px solid var(--line); border-radius: var(--r); }
 }
+/* Keys, recordings and users as tables too (UI 12, fourth batch). */
+.desk-table .desk-col-when { width: 140px; }
+.desk-table .desk-col-count { width: 96px; }
+.desk-icon { flex: none; color: var(--fg-3); }
+.desk-aside-list .pubkey { margin: 4px 0 8px; }
+.desk-aside-list .pubkey code { white-space: pre-wrap; word-break: break-all; }
+.desk-aside-links { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.desk-aside-links a { color: var(--accent); text-decoration: none; }
+.desk-aside-links a:hover { text-decoration: underline; }
+.desk-sub { flex: none; font-size: var(--fs-note); line-height: var(--lh-note); font-weight: 400; }
+.desk-lead { max-width: 80ch; font-size: var(--fs-sub); line-height: var(--lh-sub); color: var(--fg-3); }
+.desk-recs .desk-col-time { width: 96px; }
+.desk-recs .desk-col-len { width: 120px; }
+.desk-recs .desk-col-size { width: 120px; }
+.desk-bar > .icon-btn { width: 28px; height: 28px; }
+.desk-users .desk-col-user { width: 20%; }
+.desk-users .desk-col-role { width: 96px; }
+.desk-users .desk-col-sessions { width: 80px; }
+.desk-users .desk-col-created { width: 140px; }
+.desk-users .desk-col-state { width: 20%; }

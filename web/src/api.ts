@@ -62,6 +62,7 @@ export interface KeyCred {
   name: string
   kind: 'private_key'
   public_key: string
+  fingerprint: string // SHA256:…, as ssh-keygen -l shows it ('' for one not parsed)
   created_at: number
 }
 

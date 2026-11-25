@@ -56,6 +56,242 @@ export function AdminUsersPage() {
     load()
   }
 
+  const userMenu = (u: AdminUser) => [
+    // One's own role and account are not one's own to take
+    // away here: off, saying why (the server would allow it —
+    // ux1101 PG-08). Another's role, once confirmed.
+    u.id === me?.id
+      ? { label: u.role === 'admin' ? t('admin.makeMember') : t('admin.makeAdmin'), icon: <Shield size={16} />, disabled: true, hint: t('admin.selfRoleHint') }
+      : {
+          label: u.role === 'admin' ? t('admin.makeMember') : t('admin.makeAdmin'),
+          icon: <Shield size={16} />,
+          onSelect: () =>
+            setDialog(
+              <Confirm
+                title={u.role === 'admin' ? t('admin.makeMember') : t('admin.makeAdmin')}
+                body={t(u.role === 'admin' ? 'admin.roleToMemberBody' : 'admin.roleToAdminBody', { name: u.display_name || u.username })}
+                confirm={u.role === 'admin' ? t('admin.makeMember') : t('admin.makeAdmin')}
+                onClose={() => setDialog(null)}
+                onConfirm={async () => {
+                  await api('PUT', '/api/admin/users/' + u.id, { role: u.role === 'admin' ? 'member' : 'admin' })
+                  load()
+                }}
+              />,
+            ),
+        },
+    {
+      label: t('admin.resetPassword'),
+      icon: <KeySquare size={16} />,
+      onSelect: () => setDialog(<ResetDialog user={u} onClose={() => setDialog(null)} onDone={load} />),
+    },
+    u.totp
+      ? {
+          label: t('admin.resetTwoStep'),
+          icon: <Smartphone size={16} />,
+          onSelect: () =>
+            setDialog(
+              <Confirm
+                title={t('admin.resetTwoStep')}
+                body={t('admin.resetTwoStepBody', { name: u.display_name || u.username })}
+                confirm={t('admin.resetTwoStep')}
+                onClose={() => setDialog(null)}
+                onConfirm={async () => {
+                  await api('POST', '/api/admin/users/' + u.id + '/totp/reset')
+                  load()
+                }}
+              />,
+            ),
+        }
+      : null,
+    u.sso?.length
+      ? u.has_password && (boot?.local_login !== 'off' && (boot?.local_login !== 'admins' || u.role === 'admin'))
+        ? {
+            label: t('admin.ssoUnlink'),
+            icon: <Unlink size={16} />,
+            onSelect: () =>
+              setDialog(
+                <Confirm
+                  title={t('admin.ssoUnlink')}
+                  body={t('admin.ssoUnlinkBody', { name: u.display_name || u.username })}
+                  confirm={t('admin.ssoUnlink')}
+                  danger
+                  onClose={() => setDialog(null)}
+                  onConfirm={async () => {
+                    await api('DELETE', '/api/admin/users/' + u.id + '/oidc')
+                    load()
+                  }}
+                />,
+              ),
+          }
+        : {
+            label: t('admin.ssoUnlink'),
+            icon: <Unlink size={16} />,
+            disabled: true,
+            // (What it would take, as the server rules: a password, and one it may use.)
+            hint: t(
+              boot?.local_login === 'off'
+                ? 'admin.ssoHintOff'
+                : boot?.local_login === 'admins' && u.role !== 'admin'
+                  ? 'admin.ssoHintAdminsOnly'
+                  : 'admin.ssoOnlyHint',
+            ),
+          }
+      : null,
+    u.disabled
+      ? { label: t('admin.enable'), icon: <UserCheck size={16} />, separator: true, onSelect: () => update(u, { disabled: false }) }
+      : u.id === me?.id
+      ? { label: t('admin.disable'), icon: <UserX size={16} />, separator: true, disabled: true, hint: t('admin.selfDisableHint') }
+      : {
+          label: t('admin.disable'),
+          icon: <UserX size={16} />,
+          danger: true,
+          separator: true,
+          onSelect: () =>
+            setDialog(
+              <Confirm
+                title={t('admin.disable')}
+                body={t('admin.disableConfirm', { name: u.display_name || u.username })}
+                confirm={t('admin.disable')}
+                danger
+                onClose={() => setDialog(null)}
+                onConfirm={async () => {
+                  await api('PUT', '/api/admin/users/' + u.id, { disabled: true })
+                  load()
+                }}
+              />,
+            ),
+        },
+  ]
+  const create = () => setDialog(<CreateUserDialog onClose={() => setDialog(null)} onCreated={load} />)
+  const invite = () => setDialog(<InviteDialog onClose={() => setDialog(null)} />)
+
+  // A desktop's (UI 12): the search, the filter, creating and inviting in the toolbar; the users a table — user name,
+  // display name, role, open sessions, created, how they sign in —; a row chosen by a click or ↑↓, its menu at its ⋯
+  // or by a right click.
+  const desk = useDeskPages()
+  const [sel, setSel] = useState<number | null>(null)
+  const pageEl = useRef<HTMLElement>(null)
+  if (desk) {
+    const at = shownUsers.findIndex((u) => u.id === sel)
+    const go = (i: number) => {
+      const u = shownUsers[Math.max(0, Math.min(shownUsers.length - 1, i))]
+      if (!u) return
+      setSel(u.id)
+      pageEl.current?.querySelector<HTMLElement>(`tr[data-user="${u.id}"]`)?.focus()
+    }
+    const cols = ['user', 'name', 'role', 'sessions', 'created', 'state'] as const
+    return (
+      <main className="page page-desk" ref={pageEl}>
+        <div className="desk-bar">
+          <h1>{t('admin.users')}</h1>
+          {users && <span className="desk-n">{filtering ? t('admin.shownOfShort', { n: shownUsers.length, all: users.length }) : users.length}</span>}
+          <div className="spacer" />
+          {users && users.length > 0 && (
+            <>
+              <label className="page-search desk-search">
+                <Search size={15} aria-hidden="true" />
+                <input type="search" value={q} onChange={(e) => setQ(e.target.value)} placeholder={t('admin.searchUsers')} aria-label={t('admin.searchUsers')} />
+              </label>
+              <div className="desk-filters">
+                <select className="select" value={only} onChange={(e) => setOnly(e.target.value as UserFilter)} aria-label={t('admin.filterUsers')}>
+                  {USER_FILTERS.map((f) => <option key={f} value={f}>{t(f === 'all' ? 'admin.allUsers' : (`admin.only.${f}` as const))}</option>)}
+                </select>
+              </div>
+            </>
+          )}
+          <button className="btn desk-btn" onClick={create}>
+            <UserPlus size={15} />
+            {t('admin.create')}
+          </button>
+          <button className="btn desk-btn" onClick={invite}>
+            <Send size={15} />
+            {t('admin.invite')}
+          </button>
+        </div>
+        <div className="desk-body">
+          {failed && <LoadError onRetry={load} />}
+          {users === null && !failed && <p className="loading">{t('common.loading')}</p>}
+          {users && users.length > 0 && shownUsers.length === 0 && (
+            <p className="page-none">
+              {t('admin.noMatch')}{' '}
+              <button type="button" className="link-btn" onClick={() => (setQ(''), setOnly('all'))}>{t('common.clearSearch')}</button>
+            </p>
+          )}
+        </div>
+        {shownUsers.length > 0 && (
+          <table className="desk-table desk-users" aria-label={t('admin.users')}>
+            <thead>
+              <tr>
+                {cols.map((c) => <th key={c} className={'desk-col-' + c}>{t(`admin.col.${c}` as const)}</th>)}
+                <th className="desk-col-menu"><span className="sr-only">{t('common.more')}</span></th>
+              </tr>
+            </thead>
+            <tbody
+              onKeyDown={(e) => {
+                if ((e.target as HTMLElement).tagName !== 'TR') return
+                if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+                  e.preventDefault()
+                  go(at < 0 ? 0 : at + (e.key === 'ArrowDown' ? 1 : -1))
+                } else if (e.key === 'Home' || e.key === 'End') {
+                  e.preventDefault()
+                  go(e.key === 'Home' ? 0 : shownUsers.length - 1)
+                }
+              }}
+            >
+              {shownUsers.map((u, i) => {
+                const on = u.id === sel
+                const ways = [u.totp ? t('admin.state.twoStep') : '', u.sso?.length ? (u.has_password ? 'SSO' : t('admin.state.ssoOnly')) : ''].filter(Boolean)
+                return (
+                  <tr
+                    key={u.id}
+                    data-user={u.id}
+                    className={on ? 'is-sel' : undefined}
+                    aria-selected={on}
+                    tabIndex={on || (at < 0 && i === 0) ? 0 : -1}
+                    onClick={() => setSel(u.id)}
+                    onFocus={() => setSel(u.id)}
+                    onContextMenu={(e) => {
+                      e.preventDefault()
+                      setSel(u.id)
+                      e.currentTarget.querySelector<HTMLElement>('.desk-col-menu .icon-btn')?.click()
+                    }}
+                  >
+                    <td className="desk-col-user">
+                      <span className="desk-name">
+                        <span className="desk-ellipsis desk-mono">{u.username}</span>
+                        {u.id === me?.id && <span className="you">{t('admin.you')}</span>}
+                      </span>
+                    </td>
+                    <td><span className="desk-ellipsis">{u.display_name && u.display_name !== u.username ? u.display_name : ''}</span></td>
+                    <td className={u.role === 'admin' ? undefined : 'desk-dim'}>{u.role === 'admin' ? t('admin.roleAdmin') : t('admin.roleMember')}</td>
+                    <td className="tnum desk-dim">{u.open_sessions || ''}</td>
+                    <td className="desk-dim" title={new Date(u.created_at * 1000).toLocaleString()}>{whenText(u.created_at)}</td>
+                    <td>
+                      <span className="desk-ellipsis" title={u.sso?.map((x) => x.username_hint || x.email || x.subject).join(', ') || undefined}>
+                        {u.disabled ? <span className="state-danger">{t('admin.disabled')}</span> : <span className="desk-dim">{ways.join(' · ') || t('admin.state.password')}</span>}
+                      </span>
+                    </td>
+                    <td className="desk-col-menu">
+                      <Menu
+                        label={u.display_name || u.username}
+                        button={(open, toggle) => (
+                          <button className="icon-btn" tabIndex={-1} aria-label={`${t('common.more')}：${u.username}`} aria-expanded={open} onClick={toggle}>
+                            <MoreHorizontal size={16} />
+                          </button>
+                        )}
+                        items={() => userMenu(u)}
+                      />
+                    </td>
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
+        )}
+        {dialog}
+      </main>
+    )
+  }
   return (
     <main className="page">
       <div className="page-head">
@@ -133,112 +369,7 @@ export function AdminUsersPage() {
                       <MoreHorizontal size={18} />
                     </button>
                   )}
-                  items={() => [
-                    // One's own role and account are not one's own to take
-                    // away here: off, saying why (the server would allow it —
-                    // ux1101 PG-08). Another's role, once confirmed.
-                    u.id === me?.id
-                      ? { label: u.role === 'admin' ? t('admin.makeMember') : t('admin.makeAdmin'), icon: <Shield size={16} />, disabled: true, hint: t('admin.selfRoleHint') }
-                      : {
-                          label: u.role === 'admin' ? t('admin.makeMember') : t('admin.makeAdmin'),
-                          icon: <Shield size={16} />,
-                          onSelect: () =>
-                            setDialog(
-                              <Confirm
-                                title={u.role === 'admin' ? t('admin.makeMember') : t('admin.makeAdmin')}
-                                body={t(u.role === 'admin' ? 'admin.roleToMemberBody' : 'admin.roleToAdminBody', { name: u.display_name || u.username })}
-                                confirm={u.role === 'admin' ? t('admin.makeMember') : t('admin.makeAdmin')}
-                                onClose={() => setDialog(null)}
-                                onConfirm={async () => {
-                                  await api('PUT', '/api/admin/users/' + u.id, { role: u.role === 'admin' ? 'member' : 'admin' })
-                                  load()
-                                }}
-                              />,
-                            ),
-                        },
-                    {
-                      label: t('admin.resetPassword'),
-                      icon: <KeySquare size={16} />,
-                      onSelect: () => setDialog(<ResetDialog user={u} onClose={() => setDialog(null)} onDone={load} />),
-                    },
-                    u.totp
-                      ? {
-                          label: t('admin.resetTwoStep'),
-                          icon: <Smartphone size={16} />,
-                          onSelect: () =>
-                            setDialog(
-                              <Confirm
-                                title={t('admin.resetTwoStep')}
-                                body={t('admin.resetTwoStepBody', { name: u.display_name || u.username })}
-                                confirm={t('admin.resetTwoStep')}
-                                onClose={() => setDialog(null)}
-                                onConfirm={async () => {
-                                  await api('POST', '/api/admin/users/' + u.id + '/totp/reset')
-                                  load()
-                                }}
-                              />,
-                            ),
-                        }
-                      : null,
-                    u.sso?.length
-                      ? u.has_password && (boot?.local_login !== 'off' && (boot?.local_login !== 'admins' || u.role === 'admin'))
-                        ? {
-                            label: t('admin.ssoUnlink'),
-                            icon: <Unlink size={16} />,
-                            onSelect: () =>
-                              setDialog(
-                                <Confirm
-                                  title={t('admin.ssoUnlink')}
-                                  body={t('admin.ssoUnlinkBody', { name: u.display_name || u.username })}
-                                  confirm={t('admin.ssoUnlink')}
-                                  danger
-                                  onClose={() => setDialog(null)}
-                                  onConfirm={async () => {
-                                    await api('DELETE', '/api/admin/users/' + u.id + '/oidc')
-                                    load()
-                                  }}
-                                />,
-                              ),
-                          }
-                        : {
-                            label: t('admin.ssoUnlink'),
-                            icon: <Unlink size={16} />,
-                            disabled: true,
-                            // (What it would take, as the server rules: a password, and one it may use.)
-                            hint: t(
-                              boot?.local_login === 'off'
-                                ? 'admin.ssoHintOff'
-                                : boot?.local_login === 'admins' && u.role !== 'admin'
-                                  ? 'admin.ssoHintAdminsOnly'
-                                  : 'admin.ssoOnlyHint',
-                            ),
-                          }
-                      : null,
-                    u.disabled
-                      ? { label: t('admin.enable'), icon: <UserCheck size={16} />, separator: true, onSelect: () => update(u, { disabled: false }) }
-                      : u.id === me?.id
-                      ? { label: t('admin.disable'), icon: <UserX size={16} />, separator: true, disabled: true, hint: t('admin.selfDisableHint') }
-                      : {
-                          label: t('admin.disable'),
-                          icon: <UserX size={16} />,
-                          danger: true,
-                          separator: true,
-                          onSelect: () =>
-                            setDialog(
-                              <Confirm
-                                title={t('admin.disable')}
-                                body={t('admin.disableConfirm', { name: u.display_name || u.username })}
-                                confirm={t('admin.disable')}
-                                danger
-                                onClose={() => setDialog(null)}
-                                onConfirm={async () => {
-                                  await api('PUT', '/api/admin/users/' + u.id, { disabled: true })
-                                  load()
-                                }}
-                              />,
-                            ),
-                        },
-                  ]}
+                  items={() => userMenu(u)}
                 />
               </div>
             </li>
@@ -592,7 +723,7 @@ export function AdminAuditPage() {
                       const target = auditTarget(e.target, hosts)
                       const on = e.id === sel
                       return (
-                        <tr key={e.id} data-entry={e.id} className={on ? 'is-sel' : undefined} aria-selected={on} tabIndex={on || (at < 0 && e.id === flat[0].id) ? 0 : -1} onClick={() => setSel(on ? null : e.id)} onFocus={() => setSel(e.id)}>
+                        <tr key={e.id} data-entry={e.id} className={on ? 'is-sel' : undefined} aria-selected={on} tabIndex={on || (at < 0 && e.id === flat[0].id) ? 0 : -1} onClick={() => setSel(e.id)} onFocus={() => setSel(e.id)}>
                           <td className="tnum desk-dim" title={new Date(e.ts * 1000).toLocaleString()}>{clockText(e.ts)}</td>
                           <td><span className="desk-ellipsis" title={e.username}>{e.username || '—'}</span></td>
                           <td><span className="desk-ellipsis" title={e.action}>{auditAction(e.action)}</span></td>

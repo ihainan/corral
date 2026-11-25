@@ -11,6 +11,7 @@ import { chromeVars } from '../terminal/themes'
 import { formatSize } from '../terminal/FilesDialog'
 import { Confirm, EmptyState, LoadError, Menu, isCoarse, useToast } from '../components/ui'
 import { local } from '../storage'
+import { useDeskPages } from '../workbench'
 import { byDay, clockText, durationText, spanFrom, type DaySpan } from './pageText'
 
 const FONT_STACK = "'JetBrains Mono', 'SFMono-Regular', Menlo, Consolas, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', monospace"
@@ -165,6 +166,32 @@ export function RecordingsPage() {
     for (const c of first) again.set(c.name, (again.get(c.name) ?? 0) + 1)
     return first.map((c) => ((again.get(c.name) ?? 0) > 1 || ((named.get(c.name) ?? 0) > 1 && !(c.owner && admin)) ? { ...c, name: `${c.name}（#${c.id}）` } : c))
   }
+  const recMenu = (r: Recording) => [
+    { label: t('rec.download'), icon: <Download size={16} />, href: `/api/recordings/${r.id}/cast?download=1` },
+    r.ended_at === 0
+      ? null
+      : {
+          label: t('common.delete'),
+          icon: <Trash2 size={16} />,
+          danger: true,
+          separator: true,
+          onSelect: () =>
+            setDialog(
+              <Confirm
+                title={t('rec.deleteTitle')}
+                body={t('rec.deleteBody', { host: r.host_name, who: r.owner_name })}
+                confirm={t('common.delete')}
+                danger
+                onClose={() => setDialog(null)}
+                onConfirm={async () => {
+                  await api('DELETE', '/api/recordings/' + r.id)
+                  toast(t('rec.deleted'))
+                  load()
+                }}
+              />,
+            ),
+        },
+  ]
   const tools = (list || filtered) && (choices.hosts.length > 1 || choices.owners.length > 1 || filtered || (list?.recordings.length ?? 0) > 10) && (
     <div className="page-tools rec-tools">
       <select className="select" value={filter.host} onChange={(e) => narrow({ ...filter, host: Number(e.target.value) })} aria-label={t('rec.byHost')}>
@@ -182,6 +209,170 @@ export function RecordingsPage() {
       </select>
     </div>
   )
+  // A desktop's (UI 12): the filters in the toolbar, each day's recordings rows of a table (host and whose, when it
+  // began, how long, how big); a row chosen by a click or ↑↓, played by a double click or Return.
+  const desk = useDeskPages()
+  const [sel, setSel] = useState('')
+  const pageEl = useRef<HTMLElement>(null)
+  if (desk) {
+    const flat = list?.recordings ?? []
+    const at = flat.findIndex((r) => r.id === sel)
+    const open = (r: Recording) => {
+      opened.current = r.id
+      if (kept) kept.opened = r.id
+      navigate('/recordings/' + r.id)
+    }
+    const go = (i: number) => {
+      const r = flat[Math.max(0, Math.min(flat.length - 1, i))]
+      if (!r) return
+      setSel(r.id)
+      pageEl.current?.querySelector<HTMLElement>(`tr[data-rec="${CSS.escape(r.id)}"]`)?.focus()
+    }
+    return (
+      <main className="page page-desk" ref={pageEl}>
+        <div className="desk-bar">
+          <h1>{t('rec.title')}</h1>
+          {list && list.recordings.length > 0 && !more && <span className="desk-n">{list.recordings.length}</span>}
+          <div className="spacer" />
+          {(list || filtered) && (
+            <div className="desk-filters">
+              <select className="select" value={filter.host} onChange={(e) => narrow({ ...filter, host: Number(e.target.value) })} aria-label={t('rec.byHost')}>
+                <option value={0}>{t('rec.allHosts')}</option>
+                {offer(choices.hosts, filter.host).map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+              </select>
+              {admin && (
+                <select className="select" value={filter.owner} onChange={(e) => narrow({ ...filter, owner: Number(e.target.value) })} aria-label={t('rec.byOwner')}>
+                  <option value={0}>{t('rec.allOwners')}</option>
+                  {offer(choices.owners, filter.owner).map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+                </select>
+              )}
+              <select className="select" value={filter.span} onChange={(e) => narrow({ ...filter, span: e.target.value as DaySpan })} aria-label={t('rec.bySpan')}>
+                {(['all', 'today', '7d', '30d'] as const).map((sp) => <option key={sp} value={sp}>{t(`span.${sp}` as const)}</option>)}
+              </select>
+            </div>
+          )}
+          <button type="button" className="icon-btn" onClick={() => load()} disabled={refreshing} aria-label={t('rec.refresh')} title={t('rec.refresh')}>
+            <RotateCw size={15} className={refreshing ? 'spin' : undefined} />
+          </button>
+        </div>
+        <div className="desk-body">
+          {list && (
+            <p className="desk-lead">
+              {list.enabled ? t('rec.leadOn', { days: list.days }) : t('rec.leadOff')}
+              {list.enabled && (admin ? t('rec.leadAdmin') : t('rec.leadMember'))}
+            </p>
+          )}
+          {failed ? (
+            <LoadError onRetry={() => load()} />
+          ) : list === null ? (
+            <p className="loading">{t('common.loading')}</p>
+          ) : list.recordings.length === 0 && filtered ? (
+            <p className="page-none">
+              {t('rec.noMatch')}{' '}
+              <button type="button" className="link-btn" onClick={() => narrow(NO_FILTER)}>{t('common.clearFilters')}</button>
+            </p>
+          ) : list.recordings.length === 0 ? (
+            <EmptyState icon={<Film size={20} strokeWidth={1.75} />} title={t('rec.empty')} />
+          ) : null}
+        </div>
+        {!failed && flat.length > 0 && (
+          <>
+            <table className="desk-table desk-recs" aria-label={t('rec.title')}>
+              <thead>
+                <tr>
+                  <th>{t('rec.col.host')}</th>
+                  <th className="desk-col-time">{t('rec.col.start')}</th>
+                  <th className="desk-col-len">{t('rec.col.length')}</th>
+                  <th className="desk-col-size">{t('rec.col.size')}</th>
+                  {admin && <th className="desk-col-menu"><span className="sr-only">{t('common.more')}</span></th>}
+                </tr>
+              </thead>
+              {byDay(flat, (r) => r.started_at).map((g) => (
+                <tbody
+                  key={g.key}
+                  onKeyDown={(e) => {
+                    if ((e.target as HTMLElement).tagName !== 'TR') return
+                    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+                      e.preventDefault()
+                      go(at < 0 ? 0 : at + (e.key === 'ArrowDown' ? 1 : -1))
+                    } else if (e.key === 'Home' || e.key === 'End') {
+                      e.preventDefault()
+                      go(e.key === 'Home' ? 0 : flat.length - 1)
+                    } else if (e.key === 'Enter' && at >= 0) {
+                      e.preventDefault()
+                      open(flat[at])
+                    }
+                  }}
+                >
+                  <tr className="desk-group">
+                    <th colSpan={admin ? 5 : 4} scope="colgroup">{g.heading}</th>
+                  </tr>
+                  {g.items.map((r) => {
+                    const live = r.ended_at === 0
+                    const dur = (live ? Date.now() / 1000 : r.ended_at) - r.started_at
+                    const on = r.id === sel
+                    return (
+                      <tr
+                        key={r.id}
+                        data-rec={r.id}
+                        className={on ? 'is-sel' : undefined}
+                        aria-selected={on}
+                        tabIndex={on || (at < 0 && r.id === flat[0].id) ? 0 : -1}
+                        title={t('rec.rowHint')}
+                        onClick={() => setSel(r.id)}
+                        onFocus={() => setSel(r.id)}
+                        onDoubleClick={() => open(r)}
+                        onContextMenu={(e) => {
+                          const b = e.currentTarget.querySelector<HTMLElement>('.desk-col-menu .icon-btn')
+                          if (!b) return
+                          e.preventDefault()
+                          setSel(r.id)
+                          b.click()
+                        }}
+                      >
+                        <td>
+                          <span className="desk-name">
+                            <span className="desk-ellipsis">{r.host_name}</span>
+                            {admin && <span className="desk-dim desk-sub">{r.owner_name}</span>}
+                            {r.truncated && <span className="warn-text desk-sub">{t('rec.truncated')}</span>}
+                            {r.gaps && <span className="warn-text desk-sub">{t('rec.gaps')}</span>}
+                          </span>
+                        </td>
+                        <td className="tnum desk-dim" title={new Date(r.started_at * 1000).toLocaleString()}>{clockText(r.started_at)}</td>
+                        <td className={'tnum' + (live ? ' rec-len is-live' : ' desk-dim')}>
+                          {live ? <><span className="rec-live-dot" aria-hidden="true" />{t('rec.live')}</> : durationText(dur)}
+                        </td>
+                        <td className="tnum desk-dim">{!live && r.bytes >= 0 ? formatSize(r.bytes) : ''}</td>
+                        {admin && (
+                          <td className="desk-col-menu" onDoubleClick={(e) => e.stopPropagation()}>
+                            <Menu
+                              label={r.host_name}
+                              button={(o, toggle) => (
+                                <button className="icon-btn" tabIndex={-1} aria-label={`${t('common.more')}：${r.host_name}`} aria-expanded={o} onClick={toggle}>
+                                  <MoreHorizontal size={16} />
+                                </button>
+                              )}
+                              items={() => recMenu(r)}
+                            />
+                          </td>
+                        )}
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              ))}
+            </table>
+            {more && (
+              <div className="desk-more">
+                <button className="btn desk-btn" onClick={loadMore} disabled={loadingMore || refreshing}>{loadingMore ? t('common.loading') : t('rec.more')}</button>
+              </div>
+            )}
+          </>
+        )}
+        {dialog}
+      </main>
+    )
+  }
   return (
     <main className="page">
       <div className="page-head">
@@ -252,32 +443,7 @@ export function RecordingsPage() {
                           <MoreHorizontal size={18} />
                         </button>
                       )}
-                      items={() => [
-                        { label: t('rec.download'), icon: <Download size={16} />, href: `/api/recordings/${r.id}/cast?download=1` },
-                        live
-                          ? null
-                          : {
-                              label: t('common.delete'),
-                              icon: <Trash2 size={16} />,
-                              danger: true,
-                              separator: true,
-                              onSelect: () =>
-                                setDialog(
-                                  <Confirm
-                                    title={t('rec.deleteTitle')}
-                                    body={t('rec.deleteBody', { host: r.host_name, who: r.owner_name })}
-                                    confirm={t('common.delete')}
-                                    danger
-                                    onClose={() => setDialog(null)}
-                                    onConfirm={async () => {
-                                      await api('DELETE', '/api/recordings/' + r.id)
-                                      toast(t('rec.deleted'))
-                                      load()
-                                    }}
-                                  />,
-                                ),
-                            },
-                      ]}
+                      items={() => recMenu(r)}
                     />
                   </div>
                 )}

@@ -660,3 +660,27 @@ func pubOf(t *testing.T, c *client, id any) string {
 	t.Fatalf("no key %v", id)
 	return ""
 }
+
+// A key's fingerprint, as ssh-keygen -l shows it, on its making and in the list.
+func TestCredentialFingerprint(t *testing.T) {
+	h := newHarness(t)
+	admin := h.admin()
+	a := h.member(admin, "alice")
+	r := a.do("POST", "/api/credentials", map[string]any{"name": "laptop", "mode": "generate"})
+	mustStatus(t, r, 201, "key")
+	made := r.json()
+	fp, _ := made["fingerprint"].(string)
+	pk, _, _, _, err := ssh.ParseAuthorizedKey([]byte(made["public_key"].(string)))
+	if err != nil || fp == "" || fp != ssh.FingerprintSHA256(pk) {
+		t.Fatalf("made: %q (%v)", fp, err)
+	}
+	r = a.do("GET", "/api/credentials", nil)
+	var list []map[string]any
+	_ = json.Unmarshal(r.Body, &list)
+	if len(list) != 1 || list[0]["fingerprint"] != fp {
+		t.Errorf("listed: %s", r.Body)
+	}
+	if keyFingerprint("not a key") != "" {
+		t.Error("a line not parsed has none")
+	}
+}

@@ -502,11 +502,21 @@ func hostTarget(h *store.Host) string {
 // Credentials --------------------------------------------------------------
 
 type credentialView struct {
-	ID        int64  `json:"id"`
-	Name      string `json:"name"`
-	Kind      string `json:"kind"`
-	PublicKey string `json:"public_key"`
-	CreatedAt int64  `json:"created_at"`
+	ID          int64  `json:"id"`
+	Name        string `json:"name"`
+	Kind        string `json:"kind"`
+	PublicKey   string `json:"public_key"`
+	Fingerprint string `json:"fingerprint"` // as ssh-keygen -l shows it: SHA256:…
+	CreatedAt   int64  `json:"created_at"`
+}
+
+// keyFingerprint is an authorized_keys line's SHA256 fingerprint, "" for one not parsed.
+func keyFingerprint(line string) string {
+	pk, _, _, _, err := ssh.ParseAuthorizedKey([]byte(line))
+	if err != nil {
+		return ""
+	}
+	return ssh.FingerprintSHA256(pk)
 }
 
 func (s *Server) apiListCredentials(w http.ResponseWriter, r *http.Request) {
@@ -519,7 +529,7 @@ func (s *Server) apiListCredentials(w http.ResponseWriter, r *http.Request) {
 	out := []credentialView{}
 	for _, c := range creds {
 		if c.Kind == store.CredPrivateKey {
-			out = append(out, credentialView{ID: c.ID, Name: c.Name, Kind: c.Kind, PublicKey: c.PublicKey, CreatedAt: c.CreatedAt})
+			out = append(out, credentialView{ID: c.ID, Name: c.Name, Kind: c.Kind, PublicKey: c.PublicKey, Fingerprint: keyFingerprint(c.PublicKey), CreatedAt: c.CreatedAt})
 		}
 	}
 	writeJSON(w, http.StatusOK, out)
@@ -588,7 +598,7 @@ func (s *Server) apiCreateCredential(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.audit(r, "credential.create", b.Name, map[string]any{"mode": b.Mode, "fingerprint": ssh.FingerprintSHA256(pub)})
-	writeJSON(w, http.StatusCreated, credentialView{ID: id, Name: b.Name, Kind: store.CredPrivateKey, PublicKey: pubLine})
+	writeJSON(w, http.StatusCreated, credentialView{ID: id, Name: b.Name, Kind: store.CredPrivateKey, PublicKey: pubLine, Fingerprint: keyFingerprint(pubLine)})
 }
 
 func (s *Server) apiRenameCredential(w http.ResponseWriter, r *http.Request) {
