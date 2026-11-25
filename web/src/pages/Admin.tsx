@@ -708,7 +708,9 @@ export function AdminAuditPage() {
                       if ((ev.target as HTMLElement).tagName !== 'TR') return
                       if (ev.key === 'ArrowDown' || ev.key === 'ArrowUp') {
                         ev.preventDefault()
-                        go(at < 0 ? 0 : at + (ev.key === 'ArrowDown' ? 1 : -1))
+                        // (None chosen — Escape — the row in focus still the place to move from.)
+                        const from = at >= 0 ? at : flat.findIndex((x) => String(x.id) === (ev.target as HTMLElement).closest('tr')?.dataset.entry)
+                        go(from < 0 ? 0 : from + (ev.key === 'ArrowDown' ? 1 : -1))
                       } else if (ev.key === 'Escape' && sel !== null) {
                         ev.preventDefault()
                         setSel(null)
@@ -746,7 +748,7 @@ export function AdminAuditPage() {
               <aside className="desk-aside" aria-label={t('audit.entry')}>
                 <div className="desk-aside-head">
                   <h2>{auditAction(chosen.action)}</h2>
-                  <button type="button" className="icon-btn" onClick={() => setSel(null)} aria-label={t('common.close')} title={t('common.close')}>
+                  <button type="button" className="icon-btn" onClick={() => (pageEl.current?.querySelector<HTMLElement>(`tr[data-entry="${chosen.id}"]`)?.focus(), setSel(null))} aria-label={t('common.close')} title={t('common.close')}>
                     <X size={16} />
                   </button>
                 </div>

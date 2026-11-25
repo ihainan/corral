@@ -212,7 +212,7 @@ export function RecordingsPage() {
   // A desktop's (UI 12): the filters in the toolbar, each day's recordings rows of a table (host and whose, when it
   // began, how long, how big); a row chosen by a click or ↑↓, played by a double click or Return.
   const desk = useDeskPages()
-  const [sel, setSel] = useState('')
+  const [sel, setSel] = useState(back?.opened ?? '') // (back from one: it, chosen)
   const pageEl = useRef<HTMLElement>(null)
   if (desk) {
     const flat = list?.recordings ?? []
@@ -229,6 +229,7 @@ export function RecordingsPage() {
       pageEl.current?.querySelector<HTMLElement>(`tr[data-rec="${CSS.escape(r.id)}"]`)?.focus()
     }
     return (
+      <>
       <main className="page page-desk" ref={pageEl}>
         <div className="desk-bar">
           <h1>{t('rec.title')}</h1>
@@ -370,11 +371,13 @@ export function RecordingsPage() {
             )}
           </>
         )}
-        {dialog}
       </main>
+      {dialog}
+      </>
     )
   }
   return (
+    <>
     <main className="page">
       <div className="page-head">
         <PhoneBack />
@@ -460,8 +463,9 @@ export function RecordingsPage() {
           <button className="btn" onClick={loadMore} disabled={loadingMore || refreshing}>{loadingMore ? t('common.loading') : t('rec.more')}</button>
         </div>
       )}
-      {dialog}
     </main>
+    {dialog}
+    </>
   )
 }
 

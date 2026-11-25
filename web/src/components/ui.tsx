@@ -547,7 +547,9 @@ function Popover({ anchor, at, trigger, onClose, label, children }: { anchor: DO
     const outside = (t: EventTarget | null) => !ref.current?.contains(t as Node) && !trigger()?.contains(t as Node)
     const onDown = (e: PointerEvent) => {
       if (!outside(e.target)) return
-      swallowNextClick()
+      // (A press of the main button only is followed by a click to swallow: a right press makes none, and the next
+      // click — a row's right click opening its own menu, say — is not this press's.)
+      if (e.button === 0) swallowNextClick()
       onClose()
     }
     const onKey = (e: KeyboardEvent) => {

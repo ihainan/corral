@@ -191,6 +191,7 @@ export function HostsPage() {
       rowEl(h.id)?.focus()
     }
     return (
+      <>
       <main className="page page-desk" ref={pageEl}>
         <div className="desk-bar">
           <h1>{t('hosts.title')}</h1>
@@ -338,13 +339,15 @@ export function HostsPage() {
             </tbody>
           </table>
         )}
-        {confirm}
-        {dialogs}
-        {code.dialog}
       </main>
+      {confirm}
+      {dialogs}
+      {code.dialog}
+      </>
     )
   }
   return (
+    <>
     <main className="page" ref={pageEl}>
       <div className="page-head">
         <h1>{t('hosts.title')}</h1>
@@ -484,10 +487,11 @@ export function HostsPage() {
           </ul>
         </section>
       )}
-      {confirm}
-      {dialogs}
-      {code.dialog}
     </main>
+    {confirm}
+    {dialogs}
+    {code.dialog}
+    </>
   )
 }
 

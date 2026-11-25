@@ -58,11 +58,19 @@ export function KeysPage() {
   // ↑↓) beside it, whole, with those hosts.
   const desk = useDeskPages()
   const [hosts, setHosts] = useState<Host[] | null>(null)
+  const [hostsFailed, setHostsFailed] = useState(false)
+  const [hostsTry, setHostsTry] = useState(0)
   const [sel, setSel] = useState<number | null>(null)
   const pageEl = useRef<HTMLElement>(null)
   useEffect(() => {
-    if (desk && keys) api<Host[]>('GET', '/api/hosts').then(setHosts, () => {})
-  }, [desk, keys])
+    if (!desk || !keys) return
+    let live = true
+    api<Host[]>('GET', '/api/hosts').then(
+      (h) => live && (setHosts(h), setHostsFailed(false)),
+      () => live && setHostsFailed(true),
+    )
+    return () => void (live = false)
+  }, [desk, keys, hostsTry])
   if (desk) {
     const list = keys ?? []
     const at = list.findIndex((k) => k.id === sel)
@@ -75,6 +83,7 @@ export function KeysPage() {
       pageEl.current?.querySelector<HTMLElement>(`tr[data-key="${k.id}"]`)?.focus()
     }
     return (
+      <>
       <main className="page page-desk" ref={pageEl}>
         <div className="desk-bar">
           <h1>{t('keys.title')}</h1>
@@ -135,7 +144,9 @@ export function KeysPage() {
                     if (!on) return
                     if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
                       e.preventDefault()
-                      go(at < 0 ? 0 : at + (e.key === 'ArrowDown' ? 1 : -1))
+                      // (None chosen — Escape — the row in focus still the place to move from.)
+                      const from = at >= 0 ? at : list.findIndex((k) => String(k.id) === (e.target as HTMLElement).closest('tr')?.dataset.key)
+                      go(from < 0 ? 0 : from + (e.key === 'ArrowDown' ? 1 : -1))
                     } else if (e.key === 'Home' || e.key === 'End') {
                       e.preventDefault()
                       go(e.key === 'Home' ? 0 : list.length - 1)
@@ -170,7 +181,7 @@ export function KeysPage() {
                         </td>
                         <td className="desk-mono desk-dim"><span className="desk-ellipsis" title={k.fingerprint || k.public_key}>{k.fingerprint || shortKey(k.public_key)}</span></td>
                         <td className="desk-dim" title={new Date(k.created_at * 1000).toLocaleString()}>{relTime(k.created_at)}</td>
-                        <td className="tnum desk-dim">{hosts ? usedBy(k.id).length : ''}</td>
+                        <td className="tnum desk-dim">{hosts ? usedBy(k.id).length : hostsFailed ? '—' : ''}</td>
                         <td className="desk-col-menu" onClick={(e) => e.stopPropagation()}>
                           <Menu
                             label={k.name}
@@ -192,7 +203,7 @@ export function KeysPage() {
               <aside className="desk-aside" aria-label={chosen.name}>
                 <div className="desk-aside-head">
                   <h2>{chosen.name}</h2>
-                  <button type="button" className="icon-btn" onClick={() => setSel(null)} aria-label={t('common.close')} title={t('common.close')}>
+                  <button type="button" className="icon-btn" onClick={() => (pageEl.current?.querySelector<HTMLElement>(`tr[data-key="${chosen.id}"]`)?.focus(), setSel(null))} aria-label={t('common.close')} title={t('common.close')}>
                     <X size={16} />
                   </button>
                 </div>
@@ -215,7 +226,12 @@ export function KeysPage() {
                   <div>
                     <dt>{t('keys.usedBy')}</dt>
                     <dd>
-                      {hosts === null ? (
+                      {hosts === null && hostsFailed ? (
+                        <>
+                          {t('keys.usedByFailed')}{' '}
+                          <button type="button" className="link-btn" onClick={() => setHostsTry((n) => n + 1)}>{t('common.retry')}</button>
+                        </>
+                      ) : hosts === null ? (
                         '…'
                       ) : usedBy(chosen.id).length === 0 ? (
                         t('keys.usedByNone')
@@ -235,12 +251,14 @@ export function KeysPage() {
             )}
           </div>
         )}
-        {dialog}
       </main>
+      {dialog}
+      </>
     )
   }
 
   return (
+    <>
     <main className="page">
       <div className="page-head">
         <h1>{t('keys.title')}</h1>
@@ -317,8 +335,9 @@ export function KeysPage() {
           ))}
         </ul>
       )}
-      {dialog}
     </main>
+    {dialog}
+    </>
   )
 }
 

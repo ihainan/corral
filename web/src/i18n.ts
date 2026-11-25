@@ -409,6 +409,7 @@ const zh = {
   'keys.col.hosts': '使用的主机',
   'keys.usedBy': '使用这把密钥的主机',
   'keys.usedByNone': '还没有主机使用',
+  'keys.usedByFailed': '读取主机列表失败。',
   'keys.deleteConfirm': '删除密钥「{name}」？',
 
   'push.title': '通知',
@@ -3062,6 +3063,7 @@ const en: Record<Key, string> = {
   'keys.col.hosts': 'Hosts',
   'keys.usedBy': 'Hosts using this key',
   'keys.usedByNone': 'No host uses it yet',
+  'keys.usedByFailed': 'Could not read the hosts.',
   'keys.deleteConfirm': 'Delete key “{name}”?',
 
   'push.title': 'Notifications',
