@@ -1,6 +1,6 @@
 import { useTaskAsked } from '../terminal/bgTaskOpen'
 import { Activity, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState, type ReactNode } from 'react'
-import { ArrowDown, ArrowLeftRight, ArrowUp, ArrowUpDown, ArrowUpToLine, ChevronLeft, CircleStop, Code2, Columns2, Copy, Eye, FoldVertical, GitBranch, GitFork, Globe, History, Languages, ListPlus, Maximize2, MessageSquarePlus, Paperclip, Pencil, Pin, PinOff, Plus, Power, Rows2, Square, SquareSlash, SquareTerminal, TextCursorInput, Unlink, X, Zap } from 'lucide-react'
+import { ArrowDown, ArrowLeftRight, ArrowUp, ArrowUpDown, ArrowUpToLine, ChevronLeft, CircleStop, Code2, Columns2, Copy, Eye, FoldVertical, GitBranch, GitFork, Globe, History, Languages, ListPlus, Maximize2, MessageSquarePlus, Paperclip, Pencil, Pin, PinOff, Plus, Power, Rows2, Square, SquareSlash, SquareTerminal, Link2, TextCursorInput, Unlink, X, Zap } from 'lucide-react'
 import { api, ApiError, authGen, errorText, onAuthChange, uploadFile, type SessionInfo } from '../api'
 import { useSession } from '../app'
 import { t, type I18nKey } from '../i18n'
@@ -20,7 +20,7 @@ import { PanelWindow } from '../terminal/PanelWindow'
 import { convoTarget, herdrTarget, InlineReply } from '../terminal/ReplyDialog'
 import { SessionOpDialog, type SessionOp } from '../terminal/sessionOps'
 import { NEW_AGENT, NewAgentDialog, takeNewAgentAsk, type NewSubagentParent } from '../terminal/newAgent'
-import { type CodexRewind, ForkDialog, RenameDialog, type RenameTarget } from '../terminal/agentOps'
+import { type CodexRewind, ForkDialog, LinkParentDialog, type LinkPane, RenameDialog, type RenameTarget } from '../terminal/agentOps'
 import { agentWho, ChimeCounter, chime, countsOf } from '../terminal/chime'
 import { AgentList, CODEX_EFFORTS, ComposerModelSlot, ConversationView, glanceOf, type ConvoAgent, type ConvoLineageBar, type ConvoListRow, type ConvoPending, type ConvoSplitPane, type ConvoWent, type FileActs, type ModelOpt } from '../terminal/Conversation'
 import { saveTranslateConfig, useTranslateConfig } from '../terminal/thoughtTranslate'
@@ -3228,6 +3228,7 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
   // Not a tmux one's: its entry is the whole tmux session, other windows too.
   // This one, from the bar's menu; any, from its row's.
   const [closing, setClosing] = useState<Entry | null>(null)
+  const [linking, setLinking] = useState<Entry | null>(null)
   const [stoppingFleet, setStoppingFleet] = useState<Entry[] | null>(null)
   const closable = (e: Entry) => e.s.persistence === 'herdr' && !!e.row && !e.row.lost
   const canClose = closable(cur)
@@ -3426,6 +3427,45 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
       },
     }
   }
+  // Linking it under another by hand (one Corral did not see started by another: doc item 47). Those it may go
+  // under: the live agents of the same herdr session, but itself and those under it (a cycle; the gateway refuses
+  // one too), those of its workspace first.
+  const linkPaneOf = (e: Entry): LinkPane | null => {
+    const r = e.row
+    if (!r) return null
+    return {
+      key: e.key,
+      title: rows.find((x) => x.key === e.key)?.title || r.a.agent,
+      where: whereOf(e, 1),
+      pane: r.a.pane_id,
+      term: r.a.terminal_id ?? '',
+      session: r.a.session ?? '',
+    }
+  }
+  const linkParentsOf = (e: Entry): LinkPane[] => {
+    const r = e.row
+    if (!r) return []
+    const same = entries.filter((x) => x.s.id === e.s.id && x.row && !x.row.lost)
+    const byPane = new Map(same.map((x) => [x.row!.a.pane_id, x]))
+    const under = (x: Entry) => {
+      const seen = new Set<string>()
+      for (let p = x.row?.a.parent_pane; p && !seen.has(p); p = byPane.get(p)?.row?.a.parent_pane) {
+        if (p === r.a.pane_id) return true
+        seen.add(p)
+      }
+      return false
+    }
+    return same
+      .filter((x) => x.key !== e.key && !under(x))
+      .sort((a, b) => Number(b.row!.ws === r.ws) - Number(a.row!.ws === r.ws))
+      .map(linkPaneOf)
+      .filter((x): x is LinkPane => !!x)
+  }
+  const linkItem = (e: Entry): MenuItem | null => {
+    const r = e.row
+    if (e.s.persistence !== 'herdr' || !r || r.lost || r.a.parent_pane || linkParentsOf(e).length === 0) return null
+    return { label: t('convo.lineage.link'), icon: <Link2 size={16} />, onSelect: () => setLinking(e) }
+  }
   const subagentParentOf = (e: Entry): NewSubagentParent | null => {
     const r = e.row
     if (e.s.persistence !== 'herdr' || !r || r.lost) return null
@@ -3462,6 +3502,7 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
     forkItem(e),
     newSubagentItem(e),
     renameItem(e),
+    linkItem(e),
     unlinkItem(e),
     closable(e) ? { label: t('agents.close'), icon: <Power size={16} />, danger: true, separator: true, onSelect: () => setClosing(e) } : null,
   ]
@@ -3548,6 +3589,7 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
     ((f) => f && { ...f, separator: false })(forkItem(cur)),
     newSubagentItem(cur),
     renameItem(cur),
+    linkItem(cur),
     unlinkItem(cur),
     ((on, sum) => ({
       label: t('convo.translate.menu'),
@@ -3858,6 +3900,20 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
       />
     )}
     {renaming && <RenameDialog target={renaming} onClose={() => setRenaming(null)} />}
+    {linking &&
+      ((child) =>
+        child && (
+          <LinkParentDialog
+            sessionId={linking.s.id}
+            child={child}
+            parents={linkParentsOf(linking)}
+            onClose={() => setLinking(null)}
+            onLinked={(p) => {
+              toast(t('convo.lineage.linked', { name: p.title }))
+              readSessionsNow()
+            }}
+          />
+        ))(linkPaneOf(linking))}
     {portsOpen && active && <PortsDialog hostId={cur.s.host_id} onClose={() => setPortsOpen(false)} />}
     {shareOpen && active && <ShareDialog sessionId={sid} onClose={() => setShareOpen(false)} />}
     {code.dialog}

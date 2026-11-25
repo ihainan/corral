@@ -1,5 +1,5 @@
 import { useState, type FormEvent } from 'react'
-import { GitBranch, TextCursorInput } from 'lucide-react'
+import { CornerDownRight, GitBranch, TextCursorInput } from 'lucide-react'
 import { api, ApiError, errorText, type SessionInfo } from '../api'
 import { t } from '../i18n'
 import { Dialog } from '../components/ui'
@@ -218,6 +218,71 @@ export function RenameDialog({ target, onClose }: { target: RenameTarget; onClos
           </button>
         </div>
       </form>
+    </Dialog>
+  )
+}
+
+// Linking an agent under another by hand, where Corral did not see the one start the other (doc item 47, 11-25: a
+// subagent started by a shell script Corral will not read as surely starting it). The gateway checks both panes are
+// still who they were and refuses a cycle; a link made so is kept as the person's (source "manual").
+export interface LinkPane {
+  key: string
+  title: string
+  where: string
+  pane: string
+  term: string
+  session: string
+}
+export function LinkParentDialog({ sessionId, child, parents, onClose, onLinked }: { sessionId: string; child: LinkPane; parents: LinkPane[]; onClose: () => void; onLinked: (parent: LinkPane) => void }) {
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  const pick = async (p: LinkPane) => {
+    if (busy) return
+    setBusy(true)
+    setError('')
+    try {
+      await api('POST', `/api/sessions/${encodeURIComponent(sessionId)}/herdr/lineage`, {
+        action: 'link',
+        child_pane: child.pane,
+        child_term_id: child.term,
+        child_session: child.session,
+        parent_pane: p.pane,
+        parent_term_id: p.term,
+        parent_session: p.session,
+      })
+      onLinked(p)
+      onClose()
+    } catch (err) {
+      setError(err instanceof ApiError && err.code === 'lineage_cycle' ? t('convo.lineage.linkCycle') : errorText(err))
+      setBusy(false)
+    }
+  }
+  return (
+    <Dialog title={t('convo.lineage.linkTitle', { name: child.title })} onClose={onClose} busy={busy} sub={t('convo.lineage.linkSub')}>
+      {parents.length === 0 ? (
+        <p className="hint">{t('convo.lineage.linkNone')}</p>
+      ) : (
+        <ul className="pick-list">
+          {parents.map((p) => (
+            <li key={p.key}>
+              <button type="button" className="pick-item" disabled={busy} onClick={() => void pick(p)}>
+                <span className="pick-icon">
+                  <CornerDownRight size={16} />
+                </span>
+                <span className="pick-main">
+                  <span className="pick-title">{p.title}</span>
+                  {p.where && p.where !== p.title && <span className="pick-sub">{p.where}</span>}
+                </span>
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+      {error && (
+        <p className="err" role="alert">
+          {error}
+        </p>
+      )}
     </Dialog>
   )
 }
