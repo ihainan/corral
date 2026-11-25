@@ -236,3 +236,12 @@ const CountsMenu = memo(function CountsMenu({ at, items, note, trigger, onClose 
   const anchor = useMemo(() => new DOMRect(at.right, at.top - 4, 0, 0), [at])
   return <MenuLayer label={t('wb.countsList')} note={note} anchor={anchor} at="point" sheet={false} trigger={trigger} items={items} onClose={onClose} />
 })
+
+// Where a key in a desktop table's body was pressed (UI 12): on a row, or on a row's ⋯ (focus is left there when its
+// menu is closed with Escape) — there the arrows still move the row chosen, Return and Escape are the button's. A key in
+// the menu itself (portalled out of the cell, though its events reach the table through React) is neither.
+export function deskRowKey(e: { target: EventTarget }): 'row' | 'menu' | null {
+  const el = e.target as HTMLElement
+  if (el.tagName === 'TR') return 'row'
+  return el.closest?.('td.desk-col-menu') ? 'menu' : null
+}

@@ -5,7 +5,7 @@ import { t } from '../i18n'
 import { PhoneBack, useSession } from '../app'
 import { auditAction, auditDetail, auditTarget, byDay, clockText, sessionHosts, spanFrom, whenText, type DaySpan } from './pageText'
 import { Confirm, CopyButton, Dialog, EmptyState, Field, LoadError, Menu, useToast } from '../components/ui'
-import { useDeskPages } from '../workbench'
+import { deskRowKey, useDeskPages } from '../workbench'
 
 type UserFilter = 'all' | 'admin' | 'disabled' | 'no2fa'
 const USER_FILTERS: UserFilter[] = ['all', 'admin', 'disabled', 'no2fa']
@@ -228,7 +228,7 @@ export function AdminUsersPage() {
             </thead>
             <tbody
               onKeyDown={(e) => {
-                if ((e.target as HTMLElement).tagName !== 'TR') return
+                if (!deskRowKey(e)) return
                 if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
                   e.preventDefault()
                   go(at < 0 ? 0 : at + (e.key === 'ArrowDown' ? 1 : -1))

@@ -11,7 +11,7 @@ import { useCode } from '../terminal/CodeDialog'
 import { noteSessions, sessionAgents, waitingAgents } from '../terminal/agents'
 import { sessionWhich } from '../terminal/sessionName'
 import { local } from '../storage'
-import { useDeskPages } from '../workbench'
+import { deskRowKey, useDeskPages } from '../workbench'
 
 const HOST_ORDER = 'corral.hostOrder'
 const HOST_SEARCH_FROM = 6 // (hosts: more than this, and a search shows)
@@ -271,14 +271,15 @@ export function HostsPage() {
             </thead>
             <tbody
               onKeyDown={(e) => {
-                if (e.target !== e.currentTarget && (e.target as HTMLElement).tagName !== 'TR') return
+                const on = deskRowKey(e)
+                if (!on) return
                 if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
                   e.preventDefault()
                   go(at < 0 ? 0 : at + (e.key === 'ArrowDown' ? 1 : -1))
                 } else if (e.key === 'Home' || e.key === 'End') {
                   e.preventDefault()
                   go(e.key === 'Home' ? 0 : shownHosts.length - 1)
-                } else if (e.key === 'Enter' && at >= 0) {
+                } else if (e.key === 'Enter' && on === 'row' && at >= 0) {
                   e.preventDefault()
                   void connect(shownHosts[at])
                 }

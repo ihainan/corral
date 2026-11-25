@@ -3,7 +3,7 @@ import { Check, ChevronRight, Copy, FileUp, Import, KeyRound, MoreHorizontal, Pl
 import { api, ApiError, errorText, type Host, type KeyCred } from '../api'
 import { relTime, t } from '../i18n'
 import { Confirm, CopyButton, Dialog, EmptyState, Field, LoadError, Menu, copyText } from '../components/ui'
-import { useDeskPages } from '../workbench'
+import { deskRowKey, useDeskPages } from '../workbench'
 import { linkHandler } from '../router'
 
 // "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5…Jk0q4"
@@ -131,14 +131,15 @@ export function KeysPage() {
                 </thead>
                 <tbody
                   onKeyDown={(e) => {
-                    if ((e.target as HTMLElement).tagName !== 'TR') return
+                    const on = deskRowKey(e)
+                    if (!on) return
                     if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
                       e.preventDefault()
                       go(at < 0 ? 0 : at + (e.key === 'ArrowDown' ? 1 : -1))
                     } else if (e.key === 'Home' || e.key === 'End') {
                       e.preventDefault()
                       go(e.key === 'Home' ? 0 : list.length - 1)
-                    } else if (e.key === 'Escape' && sel !== null) {
+                    } else if (e.key === 'Escape' && on === 'row' && sel !== null) {
                       e.preventDefault()
                       setSel(null)
                     }

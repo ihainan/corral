@@ -11,7 +11,7 @@ import { chromeVars } from '../terminal/themes'
 import { formatSize } from '../terminal/FilesDialog'
 import { Confirm, EmptyState, LoadError, Menu, isCoarse, useToast } from '../components/ui'
 import { local } from '../storage'
-import { useDeskPages } from '../workbench'
+import { deskRowKey, useDeskPages } from '../workbench'
 import { byDay, clockText, durationText, spanFrom, type DaySpan } from './pageText'
 
 const FONT_STACK = "'JetBrains Mono', 'SFMono-Regular', Menlo, Consolas, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', monospace"
@@ -291,14 +291,15 @@ export function RecordingsPage() {
                 <tbody
                   key={g.key}
                   onKeyDown={(e) => {
-                    if ((e.target as HTMLElement).tagName !== 'TR') return
+                    const on = deskRowKey(e)
+                    if (!on) return
                     if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
                       e.preventDefault()
                       go(at < 0 ? 0 : at + (e.key === 'ArrowDown' ? 1 : -1))
                     } else if (e.key === 'Home' || e.key === 'End') {
                       e.preventDefault()
                       go(e.key === 'Home' ? 0 : flat.length - 1)
-                    } else if (e.key === 'Enter' && at >= 0) {
+                    } else if (e.key === 'Enter' && on === 'row' && at >= 0) {
                       e.preventDefault()
                       open(flat[at])
                     }
