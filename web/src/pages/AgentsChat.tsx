@@ -671,30 +671,30 @@ export function AgentsChat({ bar, active = true, onHead }: { bar?: ReactNode; ac
   }, [active, unresolved, pickIsFront])
   // A new tab: the quick switcher, its pick opened in one (none shown, the page's list is there already).
   const pickList = useRef<HTMLDivElement>(null)
-  const drawn = useRef(new Map<string, { el: ReactNode; key: string; seen: number; box: KeptBox }>())
+  type Drawn = { el: ReactNode; key: string; seen: number; box: KeptBox }
+  // (The kept views as last put on the page. A drawing works out the next from it — what stays, what is let go —
+  // and only its commit makes them so: a drawing left unfinished, as React may, lets nothing go — review 8.)
+  const drawn = useRef(new Map<string, Drawn>())
+  const drawing = useRef<{ next: Map<string, Drawn>; gone: KeptBox[]; kidsGone: [KeptBox, string, KeptBox][]; front: string | null } | null>(null)
   // (Let go for good: its effects cleaned up as for a view closed — what it sent stopped. One shown cleans up as
-  // it goes, in the drawing's commit; one hidden had cleaned up already, putting off the stopping: done just after.)
-  const goneBoxes = useRef<KeptBox[]>([])
-  const letGo = (id: string) => {
-    const d = drawn.current.get(id)
-    if (d) {
-      d.box.hidden = false
-      goneBoxes.current.push(d.box)
-    }
-    drawn.current.delete(id)
-  }
+  // it goes, in the commit; one hidden had cleaned up already, putting off the stopping: done here, just after.)
   useLayoutEffect(() => {
-    if (!goneBoxes.current.length) return
-    const l = goneBoxes.current
-    goneBoxes.current = []
-    for (const b of l) letGoBox(b)
+    const w = drawing.current
+    if (!w) return
+    drawing.current = null
+    drawn.current = w.next
+    for (const [id, v] of w.next) hideBox(v.box, id !== w.front)
+    for (const b of w.gone) letGoBox(b)
+    for (const [box, name, kid] of w.kidsGone)
+      if (box.kids.get(name) === kid) {
+        box.kids.delete(name)
+        letGoBox(kid)
+      }
   })
-  // (The page itself going — wider or narrower than 700, a sign-out —: each kept view let go with it, its layout
-  // cleanups before their effects', so these see it.)
+  // (The page itself going — wider or narrower than 700, a sign-out —: each kept view let go with it.)
   useLayoutEffect(
     () => () => {
       for (const v of drawn.current.values()) letGoBox(v.box) // (the one shown has nothing put off: its effects clean up)
-      for (const b of goneBoxes.current) letGoBox(b)
     },
     [],
   )
@@ -1199,34 +1199,40 @@ export function AgentsChat({ bar, active = true, onHead }: { bar?: ReactNode; ac
   // (In the tab of its agent — gone to another tab from the list, the tab in front is set a drawing later: that
   // one's kept view is not taken for it — else the tab in front, whose record catches up a drawing later.)
   const drawnFront = !stack && front && cur ? (tabs.find((x) => x.key === cur.key)?.id ?? front) : null
+  const next = new Map(drawn.current)
+  const goneBoxes: KeptBox[] = []
+  const kidsGone: [KeptBox, string, KeptBox][] = []
+  const letGo = (id: string) => {
+    const d = next.get(id)
+    if (d) goneBoxes.push(d.box)
+    next.delete(id)
+  }
   if (drawnFront) {
-    const d = drawn.current.get(drawnFront)
+    const d = next.get(drawnFront)
     const same = !!d && d.key === cur!.key + ' ' + cur!.s.id
     if (d && !same) letGo(drawnFront) // (another agent in it now: that one's, anew)
     const box = same ? d!.box : keptBox()
-    drawn.current.set(drawnFront, { el: body, key: cur!.key + ' ' + cur!.s.id, seen: Date.now(), box })
+    next.set(drawnFront, { el: body, key: cur!.key + ' ' + cur!.s.id, seen: Date.now(), box })
     // (The conversation beside it changed while it was behind — from another window —: the one that was there goes
     // now, its own box let go — review 7.)
     const beside = splitEntry ? 'split ' + splitEntry.key + ' ' + splitEntry.s.id : null
-    for (const [name, kid] of box.kids)
-      if (name !== beside) {
-        box.kids.delete(name)
-        kid.hidden = false
-        goneBoxes.current.push(kid)
-      }
+    for (const [name, kid] of box.kids) if (name !== beside) kidsGone.push([box, name, kid])
   }
-  for (const id of [...drawn.current.keys()]) {
+  for (const id of [...next.keys()]) {
     const x = tabs.find((y) => y.id === id)
     // (Closed, or of another agent now — as another window changed it —: let go.)
-    if (!x || (id !== drawnFront && !drawn.current.get(id)!.key.startsWith(x.key + ' '))) letGo(id)
+    if (!x || (id !== drawnFront && !next.get(id)!.key.startsWith(x.key + ' '))) letGo(id)
   }
-  if (drawn.current.size > DRAWN_MAX) {
+  if (next.size > DRAWN_MAX) {
     const blocked = (k?: string) => !!k && entries.find((e) => e.key === k)?.row?.status === 'blocked'
     const waitingOn = new Set(tabs.filter((x) => blocked(x.key) || blocked(x.split)).map((x) => x.id)) // (its agent or the one beside it)
-    const old = [...drawn.current].filter(([id]) => id !== drawnFront && !waitingOn.has(id)).sort((a, b) => a[1].seen - b[1].seen)
-    for (const [id] of old.slice(0, drawn.current.size - DRAWN_MAX)) letGo(id)
+    const old = [...next].filter(([id]) => id !== drawnFront && !waitingOn.has(id)).sort((a, b) => a[1].seen - b[1].seen)
+    for (const [id] of old.slice(0, next.size - DRAWN_MAX)) letGo(id)
   }
-  for (const [id, v] of drawn.current) hideBox(v.box, id !== drawnFront)
+  // (Which are hidden, as this drawing has them — set again by its commit, should another drawing have been left
+  // unfinished meanwhile: a view's cleanups, in the commit, go by it.)
+  for (const [id, v] of next) hideBox(v.box, id !== drawnFront)
+  drawing.current = { next, gone: goneBoxes, kidsGone, front: drawnFront }
 
   // (The workbench's rail and status bar: with the tabs, 760 and up.)
   const wbOn = wb && !!bar && !stack
@@ -1309,7 +1315,7 @@ export function AgentsChat({ bar, active = true, onHead }: { bar?: ReactNode; ac
         </p>
       )}
       <div className="term-body">
-        {[...drawn.current].map(([id, v]) => (
+        {[...next].map(([id, v]) => (
           // (The tab in front shown as just made; the others as they were last, hidden: their effects — reading, timers,
           // a live terminal — stopped by React, their state and drawing kept, nothing made again as the list changes.)
           <Activity key={id} mode={id === drawnFront ? 'visible' : 'hidden'}>
@@ -2443,6 +2449,8 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
   const insertPathNow = useRef(insertPath)
   insertPathNow.current = insertPath
   const dockSink = useMemo(() => ({ set: (s: DockSink | null) => void (dock.current = s), insert: (p: string) => insertPathNow.current(p) }), [])
+  // (From what finishes later — a file gone up, behind or not —: the box as it is now, not as it was when it began — review 8.)
+  const insertNow = useRef<(text: string) => void>(() => {})
   const insert = (text: string) => {
     const el = field.current
     const d = el ? el.value : draft
@@ -2461,6 +2469,7 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
       f.setSelectionRange(a + text.length, a + text.length)
     })
   }
+  insertNow.current = insert
   // Files (picked, pasted, dropped) go up to the host one at a time, each
   // path then put in the draft for the agent to read (not sent: there is
   // more to say, as a rule). Sending waits for them. 11-13: taken in while
@@ -2513,7 +2522,7 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
         const quoted = r.prefix === '@' ? geminiPath(r.path) : shellPath(r.path)
         if (lastKey.current !== u.forKey) return
         // (In the draft as a label, a chip over the box; sent as the path.)
-        if (quoted) insert(attach(u.file, r.path, quoted, cur.s.host_id) + ' ')
+        if (quoted) insertNow.current(attach(u.file, r.path, quoted, cur.s.host_id) + ' ')
         else toast(r.path)
       },
       (e) => {

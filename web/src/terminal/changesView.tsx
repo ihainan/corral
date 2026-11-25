@@ -137,7 +137,8 @@ export function useChanges(sid: string, pane: string, start: ChangesAgainst) {
     () =>
       (read?.files ?? []).map((f) => {
         const a = alone.get(f.path)
-        return typeof a === 'object' ? a : f
+        // (Its diff from the file read alone; what it is and its counts the list's, the newer — review 8.)
+        return typeof a === 'object' ? { ...f, hunks: a.hunks, cut: a.cut, binary: a.binary, omitted: a.omitted } : f
       }),
     [read, alone],
   )
