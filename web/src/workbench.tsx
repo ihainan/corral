@@ -10,7 +10,11 @@ import { MenuLayer, useToast, type MenuItem } from './components/ui'
 import { Avatar } from './components/Avatar'
 import { getPrefs } from './prefs'
 import { modalShown } from './shown'
-import { railKey, railKeyName, RAIL_KEYS, takenFromTerminal, terminalHasKeys } from './terminal/pageKeys'
+import { onMac, railKey, railKeyName, RAIL_KEYS, takenFromTerminal, terminalHasKeys } from './terminal/pageKeys'
+
+// A field one types in: not a terminal's (its own textarea: the terminal's keys are terminalHasKeys').
+const typedIn = (t: EventTarget | null) =>
+  t instanceof HTMLElement && !t.classList.contains('xterm-helper-textarea') && (t.isContentEditable || t.tagName === 'TEXTAREA' || (t.tagName === 'INPUT' && !['checkbox', 'radio', 'button', 'submit', 'range', 'color', 'file'].includes((t as HTMLInputElement).type)))
 import { isDesktopSettings, openSettingsModal } from './pages/Settings'
 
 // The workbench: one frame round every page on a desktop or tablet (760 and
@@ -45,12 +49,15 @@ export function Rail({ active }: { active?: RailKey }) {
   const meBtn = useRef<HTMLButtonElement>(null) // (this rail's: another page's, hidden, has one too)
   const navRef = useRef<HTMLElement>(null)
   // Alt+1…9: its pages, as they go down (railKey). Every page's rail listens; the one shown goes.
-  // Not under a dialog; a terminal focused and it first, the program's (as ⌥↑↓).
+  // Not under a dialog; a terminal focused and it first, the program's (as ⌥↑↓); before the
+  // terminal's own listener (capture), as it stops the key once it sends it. On a Mac, not
+  // in a field one types in: ⌥ and a digit type there (⌥8 •, ⌥2 ™).
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const n = railKey(e)
       const nav = navRef.current
       if (!n || !nav || !nav.getClientRects().length || e.defaultPrevented || modalShown() || terminalHasKeys(e, getPrefs().keysFirst)) return
+      if (onMac() && typedIn(e.target)) return
       const to = nav.querySelectorAll<HTMLAnchorElement>('a[data-rail-key]')[n - 1]
       if (!to) return
       e.preventDefault()
@@ -59,8 +66,8 @@ export function Rail({ active }: { active?: RailKey }) {
       takenFromTerminal(e, RAIL_KEYS, (m) => toast(m), (key) => t('keys.taken', { key }))
       if (to.getAttribute('aria-current') !== 'page') to.click()
     }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
+    window.addEventListener('keydown', onKey, true)
+    return () => window.removeEventListener('keydown', onKey, true)
   }, [toast])
   const items: { key: RailKey; href: string; label: string; icon: ReactNode }[] = [
     { key: 'agents', href: '/agents', label: t('nav.agents'), icon: <Bot size={19} strokeWidth={1.75} /> },

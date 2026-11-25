@@ -219,19 +219,25 @@ export function ImportDialog({ onClose, onDone }: { onClose: () => void; onDone:
   // A key file read here, in the browser (doc UI item 11, 11-25): its words put in the box, as
   // if pasted, and sent as those are; its name the key's, where none is typed. Any file may be
   // picked — a key's has no extension (id_ed25519) —; one too big, or a public key, is said so.
+  // (The last file picked only: one read slower before it does not come after it.)
+  const reading = useRef(0)
   const readKey = async (f: File | undefined) => {
     if (!f) return
+    const n = ++reading.current
     if (f.size > KEY_FILE_MAX) return setError({ field: 'private_key', text: t('keys.fileTooBig') })
     let text: string
     try {
       text = await f.text()
     } catch {
-      return setError({ field: 'private_key', text: t('keys.fileUnreadable') })
+      if (n === reading.current) setError({ field: 'private_key', text: t('keys.fileUnreadable') })
+      return
     }
-    if (/^(ssh-|ecdsa-|sk-)[a-z0-9-]+ [A-Za-z0-9+/=]+/.test(text.trim())) return setError({ field: 'private_key', text: t('keys.filePublic') })
+    if (n !== reading.current) return
+    // (A security key's too: sk-ssh-ed25519@openssh.com.)
+    if (/^(ssh-|ecdsa-|sk-)[A-Za-z0-9@.-]+ [A-Za-z0-9+/=]+/.test(text.trim())) return setError({ field: 'private_key', text: t('keys.filePublic') })
     setError(null)
     setPk(text)
-    if (!name.trim()) setName(f.name.replace(/\.(pem|key|ppk)$/i, ''))
+    setName((v) => (v.trim() ? v : f.name.replace(/\.(pem|key|ppk)$/i, ''))) // (as it is now: typed meanwhile, kept)
   }
   const onDrop = (e: DragEvent) => {
     setOver(false)

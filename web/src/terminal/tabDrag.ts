@@ -25,6 +25,9 @@ const DRAG_EDGE_PX = 32
 // Where each tab was is read after every render (cheap: a bar's few tabs),
 // so it is where it was last drawn, the window since resized or not.
 const SLIDE_MS = 180
+const SLIDE_ID = 'corral-tab-slide'
+// (A drag begun mid-slide: the slides stopped, so the tabs are measured, and drawn, where they are placed.)
+const stopSlides = (el: HTMLElement) => el.getAnimations?.({ subtree: true }).forEach((a) => a.id === SLIDE_ID && a.cancel())
 export function useTabSlide(nav: React.RefObject<HTMLElement | null>, order: string, still: () => boolean) {
   const was = useRef<{ order: string; at: Map<string, number> } | null>(null)
   useLayoutEffect(() => {
@@ -41,7 +44,7 @@ export function useTabSlide(nav: React.RefObject<HTMLElement | null>, order: str
       const from = before.at.get(x.dataset.tab ?? '')
       const to = at.get(x.dataset.tab ?? '')
       if (from === undefined || to === undefined || from === to) continue
-      x.animate?.([{ transform: `translateX(${from - to}px)` }, { transform: 'none' }], { duration: SLIDE_MS, easing: 'cubic-bezier(0.2, 0.8, 0.2, 1)' })
+      x.animate?.([{ transform: `translateX(${from - to}px)` }, { transform: 'none' }], { id: SLIDE_ID, duration: SLIDE_MS, easing: 'cubic-bezier(0.2, 0.8, 0.2, 1)' })
     }
   })
 }
@@ -120,6 +123,7 @@ export function useTabDrag(nav: React.RefObject<HTMLElement | null>, ids: string
     const d = cur.current
     const el = nav.current
     if (!d || !el) return
+    stopSlides(el)
     const box = el.getBoundingClientRect()
     const tabs = [...el.querySelectorAll<HTMLElement>('.term-tab[data-place]')].map((t) => {
       const r = t.getBoundingClientRect()
