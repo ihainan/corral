@@ -54,9 +54,10 @@ export function useEffectOnChange(fn: () => void, deps: DependencyList) {
 // Elsewhere (no kept tabs) a view is never hidden.
 // (kids: the parts of a view that may go while it is behind — the conversation beside it, changed from another
 // window —, each with its own box: let go when it goes, not only with the whole.)
-export type KeptBox = { hidden: boolean; later: Map<object, () => void>; kids: Map<string, KeptBox> }
+export type KeptBox = { id: number; hidden: boolean; later: Map<object, () => void>; kids: Map<string, KeptBox> }
 export const KeptView = createContext<KeptBox | null>(null)
-export const keptBox = (hidden = false): KeptBox => ({ hidden, later: new Map(), kids: new Map() })
+let boxes = 0
+export const keptBox = (hidden = false): KeptBox => ({ id: ++boxes, hidden, later: new Map(), kids: new Map() })
 export function hideBox(box: KeptBox, hidden: boolean) {
   box.hidden = hidden
   for (const k of box.kids.values()) hideBox(k, hidden)
@@ -67,7 +68,9 @@ export function KeptPart({ name, children }: { name: string; children: ReactNode
   if (!box) return children
   let mine = box.kids.get(name)
   if (!mine) box.kids.set(name, (mine = keptBox(box.hidden)))
-  return createElement(KeptView.Provider, { value: mine }, children)
+  // (Keyed by its box: one let go and taken again — closed there, opened again before its tab was shown — is made
+  // anew, not the one whose sending was stopped — review 11.)
+  return createElement(KeptView.Provider, { value: mine, key: mine.id }, children)
 }
 // The view of a box let go for good: shown, its effects clean up as for any
 // view closed; hidden, they were cleaned up already as it went behind (React
