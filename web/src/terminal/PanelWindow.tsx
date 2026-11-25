@@ -1,5 +1,5 @@
 import { Fragment, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react'
-import { useHiddenNow } from '../shown'
+import { useWhenGone } from '../shown'
 import { api, ApiError, errorText } from '../api'
 import { t, type I18nKey } from '../i18n'
 import { isCoarse } from '../components/ui'
@@ -146,7 +146,7 @@ export function PanelWindow({ sid, active, press, onSettled, toast, live, onFull
   const screenId = useId()
   const at = useRef({ shown: '', stale: true, reading: false, pumping: false, queue: [] as Pressed[], fails: 0, escDone: 0, escGoing: false, alive: true, looks: 0, look: null as AbortController | null, readAt: 0 }) // (looks: which run of the looking is the current)
   const isLive = useRef(!!live)
-  const hiddenNow = useHiddenNow()
+  const kept = useWhenGone()
   const letters = useRef(!!live?.letters)
   letters.current = !!live?.letters
   const settlesHere = (k: string) => settles(k) || (letters.current && /^[A-Za-z0-9._/]$/.test(k))
@@ -306,6 +306,7 @@ export function PanelWindow({ sid, active, press, onSettled, toast, live, onFull
     if (usePty) return
     const a = at.current
     a.alive = true
+    kept.back()
     let timer: ReturnType<typeof setTimeout>
     const run = a.looks
     const tick = async () => {
@@ -319,9 +320,9 @@ export function PanelWindow({ sid, active, press, onSettled, toast, live, onFull
       a.look?.abort()
       clearTimeout(timer)
       // (Sent to a tab behind: keys pressed still go, one by one, and its looks stop — the timer is this run's; the
-      // next run, shown again, looks anew. Closed: all stops.)
-      if (hiddenNow()) a.looks++
-      else a.alive = false
+      // next run, shown again, looks anew. Closed, or let go from behind: all stops.)
+      a.looks++
+      kept.gone(() => void (a.alive = false))
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [read, usePty])

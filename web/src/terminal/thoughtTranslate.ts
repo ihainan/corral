@@ -64,6 +64,8 @@ let config: TranslateConfig | null = null
 let configLoaded = false
 let configPromise: Promise<TranslateConfig | null> | null = null
 let storeVer = 0
+// (Which account's the store is: an answer asked for another, before a sign-out, is taken for nothing — review 6.)
+let storeGen = 0
 
 const cache = new Map<string, CacheEntry>()
 const listeners = new Set<() => void>()
@@ -85,6 +87,7 @@ function subscribe(fn: () => void): () => void {
 }
 
 function resetStore() {
+  storeGen++
   config = null
   configLoaded = false
   configPromise = null
@@ -103,14 +106,17 @@ onAuthChange(resetStore)
 export function ensureTranslateConfig(force = false): Promise<TranslateConfig | null> {
   if (!force && configLoaded) return Promise.resolve(config)
   if (!force && configPromise) return configPromise
+  const g = storeGen
   const p = api<TranslateConfig>('GET', '/api/me/translate')
     .then((c) => {
+      if (g !== storeGen) return config
       config = c
       configLoaded = true
       notify()
       return c
     })
     .catch(() => {
+      if (g !== storeGen) return config
       configLoaded = true
       notify()
       return config
@@ -125,7 +131,9 @@ export function ensureTranslateConfig(force = false): Promise<TranslateConfig | 
 export async function saveTranslateConfig(patch: TranslateConfigPatch): Promise<TranslateConfig> {
   const prevLang = config?.target_lang
   const prevMode = config?.mode
+  const g = storeGen
   const next = await api<TranslateConfig>('PUT', '/api/me/translate', patch)
+  if (g !== storeGen) return next
   config = next
   configLoaded = true
   // Clear cached errors (e.g. user just fixed API key or URL) and refetch if target language/mode changed.
@@ -260,6 +268,7 @@ function pump() {
 }
 
 async function sendBatch(mode: TranslateMode, lang: string, batch: { key: string; mode: TranslateMode; lang: string; text: string }[]) {
+  const g = storeGen
   try {
     const res = await api<{
       target_lang: string
@@ -269,6 +278,7 @@ async function sendBatch(mode: TranslateMode, lang: string, batch: { key: string
       target_lang: lang,
       items: batch.map((b) => ({ text: b.text })),
     })
+    if (g !== storeGen) return
     const results = res.results ?? []
     for (let i = 0; i < batch.length; i++) {
       const b = batch[i]
@@ -285,6 +295,7 @@ async function sendBatch(mode: TranslateMode, lang: string, batch: { key: string
       }
     }
   } catch (err) {
+    if (g !== storeGen) return
     if (err instanceof ApiError && err.code === 'translate_disabled') {
       if (config) config = { ...config, enabled: false }
       for (const b of batch) {

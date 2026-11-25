@@ -39,7 +39,7 @@ import { camesAfter, containedInMessage, isCommand, pairSent, sameMessage, squee
 import { viewRefusal } from '../terminal/sendView'
 import { agentKey, sessionWhich } from '../terminal/sessionName'
 import { pickKey as isPickKey } from '../terminal/pageKeys'
-import { firstShown, KeptView, modalShown, useEffectOnChange, useShownAt } from '../shown'
+import { firstShown, keptBox, KeptView, letGoBox, modalShown, useEffectOnChange, useShownAt, type KeptBox } from '../shown'
 import { Rail, StatusBar, StatusItem, useWorkbench } from '../workbench'
 import { AgentTabBar, askPickInTab, isTabsKey, newTabId, OPEN_PICKER, readFront, readTabs, takePickInTab, writeFront, writeTabs, type AgentTab, type PickHow, type TabView } from './agentTabs'
 import { agentMark } from '../terminal/agentIcons'
@@ -671,18 +671,30 @@ export function AgentsChat({ bar, active = true, onHead }: { bar?: ReactNode; ac
   }, [active, unresolved, pickIsFront])
   // A new tab: the quick switcher, its pick opened in one (none shown, the page's list is there already).
   const pickList = useRef<HTMLDivElement>(null)
-  const drawn = useRef(new Map<string, { el: ReactNode; key: string; seen: number; box: { hidden: boolean } }>())
-  // (Let go for good: its effects cleaned up as for a view closed — what it sent stopped.)
+  const drawn = useRef(new Map<string, { el: ReactNode; key: string; seen: number; box: KeptBox }>())
+  // (Let go for good: its effects cleaned up as for a view closed — what it sent stopped. One shown cleans up as
+  // it goes, in the drawing's commit; one hidden had cleaned up already, putting off the stopping: done just after.)
+  const goneBoxes = useRef<KeptBox[]>([])
   const letGo = (id: string) => {
     const d = drawn.current.get(id)
-    if (d) d.box.hidden = false
+    if (d) {
+      d.box.hidden = false
+      goneBoxes.current.push(d.box)
+    }
     drawn.current.delete(id)
   }
+  useLayoutEffect(() => {
+    if (!goneBoxes.current.length) return
+    const l = goneBoxes.current
+    goneBoxes.current = []
+    for (const b of l) letGoBox(b)
+  })
   // (The page itself going — wider or narrower than 700, a sign-out —: each kept view let go with it, its layout
   // cleanups before their effects', so these see it.)
   useLayoutEffect(
     () => () => {
-      for (const v of drawn.current.values()) v.box.hidden = false
+      for (const v of drawn.current.values()) letGoBox(v.box) // (the one shown has nothing put off: its effects clean up)
+      for (const b of goneBoxes.current) letGoBox(b)
     },
     [],
   )
@@ -1189,7 +1201,7 @@ export function AgentsChat({ bar, active = true, onHead }: { bar?: ReactNode; ac
     const d = drawn.current.get(drawnFront)
     const same = !!d && d.key === cur!.key + ' ' + cur!.s.id
     if (d && !same) letGo(drawnFront) // (another agent in it now: that one's, anew)
-    drawn.current.set(drawnFront, { el: body, key: cur!.key + ' ' + cur!.s.id, seen: Date.now(), box: same ? d!.box : { hidden: false } })
+    drawn.current.set(drawnFront, { el: body, key: cur!.key + ' ' + cur!.s.id, seen: Date.now(), box: same ? d!.box : keptBox() })
   }
   for (const id of [...drawn.current.keys()]) {
     const x = tabs.find((y) => y.id === id)

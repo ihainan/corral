@@ -112,8 +112,18 @@ export function useChanges(sid: string, pane: string, start: ChangesAgainst) {
     const ctl = new AbortController()
     setError('')
     api<Changes>('GET', `/api/sessions/${sid}/git/changes?` + new URLSearchParams({ pane, against }).toString(), undefined, { signal: ctl.signal, timeoutMs: 25000 }).then(
-      (c) => !ctl.signal.aborted && setRead(c),
-      (e) => !ctl.signal.aborted && setError(failText(e)),
+      (c) => {
+        if (ctl.signal.aborted) return
+        setRead(c)
+        // (Read again — shown again from a tab behind —: a file read alone is of the last reading, maybe older
+        // than this one, and one asked then is answered into nothing: read alone again on asking — review 6.)
+        setAlone((m) => (m.size ? new Map() : m))
+      },
+      (e) => {
+        if (ctl.signal.aborted) return
+        setError(failText(e))
+        setAlone((m) => ([...m.values()].includes('loading') ? new Map([...m].filter(([, v]) => v !== 'loading')) : m))
+      },
     )
     return () => ctl.abort()
   }, [sid, pane, against, again])

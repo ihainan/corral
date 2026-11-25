@@ -1,5 +1,5 @@
 import { Fragment, useContext, useEffect, useLayoutEffect, useRef, useState, type FormEvent } from 'react'
-import { modalShown, useHiddenNow } from '../shown'
+import { modalShown, useWhenGone } from '../shown'
 import { MessageCircleReply, RotateCw } from 'lucide-react'
 import { api, ApiError, errorText, type HerdrAgent } from '../api'
 import { t } from '../i18n'
@@ -136,12 +136,12 @@ export function useReply(target: ReplyTarget, { onLoaded, resizedAt, onSent, qui
   }
   const seq = useRef(0)
   const live = useRef(true) // an answer that comes back after closing is not shown
-  const hiddenNow = useHiddenNow()
+  const kept = useWhenGone()
   useEffect(() => {
     live.current = true
-    return () => {
-      if (!hiddenNow()) live.current = false // (sent to a tab behind: kept, its answer still shown — else busy for good)
-    }
+    kept.back()
+    // (Sent to a tab behind: kept, its answer still shown — else busy for good; let go from there, not.)
+    return () => kept.gone(() => void (live.current = false))
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
   const loadedRef = useRef(onLoaded)

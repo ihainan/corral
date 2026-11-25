@@ -4,6 +4,7 @@ import { api, ApiError, errorText } from '../api'
 import { t } from '../i18n'
 import { Dialog, DialogHead, HeadTool } from '../components/ui'
 import { isDark, usePrefs } from '../prefs'
+import { useEffectOnChange } from '../shown'
 import { Code } from './Code'
 import { Markdown } from './markdown'
 import { FileTools, fileWhere, useDownload } from './picture'
@@ -102,13 +103,19 @@ export function TextPreview({ sid, path, tail = false, lines: at0, onClose, onRe
   const atFrom = at?.from
   const atTo = at?.to
   const first = useRef(true)
-  useEffect(() => {
+  // (Not as shown again from a tab behind: as it was left, drawn or its source — review 6.)
+  useEffectOnChange(() => {
     if (first.current) first.current = false
     else setSource(atFrom !== undefined)
   }, [path, atFrom, atTo, asked]) // (asked again: lines asked are lines of its source — a Markdown file drawn shows its source again)
+  const readOf = useRef('')
   useEffect(() => {
     const ctl = new AbortController()
-    if (!tail) setRead(null) // (read again from its end: what is shown stays till the newer comes)
+    // (Read again from its end, or shown again from a tab behind: what is shown stays till the newer comes — not
+    // a moment's "loading" in its place, its reading place lost with it: review 6.)
+    const of = [sid, path, again, tail].join('\0')
+    if (!tail && of !== readOf.current) setRead(null)
+    readOf.current = of
     setError('')
     api<Read>('GET', `/api/sessions/${sid}/files/text?path=` + encodeURIComponent(path) + (tail ? '&tail=1' : ''), undefined, { signal: ctl.signal }).then(
       (r) => !ctl.signal.aborted && setRead(r),

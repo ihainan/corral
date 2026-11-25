@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState, type FormEvent } from 'react'
-import { useEffectOnChange, useHiddenNow } from '../shown'
+import { useEffectOnChange, useWhenGone } from '../shown'
 import { ArrowUp, Check, Clock, Copy, Download, Eye, FileQuestion, Folder, FolderPlus, House, Image as ImageIcon, LocateFixed, MoreHorizontal, Pencil, PencilLine, RotateCw, Search, SquareTerminal, Trash2, Upload, X } from 'lucide-react'
 import { FileTypeIcon } from './fileIcons'
 import { api, ApiError, errorText, postFile, type FileEntry, type FileListing } from '../api'
@@ -128,20 +128,22 @@ function FilesPanel({ sessionId, start, reveal, onPath, onInsert, onClose, docke
   // The file asked to be shown: marked while its folder is the one listed.
   const marked = reveal ? { dir: cleanPath(parent(reveal)), name: reveal.slice(reveal.lastIndexOf('/') + 1) } : null
   const markedSaid = useRef(false)
-  const hiddenNow = useHiddenNow()
+  const kept = useWhenGone()
   useEffect(() => {
     alive.current = true
-    return () => {
-      // (Sent to a tab behind: kept — its uploads go on to their end, the queue with them; shown again, as left.)
-      if (hiddenNow()) return
-      // Late answers of this panel are ignored, uploads still running stop,
-      // and a question left open counts as "no".
-      alive.current = false
-      seq.current++
-      uploadsRef.current.forEach((u) => u.abort.abort())
-      queue.current = []
-      pendingAsk.current?.(false)
-    }
+    kept.back()
+    // (Sent to a tab behind: kept — its uploads go on to their end, the queue with them; shown again, as left.
+    // Let go from there, they stop then.)
+    return () =>
+      kept.gone(() => {
+        // Late answers of this panel are ignored, uploads still running stop,
+        // and a question left open counts as "no".
+        alive.current = false
+        seq.current++
+        uploadsRef.current.forEach((u) => u.abort.abort())
+        queue.current = []
+        pendingAsk.current?.(false)
+      })
   }, [])
 
   // load lists a folder ('' is the home folder).

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useId, useRef, useState } from 'react'
+import { useEffectOnChange } from '../shown'
 import { api } from '../api'
 import { t } from '../i18n'
 import { apply, suggest, tokenAt, type Agent, type Completions, type Suggestion, type Token } from './complete'
@@ -33,7 +34,10 @@ export function useCompletion(p: {
   const of = p.sessionId + ' ' + (p.pane ?? '')
   const ofNow = useRef(of)
   ofNow.current = of
-  useEffect(() => {
+  // (Not as shown again from a tab behind: a read under way then goes on being the one — review 6.)
+  const asks = useRef(0)
+  useEffectOnChange(() => {
+    asks.current++
     loadedAt.current = 0
     loading.current = false
     setData(null)
@@ -42,19 +46,20 @@ export function useCompletion(p: {
     if (loading.current || Date.now() - loadedAt.current < fresh) return
     loading.current = true
     const asked = of
+    const n = ++asks.current // (only the last asked answers: one older coming late is taken for nothing)
     api<Completions>('GET', `/api/sessions/${p.sessionId}/complete` + (p.pane ? '?pane=' + encodeURIComponent(p.pane) : ''), undefined, { timeoutMs: 20000 })
       .then((d) => {
-        if (asked !== ofNow.current) return
+        if (asked !== ofNow.current || n !== asks.current) return
         loadedAt.current = Date.now()
         setData(d)
         setFailed(false)
       })
       .catch(() => {
-        if (asked !== ofNow.current) return
+        if (asked !== ofNow.current || n !== asks.current) return
         loadedAt.current = Date.now() - FRESH_MS + 5000 // (tried again in a while)
         setFailed(true)
       })
-      .finally(() => asked === ofNow.current && (loading.current = false))
+      .finally(() => n === asks.current && (loading.current = false))
   }, [p.sessionId, p.pane, of])
 
   // The token at the caret, after each change of the text or the caret.

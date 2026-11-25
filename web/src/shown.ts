@@ -48,12 +48,38 @@ export function useEffectOnChange(fn: () => void, deps: DependencyList) {
 }
 
 // Whether the view is being sent to a tab behind (kept) rather than let go:
-// set by the agents' page on each kept tab's box, read as an effect is cleaned
-// up. Hidden, what was sent goes on to its end — an answer, a key, a file
-// going up — and is not stopped as for a view closed (plans/agent-tabs.md 4.4:
-// what was sent may finish). Elsewhere (no kept tabs) always false.
-export const KeptView = createContext<{ hidden: boolean } | null>(null)
-export function useHiddenNow(): () => boolean {
+// set by the agents' page on each kept tab's box. Hidden, what was sent goes
+// on to its end — an answer, a key, a file going up — and is not stopped as
+// for a view closed (plans/agent-tabs.md 4.4: what was sent may finish).
+// Elsewhere (no kept tabs) a view is never hidden.
+export type KeptBox = { hidden: boolean; later: Map<object, () => void> }
+export const KeptView = createContext<KeptBox | null>(null)
+export const keptBox = (): KeptBox => ({ hidden: false, later: new Map() })
+// The view of a box let go for good: shown, its effects clean up as for any
+// view closed; hidden, they were cleaned up already as it went behind (React
+// runs them no more), so what they put off is done now.
+export function letGoBox(box: KeptBox) {
+  box.hidden = false
+  const l = [...box.later.values()]
+  box.later.clear()
+  for (const f of l) f()
+}
+
+// What stops what a view sent, from an effect's cleanup: done at once for a
+// view closed; for one sent to a tab behind, put off till it is let go from
+// there (review 6: closed from behind, its keys and files still went) — and
+// dropped once it is shown again (back(), from the effect's setup).
+export function useWhenGone(): { gone: (fn: () => void) => void; back: () => void } {
   const box = useContext(KeptView)
-  return () => !!box?.hidden
+  const now = useRef(box)
+  now.current = box
+  const me = useRef({}).current
+  return useRef({
+    gone: (fn: () => void) => {
+      const b = now.current
+      if (b?.hidden) b.later.set(me, fn)
+      else fn()
+    },
+    back: () => void now.current?.later.delete(me),
+  }).current
 }
