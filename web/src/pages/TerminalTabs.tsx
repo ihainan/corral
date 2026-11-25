@@ -14,7 +14,7 @@ import { estimateSize, useConnect } from '../connect'
 import type { TabInfo } from './Terminal'
 import { TerminalPage } from './lazyPages'
 import { NewTabDialog } from '../terminal/NewSessionDialog'
-import { useTabDrag } from '../terminal/tabDrag'
+import { showFront, useTabDrag, useTabSlide } from '../terminal/tabDrag'
 import { chromeVars, corralDark, corralLight } from '../terminal/themes'
 import { isDark, usePrefs } from '../prefs'
 import { Rail, StatusBar, useWorkbench } from '../workbench'
@@ -606,12 +606,13 @@ function TabBar(p: { tabs: SessionInfo[]; current: string; infos: Record<string,
   // The current tab is scrolled into view when it changes, or the tabs do
   // (moved by a key too; not by a drag: the tab dragged is where it was let go).
   const order = shown.map((s) => s.id).join()
+  useTabSlide(ref, order, () => moved.current || !!drag)
   useEffect(() => {
     if (moved.current) {
       moved.current = false
       return
     }
-    ref.current?.querySelector<HTMLElement>('[aria-current="page"]')?.scrollIntoView({ block: 'nearest', inline: 'nearest' })
+    showFront(ref.current)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [p.current, order])
   const which = (s: SessionInfo) => sessionWhich(s, p.tabs)

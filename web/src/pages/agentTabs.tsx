@@ -3,7 +3,7 @@ import { ChevronDown, ExternalLink, Link2, Plus, X } from 'lucide-react'
 import { t } from '../i18n'
 import { local, session } from '../storage'
 import { AgentIcon } from '../terminal/agentIcons'
-import { useTabDrag } from '../terminal/tabDrag'
+import { showFront, useTabDrag, useTabSlide } from '../terminal/tabDrag'
 import { copyText, isCoarse, MenuLayer, useToast, type MenuItem } from '../components/ui'
 
 // The agents' page's tabs (11-24, plans/agent-tabs.md): each a conversation
@@ -88,12 +88,13 @@ export function AgentTabBar(p: {
   const ids = p.views.map((v) => v.tab.id)
   const { drag, onPointerDown, offset, dragged, moved } = useTabDrag(ref, ids, p.front ?? '', p.onMove)
   const order = ids.join()
+  useTabSlide(ref, order, () => moved.current || !!drag)
   useEffect(() => {
     if (moved.current) {
       moved.current = false
       return
     }
-    ref.current?.querySelector<HTMLElement>('[aria-current="page"]')?.scrollIntoView({ block: 'nearest', inline: 'nearest' })
+    showFront(ref.current)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [p.front, order])
   // Tabs beyond either end: that end fades, and the list of them all is at hand (as Firefox's, JetBrains').

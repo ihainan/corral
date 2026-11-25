@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 
 // (Shared by the terminals' tabs and the agents' — 11-24.)
 // Dragging a tab to another place. A mouse drags once it moves a few
@@ -17,6 +17,48 @@ const DRAG_MOUSE_PX = 4
 const DRAG_HOLD_MS = 300
 const DRAG_SLOP_PX = 8 // (a finger that moves more before then is scrolling)
 const DRAG_EDGE_PX = 32
+
+// Tabs taking other places — moved by a key (Ctrl+Shift+PageUp/Down), one
+// closed, or the order changed in another window — slide there from where
+// they were drawn, as Chrome's do (doc UI item 13, 11-25); not after a drag,
+// whose tabs are drawn where they go already, nor with less motion asked for.
+// Where each tab was is read after every render (cheap: a bar's few tabs),
+// so it is where it was last drawn, the window since resized or not.
+const SLIDE_MS = 180
+export function useTabSlide(nav: React.RefObject<HTMLElement | null>, order: string, still: () => boolean) {
+  const was = useRef<{ order: string; at: Map<string, number> } | null>(null)
+  useLayoutEffect(() => {
+    const el = nav.current
+    if (!el) return
+    // (A bar hidden, its page's away: no places to slide from — it shows its tabs where they are, once back.)
+    if (!el.getClientRects().length) return void (was.current = null)
+    const tabs = [...el.querySelectorAll<HTMLElement>('.term-tab[data-tab]')]
+    const at = new Map(tabs.map((x) => [x.dataset.tab ?? '', x.offsetLeft]))
+    const before = was.current
+    was.current = { order, at }
+    if (!before || before.order === order || still() || matchMedia('(prefers-reduced-motion: reduce)').matches) return
+    for (const x of tabs) {
+      const from = before.at.get(x.dataset.tab ?? '')
+      const to = at.get(x.dataset.tab ?? '')
+      if (from === undefined || to === undefined || from === to) continue
+      x.animate?.([{ transform: `translateX(${from - to}px)` }, { transform: 'none' }], { duration: SLIDE_MS, easing: 'cubic-bezier(0.2, 0.8, 0.2, 1)' })
+    }
+  })
+}
+
+// The tab in front scrolled into the bar's view (where it is nearest), by
+// where it is placed: not where it is drawn while it slides (useTabSlide),
+// which scrollIntoView would go by.
+export function showFront(nav: HTMLElement | null) {
+  const x = nav?.querySelector<HTMLElement>('[aria-current="page"]')?.closest<HTMLElement>('.term-tab')
+  if (!nav || !x) return
+  const r = x.getBoundingClientRect()
+  const box = nav.getBoundingClientRect()
+  const t = getComputedStyle(x).transform
+  const left = r.left - (t && t !== 'none' ? new DOMMatrixReadOnly(t).m41 : 0) - box.left + nav.scrollLeft
+  if (left < nav.scrollLeft) nav.scrollLeft = left
+  else if (left + r.width > nav.scrollLeft + nav.clientWidth) nav.scrollLeft = left + r.width - nav.clientWidth
+}
 
 export function useTabDrag(nav: React.RefObject<HTMLElement | null>, ids: string[], current: string, onMove: (id: string, to: number) => void) {
   const [drag, setDrag] = useState<Drag | null>(null)
