@@ -44,7 +44,7 @@ export function useTabSlide(nav: React.RefObject<HTMLElement | null>, order: str
     // (The first new order after a drop, when it comes — a render or two later, the page's own
     // list updated —: the one it made, drawn there already. Once, and only soon after.)
     const byDrop = performance.now() - dropped.current < DROP_SETTLE_MS
-    dropped.current = 0
+    dropped.current = -Infinity
     if (byDrop || dragging || matchMedia('(prefers-reduced-motion: reduce)').matches) return
     for (const x of tabs) {
       const from = before.at.get(x.dataset.tab ?? '')
@@ -91,7 +91,7 @@ export function useTabDrag(nav: React.RefObject<HTMLElement | null>, ids: string
   } | null>(null)
   const endedAt = useRef(0)
   const moved = useRef(false) // a drop changed the order (and the bar is not to scroll for it)
-  const dropped = useRef(0) // when a drop changed the order (performance.now): the tabs are not to slide into it
+  const dropped = useRef(-Infinity) // when a drop changed the order (performance.now): the tabs are not to slide into it
 
   const update = () => {
     const d = cur.current
