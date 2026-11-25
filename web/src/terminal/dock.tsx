@@ -92,13 +92,14 @@ export function Dock({
   of,
   ident,
   pane,
-  tab,
+  tab: tabAsked,
   onTab,
   info,
   start,
   ask,
   onInsert,
   terminal,
+  noTerminal,
   acts,
   over,
   expanded,
@@ -121,6 +122,7 @@ export function Dock({
   ask?: FilesAsk // (the Files tab asked for a file or a folder)
   onInsert: (path: string) => void // (a path put in the composer, from the Files tab)
   terminal?: DockTerminal
+  noTerminal?: boolean // (the conversation shows its terminal in its own place, the main view: not twice, nor two connections to one pane)
   acts?: ChangesActs
   over: boolean // (over the thread, not beside it)
   expanded: number // (over the whole of the thread's column, this wide — the side list left in sight: for a screen wider than the dock; 0: not)
@@ -134,6 +136,8 @@ export function Dock({
   toast: (s: string, bad?: boolean) => void
 }) {
   usePrefs()
+  const tabs = noTerminal ? TABS.filter((k) => k !== 'terminal') : TABS
+  const tab: DockTab = noTerminal && tabAsked === 'terminal' ? 'info' : tabAsked
   const uid = useId() // (its tabs' and panels' ids its own: another agent's dock, kept in a tab behind, or the split's, has its own)
   const sid = of.split(' ')[0]
   const [filesShown, setFilesShown] = useState(tab === 'files')
@@ -143,8 +147,8 @@ export function Dock({
   const root = useRef<HTMLElement>(null)
   // (Tabs as a tablist: the arrows between them, Home and End; the one shown the one reached by Tab.)
   const tabKeys = (e: ReactKeyboardEvent) => {
-    const i = TABS.indexOf(tab)
-    const to = e.key === 'ArrowRight' ? TABS[(i + 1) % TABS.length] : e.key === 'ArrowLeft' ? TABS[(i + TABS.length - 1) % TABS.length] : e.key === 'Home' ? TABS[0] : e.key === 'End' ? TABS[TABS.length - 1] : null
+    const i = tabs.indexOf(tab)
+    const to = e.key === 'ArrowRight' ? tabs[(i + 1) % tabs.length] : e.key === 'ArrowLeft' ? tabs[(i + tabs.length - 1) % tabs.length] : e.key === 'Home' ? tabs[0] : e.key === 'End' ? tabs[tabs.length - 1] : null
     if (!to) return
     e.preventDefault()
     onTab(to)
@@ -199,7 +203,7 @@ export function Dock({
       )}
       <div className="convo-tray-head">
         <div className="convo-tray-tabs" role="tablist" aria-label={t('dock.title')} onKeyDown={tabKeys}>
-          {TABS.map((k) => (
+          {tabs.map((k) => (
             <button
               key={k}
               type="button"

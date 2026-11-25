@@ -412,6 +412,9 @@ function SettingsWorkbench({ modal, initialCat, onClose }: { modal?: boolean; in
                 <Setting label={t('settings.general.scRail')}>
                   <span className="sm-kbd">{isMac ? '⌥1–9' : 'Alt+1–9'}</span>
                 </Setting>
+                <Setting label={t('settings.general.scTermView')}>
+                  <span className="sm-kbd">Ctrl+`</span>
+                </Setting>
                 {/* (Who has a key a terminal could use, a terminal focused: workbench 11-23.) */}
                 <Setting label={t('settings.general.keysFirst')} id="sm-keysfirst-l" hint={t(prefs.keysFirst === 'corral' ? 'settings.general.keysFirstCorralHint' : 'settings.general.keysFirstTermHint')}>
                   <Seg

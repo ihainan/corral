@@ -11,7 +11,8 @@ import { asHeld, buildAgentGroups, dayStart, FOLDED, foldAt, isLiveBlocked, list
 import { copyText, Dialog, DialogHead, isCoarse, Menu, MenuLayer, swallowNextClick, useToast, type MenuItem } from '../components/ui'
 import { saveFile } from '../saveFile'
 import { StatusItem, useWorkbench } from '../workbench'
-import { composing, foldAllKey, helpKey, jumpKey, onMac, pickKey, RAIL_KEYS, sideKey, switchKey, takenFromTerminal, terminalHasKeys } from './pageKeys'
+import { composing, foldAllKey, helpKey, jumpKey, onMac, pickKey, RAIL_KEYS, sideKey, switchKey, takenFromTerminal, TERM_VIEW_KEY, terminalHasKeys, termViewKey } from './pageKeys'
+import { PanelWindow } from './PanelWindow'
 import { firstShown, isShown, modalShown, useEffectOnChange, useOnHide } from '../shown'
 import { keepNames, keptNames, local } from '../storage'
 import { useFlip } from '../flip'
@@ -144,6 +145,10 @@ const SIDE_MIN = 900 // (px) the view's width from which the list goes beside th
 // The list's width beside the thread (px): dragged by its edge, kept in the
 // browser; never past half the view.
 const SIDE_W_KEY = 'corral.convoSideWidth'
+// (The agents left in their terminal view, this device: the last so many. UI 14.)
+const TERM_VIEWS_KEY = 'corral.termViews'
+const TERM_VIEWS_MAX = 100
+const TERM_VIEW_MIN = 900
 const SIDE_W = 288
 const SIDE_W_MIN = 220
 const SIDE_W_MAX = 520
@@ -256,6 +261,7 @@ export function ConversationView({
   onLook,
   onShowTerminal,
   dockTerminal,
+  viewOf,
   dockSink,
   onCopied,
   composer,
@@ -299,6 +305,7 @@ export function ConversationView({
   onLook?: () => void // (its terminal shown here, where it can be)
   onShowTerminal: () => void
   dockTerminal?: DockTerminal // (the dock's Terminal tab: the pane's screen, where it can be shown)
+  viewOf?: string // (the agent's, as its tab is: which of its views — conversation or terminal — it was left in, on this device)
   dockSink?: { set: (s: DockSink | null) => void; insert: (path: string) => void } // (the page's file acts given to the dock's Files tab, while there is one; a path put in the composer from it)
   onCopied: () => void
   composer?: ReactNode // (the terminal's composer, while it is open)
@@ -343,6 +350,32 @@ export function ConversationView({
   const [wide, setWide] = useState(false)
   const [viewW, setViewW] = useState(0)
   const [viewH, setViewH] = useState(0)
+  // Its terminal in the conversation's place (UI 14, 11-25; Orca's chat/terminal switch): kept for each agent, on
+  // this device, a new one in its conversation. Only where it is wide (TERM_VIEW_MIN) and its terminal can be had.
+  const [termViews, setTermViews] = useState<string[]>(() => keptNames(TERM_VIEWS_KEY))
+  const canTermView = !!dockTerminal?.can && !!viewOf && !!convo.of && viewW >= TERM_VIEW_MIN
+  const termShown = canTermView && termViews.includes(viewOf!)
+  // (Back in the conversation: the keys to its message box, its draft as it was.)
+  const showTermView = (on: boolean) => {
+    if (!viewOf || !canTermView) return
+    const next = [...termViews.filter((k) => k !== viewOf), ...(on ? [viewOf] : [])].slice(-TERM_VIEWS_MAX)
+    setTermViews(next)
+    keepNames(TERM_VIEWS_KEY, next)
+    if (!on) requestAnimationFrame(() => root.current?.querySelector<HTMLElement>('.composer-input')?.focus())
+  }
+  const termToggle = useRef(() => {})
+  termToggle.current = () => showTermView(!termShown)
+  useEffect(() => {
+    if (!kActive || !canTermView) return
+    const onKey = (e: KeyboardEvent) => {
+      if (!termViewKey(e) || underDialog(e)) return
+      e.preventDefault()
+      e.stopPropagation()
+      termToggle.current()
+    }
+    window.addEventListener('keydown', onKey, true)
+    return () => window.removeEventListener('keydown', onKey, true)
+  }, [kActive, canTermView])
   const [sideW, setSideW] = useState(() => Number(local.get(SIDE_W_KEY)) || SIDE_W)
   const sideWidth = sideWidthOf(sideW, viewW || SIDE_MIN)
   const sideEl = useRef<HTMLElement>(null)
@@ -2025,6 +2058,25 @@ export function ConversationView({
               <span className={cls}>{says}</span>
             )
           })()}
+          {canTermView && !splitShown && (
+            <div className="convo-viewseg" role="radiogroup" aria-label={t('convo.view.label')}>
+              {([false, true] as const).map((on) => (
+                <button
+                  key={String(on)}
+                  type="button"
+                  role="radio"
+                  aria-checked={termShown === on}
+                  className={'convo-viewseg-btn' + (termShown === on ? ' is-on' : '')}
+                  onClick={() => termShown !== on && showTermView(on)}
+                  aria-label={t(on ? 'convo.view.term' : 'convo.view.chat')}
+                  aria-keyshortcuts="Control+`"
+                  title={`${t(on ? 'convo.view.term' : 'convo.view.chat')} (${TERM_VIEW_KEY})`}
+                >
+                  {on ? <SquareTerminal size={15} strokeWidth={1.75} aria-hidden="true" /> : <MessagesSquare size={15} strokeWidth={1.75} aria-hidden="true" />}
+                </button>
+              ))}
+            </div>
+          )}
           {hideDesktopLineage && canSplitNow && !splitShown && ((lineageChildren.length > 0 && preferredChild && lineageBar?.onSplitChild) || (!lineageChildren.length && lineageParent && lineageBar?.onSplitWithParent)) && (
             <button
               type="button"
@@ -2078,6 +2130,7 @@ export function ConversationView({
                 ...(convo.of && (convo.bind?.agent === 'claude' || convo.bind?.agent === 'codex' || convo.bind?.agent === 'agy') ? [{ label: t('turns.item'), icon: <ListOrdered size={16} />, onSelect: () => (setSearching(false), setTurnsShown(true)) }] : []),
                 ...(sideBind ? [{ label: t('side.item'), icon: <MessageCircleQuestion size={16} />, onSelect: () => setBtwShown(sideIdent) }] : []),
                 ...(onHostHistory ? [{ label: t('hostHistory.open'), icon: <History size={16} />, onSelect: onHostHistory }] : []),
+                ...(canTermView ? [{ label: t(termShown ? 'convo.view.toChat' : 'convo.view.toTerm'), icon: termShown ? <MessagesSquare size={16} /> : <SquareTerminal size={16} />, keys: [TERM_VIEW_KEY], onSelect: () => showTermView(!termShown) }] : []),
                 ...(hideDesktopLineage && lineageBar?.onNewSubagent ? [{ label: t('convo.lineage.newSubagent'), icon: <Plus size={16} />, onSelect: () => lineageBar.onNewSubagent?.() }] : []),
                 // (All steps opened or folded: the menu's, as Ctrl+O is a Mac's only.)
                 { label: t(allOpen === 0 ? 'pageKeys.openAll' : allOpen === 1 ? 'pageKeys.openFull' : 'pageKeys.foldAll'), icon: allOpen === 2 ? <ChevronsDownUp size={16} /> : <ChevronsUpDown size={16} />, keys: mac ? ['Ctrl+O'] : undefined, disabled: !list.length, onSelect: toggleAllOpen },
@@ -2279,7 +2332,21 @@ export function ConversationView({
           {t('convo.offline', { time: clockMs(convo.okAt) })}
         </p>
       )}
-      <div className="convo-scroll-wrap">
+      {termShown && dockTerminal && convo.of && (
+        <div className="convo-termview">
+          <PanelWindow
+            key={'main ' + convo.of + ' ' + bindIdent}
+            sid={convo.of.split(' ')[0]}
+            active={active}
+            press={dockTerminal.press}
+            onSettled={convo.refresh}
+            toast={toast}
+            live={{ main: true, onFull: dockTerminal.onFull, letters: dockTerminal.letters, who: convo.bind?.agent === 'claude' ? 'Claude Code' : agentName(convo.bind?.agent) }}
+          />
+        </div>
+      )}
+      {/* (The conversation kept while its terminal is shown in its place — where it was read to, its draft — only hidden.) */}
+      <div className="convo-scroll-wrap" hidden={termShown}>
         <div className="convo-scroll" ref={box}>
           <div className="convo-col" ref={col}>
             <ShowTerminal.Provider value={onShowTerminal}>
@@ -2339,7 +2406,7 @@ export function ConversationView({
           </button>
         )}
       </div>
-      <div className="convo-dock">
+      <div className="convo-dock" hidden={termShown}>
         {convo.status === 'ready' && convo.tasks && <Tasks tasks={convo.tasks} fold={!!ask} />}
         {/* (Asked from the screen: also where its log is not read.) */}
         {(convo.status === 'ready' || convo.status === 'none') && ask && (
@@ -2490,6 +2557,7 @@ export function ConversationView({
           // (Back to it: the dock put beside the thread first, the box not under it; where the box is
           // not to be had — a panel of Claude Code's or a question shown in its place — the dock's tabs,
           // the screen left all the same.)
+          noTerminal={termShown}
           terminal={
             dockTerminal && {
               ...dockTerminal,
@@ -5345,7 +5413,7 @@ function PageKeysHelp({ onClose, side }: { onClose: () => void; side: boolean })
   // In groups by where they act, each a heading over its rows.
   type Row = [string[], I18nKey]
   const groups: [I18nKey, Row[]][] = [
-    ...(side ? ([['pageKeys.gAgents', [[mac ? ['⌥↑', '⌥↓'] : ['Alt+↑', 'Alt+↓'], 'pageKeys.switch'], [[keySearch(wb)], 'pageKeys.search'], [[KEY_SIDE], 'pageKeys.side'], ...(wb ? ([[[RAIL_KEYS], 'pageKeys.rail']] as Row[]) : []), ...(mac && wb ? ([[['⌘K'], 'settings.general.scPalette']] as Row[]) : [])]]] as [I18nKey, Row[]][]) : []),
+    ...(side ? ([['pageKeys.gAgents', [[mac ? ['⌥↑', '⌥↓'] : ['Alt+↑', 'Alt+↓'], 'pageKeys.switch'], [[keySearch(wb)], 'pageKeys.search'], [[KEY_SIDE], 'pageKeys.side'], ...(wb ? ([[[RAIL_KEYS], 'pageKeys.rail'], [[TERM_VIEW_KEY], 'pageKeys.termView']] as Row[]) : []), ...(mac && wb ? ([[['⌘K'], 'settings.general.scPalette']] as Row[]) : [])]]] as [I18nKey, Row[]][]) : []),
     ['pageKeys.gConvo', [[['[', ']'], 'pageKeys.jump'], ...(mac ? ([[['Ctrl+O'], 'pageKeys.fold']] as Row[]) : []), [['?'], 'pageKeys.help']]],
     [
       'pageKeys.gInput',

@@ -71,6 +71,12 @@ export function railKey(e: KeyLike & { code: string }): number {
   return m ? Number(m[1]) : 0
 }
 export const RAIL_KEYS = onMac() ? '⌥1–9' : 'Alt+1–9'
+
+// Ctrl+` (the key left of 1; a Mac's Control too, as VS Code's terminal): an agent's conversation and its terminal,
+// the one for the other in its place (UI 14, 11-25). Taken from its terminal too — the way back from it. (What it
+// would send there, NUL, Ctrl+Space sends as well.) By the key's place, not its letter: other layouts put ` elsewhere.
+export const termViewKey = (e: KeyLike & { code: string }) => !composing(e) && e.ctrlKey && !e.altKey && !e.metaKey && !e.shiftKey && e.code === 'Backquote'
+export const TERM_VIEW_KEY = 'Ctrl+`'
 export const railKeyName = (n: number) => (onMac() ? '⌥' : 'Alt+') + n
 
 // ⌘P on a Mac, Ctrl+P elsewhere: to another agent, by its name — the list over

@@ -90,7 +90,8 @@ const runStyle = (r: AnsiRun): React.CSSProperties => {
 // (letters: a letter, as Enter or a number, only on the screen shown — Codex's approvals answer to "y", "p".)
 // (onLeave: where F6 takes the focus from its screen — the dock's tabs; none: its own head's first button.)
 // (who: the program the keys go to, as named to the person ("Claude Code"); onComposer: the message box, gone back to.)
-export type PanelLive = { onClose?: () => void; onFull?: () => void; note?: string; letters?: boolean; onLeave?: () => void; who?: string; onComposer?: () => void; canNotice?: boolean; onNoticeSent?: () => void }
+// (main: the conversation's whole place, its terminal view — no head of its own, the person's terminal scheme and size. UI 14, 11-25.)
+export type PanelLive = { onClose?: () => void; onFull?: () => void; note?: string; letters?: boolean; onLeave?: () => void; who?: string; onComposer?: () => void; canNotice?: boolean; onNoticeSent?: () => void; main?: boolean }
 const PTY_TRIES = 2
 export function PanelWindow({ sid, active, press, onSettled, toast, live, onFull }: { live?: PanelLive; sid: string; active: boolean; press: () => Record<string, unknown>; onSettled: () => void; toast: (s: string, bad?: boolean) => void; onFull?: () => void }) {
   const [screen, setScreen] = useState({ text: '', digest: '' })

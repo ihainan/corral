@@ -4,7 +4,7 @@ import { FitAddon } from '@xterm/addon-fit'
 import { Unicode11Addon } from '@xterm/addon-unicode11'
 import { WebLinksAddon } from '@xterm/addon-web-links'
 import { t } from '../i18n'
-import { usePrefs } from '../prefs'
+import { termScheme, usePrefs } from '../prefs'
 import { isCoarse } from '../components/ui'
 import { darkTheme } from './themes'
 import type { PanelLive } from './PanelWindow'
@@ -58,6 +58,8 @@ export function PaneTerminal({
   onFallback: () => void
 }) {
   const prefs = usePrefs()
+  // (The main view's colours: the person's terminal scheme, which follows the page's light or dark — read anew on each.)
+  const schemeId = live?.main ? termScheme().id : ''
   const screenId = useId()
   const hostRef = useRef<HTMLDivElement>(null)
   const wsRef = useRef<WebSocket | null>(null)
@@ -103,15 +105,16 @@ export function PaneTerminal({
   useEffect(() => {
     const el = hostRef.current
     if (!el) return
+    const main = !!liveRef.current?.main
     const term = new Terminal({
       fontFamily: FONT_STACK,
-      fontSize: Math.max(11, Math.min(16, prefs.fontSize - 1)),
+      fontSize: main ? prefs.fontSize : Math.max(11, Math.min(16, prefs.fontSize - 1)),
       lineHeight: 1.25,
       cursorBlink: true,
       scrollback: 3000,
       allowProposedApi: true,
       macOptionIsMeta: prefs.optionIsMeta,
-      theme: PANEL_THEME,
+      theme: main ? termScheme().theme : PANEL_THEME,
     })
     const fit = new FitAddon()
     const uni = new Unicode11Addon()
@@ -149,7 +152,7 @@ export function PaneTerminal({
     termRef.current = term
     fitRef.current = fit
 
-    if (activeRef.current && !isCoarse() && !liveRef.current) {
+    if (activeRef.current && !isCoarse() && (!liveRef.current || main)) {
       term.focus()
     }
 
@@ -187,8 +190,10 @@ export function PaneTerminal({
   useEffect(() => {
     const term = termRef.current
     if (!term) return
-    term.options.fontSize = Math.max(11, Math.min(16, prefs.fontSize - 1))
+    const main = !!liveRef.current?.main
+    term.options.fontSize = main ? prefs.fontSize : Math.max(11, Math.min(16, prefs.fontSize - 1))
     term.options.macOptionIsMeta = prefs.optionIsMeta
+    if (main) term.options.theme = termScheme().theme
     try {
       fitRef.current?.fit()
       const ws = wsRef.current
@@ -198,7 +203,7 @@ export function PaneTerminal({
     } catch {
       /* ignore */
     }
-  }, [prefs.fontSize, prefs.optionIsMeta])
+  }, [prefs.fontSize, prefs.optionIsMeta, schemeId])
 
   // Open WebSocket stream to /api/sessions/{id}/pane-ws.
   useEffect(() => {
@@ -340,7 +345,8 @@ export function PaneTerminal({
   const keyBar = isCoarse()
 
   return (
-    <div className="convo-panelwin" role="group" aria-label={t(live ? 'panel.liveTitle' : 'panel.title')}>
+    <div className={'convo-panelwin' + (live?.main ? ' is-main' : '')} role="group" aria-label={t(live ? 'panel.liveTitle' : 'panel.title')}>
+      {!live?.main && (
       <div className={'convo-panelwin-head' + (live ? ' is-live' : '')}>
         {!live && <span className="convo-panelwin-title">{t('panel.title')}</span>}
         {!isCoarse() && <span className="convo-panelwin-hint">{t(live ? 'panel.liveHint' : 'panel.hint')}</span>}
@@ -368,8 +374,9 @@ export function PaneTerminal({
           )}
         </div>
       </div>
+      )}
       {live?.note && <p className="convo-panelwin-note">{live.note}</p>}
-      {live && taking && !isCoarse() && (
+      {live && !live.main && taking && !isCoarse() && (
         <div className="convo-panelwin-taking" id={screenId + '-taking'}>
           <span>{t('panel.taking', { who })}</span>
           {live.onComposer && (
@@ -384,7 +391,8 @@ export function PaneTerminal({
           )}
         </div>
       )}
-      <div className="convo-pty-wrap">
+      {/* (The main view's ground in its scheme's colour, round its rows: no band of the page's round it.) */}
+      <div className="convo-pty-wrap" style={live?.main ? { background: termScheme().theme.background } : undefined}>
         <div
           ref={hostRef}
           className="convo-pty-term"

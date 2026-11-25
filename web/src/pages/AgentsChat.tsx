@@ -3808,6 +3808,7 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
       onShowTerminal={openTerminal}
       dockSink={dockSink}
       dockTerminal={{ can: liveFor(convo.bind?.agent) && !!convo.bind, press: pressBody, onFull: openTerminal, letters: convo.bind?.agent === 'codex' }}
+      viewOf={cur.key}
       onLook={liveFor(convo.bind?.agent) && convo.bind ? () => setLiveOf(bindKey) : undefined}
       onCopied={() => toast(t('common.copied'))}
       composer={composer}
