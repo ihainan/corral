@@ -3446,7 +3446,9 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
     const r = e.row
     if (!r) return []
     // (Of the same herdr: one host's, one herdr session's — the list's own grouping, agentKey; one agent may be
-    // listed under another of the gateway's connections to it than this one.)
+    // listed under another of the gateway's connections to it than this one. A host record edited to another
+    // machine while a connection to the old one is open is two servers alike here, as in the list itself; one
+    // picked from the other is refused as gone — the gateway looks for it on this connection's server.)
     const herdrOf = (s: SessionInfo) => `${s.host_id}|${!s.mux_session || s.mux_session === 'default' ? '' : s.mux_session}`
     const same = entries.filter((x) => herdrOf(x.s) === herdrOf(e.s) && x.row && !x.row.lost)
     const byPane = new Map(same.map((x) => [x.row!.a.pane_id, x]))
