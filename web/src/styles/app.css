@@ -1715,3 +1715,21 @@ details.adv > .form { margin-top: 16px; }
 .desk-aside-list { margin: 0; padding: 12px 16px 16px; display: flex; flex-direction: column; gap: 12px; }
 .desk-aside-list dt { font-size: var(--fs-note); line-height: var(--lh-note); color: var(--fg-3); }
 .desk-aside-list dd { margin: 0; font-size: var(--fs-sub); line-height: var(--lh-sub); color: var(--fg); white-space: pre-wrap; overflow-wrap: anywhere; }
+/* The settings as a desktop's preferences (UI 12): the dialog the window's height less 96, the same whichever group
+   is open; each setting a row of a two-column form — its label right-aligned in a 180 column, its control right after
+   it, what it does under the control (as macOS's and VS Code's settings) —; groups parted by a rule, not each a card. */
+@media (min-width: 900px) {
+  .dialog.settings-modal { height: calc(var(--vv-h, 100dvh) - 96px); max-height: calc(var(--vv-h, 100dvh) - 96px); }
+  .sm-body .settings-group { border: 0; border-radius: 0; background: none; overflow: visible; }
+  .sm-body .settings-group .setting {
+    display: grid; grid-template-columns: 180px minmax(0, 1fr); grid-template-areas: 'label ctl' '. hint';
+    column-gap: 16px; row-gap: 4px; align-items: center; min-height: 0; padding: 8px 0; border-bottom: 0;
+  }
+  .sm-body .settings-group .setting > .setting-label { display: contents; }
+  .sm-body .settings-group .setting > .setting-label > :first-child { grid-area: label; justify-self: end; text-align: right; }
+  .sm-body .settings-group .setting > .setting-label > .hint { grid-area: hint; max-width: 60ch; }
+  .sm-body .settings-group .setting > .setting-control { grid-area: ctl; justify-self: start; min-width: 0; flex-wrap: wrap; }
+  .sm-body .settings-group .setting:has(.setting-label .hint) > .setting-control { min-height: 0; }
+  .sm-body .section + .section { padding-top: 16px; border-top: 1px solid var(--line); }
+  .sm-body .settings-group .sm-card-foot { margin-top: 8px; border: 1px solid var(--line); border-radius: var(--r); }
+}
