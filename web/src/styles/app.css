@@ -348,6 +348,10 @@ code, .mono { font-family: var(--font-mono); font-size: var(--fs-sub); }
 .section + .section { margin-top: 8px; }
 .lead { color: var(--fg-2); max-width: 64ch; }
 .hint { color: var(--fg-2); font-size: var(--fs-sub); line-height: var(--lh-sub); }
+/* A key read from a file (the import dialog): the button at the right of the field's label. */
+.key-field { position: relative; }
+.key-file-btn { position: absolute; top: -4px; right: -8px; height: 28px; padding: 0 8px; gap: 6px; }
+.textarea.is-drop { border-color: var(--accent); background: var(--accent-soft); }
 .err { color: var(--danger); font-size: var(--fs-sub); line-height: var(--lh-sub); }
 .link-btn { border: 0; background: none; padding: 0; color: var(--accent-text); font: inherit; cursor: pointer; }
 .link-btn:hover { text-decoration: underline; }
@@ -1103,7 +1107,7 @@ details.adv > .form { margin-top: 16px; }
 .files-list.loading { opacity: 0.55; transition: opacity 0.15s 0.2s; }
 .files-row { display: flex; align-items: center; border-radius: var(--r); }
 .files-row:hover { background: var(--bg-hover); }
-.files-row.is-marked { background: var(--accent-soft, var(--bg-hover)); } /* (a tint only: no bar at its edge — the user's rule, 11-04) */
+.files-row.is-marked { background: var(--accent-soft); } /* (a tint only: no bar at its edge — the user's rule, 11-04) */
 .files-entry {
   flex: 1; min-width: 0; display: flex; align-items: center; gap: 12px; min-height: 44px; padding: 6px 4px 6px 12px;
   border: 0; background: none; color: var(--fg); text-align: left; cursor: pointer; border-radius: var(--r); font-size: var(--fs-ui); line-height: var(--lh-ui);
@@ -1626,3 +1630,4 @@ details.adv > .form { margin-top: 16px; }
 .sm-profile-meta { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
 .sm-profile-name { font-size: var(--fs-ui); line-height: var(--lh-ui); font-weight: 600; color: var(--fg); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sm-empty { margin: 0; padding: 12px 10px; font-size: var(--fs-sub); line-height: var(--lh-sub); color: var(--fg-3); }
+@media (pointer: coarse) { .key-file-btn { height: 36px; top: -8px; } }

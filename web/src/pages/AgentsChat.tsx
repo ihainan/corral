@@ -2821,12 +2821,11 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
   // (A Codex at work takes a message into the turn under way, as its own
   // Enter does: it says so.)
   const steers = convo.bind?.agent === 'codex' && agent?.status === 'working'
-  // (Its name cut to what the box's width holds: a placeholder of one line,
-  // however long the name, and all of it where there is room.)
+  // (Not its name: said by the bar above and its tab — the person's ask of 11-25, doc UI item 16.)
   const fieldW = useWidth(field)
   // (With a keyboard and room for it, the keys of what its two buttons did — gone there: T3 Code's way, the person's ask of 11-23.)
   const keysSaid = !steers && fieldW >= 480 && matchMedia(KEYED_COMPOSER).matches // (as the buttons go: the same query — a touch laptop used with its trackpad too)
-  const placeholder = suggestion ?? (to ? fitLine(field.current, fieldW, (name) => t(steers ? 'convo.toPlaceholderSteer' : keysSaid ? 'convo.toPlaceholderKeys' : 'convo.toPlaceholder', { name }), to) : t('term.composerPlaceholder'))
+  const placeholder = suggestion ?? (to ? t(steers ? 'convo.toPlaceholderSteer' : keysSaid ? 'convo.toPlaceholderKeys' : 'convo.toPlaceholder') : t('term.composerPlaceholder'))
   useComposerFit(field, draft, placeholder)
   // Why it cannot send now, if it cannot.
   // (Waiting for an answer, a message's Enter could take an option of its
@@ -3922,33 +3921,8 @@ function useWidth(ref: { current: HTMLElement | null }): number {
   return w
 }
 
-// A line made of words around a name, the name cut short (an ellipsis at
-// its end) so that the line fits the field's width in its own font.
-let measurer: CanvasRenderingContext2D | null = null
 // (Wide, a mouse and keyboard: the composer's history and commands are their keys, ↑ and /, said in its placeholder.)
 const KEYED_COMPOSER = '(min-width: 760px) and (hover: hover) and (pointer: fine)'
-
-function fitLine(el: HTMLElement | null, width: number, make: (name: string) => string, name: string): string {
-  const whole = make(name)
-  const chars = [...name]
-  // (Not laid out yet: a short name, as a guess.)
-  if (!el || !width) return chars.length > 24 ? make(chars.slice(0, 24).join('').trimEnd() + '…') : whole
-  const cs = getComputedStyle(el)
-  const room = width - parseFloat(cs.paddingLeft || '0') - parseFloat(cs.paddingRight || '0') - 2
-  measurer ??= document.createElement('canvas').getContext('2d')
-  if (!measurer) return whole
-  measurer.font = `${cs.fontStyle} ${cs.fontWeight} ${cs.fontSize} ${cs.fontFamily}`
-  const fits = (s: string) => measurer!.measureText(s).width <= room
-  if (fits(whole)) return whole
-  let lo = 0
-  let hi = chars.length - 1
-  while (lo < hi) {
-    const mid = (lo + hi + 1) >> 1
-    if (fits(make(chars.slice(0, mid).join('').trimEnd() + '…'))) lo = mid
-    else hi = mid - 1
-  }
-  return make(chars.slice(0, Math.max(1, lo)).join('').trimEnd() + '…')
-}
 
 // A phone's list of the agents: those for you first (waiting, then done and
 // not looked at, as the side list's first group), then working, then the

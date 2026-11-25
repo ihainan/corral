@@ -1,5 +1,5 @@
-import { useEffect, useState, type FormEvent } from 'react'
-import { Check, ChevronRight, Copy, Import, KeyRound, MoreHorizontal, Plus, Trash2 } from 'lucide-react'
+import { useEffect, useRef, useState, type DragEvent, type FormEvent } from 'react'
+import { Check, ChevronRight, Copy, FileUp, Import, KeyRound, MoreHorizontal, Plus, Trash2 } from 'lucide-react'
 import { api, ApiError, errorText, type KeyCred } from '../api'
 import { relTime, t } from '../i18n'
 import { Confirm, CopyButton, Dialog, EmptyState, Field, LoadError, Menu, copyText } from '../components/ui'
@@ -202,6 +202,9 @@ function GenerateDialog({ onClose, onDone }: { onClose: () => void; onDone: () =
   )
 }
 
+// A key file larger than this is not one (an RSA 4096 key in PEM is some 3.3 KB).
+const KEY_FILE_MAX = 64 << 10
+
 // (Also the host form's, which selects the key imported: it is given it.)
 export function ImportDialog({ onClose, onDone }: { onClose: () => void; onDone: (k: KeyCred) => void }) {
   const [name, setName] = useState('')
@@ -209,6 +212,33 @@ export function ImportDialog({ onClose, onDone }: { onClose: () => void; onDone:
   const [phrase, setPhrase] = useState('')
   const [error, setError] = useState<{ field?: string; text: string } | null>(null)
   const [busy, setBusy] = useState(false)
+  const [over, setOver] = useState(false)
+  const picker = useRef<HTMLInputElement>(null)
+  // (Files are dropped with a mouse: on a phone, nothing to say of it.)
+  const canDrop = window.matchMedia('(pointer: fine)').matches
+  // A key file read here, in the browser (doc UI item 11, 11-25): its words put in the box, as
+  // if pasted, and sent as those are; its name the key's, where none is typed. Any file may be
+  // picked — a key's has no extension (id_ed25519) —; one too big, or a public key, is said so.
+  const readKey = async (f: File | undefined) => {
+    if (!f) return
+    if (f.size > KEY_FILE_MAX) return setError({ field: 'private_key', text: t('keys.fileTooBig') })
+    let text: string
+    try {
+      text = await f.text()
+    } catch {
+      return setError({ field: 'private_key', text: t('keys.fileUnreadable') })
+    }
+    if (/^(ssh-|ecdsa-|sk-)[a-z0-9-]+ [A-Za-z0-9+/=]+/.test(text.trim())) return setError({ field: 'private_key', text: t('keys.filePublic') })
+    setError(null)
+    setPk(text)
+    if (!name.trim()) setName(f.name.replace(/\.(pem|key|ppk)$/i, ''))
+  }
+  const onDrop = (e: DragEvent) => {
+    setOver(false)
+    if (!e.dataTransfer.files.length) return // (words dragged in: the box's own)
+    e.preventDefault()
+    void readKey(e.dataTransfer.files[0])
+  }
   const submit = async (e: FormEvent) => {
     e.preventDefault()
     if (busy) return
@@ -227,9 +257,42 @@ export function ImportDialog({ onClose, onDone }: { onClose: () => void; onDone:
         <Field label={t('keys.name')} htmlFor="ki-name" error={error?.field === 'name' ? error.text : undefined}>
           <input id="ki-name" className="input" value={name} onChange={(e) => setName(e.target.value)} placeholder={t('keys.namePlaceholder')} required />
         </Field>
-        <Field label={t('keys.privateKey')} htmlFor="ki-key" error={error?.field === 'private_key' ? error.text : undefined}>
-          <textarea id="ki-key" className="textarea" value={pk} onChange={(e) => setPk(e.target.value)} placeholder={t('keys.privateKeyPlaceholder')} spellCheck={false} autoCapitalize="none" autoCorrect="off" required />
-        </Field>
+        <div className="key-field">
+          <Field label={t('keys.privateKey')} htmlFor="ki-key" error={error?.field === 'private_key' ? error.text : undefined} hint={canDrop ? t('keys.dropHint') : undefined}>
+            <textarea
+              id="ki-key"
+              className={'textarea' + (over ? ' is-drop' : '')}
+              value={pk}
+              onChange={(e) => setPk(e.target.value)}
+              onDragOver={(e) => {
+                if (![...e.dataTransfer.types].includes('Files')) return
+                e.preventDefault()
+                setOver(true)
+              }}
+              onDragLeave={() => setOver(false)}
+              onDrop={onDrop}
+              placeholder={t('keys.privateKeyPlaceholder')}
+              spellCheck={false}
+              autoCapitalize="none"
+              autoCorrect="off"
+              required
+            />
+          </Field>
+          {/* (Beside the label, not in the hint's place: still there when an error is.) */}
+          <button type="button" className="btn btn-ghost key-file-btn" onClick={() => picker.current?.click()}>
+            <FileUp size={14} aria-hidden="true" />
+            {t('keys.fromFile')}
+          </button>
+          <input
+            ref={picker}
+            type="file"
+            hidden
+            onChange={(e) => {
+              void readKey(e.target.files?.[0])
+              e.target.value = '' // (the same file picked again reads again)
+            }}
+          />
+        </div>
         <Field label={t('keys.passphrase')} htmlFor="ki-phrase" optional error={error?.field === 'passphrase' ? error.text : undefined}>
           <input id="ki-phrase" className="input" type="password" autoComplete="off" value={phrase} onChange={(e) => setPhrase(e.target.value)} />
         </Field>
