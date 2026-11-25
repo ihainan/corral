@@ -62,6 +62,17 @@ export function switchKey(e: KeyLike): -1 | 0 | 1 {
   return e.key === 'ArrowUp' ? -1 : e.key === 'ArrowDown' ? 1 : 0
 }
 
+// Alt+1…9 (⌥ on a Mac): the rail's n-th page, as its icons go down (doc UI
+// item 15, 11-25); 0 for any other key. By the key's place, not what it types
+// (a Mac's ⌥1 types "¡"); Ctrl with Alt is AltGr (see shortcutHeld).
+export function railKey(e: KeyLike & { code: string }): number {
+  if (composing(e) || !e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return 0
+  const m = /^Digit([1-9])$/.exec(e.code)
+  return m ? Number(m[1]) : 0
+}
+export const RAIL_KEYS = onMac() ? '⌥1–9' : 'Alt+1–9'
+export const railKeyName = (n: number) => (onMac() ? '⌥' : 'Alt+') + n
+
 // ⌘P on a Mac, Ctrl+P elsewhere: to another agent, by its name — the list over
 // the conversation, or the search of the one beside it. As VS Code's quick open;
 // taken while typing too, which "/" could not be (the person, 11-23: "/" is the

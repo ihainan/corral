@@ -11,7 +11,7 @@ import { asHeld, buildAgentGroups, dayStart, FOLDED, foldAt, isLiveBlocked, list
 import { copyText, Dialog, DialogHead, isCoarse, Menu, MenuLayer, swallowNextClick, useToast, type MenuItem } from '../components/ui'
 import { saveFile } from '../saveFile'
 import { StatusItem, useWorkbench } from '../workbench'
-import { composing, foldAllKey, helpKey, jumpKey, onMac, pickKey, sideKey, switchKey, takenFromTerminal, terminalHasKeys } from './pageKeys'
+import { composing, foldAllKey, helpKey, jumpKey, onMac, pickKey, RAIL_KEYS, sideKey, switchKey, takenFromTerminal, terminalHasKeys } from './pageKeys'
 import { firstShown, isShown, modalShown, useEffectOnChange, useOnHide } from '../shown'
 import { keepNames, keptNames, local } from '../storage'
 import { useFlip } from '../flip'
@@ -5345,7 +5345,7 @@ function PageKeysHelp({ onClose, side }: { onClose: () => void; side: boolean })
   // In groups by where they act, each a heading over its rows.
   type Row = [string[], I18nKey]
   const groups: [I18nKey, Row[]][] = [
-    ...(side ? ([['pageKeys.gAgents', [[mac ? ['⌥↑', '⌥↓'] : ['Alt+↑', 'Alt+↓'], 'pageKeys.switch'], [[keySearch(wb)], 'pageKeys.search'], [[KEY_SIDE], 'pageKeys.side'], ...(mac && wb ? ([[['⌘K'], 'settings.general.scPalette']] as Row[]) : [])]]] as [I18nKey, Row[]][]) : []),
+    ...(side ? ([['pageKeys.gAgents', [[mac ? ['⌥↑', '⌥↓'] : ['Alt+↑', 'Alt+↓'], 'pageKeys.switch'], [[keySearch(wb)], 'pageKeys.search'], [[KEY_SIDE], 'pageKeys.side'], ...(wb ? ([[[RAIL_KEYS], 'pageKeys.rail']] as Row[]) : []), ...(mac && wb ? ([[['⌘K'], 'settings.general.scPalette']] as Row[]) : [])]]] as [I18nKey, Row[]][]) : []),
     ['pageKeys.gConvo', [[['[', ']'], 'pageKeys.jump'], ...(mac ? ([[['Ctrl+O'], 'pageKeys.fold']] as Row[]) : []), [['?'], 'pageKeys.help']]],
     [
       'pageKeys.gInput',

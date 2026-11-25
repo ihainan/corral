@@ -8,6 +8,9 @@ import { countedAgents, rowTitle, useWaitingCount } from './terminal/agents'
 import { AgentIcon } from './terminal/agentIcons'
 import { MenuLayer, useToast, type MenuItem } from './components/ui'
 import { Avatar } from './components/Avatar'
+import { getPrefs } from './prefs'
+import { modalShown } from './shown'
+import { railKey, railKeyName, RAIL_KEYS, takenFromTerminal, terminalHasKeys } from './terminal/pageKeys'
 import { isDesktopSettings, openSettingsModal } from './pages/Settings'
 
 // The workbench: one frame round every page on a desktop or tablet (760 and
@@ -40,6 +43,25 @@ export function Rail({ active }: { active?: RailKey }) {
   const waiting = useWaitingCount(false)
   const [account, setAccount] = useState<DOMRect | null>(null)
   const meBtn = useRef<HTMLButtonElement>(null) // (this rail's: another page's, hidden, has one too)
+  const navRef = useRef<HTMLElement>(null)
+  // Alt+1…9: its pages, as they go down (railKey). Every page's rail listens; the one shown goes.
+  // Not under a dialog; a terminal focused and it first, the program's (as ⌥↑↓).
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const n = railKey(e)
+      const nav = navRef.current
+      if (!n || !nav || !nav.getClientRects().length || e.defaultPrevented || modalShown() || terminalHasKeys(e, getPrefs().keysFirst)) return
+      const to = nav.querySelectorAll<HTMLAnchorElement>('a[data-rail-key]')[n - 1]
+      if (!to) return
+      e.preventDefault()
+      e.stopPropagation()
+      if (e.repeat) return
+      takenFromTerminal(e, RAIL_KEYS, (m) => toast(m), (key) => t('keys.taken', { key }))
+      if (to.getAttribute('aria-current') !== 'page') to.click()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [toast])
   const items: { key: RailKey; href: string; label: string; icon: ReactNode }[] = [
     { key: 'agents', href: '/agents', label: t('nav.agents'), icon: <Bot size={19} strokeWidth={1.75} /> },
     // (The terminals' page, apart from the agents' since 11-24: the terminal last in front there.)
@@ -57,19 +79,21 @@ export function Rail({ active }: { active?: RailKey }) {
   const n = waiting.n ?? 0
   const name = me?.display_name || me?.username || ''
   return (
-    <nav className="wb-rail" aria-label={t('nav.main')}>
+    <nav className="wb-rail" ref={navRef} aria-label={t('nav.main')}>
       <button type="button" className="wb-rail-item" onClick={openPalette} aria-label={t('palette.title')} title={t('palette.title') + (PALETTE_KEY ? ` (${PALETTE_KEY})` : '')} aria-keyshortcuts={PALETTE_KEY ? 'Meta+K' : undefined}>
         <Search size={19} strokeWidth={1.75} />
       </button>
       <span className="wb-rail-sep" aria-hidden="true" />
-      {items.map((i) => (
+      {items.map((i, at) => (
         <a
           key={i.key}
           className="wb-rail-item"
           href={i.href}
           onClick={linkHandler(i.href)}
           aria-current={i.key === active ? 'page' : undefined}
-          title={i.label}
+          data-rail-key
+          title={at < 9 ? `${i.label} (${railKeyName(at + 1)})` : i.label}
+          aria-keyshortcuts={at < 9 ? `Alt+${at + 1}` : undefined}
           aria-label={i.key === 'agents' && n ? `${i.label}，${t(waiting.stale ? 'nav.waitingStaleN' : 'nav.waitingN', { n })}` : i.label}
         >
           {i.icon}
