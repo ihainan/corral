@@ -313,6 +313,19 @@ func wholeOf(text string) *regexp.Regexp {
 // (A path to a picture anywhere in a message: quoted, or alone between spaces.)
 var picturesIn = regexp.MustCompile(`(?i)(?:^|[\s\x{00A0}])('[^']*?\.(?:png|jpe?g|gif|webp)'|"[^"]*?\.(?:png|jpe?g|gif|webp)"|[^'"\s\x{00A0}]+\.(?:png|jpe?g|gif|webp))`)
 
+// hasPicturePath reports whether text contains a standalone picture path
+// (quoted, or between spaces/line breaks), using the same picturesIn rule as
+// wholeOf and codexPasteParts.
+func hasPicturePath(text string) bool {
+	for _, m := range picturesIn.FindAllStringSubmatchIndex(text, -1) {
+		if r, _ := utf8.DecodeRuneInString(text[m[3]:]); m[3] < len(text) && !unicode.IsSpace(r) {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
 // picturePath: where a path to a picture at a message's start ends (its
 // quotes, a pair of the one kind, with it; one not quoted has none in it).
 func picturePath(s string) []int {

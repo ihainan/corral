@@ -610,44 +610,23 @@ function strip_ago_tail(s,    r) {
   sub(/[ \t]+\((just now|[0-9]+[smhd][ \t]+ago)\)$/, "", r)
   return r
 }
-function match_code_line(line, exp_list, exp_cnt,    s, pos, left, right, tail, num_str, other_n, name, i, found) {
+function match_code_line(line, exp_list, exp_cnt,    tail, suffix, i) {
   if (exp_cnt < 1) return 0
   if (line !~ /^The code will be restored( [+-][0-9]+(,[0-9]+)*)* in /) return 0
-  s = line
-  sub(/^The code will be restored( [+-][0-9]+(,[0-9]+)*)* in /, "", s)
-  s = trim(s)
-  if (s == "" || has_ellipsis(s)) return 0
-  if (substr(s, length(s), 1) == ".") {
-    s = trim(substr(s, 1, length(s) - 1))
-  }
-  if (s == "" || has_ellipsis(s) || index(s, ell) > 0 || index(s, "...") > 0) return 0
+  tail = line
+  sub(/^The code will be restored( [+-][0-9]+(,[0-9]+)*)* /, "", tail)
   if (exp_cnt == 1) {
-    if (index(s, " and ") > 0) return 0
-    return (s == exp_list[1])
+    return (tail == "in " exp_list[1] ".")
   }
   if (exp_cnt == 2) {
-    pos = index(s, " and ")
-    if (pos == 0) return 0
-    left = trim(substr(s, 1, pos - 1))
-    right = trim(substr(s, pos + 5))
-    if (left == "" || right == "" || index(right, " and ") > 0) return 0
-    if (right ~ /^[0-9]+ other files?$/) return 0
-    return ((left == exp_list[1] && right == exp_list[2]) || (left == exp_list[2] && right == exp_list[1]))
+    return (tail == "in " exp_list[1] " and " exp_list[2] "." ||
+            tail == "in " exp_list[2] " and " exp_list[1] ".")
   }
-  if (s !~ / and [1-9][0-9]* other files$/) return 0
-  tail = s
-  sub(/^.* and /, "", tail)
-  num_str = tail
-  sub(/ other files$/, "", num_str)
-  other_n = num_str + 0
-  if (other_n < 2 || other_n + 1 != exp_cnt) return 0
-  name = trim(substr(s, 1, length(s) - length(" and " tail)))
-  if (name == "") return 0
-  found = 0
+  suffix = " and " (exp_cnt - 1) " other files."
   for (i = 1; i <= exp_cnt; i++) {
-    if (name == exp_list[i]) { found = 1; break }
+    if (tail == "in " exp_list[i] suffix) return 1
   }
-  return found
+  return 0
 }
 END {
   opt_want = ENVIRON["OPT_WANT"]
@@ -1304,7 +1283,7 @@ func (s *Server) apiConversationRewind(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var auditFiles []string
-	if b.RestoreCode {
+	if b.RestoreCode && len(b.Files) > 0 {
 		var ferr error
 		_, auditFiles, ferr = normalizeRewindFiles(b.Files)
 		if ferr != nil {
@@ -1333,6 +1312,11 @@ func (s *Server) apiConversationRewind(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		reason = "signed_out"
 		writeError(w, http.StatusUnauthorized, "unauthorized", "please sign in")
+		return
+	}
+	if b.RestoreCode && len(b.Files) == 0 {
+		reason = "no_code_changes"
+		writeError(w, http.StatusConflict, "no_code_changes", "no restorable code changes after this message")
 		return
 	}
 	ctx, cancel := context.WithDeadline(r.Context(), expiry)
@@ -1487,8 +1471,15 @@ func (s *Server) apiConversationRewind(w http.ResponseWriter, r *http.Request) {
 		fail(perr)
 		return
 	}
-	plan.RestoreCode = b.RestoreCode
-	plan.ExpectedFiles = auditFiles
+	if b.RestoreCode {
+		verifiedPaths, verr := verifyRewindCodePaths(allEntries, b.MessageID, auditFiles)
+		if verr != nil {
+			fail(verr)
+			return
+		}
+		plan.RestoreCode = true
+		plan.ExpectedFiles = verifiedPaths
+	}
 
 	if sess.Persistence == "herdr" {
 		pane = &herdrClaudeRewindPane{sess: sess, inflight: &running, socket: socket, pane: b.Pane, terminalID: liveTermID, pid: front.pid, start: front.start, sid: front.sid}

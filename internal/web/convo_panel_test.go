@@ -230,6 +230,181 @@ func TestScreenDigestSteady(t *testing.T) {
 	if dBash1 == dBash2 {
 		t.Error("stale AskUserQuestion in scrollback masked Bash permission prompt change")
 	}
+	// A tab-like line inside the question body (e.g. "☐ Preview ✔ Submit") must
+	// NOT become the dialog's top anchor and drop the real question above it.
+	fakeTabCases := []struct {
+		name     string
+		staging  string
+		timer    string
+		prod     string
+	}{
+		{
+			name: "multi-tab with fake tab line in body",
+			staging: strings.Join([]string{
+				"✽ Orchestrating… (13m 18s)",
+				"────────────────────────────────────────────────────────────",
+				"←  ☒ Scope  ☐ Action  ✔ Submit  →",
+				"",
+				"Delete staging?",
+				"☐ Preview ✔ Submit",
+				"Choose:",
+				"",
+				"❯ 1. Yes",
+				"  2. No",
+				"  3. Type something.",
+				"────────────────────────────────────────────────────────────",
+				"  4. Chat about this",
+				"",
+				"Enter to select · Tab/Arrow keys to navigate · Esc to cancel",
+				"  ● main",
+				"  ◯ general-purpose  Run Codex  13m 18s",
+			}, "\n") + "\n",
+			timer: strings.Join([]string{
+				"* Pondering… (13m 19s)",
+				"────────────────────────────────────────────────────────────",
+				"←  ☒ Scope  ☐ Action  ✔ Submit  →",
+				"",
+				"Delete staging?",
+				"☐ Preview ✔ Submit",
+				"Choose:",
+				"",
+				"❯ 1. Yes",
+				"  2. No",
+				"  3. Type something.",
+				"────────────────────────────────────────────────────────────",
+				"  4. Chat about this",
+				"",
+				"Enter to select · Tab/Arrow keys to navigate · Esc to cancel",
+				"  ● main",
+				"  ◯ general-purpose  Run Codex  13m 19s",
+			}, "\n") + "\n",
+			prod: strings.Join([]string{
+				"✽ Orchestrating… (13m 18s)",
+				"────────────────────────────────────────────────────────────",
+				"←  ☒ Scope  ☐ Action  ✔ Submit  →",
+				"",
+				"Delete production?",
+				"☐ Preview ✔ Submit",
+				"Choose:",
+				"",
+				"❯ 1. Yes",
+				"  2. No",
+				"  3. Type something.",
+				"────────────────────────────────────────────────────────────",
+				"  4. Chat about this",
+				"",
+				"Enter to select · Tab/Arrow keys to navigate · Esc to cancel",
+				"  ● main",
+				"  ◯ general-purpose  Run Codex  13m 18s",
+			}, "\n") + "\n",
+		},
+		{
+			name: "lone-tab with fake tab line in body",
+			staging: strings.Join([]string{
+				"✽ Orchestrating… (13m 18s)",
+				"────────────────────────────────────────────────────────────",
+				"☐ Action",
+				"",
+				"Delete staging?",
+				"☐ Preview ✔ Submit",
+				"Choose:",
+				"❯ 1. Yes",
+				"  2. No",
+				"  3. Type something.",
+				"Enter to select · ↑/↓ to navigate · Esc to cancel",
+			}, "\n") + "\n",
+			timer: strings.Join([]string{
+				"* Pondering… (13m 19s)",
+				"────────────────────────────────────────────────────────────",
+				"☐ Action",
+				"",
+				"Delete staging?",
+				"☐ Preview ✔ Submit",
+				"Choose:",
+				"❯ 1. Yes",
+				"  2. No",
+				"  3. Type something.",
+				"Enter to select · ↑/↓ to navigate · Esc to cancel",
+			}, "\n") + "\n",
+			prod: strings.Join([]string{
+				"✽ Orchestrating… (13m 18s)",
+				"────────────────────────────────────────────────────────────",
+				"☐ Action",
+				"",
+				"Delete production?",
+				"☐ Preview ✔ Submit",
+				"Choose:",
+				"❯ 1. Yes",
+				"  2. No",
+				"  3. Type something.",
+				"Enter to select · ↑/↓ to navigate · Esc to cancel",
+			}, "\n") + "\n",
+		},
+		{
+			name: "no rule and no real tab bar above fake tab line",
+			staging: strings.Join([]string{
+				"Delete staging?",
+				"☐ Preview ✔ Submit",
+				"Choose:",
+				"❯ 1. Yes",
+				"  2. No",
+				"  3. Type something.",
+				"Enter to select · ↑/↓ to navigate · Esc to cancel",
+			}, "\n") + "\n",
+			timer: strings.Join([]string{
+				"Delete staging?",
+				"☐ Preview ✔ Submit",
+				"Choose:",
+				"❯ 1. Yes",
+				"  2. No",
+				"  3. Type something.",
+				"Enter to select · ↑/↓ to navigate · Esc to cancel",
+			}, "\n") + "\n",
+			prod: strings.Join([]string{
+				"Delete production?",
+				"☐ Preview ✔ Submit",
+				"Choose:",
+				"❯ 1. Yes",
+				"  2. No",
+				"  3. Type something.",
+				"Enter to select · ↑/↓ to navigate · Esc to cancel",
+			}, "\n") + "\n",
+		},
+	}
+	for _, tc := range fakeTabCases {
+		_, dStg, _ := screenOf([]byte(tc.staging))
+		_, dTim, _ := screenOf([]byte(tc.timer))
+		_, dPrd, _ := screenOf([]byte(tc.prod))
+		if dStg != dTim {
+			t.Errorf("%s: background timer tick changed digest", tc.name)
+		}
+		if dStg == dPrd {
+			t.Errorf("%s: fake tab line masked question change (staging vs production)", tc.name)
+		}
+		for _, awk := range []string{"awk", "mawk", "gawk", "busybox awk", "original-awk"} {
+			if _, err := exec.LookPath(strings.Fields(awk)[0]); err != nil {
+				continue
+			}
+			hashAwk := func(in string) string {
+				pipe := strings.ReplaceAll(steadyPipe, "LC_ALL=C awk", "LC_ALL=C "+awk) + " | sha256sum"
+				cmd := exec.Command("sh", "-c", pipe)
+				cmd.Stdin = strings.NewReader(in)
+				out, err := cmd.Output()
+				if err != nil {
+					t.Fatalf("%s (%s): %v", tc.name, awk, err)
+				}
+				h, _, _ := strings.Cut(string(out), " ")
+				return h
+			}
+			hStg, hTim, hPrd := hashAwk(tc.staging), hashAwk(tc.timer), hashAwk(tc.prod)
+			if hStg != dStg || hTim != dTim || hPrd != dPrd {
+				t.Errorf("%s (%s): awk/Go parity mismatch", tc.name, awk)
+			}
+			if hStg == hPrd {
+				t.Errorf("%s (%s): awk masked question change (staging vs production)", tc.name, awk)
+			}
+		}
+	}
 }
 
 // What names the terminal shown, on the gateway and the host alike; what moves

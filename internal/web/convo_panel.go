@@ -434,27 +434,35 @@ func askDialogBounds(lines []string) (top, end int, ok bool) {
 		if revLimit < 0 {
 			revLimit = 0
 		}
+		revIdx := -1
 		for j := firstOpt - 1; j >= revLimit; j-- {
 			l := lines[j]
 			if isAskRule(l) || askMultiTab.MatchString(l) {
 				break
 			}
 			if askReviewHd.MatchString(l) {
-				top = j
-				for u := j - 1; u >= 0; u-- {
-					if blankLine.MatchString(lines[u]) {
-						continue
-					}
-					if askMultiTab.MatchString(lines[u]) {
-						top = u
-					}
-					break
-				}
-				return top, end, true
+				revIdx = j
 			}
 		}
+		if revIdx >= 0 {
+			top = revIdx
+			for u := revIdx - 1; u >= 0; u-- {
+				if blankLine.MatchString(lines[u]) {
+					continue
+				}
+				if askMultiTab.MatchString(lines[u]) {
+					top = u
+				}
+				break
+			}
+			return top, end, true
+		}
 	}
-	// (B) AskUserQuestion dialog.
+	// (B) AskUserQuestion dialog: anchor the tab bar strictly at the first
+	// non-blank line under the dialog's top border rule (or at the very top of
+	// the screen when the rule scrolled off) so a tab-like line inside the
+	// question body (e.g. "☐ Preview ✔ Submit") can never drop earlier lines
+	// of the question from the digest.
 	if !sawAskHint && !sawChat {
 		return 0, 0, false
 	}
@@ -463,26 +471,20 @@ func askDialogBounds(lines []string) (top, end int, ok bool) {
 		tabLimit = 0
 	}
 	firstNonBlank, nonBlankCount := -1, 0
+	hitRule := false
 	for j := firstOpt - 1; j >= tabLimit; j-- {
 		l := lines[j]
-		if askMultiTab.MatchString(l) {
-			if nonBlankCount > 0 {
-				return j, end, true
-			}
-			return 0, 0, false
-		}
 		if isAskRule(l) {
-			if firstNonBlank >= 0 && askLoneTab.MatchString(lines[firstNonBlank]) && nonBlankCount >= 2 {
-				return firstNonBlank, end, true
-			}
-			return 0, 0, false
+			hitRule = true
+			break
 		}
 		if !blankLine.MatchString(l) {
 			firstNonBlank = j
 			nonBlankCount++
 		}
 	}
-	if tabLimit == 0 && firstNonBlank >= 0 && askLoneTab.MatchString(lines[firstNonBlank]) && nonBlankCount >= 2 {
+	if (hitRule || tabLimit == 0) && firstNonBlank >= 0 && nonBlankCount >= 2 &&
+		(askMultiTab.MatchString(lines[firstNonBlank]) || askLoneTab.MatchString(lines[firstNonBlank])) {
 		return firstNonBlank, end, true
 	}
 	return 0, 0, false
@@ -628,29 +630,29 @@ END {
       if (!bad && oc >= 2 && lnum == 1 && ccnt + subcur == 1 && fopt > 1) {
         if (oc == 2 && o1 == "Submit answers" && o2 == "Cancel") {
           rlim = fopt - 60; if (rlim < 1) rlim = 1
+          ridx = 0
           for (j = fopt - 1; j >= rlim; j--) {
             if (isrule(L[j]) || ismultitab(L[j])) break
-            if (isrevhead(L[j])) {
-              top = j
-              for (u = j - 1; u >= 1; u--) {
-                if (isblank(L[u])) continue
-                if (ismultitab(L[u])) top = u
-                break
-              }
+            if (isrevhead(L[j])) ridx = j
+          }
+          if (ridx > 0) {
+            top = ridx
+            for (u = ridx - 1; u >= 1; u--) {
+              if (isblank(L[u])) continue
+              if (ismultitab(L[u])) top = u
               break
             }
           }
         }
         if (!top && (sawAsk || sawChat)) {
           tlim = fopt - 60; if (tlim < 1) tlim = 1
-          fnb = 0; nbc = 0; stopped = 0
+          fnb = 0; nbc = 0; hitrule = 0
           for (j = fopt - 1; j >= tlim; j--) {
             l = L[j]
-            if (ismultitab(l)) { if (nbc > 0) top = j; stopped = 1; break }
-            if (isrule(l)) { if (fnb > 0 && islonetab(L[fnb]) && nbc >= 2) top = fnb; stopped = 1; break }
+            if (isrule(l)) { hitrule = 1; break }
             if (!isblank(l)) { fnb = j; nbc++ }
           }
-          if (!top && !stopped && tlim == 1 && fnb > 0 && islonetab(L[fnb]) && nbc >= 2) top = fnb
+          if ((hitrule || tlim == 1) && fnb > 0 && nbc >= 2 && (ismultitab(L[fnb]) || islonetab(L[fnb]))) top = fnb
         }
       }
     }

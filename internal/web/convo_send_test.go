@@ -453,3 +453,198 @@ taken
 		}
 	})
 }
+
+func TestHasPicturePath(t *testing.T) {
+	for _, tc := range []struct {
+		text string
+		want bool
+	}{
+		{"/tmp/a.png\ninspect this", true},
+		{"/tmp/a.png inspect this", true},
+		{"'/tmp/my shot.png'\ninspect this", true},
+		{`"/tmp/a.JPG" check`, true},
+		{"看看 /tmp/a.webp", true},
+		{"帮我开好实验 2", false},
+		{"请看abc/a.png后面还有字", false},
+		{"plain text without images", false},
+	} {
+		if got := hasPicturePath(tc.text); got != tc.want {
+			t.Errorf("hasPicturePath(%q) = %v, want %v", tc.text, got, tc.want)
+		}
+	}
+}
+
+// Reproduces the slow-image-paste regression: Claude Code's greyed-out
+// suggestion matches the message text after squeezing whitespace
+// ("/tmp/a.png inspect this" vs "/tmp/a.png\ninspect this"), and Claude Code
+// takes >0.3s to load the image into "[Image #1]". With haspic=1, boxbefore()
+// must NOT skip pasted() and taken() must NOT treat "[Image #1]..." as sent:
+// the message must either actually be sent or exit 18 — never exit 0 with 0 sends.
+func TestConvoGatedSlowImagePasteWithMatchingSuggestion(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("no sh")
+	}
+	msg := "/tmp/a.png\ninspect this"
+	if !hasPicturePath(msg) {
+		t.Fatalf("expected hasPicturePath(%q) = true", msg)
+	}
+	cmd := convoGatedPicCommand("free", "herdr", "", "p1", "/run/x.sock", 1, 1, sidA, len(msg), 0)
+	if !strings.Contains(cmd, fmt.Sprintf(" %d@ '/run/x.sock'", len(msg))) {
+		t.Fatalf("convoGatedPicCommand did not tag length with @: %s", cmd[max(0, len(cmd)-80):])
+	}
+	bodyStart := strings.Index(cmd, "sh -c ") + len("sh -c ")
+	bodyEnd := strings.Index(cmd, " corral ")
+	quotedScript := cmd[bodyStart:bodyEnd]
+	dir := t.TempDir()
+	scriptPath := filepath.Join(dir, "gated.sh")
+	if out, err := exec.Command("sh", "-c", "printf %s "+quotedScript+" > "+scriptPath).CombinedOutput(); err != nil {
+		t.Fatalf("extract script: %v %s", err, out)
+	}
+	raw, err := os.ReadFile(scriptPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ownerIdx := strings.Index(string(raw), "\nowner() {")
+	ownedEnd := strings.Index(string(raw), "\nb=corral-send-$$")
+	boxIdx := strings.Index(string(raw), "\ncc= b0= b1=")
+	takenEnd := strings.Index(string(raw), "\nif [ -n \"$gate\" ]; then")
+	if ownerIdx < 0 || ownedEnd < 0 || boxIdx < 0 || takenEnd < 0 {
+		t.Fatal("could not locate convoGated functions")
+	}
+	funcs := string(raw[ownerIdx:ownedEnd]) + "\n" + string(raw[boxIdx:takenEnd]) + "\n"
+	rule := strings.Repeat("─", 40)
+	foot := "  Opus 5.5·H | Ctx 132.6K\n  ⏵⏵ auto mode on (shift+tab to cycle)"
+
+	// Subtest 1: Claude Code takes 4 reads (~0.4s+) to replace the suggestion
+	// with "[Image #1]\ninspect this" and drops any Enter received beforehand.
+	t.Run("slow image load waits in pasted and sends once", func(t *testing.T) {
+		subDir := t.TempDir()
+		msgFile := filepath.Join(subDir, "msg")
+		os.WriteFile(msgFile, []byte(msg), 0o600)
+		suggScreen := filepath.Join(subDir, "sugg.txt")
+		loadedScreen := filepath.Join(subDir, "loaded.txt")
+		sentScreen := filepath.Join(subDir, "sent.txt")
+		os.WriteFile(suggScreen, []byte(rule+"\n❯ /tmp/a.png inspect this\n"+rule+"\n"+foot+"\n"), 0o600)
+		os.WriteFile(loadedScreen, []byte(rule+"\n❯ [Image #1]\n  inspect this\n"+rule+"\n"+foot+"\n"), 0o600)
+		os.WriteFile(sentScreen, []byte("> [Image #1] inspect this\n\n* Enchanting… (1s)\n"+rule+"\n❯ \n"+rule+"\n"+foot+"\n"), 0o600)
+		readsFile := filepath.Join(subDir, "reads")
+		sentCountFile := filepath.Join(subDir, "sent_count")
+		herdrStub := fmt.Sprintf(`#!/bin/sh
+if [ "$1" = pane ] && [ "$2" = read ]; then
+  printf x >> %q
+  n=$(wc -c < %q | tr -d ' ')
+  if [ -f %q ]; then cat %q
+  elif [ "$n" -ge 5 ]; then cat %q
+  else cat %q
+  fi
+  exit 0
+fi
+if [ "$1" = pane ] && [ "$2" = send-keys ] && [ "$4" = enter ]; then
+  n=$(wc -c < %q 2>/dev/null | tr -d ' ')
+  # Claude Code drops Enter until image finishes loading (read >= 5).
+  if [ "${n:-0}" -ge 5 ]; then printf x >> %q; fi
+  exit 0
+fi
+exit 0
+`, readsFile, readsFile, sentCountFile, sentScreen, loadedScreen, suggScreen, readsFile, sentCountFile)
+		os.WriteFile(filepath.Join(subDir, "herdr"), []byte(herdrStub), 0o755)
+		harness := funcs + fmt.Sprintf(`
+kind=claude cx= oc= noenter= haspic=1 mode=herdr p=p1 sock=/s gate=free f=%q
+gate_enter() { return 0; }
+boxbefore
+pasted
+herdr pane send-keys "$p" enter
+taken
+`, msgFile)
+		c := exec.Command("sh", "-c", harness)
+		c.Env = append(os.Environ(), "PATH="+subDir+":"+os.Getenv("PATH"))
+		if out, err := c.CombinedOutput(); err != nil {
+			t.Fatalf("slow image paste failed: %v\n%s", err, out)
+		}
+		got, _ := os.ReadFile(sentCountFile)
+		if len(got) != 1 {
+			t.Fatalf("actual send count = %d, want 1", len(got))
+		}
+	})
+
+	// Subtest 2: Two-step transition where the raw pasted text briefly differs
+	// from b0 (causing pasted() to return early and first Enter to be dropped),
+	// then Claude Code switches the box to "[Image #1]\ninspect this". taken()
+	// must recognize "[Image #1]" as unsent and retry Enter (sending once), and
+	// if Enter keeps failing, exit 18 instead of returning 0.
+	for _, acceptRetry := range []bool{true, false} {
+		name := "two-step transition retries Enter and sends once"
+		if !acceptRetry {
+			name = "two-step transition with stuck retry exits 18"
+		}
+		t.Run(name, func(t *testing.T) {
+			subDir := t.TempDir()
+			msgFile := filepath.Join(subDir, "msg")
+			os.WriteFile(msgFile, []byte(msg), 0o600)
+			suggScreen := filepath.Join(subDir, "sugg.txt")
+			rawPasteScreen := filepath.Join(subDir, "raw.txt")
+			loadedScreen := filepath.Join(subDir, "loaded.txt")
+			sentScreen := filepath.Join(subDir, "sent.txt")
+			os.WriteFile(suggScreen, []byte(rule+"\n❯ /tmp/a.png inspect this\n"+rule+"\n"+foot+"\n"), 0o600)
+			os.WriteFile(rawPasteScreen, []byte(rule+"\n❯ /tmp/a.png\n  inspect this\n"+rule+"\n"+foot+"\n"), 0o600)
+			os.WriteFile(loadedScreen, []byte(rule+"\n❯ [Image #1]\n  inspect this\n"+rule+"\n"+foot+"\n"), 0o600)
+			os.WriteFile(sentScreen, []byte(rule+"\n❯ \n"+rule+"\n"+foot+"\n"), 0o600)
+			readsFile := filepath.Join(subDir, "reads")
+			entersFile := filepath.Join(subDir, "enters")
+			sentCountFile := filepath.Join(subDir, "sent_count")
+			acceptFlag := "0"
+			if acceptRetry {
+				acceptFlag = "1"
+			}
+			herdrStub := fmt.Sprintf(`#!/bin/sh
+if [ "$1" = pane ] && [ "$2" = read ]; then
+  printf x >> %q
+  n=$(wc -c < %q | tr -d ' ')
+  if [ -f %q ]; then cat %q
+  elif [ "$n" -eq 1 ]; then cat %q
+  elif [ "$n" -eq 2 ]; then cat %q
+  else cat %q
+  fi
+  exit 0
+fi
+if [ "$1" = pane ] && [ "$2" = send-keys ] && [ "$4" = enter ]; then
+  printf x >> %q
+  e=$(wc -c < %q | tr -d ' ')
+  # First Enter is dropped while image loads; second Enter succeeds only if acceptFlag=1.
+  if [ "$e" -ge 2 ] && [ %q = 1 ]; then printf x >> %q; fi
+  exit 0
+fi
+exit 0
+`, readsFile, readsFile, sentCountFile, sentScreen, suggScreen, rawPasteScreen, loadedScreen, entersFile, entersFile, acceptFlag, sentCountFile)
+			os.WriteFile(filepath.Join(subDir, "herdr"), []byte(herdrStub), 0o755)
+			harness := funcs + fmt.Sprintf(`
+kind=claude cx= oc= noenter= haspic=1 mode=herdr p=p1 sock=/s gate=free f=%q
+gate_enter() { return 0; }
+boxbefore
+pasted
+herdr pane send-keys "$p" enter
+taken
+`, msgFile)
+			c := exec.Command("sh", "-c", harness)
+			c.Env = append(os.Environ(), "PATH="+subDir+":"+os.Getenv("PATH"))
+			err := c.Run()
+			got, _ := os.ReadFile(sentCountFile)
+			if acceptRetry {
+				if err != nil {
+					t.Fatalf("expected retry Enter to succeed, got %v", err)
+				}
+				if len(got) != 1 {
+					t.Fatalf("actual send count = %d, want 1", len(got))
+				}
+			} else {
+				var ee *exec.ExitError
+				if !errors.As(err, &ee) || ee.ExitCode() != 18 {
+					t.Fatalf("expected exit 18 when retry Enter also fails, got %v", err)
+				}
+				if len(got) != 0 {
+					t.Fatalf("actual send count = %d, want 0", len(got))
+				}
+			}
+		})
+	}
+}

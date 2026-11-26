@@ -3388,12 +3388,35 @@ func TestClaudeRewindCommitScriptCodeRestoreAtomicCheck(t *testing.T) {
 				t.Fatalf("quoted spoof matched: code=%d keys=%q, want 37 and empty", code, keys)
 			}
 
-			// 10) Regex/shell metacharacters in filename -> exact match, no injection.
+			// 10) Regex/shell metacharacters and " and " inside filenames -> exact match, no injection.
 			evilFile := `a+b[1]'$HOME.txt`
 			scrEvil := realCCConfirmScreen(realCCAboveThreeTurns, "third message", "The code will be restored +1 -2 in "+evilFile+".", true, 0)
 			out, code, keys = run(scrEvil, "third message", true, []string{evilFile})
 			if ok, _ := parseClaudeRewindCommitOut([]byte(out)); code != 0 || !ok || keys == "" {
 				t.Fatalf("metachar filename failed: code=%d out=%q keys=%q", code, out, keys)
+			}
+			// Single filename containing " and ".
+			scrAndOne := realCCConfirmScreen(realCCAboveThreeTurns, "third message", "The code will be restored +1 -2 in fish and chips.txt.", true, 0)
+			out, code, keys = run(scrAndOne, "third message", true, []string{"/repo/fish and chips.txt"})
+			if ok, _ := parseClaudeRewindCommitOut([]byte(out)); code != 0 || !ok || keys == "" {
+				t.Fatalf("single filename with ' and ' failed: code=%d out=%q keys=%q", code, out, keys)
+			}
+			// Two files where one contains " and " (both orders accepted).
+			for _, desc := range []string{
+				"The code will be restored +1 -5 in fish and chips.txt and a.txt.",
+				"The code will be restored +1 -5 in a.txt and fish and chips.txt.",
+			} {
+				scrAndTwo := realCCConfirmScreen(realCCAboveTwoFiles, "third message", desc, true, 0)
+				out, code, keys = run(scrAndTwo, "third message", true, []string{"/repo/fish and chips.txt", "/repo/a.txt"})
+				if ok, _ := parseClaudeRewindCommitOut([]byte(out)); code != 0 || !ok || keys == "" {
+					t.Fatalf("two files with ' and ' (%q) failed: code=%d out=%q keys=%q", desc, code, out, keys)
+				}
+			}
+			// Three files where the shown filename contains " and ".
+			scrAndThree := realCCConfirmScreen(realCCAboveTwoFiles, "third message", "The code will be restored -3 in fish and chips.txt and 2 other files.", true, 0)
+			out, code, keys = run(scrAndThree, "third message", true, []string{"/repo/fish and chips.txt", "/repo/a.txt", "/repo/b.txt"})
+			if ok, _ := parseClaudeRewindCommitOut([]byte(out)); code != 0 || !ok || keys == "" {
+				t.Fatalf("three files with ' and ' failed: code=%d out=%q keys=%q", code, out, keys)
 			}
 
 			// 11) Direct awk guard: OPT_WANT outside the 2 allowlisted labels MUST exit 35.
@@ -3559,16 +3582,20 @@ func TestClaudeRewindNormalizeFilesAndParseParity(t *testing.T) {
 		{"The code will be restored -2 in a.txt.", []string{"a.txt"}},
 		{"The code will be restored in a.txt.", []string{"a.txt"}},
 		{"The code will be restored +1,200 -5 in a.txt.", []string{"a.txt"}},
+		{"The code will be restored +1 -2 in fish and chips.txt.", []string{"/repo/fish and chips.txt"}},
 		{"The code will be restored +1 -5 in a.txt and b.txt.", []string{"sub/b.txt", "a.txt"}},
+		{"The code will be restored +1 -5 in fish and chips.txt and a.txt.", []string{"/repo/a.txt", "/repo/fish and chips.txt"}},
+		{"The code will be restored +1 -5 in a.txt and fish and chips.txt.", []string{"/repo/fish and chips.txt", "/repo/a.txt"}},
+		{"The code will be restored +1 -5 in fish and chips.txt and salt and pepper.txt.", []string{"fish and chips.txt", "salt and pepper.txt"}},
 		{"The code will be restored -2 in b.txt and b.txt.", []string{"src/b.txt", "test/b.txt"}},
 		{"The code will be restored -4 in a.txt and 3 other files.", fourPaths},
 		{"The code will be restored -4 in b.txt and 3 other files.", fourPaths},
+		{"The code will be restored -3 in fish and chips.txt and 2 other files.", []string{"fish and chips.txt", "a.txt", "b.txt"}},
 		{"The code will be restored -10 in d1.txt and 9 other files.", tenPaths},
 	}
 	for _, tc := range goodCases {
-		got, ok := parseRewindCodeFiles(tc.line)
-		if !ok || !matchRewindCodeFiles(got, ok, tc.paths) {
-			t.Fatalf("parse/match(%q, %v) = (%+v, %v), want match", tc.line, tc.paths, got, ok)
+		if !matchRewindCodeLine(tc.line, tc.paths) {
+			t.Fatalf("matchRewindCodeLine(%q, %v) = false, want true", tc.line, tc.paths)
 		}
 	}
 
@@ -3581,6 +3608,7 @@ func TestClaudeRewindNormalizeFilesAndParseParity(t *testing.T) {
 		{"The code will be restored +1 -2 in .", []string{"a.txt"}},
 		{"The code will be restored +1 -2 in a.txt…", []string{"a.txt"}},
 		{"The code will be restored +1 -2 in a.txt...", []string{"a.txt"}},
+		{"The code will be restored +1 -2 in fish and chips.txt", []string{"fish and chips.txt"}}, // missing trailing period
 		{"The code will be restored +1 -5 in a.txt and a.txt.", []string{"a.txt", "b.txt"}},
 		{"The code will be restored -2 in b.txt.", []string{"src/b.txt", "test/b.txt"}},
 		{"The code will be restored -2 in a.txt and 1 other file.", []string{"a.txt", "b.txt"}},
@@ -3595,9 +3623,137 @@ func TestClaudeRewindNormalizeFilesAndParseParity(t *testing.T) {
 		{"The code will be restored +1 -2 in a.txt and b.txt and c.txt.", []string{"a.txt", "b.txt", "c.txt"}},
 	}
 	for _, tc := range mismatchCases {
-		got, ok := parseRewindCodeFiles(tc.line)
-		if matchRewindCodeFiles(got, ok, tc.paths) {
-			t.Fatalf("expected mismatch for (%q, %v), got %+v", tc.line, tc.paths, got)
+		if matchRewindCodeLine(tc.line, tc.paths) {
+			t.Fatalf("matchRewindCodeLine(%q, %v) = true, want false", tc.line, tc.paths)
 		}
 	}
+}
+
+func TestClaudeRewindVerifyCodePathsAgainstLog(t *testing.T) {
+	mkUser := func(seq int, id, text string) convo.Entry {
+		return convo.Entry{
+			Seq:   seq,
+			ID:    id,
+			Role:  convo.RoleUser,
+			Parts: []convo.Part{{Kind: convo.KindText, Text: text}},
+		}
+	}
+	mkTool := func(seq int, name, detail string, isErr, gone bool) convo.Entry {
+		return convo.Entry{
+			Seq:  seq,
+			ID:   "a-" + strconv.Itoa(seq),
+			Role: convo.RoleAssistant,
+			Gone: gone,
+			Parts: []convo.Part{{
+				Kind: convo.KindTool,
+				Tool: &convo.Tool{Name: name, Detail: detail, Error: isErr},
+			}},
+		}
+	}
+
+	// 1. Same basename in different directories: /shown/a.txt vs /other/a.txt -> code_mismatch.
+	entriesOtherDir := []convo.Entry{
+		mkUser(1, "u1", "first"),
+		mkTool(2, "Write", "/other/a.txt", false, false),
+	}
+	if _, err := verifyRewindCodePaths(entriesOtherDir, "u1", []string{"/shown/a.txt"}); err == nil || err.code != "code_mismatch" {
+		t.Fatalf("same basename different dir: got err=%v, want code_mismatch", err)
+	}
+
+	// 2. 3+ files where screen would show "in a.txt and 2 other files." for both,
+	//    but actual full paths contain secret.txt & config.json -> code_mismatch.
+	entriesThreeActual := []convo.Entry{
+		mkUser(1, "u1", "first"),
+		mkTool(2, "Write", "/repo/a.txt", false, false),
+		mkTool(3, "Edit", "/repo/secret.txt", false, false),
+		mkTool(4, "MultiEdit", "/repo/config.json", false, false),
+	}
+	if _, err := verifyRewindCodePaths(entriesThreeActual, "u1", []string{"/repo/a.txt", "/repo/b.txt", "/repo/c.txt"}); err == nil || err.code != "code_mismatch" {
+		t.Fatalf("3+ files swapped hidden files: got err=%v, want code_mismatch", err)
+	}
+
+	// 3. Different order, identical full-path set (including duplicate basenames in different dirs,
+	//    repeated edits, ignored Bash/Read/failed/gone/before-target edits) -> passes.
+	entriesMixed := []convo.Entry{
+		mkUser(1, "u0", "earlier"),
+		mkTool(2, "Write", "/repo/before.txt", false, false),
+		mkUser(3, "u1", "target"),
+		mkTool(4, "Write", "/repo/a.txt", false, false),
+		mkTool(5, "Edit", "/repo/src/b.txt", false, false),
+		mkTool(6, "MultiEdit", "/repo/test/b.txt", false, false),
+		mkTool(7, "NotebookEdit", "/repo/nb/demo.ipynb", false, false),
+		mkTool(8, "Edit", "/repo/a.txt", false, false),           // duplicate path
+		mkTool(9, "Write", "/repo/failed.txt", true, false),      // errored edit -> ignored
+		mkTool(10, "Write", "/repo/gone.txt", false, true),       // gone entry -> ignored
+		mkTool(11, "Bash", "echo hi > /repo/bash.txt", false, false),
+		mkTool(12, "Read", "/repo/read.txt", false, false),
+	}
+	got, err := verifyRewindCodePaths(entriesMixed, "u1", []string{
+		"/repo/nb/demo.ipynb",
+		"/repo/test/b.txt",
+		"/repo/a.txt",
+		"/repo/src/b.txt",
+	})
+	if err != nil {
+		t.Fatalf("same full-path set in different order failed: %v", err)
+	}
+	wantLog := []string{"/repo/a.txt", "/repo/src/b.txt", "/repo/test/b.txt", "/repo/nb/demo.ipynb"}
+	if !slices.Equal(got, wantLog) {
+		t.Fatalf("verified paths = %v, want %v", got, wantLog)
+	}
+
+	// 4. Empty requested list OR no edit-tool files in log -> no_code_changes.
+	if _, err := verifyRewindCodePaths(entriesMixed, "u1", nil); err == nil || err.code != "no_code_changes" {
+		t.Fatalf("empty requested files: got err=%v, want no_code_changes", err)
+	}
+	entriesNoEdits := []convo.Entry{
+		mkUser(1, "u1", "target"),
+		mkTool(2, "Bash", "echo hi > /repo/bash.txt", false, false),
+		mkTool(3, "Write", "/repo/failed.txt", true, false),
+	}
+	if _, err := verifyRewindCodePaths(entriesNoEdits, "u1", []string{"/repo/bash.txt"}); err == nil || err.code != "no_code_changes" {
+		t.Fatalf("no edit tools in log: got err=%v, want no_code_changes", err)
+	}
+}
+
+func TestClaudeRewindRestoreCodeFilenameWithAndFlow(t *testing.T) {
+	fastRewindTimings(t)
+
+	t.Run("single_file_with_and", func(t *testing.T) {
+		fp, plan := newRealCCCodeRewindFake(
+			realCCAboveThreeTurns,
+			"fish and chips.txt +2 -1",
+			"The code will be restored +1 -2 in fish and chips.txt.",
+			true,
+		)
+		plan.RestoreCode = true
+		plan.ExpectedFiles = []string{"/repo/fish and chips.txt"}
+
+		res, err := claudeRewind(context.Background(), fp, plan)
+		if err != nil {
+			t.Fatalf("expected success, got err: %v", err)
+		}
+		if !res.OK || !res.RestoredCode {
+			t.Fatalf("unexpected result: %+v", res)
+		}
+	})
+
+	t.Run("two_files_one_with_and", func(t *testing.T) {
+		fp, plan := newRealCCCodeRewindFake(
+			realCCAboveTwoFiles,
+			"2 files changed +5 -1",
+			"The code will be restored +1 -5 in a.txt and fish and chips.txt.",
+			true,
+		)
+		plan.RestoreCode = true
+		plan.ExpectedFiles = []string{"/repo/fish and chips.txt", "/repo/a.txt"}
+
+		res, err := claudeRewind(context.Background(), fp, plan)
+		if err != nil {
+			t.Fatalf("expected success, got err: %v", err)
+		}
+		if !res.OK || !res.RestoredCode {
+			t.Fatalf("unexpected result: %+v", res)
+		}
+	})
 }
