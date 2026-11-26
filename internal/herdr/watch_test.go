@@ -418,12 +418,14 @@ func TestWatcherLogsStreamBreak(t *testing.T) {
 	defer cancel()
 
 	rec := newLogRecorder()
+	var lostCount atomic.Int32
 	w := NewWatcher(c, "/run/herdr/stream.sock", nil, nil)
 	w.SessionID = "sess-stream"
 	w.ServerName = "default"
 	w.Log = slog.New(rec)
 	w.baseBackoff = 2 * time.Millisecond
 	w.maxBackoff = 4 * time.Millisecond
+	w.OnLost = func() { lostCount.Add(1) }
 
 	done := make(chan struct{})
 	go func() {
@@ -432,16 +434,36 @@ func TestWatcherLogsStreamBreak(t *testing.T) {
 	}()
 
 	recs := rec.waitFor(t, 4*time.Second, func(list []capturedLog) bool {
-		return len(list) >= 2 && list[1].Level == slog.LevelInfo
+		return len(list) >= 2 && list[len(list)-1].Level == slog.LevelInfo
 	})
 	cancel()
 	<-done
 
-	if recs[0].Level != slog.LevelWarn || recs[0].Attrs["step"].String() != stepStream || recs[0].Attrs["busy"].Bool() {
+	if recs[0].Level != slog.LevelWarn ||
+		recs[0].Attrs["step"].String() != stepStream ||
+		recs[0].Attrs["busy"].Bool() ||
+		recs[0].Attrs["failures"].Int64() != 1 {
 		t.Fatalf("unexpected stream break warn: %+v", recs[0])
 	}
-	if recs[1].Level != slog.LevelInfo || recs[1].Attrs["failures"].Int64() != 1 {
-		t.Fatalf("unexpected recovery info: %+v", recs[1])
+	// With 2–4ms backoff, an early reconnect may briefly observe ErrBusy while the
+	// broken stream's SSH channel finishes async teardown in sshx.guardedConn.
+	for i := 1; i < len(recs)-1; i++ {
+		r := recs[i]
+		wantFailures := int64(1 << i)
+		if r.Level != slog.LevelWarn ||
+			r.Attrs["step"].String() != stepDial ||
+			!r.Attrs["busy"].Bool() ||
+			r.Attrs["failures"].Int64() != wantFailures {
+			t.Fatalf("unexpected intermediate record[%d]: %+v (all=%+v)", i, r, recs)
+		}
+	}
+	info := recs[len(recs)-1]
+	failures := info.Attrs["failures"].Int64()
+	lost := int64(lostCount.Load())
+	minFailures := int64(1 << (len(recs) - 2))
+	maxFailures := int64(1<<(len(recs)-1)) - 1
+	if info.Level != slog.LevelInfo || failures != lost || failures < minFailures || failures > maxFailures {
+		t.Fatalf("unexpected recovery info: %+v (lost=%d, recs=%+v)", info, lost, recs)
 	}
 }
 
