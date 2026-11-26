@@ -43,6 +43,9 @@ export const useDeskPages = (): boolean => useMedia(DESK_QUERY)
 
 export type RailKey = 'agents' | 'terminals' | 'hosts' | 'keys' | 'settings' | 'recordings' | 'users' | 'audit'
 
+// How long Alt is held before the rail shows its numbers (RAIL_KEYS): longer than a shortcut's press.
+const RAIL_HOLD_MS = 450
+
 export function Rail({ active }: { active?: RailKey }) {
   const { me, setMe, boot } = useSession()
   const toast = useToast()
@@ -53,6 +56,44 @@ export function Rail({ active }: { active?: RailKey }) {
   const [account, setAccount] = useState<DOMRect | null>(null)
   const meBtn = useRef<HTMLButtonElement>(null) // (this rail's: another page's, hidden, has one too)
   const navRef = useRef<HTMLElement>(null)
+  // Alt (⌥) held a moment, nothing else with it: each page's number and name beside its icon, and Alt+n then goes
+  // there even from a terminal that has the keys first — held, it is plainly the rail that is asked (doc UI 28:
+  // ⌥1 went to herdr, which has the same keys, and nothing said why). Let go, gone. A quick Alt+n is as before.
+  const [held, setHeld] = useState(false)
+  const heldRef = useRef(false)
+  useEffect(() => {
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const drop = () => {
+      clearTimeout(timer)
+      timer = undefined
+      heldRef.current = false
+      setHeld(false)
+    }
+    const down = (e: KeyboardEvent) => {
+      if (e.key !== 'Alt') {
+        // (Another key with it before the moment is up: a shortcut of its own, Alt+↑ say — no names.)
+        if (!heldRef.current) clearTimeout(timer)
+        return
+      }
+      if (e.repeat || timer || heldRef.current || e.ctrlKey || e.metaKey || e.shiftKey) return
+      // (Not over a dialog, nor on a Mac in a field one types in: ⌥ held there is for its characters, ⌥8 •.)
+      if (modalShown() || (onMac() && typedIn(e.target)) || !navRef.current?.getClientRects().length) return
+      timer = setTimeout(() => {
+        heldRef.current = true
+        setHeld(true)
+      }, RAIL_HOLD_MS)
+    }
+    const up = (e: KeyboardEvent) => e.key === 'Alt' && drop()
+    window.addEventListener('keydown', down, true)
+    window.addEventListener('keyup', up, true)
+    window.addEventListener('blur', drop)
+    return () => {
+      drop()
+      window.removeEventListener('keydown', down, true)
+      window.removeEventListener('keyup', up, true)
+      window.removeEventListener('blur', drop)
+    }
+  }, [])
   // Alt+1…9: its pages, as they go down (railKey). Every page's rail listens; the one shown goes.
   // Not under a dialog; a terminal focused and it first, the program's (as ⌥↑↓); before the
   // terminal's own listener (capture), as it stops the key once it sends it. On a Mac, not
@@ -61,14 +102,14 @@ export function Rail({ active }: { active?: RailKey }) {
     const onKey = (e: KeyboardEvent) => {
       const n = railKey(e)
       const nav = navRef.current
-      if (!n || !nav || !nav.getClientRects().length || e.defaultPrevented || modalShown() || terminalHasKeys(e, getPrefs().keysFirst)) return
-      if (onMac() && typedIn(e.target)) return
+      if (!n || !nav || !nav.getClientRects().length || e.defaultPrevented || modalShown()) return
+      if (!heldRef.current && (terminalHasKeys(e, getPrefs().keysFirst) || (onMac() && typedIn(e.target)))) return
       const to = nav.querySelectorAll<HTMLAnchorElement>('a[data-rail-key]')[n - 1]
       if (!to) return
       e.preventDefault()
       e.stopPropagation()
       if (e.repeat) return
-      takenFromTerminal(e, RAIL_KEYS, (m) => toast(m), (key) => t('keys.taken', { key }))
+      if (!heldRef.current) takenFromTerminal(e, RAIL_KEYS, (m) => toast(m), (key) => t('keys.taken', { key }))
       if (to.getAttribute('aria-current') !== 'page') to.click()
     }
     window.addEventListener('keydown', onKey, true)
@@ -91,7 +132,7 @@ export function Rail({ active }: { active?: RailKey }) {
   const n = waiting.n ?? 0
   const name = me?.display_name || me?.username || ''
   return (
-    <nav className="wb-rail" ref={navRef} aria-label={t('nav.main')}>
+    <nav className={'wb-rail' + (held ? ' is-keys' : '')} ref={navRef} aria-label={t('nav.main')}>
       <button type="button" className="wb-rail-item" onClick={openPalette} aria-label={t('palette.title')} title={t('palette.title') + (PALETTE_KEY ? ` (${PALETTE_KEY})` : '')} aria-keyshortcuts={PALETTE_KEY ? 'Meta+K' : undefined}>
         <Search size={19} strokeWidth={1.75} />
       </button>
@@ -109,6 +150,12 @@ export function Rail({ active }: { active?: RailKey }) {
           aria-label={i.key === 'agents' && n ? `${i.label}，${t(waiting.stale ? 'nav.waitingStaleN' : 'nav.waitingN', { n })}` : i.label}
         >
           {i.icon}
+          {held && at < 9 && (
+            <span className="wb-rail-hint" aria-hidden="true">
+              <kbd>{at + 1}</kbd>
+              {i.label}
+            </span>
+          )}
           {i.key === 'agents' && n > 0 && (
             <span className={'wb-rail-badge' + (waiting.stale ? ' is-stale' : '')} aria-hidden="true">
               {n > 99 ? '99+' : n}

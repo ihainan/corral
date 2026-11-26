@@ -155,6 +155,19 @@ code, .mono { font-family: var(--font-mono); font-size: var(--fs-sub); }
 .wb-rail-item:focus-visible { outline: none; box-shadow: var(--wb-focus, var(--focus)); }
 @media (pointer: coarse) { .wb-rail-item { width: 44px; height: 44px; } }
 .wb-rail-gap { flex: 1; }
+/* Alt held (doc UI 28): beside each icon its number and the page's name, over what is right of the rail. */
+.wb-rail-hint {
+  position: absolute; left: calc(100% + 12px); top: 50%; transform: translateY(-50%); z-index: 1; pointer-events: none;
+  display: inline-flex; align-items: center; gap: 6px; padding: 3px 8px 3px 4px; white-space: nowrap;
+  border: 1px solid var(--wb-line, var(--line)); border-radius: var(--r-sm); background: var(--surface);
+  box-shadow: var(--shadow-pop); color: var(--wb-fg, var(--fg));
+  font-size: var(--fs-sub); line-height: var(--lh-sub); font-weight: 500;
+}
+.wb-rail-hint kbd {
+  display: inline-grid; place-items: center; min-width: 18px; height: 18px; padding: 0 4px; border-radius: 4px;
+  background: var(--wb-accent-soft, var(--accent-soft)); color: var(--wb-accent, var(--accent-text, var(--accent)));
+  font: inherit; font-size: var(--fs-note); line-height: var(--lh-note); font-weight: 600;
+}
 .wb-rail-sep { flex: none; width: 20px; height: 1px; margin: 2px 0; background: var(--wb-line, var(--line)); }
 /* The command palette (palette.tsx): near the top, as such boxes are, not in the middle. */
 .dialog.palette { align-self: start; margin-top: min(12vh, 96px); max-width: 600px; padding: 0; gap: 0; max-height: min(560px, calc(var(--vv-h, 100dvh) - 32px)); overflow: hidden; }
