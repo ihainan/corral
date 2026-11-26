@@ -582,7 +582,7 @@ func titleSays(title, program string) bool {
 	// Told by its first word, the program's: "修复 --help 输出格式" is words.)
 	first := strings.ToLower(path.Base(strings.Fields(t)[0]))
 	switch first {
-	case strings.ToLower(program), "agy", "claude", "codex", "opencode", "gemini":
+	case strings.ToLower(program), "agy", "claude", "codex", "opencode", "gemini", "devin":
 		return false
 	}
 	return true
@@ -603,6 +603,8 @@ func agentProgram(a string) (string, string) {
 		return "Gemini CLI", "Gemini CLI"
 	case "agy", "antigravity":
 		return "Antigravity CLI", "Antigravity CLI"
+	case "devin", "devin-cli":
+		return "Devin", "Devin"
 	}
 	return a, a
 }

@@ -23,6 +23,7 @@ func TestHostScriptsParse(t *testing.T) {
 		"title":         convoTitleCommand("/home/u/.claude/projects/-w/a.jsonl", "11111111-2222-4333-8444-555555555501", 4096),
 		"complete":           completeCommand("/home/u/proj"),
 		"opencode read":      ocQueryCommand("/home/u/.local/share/opencode/opencode.db", "tail", "ses_x"),
+		"devin read":         dvQueryCommand("/home/u/.local/share/devin/cli/sessions.db", "tail", "x-y", "200"),
 		"codex models cache": codexModelsCacheCommand(123),
 	}
 	for name, cmd := range cmds {

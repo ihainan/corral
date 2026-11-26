@@ -23,7 +23,7 @@ type agentOldSession struct {
 
 // GET /api/sessions/{id}/agent-sessions?q=…&kind=…&dir=…
 // Searches past conversations across all folders (or one optional dir) and all
-// 4 agent kinds (claude, codex, opencode, agy) so the New Agent dialog can
+// 5 agent kinds (claude, codex, opencode, agy, devin) so the New Agent dialog can
 // search and resume closed conversations without first knowing their folder.
 func (s *Server) apiAgentSessions(w http.ResponseWriter, r *http.Request) {
 	sess, ok := s.runningSession(w, r)
@@ -277,7 +277,37 @@ if want_kind in ('', 'agy'):
         except sqlite3.Error:
             pass
 
-# 4. OpenCode (~/.local/share/opencode/opencode.db)
+# 4. Devin CLI (~/.local/share/devin/cli/sessions.db): its sessions, the
+# first message of each from its prompt history.
+if want_kind in ('', 'devin'):
+    db_path = os.path.join(os.environ.get('XDG_DATA_HOME') or os.path.expanduser('~/.local/share'), 'devin', 'cli', 'sessions.db')
+    if os.path.isfile(db_path):
+        try:
+            con = sqlite3.connect('file:' + urllib.parse.quote(db_path) + '?mode=ro', uri=True, timeout=2)
+            rows = con.execute(
+                """SELECT id, working_directory, title, last_activity_at,
+                          (SELECT content FROM prompt_history p WHERE p.session_id = s.id AND COALESCE(p.is_shell, 0) = 0 ORDER BY p.id LIMIT 1)
+                   FROM sessions s
+                   WHERE COALESCE(hidden, 0) = 0
+                   ORDER BY last_activity_at DESC LIMIT 300"""
+            )
+            for sid, cwd, title, act, first in rows:
+                d = norm_dir(cwd)
+                if not sid or not d or not dir_ok(d):
+                    continue
+                t = clean(title, 120)
+                f = clean(first, 200)
+                if not (t or f):
+                    continue
+                if not match_query('devin', d, t, f, sid):
+                    continue
+                ms = int(act * 1000) if isinstance(act, (int, float)) and act < 1e12 else int(act or 0)
+                results.append({'id': sid, 'kind': 'devin', 'dir': d, 'ms': ms, 'title': t, 'first': f})
+            con.close()
+        except sqlite3.Error:
+            pass
+
+# 5. OpenCode (~/.local/share/opencode/opencode.db)
 if want_kind in ('', 'opencode'):
     db_path = os.path.expanduser('~/.local/share/opencode/opencode.db')
     if os.path.isfile(db_path):
@@ -327,6 +357,10 @@ func parseAgentSessions(out []byte) []agentOldSession {
 		}
 		if r.Kind == "opencode" {
 			if !ocSessionID.MatchString(r.ID) {
+				continue
+			}
+		} else if r.Kind == "devin" {
+			if !devinSessionID.MatchString(r.ID) {
 				continue
 			}
 		} else if !sessionUUID.MatchString(r.ID) {

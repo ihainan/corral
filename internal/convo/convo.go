@@ -30,7 +30,8 @@ type Parser interface {
 }
 
 // New is the parser for an agent's log: "codex", "opencode" (its session's
-// rows, see OpenCode), "agy" (Antigravity CLI's full transcript), else Claude Code's.
+// rows, see OpenCode), "agy" (Antigravity CLI's full transcript), "devin"
+// (Devin CLI's messages, as read from its database: see Devin), else Claude Code's.
 func New(agent string) Parser {
 	switch agent {
 	case "codex":
@@ -39,6 +40,8 @@ func New(agent string) Parser {
 		return NewOpenCode()
 	case "agy":
 		return NewAgy()
+	case "devin":
+		return NewDevin()
 	}
 	return NewClaude()
 }

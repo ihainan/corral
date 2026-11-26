@@ -240,7 +240,7 @@ printf 'hostnow=%s\0' "$(date +%s 2>/dev/null)"
 nl=$(printf '\nx'); nl=${nl%x}
 btime=$(sed -n 's/^btime \([0-9]*\)$/\1/p' /proc/stat 2>/dev/null); hz=$(getconf CLK_TCK 2>/dev/null)
 case $hz in ''|*[!0-9]*|0) hz=;; esac
-` + codexFdsSh + agyFdsSh + `
+` + codexFdsSh + agyFdsSh + devinFdsSh + `
 # Codex's subcommand ($1 its pid): its first word after options and their
 # values ("codex -p exec" is no exec; "codex -c x=1 exec" is), none after
 # "--". Those that do not converse (exec, review, …) are no agent to type to.
@@ -375,16 +375,17 @@ for f in "$HOME"/.claude/sessions/*.json; do
   done
   rec "$pid" "$st" "$fg" "$ps" "$sid" "$log" claude
 done
-# The user's codex, opencode and agy processes, in one pass over /proc (by
-# their names, read with the shell's own read; each kind then as before).
-codexes= opencodes= agys=
+# The user's codex, opencode, agy and devin processes, in one pass over
+# /proc (by their names, read with the shell's own read; each kind then as
+# before).
+codexes= opencodes= agys= devins=
 for d in /proc/[0-9]*; do
   [ -O "$d" ] || continue
   read_all "$d/comm" "$nl"
   while :; do case $x in *"$nl") x=${x%"$nl"};; *) break;; esac; done # (as $(…) would leave it)
-  case $x in codex) codexes="$codexes $d";; opencode) opencodes="$opencodes $d";; agy) agys="$agys $d";; esac
+  case $x in codex) codexes="$codexes $d";; opencode) opencodes="$opencodes $d";; agy) agys="$agys $d";; devin) devins="$devins $d";; esac
 done
-[ "$only" = opencode ] && codexes= agys=
+[ "$only" = opencode ] && codexes= agys= devins=
 # What a log says of itself, from its head: where it was begun and when.
 # (What it says of itself is in its first line's payload: the line's own
 # timestamp is of when it was written, which a rewrite moves on.)
@@ -521,7 +522,7 @@ for d in $agys; do
   stat_of "$pid" || continue
   rec "$pid" "$st" "$fg" "$st" "$sid" "$log" agy
 done
-exit 0`
+# Devin CLI: see devinLocateSh.` + devinLocateSh + `exit 0`
 	return "sh -c " + sshx.QuoteShell(script) + " corral " + sshx.QuoteShell(mode) + " " + sshx.QuoteShell(tmuxName) + " " + sshx.QuoteShell(tmuxPane) + " " + sshx.QuoteShell(times) + " " + sshx.QuoteShell(only)
 }
 
@@ -628,7 +629,7 @@ type convoProc struct {
 	wrote      int64 // when its log was last written, unix milliseconds (0: not known)
 	wroteTold  bool  // wrote is its last record's time (not the file's)
 	sid, log   string
-	agent      string // "claude" (Claude Code), "codex" or "opencode"
+	agent      string // "claude" (Claude Code), "codex", "opencode", "agy" or "devin"
 	// ocService: an OpenCode 2's, whose database its background service
 	// holds (opencode serve --service, found by the port it talks to):
 	// what herdr says of its session may be another pane's (the service
@@ -945,7 +946,8 @@ func parseConvoLocate(out string) (l convoLocated) {
 				}
 			}
 		}
-		if p.pid <= 0 || p.start <= 0 || procStart != p.start || !convoUUID.MatchString(p.sid) {
+		// (A Devin's session is named in words: "cuddly-dime".)
+		if p.pid <= 0 || p.start <= 0 || procStart != p.start || !(convoUUID.MatchString(p.sid) || p.agent == "devin" && devinSessionID.MatchString(p.sid)) {
 			continue
 		}
 		// (Here, not in the host's shell, whose numbers may be 32 bits.)
@@ -953,7 +955,7 @@ func parseConvoLocate(out string) (l convoLocated) {
 			p.started = btime*1000 + p.start*1000/hz
 		}
 		switch p.agent {
-		case "codex", "agy":
+		case "codex", "agy", "devin":
 		case "opencode":
 			// (Its session is told after: by herdr, or by where it runs.)
 			if p.sid != convoNoSession {
@@ -983,6 +985,9 @@ func convoLogOf(agent, log, sid string) bool {
 	}
 	if agent == "opencode" {
 		return strings.HasSuffix(l, "/opencode/opencode.db")
+	}
+	if agent == "devin" {
+		return strings.HasSuffix(l, "/devin/cli/sessions.db")
 	}
 	if agent == "codex" {
 		return sid != "" && strings.Contains(l, "/.codex/sessions/") && convoSessionOf(l) == sid
@@ -1785,7 +1790,8 @@ type convoState struct {
 	ocCursor   int64 // (OpenCode) rows written since this are read next (unix ms)
 	ocCursorK  int   // (OpenCode) and, stopped within its millisecond, the last row read in it
 	ocCursorID string
-	noReaderAt time.Time // (OpenCode) when reading found no python3
+	noReaderAt time.Time // (OpenCode, Devin) when reading found no python3
+	dvTip      int64     // (Devin) the node its line was at when last read: what is after it is read next
 	sub        bool      // a subagent's own log (see apiConversationSubagent)
 }
 
@@ -2434,6 +2440,10 @@ func (s *Server) locateScan(ctx context.Context, sess *term.Session, st *convoSt
 				p.log = ""
 			}
 		}
+		// (Devin: the session its agent holds, else herdr's word on it.)
+		if p != nil && p.agent == "devin" {
+			s.devinSessionOf(sess, p, pane)
+		}
 		var refused bool
 		held := p != nil && p.agent == "codex" && p.log == "" // (its log, if any, its daemon's)
 		guessed, refused = s.daemonLog(p, l)
@@ -2542,7 +2552,7 @@ func (s *Server) locateScan(ctx context.Context, sess *term.Session, st *convoSt
 	}
 	// (No python3 to read OpenCode's with, found reading: said a minute,
 	// then tried again.)
-	if reason == "" && agent == "opencode" && st.reason == convoNoReader && sid == st.sid && log == st.log && time.Since(st.noReaderAt) < time.Minute {
+	if reason == "" && (agent == "opencode" || agent == "devin") && st.reason == convoNoReader && sid == st.sid && log == st.log && time.Since(st.noReaderAt) < time.Minute {
 		reason = convoNoReader
 	}
 	// (A weak binding checked: where the scan finds the same process at no
@@ -2590,6 +2600,7 @@ func (st *convoState) adopt(sid, log, agent, reason string) {
 		st.grewAt = time.Time{} // (another log's: its own, from its first look)
 		st.agyDBAt, st.agyDBMinIdx = time.Time{}, 0
 		st.long, st.strip, st.ocCursor, st.ocCursorK, st.ocCursorID = nil, b64Strip{}, 0, 0, ""
+		st.dvTip = 0
 	}
 	st.reason = reason
 	// (What was queued to a process of the same session before this one: not this one's.)
@@ -2604,6 +2615,9 @@ func (st *convoState) adopt(sid, log, agent, reason string) {
 func (s *Server) readConvo(sess *term.Session, st *convoState) (more bool, err error) {
 	if st.agent == "opencode" {
 		return false, s.readOpenCode(sess, st)
+	}
+	if st.agent == "devin" {
+		return false, s.readDevin(sess, st)
 	}
 	err = s.withSFTP(context.Background(), sess, convoReadLimit, func(c *sftplite.Client) error {
 		if sess.Persistence == "tmux" && st.agent == "claude" && !st.sub {
@@ -2830,6 +2844,9 @@ func convoTitleCommand(log, sid string, upto int64) string {
 func (s *Server) readOlder(sess *term.Session, st *convoState) error {
 	if st.agent == "opencode" {
 		return s.readOlderOpenCode(sess, st)
+	}
+	if st.agent == "devin" {
+		return s.readOlderDevin(sess, st)
 	}
 	if !st.older || st.parser.Trimmed() || (st.from <= 0 && !codexChains(st)) {
 		return nil
@@ -4342,6 +4359,13 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 				front.sid = ""
 			}
 		}
+	}
+	// (Devin's conversation is only read here: nothing is typed to it, nor
+	// any key pressed, from the page — its terminal for that.)
+	if front != nil && front.agent == "devin" {
+		reason = "unsupported"
+		writeError(w, http.StatusConflict, "unsupported", "Devin's conversation is only read here: reply in its terminal")
+		return
 	}
 	// (A Codex's screen only looked at — what it does now, for the page to
 	// say: nothing typed — needs it to be the same process, its thread not
