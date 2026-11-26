@@ -66,7 +66,9 @@ func TestCodexFds(t *testing.T) {
 		t.Errorf("A's log: log %q, pending %q", log, pend)
 	}
 	const y = "01a18ff7-5555-7a80-bb03-7c6c92a8fd35"
-	open(lockAged(y, 2*time.Second)) // (review475: a subagent's lock, its log not open yet, two seconds old)
+	// (review475: a subagent's lock, its log not open yet, just taken. Not two seconds old, as it was: the script
+	// counts under three as young, and a slow CI runner's shell took the second left — TestCodexFds failed twice, 11-26.)
+	open(lockAged(y, 0))
 	if _, pend := fds(); pend != "" || young != "1" {
 		t.Errorf("a lock just taken: not pending (%q), but new (%q)", pend, young)
 	}

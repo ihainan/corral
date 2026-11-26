@@ -3448,7 +3448,8 @@ function Runs({ head, statusAt, modelAt, quiet, meta, goal, active, mode, model,
         e.preventDefault()
         moveEffort.current(e.key === 'ArrowRight' ? 1 : -1)
       } else if ((open === 'model' || open === 'effort' || open === 'mode') && (e.key === 'ArrowDown' || e.key === 'ArrowUp') && menu.current?.contains(document.activeElement)) {
-        const all = [...menu.current.querySelectorAll<HTMLElement>('button, [role="slider"]')] // (the effort's slider a stop as well: review b8-2)
+        // (The effort's slider a stop as well, review b8-2; a button disabled none — focus() would leave it where it is, b9-5.)
+        const all = [...menu.current.querySelectorAll<HTMLElement>('button:not(:disabled), [role="slider"]')]
         const at = all.indexOf(document.activeElement as HTMLElement)
         e.preventDefault()
         all[(at + (e.key === 'ArrowDown' ? 1 : all.length - 1)) % all.length]?.focus()
@@ -7250,6 +7251,21 @@ function useSeen(el: HTMLElement | null): boolean {
 // A run of steps between what the agent wrote: one line (what it did; while
 // it goes on, the step under way and for how long); opened, a line a step,
 // each opened on its own (a call's command, output and changes, a thought).
+// At work: its seconds, then what Claude Code's spinner says beside them — the turn's tokens so far, and while it
+// thinks how hard (doc UI 30). Its own component, the only one to read TurnLive: a count that moves on redraws the
+// line under way, not every group of steps above it (review b9-4).
+function LiveFigures({ secs, live, thinking }: { secs: string; live: boolean; thinking: boolean }) {
+  const turn = useContext(TurnLive)
+  const said = [
+    secs,
+    live && turn.out ? t('convo.live.tokens', { n: tokens(turn.out) }) : '',
+    live && thinking && turn.effort ? t('convo.live.effort', { e: effortName(turn.effort).toLowerCase() }) : '',
+  ]
+    .filter(Boolean)
+    .join(' · ')
+  return said ? <span className="convo-live-time">{said}</span> : null
+}
+
 function Work({ it, open, onToggle, onCopy }: { it: Extract<Item, { kind: 'work' }>; open: boolean; onToggle: (key: string, open: boolean) => void; onCopy: (s: string) => void }) {
   const [workEl, setWorkEl] = useState<HTMLDivElement | null>(null)
   const seen = useSeen(workEl)
@@ -7281,17 +7297,8 @@ function Work({ it, open, onToggle, onCopy }: { it: Extract<Item, { kind: 'work'
   const between = !busy && !!it.live && !thought && !sum
   const [shine, setShine] = useState<HTMLSpanElement | null>(null)
   useRunWhileSeen(shine, (!!busy && !asks) || between)
-  // (At work: its seconds, then what Claude Code's spinner says beside them — the turn's tokens so far, and while
-  // it thinks how hard: doc UI 30.)
-  const turn = useContext(TurnLive)
-  const liveFigures = (secs: boolean) =>
-    [
-      secs && since > 0 && now >= since ? duration(now - since) : '',
-      it.live && turn.out ? t('convo.live.tokens', { n: tokens(turn.out) }) : '',
-      it.live && busy && !busy.tool && turn.effort ? t('convo.live.effort', { e: effortName(turn.effort).toLowerCase() }) : '',
-    ]
-      .filter(Boolean)
-      .join(' · ')
+  const secs = since > 0 && now >= since ? duration(now - since) : ''
+  const thinking = !!busy && !busy.tool
   // Shut, what is said of it without opening: the subagents it sent off, by
   // name, each to be read; and with calls beside it the last of what it
   // thought, a line (at most one for a run, however long it thought).
@@ -7340,12 +7347,12 @@ function Work({ it, open, onToggle, onCopy }: { it: Extract<Item, { kind: 'work'
           ) : busy ? (
             <span className="convo-work-text is-live">
               <span ref={setShine} className="convo-shimmer">{busy.tool ? liveText(busy.tool) : t('convo.live.thinking')}</span>
-              {liveFigures(true) && <span className="convo-live-time">{liveFigures(true)}</span>}
+              <LiveFigures secs={secs} live={!!it.live} thinking={thinking} />
             </span>
           ) : between ? (
             <span className="convo-work-text is-live">
               <span ref={setShine} className="convo-shimmer">{head}</span>
-              {liveFigures(false) && <span className="convo-live-time">{liveFigures(false)}</span>}
+              <LiveFigures secs="" live={!!it.live} thinking={false} />
             </span>
           ) : (
             <span className="convo-work-text">{head || sum}</span>
@@ -7366,7 +7373,7 @@ function Work({ it, open, onToggle, onCopy }: { it: Extract<Item, { kind: 'work'
         ) : busy ? (
           <span className="convo-work-text is-live">
             <span ref={setShine} className="convo-shimmer">{busy.tool ? liveText(busy.tool) : t('convo.live.thinking')}</span>
-            {liveFigures(true) && <span className="convo-live-time">{liveFigures(true)}</span>}
+            <LiveFigures secs={secs} live={!!it.live} thinking={thinking} />
             {chev}
           </span>
         ) : (

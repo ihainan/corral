@@ -125,18 +125,21 @@ type Claude struct {
 		sent  time.Time
 	}
 	answerID string // the requestId of the answer Meta's Answer is of
-	// The turn under way's tokens (Meta's TurnOut): of its answers done, and
-	// of the one being written; turnBegun: a message of the person's read in
-	// this part; turnFirst: the first answer read in it before one was (to
-	// tell, as parts are joined, an answer cut in two from two answers).
-	turnDone, turnCur int64
-	turnBegun         bool
-	turnFirst         string
-	taskBase          []taskItem
-	taskOps           []taskOp
-	taskOpsFull       bool              // more were made than are kept: the list is not made again (see Prepend)
-	late              map[string]taskOp // (while Prepend pairs results: their changes, to be made in their turn)
-	tree              rowTree           // what each row hangs on, to tell what a rewind took back (see rewound)
+	// The turn under way's tokens (Meta's TurnOut): each answer's by its
+	// requestId, the most any row of it said, so that an answer is counted
+	// once however its rows fall — next to each other or not, in one part of
+	// the log or two; turnFolded: what was counted before the map grew past
+	// maxTurnAnswers and was folded into a sum; turnBegun: a message of the
+	// person's read in this part.
+	turnOuts    map[string]int64
+	turnSum     int64 // (of turnOuts, kept as it changes)
+	turnFolded  int64
+	turnBegun   bool
+	taskBase    []taskItem
+	taskOps     []taskOp
+	taskOpsFull bool              // more were made than are kept: the list is not made again (see Prepend)
+	late        map[string]taskOp // (while Prepend pairs results: their changes, to be made in their turn)
+	tree        rowTree           // what each row hangs on, to tell what a rewind took back (see rewound)
 }
 
 // taskOp is a change made to the task list; or (orphan: the result's call
@@ -611,19 +614,12 @@ func (c *Claude) Prepend(other Parser) {
 	// (The turn under way begun before c's part: o's answers of it counted
 	// too — the one c's part begins with once, where o's part ends in it.)
 	if !c.turnBegun {
-		if c.turnFirst == "" {
-			c.turnDone, c.turnCur = c.turnDone+o.turnDone, o.turnCur
-		} else {
-			c.turnDone += o.turnDone
-			if o.answerID != c.turnFirst {
-				c.turnDone += o.turnCur
-			}
-		}
-		if o.turnFirst != "" {
-			c.turnFirst = o.turnFirst
+		c.turnFolded += o.turnFolded
+		for id, out := range o.turnOuts {
+			c.turnOut(id, out)
 		}
 		c.turnBegun = o.turnBegun
-		c.meta.TurnOut = c.turnDone + c.turnCur
+		c.meta.TurnOut = c.turnTotal()
 	}
 	if c.lastReq.model == "" {
 		// (Its sent comes along: of no use here, as the rows of this part
@@ -1983,24 +1979,45 @@ func (c *Claude) answered(r *claudeRow, out int64) {
 		if out > c.meta.Answer.Out {
 			c.meta.Answer.Out = out
 		}
-		if out > c.turnCur {
-			c.turnCur = out
-		}
-		c.meta.TurnOut = c.turnDone + c.turnCur
+		c.turnOut(id, out)
+		c.meta.TurnOut = c.turnTotal()
 		return
 	}
 	c.answerID, c.meta.Answer = id, &Answer{Out: out, Ms: ms}
-	c.turnDone, c.turnCur = c.turnDone+c.turnCur, out
-	if !c.turnBegun && c.turnFirst == "" {
-		c.turnFirst = id
-	}
-	c.meta.TurnOut = c.turnDone + c.turnCur
+	c.turnOut(id, out)
+	c.meta.TurnOut = c.turnTotal()
 }
 
+// maxTurnAnswers: answers of one turn told apart by their requestId; past
+// it, what was counted is folded into a sum (a turn of thousands of answers:
+// one of them coming back after that is then counted again, a small error
+// against a map without end).
+const maxTurnAnswers = 2048
+
+// turnOut takes in what a row says of its answer's tokens: the most said of
+// that answer counts.
+func (c *Claude) turnOut(id string, out int64) {
+	if out <= c.turnOuts[id] {
+		return
+	}
+	if c.turnOuts == nil {
+		c.turnOuts = map[string]int64{}
+	}
+	if _, there := c.turnOuts[id]; !there && len(c.turnOuts) >= maxTurnAnswers {
+		c.turnFolded, c.turnOuts, c.turnSum = c.turnTotal(), map[string]int64{}, 0
+	}
+	c.turnSum += out - c.turnOuts[id]
+	c.turnOuts[id] = out
+}
+
+func (c *Claude) turnTotal() int64 { return c.turnFolded + c.turnSum }
+
 // turnBegins: a message of the person's — the turn's tokens counted from
-// nought.
+// nought. (Not a message that waited and is taken in as the agent works —
+// queued(): that one is let into the turn under way, and Claude Code's
+// count goes on through it. Review b9-1, not taken.)
 func (c *Claude) turnBegins() {
-	c.turnDone, c.turnCur, c.turnBegun, c.meta.TurnOut = 0, 0, true, 0
+	c.turnOuts, c.turnSum, c.turnFolded, c.turnBegun, c.meta.TurnOut = nil, 0, 0, true, 0
 }
 
 // compacted: what filled the context before is gone; how full it is now is

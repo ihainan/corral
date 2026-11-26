@@ -58,9 +58,33 @@ func TestClaudeTurnOut(t *testing.T) {
 			t.Fatalf("%s, then more of the answer: %d, want 149", name, got)
 		}
 	}
+	// An answer cut in two whose first part said more (review b9-2), and an
+	// answer's rows apart, another answer between them (b9-3): once, the most.
+	before, after := NewClaude(), NewClaude()
+	before.Feed([]byte(asked("u1", "第一轮") + said("r1", "01", 100)))
+	after.Feed([]byte(said("r1", "02", 40) + said("r2", "03", 7)))
+	after.Prepend(before)
+	if got := after.Meta().TurnOut; got != 107 {
+		t.Fatalf("cut in two, the larger before: %d, want 107", got)
+	}
+	c = NewClaude()
+	c.Feed([]byte(asked("u1", "第一轮") + said("r1", "01", 100) + said("r2", "02", 40) + said("r1", "03", 110)))
+	if got := c.Meta().TurnOut; got != 150 {
+		t.Fatalf("rows of one answer apart: %d, want 150", got)
+	}
+	// Three parts, the turn begun in the first.
+	p1, p2, p3 := NewClaude(), NewClaude(), NewClaude()
+	p1.Feed([]byte(asked("u1", "第一轮") + said("r1", "01", 100)))
+	p2.Feed([]byte(said("r1", "02", 100) + said("r2", "03", 40)))
+	p3.Feed([]byte(said("r2", "04", 40) + said("r3", "05", 7)))
+	p2.Prepend(p1)
+	p3.Prepend(p2)
+	if got := p3.Meta().TurnOut; got != 147 {
+		t.Fatalf("three parts: %d, want 147", got)
+	}
 	// The second part with a message of the person's of its own: the first
 	// part's turn is over, none of it counted.
-	before, after := NewClaude(), NewClaude()
+	before, after = NewClaude(), NewClaude()
 	before.Feed([]byte(asked("u1", "第一轮") + said("r1", "01", 100)))
 	after.Feed([]byte(asked("u2", "第二轮") + said("r2", "03", 5)))
 	after.Prepend(before)
