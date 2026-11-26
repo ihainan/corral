@@ -1794,6 +1794,7 @@ type convoState struct {
 	dvTip        int64  // (Devin) the node its line was at when last read: what is after it is read next
 	sub          bool   // a subagent's own log (see apiConversationSubagent)
 	rewindTarget string // active pending rewind target message ID overlaid for this state's gen
+	runningSig   string // last Running() id signature observed (nudges cmdProber on change)
 }
 
 // newParser: a parser for the log read, a subagent's own as such (its
@@ -2152,8 +2153,8 @@ func (s *Server) apiConversation(w http.ResponseWriter, r *http.Request) {
 		// message to it is refused then. herdr says busy or idle itself.)
 		if st.reason == convoNoLog && st.bind != nil && st.agent == "claude" && !st.sub {
 			now := s.convoFreshStatus(ctx, sess, st.bind)
-			if sess.Persistence != "tmux" && !strings.HasPrefix(now, "waiting:") {
-				now = ""
+			if sess.Persistence != "tmux" {
+				now = herdrProcStatus(now)
 			}
 			ans.AgentStatus = shellWord(now)
 			if w, ok := strings.CutPrefix(now, "waiting:"); ok {
@@ -2198,11 +2199,12 @@ func (s *Server) apiConversation(w http.ResponseWriter, r *http.Request) {
 	// confirmation sits on screen, and agy keeps queued follow-up prompts on
 	// screen (not in transcript_full.jsonl) until consumed. In herdr mode the
 	// Unix socket read takes ~1ms (cached 2s), so check whenever busy/unknown.
-	if st.agent == "agy" && st.bind != nil && !st.sub && (st.status == "busy" || st.status == "") && (sess.Persistence == "herdr" || st.agyWait || len(st.agyQueued) > 0 || st.grewAt.IsZero() || time.Since(st.grewAt) >= 1500*time.Millisecond) {
+	if st.agent == "agy" && st.bind != nil && !st.sub && (sess.Persistence == "herdr" || ((st.status == "busy" || st.status == "") && (st.agyWait || len(st.agyQueued) > 0 || st.grewAt.IsZero() || time.Since(st.grewAt) >= 1500*time.Millisecond))) {
 		if s.agyWaits(ctx, sess, st) {
 			st.status = "waiting:permission prompt"
 		}
-	} else if st.agent == "agy" && st.status != "busy" && st.status != "" {
+	}
+	if st.agent == "agy" && st.status != "busy" && st.status != "" && !strings.HasPrefix(st.status, "waiting:") {
 		st.agyQueued = nil
 	}
 	ans.Available, ans.Gen, ans.Rev, ans.Older, ans.More, ans.AgentStatus = true, st.gen, st.parser.Rev(), st.older, more, st.status
@@ -2244,6 +2246,15 @@ func (s *Server) apiConversation(w http.ResponseWriter, r *http.Request) {
 		ans.Queued = st.agyQueued
 	}
 	ans.Running = st.parser.Running()
+	if sess.Persistence == "herdr" && pane != "" && !st.sub {
+		sig := runningSigOf(ans.Running)
+		if sig != st.runningSig {
+			st.runningSig = sig
+			if cmds := s.herdrSocks.cmdsOf(sess.ID); cmds != nil {
+				cmds.nudge()
+			}
+		}
+	}
 	if !st.grewAt.IsZero() {
 		ans.QuietMs = max(0, time.Since(st.grewAt).Milliseconds())
 	}
@@ -2634,25 +2645,21 @@ func (s *Server) readConvo(sess *term.Session, st *convoState) (more bool, err e
 			st.status = convoProcStatus(c, st)
 		}
 		if sess.Persistence != "tmux" {
-			// (herdr says busy or idle itself, but not a dialog Claude Code
-			// has open (/usage, a picker): its file's "waiting" only, the
-			// host refusing a message then. Read anew each time: none for
-			// another agent come into the pane since.)
+			// (herdr says busy or idle itself, but may lag or miss a turn start
+			// or a dialog Claude Code has open (/usage, a picker): pass through
+			// waiting:*, busy, and idle from its session file, leaving out "shell"
+			// so background commands left after a turn do not appear as active turns.)
 			st.status = ""
 			if st.agent == "claude" && !st.sub {
-				if w := convoProcStatus(c, st); strings.HasPrefix(w, "waiting:") {
-					st.status = w
-				}
+				st.status = herdrProcStatus(convoProcStatus(c, st))
 			}
 		}
 		// (Codex's and Agy's logs say whether they work.)
 		defer func() {
-			if sess.Persistence == "tmux" {
-				if cx, ok := st.parser.(*convo.Codex); ok {
-					st.status = cx.Status()
-				} else if ag, ok := st.parser.(*convo.Agy); ok {
-					st.status = ag.Status()
-				}
+			if cx, ok := st.parser.(*convo.Codex); ok {
+				st.status = cx.Status()
+			} else if ag, ok := st.parser.(*convo.Agy); ok {
+				st.status = ag.Status()
 			}
 		}()
 		fi, err := c.Stat(st.log)
@@ -3099,6 +3106,30 @@ func shellWord(status string) string {
 		return "busy"
 	}
 	return status
+}
+
+// herdrProcStatus filters Claude Code's session-file status for a herdr pane:
+// "waiting:*" (prompts/dialogs), "busy" (when herdr lags), and "idle" pass
+// through; "shell" (turn over, background command running) does not.
+func herdrProcStatus(status string) string {
+	if status == "busy" || status == "idle" || strings.HasPrefix(status, "waiting:") {
+		return status
+	}
+	return ""
+}
+
+// runningSigOf builds a compact signature of currently running background items
+// so apiConversation can nudge cmdProber when background work starts or ends.
+func runningSigOf(items []convo.Running) string {
+	if len(items) == 0 {
+		return ""
+	}
+	ids := make([]string, len(items))
+	for i, r := range items {
+		ids[i] = r.Kind + ":" + r.ID
+	}
+	slices.Sort(ids)
+	return strings.Join(ids, ",")
 }
 
 // procStatusOf: what the session file b says, if it is of the process and

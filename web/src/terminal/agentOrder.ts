@@ -692,16 +692,18 @@ export function reorderPinned(pins: string[], key: string, visibleKeys: Set<stri
   return pins.map((k) => (visibleKeys.has(k) ? nextVisible[vi++] : k))
 }
 
-// The one being read stays where it was when it was gone to, whatever
-// becomes of it meanwhile (looked at, a done one is no longer for the
-// person; answered, a waiting one works): it goes to its place once another
-// is (else it would move from under the pointer as it is read). Placed so
-// by the lists and by Alt+Up/Down alike (placeAs, which its page sets);
-// what its row says is as it is.
-// liveStatus preserves the real-time status so a live "blocked" transition
-// is never suppressed by a frozen placeAs.
+// The one being read stays in "For you" only when opening a finished ("done")
+// agent marks it seen ("idle"): that side effect of clicking it should not yank
+// it out from under the pointer while it is being read or stepped through with
+// Alt+Up/Down. Any real activity change (idle -> working, done -> working,
+// blocked -> working, working -> idle/done, or any -> blocked) regroups
+// immediately so the sidebar group matches the conversation view and live dot.
 export const asHeld = (r: ConvoListRow): ConvoListRow =>
-  r.placeAs && r.current
+  r.placeAs &&
+  r.current &&
+  r.placeAs.status === 'done' &&
+  (r.liveStatus ?? r.status) === 'idle' &&
+  !r.cmds
     ? { ...r, liveStatus: r.liveStatus ?? r.status, status: r.placeAs.status, since: r.placeAs.since, cmds: r.placeAs.cmds }
     : r
 

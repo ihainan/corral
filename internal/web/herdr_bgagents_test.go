@@ -142,3 +142,49 @@ func TestCmdProberAtWork(t *testing.T) {
 		t.Fatalf("done, one out: %+v", a)
 	}
 }
+
+// nudge wakes cmdProber within soonBy even while an agent stays working,
+// instead of waiting a full every (1 minute) interval.
+func TestCmdProberNudgeWhileWorking(t *testing.T) {
+	scans := make(chan struct{}, 8)
+	p := newCmdSubProber(func(_ context.Context, _ []string) (map[string][]bgCmd, map[string][]bgAgent, map[string]map[string]bool, bool, error) {
+		scans <- struct{}{}
+		return nil, map[string][]bgAgent{cmdSess: {{ID: "aaaaaaaa11", What: "Survey cluster"}}}, nil, true, nil
+	})
+	p.every = 5 * time.Second
+	p.soonBy = 20 * time.Millisecond
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go p.run(ctx)
+
+	p.consider("w1:p1", "claude", "working", cmdSess)
+	select {
+	case <-scans:
+	case <-time.After(time.Second):
+		t.Fatal("initial scan did not run")
+	}
+	// Agent stays working and launches a background subagent: nudge triggers
+	// a scan well before p.every (5s).
+	p.nudge()
+	select {
+	case <-scans:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("nudge did not trigger early scan while working")
+	}
+}
+
+// Transitioning between working and done/idle for the same session keeps
+// already-discovered background subagents visible without a 5s gap.
+func TestCmdProberSubsAcrossTransition(t *testing.T) {
+	p := newCmdSubProber(nil)
+	p.at = time.Now()
+	p.subs = map[string][]bgAgent{cmdSess: {{ID: "aaaaaaaa11", What: "Survey cluster"}}}
+	p.consider("w1:p1", "claude", "working", cmdSess)
+	time.Sleep(5 * time.Millisecond)
+	p.consider("w1:p1", "claude", "done", cmdSess)
+	s := herdrSummary{Workspaces: []herdrWorkspace{{Agents: []herdrAgent{{PaneID: "w1:p1", Agent: "claude", Status: "done", Session: cmdSess, Bg: bgRunning, BgN: 1}}}}}
+	p.decorate(&s)
+	if l := s.Workspaces[0].Agents[0].BgAgentList; len(l) != 1 || l[0].ID != "aaaaaaaa11" {
+		t.Fatalf("subagent lost across working->done transition: %+v", l)
+	}
+}

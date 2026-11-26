@@ -9,6 +9,7 @@
     "dev": "vite",
     "build": "node scripts/check-styles.mjs && tsc --noEmit && vite build",
     "check-styles": "node scripts/check-styles.mjs",
+    "test": "node scripts/run-tests.mjs",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

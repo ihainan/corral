@@ -9,6 +9,7 @@ import { setPrefs, usePrefs } from '../prefs'
 import { openSettingsModal } from '../pages/Settings'
 import { dropPickInTab, OPEN_PICKER } from '../pages/agentTabs'
 import { asHeld, buildAgentGroups, dayStart, FOLDED, foldAt, isLiveBlocked, listOrder, pinned, type ConvoListRow, type OrderOpts, type RowCmds, type RowTask } from './agentOrder'
+import { stampAgeMs } from './sideState'
 import { copyText, Dialog, DialogHead, isCoarse, Menu, MenuLayer, swallowNextClick, useToast, type MenuItem } from '../components/ui'
 import { saveFile } from '../saveFile'
 import { StatusItem, useWorkbench } from '../workbench'
@@ -4645,15 +4646,15 @@ function Gauge({ part, tick }: { part: number; tick?: number }) {
 // The time on a row of the list, short: how long it has waited or worked;
 // else when it came to rest — the clock's time today, the date before.
 function stamp(r: ConvoListRow, now: number): string {
+  const age = stampAgeMs(r.since, now)
+  if (age === null) return ''
   // (Waiting or at work: how long, short — its colour and group say which; the room is the title's.)
   if (r.status === 'working' || r.status === 'blocked') {
-    if (!r.since || now < r.since) return ''
-    const m = Math.floor((now - r.since) / 60000)
+    const m = Math.floor(age / 60000)
     return m < 1 ? t('convo.short.now') : m < 60 ? t('convo.short.m', { n: m }) : m < 48 * 60 ? t('convo.short.h', { n: Math.floor(m / 60) }) : t('convo.short.d', { n: Math.floor(m / 1440) })
   }
-  if (!r.since || now < r.since) return ''
-  const d = new Date(r.since)
-  if (r.since >= dayStart(now)) return hhmm(d)
+  const d = new Date(r.since!)
+  if (r.since! >= dayStart(now)) return hhmm(d)
   // (Before today: its date, short — never a word wider than a time.)
   return d.toLocaleDateString(getLang(), { month: 'numeric', day: 'numeric' })
 }
@@ -4799,12 +4800,14 @@ export function AgentList({ rows, menus, onPicked, placed, query: given, onQuery
       actions: it.actions?.map((a) => ({ ...a, onSelect: wrap(a.onSelect) })),
     }))
   }
-  // (The times move on: drawn again every half minute.)
-  const [now, setNow] = useState(Date.now())
+  // (The times move on: drawn again every half minute; use the fresher of the
+  // periodic tick and render time so a row that just transitioned never appears blank.)
+  const [tickNow, setNow] = useState(Date.now())
   useEffect(() => {
     const timer = setInterval(() => setNow(Date.now()), 30000)
     return () => clearInterval(timer)
   }, [])
+  const now = Math.max(tickNow, Date.now())
   const prefs = usePrefs()
   const orderOpts: OrderOpts = { group: prefs.sidebarGroup, sort: prefs.sidebarSort, pinFixed: prefs.pinFixedOrder, nestChildren: prefs.sidebarNestChildren }
   // Which of the long groups are opened out (by their name; shut again at

@@ -165,6 +165,26 @@ func (p *cmdProber) consider(pane, agent, status, session string) {
 	}
 }
 
+// nudge asks the prober to scan soon (within soonBy) when a conversation read
+// notices background work starting or ending, instead of waiting up to every
+// (1 minute) while the agent stays working.
+func (p *cmdProber) nudge() {
+	p.mu.Lock()
+	if len(p.working) == 0 && len(p.ended) == 0 && len(p.read) == 0 {
+		p.mu.Unlock()
+		return
+	}
+	soon := time.Now().Add(p.soonBy)
+	if p.soon.IsZero() || soon.Before(p.soon) {
+		p.soon = soon
+	}
+	p.mu.Unlock()
+	select {
+	case p.wake <- struct{}{}:
+	default:
+	}
+}
+
 // readAt: a chat page read session's conversation (a Codex thread), at rest
 // or not as its log says (idle), leaving running what mark says (its
 // commands' ids): what it left running is looked for while it is, as of
@@ -255,14 +275,16 @@ func (p *cmdProber) of(pane, session string) []bgCmd {
 }
 
 // paneSessionLocked: the agent session pane's Claude Code is watched for (at
-// work, or done or idle), where what was found is of after it came to that;
-// "" else.
+// work, or done or idle); "" else. Unlike ofLocked (commands), subagents are
+// already filtered to background-only by their meta and gated by subsShown, so
+// transitioning between working and done/idle for the same session keeps them
+// visible without a 5s gap.
 func (p *cmdProber) paneSessionLocked(pane, session string) string {
 	e, ok := p.working[pane]
 	if !ok {
 		e, ok = p.ended[pane]
 	}
-	if !ok || (session != "" && strings.ToLower(session) != e.session) || p.at.Before(e.from) {
+	if !ok || (session != "" && strings.ToLower(session) != e.session) {
 		return ""
 	}
 	return e.session

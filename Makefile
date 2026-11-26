@@ -17,6 +17,7 @@ test:
 
 check: test web-deps
 	cd web && pnpm run typecheck
+	cd web && pnpm run test
 	python3 scripts/gen-notices.py --check
 	cd web && node scripts/check-styles.mjs
 
