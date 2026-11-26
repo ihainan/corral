@@ -356,3 +356,72 @@ func goneMark(entries []*Entry, ids map[string]bool) []*Entry {
 	}
 	return out
 }
+
+// UserIDs returns the set of all non-empty user entry IDs currently parsed
+// (including already-gone entries), used to tell existing log messages from
+// new ones written after an in-place rewind.
+func (c *Claude) UserIDs() map[string]bool {
+	out := make(map[string]bool)
+	for _, e := range c.entries {
+		if e.Role == RoleUser && e.ID != "" {
+			out[e.ID] = true
+		}
+	}
+	return out
+}
+
+// SeqOf returns the Seq of the entry with the given ID, if present.
+func (c *Claude) SeqOf(id string) (int, bool) {
+	if id == "" {
+		return 0, false
+	}
+	for _, e := range c.entries {
+		if e.ID == id {
+			return e.Seq, true
+		}
+	}
+	return 0, false
+}
+
+// RewindSettled reports whether a new user message (not in knownUsers) has
+// appeared in the log with its parentUuid pointing before targetID, meaning
+// Claude Code's JSONL log has taken over the rewind.
+func (c *Claude) RewindSettled(targetID string, knownUsers map[string]bool) bool {
+	t := &c.tree
+	tOrd, hasTarget := t.at[targetID]
+	for _, e := range c.entries {
+		if e.Role != RoleUser || e.ID == "" || knownUsers[e.ID] {
+			continue
+		}
+		ord, ok := t.at[e.ID]
+		if !ok {
+			continue
+		}
+		parent := t.up[ord-t.base]
+		if parent == "" {
+			if hasTarget && t.dead[targetID] {
+				return true
+			}
+			for _, k := range t.cuts {
+				if k.parent == "" && k.at >= ord {
+					return true
+				}
+			}
+			continue
+		}
+		if hasTarget {
+			if pOrd, pOK := t.at[parent]; pOK {
+				if pOrd < tOrd {
+					return true
+				}
+				continue
+			}
+		}
+		for _, k := range t.cuts {
+			if k.parent == parent && k.at >= ord {
+				return true
+			}
+		}
+	}
+	return false
+}

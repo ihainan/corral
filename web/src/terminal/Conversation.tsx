@@ -2,7 +2,7 @@ import { askTask, taskTaken, TASK_ASK_FOR, type TaskAsked } from './bgTaskOpen'
 import { DRAFTS_EVENT, hasAgentDraft } from './drafts'
 import { createContext, Fragment, memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
-import { Activity, ArrowDown, History, ArrowDownAZ, ArrowUp, ArrowUpDown, Bot, Check, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, ChevronsDownUp, ChevronsUpDown, Clock, Columns2, Copy, Cpu, Download, Eye, FilePen, FileText, Folder, FolderOpen, Gauge as GaugeIcon, PencilLine, GitBranch, GitFork, Hand, Image as ImageIcon, ImageOff, Info, Keyboard, ListChecks, ListOrdered, Loader, LogOut, MessageCircleQuestion, MessagesSquare, MoreHorizontal, MoreVertical, PanelLeft, PanelRight, Pin, Plus, Radar, RotateCw, Search, Server, Settings, ShieldOff, Sparkles, SquarePlus, SquareTerminal, Target, TextCursorInput, TriangleAlert, WifiOff, X } from 'lucide-react'
+import { Activity, ArrowDown, History, ArrowDownAZ, ArrowUp, ArrowUpDown, Bot, Check, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, ChevronsDownUp, ChevronsUpDown, Clock, Columns2, Copy, Cpu, Download, Eye, FilePen, FileText, Folder, FolderOpen, Gauge as GaugeIcon, PencilLine, GitBranch, GitFork, Hand, Image as ImageIcon, ImageOff, Info, Keyboard, ListChecks, ListOrdered, Loader, LogOut, MessageCircleQuestion, MessagesSquare, MoreHorizontal, MoreVertical, PanelLeft, PanelRight, Pin, Plus, Radar, RotateCcw, RotateCw, Search, Server, Settings, ShieldOff, Sparkles, SquarePlus, SquareTerminal, Target, TextCursorInput, TriangleAlert, WifiOff, X } from 'lucide-react'
 import { t, getLang, type I18nKey } from '../i18n'
 import { api } from '../api'
 import { setPrefs, usePrefs } from '../prefs'
@@ -287,6 +287,8 @@ export function ConversationView({
   files,
   onForkAt,
   forkWhole,
+  onRewindAt,
+  rewindIdle,
   onDraft,
   compacting,
   goal,
@@ -331,6 +333,8 @@ export function ConversationView({
   files?: FileActs // (its session live: a file it names can be shown, fetched, looked at)
   forkWhole?: boolean // (all of it can be forked now: its turn over and nothing of it running, as the list says)
   onForkAt?: (at: string | undefined) => void // (a copy of it up to the end of a turn can be started: cut before at, the next message typed; none, all of it)
+  rewindIdle?: boolean // (Claude Code is idle: rewind can be triggered now)
+  onRewindAt?: (entry: ConvoEntry, text: string) => void // (Claude Code in-place rewind to before this user message)
   onDraft?: (text: string) => void // (words put in its composer, not sent: the session card's requests of the agent)
   compacting?: boolean // (its screen says it compacts the conversation: its log silent till done)
   goal?: string // (a Codex's goal, as its footer last said it: "Pursuing goal (141K / 200K)")
@@ -1875,6 +1879,10 @@ export function ConversationView({
       can: (e: ConvoEntry) => atRest || !!next(e),
     }
   }, [onForkAt, atRest])
+  const rewindAt = useMemo(() => {
+    if (!onRewindAt) return undefined
+    return { idle: !!rewindIdle, go: onRewindAt }
+  }, [onRewindAt, rewindIdle])
   const quotaOf: QuotaOf | undefined =
     convo.status === 'ready' && convo.meta
       ? convo.bind?.agent === 'codex'
@@ -1961,6 +1969,7 @@ export function ConversationView({
   return (
     <OpenAllOf.Provider value={allOpen}>
     <ForkAtOf.Provider value={forkAt}>
+    <RewindAtOf.Provider value={rewindAt}>
     <FileActsOf.Provider value={files}>
     <CopyOf.Provider value={copy}>
     <CodeSpanOf.Provider value={codeSpan}>
@@ -2579,8 +2588,9 @@ export function ConversationView({
       </div>
       {changes && shownEdits && <ChangesPanel key={changes.key} edits={shownEdits} focus={changes.path} onClose={unshow} active={active} onCopy={copy} />}
       {subs && subs.length > 0 && convo.of && (
-        // (A subagent's messages are not the session's turns: no fork from them.)
+        // (A subagent's messages are not the session's turns: no fork or rewind from them.)
         <ForkAtOf.Provider value={undefined}>
+        <RewindAtOf.Provider value={undefined}>
         <SubPanel
           key={subs[subs.length - 1].agent}
           of={convo.of}
@@ -2594,6 +2604,7 @@ export function ConversationView({
           active={active}
           copy={copy}
         />
+        </RewindAtOf.Provider>
         </ForkAtOf.Provider>
       )}
       {/* (Kept when the command ends — gone from the list — saying so, its output still there: review 1ad2c3d.) */}
@@ -2662,6 +2673,7 @@ export function ConversationView({
     </CodeSpanOf.Provider>
     </CopyOf.Provider>
     </FileActsOf.Provider>
+    </RewindAtOf.Provider>
     </ForkAtOf.Provider>
     </OpenAllOf.Provider>
   )
@@ -6404,6 +6416,8 @@ function PathCode({ path, lines, text, copy = text }: { path: string; lines?: Li
 const CopyOf = createContext<((s: string) => void) | undefined>(undefined)
 // (A copy of the conversation up to the end of one of the person's turns, where one can be started.)
 const ForkAtOf = createContext<{ go: (e: ConvoEntry) => void; can: (e: ConvoEntry) => boolean } | undefined>(undefined)
+// (Claude Code in-place rewind to before a user message.)
+const RewindAtOf = createContext<{ idle: boolean; go: (e: ConvoEntry, text: string) => void } | undefined>(undefined)
 type ExpandLevel = 0 | 1 | 2
 const OpenAllOf = createContext<ExpandLevel>(0)
 
@@ -7066,6 +7080,7 @@ function UserTurn({ e, onCopy }: { e: ConvoEntry; onCopy: (s: string) => void })
   // (A shell command run with "!": in the terminal's letters, as typed.)
   const shell = /^! \S/.test(text)
   const forkAt = useContext(ForkAtOf)
+  const rewindAt = useContext(RewindAtOf)
   // (A long one — a pasted command, a log — folded to its first lines, opened at a tap.)
   const written = useContext(WordsAsWritten) && !shell
   // (A subagent's task, in its panel: what it was asked, a few lines of it —
@@ -7106,7 +7121,11 @@ function UserTurn({ e, onCopy }: { e: ConvoEntry; onCopy: (s: string) => void })
       <div className="convo-meta">
         {e.mid && <span>{t('convo.midSent')}</span>}
         <span>{clock(e.ts)}</span>
-        <MetaActs copy={text ? () => onCopy(text) : undefined} fork={forkAt && !e.mid && !e.gone && e.id && forkAt.can(e) ? () => forkAt.go(e) : undefined} />
+        <MetaActs
+          copy={text ? () => onCopy(text) : undefined}
+          fork={forkAt && !e.mid && !e.gone && e.id && forkAt.can(e) ? () => forkAt.go(e) : undefined}
+          rewind={rewindAt && !e.mid && !e.gone && e.id && text.trim() ? { disabled: !rewindAt.idle, onSelect: () => rewindAt.go(e, text) } : undefined}
+        />
       </div>
     </div>
   )
@@ -7115,8 +7134,8 @@ function UserTurn({ e, onCopy }: { e: ConvoEntry; onCopy: (s: string) => void })
 // What can be done with a message, after its time: words where a pointer
 // hovers (shown as it does, see terminal.css); behind a "···" on a touch
 // screen, so they take no line of their own under every message.
-function MetaActs({ copy, fork }: { copy?: () => void; fork?: () => void }) {
-  if (!copy && !fork) return null
+function MetaActs({ copy, fork, rewind }: { copy?: () => void; fork?: () => void; rewind?: { disabled: boolean; onSelect: () => void } }) {
+  if (!copy && !fork && !rewind) return null
   return (
     <>
       <span className="convo-meta-acts">
@@ -7130,12 +7149,26 @@ function MetaActs({ copy, fork }: { copy?: () => void; fork?: () => void }) {
             {t('fork.at')}
           </button>
         )}
+        {rewind && (
+          <button
+            type="button"
+            className="link-btn"
+            aria-disabled={rewind.disabled || undefined}
+            title={rewind.disabled ? t('rewind.onlyIdle') : t('rewind.atHint')}
+            onClick={() => {
+              if (!rewind.disabled) rewind.onSelect()
+            }}
+          >
+            {t('rewind.at')}
+          </button>
+        )}
       </span>
       <Menu
         label={t('common.more')}
         items={() => [
           copy ? { label: t('common.copy'), icon: <Copy size={16} />, onSelect: copy } : null,
           fork ? { label: t('fork.at'), icon: <GitBranch size={16} />, hint: t('fork.atHint'), onSelect: fork } : null,
+          rewind ? { label: t('rewind.at'), icon: <RotateCcw size={16} />, hint: rewind.disabled ? t('rewind.onlyIdle') : t('rewind.atHint'), disabled: rewind.disabled, onSelect: rewind.onSelect } : null,
         ]}
         button={(open, toggle) => (
           <button type="button" className="convo-meta-more" aria-expanded={open} aria-haspopup="menu" onClick={toggle} aria-label={t('common.more')}>

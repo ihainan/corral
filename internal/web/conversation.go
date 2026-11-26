@@ -1791,8 +1791,9 @@ type convoState struct {
 	ocCursorK  int   // (OpenCode) and, stopped within its millisecond, the last row read in it
 	ocCursorID string
 	noReaderAt time.Time // (OpenCode, Devin) when reading found no python3
-	dvTip      int64     // (Devin) the node its line was at when last read: what is after it is read next
-	sub        bool      // a subagent's own log (see apiConversationSubagent)
+	dvTip        int64  // (Devin) the node its line was at when last read: what is after it is read next
+	sub          bool   // a subagent's own log (see apiConversationSubagent)
+	rewindTarget string // active pending rewind target message ID overlaid for this state's gen
 }
 
 // newParser: a parser for the log read, a subagent's own as such (its
@@ -1972,12 +1973,13 @@ const (
 // in it (its pid and start time) and its session, so the browser can tell
 // whether what it shows, and what it would act on, is still that.
 type convoBind struct {
-	Pane    string `json:"pane"`
-	PID     int64  `json:"pid"`
-	Start   int64  `json:"start"`
-	Session string `json:"session"`
-	Agent   string `json:"agent"`           // "claude" or "codex"
-	Title   string `json:"title,omitempty"` // (tmux: the pane's title)
+	Pane       string `json:"pane"`
+	TerminalID string `json:"terminal_id,omitempty"` // (herdr: terminal instance id of the pane)
+	PID        int64  `json:"pid"`
+	Start      int64  `json:"start"`
+	Session    string `json:"session"`
+	Agent      string `json:"agent"`           // "claude" or "codex"
+	Title      string `json:"title,omitempty"` // (tmux: the pane's title)
 	// Via: the host the process's requests go to, where it is not the
 	// model maker's own ("sub2api.example.com"); absent where it is, and
 	// for an agent whose endpoint is not read (OpenCode's). Auth: how it
@@ -2225,11 +2227,13 @@ func (s *Server) apiConversation(w http.ResponseWriter, r *http.Request) {
 	}
 	ans.AgentStatus = shellWord(ans.AgentStatus)
 	ans.OlderCut = st.older && (st.parser.Trimmed() || st.from < 0)
+	activeRewind := s.syncClaudeRewind(sess, st)
+	ans.Gen = st.gen
 	if gen != st.gen {
 		ans.Reset = true
 		rev = 0
 	}
-	ans.Entries = st.parser.Since(rev)
+	ans.Entries = overlayRewindEntries(st, activeRewind, st.parser.Since(rev))
 	st.takeEarlierTitle()
 	ans.Title, ans.Tasks = st.parser.Title(), st.parser.Tasks()
 	if m := st.meta(); m != (convo.Meta{}) {
@@ -2516,6 +2520,11 @@ func (s *Server) locateScan(ctx context.Context, sess *term.Session, st *convoSt
 		st.bind = nil
 		if p != nil {
 			b := &convoBind{PID: p.pid, Start: p.start, Session: p.sid, Agent: p.agent, Pane: p.herdrPane, Via: p.ep, Auth: p.auth, ac: p.ac}
+			if sess.Persistence == "herdr" && p.herdrPane != "" {
+				if hp, ok := s.herdrSocks.paneDetail(sess.ID, p.herdrPane); ok {
+					b.TerminalID = hp.TerminalID
+				}
+			}
 			if sess.Persistence == "tmux" {
 				b.Pane, b.Title = p.tmuxPane, l.tmuxTitle
 			}
@@ -2601,6 +2610,7 @@ func (st *convoState) adopt(sid, log, agent, reason string) {
 		st.agyDBAt, st.agyDBMinIdx = time.Time{}, 0
 		st.long, st.strip, st.ocCursor, st.ocCursorK, st.ocCursorID = nil, b64Strip{}, 0, 0, ""
 		st.dvTip = 0
+		st.rewindTarget = ""
 	}
 	st.reason = reason
 	// (What was queued to a process of the same session before this one: not this one's.)
@@ -4213,31 +4223,6 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 	// replyToPane), from the check to its last key; once its command is on
 	// its way, given back when that has ended.)
 	// (An answer's lock first, then the pane's turn: as herdr's own answer takes them, see replyToPane.)
-	var answer *paneReply
-	// (Given back once the host's command has ended, not when this request
-	// gives up on it: an answer still on its way there holds the pane.)
-	unlockAnswer, answerHeld := func() {}, false
-	defer func() {
-		if !answerHeld {
-			unlockAnswer()
-		}
-	}()
-	if what == "reply" {
-		lock, err := s.replies.lock(ctx, s.convoReplyKey(sess, b.Pane))
-		if err != nil {
-			reason = "busy"
-			writeError(w, http.StatusTooManyRequests, "busy", "an earlier answer to this pane is still under way")
-			return
-		}
-		var once sync.Once
-		unlockAnswer = func() { once.Do(func() { s.replies.unlock(lock) }) }
-		if lock.digest == b.Digest && time.Since(lock.at) < answeredFor {
-			reason = "already_answered"
-			writeError(w, http.StatusConflict, "already_answered", "this screen was just answered; look again before answering")
-			return
-		}
-		answer = lock
-	}
 	// (A list asked for of a process found here before, and kept: answered
 	// with nothing asked of the host — neither its pane's turn nor the scan
 	// of its processes. Nothing is typed for it.)
@@ -4246,12 +4231,48 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 		s.keptCodexModels(w, ctx, sess, b.Pane, b.PID, b.Start, b.Session, &outcome, &reason)) {
 		return
 	}
+	var answer *paneReply
+	// (Given back once the host's command has ended, not when this request
+	// gives up on it: an operation still on its way there holds the pane.)
+	unlockAnswer, answerHeld := func() {}, false
+	defer func() {
+		if !answerHeld {
+			unlockAnswer()
+		}
+	}()
+	// Physical-pane lock (cross-connection) for all mutating/key operations so
+	// sends, replies, mode/model switches and rewinds never interleave across
+	// separate Corral connections to the same pane.
+	if what != "suggest" && what != "screen" && what != "panel_screen" && what != "sent_missing" {
+		lock, err := s.replies.lock(ctx, s.convoReplyKey(sess, b.Pane))
+		if err != nil {
+			reason = "busy"
+			writeError(w, http.StatusTooManyRequests, "busy", "an earlier answer to this pane is still under way")
+			return
+		}
+		var once sync.Once
+		unlockAnswer = func() { once.Do(func() { s.replies.unlock(lock) }) }
+		if what == "reply" {
+			if lock.digest == b.Digest && time.Since(lock.at) < answeredFor {
+				reason = "already_answered"
+				writeError(w, http.StatusConflict, "already_answered", "this screen was just answered; look again before answering")
+				return
+			}
+			answer = lock
+		}
+	}
 	turn, ok := convoSending.take(ctx, convoTurnKey(sess.ID, b.Pane))
 	if !ok {
 		reason = "busy"
 		writeError(w, http.StatusTooManyRequests, "busy", "another message to this agent is still being sent")
 		return
 	}
+	rawTurn := turn
+	turn = func() {
+		rawTurn()
+		unlockAnswer()
+	}
+	answerHeld = true
 	defer func() { turn() }()
 
 	socket := s.herdrSocks.get(sess.ID)

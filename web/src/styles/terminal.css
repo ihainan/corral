@@ -1038,6 +1038,8 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 .convo-pic-hover-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono); }
 .convo-meta { display: flex; gap: 12px; font-size: var(--fs-note); line-height: var(--lh-note); color: var(--term-fg-3); font-variant-numeric: tabular-nums; }
 .convo-meta .link-btn { font-size: var(--fs-note); line-height: var(--lh-note); color: var(--term-fg-3); }
+.convo-meta .link-btn[aria-disabled='true'] { opacity: 0.45; cursor: not-allowed; text-decoration: none; }
+.convo-meta .link-btn[aria-disabled='true']:hover { color: var(--term-fg-3); text-decoration: none; }
 .convo-meta-acts { display: inline-flex; gap: 12px; }
 .convo-meta-more { display: none; align-items: center; justify-content: center; width: 28px; height: 20px; margin: 0 -6px; padding: 0; border: 0; border-radius: var(--r-sm); background: none; color: var(--term-fg-3); cursor: pointer; }
 .convo-meta-more:focus-visible { outline: 2px solid var(--term-accent-text); outline-offset: 1px; }

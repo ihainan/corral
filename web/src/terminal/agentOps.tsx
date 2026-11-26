@@ -1,7 +1,7 @@
 import { useState, type FormEvent } from 'react'
-import { CornerDownRight, GitBranch, TextCursorInput } from 'lucide-react'
+import { CornerDownRight, GitBranch, RotateCcw, TextCursorInput } from 'lucide-react'
 import { api, ApiError, errorText, type SessionInfo } from '../api'
-import { t } from '../i18n'
+import { t, type I18nKey } from '../i18n'
 import { Dialog } from '../components/ui'
 import { expectSession, renamedHerdr } from './agents'
 
@@ -283,6 +283,105 @@ export function LinkParentDialog({ sessionId, child, parents, onClose, onLinked 
           {error}
         </p>
       )}
+    </Dialog>
+  )
+}
+
+export interface RewindTarget {
+  sessionId: string
+  pane: string
+  terminalId?: string
+  pid: number
+  start: number
+  session: string
+  messageId: string
+  text: string
+}
+
+const REWIND_ERR_KEYS: Record<string, I18nKey> = {
+  terminal_changed: 'rewind.err.terminal_changed',
+  process_changed: 'rewind.err.process_changed',
+  session_changed: 'rewind.err.session_changed',
+  not_in_front: 'rewind.err.not_in_front',
+  agent_busy: 'rewind.err.agent_busy',
+  input_not_empty: 'rewind.err.input_not_empty',
+  ambiguous_message: 'rewind.err.ambiguous_message',
+  message_not_found: 'rewind.err.message_not_found',
+  not_ready: 'rewind.notReady',
+  picker_not_opened: 'rewind.err.picker_not_opened',
+  target_mismatch: 'rewind.err.target_mismatch',
+  confirm_mismatch: 'rewind.err.confirm_mismatch',
+  option_not_found: 'rewind.err.option_not_found',
+  rewind_uncertain: 'rewind.err.rewind_uncertain',
+  busy: 'rewind.err.busy',
+  unsupported: 'rewind.err.unsupported',
+}
+
+export function RewindDialog({
+  target,
+  onDone,
+  onRefresh,
+  onClose,
+}: {
+  target: RewindTarget
+  onDone: (text: string, warning?: string) => void
+  onRefresh: () => void
+  onClose: () => void
+}) {
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  const submit = async (e?: FormEvent) => {
+    e?.preventDefault()
+    if (busy) return
+    setBusy(true)
+    setError('')
+    try {
+      const r = await api<{ ok: boolean; text?: string; warning?: string }>(
+        'POST',
+        `/api/sessions/${encodeURIComponent(target.sessionId)}/conversation/rewind`,
+        {
+          pane: target.pane,
+          terminal_id: target.terminalId ?? '',
+          pid: target.pid,
+          start: target.start,
+          session: target.session,
+          message_id: target.messageId,
+        },
+        { timeoutMs: 60000 },
+      )
+      onDone(r.text ?? target.text, r.warning)
+    } catch (err) {
+      if (err instanceof ApiError) {
+        if (err.code === 'terminal_changed' || err.code === 'process_changed' || err.code === 'session_changed') {
+          onRefresh()
+        }
+        const key = REWIND_ERR_KEYS[err.code]
+        setError(key ? t(key) : errorText(err))
+      } else {
+        setError(errorText(err))
+      }
+      setBusy(false)
+    }
+  }
+  const close = () => !busy && onClose()
+  return (
+    <Dialog title={t('rewind.confirmTitle')} onClose={close} busy={busy} icon={<RotateCcw size={18} />}>
+      <form className="form" onSubmit={submit}>
+        <p className="lead">{t('rewind.confirmBody')}</p>
+        {error && (
+          <p className="err" role="alert">
+            {error}
+          </p>
+        )}
+        <div className="dialog-actions">
+          <button type="button" className="btn btn-ghost" disabled={busy} onClick={close}>
+            {t('common.cancel')}
+          </button>
+          <button type="submit" className="btn btn-primary" disabled={busy}>
+            {t(busy ? 'rewind.busy' : 'rewind.confirmTitle')}
+          </button>
+        </div>
+      </form>
     </Dialog>
   )
 }

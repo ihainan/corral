@@ -254,6 +254,7 @@ export interface ConvoCost {
 // What the entries are of (internal/web/conversation.go convoBind).
 export interface ConvoBind {
   pane: string
+  terminal_id?: string
   pid: number
   start: number
   session: string
@@ -419,7 +420,7 @@ export function forgetConversations() {
 }
 
 const sameBind = (a?: ConvoBind, b?: ConvoBind) =>
-  a === b || (!!a && !!b && a.pane === b.pane && a.pid === b.pid && a.start === b.start && a.session === b.session && a.title === b.title && a.agent === b.agent && a.via === b.via && a.auth === b.auth)
+  a === b || (!!a && !!b && a.pane === b.pane && a.terminal_id === b.terminal_id && a.pid === b.pid && a.start === b.start && a.session === b.session && a.title === b.title && a.agent === b.agent && a.via === b.via && a.auth === b.auth)
 
 const sameMeta = (a?: ConvoMeta, b?: ConvoMeta) =>
   a === b || (!!a && !!b && a.model === b.model && a.mode === b.mode && a.effort === b.effort && a.branch === b.branch && a.forked === b.forked && a.history_partial === b.history_partial && a.context === b.context && a.window === b.window && a.window_by === b.window_by && JSON.stringify(a.cost) === JSON.stringify(b.cost) && JSON.stringify(a.quota) === JSON.stringify(b.quota) && JSON.stringify(a.answer) === JSON.stringify(b.answer) && a.turn_out === b.turn_out)

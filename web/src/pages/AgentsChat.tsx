@@ -20,7 +20,7 @@ import { PanelWindow } from '../terminal/PanelWindow'
 import { convoTarget, herdrTarget, InlineReply } from '../terminal/ReplyDialog'
 import { SessionOpDialog, type SessionOp } from '../terminal/sessionOps'
 import { NEW_AGENT, NewAgentDialog, takeNewAgentAsk, type NewSubagentParent } from '../terminal/newAgent'
-import { type CodexRewind, ForkDialog, LinkParentDialog, type LinkPane, RenameDialog, type RenameTarget } from '../terminal/agentOps'
+import { type CodexRewind, ForkDialog, LinkParentDialog, type LinkPane, RenameDialog, type RenameTarget, RewindDialog, type RewindTarget } from '../terminal/agentOps'
 import { agentWho, ChimeCounter, chime, countsOf } from '../terminal/chime'
 import { AgentList, CODEX_EFFORTS, ComposerModelSlot, ConversationView, glanceOf, type ConvoAgent, type ConvoLineageBar, type ConvoListRow, type ConvoPending, type ConvoSplitPane, type ConvoWent, type FileActs, type ModelOpt } from '../terminal/Conversation'
 import { saveTranslateConfig, useTranslateConfig } from '../terminal/thoughtTranslate'
@@ -3286,6 +3286,7 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
   // tells it. While it is at rest (as the list says it): not a turn in
   // the middle (a check when asked, not a hold on it).
   const [forking, setForking] = useState<{ s: SessionInfo; kind: 'claude' | 'codex'; source: string; at?: string; rewind?: CodexRewind; dir: string; name: string; key: string } | null>(null)
+  const [rewinding, setRewinding] = useState<RewindTarget | null>(null)
   // (All of it: asked again as it is sent, of the list now — another
   // window may have set it to work meanwhile — review585-11.)
   const entriesNow = useRef(entries)
@@ -3869,6 +3870,29 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
       }}
       onForkAt={forkOf(cur) ? forkHere : undefined}
       forkWhole={cur.row ? cur.row.status === 'idle' || cur.row.status === 'done' : cur.s.persistence === 'tmux' && (agent?.status === 'idle' || agent?.status === 'done')}
+      onRewindAt={
+        convo.bind?.agent === 'claude' && convo.bind.session
+          ? (entry, text) => {
+              const b = convo.bind
+              if (!b || b.agent !== 'claude' || !b.session) return
+              setRewinding({
+                sessionId: sid,
+                pane: b.pane,
+                terminalId: b.terminal_id || cur.row?.a.terminal_id || '',
+                pid: b.pid,
+                start: b.start,
+                session: b.session,
+                messageId: entry.id,
+                text,
+              })
+            }
+          : undefined
+      }
+      rewindIdle={
+        (cur.row
+          ? cur.row.status === 'idle' || cur.row.status === 'done'
+          : cur.s.persistence === 'tmux' && (agent?.status === 'idle' || agent?.status === 'done')) && !agent?.dialog
+      }
     />
     {viewing && active && (
       <PictureDialog
@@ -3936,6 +3960,25 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
           }
         }}
         onClose={() => setForking(null)}
+      />
+    )}
+    {rewinding && (
+      <RewindDialog
+        target={rewinding}
+        onRefresh={() => convo.refresh()}
+        onDone={(text, warning) => {
+          setRewinding(null)
+          setDraft(text)
+          requestAnimationFrame(() => {
+            const f = field.current
+            if (!f) return
+            f.focus()
+            f.setSelectionRange(f.value.length, f.value.length)
+          })
+          convo.refresh()
+          if (warning === 'input_not_cleared') toast(t('rewind.err.input_not_cleared'), true)
+        }}
+        onClose={() => setRewinding(null)}
       />
     )}
     {renaming && <RenameDialog target={renaming} onClose={() => setRenaming(null)} />}

@@ -365,3 +365,46 @@ func TestClaudeRewindManyTriesAcrossPrepend(t *testing.T) {
 		}
 	}
 }
+
+func TestClaudeRewindSettled(t *testing.T) {
+	c := NewClaude()
+	c.Feed(lines(
+		treeRow("user", "u1", "", "first"),
+		treeRow("text", "a1", "u1", "ok1"),
+		treeRow("user", "u2", "a1", "second"),
+		treeRow("text", "a2", "u2", "ok2"),
+	))
+	known := c.UserIDs()
+	if !known["u1"] || !known["u2"] || len(known) != 2 {
+		t.Fatalf("UserIDs = %v", known)
+	}
+	if seq, ok := c.SeqOf("u2"); !ok || seq <= 0 {
+		t.Fatalf("SeqOf(u2) = %d, %v", seq, ok)
+	}
+	// Existing messages alone must not settle the rewind.
+	if c.RewindSettled("u2", known) {
+		t.Fatal("settled with no new user message")
+	}
+	// A new user message hanging AFTER u2 (on a2) must not settle a rewind to before u2.
+	c.Feed(lines(treeRow("user", "u3", "a2", "still on old branch")))
+	if c.RewindSettled("u2", known) {
+		t.Fatal("settled on a message whose parent is after target")
+	}
+	// A new user message hanging BEFORE u2 (on a1) settles the rewind.
+	c.Feed(lines(treeRow("user", "u4", "a1", "rewound branch")))
+	if !c.RewindSettled("u2", known) {
+		t.Fatal("did not settle after new message hanging before target")
+	}
+
+	// Rewinding to before the very first message (root parentUuid: null).
+	c2 := NewClaude()
+	c2.Feed(lines(treeRow("user", "u1", "", "first"), treeRow("text", "a1", "u1", "ok1")))
+	k2 := c2.UserIDs()
+	if c2.RewindSettled("u1", k2) {
+		t.Fatal("root rewind settled early")
+	}
+	c2.Feed(lines(treeRow("user", "u2", "", "fresh start")))
+	if !c2.RewindSettled("u1", k2) {
+		t.Fatal("root rewind did not settle after new root user message")
+	}
+}

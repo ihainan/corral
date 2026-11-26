@@ -70,6 +70,7 @@ type Server struct {
 	ocContested      ocContests       // (folders where two OpenCodes ran at once)
 	herdrTimes       herdrServers     // when each herdr server's agents last changed (shared by its watchers)
 	replies          paneReplies      // answers to agents in herdr panes
+	rewinds          rewindStore      // pending Claude Code in-place rewinds (lost on gateway restart)
 	cxPressed        sync.Map         // convoReplyKey → time.Time: when keys or text last went to a Codex's pane (its title read before, stale)
 	agyPressedMap    sync.Map         // convoReplyKey → time.Time: when keys or text last went to an agy pane (its screen wait check before, stale)
 	agyPanes         sync.Map         // sessID+"\x00"+pane → bool: herdr panes Corral bound to agy (fallback when herdr omits hp.Agent)
@@ -281,6 +282,7 @@ func (s *Server) registerRoutes() {
 	s.handle("POST /api/sessions/{id}/conversation/screen", SignedIn, s.apiConversationScreen)
 	s.handle("POST /api/sessions/{id}/conversation/reply", SignedIn, s.apiConversationReply)
 	s.handle("POST /api/sessions/{id}/conversation/send", SignedIn, s.apiConversationSend)
+	s.handle("POST /api/sessions/{id}/conversation/rewind", SignedIn, s.apiConversationRewind)
 	s.handle("POST /api/sessions/{id}/conversation/command", SignedIn, s.apiConversationCommand)
 	s.handle("GET /api/sessions/{id}/conversation/subagent", SignedIn, s.apiConversationSubagent)
 	s.handle("GET /api/sessions/{id}/conversation/subagents", SignedIn, s.apiConversationSubagents)
