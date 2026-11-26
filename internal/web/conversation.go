@@ -3303,20 +3303,22 @@ screen() {
   printf '%s\n' "$s" | awk -v n="$rd" '{ a[NR] = $0 } NF { last = NR } END { for (i = last - n + 1; i <= last; i++) if (i > 0) print a[i] }'
 }
 # Who has Claude Code's input box (convo_view.go): $1 after (1: the box
-# holds a text of ours, its line not read). Not read: none — nothing typed.
+# holds a text of ours, its line not read). Not read: or=0, o=none — nothing typed.
 owner() {
-  os=
+  os= or=0
   # (A read that failed is no screen, whatever it printed: os empty — review561.)
   if [ "$mode" = tmux ]; then os=$(tmux -u capture-pane -p -t "$p" 2>/dev/null 9>&-) || { os=; o=none; return 0; }
   else os=$(HERDR_SOCKET_PATH=$sock herdr pane read "$p" --source visible 2>/dev/null 9>&-) || { os=; o=none; return 0; }; fi
+  or=1
   o=$(printf '%s\n' "$os" | awk -v after="$1" 'OWNERAWK' 2>/dev/null) || o=none
 }
 # (Claude Code's own: a text typed only where its input box is plainly the
 # conversation's — not a subagent's shown in front, nor a list holding the
 # keys. $1: what the box holds is ours (1: not read — keys, as an Enter
 # again, go after a text of ours; or the text just pasted). $2: typed
-# already. Not typed: 13 a subagent's, 14 a list's, 15 no box seen; typed
-# (Enter held back): 16, as is the agent no longer the one in front.)
+# already. Not typed: 13 a subagent's, 14 a list's, 15 no box seen, 19
+# screen unreadable; typed (Enter held back): 16, as is the agent no longer
+# the one in front.)
 owned() {
   [ "$kind" = claude ] && [ -z "$cx" ] || return 0
   case $gate in free|enter|idle|stop|box:*) ;; *) return 0;; esac
@@ -3327,11 +3329,13 @@ owned() {
   # where the screen was not read, nor where a list of agents shows a
   # subagent's conversation in front — review559.)
   if [ "$gate" = stop ] && [ "$o" = none ]; then
+    [ "$or" = 1 ] || exit 19
     [ -n "$os" ] || exit 15
     printf '%s\n' "$os" | awk '/^[ \t]*(❯[ \t]+)?◯ main[ \t]*$/ { f = 1 } END { exit !f }' && exit 13
     return 0
   fi
   [ "$2" = 1 ] && exit 16
+  [ "$or" = 1 ] || exit 19
   case $o in subagent) exit 13;; list|sessions) exit 14;; *) exit 15;; esac
 }
 b=corral-send-$$ typing=0 partdir=
@@ -3583,19 +3587,26 @@ boxread() {
   bx=$(printf '%s\n' "$bs" | awk 'BOXAWK')
 }
 # (Before the paste: its box as it was, empty or a greyed suggestion — only
-# where the screen shows Claude Code's own conversation box.)
+# where the screen shows Claude Code's own conversation box. When the greyed
+# suggestion already holds the exact words being pasted, plain-text boxread()
+# cannot see a diff after pasting, so b1 is seeded here to avoid spinning 47x.)
 boxbefore() {
   [ "$kind" = claude ] && [ -z "$cx" ] && [ -z "$oc" ] && [ -z "$noenter" ] || return 0
   case $gate in ''|free|enter|idle) ;; *) return 0;; esac
   owner 0
   [ "$o" = main ] || return 0
   b0=$(printf '%s\n' "$os" | awk 'BOXAWK') && cc=1
+  if [ -n "$b0" ]; then
+    bs0=$(printf '%s' "$b0" | awk 'SQUEEZEAWK')
+    bsw=$(awk 'SQUEEZEAWK' "$f")
+    [ -n "$bs0" ] && [ "$bs0" = "$bsw" ] && b1=$b0
+  fi
 }
 # (After it: till its box shows something else, up to 5 seconds. Not seen
 # so long — a picture read slowly — Enter as ever, and after it the box
 # looked at for a while yet: what it shows then, the words to look for.)
 pasted() {
-  [ -n "$cc" ] || return 0
+  [ -n "$cc" ] && [ -z "$b1" ] || return 0
   n=0
   while [ "$n" -lt 47 ]; do
     boxread || return 0
@@ -3804,6 +3815,7 @@ fi`
 	script = strings.ReplaceAll(script, "OWNERAWK", claudeOwnerAwk) // (see convo_view.go)
 	script = strings.ReplaceAll(script, "PALETTEAWK", claudePaletteAwk)
 	script = strings.ReplaceAll(script, "BOXAWK", claudeBoxAwk)
+	script = strings.ReplaceAll(script, "SQUEEZEAWK", claudeBoxSqueezeAwk)
 	cmd := "sh -c " + sshx.QuoteShell(script) + " corral " + sshx.QuoteShell(mode) + " " + sshx.QuoteShell(session) + " " + sshx.QuoteShell(pane) + " " +
 		strconv.FormatInt(pid, 10) + " " + strconv.FormatInt(start, 10) + " " + n + " " + sshx.QuoteShell(socket) + " " + sshx.QuoteShell(sid) + " " + strconv.Itoa(max(0, min(read, 60))) + " " + sshx.QuoteShell(gate)
 	for _, k := range keys {
@@ -4027,12 +4039,12 @@ func (s *Server) apiConversationModel(w http.ResponseWriter, r *http.Request) {
 }
 
 // modeLines: the screen read after a key, for what (the mode's line).
+// For "send", res.Out is unused (taken() verifies the box inside the script),
+// so reading the screen again after Enter would only add latency and risk
+// turning a completed send into exit 8 ("unknown").
 func modeLines(what string) int {
-	switch what {
-	case "mode":
+	if what == "mode" {
 		return 8
-	case "send":
-		return sendLines
 	}
 	return 0
 }
@@ -4203,7 +4215,9 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 	ctx, cancel := context.WithDeadline(parent, expiry)
 	defer cancel()
 	step := 15 * time.Second
-	if what == "models" || what == "model" || what == "effort" || (what == "mode" && b.Mode != "") {
+	if what == "send" {
+		step = 30 * time.Second // (locate + draft check + gated paste/Enter/taken on busy hosts; under frontend SEND_MS=45s)
+	} else if what == "models" || what == "model" || what == "effort" || (what == "mode" && b.Mode != "") {
 		step = 45 * time.Second // (several steps on the host: see modelFlow, convoModeTo)
 	}
 	ctx, cancelStep := context.WithTimeout(ctx, step)
@@ -4880,6 +4894,10 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 	case errors.As(err, &exitErr) && exitErr.Status == 10:
 		reason = "screen_changed"
 		writeError(w, http.StatusConflict, "screen_changed", "the screen changed; look again before answering")
+		return
+	case errors.As(err, &exitErr) && exitErr.Status == exitOwnerUnread:
+		reason = "no_screen"
+		writeError(w, http.StatusBadGateway, "no_screen", "the pane's screen could not be read")
 		return
 	case errors.As(err, &exitErr) && exitErr.Status >= exitOwnerSubagent && exitErr.Status <= exitOwnerLast:
 		// (Claude Code's input box not the conversation's: nothing typed, or typed and no Enter.)

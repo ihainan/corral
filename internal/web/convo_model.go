@@ -1237,6 +1237,9 @@ func writeSwitchError(w http.ResponseWriter, err error, typed bool, outcome, rea
 		// (Its picker's command not sent, or typed and not sent: it waits for an answer.)
 		*outcome, *reason = said(typed || exitErr.Status == 5), "agent_waiting"
 		writeError(w, http.StatusConflict, "agent_waiting", "it waits for an answer, or has a dialog open: answer it first")
+	case errors.As(err, &exitErr) && exitErr.Status == exitOwnerUnread:
+		*outcome, *reason = said(typed), "no_screen"
+		writeError(w, http.StatusBadGateway, "no_screen", "the pane's screen could not be read")
 	case errors.As(err, &exitErr) && exitErr.Status >= exitOwnerSubagent && exitErr.Status <= exitOwnerLast:
 		// (Claude Code's input box not the conversation's: its picker's command not sent.)
 		code, typedNow, _ := writeOwnerRefusal(w, err)

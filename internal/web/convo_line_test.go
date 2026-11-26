@@ -623,9 +623,9 @@ func TestSettleDefault(t *testing.T) {
 }
 
 func TestLineNotTyped(t *testing.T) {
-	for status := 0; status < 20; status++ {
+	for status := 0; status < 21; status++ {
 		maybe := status == 5 || status == 6 || status == 16
-		known := status == 3 || status == 4 || (status >= 7 && status <= 15) || status == 17
+		known := status == 3 || status == 4 || (status >= 7 && status <= 15) || status == 17 || status == exitOwnerUnread
 		got := lineNotTyped(&sshx.ExitError{Status: status})
 		if maybe && got || known && !got {
 			t.Errorf("exit %d: nothing typed %v", status, got)

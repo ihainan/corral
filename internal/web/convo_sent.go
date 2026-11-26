@@ -179,6 +179,10 @@ func (s *Server) sentEnter(w http.ResponseWriter, ctx context.Context, sess *ter
 		*outcome, *reason = "refused", "agent_waiting"
 		writeError(w, http.StatusConflict, "agent_waiting", "it waits for an answer, or has a dialog open: answer it first")
 		return
+	case errors.As(err, &exitErr) && exitErr.Status == exitOwnerUnread:
+		*outcome, *reason = "refused", "no_screen"
+		writeError(w, http.StatusBadGateway, "no_screen", "the pane's screen could not be read")
+		return
 	case errors.As(err, &exitErr) && exitErr.Status >= exitOwnerSubagent && exitErr.Status <= exitOwnerLast:
 		// (Claude Code's input box not the conversation's: the Enter not pressed there.)
 		*outcome = "refused"

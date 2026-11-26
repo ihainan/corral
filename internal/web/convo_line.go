@@ -481,7 +481,7 @@ func lineNotTyped(err error) bool {
 		return false
 	}
 	switch e.Status {
-	case 3, 4, 7, 8, 9, 10, 11, 12, exitOwnerSubagent, exitOwnerOther, exitOwnerNone, 17:
+	case 3, 4, 7, 8, 9, 10, 11, 12, exitOwnerSubagent, exitOwnerOther, exitOwnerNone, exitOwnerUnread, 17:
 		return true
 	}
 	return false

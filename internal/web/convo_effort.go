@@ -297,6 +297,9 @@ func (s *Server) convoEffort(w http.ResponseWriter, ctx context.Context, sess *t
 	case errors.As(err, &exitErr) && (exitErr.Status == 9 || exitErr.Status == 5):
 		*outcome, *reason = said(typed || exitErr.Status == 5), "agent_waiting"
 		writeError(w, http.StatusConflict, "agent_waiting", "it waits for an answer, or has a dialog open: answer it first")
+	case errors.As(err, &exitErr) && exitErr.Status == exitOwnerUnread:
+		*outcome, *reason = said(typed), "no_screen"
+		writeError(w, http.StatusBadGateway, "no_screen", "the pane's screen could not be read")
 	case errors.As(err, &exitErr) && exitErr.Status >= exitOwnerSubagent && exitErr.Status <= exitOwnerLast:
 		// (Claude Code's input box not the conversation's: /effort not sent.)
 		code, typedNow, _ := writeOwnerRefusal(w, err)

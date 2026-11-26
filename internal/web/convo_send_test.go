@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/ihainan/corral/internal/sshx"
 )
 
 // What may be typed into a pane: text, its line ends made "\n"; never a
@@ -255,4 +257,199 @@ func TestFillOK(t *testing.T) {
 	if fillOK("nothex", "ok") {
 		t.Error("no digest: ok")
 	}
+}
+
+// modeLines must not ask convoGated to sleep and re-read the screen after a
+// send: convoPress ignores res.Out for "send", and a failing post-send screen
+// read used to exit 8 and surface as 502 "unknown" even after Enter succeeded.
+func TestModeLinesDoesNotReadAfterSend(t *testing.T) {
+	if got := modeLines("send"); got != 0 {
+		t.Fatalf("modeLines(send) = %d, want 0", got)
+	}
+	if got := modeLines("mode"); got <= 0 {
+		t.Fatalf("modeLines(mode) = %d, want > 0", got)
+	}
+}
+
+// When herdr pane read fails before typing, owned() must exit exitOwnerUnread
+// (19 → 502 no_screen) rather than exitOwnerNone (15 → 409 no_input), and
+// callers must treat it as nothing typed / gate refused.
+func TestConvoGatedOwnerUnreadExits19(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("no sh")
+	}
+	cmd := convoGatedCommand("free", "herdr", "", "p1", "/run/x.sock", 1, 1, sidA, 2, nil, 0)
+	// Extract the shell body of convoGated and test owner()/owned() directly with
+	// a stub herdr whose `pane read` fails.
+	bodyStart := strings.Index(cmd, "sh -c ") + len("sh -c ")
+	bodyEnd := strings.Index(cmd, " corral ")
+	quotedScript := cmd[bodyStart:bodyEnd]
+	dir := t.TempDir()
+	scriptPath := filepath.Join(dir, "gated.sh")
+	if out, err := exec.Command("sh", "-c", "printf %s "+quotedScript+" > "+scriptPath).CombinedOutput(); err != nil {
+		t.Fatalf("extract script: %v %s", err, out)
+	}
+	raw, err := os.ReadFile(scriptPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Keep only owner() and owned() so we can invoke owned 0 0 in isolation.
+	ownerIdx := strings.Index(string(raw), "\nowner() {")
+	idx := strings.Index(string(raw), "\nb=corral-send-$$")
+	if ownerIdx < 0 || idx < 0 {
+		t.Fatal("could not find owner()/owned() markers")
+	}
+	harness := string(raw[ownerIdx:idx]) + "\nkind=claude cx= mode=herdr p=p1 sock=/s gate=free\nowned 0 0\n"
+	os.WriteFile(filepath.Join(dir, "herdr"), []byte("#!/bin/sh\nexit 1\n"), 0o755)
+	c := exec.Command("sh", "-c", harness)
+	c.Env = append(os.Environ(), "PATH="+dir+":"+os.Getenv("PATH"))
+	err = c.Run()
+	var ee *exec.ExitError
+	if !errors.As(err, &ee) || ee.ExitCode() != exitOwnerUnread {
+		t.Fatalf("owned with unreadable screen: err=%v, want exit %d", err, exitOwnerUnread)
+	}
+	// Also verify stop gate with unreadable screen exits 19 rather than 15.
+	harnessStop := string(raw[ownerIdx:idx]) + "\nkind=claude cx= mode=herdr p=p1 sock=/s gate=stop\nowned 0 0\n"
+	c2 := exec.Command("sh", "-c", harnessStop)
+	c2.Env = append(os.Environ(), "PATH="+dir+":"+os.Getenv("PATH"))
+	err = c2.Run()
+	if !errors.As(err, &ee) || ee.ExitCode() != exitOwnerUnread {
+		t.Fatalf("stop owned with unreadable screen: err=%v, want exit %d", err, exitOwnerUnread)
+	}
+	// lineNotTyped and gateRefused must recognize exitOwnerUnread as nothing typed.
+	unreadErr := &sshx.ExitError{Status: exitOwnerUnread}
+	if !lineNotTyped(unreadErr) {
+		t.Error("lineNotTyped(exitOwnerUnread) = false, want true")
+	}
+	if !gateRefused(unreadErr) {
+		t.Error("gateRefused(exitOwnerUnread) = false, want true")
+	}
+}
+
+// Sending text identical to Claude Code's greyed-out suggestion (single-line or
+// wrapped across lines) must NOT make pasted() spin 47 iterations waiting for
+// plain-text boxread() to differ from b0; taken() must succeed immediately when
+// Enter clears the box and still exit 18 if Enter truly fails.
+func TestConvoGatedSuggestionMatchSkipsPasteSpin(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("no sh")
+	}
+	cmd := convoGatedCommand("free", "herdr", "", "p1", "/run/x.sock", 1, 1, sidA, 2, nil, 0)
+	bodyStart := strings.Index(cmd, "sh -c ") + len("sh -c ")
+	bodyEnd := strings.Index(cmd, " corral ")
+	quotedScript := cmd[bodyStart:bodyEnd]
+	dir := t.TempDir()
+	scriptPath := filepath.Join(dir, "gated.sh")
+	if out, err := exec.Command("sh", "-c", "printf %s "+quotedScript+" > "+scriptPath).CombinedOutput(); err != nil {
+		t.Fatalf("extract script: %v %s", err, out)
+	}
+	raw, err := os.ReadFile(scriptPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Extract owner/owned/boxread/boxbefore/pasted/taken from convoGated.
+	// Find start of owner() and end of taken().
+	ownerIdx := strings.Index(string(raw), "\nowner() {")
+	ownedEnd := strings.Index(string(raw), "\nb=corral-send-$$")
+	boxIdx := strings.Index(string(raw), "\ncc= b0= b1=")
+	takenEnd := strings.Index(string(raw), "\nif [ -n \"$gate\" ]; then")
+	if ownerIdx < 0 || ownedEnd < 0 || boxIdx < 0 || takenEnd < 0 {
+		t.Fatal("could not locate convoGated functions")
+	}
+	funcs := string(raw[ownerIdx:ownedEnd]) + "\n" + string(raw[boxIdx:takenEnd]) + "\n"
+	rule := strings.Repeat("─", 40)
+	foot := "  Opus 5.5·H | Ctx 132.6K\n  ⏵⏵ auto mode on (shift+tab to cycle)"
+
+	for _, tc := range []struct {
+		name      string
+		boxBefore string
+		msg       string
+	}{
+		{"single-line suggestion", "❯ 帮我开好实验 2", "帮我开好实验 2"},
+		{"wrapped suggestion", "❯ 帮我开好\n  实验 2", "帮我开好实验 2"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			subDir := t.TempDir()
+			msgFile := filepath.Join(subDir, "msg")
+			os.WriteFile(msgFile, []byte(tc.msg), 0o600)
+			beforeScreen := filepath.Join(subDir, "before.txt")
+			afterScreen := filepath.Join(subDir, "after.txt")
+			os.WriteFile(beforeScreen, []byte(rule+"\n"+tc.boxBefore+"\n"+rule+"\n"+foot+"\n"), 0o600)
+			os.WriteFile(afterScreen, []byte("> "+tc.msg+"\n\n* Enchanting… (1s)\n"+rule+"\n❯ \n"+rule+"\n"+foot+"\n"), 0o600)
+			countFile := filepath.Join(subDir, "reads")
+			stateFile := filepath.Join(subDir, "state")
+			os.WriteFile(stateFile, []byte("before"), 0o600)
+			herdrStub := fmt.Sprintf(`#!/bin/sh
+if [ "$1" = pane ] && [ "$2" = read ]; then
+  printf x >> %q
+  if [ "$(cat %q)" = before ]; then cat %q; else cat %q; fi
+  exit 0
+fi
+exit 0
+`, countFile, stateFile, beforeScreen, afterScreen)
+			os.WriteFile(filepath.Join(subDir, "herdr"), []byte(herdrStub), 0o755)
+			harness := funcs + fmt.Sprintf(`
+kind=claude cx= oc= noenter= mode=herdr p=p1 sock=/s gate=free f=%q
+gate_enter() { return 0; }
+boxbefore
+pasted
+reads_after_pasted=$(wc -c < %q | tr -d ' ')
+printf after > %q
+taken
+reads_after_taken=$(wc -c < %q | tr -d ' ')
+printf '%%s %%s\n' "$reads_after_pasted" "$reads_after_taken"
+`, msgFile, countFile, stateFile, countFile)
+			c := exec.Command("sh", "-c", harness)
+			c.Env = append(os.Environ(), "PATH="+subDir+":"+os.Getenv("PATH"))
+			out, err := c.CombinedOutput()
+			if err != nil {
+				t.Fatalf("harness failed: %v\n%s", err, out)
+			}
+			fields := strings.Fields(string(out))
+			if len(fields) != 2 {
+				t.Fatalf("unexpected output: %q", out)
+			}
+			// boxbefore() does 1 read; pasted() must do 0 reads (not 47!); taken() does 1 read.
+			if fields[0] != "1" {
+				t.Errorf("reads after boxbefore+pasted = %s, want 1 (pasted must not spin 47x on suggestion match)", fields[0])
+			}
+			if fields[1] != "2" {
+				t.Errorf("reads after taken = %s, want 2", fields[1])
+			}
+		})
+	}
+	// If Enter truly fails to send the matched suggestion, taken() must still
+	// retry Enter once and exit 18 (enter_not_taken).
+	t.Run("stuck suggestion still exits 18", func(t *testing.T) {
+		subDir := t.TempDir()
+		msg := "帮我开好实验 2"
+		msgFile := filepath.Join(subDir, "msg")
+		os.WriteFile(msgFile, []byte(msg), 0o600)
+		stuckScreen := filepath.Join(subDir, "stuck.txt")
+		os.WriteFile(stuckScreen, []byte(rule+"\n❯ "+msg+"\n"+rule+"\n"+foot+"\n"), 0o600)
+		enterLog := filepath.Join(subDir, "enters")
+		herdrStub := fmt.Sprintf(`#!/bin/sh
+if [ "$1" = pane ] && [ "$2" = read ]; then cat %q; exit 0; fi
+if [ "$1" = pane ] && [ "$2" = send-keys ]; then printf x >> %q; exit 0; fi
+exit 0
+`, stuckScreen, enterLog)
+		os.WriteFile(filepath.Join(subDir, "herdr"), []byte(herdrStub), 0o755)
+		harness := funcs + fmt.Sprintf(`
+kind=claude cx= oc= noenter= mode=herdr p=p1 sock=/s gate=free f=%q
+gate_enter() { return 0; }
+boxbefore
+pasted
+taken
+`, msgFile)
+		c := exec.Command("sh", "-c", harness)
+		c.Env = append(os.Environ(), "PATH="+subDir+":"+os.Getenv("PATH"))
+		err := c.Run()
+		var ee *exec.ExitError
+		if !errors.As(err, &ee) || ee.ExitCode() != 18 {
+			t.Fatalf("stuck suggestion: err=%v, want exit 18", err)
+		}
+		if b, _ := os.ReadFile(enterLog); len(b) != 1 {
+			t.Errorf("retry enters = %d, want 1", len(b))
+		}
+	})
 }
