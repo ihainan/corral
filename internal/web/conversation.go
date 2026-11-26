@@ -3223,6 +3223,15 @@ func convoGatedFillCommand(gate, mode, session, pane, socket string, pid, start 
 	return convoGated(gate, mode, session, pane, socket, pid, start, sid, strconv.Itoa(length)+"-", nil, read)
 }
 
+// convoGatedPicCommand: convoGatedCommand for a Claude Code message that
+// contains a standalone picture path (hasPicturePath). Claude Code reads the
+// image file before replacing the path with "[Image #N]", so boxbefore() must
+// not pre-seed b1 from a matching greyed-out suggestion and taken() must not
+// treat "[Image #N]..." as already sent.
+func convoGatedPicCommand(gate, mode, session, pane, socket string, pid, start int64, sid string, length int, read int) string {
+	return convoGated(gate, mode, session, pane, socket, pid, start, sid, strconv.Itoa(length)+"@", nil, read)
+}
+
 func convoGated(gate, mode, session, pane, socket string, pid, start int64, sid, n string, keys []string, read int) string {
 	script := `PATH="$HOME/.local/bin:$HOME/bin:$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
 mode=$1 sess=$2 p=$3 pid=$4 start=$5 len=$6 sock=$7 sid=$8 rd=$9
@@ -3290,6 +3299,15 @@ esac
 noenter=
 case $len in *-)
   noenter=1 len=${len%-}
+  case $len in ''|*[!0-9]*) exit 4;; esac ;;
+esac
+# (A Claude Code message containing a standalone picture path, its length "12@":
+# Claude Code loads the image into "[Image #N]" asynchronously before accepting
+# Enter, so boxbefore() must not short-circuit pasted() and taken() must keep
+# treating "[Image #N]" in the box as unsent.)
+haspic=
+case $len in *@)
+  haspic=1 len=${len%@}
   case $len in ''|*[!0-9]*) exit 4;; esac ;;
 esac
 # (What the pane shows after, its last rd lines but blank ones at the end.)
@@ -3596,7 +3614,7 @@ boxbefore() {
   owner 0
   [ "$o" = main ] || return 0
   b0=$(printf '%s\n' "$os" | awk 'BOXAWK') && cc=1
-  if [ -n "$b0" ]; then
+  if [ -n "$b0" ] && [ -z "$haspic" ]; then
     bs0=$(printf '%s' "$b0" | awk 'SQUEEZEAWK')
     bsw=$(awk 'SQUEEZEAWK' "$f")
     [ -n "$bs0" ] && [ "$bs0" = "$bsw" ] && b1=$b0
@@ -3629,7 +3647,12 @@ taken() {
     while [ "$n" -lt 10 ]; do
       sleep 0.1; n=$((n + 1))
       boxread || return 0
-      [ "$bx" = "$b1" ] || return 0
+      if [ "$bx" != "$b1" ]; then
+        if [ -n "$haspic" ]; then
+          case $bx in *'[Image #'[0-9]*']'*) b1=$bx; continue ;; esac
+        fi
+        return 0
+      fi
     done
     [ "$k" = 2 ] && exit 18
     gate_enter
@@ -4826,6 +4849,9 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 		}
 	}
 	cmd := convoGatedCommand(gate, sess.Persistence, sess.TmuxSession, b.Pane, socket, b.PID, b.Start, b.Session, len(text), press, modeLines(what))
+	if what == "send" && front.agent == "claude" && !inBox && hasPicturePath(text) {
+		cmd = convoGatedPicCommand(gate, sess.Persistence, sess.TmuxSession, b.Pane, socket, b.PID, b.Start, b.Session, len(text), modeLines(what))
+	}
 	if what == "reply" && b.Fill {
 		cmd = convoGatedFillCommand(gate, sess.Persistence, sess.TmuxSession, b.Pane, socket, b.PID, b.Start, b.Session, len(text), modeLines(what))
 	}
