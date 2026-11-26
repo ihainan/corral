@@ -161,9 +161,19 @@ func Dial(ctx context.Context, c *ssh.Client, socketPath string) (*Client, error
 // DialWait is Dial waiting up to await for a side operation's slot on c
 // where all are taken (sshx.DialOptions.AwaitSlot): for what a person asked.
 func DialWait(ctx context.Context, c *ssh.Client, socketPath string, await time.Duration) (*Client, error) {
-	ctx, cancel := context.WithTimeout(ctx, dialTimeout+await)
+	return dial(ctx, c, socketPath, sshx.DialOptions{Aux: true, AwaitSlot: await})
+}
+
+// DialWatch opens the socket using the dedicated watch-channel quota
+// (sshx.MaxWatchPerConn) so status watching does not compete with Aux traffic.
+func DialWatch(ctx context.Context, c *ssh.Client, socketPath string) (*Client, error) {
+	return dial(ctx, c, socketPath, sshx.DialOptions{Watch: true})
+}
+
+func dial(ctx context.Context, c *ssh.Client, socketPath string, opt sshx.DialOptions) (*Client, error) {
+	ctx, cancel := context.WithTimeout(ctx, dialTimeout+opt.AwaitSlot)
 	defer cancel()
-	conn, err := sshx.DialVia(ctx, c, "unix", socketPath, sshx.DialOptions{Aux: true, AwaitSlot: await})
+	conn, err := sshx.DialVia(ctx, c, "unix", socketPath, opt)
 	if err != nil {
 		return nil, fmt.Errorf("cannot reach herdr socket: %w", err)
 	}

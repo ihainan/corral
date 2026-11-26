@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -24,6 +25,12 @@ func setMaxAux(t *testing.T, n int) {
 	old := MaxAuxPerConn
 	MaxAuxPerConn = n
 	t.Cleanup(func() { MaxAuxPerConn = old })
+}
+
+func setMaxWatch(t *testing.T, n int) {
+	old := MaxWatchPerConn
+	MaxWatchPerConn = n
+	t.Cleanup(func() { MaxWatchPerConn = old })
 }
 
 func isClosed(c *ssh.Client, within time.Duration) bool {
@@ -374,4 +381,175 @@ func TestRefusedExecHoldsItsPlaceUntilTheChannelEnds(t *testing.T) {
 	}
 	fr.up.Store(false)
 	eventually(t, "place not given back once the channel closed", func() bool { return auxInUse(c) == 0 })
+}
+
+// Aux and Watch quotas are counted separately: filling Aux does not block Watch,
+// filling Watch (2 unfinished) rejects a 3rd Watch without affecting Aux, and
+// Aux+Watch together are rejected as mutually exclusive.
+func TestWatchAndAuxQuotasAreIndependent(t *testing.T) {
+	if MaxWatchPerConn != 2 {
+		t.Fatalf("MaxWatchPerConn = %d, want 2", MaxWatchPerConn)
+	}
+	setMaxAux(t, 2)
+	setMaxWatch(t, 2)
+
+	srv := testutil.StartSSHServer(t, "alice", "alice-pass", t.TempDir())
+	srv.HandleChannel(func(nc ssh.NewChannel) bool {
+		if nc.ChannelType() != "direct-streamlocal@openssh.com" {
+			return false
+		}
+		ch, reqs, err := nc.Accept()
+		if err != nil {
+			return true
+		}
+		go ssh.DiscardRequests(reqs)
+		go func() {
+			defer ch.Close()
+			io.Copy(io.Discard, ch)
+		}()
+		return true
+	})
+
+	c := dialTest(t, srv)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// Fill all Aux slots.
+	aux1, err := DialVia(ctx, c, "unix", "/run/aux1.sock", DialOptions{Aux: true})
+	if err != nil {
+		t.Fatalf("aux1: %v", err)
+	}
+	aux2, err := DialVia(ctx, c, "unix", "/run/aux2.sock", DialOptions{Aux: true})
+	if err != nil {
+		t.Fatalf("aux2: %v", err)
+	}
+	if _, err := DialVia(ctx, c, "unix", "/run/aux3.sock", DialOptions{Aux: true}); !errors.Is(err, ErrBusy) {
+		t.Fatalf("3rd aux with Aux full: got %v, want ErrBusy", err)
+	}
+
+	// Even with Aux completely full, both Watch slots are available.
+	w1, err := DialVia(ctx, c, "unix", "/run/watch1.sock", DialOptions{Watch: true})
+	if err != nil {
+		t.Fatalf("watch1 while Aux full: %v", err)
+	}
+	w2, err := DialVia(ctx, c, "unix", "/run/watch2.sock", DialOptions{Watch: true})
+	if err != nil {
+		t.Fatalf("watch2 while Aux full: %v", err)
+	}
+	if auxInUse(c) != 2 || watchInUse(c) != 2 {
+		t.Fatalf("inUse aux=%d watch=%d, want 2, 2", auxInUse(c), watchInUse(c))
+	}
+	if _, err := DialVia(ctx, c, "unix", "/run/watch3.sock", DialOptions{Watch: true}); !errors.Is(err, ErrBusy) {
+		t.Fatalf("3rd watch with Watch full: got %v, want ErrBusy", err)
+	}
+
+	// Release Aux channels while Watch stays full: Watch remains capped at 2, Aux is unaffected.
+	aux1.Close()
+	aux2.Close()
+	eventually(t, "aux slots not released", func() bool { return auxInUse(c) == 0 })
+
+	if _, err := DialVia(ctx, c, "unix", "/run/watch3.sock", DialOptions{Watch: true}); !errors.Is(err, ErrBusy) {
+		t.Fatalf("3rd watch still full: got %v, want ErrBusy", err)
+	}
+	aux3, err := DialVia(ctx, c, "unix", "/run/aux3.sock", DialOptions{Aux: true})
+	if err != nil {
+		t.Fatalf("aux3 while Watch full: %v", err)
+	}
+	aux4, err := DialVia(ctx, c, "unix", "/run/aux4.sock", DialOptions{Aux: true})
+	if err != nil {
+		t.Fatalf("aux4 while Watch full: %v", err)
+	}
+	aux3.Close()
+	aux4.Close()
+	w1.Close()
+	w2.Close()
+	eventually(t, "quotas not returned to zero", func() bool { return auxInUse(c) == 0 && watchInUse(c) == 0 })
+
+	// Aux and Watch are mutually exclusive; Release is still called once.
+	var released atomic.Int32
+	if _, err := DialVia(ctx, c, "unix", "/run/both.sock", DialOptions{
+		Aux:     true,
+		Watch:   true,
+		Release: func() { released.Add(1) },
+	}); err == nil {
+		t.Fatal("DialOptions{Aux: true, Watch: true} succeeded")
+	}
+	if released.Load() != 1 || auxInUse(c) != 0 || watchInUse(c) != 0 {
+		t.Fatalf("after invalid options: released=%d aux=%d watch=%d", released.Load(), auxInUse(c), watchInUse(c))
+	}
+}
+
+// A Watch channel holds its slot until the SSH channel really ends (not on EOF
+// or local Close alone), matching Aux accounting.
+func TestWatchChannelHoldsQuotaUntilRealEnd(t *testing.T) {
+	srv := testutil.StartSSHServer(t, "alice", "alice-pass", t.TempDir())
+	srv.HandleChannel(func(nc ssh.NewChannel) bool {
+		if nc.ChannelType() != "direct-streamlocal@openssh.com" {
+			return false
+		}
+		ch, reqs, err := nc.Accept()
+		if err == nil {
+			go ssh.DiscardRequests(reqs)
+			ch.CloseWrite() // EOF without closing the channel
+			go io.Copy(io.Discard, ch)
+		}
+		return true
+	})
+	fr := newFreezer(t, srv.Addr.String())
+	c := dialVia(t, fr)
+	conn, err := DialVia(context.Background(), c, "unix", "/run/watch.sock", DialOptions{Watch: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if watchInUse(c) != 1 || auxInUse(c) != 0 {
+		t.Fatalf("inUse watch=%d aux=%d, want 1, 0", watchInUse(c), auxInUse(c))
+	}
+	if _, err := io.Copy(io.Discard, conn); err != nil {
+		t.Fatal(err)
+	}
+	fr.up.Store(true) // prevent our close from reaching the host
+	conn.Close()
+	time.Sleep(250 * time.Millisecond)
+	if watchInUse(c) != 1 {
+		t.Fatalf("watch slot released before channel really ended: %d", watchInUse(c))
+	}
+	fr.up.Store(false)
+	eventually(t, "watch slot not released after channel ended", func() bool { return watchInUse(c) == 0 })
+}
+
+// Concurrent acquire/release across Aux and Watch stays within bounds and
+// leaves zero slots held under -race.
+func TestWatchAndAuxConcurrentAcquireRelease(t *testing.T) {
+	c := &ssh.Client{}
+	var wg sync.WaitGroup
+	var errCount atomic.Int32
+
+	runPool := func(take func(*ssh.Client) (func(), bool), inUse func(*ssh.Client) int, limit int) {
+		defer wg.Done()
+		for range 200 {
+			rel, ok := take(c)
+			if !ok {
+				continue
+			}
+			if n := inUse(c); n < 1 || n > limit {
+				errCount.Add(1)
+			}
+			rel()
+			rel() // oneShot must ignore duplicate release
+		}
+	}
+
+	for range 8 {
+		wg.Add(2)
+		go runPool(takeAux, auxInUse, MaxAuxPerConn)
+		go runPool(takeWatch, watchInUse, MaxWatchPerConn)
+	}
+	wg.Wait()
+
+	if errCount.Load() != 0 {
+		t.Fatalf("quota invariant violated %d times", errCount.Load())
+	}
+	if auxInUse(c) != 0 || watchInUse(c) != 0 {
+		t.Fatalf("slots leaked: aux=%d watch=%d", auxInUse(c), watchInUse(c))
+	}
 }

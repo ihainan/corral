@@ -14,8 +14,15 @@ package sshx
 // terminal's connection, so a host that leaves them hanging must not cost
 // the terminal: they are never cut off by closing the connection. Instead
 // at most MaxAuxPerConn may be unfinished per connection; more are refused
-// (ErrBusy) until some end. Only a connection dedicated to such traffic (the
-// port-forwarding pool) is closed when a channel will not end.
+// (ErrBusy) until some end. Status watching (herdr event subscription and
+// snapshot refresh) has its own separate quota of MaxWatchPerConn per
+// connection so background Aux traffic cannot starve it. Only a connection
+// dedicated to such traffic (the port-forwarding pool) is closed when a
+// channel will not end.
+//
+// Worst-case channels per SSH connection: 1 terminal + MaxAuxPerConn (4) +
+// MaxWatchPerConn (2) = 7, which must stay below sshd's default MaxSessions
+// of 10.
 
 import (
 	"context"
@@ -37,35 +44,64 @@ var StuckGrace = 5 * time.Second
 // MaxAuxPerConn bounds unfinished side operations per SSH connection.
 var MaxAuxPerConn = 4
 
+// MaxWatchPerConn bounds unfinished status-watching channels (one event
+// subscription and one snapshot refresh) per SSH connection, accounted
+// separately from MaxAuxPerConn.
+var MaxWatchPerConn = 2
+
 var ErrBusy = errors.New("too many operations are still running on this SSH connection")
 
-var (
-	auxMu  sync.Mutex
-	auxOps = map[*ssh.Client]int{}
-)
+type slotPool struct {
+	mu  sync.Mutex
+	ops map[*ssh.Client]int
+}
 
-// takeAux reserves one side operation on c; release is safe to call twice.
-func takeAux(c *ssh.Client) (release func(), ok bool) {
-	auxMu.Lock()
-	defer auxMu.Unlock()
-	if auxOps[c] >= MaxAuxPerConn {
+// take reserves one slot on c up to limit; release is safe to call twice.
+func (p *slotPool) take(c *ssh.Client, limit int) (release func(), ok bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.ops[c] >= limit {
 		return nil, false
 	}
-	auxOps[c]++
+	p.ops[c]++
 	return oneShot(func() {
-		auxMu.Lock()
-		defer auxMu.Unlock()
-		if auxOps[c]--; auxOps[c] <= 0 {
-			delete(auxOps, c)
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		if p.ops[c]--; p.ops[c] <= 0 {
+			delete(p.ops, c)
 		}
 	}), true
 }
 
+func (p *slotPool) inUse(c *ssh.Client) int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.ops[c]
+}
+
+var (
+	auxSlots   = slotPool{ops: map[*ssh.Client]int{}}
+	watchSlots = slotPool{ops: map[*ssh.Client]int{}}
+)
+
+// takeAux reserves one side operation on c; release is safe to call twice.
+func takeAux(c *ssh.Client) (release func(), ok bool) {
+	return auxSlots.take(c, MaxAuxPerConn)
+}
+
 // auxInUse is for tests.
 func auxInUse(c *ssh.Client) int {
-	auxMu.Lock()
-	defer auxMu.Unlock()
-	return auxOps[c]
+	return auxSlots.inUse(c)
+}
+
+// takeWatch reserves one status-watching channel on c; release is safe to call twice.
+func takeWatch(c *ssh.Client) (release func(), ok bool) {
+	return watchSlots.take(c, MaxWatchPerConn)
+}
+
+// watchInUse is for tests.
+func watchInUse(c *ssh.Client) int {
+	return watchSlots.inUse(c)
 }
 
 // oneShot makes a release function that only acts the first time.
@@ -82,14 +118,18 @@ func oneShot(f func()) func() {
 // will not end.
 type DialOptions struct {
 	// Aux marks a side operation next to a terminal: it counts against
-	// MaxAuxPerConn until the channel really ends.
+	// MaxAuxPerConn until the channel really ends. Mutually exclusive with Watch.
 	Aux bool
+	// Watch marks a status-watching channel (event subscription or snapshot
+	// refresh): it counts against MaxWatchPerConn until the channel really ends,
+	// independent of Aux. Mutually exclusive with Aux.
+	Watch bool
 	// Release gives back a quota the caller took for this channel. DialVia
 	// owns it from the call on, on every path, and calls it once when the
 	// channel is really over (or was never opened).
 	Release func()
-	// AwaitSlot: an Aux one, where MaxAuxPerConn are unfinished, waits up to
-	// this long for one to end rather than being refused at once (ErrBusy):
+	// AwaitSlot: an Aux or Watch dial, where its quota is full, waits up to
+	// this long for a slot to end rather than being refused at once (ErrBusy):
 	// for what a person asked for (an answer pressed), not a look of the
 	// gateway's own, which comes again anyway (as ExecOptions.AwaitSlot).
 	AwaitSlot time.Duration
@@ -116,18 +156,29 @@ func DialVia(ctx context.Context, c *ssh.Client, network, addr string, opt DialO
 func openGuarded(ctx context.Context, c *ssh.Client, network, addr string, opt DialOptions,
 	open func() (ssh.Channel, <-chan *ssh.Request, error)) (net.Conn, error) {
 	release := oneShot(opt.Release)
-	if opt.Aux {
-		aux, ok := takeAux(c)
+	if opt.Aux && opt.Watch {
+		release()
+		return nil, errors.New("sshx: DialOptions.Aux and Watch are mutually exclusive")
+	}
+	var take func(*ssh.Client) (func(), bool)
+	switch {
+	case opt.Aux:
+		take = takeAux
+	case opt.Watch:
+		take = takeWatch
+	}
+	if take != nil {
+		slot, ok := take(c)
 		for until := time.Now().Add(opt.AwaitSlot); !ok && time.Now().Before(until) && ctx.Err() == nil; {
 			time.Sleep(50 * time.Millisecond)
-			aux, ok = takeAux(c)
+			slot, ok = take(c)
 		}
 		if !ok {
 			release()
 			return nil, ErrBusy
 		}
 		caller := release
-		release = oneShot(func() { aux(); caller() })
+		release = oneShot(func() { slot(); caller() })
 	}
 	if err := ctx.Err(); err != nil {
 		release()

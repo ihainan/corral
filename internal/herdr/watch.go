@@ -65,8 +65,14 @@ type Watcher struct {
 	// Log receives disconnect and recovery logs (defaults to slog.Default()).
 	Log *slog.Logger
 
-	baseBackoff time.Duration // defaults to time.Second; overridden in tests
-	maxBackoff  time.Duration // defaults to time.Minute; overridden in tests
+	baseBackoff      time.Duration                                    // defaults to time.Second; overridden in tests
+	maxBackoff       time.Duration                                    // defaults to time.Minute; overridden in tests
+	refreshRetryBase time.Duration                                    // defaults to time.Second; overridden in tests
+	refreshRetryMax  time.Duration                                    // defaults to 10 * time.Second; overridden in tests
+	refreshGiveUp    time.Duration                                    // defaults to 20 * time.Second; overridden in tests
+	kickSettle       time.Duration                                    // defaults to 250 * time.Millisecond; overridden in tests
+	nowFunc          func() time.Time                                 // defaults to time.Now; overridden in tests
+	retryTimerFunc   func(time.Duration) (<-chan time.Time, func())   // defaults to time.NewTimer; overridden in tests
 
 	mu     sync.Mutex
 	last   *Snapshot
@@ -115,6 +121,21 @@ func (w *Watcher) logger() *slog.Logger {
 		return w.Log
 	}
 	return slog.Default()
+}
+
+func (w *Watcher) now() time.Time {
+	if w.nowFunc != nil {
+		return w.nowFunc()
+	}
+	return time.Now()
+}
+
+func (w *Watcher) newRetryTimer(d time.Duration) (<-chan time.Time, func()) {
+	if w.retryTimerFunc != nil {
+		return w.retryTimerFunc(d)
+	}
+	t := time.NewTimer(d)
+	return t.C, func() { t.Stop() }
 }
 
 // Run blocks until ctx ends, reconnecting with backoff after failures.
@@ -221,7 +242,7 @@ func (w *Watcher) once(ctx context.Context, onConnected func()) error {
 		extSubs = append(extSubs, perPane)
 	}
 
-	ev, err := Dial(ctx, w.client, w.socketPath)
+	ev, err := DialWatch(ctx, w.client, w.socketPath)
 	if err != nil {
 		return &watchError{step: stepDial, err: err}
 	}
@@ -233,7 +254,7 @@ func (w *Watcher) once(ctx context.Context, onConnected func()) error {
 		}
 		// Older herdr versions reject newer subscription types (pane.moved / pane.updated)
 		// and close the connection after an error: re-Dial cleanly with legacy subscriptions.
-		ev, err = Dial(ctx, w.client, w.socketPath)
+		ev, err = DialWatch(ctx, w.client, w.socketPath)
 		if err != nil {
 			return &watchError{step: stepDial, err: err}
 		}
@@ -272,6 +293,10 @@ func (w *Watcher) once(ctx context.Context, onConnected func()) error {
 	// Periodic refresh as a safety net in case an event was dropped.
 	tick := time.NewTicker(30 * time.Second)
 	defer tick.Stop()
+	settle := w.kickSettle
+	if settle <= 0 {
+		settle = 250 * time.Millisecond
+	}
 	for {
 		select {
 		case <-ctx.Done():
@@ -282,20 +307,31 @@ func (w *Watcher) once(ctx context.Context, onConnected func()) error {
 			}
 			return &watchError{step: stepStream, err: err}
 		case <-kick:
-			time.Sleep(250 * time.Millisecond) // let bursts settle
+			t := time.NewTimer(settle) // let bursts settle
+			select {
+			case <-ctx.Done():
+				t.Stop()
+				return nil
+			case err := <-errc:
+				t.Stop()
+				if err == nil {
+					err = errStreamEnded
+				}
+				return &watchError{step: stepStream, err: err}
+			case <-t.C:
+			}
 			for len(kick) > 0 {
 				<-kick
 			}
 		case <-tick.C:
 		case <-w.again:
 		}
-		s, err := w.refresh(ctx)
+		s, err := w.refreshWithRetry(ctx, errc)
 		if err != nil {
-			var we *watchError
-			if errors.As(err, &we) {
-				err = we.err
-			}
-			return &watchError{step: stepRefresh, err: err}
+			return err
+		}
+		if s == nil {
+			return nil
 		}
 		if paneSet(s) != paneKey {
 			return nil // resubscribe with the new pane list
@@ -303,8 +339,97 @@ func (w *Watcher) once(ctx context.Context, onConnected func()) error {
 	}
 }
 
+// refreshWithRetry retries transient snapshot refresh failures while the event
+// subscription stream (errc) remains healthy. It backs off exponentially up to
+// refreshRetryMax and only gives up after refreshGiveUp of consecutive failures
+// (or immediately if the subscription stream ends).
+func (w *Watcher) refreshWithRetry(ctx context.Context, errc <-chan error) (*Snapshot, error) {
+	retryBase := w.refreshRetryBase
+	if retryBase <= 0 {
+		retryBase = time.Second
+	}
+	retryMax := w.refreshRetryMax
+	if retryMax <= 0 {
+		retryMax = 10 * time.Second
+	}
+	giveUp := w.refreshGiveUp
+	if giveUp <= 0 {
+		giveUp = 20 * time.Second
+	}
+
+	var (
+		failStart time.Time
+		delay     = retryBase
+		attempts  int
+	)
+	for {
+		s, err := w.refresh(ctx)
+		if err == nil {
+			return s, nil
+		}
+		if ctx.Err() != nil {
+			return nil, nil
+		}
+		select {
+		case serr := <-errc:
+			if serr == nil {
+				serr = errStreamEnded
+			}
+			return nil, &watchError{step: stepStream, err: serr}
+		default:
+		}
+
+		rawErr := err
+		var we *watchError
+		if errors.As(err, &we) {
+			rawErr = we.err
+		}
+
+		now := w.now()
+		if attempts == 0 {
+			failStart = now
+		}
+		attempts++
+		elapsed := now.Sub(failStart)
+		if elapsed >= giveUp {
+			return nil, &watchError{step: stepRefresh, err: rawErr}
+		}
+
+		wait := delay
+		if remaining := giveUp - elapsed; wait > remaining {
+			wait = remaining
+		}
+		w.logger().Debug("herdr watch refresh failed",
+			"session", w.SessionID,
+			"server", w.ServerName,
+			"socket", w.socketPath,
+			"busy", errors.Is(rawErr, sshx.ErrBusy),
+			"attempt", attempts,
+			"failing_for", elapsed.Round(time.Millisecond),
+			"retry_in", wait.Round(time.Millisecond),
+			"err", rawErr,
+		)
+
+		waitCh, stop := w.newRetryTimer(wait)
+		select {
+		case <-ctx.Done():
+			stop()
+			return nil, nil
+		case serr := <-errc:
+			stop()
+			if serr == nil {
+				serr = errStreamEnded
+			}
+			return nil, &watchError{step: stepStream, err: serr}
+		case <-waitCh:
+			stop()
+		}
+		delay = min(delay*2, retryMax)
+	}
+}
+
 func (w *Watcher) refresh(ctx context.Context) (*Snapshot, error) {
-	c, err := Dial(ctx, w.client, w.socketPath)
+	c, err := DialWatch(ctx, w.client, w.socketPath)
 	if err != nil {
 		return nil, &watchError{step: stepDial, err: err}
 	}
