@@ -41,7 +41,8 @@ import { matchQuery } from './agents'
 import { callOut, keptEntries } from './conversation'
 import { ShowTerminal } from './showTerminal'
 import { FileTypeIcon } from './fileIcons'
-import { categoryIcon, stepIcon, ThinkIcon, WorkIcon } from './stepIcons'
+import { categoryIcon, stepIcon, taskIcon, ThinkIcon, WorkIcon } from './stepIcons'
+import { taskEventMeta, toolObjectIsCode } from './stepFormat'
 import { SessionCard, type CardActs, type CardData } from './sessionCard'
 import type { Convo, ConvoAnswer, ConvoCost, ConvoQuota, ConvoQuotaWindow, ConvoEntry, ConvoShell, ConvoHunk, ConvoMeta, ConvoPart, ConvoQueued, ConvoRunning, ConvoTask, ConvoTool, ConvoTrouble, ConvoEvent } from './conversation'
 import { agentName } from './askText'
@@ -6268,7 +6269,7 @@ function EventNote({ ev, idle, sum }: { ev: ConvoEvent; idle?: boolean; sum?: Co
     const Ic = SAID_ICONS[ev.ic ?? ''] ?? Info
     return (
       <div className={'convo-event is-limit is-said' + (ev.level === 'warning' ? ' is-warn' : '')}>
-        <Ic size={14} aria-hidden="true" />
+        <Ic size={16} strokeWidth={1.75} className="convo-step-ic" aria-hidden="true" />
         <div className="convo-trouble-body">
           <p className="convo-trouble-head">{ev.text}</p>
         </div>
@@ -6279,7 +6280,7 @@ function EventNote({ ev, idle, sum }: { ev: ConvoEvent; idle?: boolean; sum?: Co
     const what = [ev.model ? modelName(ev.model) : '', ev.effort ? t('convo.model.effort', { e: effortName(ev.effort) }) : ''].filter(Boolean).join(' · ') // (as the chip says it)
     return (
       <div className="convo-event is-limit is-model">
-        <Cpu size={14} aria-hidden="true" />
+        <Cpu size={16} strokeWidth={1.75} className="convo-step-ic" aria-hidden="true" />
         <div className="convo-trouble-body">
           <p className="convo-trouble-head">{t(ev.kept ? 'convo.model.kept' : ev.session ? 'convo.model.setSession' : ev.saved ? 'convo.model.setSaved' : 'convo.model.set', { m: what })}</p>
         </div>
@@ -6295,7 +6296,7 @@ function EventNote({ ev, idle, sum }: { ev: ConvoEvent; idle?: boolean; sum?: Co
     } else head = t(ev.kind === 'limit_wait' ? 'convo.limit.wait' : ev.kind === 'limit_reset' ? 'convo.limit.reset' : 'convo.limit.cancelled')
     return (
       <div className={'convo-event is-limit' + (ev.kind === 'limit' ? ' is-warn' : '')}>
-        <Clock size={14} aria-hidden="true" />
+        <Clock size={16} strokeWidth={1.75} className="convo-step-ic" aria-hidden="true" />
         <div className="convo-trouble-body">
           <p className="convo-trouble-head">{head}</p>
           {ev.kind === 'limit_cancelled' && ev.text && <p className="convo-trouble-said">{ev.text}</p>}
@@ -6308,24 +6309,33 @@ function EventNote({ ev, idle, sum }: { ev: ConvoEvent; idle?: boolean; sum?: Co
       </div>
     )
   }
-  // Work set going in the background, ended (or waiting): one line, its
-  // name's first line; all of it (a command of many lines) behind a tap.
+  // Work set going in the background, ended (or waiting): same icon + title
+  // structure as other steps; monospace only for raw shell commands.
   if (ev.kind === 'task') {
     const name = ev.text ?? ''
-    const head = t(`convo.task.${ev.task ?? 'cmd'}.${ev.status ?? 'done'}` as I18nKey) + (ev.code ? t('convo.task.code', { n: ev.code }) : '')
-    // (One line, its name's first line cut where the line ends: the line
-    // itself opens all of it, however much was cut.)
+    const meta = taskEventMeta(ev)
+    const Icon = taskIcon(meta.icon)
+    const head = t(meta.headKey as I18nKey) + (ev.code ? t('convo.task.code', { n: ev.code }) : '')
     return (
       <div className={'convo-event is-task' + (ev.status === 'failed' ? ' is-warn' : '')}>
         {name ? (
-          <button type="button" className="convo-task-line" aria-expanded={open} onClick={() => setOpen(!open)} title={name.length > 400 ? name.slice(0, 400) + '…' : name}>
-            <span className="convo-task-head">{head}</span>
-            <span className="convo-task-name">{firstLine(name)}</span>
+          <button type="button" className="convo-work-head convo-task-line" aria-expanded={open} onClick={() => setOpen(!open)} title={name.length > 400 ? name.slice(0, 400) + '…' : name}>
+            <Icon size={16} strokeWidth={1.75} className="convo-step-ic" aria-hidden="true" />
+            <span className="convo-work-text convo-task-text">
+              <span className="convo-task-head">{head}{t('convo.task.sep')}</span>
+              <span className={'convo-task-name' + (meta.isCode ? ' is-code' : '')}>{firstLine(name)}</span>
+              <span className="convo-chev-box" aria-hidden="true">
+                <ChevronRight size={14} className="convo-chev" />
+              </span>
+            </span>
           </button>
         ) : (
-          <p className="convo-task-line">
-            <span className="convo-task-head">{head}</span>
-          </p>
+          <div className="convo-work-head is-static convo-task-line">
+            <Icon size={16} strokeWidth={1.75} className="convo-step-ic" aria-hidden="true" />
+            <span className="convo-work-text convo-task-text">
+              <span className="convo-task-head">{head}</span>
+            </span>
+          </div>
         )}
         {name && open && (
           <pre className="convo-pre convo-task-full">
@@ -6340,7 +6350,7 @@ function EventNote({ ev, idle, sum }: { ev: ConvoEvent; idle?: boolean; sum?: Co
     const said = (ev.text ?? '').trim()
     return (
       <div className="convo-event is-scheduled">
-        <Clock size={14} aria-hidden="true" />
+        <Clock size={16} strokeWidth={1.75} className="convo-step-ic" aria-hidden="true" />
         <div className="convo-trouble-body">
           <p className="convo-trouble-head">{t(ev.loop ? 'convo.event.loop' : 'convo.event.scheduled')}</p>
           {said && open && (
@@ -6372,7 +6382,7 @@ function EventNote({ ev, idle, sum }: { ev: ConvoEvent; idle?: boolean; sum?: Co
     return (
       <details className="convo-summary is-compact">
         <summary>
-          <ChevronRight size={14} className="convo-chev" aria-hidden="true" />
+          <ChevronRight size={16} strokeWidth={1.75} className="convo-chev" aria-hidden="true" />
           <span className="convo-event-said">{line}</span>
         </summary>
         <div className="convo-md">
@@ -7544,7 +7554,7 @@ function object(tool: ConvoTool): { text: string; code: boolean } {
   if (v === 'cmd' && d) return { text: d.replace(/^cd\s+(?:"[^"]*"|'[^']*'|[^\s&;|]+)\s*&&\s*/, ''), code: true }
   if (tool.title) return { text: tool.title, code: false }
   if (v === 'read' || v === 'edit' || v === 'write') return { text: shortPath(d), code: true }
-  return { text: d, code: v === 'cmd' || v === 'search' || v === 'web' || v === 'browser' || v === 'mcp' || v === 'doc' || v === 'page' || v === 'stop' }
+  return { text: d, code: toolObjectIsCode(tool.name, v, false, false) }
 }
 
 // The word each verb says, done and under way. A table, not a name put

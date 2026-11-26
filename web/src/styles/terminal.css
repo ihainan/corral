@@ -954,23 +954,26 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 .convo-state p { margin: 0; max-width: 32em; }
 /* (A new conversation: what was sent waits under its note, as it would in the thread.) */
 .convo-state-pending { align-self: stretch; display: flex; flex-direction: column; gap: 14px; text-align: start; color: var(--term-fg); margin-top: 12px; }
-.convo-older, .convo-working, .convo-note, .convo-cut { margin: 0; font-size: var(--fs-sub); line-height: var(--lh-sub); color: var(--term-fg-3); }
+.convo-older { margin: 0; font-size: var(--fs-sub); line-height: var(--lh-sub); color: var(--term-fg-way); text-align: center; }
+.convo-cut { margin: 0; font-size: var(--fs-note); line-height: var(--lh-note); color: var(--term-fg-way); }
+.convo-working, .convo-note { margin: 0; padding-left: 24px; font-size: var(--fs-sub); line-height: var(--lh-sub); color: var(--term-fg-2); }
 .convo-note { white-space: pre-wrap; }
-.convo-older { text-align: center; }
 .term-root .convo-working-act { margin-left: 10px; font-size: var(--fs-sub); line-height: var(--lh-sub); }
-/* The thread's rhythm: its parts 12 apart; what the agent did tucked under
-   what it said of it (4); the answer 16 off what led to it; a new turn of the
-   person's 32 off the last. Distance does the grouping, not more frames. */
-/* (The column's gap is the 12; the pairs below only add to it or take from
-   it, so a part's own margins — an event's, a note's — never undo it.) */
-:is(.convo-col, .convo-sub-body) > .convo-mid + .convo-work, :is(.convo-col, .convo-sub-body) > .convo-work + .convo-work { margin-top: -8px; }
-:is(.convo-col, .convo-sub-body) > * + .convo-answer, :is(.convo-col, .convo-sub-body) > .convo-user + * { margin-top: 4px; }
+/* The thread's rhythm: process items 8 apart (12px column gap minus 4px);
+   body paragraphs (answer & full mid-turn text) 16 off what precedes and
+   follows them (12 + 4); a new turn of the person's 32 off the last (12 + 20). */
+:is(.convo-col, .convo-sub-body) > :is(.convo-mid.is-brief, .convo-work, .convo-event.is-task, .convo-event.is-limit, .convo-event.is-scheduled, .convo-fold, .convo-gone, .convo-note, .convo-note-parts, .convo-working, .convo-summary:not(.is-compact)) + :is(.convo-mid.is-brief, .convo-work, .convo-event.is-task, .convo-event.is-limit, .convo-event.is-scheduled, .convo-fold, .convo-gone, .convo-note, .convo-note-parts, .convo-working, .convo-summary:not(.is-compact)) { margin-top: -4px; }
+:is(.convo-col, .convo-sub-body) > * + .convo-answer,
+:is(.convo-col, .convo-sub-body) > * + .convo-mid:not(.is-brief),
+:is(.convo-col, .convo-sub-body) > .convo-mid:not(.is-brief) + :not(.convo-held):not(.convo-user),
+:is(.convo-col, .convo-sub-body) > .convo-answer + :not(.convo-held):not(.convo-user),
+:is(.convo-col, .convo-sub-body) > .convo-user + :not(.convo-held):not(.convo-user) { margin-top: 4px; }
 :is(.convo-col, .convo-sub-body) > * + .convo-user { margin-top: 20px; }
 :is(.convo-col, .convo-sub-body) > * + .convo-user.is-mid, :is(.convo-col, .convo-sub-body) > .convo-older + .convo-user { margin-top: 4px; }
 /* An item not shown (in a folded turn, or told on another's line): held in
    its place, of no height, its gap taken back — the column's children stay
    one to an item for the jumps and the scroll kept, which count them. */
-:is(.convo-col, .convo-sub-body) > .convo-held.convo-held { height: 0; margin: -12px 0 0; }
+:is(.convo-col, .convo-sub-body) > .convo-held.convo-held.convo-held { height: 0; margin: -12px 0 0; }
 /* A finished turn's way there, folded to a line over its answer (11-13). */
 .convo-fold { align-self: flex-start; }
 
@@ -1125,36 +1128,36 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 .md-table th:first-child, .md-table td:first-child { padding-left: 0; }
 .md-table th { font-weight: 600; color: var(--term-fg); white-space: nowrap; border-bottom-color: color-mix(in srgb, var(--term-fg) 18%, transparent); }
 
-/* A turn's work: one grey line, opened to a line a step (no cards). Each
-   begins with a mark of what kind of thing it was (stepIcons.tsx): 16px, on
-   the middle of its first line however many lines it takes, the words 8px
-   on; what is under a line starts where its words do, 24 in. */
+/* A turn's work: unified two-edge layout (16px icon slot at 0, 8px gap, all
+   process text aligned at 24px) and two-level grey hierarchy (level 1:
+   --term-fg-2 at --fs-sub; level 2 descriptions/details: --term-fg-way at
+   --fs-note). */
 .convo-work { display: flex; flex-direction: column; min-width: 0; }
 .convo-work-head, .convo-step-head {
   display: flex; align-items: baseline; gap: 8px; max-width: 100%; border: 0; background: none; padding: 2px 0;
-  color: var(--term-fg-3); text-align: left; cursor: pointer; font: inherit; font-size: var(--fs-ui); line-height: var(--lh-ui);
+  color: var(--term-fg-2); text-align: left; cursor: pointer; font: inherit; font-size: var(--fs-sub); line-height: var(--lh-sub);
 }
-.convo-work-head { font-size: var(--fs-sub); line-height: var(--lh-sub); color: var(--term-fg-way); }
 .convo-work-head { align-self: flex-start; }
-/* (Its last thought's line in full — a sentence or two, as they mostly are; one run long cut at three. 11-26.) */
-.convo-work-said { margin: 0 0 2px 24px; color: var(--term-fg-way); font-size: var(--fs-sub); line-height: var(--lh-sub); overflow-wrap: anywhere; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; line-clamp: 3; overflow: hidden; }
-.convo-work-sent { list-style: none; margin: 0 0 4px 24px; padding: 0; display: grid; gap: 2px; color: var(--term-fg-2); font-size: var(--fs-sub); line-height: var(--lh-sub); }
+/* (Subordinate description tucked directly under a step title: level 2 grey, one size smaller, aligned at 24px.) */
+.convo-work-said { margin: 0 0 0 24px; color: var(--term-fg-way); font-size: var(--fs-note); line-height: var(--lh-note); overflow-wrap: anywhere; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; line-clamp: 3; overflow: hidden; }
+.convo-work-sent { list-style: none; margin: 2px 0 0 24px; padding: 0; display: grid; gap: 2px; color: var(--term-fg-way); font-size: var(--fs-note); line-height: var(--lh-note); }
 .convo-work-sent li { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .convo-work-sent .link-btn { color: inherit; font: inherit; }
 .convo-work-sent .link-btn:hover { color: var(--term-fg); }
-.convo-work-sent-more { color: var(--term-fg-3); }
+.convo-work-sent-more { color: var(--term-fg-way); }
 @media (pointer: coarse) { .convo-work-head, .convo-step-head { padding: 8px 0; } }
 .convo-work-head:hover, .convo-step-head:hover { color: var(--term-fg); }
 /* (A run with nothing yet to open: a line, not a button.) */
-.convo-work-head.is-static, .convo-work-head.is-static:hover { cursor: default; color: var(--term-fg-way); }
+.convo-work-head.is-static, .convo-work-head.is-static:hover { cursor: default; color: var(--term-fg-2); }
 .convo-work-head.is-static:hover > .convo-step-ic { color: var(--term-fg-way); }
 .convo-work-head:focus-visible, .convo-step-head:focus-visible { outline: 2px solid var(--term-accent-text); outline-offset: 2px; border-radius: var(--r-xs); }
 .convo-chev { flex: none; align-self: center; color: inherit; transition: transform 0.15s var(--ease); }
+.convo-work-head > .convo-chev { align-self: flex-start; margin-top: calc((var(--lh-sub) - 16px) / 2); color: var(--term-fg-way); }
+.convo-work-head:hover > .convo-chev { color: var(--term-fg-2); }
 [aria-expanded='true'] > .convo-chev { transform: rotate(90deg); }
-/* The mark: placed by the line's height, not the font's baseline, so it sits
-   the same in every face (a fixed offset from the baseline did not). */
-.convo-step-ic { flex: none; align-self: flex-start; margin-top: calc((var(--lh-ui) - 16px) / 2); color: var(--term-fg-way); }
-.convo-work-head > .convo-step-ic, .convo-step.is-thought .convo-step-ic { margin-top: calc((var(--lh-sub) - 16px) / 2); }
+/* The mark: 16px slot placed by the line's height, not the font's baseline, so
+   every process icon sits on the same 0..16px gutter and text starts at 24px. */
+.convo-step-ic { flex: none; align-self: flex-start; margin-top: calc((var(--lh-sub) - 16px) / 2); color: var(--term-fg-way); }
 .convo-work-head:hover > .convo-step-ic, .convo-step-head:hover > .convo-step-ic { color: var(--term-fg-2); }
 /* (What it is in outranks the pointer over it: after the hover, as strong.) */
 .convo-work-head.is-live > .convo-step-ic { color: var(--term-fg); }
@@ -1171,35 +1174,29 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 .convo-work-text.is-live > .convo-chev-box { margin-left: 0; } /* (the live line's own 8px gap is before it) */
 .convo-work-text { min-width: 0; }
 .convo-failed { flex: none; margin-left: 8px; font-size: var(--fs-sub); line-height: var(--lh-sub); font-weight: 500; color: var(--term-danger-text); white-space: nowrap; }
-.convo-work-body { display: flex; flex-direction: column; gap: 1px; padding: 4px 0 2px 24px; }
+.convo-work-body { display: flex; flex-direction: column; gap: 2px; padding: 4px 0 2px 24px; }
 .convo-step { display: flex; flex-direction: column; min-width: 0; }
-.convo-step-head { width: 100%; color: var(--term-fg-2); }
-/* (The verb: of the line's words, not a column of its own down the run — regular, as grey as the rest.) */
-.convo-step-verb { flex: none; color: var(--term-fg-2); }
+.convo-step-head { width: 100%; }
+/* (The verb: of the line's words, not a column of its own down the run — regular, inheriting hover.) */
+.convo-step-verb { flex: none; color: inherit; }
 .convo-step-obj { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.convo-step-obj.is-code { font-family: var(--font-mono); font-size: var(--fs-sub); }
+.convo-step-obj.is-code { font-family: var(--font-mono); font-size: var(--fs-note); line-height: var(--lh-note); }
 .convo-work-text.is-live { display: flex; align-items: baseline; gap: 8px; min-width: 0; color: var(--term-fg-2); }
-.convo-step-body, .convo-thinking { padding: 4px 0 10px; }
-.convo-thinking { white-space: normal; font-size: var(--fs-sub); line-height: var(--lh-sub); color: var(--term-fg-2); }
-/* What the agent wrote between its steps: as its answer is. */
+.convo-step-body, .convo-thinking { padding: 4px 0 8px 24px; }
+@media (max-width: 640px) { .convo-work-body .convo-step-body { padding-left: 0; } }
+.convo-thinking { white-space: normal; font-size: var(--fs-note); line-height: var(--lh-note); color: var(--term-fg-way); }
+/* What the agent wrote between its steps: full body text at 0px; short process
+   commentary (is-brief) aligned to the 24px process text edge at level 1 grey. */
 .convo-mid { margin: 0; }
-/* (What it says on the way, a step quieter than the answer it ends with: C04/A04) */
-.convo-mid.is-brief { font-size: var(--fs-sub); line-height: var(--lh-sub); color: var(--term-fg-way); }
-/* (11-13: 13/20, as the rest of the way there — a run's line, a step, a thought — not 14/20 of its own) */
-/* (11-13: what it says on the way was the second grey, L*39, beside the answer's L*8: read as one.
-   Now two layers — the answer black; what goes on the way, its words, a run's line, a thought, in a
-   grey of their own, --term-fg-way: #707683 (L*50, 4.6:1 on white, the lightest small text may be:
-   these are only ever on the thread's white). Not the third grey made lighter: that one is also on
-   tinted grounds — the side list, a diff — where it would fall under 4.5:1.) */
-/* Thinking: told apart from calls by its mark and a lighter, smaller line, in a run's line and as a step. */
-.convo-work-text.is-thought, .convo-step.is-thought .convo-step-head { color: var(--term-fg-way); font-size: var(--fs-sub); line-height: var(--lh-sub); }
+.convo-mid.is-brief { padding-left: 24px; font-size: var(--fs-sub); line-height: var(--lh-sub); color: var(--term-fg-2); }
+.convo-mid.is-brief code { font-size: var(--fs-note); line-height: var(--lh-note); color: inherit; }
+.convo-mid.is-brief .md-path > code, .convo-mid.is-brief a code { color: var(--term-accent-text); }
 .convo-thought-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .convo-thought-head > .convo-step-head { flex: 1; min-width: 0; width: auto; }
-.convo-thinking { color: var(--term-fg-3); font-size: var(--fs-sub); line-height: var(--lh-sub); }
 .convo-thinking-bar { flex: none; display: inline-flex; align-items: center; gap: 8px; }
-.convo-thinking-status { font-size: var(--fs-note); line-height: var(--lh-note); color: var(--term-fg-3); white-space: nowrap; }
+.convo-thinking-status { font-size: var(--fs-note); line-height: var(--lh-note); color: var(--term-fg-way); white-space: nowrap; }
 .convo-thinking-toggle { appearance: none; border: 1px solid var(--term-line); border-radius: var(--r); background: transparent; color: var(--term-fg-2); font: inherit; font-size: var(--fs-note); line-height: var(--lh-note); padding: 1px 8px; cursor: pointer; }
-.convo-thinking-toggle:hover, .convo-thinking-toggle:focus-visible { color: var(--term-fg); border-color: var(--term-fg-3); }
+.convo-thinking-toggle:hover, .convo-thinking-toggle:focus-visible { color: var(--term-fg); border-color: var(--term-fg-way); }
 .convo-thinking-summary {
   margin-top: 8px; padding: 8px 12px; border: 1px solid var(--term-line); border-radius: var(--r);
   background: color-mix(in srgb, var(--term-fg) 4%, var(--term-bg)); color: var(--term-fg-2);
@@ -1211,11 +1208,11 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 .convo-thinking-summary-head > .convo-thinking-status { margin-left: auto; padding-left: 12px; font-weight: 400; }
 .convo-thinking-summary-head:last-child { margin-bottom: 0; } /* (only the head yet, while summarizing) */
 .convo-thinking-summary p:last-child, .convo-thinking-summary ul:last-child, .convo-thinking-summary ol:last-child { margin-bottom: 0; }
-.convo-work-body > .convo-note { margin: 4px 0; }
+.convo-work-body > .convo-note { margin: 0; padding-left: 24px; }
 /* What a rewind took back: a quiet line; what it was, faded, behind it. */
 .convo-gone { display: flex; flex-direction: column; min-width: 0; }
 .convo-gone-head { font-size: var(--fs-sub); line-height: var(--lh-sub); }
-.convo-gone-body { display: flex; flex-direction: column; gap: 14px; margin: 6px 0 2px 6px; padding: 2px 0 2px 14px; opacity: 0.62; }
+.convo-gone-body { display: flex; flex-direction: column; gap: 12px; margin: 4px 0 0; padding: 2px 0 2px 24px; opacity: 0.62; }
 .convo-lines { flex: none; display: inline-flex; gap: 6px; font-family: var(--font-mono); font-size: var(--fs-sub); line-height: var(--lh-sub); }
 .convo-lines-add { color: var(--term-ok-text); }
 .convo-lines-del { color: var(--term-danger-text); }
@@ -1227,7 +1224,7 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
    with the line out of view as in it. */
 .convo-shimmer {
   min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  background: linear-gradient(90deg, var(--term-fg-3) 0% 38%, var(--term-accent-text) 50%, var(--term-fg-3) 62% 100%) 100% 0 / 250% 100% no-repeat;
+  background: linear-gradient(90deg, var(--term-fg-2) 0% 38%, var(--term-accent-text) 50%, var(--term-fg-2) 62% 100%) 100% 0 / 250% 100% no-repeat;
   -webkit-background-clip: text; background-clip: text; color: transparent; animation: convo-shimmer 2.2s steps(30) infinite; animation-play-state: paused;
 }
 .convo-shimmer[data-run] { animation-play-state: running; }
@@ -1243,7 +1240,7 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 @keyframes convo-shimmer { 0% { background-position: 100% 0; } 75%, 100% { background-position: 0% 0; } }
 /* (Less motion asked for: no band moving, the words dim and come back in place.) */
 @keyframes convo-pulse { from { opacity: 1; } to { opacity: 0.45; } }
-.convo-live-time { flex: none; color: var(--term-fg-3); font-size: var(--fs-sub); line-height: var(--lh-sub); font-variant-numeric: tabular-nums; }
+.convo-live-time { flex: none; color: var(--term-fg-way); font-size: var(--fs-note); line-height: var(--lh-note); font-variant-numeric: tabular-nums; }
 .convo-spin {
   display: inline-block; width: 11px; height: 11px; margin-right: 6px; vertical-align: -1px; border-radius: 50%;
   border: 1.5px solid var(--term-line); border-top-color: var(--term-accent-text); animation: convo-spin 0.9s linear infinite;
@@ -1438,8 +1435,8 @@ button.gch-ut:hover { background: var(--term-hover); }
 }
 .convo-pre-wrap .convo-pre { padding-right: 52px; }
 .convo-result.is-full { max-height: none; }
-.convo-omitted { color: var(--term-fg-3); font-size: var(--fs-note); line-height: var(--lh-note); }
-.convo-result-head { margin: 8px 0 4px; font-size: var(--fs-note); line-height: var(--lh-note); color: var(--term-fg-3); }
+.convo-omitted { color: var(--term-fg-way); font-size: var(--fs-note); line-height: var(--lh-note); }
+.convo-result-head { margin: 8px 0 4px; font-size: var(--fs-note); line-height: var(--lh-note); color: var(--term-fg-way); }
 .convo-diff > span { display: block; }
 .convo-del { background: var(--term-del-bg); }
 .convo-add { background: var(--term-add-bg); }
@@ -1456,11 +1453,14 @@ button.gch-ut:hover { background: var(--term-hover); }
 .convo-file-card-dir { flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono); font-size: var(--fs-note); line-height: var(--lh-note); color: var(--term-fg-3); }
 .convo-file-card .convo-file-tools { margin-left: 0; }
 .convo-summary summary { display: flex; align-items: center; gap: 8px; cursor: pointer; list-style: none; font-size: var(--fs-sub); line-height: var(--lh-sub); color: var(--term-fg-2); }
+.convo-summary:not(.is-compact) > summary > .convo-chev { color: var(--term-fg-way); }
+.convo-summary:not(.is-compact) > summary:hover > .convo-chev { color: var(--term-fg-2); }
 .convo-summary summary::-webkit-details-marker { display: none; }
 .convo-summary[open] > summary > .convo-chev { transform: rotate(90deg); }
 .convo-summary summary:hover { color: var(--term-fg); }
 @media (pointer: coarse) { .convo-summary summary { min-height: 44px; margin: -11px 0; } }
 .convo-summary .convo-md { margin-top: 8px; color: var(--term-fg-2); font-size: var(--fs-sub); line-height: var(--lh-sub); }
+.convo-summary:not(.is-compact) > .convo-md { padding-left: 24px; }
 /* A compaction with the summary it wrote: the compaction's line, a rule to the
    end of the column (as a compaction alone has), opened to the summary. */
 .convo-summary.is-compact { margin: 4px 0; }
@@ -1575,23 +1575,20 @@ button.gch-ut:hover { background: var(--term-hover); }
   white-space: pre-wrap; overflow-wrap: anywhere; max-height: 200px; overflow-y: auto;
 }
 .convo-trouble svg { flex: none; margin-top: 2px; color: var(--term-warn-text); }
-.convo-event.is-scheduled { display: flex; gap: 8px; align-items: flex-start; margin: 0; font-size: var(--fs-sub); line-height: var(--lh-sub); color: var(--term-fg-2); }
-.convo-event.is-scheduled svg { flex: none; margin-top: 3px; color: var(--term-fg-3); }
+.convo-event.is-scheduled { display: flex; gap: 8px; align-items: flex-start; margin: 0; padding: 2px 0; font-size: var(--fs-sub); line-height: var(--lh-sub); color: var(--term-fg-2); }
 .convo-event.is-scheduled .convo-trouble-head { color: var(--term-fg-2); }
-/* Background work ended: one quiet line (itself the button that opens all of
-   its name), its name in the code face, cut where the line ends */
-.convo-event.is-task { margin: 2px 0; font-size: var(--fs-sub); line-height: var(--lh-sub); color: var(--term-fg-3); }
-.convo-task-line {
-  display: flex; align-items: baseline; gap: 6px; width: 100%; min-width: 0; margin: 0; padding: 0; border: 0;
-  background: none; color: inherit; font: inherit; text-align: left;
-}
-button.convo-task-line { cursor: pointer; }
-button.convo-task-line:hover .convo-task-name { color: var(--term-fg); }
-/* (Both cut where the line ends, the state first: the name keeps a few letters' room) */
-.convo-task-head { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.convo-event.is-task.is-warn .convo-task-head { color: var(--term-warn-text); }
-.convo-task-name { flex: 1 0 0; min-width: 6em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono); font-size: var(--fs-note); line-height: var(--lh-note); color: var(--term-fg-2); }
-.convo-task-full { margin: 4px 0; max-height: 240px; overflow: auto; }
+.convo-event.is-scheduled .convo-trouble-said, .convo-event.is-limit .convo-trouble-said { color: var(--term-fg-way); font-size: var(--fs-note); line-height: var(--lh-note); }
+.convo-event.is-scheduled .link-btn, .convo-event.is-limit .link-btn { margin-top: 2px; font-size: var(--fs-note); line-height: var(--lh-note); }
+/* Background work ended: same icon + title step row as other process items;
+   monospace only for raw shell commands (.is-code). */
+.convo-event.is-task { display: flex; flex-direction: column; min-width: 0; margin: 0; }
+.convo-task-text { min-width: 0; overflow-wrap: anywhere; }
+.convo-task-head { color: inherit; }
+.convo-event.is-task.is-warn .convo-step-ic, .convo-event.is-task.is-warn .convo-task-head { color: var(--term-warn-text); }
+.convo-task-name { color: inherit; }
+.convo-task-name.is-code { font-family: var(--font-mono); font-size: var(--fs-note); line-height: var(--lh-note); }
+.convo-task-full { margin: 4px 0 0 24px; max-height: 240px; overflow: auto; }
+@media (max-width: 640px) { .convo-work-body .convo-task-full { margin-left: 0; } }
 .convo-event.is-compact { display: flex; align-items: center; gap: 10px; margin: 4px 0; font-size: var(--fs-note); line-height: var(--lh-note); color: var(--term-fg-3); text-align: center; }
 .convo-event.is-compact::before, .convo-event.is-compact::after { content: ''; flex: 1 1 24px; border-top: 1px solid var(--term-line); }
 .convo-event-said { flex: 0 1 auto; min-width: 0; }
@@ -2484,10 +2481,9 @@ button.convo-queue-row.is-note:last-child { border-radius: 0 0 var(--r-lg) var(-
 .convo-rail-when { font-size: var(--fs-note); line-height: var(--lh-note); color: var(--term-fg-3); }
 .convo-rail-text { font-size: var(--fs-sub); line-height: var(--lh-sub); color: var(--term-fg); display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; }
 @media (prefers-reduced-motion: reduce) { .convo-rail-tick::before { transition: none; } }
-.convo-event.is-limit { display: flex; gap: 8px; align-items: flex-start; margin: 0; font-size: var(--fs-sub); line-height: var(--lh-sub); color: var(--term-fg-2); }
-.convo-event.is-limit svg { flex: none; margin-top: 3px; color: var(--term-fg-3); }
+.convo-event.is-limit { display: flex; gap: 8px; align-items: flex-start; margin: 0; padding: 2px 0; font-size: var(--fs-sub); line-height: var(--lh-sub); color: var(--term-fg-2); }
 .convo-event.is-limit .convo-trouble-head { color: var(--term-fg-2); }
-.convo-event.is-limit.is-warn svg, .convo-event.is-limit.is-warn .convo-trouble-head { color: var(--term-warn-text); }
+.convo-event.is-limit.is-warn .convo-step-ic, .convo-event.is-limit.is-warn .convo-trouble-head { color: var(--term-warn-text); }
 
 /* A subagent's own conversation, in the panel beside */
 .convo-sub-body { padding: 12px 16px 24px; display: flex; flex-direction: column; gap: 12px; }
@@ -2801,7 +2797,8 @@ button.convo-queue-row.is-note:last-child { border-radius: 0 0 var(--r-lg) var(-
 .convo-shell { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; min-width: 0; }
 .convo-shell > .convo-pre-wrap { width: 100%; }
 .convo-shell-err { width: 100%; color: var(--term-danger-text); }
-.convo-note-parts { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.convo-note-parts { display: flex; flex-direction: column; gap: 6px; padding-left: 24px; min-width: 0; }
+.convo-note-parts > .convo-note { padding-left: 0; }
 /* Claude Code's card above its box (Heads up, You should know): over the composer, folded to a line */
 .claude-card { margin: 0 0 8px; border: 1px solid var(--term-line); border-radius: var(--r-lg); background: var(--term-bg); font-family: var(--font-ui); }
 .claude-card-head {

@@ -23,6 +23,7 @@ import {
   MessageCircleQuestionMark,
   MousePointerClick,
   Plug,
+  Radar,
   Search,
   Send,
   Sparkles,
@@ -87,3 +88,9 @@ export function stepIcon(tool: ConvoTool): LucideIcon {
 }
 
 export const categoryIcon = (c: Category): LucideIcon => CATEGORY_ICON[c]
+
+export function taskIcon(kind?: 'cmd' | 'agent' | 'monitor'): LucideIcon {
+  if (kind === 'agent') return Bot
+  if (kind === 'monitor') return Radar
+  return Terminal
+}
