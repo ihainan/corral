@@ -3,6 +3,7 @@ package convo
 import (
 	"bytes"
 	"encoding/json"
+	"regexp"
 	"strings"
 )
 
@@ -93,6 +94,30 @@ const (
 )
 
 func NewDevin() *Devin { return &Devin{} }
+
+// dvRefRe: how Devin cites a file, or lines of one, in what it says
+// (<ref_file file="/w/a.go" />, <ref_snippet file="/w/a.go" lines="3-9" />):
+// its own terminal shows them as links; here they would be raw markup.
+var dvRefRe = regexp.MustCompile(`<ref_(?:file|snippet)\s+file="([^"<>\n]{1,1000})"(?:\s+lines="([0-9]{1,9}(?:-[0-9]{1,9})?)")?\s*/?>`)
+
+// dvRefs puts each citation as the file it names, in code: with its lines,
+// when it gives them (a.go:3-9).
+func dvRefs(s string) string {
+	if !strings.Contains(s, "<ref_") {
+		return s
+	}
+	return dvRefRe.ReplaceAllStringFunc(s, func(m string) string {
+		g := dvRefRe.FindStringSubmatch(m)
+		at := g[1]
+		if g[2] != "" {
+			at += ":" + g[2]
+		}
+		if strings.Contains(at, "`") {
+			return m
+		}
+		return "`" + at + "`"
+	})
+}
 
 func (c *Devin) Rev() int                 { return c.rev }
 func (c *Devin) Title() string            { return c.title }
@@ -227,7 +252,7 @@ func (c *Devin) answer(r dvRow) {
 		parts = append(parts, textPart(KindThinking, th))
 	}
 	if tx := strings.TrimSpace(r.C); tx != "" {
-		parts = append(parts, textPart(KindText, tx))
+		parts = append(parts, textPart(KindText, dvRefs(tx)))
 	}
 	e := &Entry{ID: clip(r.ID, maxID), Role: RoleAssistant, Time: clip(r.T, 64)}
 	var made []*Tool

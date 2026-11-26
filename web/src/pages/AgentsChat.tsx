@@ -2839,6 +2839,8 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
   // Why it cannot send now, if it cannot.
   // (Waiting for an answer, a message's Enter could take an option of its
   // question, or of a permission it asks: the answer first.)
+  // (A Devin bound: read only, for good — not a moment's wait to write through.)
+  const readOnly = bound && devin && !agent?.other
   const blocked = agent?.other
     ? t('convo.otherAgent', { agent: agent.other })
     : !bound
@@ -3013,12 +3015,19 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
               {t('agents.closeDialog')}
             </button>
           )}
+          {readOnly && (
+            <button type="button" className="link-btn agents-chat-why-act" onClick={() => openTerminal()}>
+              {t('convo.showTerminal')}
+            </button>
+          )}
         </p>
       )}
       {/* (Something written while it works: what will become of it, said while it is typed — the placeholder that said so is gone by then.) */}
       {!blocked && draft.trim() && agent?.status === 'working' && <p className="agents-chat-why is-note">{t(steers ? 'convo.steerNote' : 'convo.queueNote')}</p>}
       {panelOpen && <PanelWindow key={bindKey} sid={sid} active={active} press={pressBody} onSettled={convo.refresh} onFull={() => openTerminal()} toast={toast} />}
       {!panelOpen && !waits && liveOf === bindKey && <PanelWindow key={'live ' + bindKey} sid={sid} active={active} press={pressBody} onSettled={convo.refresh} toast={toast} live={{ onClose: () => setLiveOf(null), onFull: () => openTerminal(), letters: convo.bind?.agent === 'codex' }} />}
+      {/* (Devin's is only read here: no box to write in, the terminal for that.) */}
+      {!readOnly && (
       <div className="composer-box">
         <AttachStrip
           draft={draft}
@@ -3229,6 +3238,7 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
           )}
         </div>
       </div>
+      )}
     </div>
   )
 
