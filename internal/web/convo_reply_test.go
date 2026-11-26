@@ -636,3 +636,193 @@ func ownerGateCases(t *testing.T, dir string, pid int, start int64, run func(str
 		t.Fatalf("Enter not taken: exit %d, typed %q", got, wrote())
 	}
 }
+
+// Multi-tab AskUserQuestion with background task timers and spinners changing
+// between screen read and reply/fill:
+// - Background timer / spinner / status / Tip changes still allow submit (down -> fill -> enter).
+// - Question text changing is still refused (exit 10, screen_changed).
+// - Option text or cursor changing is still refused (exit 10, screen_changed).
+// - Already answered (tab marked answered or no longer waiting) is still refused.
+func TestAskUserQuestionFreeInputWithBackgroundTasks(t *testing.T) {
+	for _, p := range []string{"sh", "python3", "sha256sum"} {
+		if _, err := exec.LookPath(p); err != nil {
+			t.Skip("no " + p)
+		}
+	}
+	if _, err := os.Stat("/proc/self/stat"); err != nil {
+		t.Skip("no /proc")
+	}
+	dir := t.TempDir()
+	typed := filepath.Join(dir, "typed")
+	screenFile := filepath.Join(dir, "screen.txt")
+	os.WriteFile(filepath.Join(dir, "herdr"), []byte("#!/bin/sh\nif [ \"$1 $2\" = 'pane read' ]; then cat "+screenFile+"; exit 0; fi\nprintf '%s\\n' \"$*\" >>"+typed+"\n"), 0o755)
+	helper := exec.Command("python3", "-c", `import pty, os, sys, time
+pid, fd = pty.fork()
+if pid == 0:
+    os.environ["HERDR_PANE_ID"] = "p1"
+    os.execvp("sleep", ["sleep", "30"])
+print(pid, flush=True)
+time.sleep(30)`)
+	out, _ := helper.StdoutPipe()
+	if err := helper.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer helper.Process.Kill()
+	var pid int
+	if _, err := fmt.Fscan(out, &pid); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(200 * time.Millisecond)
+	stat, _ := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+	rest := strings.Fields(string(stat[strings.LastIndexByte(string(stat), ')')+2:]))
+	start, _ := strconv.ParseInt(rest[19], 10, 64)
+	os.MkdirAll(filepath.Join(dir, ".claude", "sessions"), 0o755)
+	state := func(status, why string) {
+		os.WriteFile(filepath.Join(dir, ".claude", "sessions", strconv.Itoa(pid)+".json"), []byte(fmt.Sprintf(`{"pid":%d,"sessionId":%q,"status":%q,"waitingFor":%q}`, pid, sidA, status, why)), 0o644)
+	}
+	env := append(os.Environ(), "PATH="+dir+":"+os.Getenv("PATH"), "XDG_RUNTIME_DIR="+dir, "HOME="+dir)
+	runKeys := func(gate string, keys []string) int {
+		os.Remove(typed)
+		cmd := convoGatedCommand(gate, "herdr", "", "p1", "/run/x.sock", int64(pid), start, sidA, 0, keys, 0)
+		c := exec.Command("sh", "-c", cmd)
+		c.Env = env
+		err := c.Run()
+		var ee *exec.ExitError
+		if errors.As(err, &ee) {
+			return ee.ExitCode()
+		}
+		return 0
+	}
+	runFill := func(gate, msg string) int {
+		os.Remove(typed)
+		cmd := convoGatedFillCommand(gate, "herdr", "", "p1", "/run/x.sock", int64(pid), start, sidA, len(msg), 0)
+		c := exec.Command("sh", "-c", cmd)
+		c.Stdin = strings.NewReader(msg)
+		c.Env = env
+		err := c.Run()
+		var ee *exec.ExitError
+		if errors.As(err, &ee) {
+			return ee.ExitCode()
+		}
+		return 0
+	}
+	wrote := func() string { b, _ := os.ReadFile(typed); return strings.TrimSpace(string(b)) }
+
+	makeScreen := func(spinner, tabs, question, opt2, row4 string, cursor int, footer, bgTimer string) string {
+		cur := func(n int) string {
+			if cursor == n {
+				return "❯ "
+			}
+			return "  "
+		}
+		return strings.Join([]string{
+			spinner,
+			"────────────────────────────────────────────────────────────",
+			tabs,
+			"",
+			question,
+			"",
+			cur(1) + "1. 只留给机构与导入账号 (Recommended)",
+			"     个人一律走统一登录；4 个公众号机构账号和定时导入程序仍用密码。",
+			cur(2) + "2. " + opt2,
+			"     只能统一登录；机构账号与导入程序需要另想办法。",
+			cur(3) + "3. 全部保留",
+			"     两种方式并存，登录页同时显示。",
+			cur(4) + "4. " + row4,
+			"────────────────────────────────────────────────────────────",
+			"  5. Chat about this",
+			"",
+			footer,
+			"  ● main",
+			"  ◯ general-purpose  Run Codex adversarial review of P…  " + bgTimer,
+			"  2 background tasks running · Run Codex adversarial review  " + bgTimer,
+		}, "\n") + "\n"
+	}
+
+	const (
+		tabsQ2 = "←  ☒ 登录范围  ☐ 密码登录  ☐ 生产应用  ☐ 写入授权  ✔ Submit  →"
+		q2Text = "接入统一登录后，博客原来的账号密码登录怎么处理?"
+		ownMsg = "机构账号我们后面会做特殊处理"
+	)
+
+	state("waiting", "input needed")
+
+	// 1. Background spinner, elapsed timer, and footer hint all tick while user
+	//    submits free text: move cursor to row 4 -> fill -> enter all succeed.
+	s0 := makeScreen("✽ Orchestrating… (13m 18s · ↓ 44.1k tokens)", tabsQ2, q2Text, "全部关闭", "Type something.", 1,
+		"Enter to select · Tab/Arrow keys to navigate · Esc to cancel", "13m 18s")
+	_, d0, _ := screenOf([]byte(s0))
+	s0Ticked := makeScreen("* Pondering… (13m 19s · ↓ 45.0k tokens)", tabsQ2, q2Text, "全部关闭", "Type something.", 1,
+		"Enter to select · Tab/Arrow keys to navigate · Esc to cancel", "13m 19s")
+	os.WriteFile(screenFile, []byte(s0Ticked), 0o644)
+	if got := runKeys("reply:"+d0, []string{"down", "down", "down"}); got != 0 || strings.Count(wrote(), "send-keys p1 down") != 3 {
+		t.Fatalf("cursor move while bg timer ticked: exit %d, typed %q", got, wrote())
+	}
+
+	s1 := makeScreen("✻ Waiting for 2 background tasks… (13m 20s)", tabsQ2, q2Text, "全部关闭", "Type something.", 4,
+		"Enter to submit · Tab/Arrow keys to navigate · Esc to cancel", "13m 20s")
+	_, d1, _ := screenOf([]byte(s1))
+	if d1 == d0 {
+		t.Fatal("moving cursor to row 4 did not change digest")
+	}
+	s1Ticked := makeScreen("· Running… (13m 21s)", tabsQ2, q2Text, "全部关闭", "Type something.", 4,
+		"Enter to submit · Tab/Arrow keys to navigate · Esc to cancel", "13m 21s")
+	os.WriteFile(screenFile, []byte(s1Ticked), 0o644)
+	if got := runFill("reply:"+d1, ownMsg); got != 0 || !strings.Contains(wrote(), "pane send-text p1") {
+		t.Fatalf("fill while bg timer ticked: exit %d, typed %q", got, wrote())
+	}
+
+	s2 := makeScreen("✽ Orchestrating… (13m 22s)", tabsQ2, q2Text, "全部关闭", ownMsg, 4,
+		"Enter to submit · Tab/Arrow keys to navigate · Esc to cancel", "13m 22s")
+	_, d2, _ := screenOf([]byte(s2))
+	if d2 == d1 {
+		t.Fatal("pasting text into row 4 did not change digest")
+	}
+	s2Ticked := makeScreen("✶ Compacting conversation… (13m 23s)", tabsQ2, q2Text, "全部关闭", ownMsg, 4,
+		"Enter to submit · Tab/Arrow keys to navigate · Esc to cancel", "13m 23s")
+	os.WriteFile(screenFile, []byte(s2Ticked), 0o644)
+	if got := runKeys("reply:"+d2, []string{"enter"}); got != 0 || wrote() != "pane send-keys p1 enter" {
+		t.Fatalf("enter while bg timer ticked: exit %d, typed %q", got, wrote())
+	}
+
+	// 2. Question changed (different question / next tab): MUST be refused (exit 10).
+	sOtherQ := makeScreen("✽ Orchestrating… (13m 18s)", tabsQ2, "生产应用使用哪个域名?", "全部关闭", "Type something.", 1,
+		"Enter to select · Tab/Arrow keys to navigate · Esc to cancel", "13m 18s")
+	os.WriteFile(screenFile, []byte(sOtherQ), 0o644)
+	if got := runKeys("reply:"+d0, []string{"down"}); got != 10 || wrote() != "" {
+		t.Fatalf("question changed: exit %d, typed %q", got, wrote())
+	}
+
+	// 3. Option changed: MUST be refused (exit 10).
+	sOtherOpt := makeScreen("✽ Orchestrating… (13m 18s)", tabsQ2, q2Text, "仅关闭普通用户", "Type something.", 1,
+		"Enter to select · Tab/Arrow keys to navigate · Esc to cancel", "13m 18s")
+	os.WriteFile(screenFile, []byte(sOtherOpt), 0o644)
+	if got := runKeys("reply:"+d0, []string{"down"}); got != 10 || wrote() != "" {
+		t.Fatalf("option changed: exit %d, typed %q", got, wrote())
+	}
+
+	// 4. Cursor moved unexpectedly: MUST be refused (exit 10).
+	sOtherCur := makeScreen("✽ Orchestrating… (13m 18s)", tabsQ2, q2Text, "全部关闭", "Type something.", 2,
+		"Enter to select · Tab/Arrow keys to navigate · Esc to cancel", "13m 18s")
+	os.WriteFile(screenFile, []byte(sOtherCur), 0o644)
+	if got := runKeys("reply:"+d0, []string{"down"}); got != 10 || wrote() != "" {
+		t.Fatalf("cursor changed: exit %d, typed %q", got, wrote())
+	}
+
+	// 5. Already answered:
+	// 5a) Tab status changed (☐ 密码登录 -> ☒ 密码登录): MUST be refused (exit 10).
+	tabsAnswered := "←  ☒ 登录范围  ☒ 密码登录  ☐ 生产应用  ☐ 写入授权  ✔ Submit  →"
+	sTabAnswered := makeScreen("✽ Orchestrating… (13m 18s)", tabsAnswered, q2Text, "全部关闭", "Type something.", 1,
+		"Enter to select · Tab/Arrow keys to navigate · Esc to cancel", "13m 18s")
+	os.WriteFile(screenFile, []byte(sTabAnswered), 0o644)
+	if got := runKeys("reply:"+d0, []string{"down"}); got != 10 || wrote() != "" {
+		t.Fatalf("already answered (tab ticked): exit %d, typed %q", got, wrote())
+	}
+
+	// 5b) No longer waiting (dialog answered & dismissed): MUST be refused (exit 9).
+	state("busy", "")
+	os.WriteFile(screenFile, []byte(s0), 0o644)
+	if got := runKeys("reply:"+d0, []string{"down"}); got != 9 || wrote() != "" {
+		t.Fatalf("already answered (not waiting): exit %d, typed %q", got, wrote())
+	}
+}

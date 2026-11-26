@@ -265,6 +265,59 @@ func TestHerdrReply(t *testing.T) {
 	}
 }
 
+func TestHerdrReplyAskUserQuestionWithBackgroundTimer(t *testing.T) {
+	h := newHarness(t)
+	admin := h.admin()
+	hd := newFakeHerdr(t)
+	askWithTimer := func(sec, question, opt2 string) string {
+		return strings.Join([]string{
+			"✽ Orchestrating… (" + sec + ")",
+			"────────────────────────────────────────────────────────────",
+			"←  ☒ 登录范围  ☐ 密码登录  ☐ 生产应用  ☐ 写入授权  ✔ Submit  →",
+			"",
+			question,
+			"❯ 1. 只留给机构与导入账号 (Recommended)",
+			"  2. " + opt2,
+			"  3. Type something.",
+			"Enter to select · Tab/Arrow keys to navigate · Esc to cancel",
+			"  ● main",
+			"  ◯ general-purpose  Run Codex adversarial review  " + sec,
+		}, "\n")
+	}
+	const q = "接入统一登录后，博客原来的账号密码登录怎么处理?"
+	hd.setScreen(askWithTimer("13m 18s", q, "全部关闭"))
+	base, _ := herdrReplyEnv(t, h, admin, hd)
+
+	askDigest, _ := admin.do("GET", base+"screen", nil).json()["digest"].(string)
+	// Background timer ticks -> reply still succeeds.
+	hd.setScreen(askWithTimer("13m 19s", q, "全部关闭"))
+	mustStatus(t, admin.do("POST", base+"reply", map[string]any{"digest": askDigest, "keys": []string{"down"}}), 200, "ask reply after bg timer tick")
+	// Duplicate submit on same question (even after another tick) -> already_answered.
+	hd.setScreen(askWithTimer("13m 20s", q, "全部关闭"))
+	r := admin.do("POST", base+"reply", map[string]any{"digest": askDigest, "keys": []string{"down"}})
+	mustStatus(t, r, 409, "duplicate ask reply")
+	if r.code() != "already_answered" {
+		t.Fatalf("expected already_answered, got %s", r.Body)
+	}
+	// Question changed -> screen_changed.
+	hd.setScreen(askWithTimer("13m 21s", "生产应用用哪个域名?", "全部关闭"))
+	r = admin.do("POST", base+"reply", map[string]any{"digest": askDigest, "keys": []string{"down"}})
+	mustStatus(t, r, 409, "question changed")
+	if r.code() != "screen_changed" {
+		t.Fatalf("expected screen_changed, got %s", r.Body)
+	}
+	// Option changed -> screen_changed.
+	hd.setScreen(askWithTimer("13m 21s", q, "仅关闭普通用户"))
+	r = admin.do("POST", base+"reply", map[string]any{"digest": askDigest, "keys": []string{"down"}})
+	mustStatus(t, r, 409, "option changed")
+	if r.code() != "screen_changed" {
+		t.Fatalf("expected screen_changed, got %s", r.Body)
+	}
+	if len(hd.typed()) != 1 {
+		t.Fatalf("expected only 1 send, got %d", len(hd.typed()))
+	}
+}
+
 // Two answers to one screen at once: one is typed. herdr refusing, or its
 // acknowledgement getting lost, is audited as such.
 func TestHerdrReplyRacesAndOutcomes(t *testing.T) {

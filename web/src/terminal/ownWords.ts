@@ -39,24 +39,208 @@ export function cursorRow(text: string): { n: number; rest: string; line: string
 }
 
 // The prompt without row n, its cursor mark, nor its hints at the foot
-// (they change as the row does): what must stay as it was. The hints only
-// where a line is one of them whole — a command saying "to cancel" in it
-// is the prompt's, kept (review513).
-const FOOT = [
-  /^\s*Esc to cancel( · Tab to amend)?\s*$/,
-  /^\s*Enter to select · ↑\/↓ to navigate( · ctrl\+g to edit in Vim)? · Esc to cancel\s*$/,
-  /^\s*shift\+tab to approve with this feedback\s*$/,
-  /^\s*ctrl\+g to edit in Vim · ~?\/?[\w./-]*\.md\s*$/,
-]
-const isFoot = (l: string) => FOOT.some((f) => f.test(l))
+// (they change as the row does): what must stay as it was. For an active
+// AskUserQuestion dialog, only the question itself (tab bar, question, and
+// options other than row n) is compared so background-task timers, spinners,
+// status bars, Tips, and changing footer hints never cause false refusals.
+// For other prompts (plan / permission amend), known footers, live spinners,
+// blinking bullets, and bottom agent-list ages are normalized.
+const HINT_SEG = /^(?:Enter to (?:select|confirm|submit)|(?:[↑↓←→/]+|Tab\/Arrow keys|Arrow keys) to navigate|Tab to (?:switch questions|amend)|n to add notes|Esc to cancel|shift\+tab to approve with this feedback|ctrl\+g to edit in Vim(?: .*)?)$/
+const NAV_HINT = /Enter to (?:select|confirm|submit)|to navigate|Tab to switch questions/
+const SPINNER = /^[*·✢✳✶✻✽] (?:[A-Za-z0-9 -]*….*|Waiting for \d+ background (?:task|agent|shell)s?.*)$/
+const AGENT_ROW = /^[ \t]*(?:❯[ \t]+)?(?:●|◯)[ \t]/
+const AGENT_MAIN = /^[ \t]*(?:❯[ \t]+)?(?:●|◯)[ \t]+main[ \t]*$/
+const ROW_AGE = /[ \t]+\d+[hms][ \t]*$/
+const PURE_RULE = /^[ \t]*[─━╌▔]{8,}[ \t]*$/
+const HINT_RULE = /^[ \t]*[─━╌▔]{2,}.*[─━╌▔]{2,}[ \t]*$/
+const MULTI_TAB = /^[ \t]*(?:←[ \t]+)?(?:☐|☒|☑)[ \t]+[^ \t].*[ \t]+(?:✔|✓)[ \t]+Submit(?:[ \t]+→)?[ \t]*$/
+const LONE_TAB = /^[ \t]*(?:☐|☒)[ \t]+[^ \t]/
+const OPT_LINE = /^[ \t]*(❯)?[ \t]*(\d{1,2})\.[ \t]+(.*)$/
+const SUBMIT_LINE = /^[ \t]*(?:❯[ \t]+)?Submit[ \t]*$/
+const CHAT_LINE = /^[ \t]*(?:\d{1,2}\.[ \t]+)?Chat about this[ \t]*$/
+const BG_MODE = /^[ \t]*(?:⏵|⏸|\? for shortcuts|Tip:[ \t])/
+const BG_FOOTER = /\d+ background (?:task|agent|shell)s?|\d+ local agents?|↓ to manage|ctrl\+o to expand|ctrl\+t to hide/
+const BG_STATUS = /│.*(?:Ctx |\$\d)|(?:Ctx |\$\d).*│/
+
+const isRule = (l: string) => PURE_RULE.test(l) || (HINT_RULE.test(l) && !l.includes('❯'))
+const isFoot = (l: string): boolean => {
+  const t = l.trim()
+  if (!t || t.includes('❯')) return false
+  if (t === 'ctrl+g to edit in Vim' || t.startsWith('ctrl+g to edit in Vim · ')) return true
+  const parts = t.split('·').map((p) => p.trim()).filter(Boolean)
+  return parts.length > 0 && parts.every((p) => HINT_SEG.test(p))
+}
+const isBgFooter = (l: string) => !l.includes('❯') && !OPT_LINE.test(l) && (BG_MODE.test(l) || BG_FOOTER.test(l) || BG_STATUS.test(l))
+
+// Extract the [top..end] lines of an active Claude Code AskUserQuestion dialog
+// at the bottom of the screen (matching Go's askDialogBounds); null otherwise.
+export function extractAskRegion(text: string): string[] | null {
+  const lines = text.replace(/\r/g, '').split('\n')
+  let n = lines.length
+  while (n > 0 && !lines[n - 1].trim()) n--
+  if (n < 2) return null
+  let k = n - 1
+  let sawAskHint = false
+  let sawChat = false
+  while (k >= 0) {
+    const l = lines[k]
+    if (!l.trim()) {
+      k--
+      continue
+    }
+    if (AGENT_ROW.test(l)) {
+      let j = k
+      let hasMain = false
+      while (j >= 0 && AGENT_ROW.test(lines[j])) {
+        if (AGENT_MAIN.test(lines[j])) hasMain = true
+        j--
+      }
+      if (hasMain) {
+        k = j
+        continue
+      }
+      break
+    }
+    if (isFoot(l)) {
+      if (NAV_HINT.test(l)) sawAskHint = true
+      k--
+      continue
+    }
+    if (k >= 1 && !l.includes('❯') && !OPT_LINE.test(l) && lines[k - 1].trim() && !lines[k - 1].includes('❯') && !OPT_LINE.test(lines[k - 1])) {
+      const prev = lines[k - 1].trim()
+      const cur = l.trim()
+      const js = prev + ' ' + cur
+      const jt = prev + cur
+      if (isFoot(js)) {
+        if (NAV_HINT.test(js)) sawAskHint = true
+        k -= 2
+        continue
+      }
+      if (isFoot(jt)) {
+        if (NAV_HINT.test(jt)) sawAskHint = true
+        k -= 2
+        continue
+      }
+    }
+    if (isRule(l)) {
+      k--
+      continue
+    }
+    if (CHAT_LINE.test(l)) {
+      sawChat = true
+      k--
+      continue
+    }
+    if (SPINNER.test(l) || isBgFooter(l)) {
+      k--
+      continue
+    }
+    break
+  }
+  const end = k
+  if (end < 1 || (!sawAskHint && !sawChat)) return null
+  let submitCursor = 0
+  let scanStart = end
+  if (SUBMIT_LINE.test(lines[end])) {
+    if (lines[end].includes('❯')) submitCursor = 1
+    scanStart = end - 1
+  }
+  let optCount = 0
+  let lastNum = 0
+  let cursorCount = 0
+  let firstOpt = -1
+  let maxOptLine = -1
+  let badOpt = false
+  const limit = Math.max(0, scanStart - 80)
+  for (let i = scanStart; i >= limit; i--) {
+    const l = lines[i]
+    if (isRule(l) || MULTI_TAB.test(l) || LONE_TAB.test(l)) break
+    const m = OPT_LINE.exec(l)
+    if (m) {
+      const num = Number(m[2])
+      if (optCount === 0) {
+        lastNum = num
+        maxOptLine = i
+      } else if (num !== lastNum - 1) {
+        badOpt = true
+        break
+      } else {
+        lastNum = num
+      }
+      optCount++
+      if (m[1]) cursorCount++
+      firstOpt = i
+      if (num === 1) break
+    } else if (l.includes('❯')) {
+      badOpt = true
+      break
+    }
+  }
+  if (!badOpt && maxOptLine >= 0) {
+    let seenBlank = false
+    for (let m = maxOptLine + 1; m <= end; m++) {
+      if (SUBMIT_LINE.test(lines[m])) continue
+      if (!lines[m].trim()) {
+        seenBlank = true
+        continue
+      }
+      if (seenBlank && !lines[m].startsWith('  ') && !lines[m].startsWith('\t')) {
+        badOpt = true
+        break
+      }
+    }
+  }
+  if (badOpt || optCount < 2 || lastNum !== 1 || cursorCount + submitCursor !== 1 || firstOpt <= 0) return null
+  const tabLimit = Math.max(0, firstOpt - 60)
+  let firstNonBlank = -1
+  let nonBlankCount = 0
+  for (let j = firstOpt - 1; j >= tabLimit; j--) {
+    const l = lines[j]
+    if (MULTI_TAB.test(l)) return nonBlankCount > 0 ? lines.slice(j, end + 1) : null
+    if (isRule(l)) return firstNonBlank >= 0 && LONE_TAB.test(lines[firstNonBlank]) && nonBlankCount >= 2 ? lines.slice(firstNonBlank, end + 1) : null
+    if (l.trim()) {
+      firstNonBlank = j
+      nonBlankCount++
+    }
+  }
+  if (tabLimit === 0 && firstNonBlank >= 0 && LONE_TAB.test(lines[firstNonBlank]) && nonBlankCount >= 2) return lines.slice(firstNonBlank, end + 1)
+  return null
+}
+
+function stripBottomAgentAges(lines: string[]): string[] {
+  const out = [...lines]
+  let n = out.length
+  while (n > 0 && !out[n - 1].trim()) n--
+  let i = n
+  let hasMain = false
+  while (i > 0 && AGENT_ROW.test(out[i - 1])) {
+    i--
+    if (AGENT_MAIN.test(out[i])) hasMain = true
+  }
+  if (hasMain) {
+    for (let k = i; k < n; k++) {
+      while (ROW_AGE.test(out[k])) out[k] = out[k].replace(ROW_AGE, '')
+    }
+  }
+  return out
+}
+
 export function frame(text: string, n: number): string {
   const row = new RegExp(`^\\s*❯?\\s*${n}\\. `)
-  return text
-    .split('\n')
-    .filter((l) => !row.test(l) && !isFoot(l))
+  const region = extractAskRegion(text)
+  if (region) {
+    return region
+      .filter((l) => !row.test(l))
+      .map((l) => l.replace('❯', ' ').replace(/\s+$/, ''))
+      .join('\n')
+      .trim()
+  }
+  const lines = stripBottomAgentAges(text.replace(/\r/g, '').split('\n'))
+  return lines
+    .filter((l) => !row.test(l) && !isFoot(l) && !SPINNER.test(l))
     // (Its tool's bullet blinks while it waits; a rule may carry a hint that
     // changes as it waits, "◐ medium · /effort", "tmux detected · …": a rule.)
-    .map((l) => (RULE.test(l) ? '—' : l.replace('❯', ' ').replace(/^●/, ' ').replace(/\s+$/, '')))
+    .map((l) => (RULE.test(l) ? '—' : l.replace('❯', ' ').replace(/^([ \t]*)[●⏺]/, '$1 ').replace(/\s+$/, '')))
     .join('\n')
     .trim()
 }
@@ -66,14 +250,21 @@ export function frame(text: string, n: number): string {
 // long row itself, its words going on under it: then the row is not all
 // there, nor sent — review513.)
 export function wholeRow(text: string, n: number): boolean {
-  const lines = text.split('\n')
-  const i = lines.findIndex((l) => new RegExp(`^\\s*❯\\s*${n}\\. `).test(l))
+  const lines = text.replace(/\r/g, '').split('\n')
+  const re = new RegExp(`^\\s*❯\\s*${n}\\. `)
+  let i = -1
+  for (let k = lines.length - 1; k >= 0; k--) {
+    if (re.test(lines[k])) {
+      i = k
+      break
+    }
+  }
   if (i < 0) return false
   const next = lines[i + 1] ?? ''
-  return !next.trim() || /^\s*(❯\s*)?\d+\. /.test(next) || RULE.test(next) || isFoot(next)
+  return !next.trim() || /^\s*(❯\s*)?\d+\. /.test(next) || RULE.test(next) || isFoot(next) || CHAT_LINE.test(next)
 }
 
-const RULE = /^\s*[─▔]{2,}.*[─▔]\s*$/
+const RULE = /^\s*[─━╌▔]{2,}.*[─━╌▔]\s*$/
 
 // A key's or text's answer, then the screen read again till done says it shows what it was to (3.5 s at most).
 async function after(target: ReplyTarget, done: (text: string) => boolean): Promise<Screen | null> {
@@ -201,7 +392,7 @@ export async function ownWords(target0: ReplyTarget, now: Screen, r: OwnRow, tex
 }
 
 // The rows of Claude Code 2.1.312 (as tried: ccprobe5–8.py).
-export const questionOwn = (n: number): OwnRow => ({ n, ready: (r) => r === 'Type something.', keys: [], filled: (t) => t })
+export const questionOwn = (n: number): OwnRow => ({ n, ready: (r) => /^Type something\.?$/.test(r), keys: [], filled: (t) => t })
 export const permissionAmend = (n: number, yes: boolean): OwnRow => ({
   n,
   ready: (r) => r === (yes ? 'Yes, and tell Claude what to do next' : 'No, and tell Claude what to do differently'),
