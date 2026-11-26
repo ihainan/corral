@@ -616,7 +616,14 @@ func (c *Claude) Prepend(other Parser) {
 	if !c.turnBegun {
 		c.turnFolded += o.turnFolded
 		for id, out := range o.turnOuts {
-			c.turnOut(id, out)
+			// (Kept apart while there is room, or where c's part has it; else
+			// counted in the folded sum: never folding c's own, the latest — its
+			// further rows, read after, are still the same answer. Review, 11-26.)
+			if _, ok := c.turnOuts[id]; ok || len(c.turnOuts) < maxTurnAnswers {
+				c.turnOut(id, out)
+			} else {
+				c.turnFolded += out
+			}
 		}
 		c.turnBegun = o.turnBegun
 		c.meta.TurnOut = c.turnTotal()

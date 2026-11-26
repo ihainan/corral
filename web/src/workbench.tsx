@@ -103,7 +103,9 @@ export function Rail({ active }: { active?: RailKey }) {
       const n = railKey(e)
       const nav = navRef.current
       if (!n || !nav || !nav.getClientRects().length || e.defaultPrevented || modalShown()) return
-      if (!heldRef.current && (terminalHasKeys(e, getPrefs().keysFirst) || (onMac() && typedIn(e.target)))) return
+      // (Held or not, a field on a Mac types it: Alt held first, then a field clicked into — review, 11-26.)
+      if (onMac() && typedIn(e.target)) return
+      if (!heldRef.current && terminalHasKeys(e, getPrefs().keysFirst)) return
       const to = nav.querySelectorAll<HTMLAnchorElement>('a[data-rail-key]')[n - 1]
       if (!to) return
       e.preventDefault()

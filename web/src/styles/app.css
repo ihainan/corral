@@ -159,8 +159,8 @@ code, .mono { font-family: var(--font-mono); font-size: var(--fs-sub); }
 .wb-rail-hint {
   position: absolute; left: calc(100% + 12px); top: 50%; transform: translateY(-50%); z-index: 1; pointer-events: none;
   display: inline-flex; align-items: center; gap: 6px; padding: 3px 8px 3px 4px; white-space: nowrap;
-  border: 1px solid var(--wb-line, var(--line)); border-radius: var(--r-sm); background: var(--surface);
-  box-shadow: var(--shadow-pop); color: var(--wb-fg, var(--fg));
+  border: 1px solid var(--wb-line, var(--line)); border-radius: var(--r-sm); background: var(--wb-chrome, var(--surface));
+  box-shadow: var(--shadow-pop); color: var(--wb-fg, var(--fg)); /* (both of the rail's set: the app's and the terminal's themes may differ — review, 11-26) */
   font-size: var(--fs-sub); line-height: var(--lh-sub); font-weight: 500;
 }
 .wb-rail-hint kbd {

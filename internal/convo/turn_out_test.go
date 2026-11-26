@@ -2,6 +2,7 @@ package convo
 
 import (
 	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -90,5 +91,25 @@ func TestClaudeTurnOut(t *testing.T) {
 	after.Prepend(before)
 	if got := after.Meta().TurnOut; got != 5 {
 		t.Fatalf("a turn of the second part's own: %d, want 5", got)
+	}
+	// A turn of more answers than are kept apart, cut in two: joined, the
+	// later part's latest answer is still known, so a further row of it read
+	// after is not counted again (review, 11-26).
+	var many strings.Builder
+	many.WriteString(asked("u1", "长的一轮"))
+	for i := 0; i < maxTurnAnswers-1; i++ {
+		many.WriteString(said("q"+strconv.Itoa(i), "01", 1))
+	}
+	before, after = NewClaude(), NewClaude()
+	before.Feed([]byte(many.String()))
+	after.Feed([]byte(said("z1", "02", 500) + said("z2", "03", 500)))
+	after.Prepend(before)
+	want := int64(maxTurnAnswers - 1 + 1000)
+	if got := after.Meta().TurnOut; got != want {
+		t.Fatalf("joined, many answers: %d, want %d", got, want)
+	}
+	after.Feed([]byte(said("z2", "04", 500)))
+	if got := after.Meta().TurnOut; got != want {
+		t.Fatalf("a further row of the latest answer, after the join: %d, want %d", got, want)
 	}
 }
