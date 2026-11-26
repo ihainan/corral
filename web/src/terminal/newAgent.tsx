@@ -34,7 +34,7 @@ export interface NewSubagentParent {
   ws?: string
 }
 
-type Kind = 'claude' | 'codex' | 'opencode' | 'agy'
+type Kind = 'claude' | 'codex' | 'opencode' | 'agy' | 'devin'
 type Placement = 'split' | 'workspace'
 type TabMode = 'new' | 'resume'
 type OldSession = { id: string; kind: Kind; dir: string; modified: number; title?: string; first?: string }
@@ -60,7 +60,7 @@ const keepDir = (d: string) => {
 const KIND = 'corral.newAgentKind'
 const lastKind = (): Kind => {
   const v = local.get(KIND)
-  return v === 'codex' || v === 'opencode' || v === 'agy' ? v : 'claude'
+  return v === 'codex' || v === 'opencode' || v === 'agy' || v === 'devin' ? v : 'claude'
 }
 
 const SUB_PLACEMENT = 'corral.subagentPlacement'
@@ -236,7 +236,7 @@ export function NewAgentDialog({
   const canFork = activeKind === 'claude' || activeKind === 'codex'
   const copying = fork && canFork && !!activeResume
   const isHerdrSess = !!sess && !!herdrOf(sess)
-  const canWorktree = tab === 'new' && !(parent && placement === 'split') && (isHerdrSess || (kind !== 'opencode' && kind !== 'agy'))
+  const canWorktree = tab === 'new' && !(parent && placement === 'split') && (isHerdrSess || (kind !== 'opencode' && kind !== 'agy' && kind !== 'devin'))
   const inWorktree = worktree && canWorktree
   const moreParts: string[] = []
   if (label.trim()) moreParts.push(t('newAgent.summaryNamed', { name: label.trim() }))
@@ -244,7 +244,7 @@ export function NewAgentDialog({
     const branch = isHerdrSess ? worktreeBranch.trim() : ''
     moreParts.push(branch ? t('newAgent.summaryWorktreeBranch', { branch }) : t('newAgent.summaryWorktree'))
   }
-  if (first.trim()) moreParts.push(t('newAgent.summaryFirst'))
+  if (first.trim() && kind !== 'devin') moreParts.push(t('newAgent.summaryFirst'))
   const moreSummary = moreParts.join(' · ')
 
   if (!herdrs.length) {
@@ -294,7 +294,8 @@ export function NewAgentDialog({
       keepDir(useDir)
       local.set(KIND, useKind)
       if (parent) local.set(SUB_PLACEMENT, placement)
-      const said = !useResume || useFork ? first.trim() : ''
+      // (Devin's chat page only reads: what to say first is said in its terminal.)
+      const said = useKind === 'devin' ? '' : !useResume || useFork ? first.trim() : ''
       if (r.tmux) {
         let opened: SessionInfo
         try {
@@ -364,7 +365,7 @@ export function NewAgentDialog({
     <div className="field">
       <span>{t('newAgent.kind')}</span>
       <div className={compact ? 'seg new-agent-kinds' : 'seg seg-marks'} role="radiogroup" aria-label={t('newAgent.kind')}>
-        {(['claude', 'codex', 'opencode', 'agy'] as const).map((k) => (
+        {(['claude', 'codex', 'opencode', 'agy', 'devin'] as const).map((k) => (
           <button key={k} type="button" role="radio" aria-checked={kind === k} aria-pressed={kind === k} title={t(`newAgent.kind.${k}`)} onClick={() => setKind(k)}>
             <AgentGlyph program={k} size={compact ? 14 : 16} />
             {compact ? <span>{t(`newAgent.kind.${k}`)}</span> : t(`newAgent.kind.${k}`)}
@@ -386,7 +387,7 @@ export function NewAgentDialog({
           <input type="checkbox" checked={worktree} onChange={(e) => setWorktree(e.target.checked)} />
           <span>{t('newAgent.worktree')}</span>
         </label>
-        {(!hintWhenChecked || worktree) && <p className="hint">{t(isHerdrSess && (kind === 'agy' || kind === 'opencode' || !!worktreeBranch.trim()) ? 'newAgent.worktreeHintHerdr' : 'newAgent.worktreeHint', { agent: t(`newAgent.kind.${kind}`) })}</p>}
+        {(!hintWhenChecked || worktree) && <p className="hint">{t(isHerdrSess && (kind === 'agy' || kind === 'opencode' || kind === 'devin' || !!worktreeBranch.trim()) ? 'newAgent.worktreeHintHerdr' : 'newAgent.worktreeHint', { agent: t(`newAgent.kind.${kind}`) })}</p>}
         {inWorktree && isHerdrSess && (
           <label className="field new-agent-wt-branch">
             <span>{t('newAgent.worktreeBranch')}</span>
@@ -404,7 +405,8 @@ export function NewAgentDialog({
         )}
       </div>
     ) : null
-  const firstField = (
+  // (Devin's chat page only reads: no first message to give it.)
+  const firstField = kind === 'devin' ? null : (
     <label className="field">
       <span>{t('newAgent.first')}</span>
       <textarea className="input" rows={3} value={first} placeholder={t('newAgent.firstHint')} onChange={(e) => setFirst(e.target.value)} />
@@ -521,7 +523,7 @@ export function NewAgentDialog({
             </div>
             <div className="new-agent-filters">
               <div className="new-agent-chips" role="group" aria-label={t('newAgent.kind')}>
-                {(['all', 'claude', 'codex', 'opencode', 'agy'] as const).map((k) => (
+                {(['all', 'claude', 'codex', 'opencode', 'agy', 'devin'] as const).map((k) => (
                   <button key={k} type="button" className={'new-agent-chip' + (kindFilter === k ? ' is-on' : '')} onClick={() => setKindFilter(k)}>
                     {k !== 'all' && <AgentGlyph program={k} />}
                     <span>{k === 'all' ? t('newAgent.filterAll') : t(`newAgent.kind.${k}`)}</span>

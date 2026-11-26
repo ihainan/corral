@@ -92,6 +92,8 @@ export function agentName(agent?: string): string {
     case 'agy':
     case 'antigravity':
       return 'Antigravity'
+    case 'devin':
+      return 'Devin'
   }
   return t('convo.agentAny')
 }

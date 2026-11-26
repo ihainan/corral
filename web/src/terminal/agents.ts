@@ -68,8 +68,9 @@ export const isClaude = (name?: string) => !!name && /claude/i.test(name)
 export const isCodex = (name?: string) => !!name && /codex/i.test(name)
 export const isOpenCode = (name?: string) => !!name && /opencode/i.test(name)
 export const isAgy = (name?: string) => !!name && /^(?:agy|antigravity)/i.test(name)
-// (Whose conversation is read: Claude Code's, Codex's and Antigravity's logs, OpenCode's database.)
-export const readsLog = (name?: string) => isClaude(name) || isCodex(name) || isOpenCode(name) || isAgy(name)
+export const isDevin = (name?: string) => !!name && /^devin/i.test(name)
+// (Whose conversation is read: Claude Code's, Codex's and Antigravity's logs, OpenCode's and Devin's databases.)
+export const readsLog = (name?: string) => isClaude(name) || isCodex(name) || isOpenCode(name) || isAgy(name) || isDevin(name)
 
 // A pane's title without the mark Claude Code puts before it (its spinner's
 // frames, ◐ and the like while it works, ✳ when idle).
@@ -81,10 +82,15 @@ export const paneTitle = (s: string) => s.replace(/^[\s·✢✳✶✻✽*⠀-⣿
 // folder (a row says that already, or need not); else the pane's title.
 // (Nor where it is only the command the agent was started by — "claude
 // --enable-auto-mode" — as its pane shows it till the agent names it: 11-15.)
-const LAUNCH = /^(?:claude|codex|opencode|gemini|agy)(?:\s+-\S+(?:\s+[^-\s]\S*)?)*$/
+const LAUNCH = /^(?:claude|codex|opencode|gemini|agy|devin)(?:\s+-\S+(?:\s+[^-\s]\S*)?)*$/
 export const paneName = (a: HerdrAgent) => {
   if (a.thread_title) return a.thread_title
-  const t = a.bare_title ? '' : paneTitle(a.title)
+  // (Devin titles its pane "devin: <its session's title>", the folder's name till it has one.)
+  let t = a.bare_title ? '' : paneTitle(a.title)
+  if (isDevin(a.agent)) {
+    t = t.replace(/^devin:\s*/i, '')
+    if (t === a.cwd.split('/').filter(Boolean).pop()) t = ''
+  }
   return LAUNCH.test(t) ? '' : t
 }
 

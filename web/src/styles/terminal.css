@@ -2650,7 +2650,7 @@ button.convo-queue-row.is-note:last-child { border-radius: 0 0 var(--r-lg) var(-
    dialog overlay carries sheet-mode whatever the width. */
 .dialog.new-agent-dialog { max-width: min(560px, calc(100vw - 32px)); }
 @media (max-width: 520px) { .sheet-mode .dialog.new-agent-dialog { max-width: none; } }
-.new-agent-kinds { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.new-agent-kinds { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); }
 .new-agent-kinds button { display: inline-flex; align-items: center; justify-content: center; gap: 4px; padding: 0 4px; font-size: var(--fs-note); line-height: var(--lh-note); }
 .new-agent-kinds button > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .new-agent-kinds .agent-glyph { flex: none; }

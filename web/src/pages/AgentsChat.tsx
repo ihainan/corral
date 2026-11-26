@@ -32,7 +32,7 @@ import { isLogPic, logPic, lookAt, PictureDialog, useDownload } from '../termina
 import { IMAGE_EXT, TextPreview } from '../terminal/textPreview'
 import { attach, ATTACH_LABEL, AttachStrip, PICTURE_PATH, takeOut, type Going } from '../terminal/attach'
 import { answerable, asking, callOut, useConversation, type ConvoEntry } from '../terminal/conversation'
-import { ackBg, answeredHerdr, convoTitles, expectSession, paneWaits, waitingTitle, isAgy, isCodex, isOpenCode, listAgents, paneName, paneTitle, readSessionsNow, readsLog, useRunningSessions, type AgentRow, type AgentStatus } from '../terminal/agents'
+import { ackBg, answeredHerdr, convoTitles, expectSession, paneWaits, waitingTitle, isAgy, isCodex, isDevin, isOpenCode, listAgents, paneName, paneTitle, readSessionsNow, readsLog, useRunningSessions, type AgentRow, type AgentStatus } from '../terminal/agents'
 import { normalizeProjectPath, reorderPinned, rowTasks, type RowCmds, type RowTask } from '../terminal/agentOrder'
 import { conversationReadable, prefetchConversation } from '../terminal/conversation'
 import { holdTermMode, tmuxKey } from '../terminal/chatSend'
@@ -1938,7 +1938,9 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
       .then(() => settle(t(what === 'stop' ? 'convo.stopped' : 'convo.sentNow')))
       .catch((e) => settle(refusal(e)))
   }
-  const canPress = bound && working
+  // (Devin's conversation is only read here: nothing is sent to it, nor pressed in it.)
+  const devin = convo.bind?.agent ? convo.bind.agent === 'devin' : !!row && isDevin(row.a.agent)
+  const canPress = bound && working && !devin
   // A dialog of Claude Code's own open (/usage, a picker): Escape closes it,
   // pressed from here only when asked (it may be in use in the terminal),
   // and by the host only while one is still open (closed there meanwhile,
@@ -1966,8 +1968,8 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
   const codex = convo.bind?.agent ? convo.bind.agent === 'codex' : !!row && isCodex(row.a.agent)
   const agy = convo.bind?.agent ? convo.bind.agent === 'agy' : !!row && isAgy(row.a.agent)
   const opencode = convo.bind?.agent ? convo.bind.agent === 'opencode' : !!row && isOpenCode(row.a.agent)
-  // (Claude Code's own keys and pickers: not Codex's, OpenCode's, nor Antigravity's.)
-  const notClaude = convo.bind?.agent ? convo.bind.agent !== 'claude' : !!row && (isCodex(row.a.agent) || isOpenCode(row.a.agent) || isAgy(row.a.agent))
+  // (Claude Code's own keys and pickers: not Codex's, OpenCode's, Antigravity's, nor Devin's.)
+  const notClaude = convo.bind?.agent ? convo.bind.agent !== 'claude' : !!row && (isCodex(row.a.agent) || isOpenCode(row.a.agent) || isAgy(row.a.agent) || isDevin(row.a.agent))
 
   // The permission mode, switched from here: Shift+Tab pressed in its pane,
   // the mode it went to read off its screen (the log says it only with the
@@ -2841,7 +2843,9 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
     ? t('convo.otherAgent', { agent: agent.other })
     : !bound
       ? t(convo.status === 'loading' ? 'agents.loadingSend' : convo.status === 'none' && convo.reason === 'no_agent' ? (agent?.program === 'claude' ? 'agents.claudeStartingSend' : 'agents.noAgentSend') : 'agents.cannotSend')
-      : agent?.status === 'blocked'
+      : devin
+        ? t('convo.devinReadOnly')
+        : agent?.status === 'blocked'
         ? t(waits ? 'agents.answerAbove' : 'agents.answerFirst') // (its card over the composer, or the terminal only)
         : agent?.dialog
           ? t('agents.dialogOpen') // (a message's Enter would go to it: the host refuses it too)

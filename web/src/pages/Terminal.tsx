@@ -2512,7 +2512,7 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
   const moreItems = (): (MenuItem | null)[] => watch ? watchItems() : [
     // The agent in the pane in front, on the agents page (its conversation
     // there): only one that page reads, and only while herdr's word is fresh.
-    !ended && herdr && !herdr.lost && herdr.focused_pane && ['claude', 'codex', 'opencode', 'agy'].includes(herdr.focused_agent ?? '')
+    !ended && herdr && !herdr.lost && herdr.focused_pane && ['claude', 'codex', 'opencode', 'agy', 'devin'].includes(herdr.focused_agent ?? '')
       ? { label: t('term.openChat'), icon: <MessagesSquare size={16} />, onSelect: () => navigate('/agents?' + new URLSearchParams({ s: id, pane: herdr.focused_pane! })) }
       : null,
     { label: t('term.upload'), icon: <ImagePlus size={16} />, onSelect: () => fileRef.current?.click() },
