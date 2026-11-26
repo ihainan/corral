@@ -5,6 +5,8 @@
 // us to reset and replays what it still has. Phones suspend background tabs
 // within seconds, so reconnecting is the normal path, not an edge case.
 
+import { allowLeave, isActiveTerminalStatus, setLeaveGuardTerminal } from '../leaveGuard'
+
 export type Status = 'connecting' | 'open' | 'reconnecting' | 'offline' | 'ended' | 'gone' | 'full' | 'revoked'
 
 export interface EndInfo {
@@ -74,10 +76,12 @@ export class TermConnection {
   private viewer = Array.from(crypto.getRandomValues(new Uint8Array(12)), (b) => b.toString(36).padStart(2, '0')).join('')
   opens = 0 // counts accepted sockets; input held elsewhere checks it did not change
   status: Status = 'connecting'
+  private leaveToken = Symbol('term-connection')
 
   // watch: a read-only connection of someone the owner let watch. It sends
   // nothing but pings: no input, no sizes, no visibility.
   constructor(private id: string, private h: Handlers, private watch = false) {
+    setLeaveGuardTerminal(this.leaveToken, isActiveTerminalStatus(this.status))
     window.addEventListener('online', this.onOnline)
     window.addEventListener('offline', this.onOffline)
     document.addEventListener('visibilitychange', this.onVisible)
@@ -97,6 +101,7 @@ export class TermConnection {
 
   dispose() {
     this.closed = true
+    setLeaveGuardTerminal(this.leaveToken, false)
     window.removeEventListener('online', this.onOnline)
     window.removeEventListener('offline', this.onOffline)
     document.removeEventListener('visibilitychange', this.onVisible)
@@ -203,6 +208,7 @@ export class TermConnection {
   private setStatus(s: Status) {
     if (this.status === s) return
     this.status = s
+    setLeaveGuardTerminal(this.leaveToken, !this.closed && isActiveTerminalStatus(s))
     this.h.onStatus(s)
   }
 
@@ -358,6 +364,7 @@ export class TermConnection {
       if (r.status === 401) {
         this.ended = true
         clearTimeout(this.timer)
+        allowLeave()
         location.href = '/login?next=' + encodeURIComponent(location.pathname + location.search)
         return
       }

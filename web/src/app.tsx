@@ -5,7 +5,8 @@ import { forgetColours } from './terminal/Code'
 import { Bot, ChevronLeft, Film, KeyRound, LogOut, ScrollText, Server, Settings, SquareTerminal, Users } from 'lucide-react'
 import { api, ApiError, bumpAuthGen, setUnauthorizedHandler, type Bootstrap, type Me } from './api'
 import { applyDefaultLanguage, t } from './i18n'
-import { freezePrefs, resetPrefsSession, sendPendingPrefs, syncPrefsFromServer } from './prefs'
+import { installLeaveGuard, reloadPage } from './leaveGuard'
+import { freezePrefs, getPrefs, resetPrefsSession, sendPendingPrefs, syncPrefsFromServer } from './prefs'
 import { match, navigate, usePath, linkHandler } from './router'
 import { BrandMark, ToastProvider, useToast } from './components/ui'
 import { disablePush, syncPush } from './push'
@@ -78,10 +79,11 @@ export function App() {
     [setMe],
   )
   useEffect(() => {
-    const onStorage = (e: StorageEvent) => e.key === AUTH_EVENT && location.reload()
+    const onStorage = (e: StorageEvent) => e.key === AUTH_EVENT && reloadPage()
     window.addEventListener('storage', onStorage)
     return () => window.removeEventListener('storage', onStorage)
   }, [])
+  useEffect(() => installLeaveGuard(() => getPrefs().confirmLeave), [])
   const [error, setError] = useState(false)
   const path = usePath()
   const tabs = useTabsMode()
@@ -148,7 +150,7 @@ export function App() {
       <div className="auth-wrap">
         <div className="auth">
           <p className="lead">{t('error.network')}</p>
-          <button className="btn" onClick={() => location.reload()}>{t('common.retry')}</button>
+          <button className="btn" onClick={() => reloadPage()}>{t('common.retry')}</button>
         </div>
       </div>
     )
@@ -453,7 +455,7 @@ function UpdateNotice({ loaded }: { loaded: string }) {
       if (told) return
       if (document.visibilityState !== 'visible') return void (pending = true)
       told = true
-      toast(t('app.updated'), false, { label: t('app.reload'), run: () => location.reload() })
+      toast(t('app.updated'), false, { label: t('app.reload'), run: () => reloadPage() })
     }
     const seen = (v: string) => {
       if (loaded && v && v !== loaded) tell()

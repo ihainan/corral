@@ -10,7 +10,7 @@
 export const AFTER_TURN = [4000, 9000, 20000, 40000]
 export const RECENT = 2500
 export const EVERY = 60000
-export const AFTER_PRESS = [1000, 3000, 8000, 15000]
+export const AFTER_PRESS = [500, 1500, 4000, 9000, 15000]
 
 export interface LookerEnv<C> {
   // One look: the card there, or null for none; a throw is a failed look.

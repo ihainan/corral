@@ -1,5 +1,6 @@
 import { useEffect, useState, type ComponentProps, type CSSProperties } from 'react'
 import { t } from '../i18n'
+import { reloadPage } from '../leaveGuard'
 import { termScheme, usePrefs } from '../prefs'
 import { chromeVars } from '../terminal/themes'
 
@@ -66,7 +67,7 @@ function LoadFailed() {
   return (
     <div className="lazy-failed" role="alert">
       <p>{t('app.partFailed')}</p>
-      <button type="button" className="btn" onClick={() => location.reload()}>
+      <button type="button" className="btn" onClick={() => reloadPage()}>
         {t('app.reload')}
       </button>
     </div>

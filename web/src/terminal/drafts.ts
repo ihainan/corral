@@ -1,3 +1,4 @@
+import { registerDraftCheck } from '../leaveGuard'
 import { session as tabStore } from '../storage'
 
 // The composer's memory: drafts by session, so one survives leaving the
@@ -244,5 +245,13 @@ function saveSoon() {
   saveTimer = window.setTimeout(save, 400)
 }
 window.addEventListener('pagehide', () => saveTimer !== undefined && (clearTimeout(saveTimer), save()))
+export function hasAnyDraft(): boolean {
+  for (const v of drafts.values()) if (v.trim()) return true
+  for (const v of shown.values()) if (v.trim()) return true
+  for (const v of replies.values()) if (v.trim()) return true
+  return false
+}
+registerDraftCheck(hasAnyDraft)
+
 // (A phone may stop a page in the background without a pagehide: kept as it goes there.)
 document.addEventListener('visibilitychange', () => document.hidden && saveTimer !== undefined && (clearTimeout(saveTimer), save()))

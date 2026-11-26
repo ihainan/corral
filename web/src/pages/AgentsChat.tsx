@@ -12,7 +12,7 @@ import { CLOSE_MENUS, Confirm, copyText, Menu, useToast, type MenuItem } from '.
 import { chromeVars, corralDark, corralLight } from '../terminal/themes'
 import { HostHistoryDialog } from '../terminal/hostHistory'
 import { CardNotice, useClaudeCard, type ClaudeCard } from '../terminal/cardNotice'
-import { attachedIn, expandForClaude, expandPastes, getDraft, keepDraft, keepPaste, keepSent, keptSent, remember, sentHistory, unsendable } from '../terminal/drafts'
+import { attachedIn, expandForClaude, expandPastes, getDraft, keepDraft, keepPaste, keepSent, keptSent, remember, sentHistory, showDraft, unsendable } from '../terminal/drafts'
 import { geminiPath, shellPath, type LineSpan } from '../terminal/paths'
 import type { DockSink } from '../terminal/dock'
 import { useCompletion } from '../terminal/Completion'
@@ -2348,6 +2348,10 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
   const draftKeyNow = useRef(draftKey)
   draftKeyNow.current = draftKey
   const draft = shownDraft ?? getDraft(draftKey)
+  useEffect(() => {
+    showDraft(draftKey, draft)
+    return () => showDraft(draftKey, '')
+  }, [draftKey, draft])
   // What is typed or put in (a path, a completion, a long paste) is the
   // draft, kept; an entry of what was sent, shown while going through them,
   // is not: the draft put aside stays kept (and only there, so that a send
@@ -3004,7 +3008,16 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
     // (A question over it: the box kept to a line, its tools back when it is typed in.)
     // (The card asking is up: the box gives its room to the card — one line says why — rather than stand empty under it, as on a small phone it pushed the card's own buttons out of sight.)
     <div className={'composer' + (waits && agent?.status === 'blocked' ? ' is-held' : '') + (askHides ? ' is-asked' : '') + (panelOpen ? ' is-paneled' : '')}>
-      {claudeCard.card && <CardNotice card={claudeCard.card} stale={claudeCard.stale} onPress={claudeCard.press} />}
+      {claudeCard.card && (
+        <CardNotice
+          card={claudeCard.card}
+          stale={claudeCard.stale}
+          busyKey={claudeCard.busyKey}
+          error={claudeCard.error}
+          errorSeq={claudeCard.errorSeq}
+          onPress={claudeCard.press}
+        />
+      )}
       {completion.list}
       {/* (Why nothing can be sent now: over the box, where a phone shows it too;
           answered from the card, the card says what goes on.) */}

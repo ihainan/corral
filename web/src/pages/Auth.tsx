@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react'
 import { api, ApiError, errorText, type Me } from '../api'
 import { hasKey, t } from '../i18n'
+import { allowLeave } from '../leaveGuard'
 import { navigate } from '../router'
 import { syncPrefsFromServer } from '../prefs'
 import { useSession } from '../app'
@@ -270,6 +271,7 @@ export function SetupPage() {
           const r = await api<{ user: Me }>('POST', '/api/setup', { token, ...v })
           setMe(r.user)
           history.replaceState(null, '', '/setup')
+          allowLeave()
           location.replace('/')
         }}
       />

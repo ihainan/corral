@@ -2,6 +2,7 @@ import { useContext, useEffect, useRef, useState } from 'react'
 import { ShowTerminal } from './showTerminal'
 import { ApiError } from '../api'
 import { t } from '../i18n'
+import { registerDraftCheck } from '../leaveGuard'
 import { Markdown } from './markdown'
 import { readAskScreen, sameLoose, sameWords, type AskScreen, type ScreenOption } from './askScreen'
 import { choiceText, lasting } from './askText'
@@ -357,6 +358,10 @@ export function AskPanel({ call, index, shown, target, drive, busy, alive, lead 
 // and the question passes. (Bounded: the oldest go.)
 export const cardDrafts = new Map<string, string>()
 export const cardTicks = new Map<string, number[]>()
+registerDraftCheck(() => {
+  for (const v of cardDrafts.values()) if (v.trim()) return true
+  return false
+})
 export function keepDraft<T>(m: Map<string, T>, key: string | undefined, v: T | undefined) {
   if (!key) return
   m.delete(key)
