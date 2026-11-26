@@ -33,6 +33,8 @@ const (
 // Antigravity CLI (11-26, its alert said only its command line): its
 // transcript, where the conversation's own reading has it, its end read
 // as Codex's is, the last of its words since the person's last message.
+// Where no page has read it (none open, the gateway started since) none
+// is looked for: the alert says where, as before.
 
 // lastAnswer: what tr's agent said last in the turn of round, its
 // whitespace made single, at most maxSaid letters; "" where not known (not
@@ -160,20 +162,37 @@ func (s *Server) agyLastAnswer(sess *term.Session, pane herdr.Pane) string {
 		return ""
 	}
 	st.mu.Lock()
-	log, agent, reason, sub := st.log, st.agent, st.reason, st.sub
+	log, sid, agent, reason, sub := st.log, st.sid, st.agent, st.reason, st.sub
 	st.mu.Unlock()
 	l, ok := cleanRemotePath(log)
-	if agent != "agy" || reason != "" || sub || !ok || !strings.Contains(l, "/brain/") || !strings.HasSuffix(l, "/.system_generated/logs/transcript_full.jsonl") {
+	if agent != "agy" || reason != "" || sub || !ok || !convoLogOf("agy", l, sid) {
+		return ""
+	}
+	// (The pane's another conversation's now — herdr says whose it runs —: not this one's words. Review b5-2.)
+	if as := pane.AgentSession; as != nil && as.Value != "" && !strings.Contains(as.Value, sid) {
 		return ""
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), saidCodexWait)
 	defer cancel()
-	out, err := sshx.Output(ctx, sess.Client(), codexTailCommand(l, saidAgyTail), saidAgyTail+1024)
+	out, err := sshx.Output(ctx, sess.Client(), agyTailCommand(l, saidAgyTail), saidAgyTail+1024)
 	if err != nil {
 		return ""
 	}
 	return agyLastSaid(out)
 }
+
+// agyTailCommand prints the end of an Antigravity transcript — its last n
+// bytes — only where it was written in the last few minutes: one its
+// conversation read a while ago, the pane's since gone on to another, says
+// nothing of the turn just ended (review b5-2). Fixed command; the size a
+// constant, the transcript the one its conversation located (absolute,
+// convoLogOf), quoted.
+func agyTailCommand(log string, n int) string {
+	q := sshx.QuoteShell(log)
+	return "[ -n \"$(find " + q + " -maxdepth 0 -mmin -" + strconv.Itoa(agyWrittenWithin) + " 2>/dev/null)\" ] && tail -c " + strconv.Itoa(n) + " -- " + q
+}
+
+const agyWrittenWithin = 5 // minutes
 
 // agyLastSaid: of a transcript's end, the agent's last words since the
 // person's last message ("" none). The first line, cut by the tail's

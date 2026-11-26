@@ -578,15 +578,12 @@ func titleSays(title, program string) bool {
 		return false
 	}
 	// (A command line — "agy --model gemini-4-neon-high --mode auto", the
-	// title a program left as it began — says nothing of what it did: 11-26.)
-	f := strings.Fields(t)
-	if program != "" && strings.EqualFold(path.Base(f[0]), program) {
+	// title a program left as it began — says nothing of what it did: 11-26.
+	// Told by its first word, the program's: "修复 --help 输出格式" is words.)
+	first := strings.ToLower(path.Base(strings.Fields(t)[0]))
+	switch first {
+	case strings.ToLower(program), "agy", "claude", "codex", "opencode", "gemini":
 		return false
-	}
-	for _, w := range f[1:] {
-		if strings.HasPrefix(w, "--") || (len(w) == 2 && w[0] == '-' && w[1] != '-') {
-			return false
-		}
 	}
 	return true
 }

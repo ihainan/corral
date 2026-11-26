@@ -5325,6 +5325,8 @@ export function AgentList({ rows, menus, onPicked, placed, query: given, onQuery
         // (A command or subagent it set going: its own card, plainer than an agent's — what it does in
         // the agent's words, how long it has run, the command's words whole, where its output goes. 11-26.)
         const x = rowTip.task
+        // (Gone from its row since — ended, the row gone —: no card left over it. Review b5-4.)
+        if (!rows.find((r) => r.key === rowTip.key)?.tasks?.some((y) => y.kind === x.kind && y.id === x.id)) return null
         const cardW = 320
         const vw = typeof window !== 'undefined' ? window.innerWidth : 1280
         const vh = typeof window !== 'undefined' ? window.innerHeight : 800

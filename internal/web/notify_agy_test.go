@@ -20,12 +20,21 @@ func TestAgyLastSaid(t *testing.T) {
 	for title, says := range map[string]bool{
 		"agy --model gemini-4-neon-high --mode auto": false,
 		"/usr/local/bin/agy":                         false,
-		"npm run dev -- --port 3000":                 false,
 		"修复下载按钮没反应":                                  true,
+		"修复 --help 输出格式":                             true,
+		"claude --resume abc":                        false,
 		"Fix the login - redirect loop":              true,
 	} {
 		if titleSays(title, "agy") != says {
 			t.Errorf("titleSays(%q) = %v", title, !says)
 		}
+	}
+}
+
+// Its tail read only where written lately, quoted; a description taken up to the next call's id only.
+func TestAgyTailCommand(t *testing.T) {
+	c := agyTailCommand("/home/u/.gemini/antigravity-cli/brain/x y/.system_generated/logs/transcript_full.jsonl", 1024)
+	if !strings.Contains(c, "find '/home/u/.gemini/antigravity-cli/brain/x y/") || !strings.Contains(c, "-mmin -5") || !strings.HasSuffix(c, "tail -c 1024 -- '/home/u/.gemini/antigravity-cli/brain/x y/.system_generated/logs/transcript_full.jsonl'") {
+		t.Fatal(c)
 	}
 }

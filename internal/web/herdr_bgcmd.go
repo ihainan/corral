@@ -526,7 +526,8 @@ for a in "$@"; do
 done
 # (Of each command a Claude Code's task file tells, what the agent said it does — its call's
 # "description", as the agent's own page shows it: the call is the one whose result names the
-# task. At most 16, a grep or two of its log each.)
+# task, read up to the next call's id — one with none does not take the next one's. At most 16,
+# a grep or two of its log each.)
 i=0; told=
 for p in $pairs; do
   [ "$i" -lt 16 ] || break
@@ -540,7 +541,7 @@ for p in $pairs; do
     i=$((i + 1))
     tu=$(grep -m 1 -F "\"backgroundTaskId\":\"$id\"" "$f" | grep -o '"tool_use_id":"[A-Za-z0-9_-]*"' | head -n 1 | cut -d'"' -f4)
     [ -n "$tu" ] || break
-    w=$(grep -m 1 -F "\"id\":\"$tu\"" "$f" | sed "s/^.*\"id\":\"$tu\"//; s/\"type\":\"tool_use\".*//" | grep -oE '"description":"([^"\\]|\\.)*"' | head -n 1 | head -c 600)
+    w=$(grep -m 1 -F "\"id\":\"$tu\"" "$f" | sed "s/^.*\"id\":\"$tu\"//; s/\"id\":\".*//; s/\"type\":\"tool_use\".*//" | grep -oE '"description":"([^"\\]|\\.)*"' | head -n 1 | head -c 600)
     [ -n "$w" ] && printf 'desc\t%s\t%s\t{%s}\n' "$s" "$id" "$w"
     break
   done
