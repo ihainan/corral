@@ -2642,14 +2642,38 @@ button.convo-queue-row.is-note:last-child { border-radius: 0 0 var(--r-lg) var(-
   border-radius: 999px; background: var(--bg-subtle); border: 1px solid var(--line);
   color: var(--fg-2); font-size: var(--fs-note); line-height: var(--lh-note); font-weight: 500;
 }
-.new-agent-old > .link-btn { align-self: flex-start; } /* (at the fields' edge, not centred between them) */
 .new-agent .field > span { font-size: var(--fs-sub); line-height: var(--lh-sub); font-weight: 500; color: var(--fg-2); }
 .new-agent-olds { display: flex; flex-direction: column; gap: 4px; max-height: 240px; overflow: auto; }
 .new-agent-olds.is-search { max-height: 340px; gap: 0; border: 1px solid var(--line); border-radius: var(--r); }
-/* (Wider (720: the kinds, the folder and "closed only" side by side), its filters on one line and its list one list — doc UI item 17, 11-26: at 440 the kinds broke over two
-   lines, the folder and "closed only" a third, each conversation a box of its own.) */
-.dialog.new-agent-dialog { max-width: min(720px, calc(100vw - 32px)); }
-.sheet-mode .dialog.new-agent-dialog { max-width: none; } /* (a phone's sheet the screen's width, as every dialog: review b6-4) */
+/* Compact on a desktop. A phone's sheet is full width again, but only inside
+   the narrow-screen query: this sheet loads after app.css, and the shared
+   dialog overlay carries sheet-mode whatever the width. */
+.dialog.new-agent-dialog { max-width: min(560px, calc(100vw - 32px)); }
+@media (max-width: 520px) { .sheet-mode .dialog.new-agent-dialog { max-width: none; } }
+.new-agent-kinds { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.new-agent-kinds button { display: inline-flex; align-items: center; justify-content: center; gap: 4px; padding: 0 4px; font-size: var(--fs-note); line-height: var(--lh-note); }
+.new-agent-kinds button > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.new-agent-kinds .agent-glyph { flex: none; }
+@media (max-width: 520px) {
+  .new-agent-kinds button { flex-direction: column; gap: 2px; height: auto; padding: 4px 2px; }
+  .new-agent-kinds button > span { max-width: 100%; }
+}
+.new-agent-more { display: flex; flex-direction: column; gap: 10px; }
+.new-agent-more-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.new-agent-more-toggle {
+  flex: none; display: inline-flex; align-items: center; gap: 4px; padding: 0; border: 0; border-radius: var(--r-sm);
+  background: none; color: var(--fg-2); font: inherit; font-size: var(--fs-sub); line-height: var(--lh-sub); font-weight: 500; cursor: pointer;
+}
+.new-agent-more-toggle:hover { color: var(--fg); }
+.new-agent-more-toggle:focus-visible { outline: none; box-shadow: var(--focus); }
+.new-agent-more-caret { transition: transform 0.16s var(--ease); }
+.new-agent-more-toggle[aria-expanded='true'] .new-agent-more-caret { transform: rotate(180deg); }
+.new-agent-more-summary {
+  flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: var(--fg-3); font-size: var(--fs-note); line-height: var(--lh-note);
+}
+.new-agent-more-body { display: flex; flex-direction: column; gap: 12px; }
+.new-agent-more-body[hidden] { display: none; }
 .new-agent-oldrow { display: flex; justify-content: space-between; gap: 12px; padding: 8px 10px; border: 1px solid var(--line); border-radius: var(--r-sm); background: none; text-align: left; cursor: pointer; color: var(--fg); font-size: var(--fs-sub); line-height: var(--lh-sub); }
 .new-agent-oldrow.on { border-color: var(--accent, #3b6cf6); background: var(--bg-subtle); }
 .new-agent-oldtitle { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }

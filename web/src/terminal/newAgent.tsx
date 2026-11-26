@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent } from 'react'
-import { Bot, Folder, GitFork, History, Search, X } from 'lucide-react'
+import { Bot, ChevronDown, Folder, GitFork, History, Search, X } from 'lucide-react'
 import { api, ApiError, errorText, type SessionInfo } from '../api'
 import { t } from '../i18n'
 import { Dialog } from '../components/ui'
@@ -96,6 +96,12 @@ function matchSessionTokens(s: OldSession, q: string): boolean {
   return toks.every((tok) => hay.includes(tok))
 }
 
+function sessionOptionLabel(s: SessionInfo): string {
+  const raw = s.mux_session ?? ''
+  const name = !raw || raw === 'default' ? t('newAgent.sessionDefault') : /^\d+$/.test(raw) ? t('newAgent.sessionNumbered', { n: raw }) : raw
+  return `${s.host_name} · ${s.persistence === 'tmux' ? 'tmux' : 'herdr'} ${name}`
+}
+
 export function NewAgentDialog({
   sessions,
   parent,
@@ -131,6 +137,7 @@ export function NewAgentDialog({
   const [worktreeBranch, setWorktreeBranch] = useState('')
   const [label, setLabel] = useState('')
   const [first, setFirst] = useState('')
+  const [moreOpen, setMoreOpen] = useState(false)
 
   // Search & resume closed conversations state (all folders & all 4 agent kinds).
   const [searchQ, setSearchQ] = useState('')
@@ -231,6 +238,14 @@ export function NewAgentDialog({
   const isHerdrSess = !!sess && !!herdrOf(sess)
   const canWorktree = tab === 'new' && !(parent && placement === 'split') && (isHerdrSess || (kind !== 'opencode' && kind !== 'agy'))
   const inWorktree = worktree && canWorktree
+  const moreParts: string[] = []
+  if (label.trim()) moreParts.push(t('newAgent.summaryNamed', { name: label.trim() }))
+  if (inWorktree) {
+    const branch = isHerdrSess ? worktreeBranch.trim() : ''
+    moreParts.push(branch ? t('newAgent.summaryWorktreeBranch', { branch }) : t('newAgent.summaryWorktree'))
+  }
+  if (first.trim()) moreParts.push(t('newAgent.summaryFirst'))
+  const moreSummary = moreParts.join(' · ')
 
   if (!herdrs.length) {
     return (
@@ -326,6 +341,76 @@ export function NewAgentDialog({
   const close = () => !busy && onClose()
   const pickedRunning = picked ? running.get(picked.id) : undefined
 
+  const dirField = (
+    <label className="field">
+      <span>{t('newAgent.dir')}</span>
+      <input
+        className="input"
+        value={dir}
+        list="new-agent-dirs"
+        autoCapitalize="none"
+        autoCorrect="off"
+        spellCheck={false}
+        onChange={(e) => setDir(e.target.value)}
+      />
+      <datalist id="new-agent-dirs">
+        {dirs.map((d) => (
+          <option key={d} value={d} />
+        ))}
+      </datalist>
+    </label>
+  )
+  const kindField = (compact: boolean) => (
+    <div className="field">
+      <span>{t('newAgent.kind')}</span>
+      <div className={compact ? 'seg new-agent-kinds' : 'seg seg-marks'} role="radiogroup" aria-label={t('newAgent.kind')}>
+        {(['claude', 'codex', 'opencode', 'agy'] as const).map((k) => (
+          <button key={k} type="button" role="radio" aria-checked={kind === k} aria-pressed={kind === k} title={t(`newAgent.kind.${k}`)} onClick={() => setKind(k)}>
+            <AgentGlyph program={k} size={compact ? 14 : 16} />
+            {compact ? <span>{t(`newAgent.kind.${k}`)}</span> : t(`newAgent.kind.${k}`)}
+          </button>
+        ))}
+      </div>
+    </div>
+  )
+  const labelField = (
+    <label className="field">
+      <span>{t('newAgent.label')}</span>
+      <input className="input" value={label} maxLength={40} placeholder={t(parent && placement === 'split' ? 'newAgent.labelHintSplit' : 'newAgent.labelHint')} onChange={(e) => setLabel(e.target.value)} />
+    </label>
+  )
+  const worktreeField = (hintWhenChecked: boolean) =>
+    canWorktree ? (
+      <div className="field">
+        <label className="check">
+          <input type="checkbox" checked={worktree} onChange={(e) => setWorktree(e.target.checked)} />
+          <span>{t('newAgent.worktree')}</span>
+        </label>
+        {(!hintWhenChecked || worktree) && <p className="hint">{t(isHerdrSess && (kind === 'agy' || kind === 'opencode' || !!worktreeBranch.trim()) ? 'newAgent.worktreeHintHerdr' : 'newAgent.worktreeHint', { agent: t(`newAgent.kind.${kind}`) })}</p>}
+        {inWorktree && isHerdrSess && (
+          <label className="field new-agent-wt-branch">
+            <span>{t('newAgent.worktreeBranch')}</span>
+            <input
+              className="input"
+              value={worktreeBranch}
+              maxLength={120}
+              autoCapitalize="none"
+              autoCorrect="off"
+              spellCheck={false}
+              placeholder={t('newAgent.worktreeBranchHint')}
+              onChange={(e) => setWorktreeBranch(e.target.value)}
+            />
+          </label>
+        )}
+      </div>
+    ) : null
+  const firstField = (
+    <label className="field">
+      <span>{t('newAgent.first')}</span>
+      <textarea className="input" rows={3} value={first} placeholder={t('newAgent.firstHint')} onChange={(e) => setFirst(e.target.value)} />
+    </label>
+  )
+
   return (
     <Dialog title={t(parent ? 'newAgent.subagentTitle' : 'newAgent.title')} onClose={close} className="new-agent-dialog" icon={parent ? <GitFork size={18} /> : tab === 'resume' ? <History size={18} /> : <Bot size={18} />}>
       <form className="new-agent" onSubmit={submit}>
@@ -360,7 +445,7 @@ export function NewAgentDialog({
             >
               {herdrs.map((s) => (
                 <option key={s.id} value={s.id}>
-                  {s.host_name + (s.mux_session ? ' · ' + s.mux_session : '') + (s.persistence === 'tmux' ? ' · tmux' : '')}
+                  {sessionOptionLabel(s)}
                 </option>
               ))}
             </select>
@@ -381,83 +466,38 @@ export function NewAgentDialog({
         )}
 
         {tab === 'new' ? (
-          <>
-            <label className="field">
-              <span>{t('newAgent.dir')}</span>
-              <input
-                className="input"
-                value={dir}
-                list="new-agent-dirs"
-                autoCapitalize="none"
-                autoCorrect="off"
-                spellCheck={false}
-                onChange={(e) => setDir(e.target.value)}
-              />
-              <datalist id="new-agent-dirs">
-                {dirs.map((d) => (
-                  <option key={d} value={d} />
-                ))}
-              </datalist>
-            </label>
-            <div className="field">
-              <span>{t('newAgent.kind')}</span>
-              <div className="seg seg-marks" role="radiogroup">
-                {(['claude', 'codex', 'opencode', 'agy'] as const).map((k) => (
-                  <button key={k} type="button" role="radio" aria-checked={kind === k} aria-pressed={kind === k} onClick={() => setKind(k)}>
-                    <AgentGlyph program={k} />
-                    {t(`newAgent.kind.${k}`)}
+          parent ? (
+            <>
+              {dirField}
+              {kindField(false)}
+              {worktreeField(false)}
+              {labelField}
+              {firstField}
+            </>
+          ) : (
+            <>
+              {kindField(true)}
+              {dirField}
+              <div className="new-agent-more">
+                <div className="new-agent-more-head">
+                  <button type="button" className="new-agent-more-toggle" aria-expanded={moreOpen} aria-controls="new-agent-more-panel" onClick={() => setMoreOpen((v) => !v)}>
+                    <ChevronDown size={14} className="new-agent-more-caret" aria-hidden="true" />
+                    <span>{t('newAgent.more')}</span>
                   </button>
-                ))}
+                  {!moreOpen && moreSummary && (
+                    <span className="new-agent-more-summary" title={moreSummary}>
+                      {moreSummary}
+                    </span>
+                  )}
+                </div>
+                <div className="new-agent-more-body" id="new-agent-more-panel" hidden={!moreOpen}>
+                  {labelField}
+                  {worktreeField(true)}
+                  {firstField}
+                </div>
               </div>
-            </div>
-            {canWorktree && (
-              <div className="field">
-                <label className="check">
-                  <input type="checkbox" checked={worktree} onChange={(e) => setWorktree(e.target.checked)} />
-                  <span>{t('newAgent.worktree')}</span>
-                </label>
-                <p className="hint">{t(isHerdrSess && (kind === 'agy' || kind === 'opencode' || !!worktreeBranch.trim()) ? 'newAgent.worktreeHintHerdr' : 'newAgent.worktreeHint', { agent: t(`newAgent.kind.${kind}`) })}</p>
-                {inWorktree && isHerdrSess && (
-                  <label className="field new-agent-wt-branch">
-                    <span>{t('newAgent.worktreeBranch')}</span>
-                    <input
-                      className="input"
-                      value={worktreeBranch}
-                      maxLength={120}
-                      autoCapitalize="none"
-                      autoCorrect="off"
-                      spellCheck={false}
-                      placeholder={t('newAgent.worktreeBranchHint')}
-                      onChange={(e) => setWorktreeBranch(e.target.value)}
-                    />
-                  </label>
-                )}
-              </div>
-            )}
-            <label className="field">
-              <span>{t('newAgent.label')}</span>
-              <input className="input" value={label} maxLength={40} placeholder={t(parent && placement === 'split' ? 'newAgent.labelHintSplit' : 'newAgent.labelHint')} onChange={(e) => setLabel(e.target.value)} />
-            </label>
-            {!parent && (
-              <div className="new-agent-old">
-                <button
-                  type="button"
-                  className="link-btn"
-                  onClick={() => {
-                    setKindFilter('all')
-                    setScope('all')
-                    setTab('resume')
-                  }}
-                >
-                  {t('newAgent.resumeShortcut')}
-                </button>
-              </div>
-            )}
-            <label className="field">
-              <span>{t('newAgent.first')}</span>
-              <textarea className="input" rows={3} value={first} placeholder={t('newAgent.firstHint')} onChange={(e) => setFirst(e.target.value)} />
-            </label>
-          </>
+            </>
+          )
         ) : (
           <div className="new-agent-resume">
             <div className="new-agent-search">
