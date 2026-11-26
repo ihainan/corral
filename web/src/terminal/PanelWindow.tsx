@@ -6,6 +6,7 @@ import { isCoarse } from '../components/ui'
 import { ansiLines, type AnsiRun } from './ansi'
 import { readNoticeDialog, type NoticeAction } from './noticeDialog'
 import { PaneTerminal } from './PaneTerminal'
+import { claimPaneTerminal } from './termViewKeep'
 
 // A panel of Claude Code's own (/rewind, /resume, /mcp, /config…), which it
 // draws on its screen and tells its log nothing of till it is shut: the
@@ -110,6 +111,10 @@ export function PanelWindow({ sid, active, keys, press, onSettled, toast, live, 
   // to the terminal, and Claude Code's "Enter to continue" notices were left as a raw screen — doc item 44, 11-24.)
   const needNoticeCheck = allowNotice
   const paneId = String(press().pane ?? '')
+  const isMain = !!live?.main
+  useEffect(() => {
+    if (!isMain && active && paneId) claimPaneTerminal(sid, paneId)
+  }, [isMain, active, sid, paneId])
   const [lookGaveUp, setLookGaveUp] = useState(false)
   // (The live terminal not opened: tried again, twice, before the screen is read instead — come back to its
   // tab, the connection it had may not be let go yet, 409. Each coming back, tried afresh. Plans/agent-tabs 4.4.)

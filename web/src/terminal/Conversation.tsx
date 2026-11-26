@@ -14,6 +14,7 @@ import { saveFile } from '../saveFile'
 import { StatusItem, useWorkbench } from '../workbench'
 import { composing, foldAllKey, helpKey, jumpKey, onMac, pickKey, RAIL_KEYS, sideKey, switchKey, takenFromTerminal, TERM_VIEW_KEY, terminalHasKeys, termViewKey } from './pageKeys'
 import { PanelWindow } from './PanelWindow'
+import { onPaneTerminalClaim, resolveTermViewKeep } from './termViewKeep'
 import { firstShown, isShown, modalShown, useEffectOnChange, useOnHide } from '../shown'
 import { keepNames, keptNames, local } from '../storage'
 import { useFlip } from '../flip'
@@ -270,6 +271,7 @@ export function ConversationView({
   onLook,
   onShowTerminal,
   dockTerminal,
+  inlinePanel,
   viewOf,
   dockSink,
   onCopied,
@@ -316,6 +318,7 @@ export function ConversationView({
   onLook?: () => void // (its terminal shown here, where it can be)
   onShowTerminal: () => void
   dockTerminal?: DockTerminal // (the dock's Terminal tab: the pane's screen, where it can be shown)
+  inlinePanel?: boolean // (composer shows its own PanelWindow for this pane: hidden main terminal yields the pane-ws slot)
   viewOf?: string // (the agent's, as its tab is: which of its views — conversation or terminal — it was left in, on this device)
   dockSink?: { set: (s: DockSink | null) => void; insert: (path: string) => void } // (the page's file acts given to the dock's Files tab, while there is one; a path put in the composer from it)
   onCopied: () => void
@@ -377,6 +380,7 @@ export function ConversationView({
   const termShown = canTermView && termViews.includes(viewOf!)
   const termShownNow = useRef(termShown)
   termShownNow.current = termShown
+  const [keptTermKey, setKeptTermKey] = useState<string | null>(null)
   const focusBack = useRef(false)
   const showTermView = (on: boolean) => {
     if (!viewOf || !canTermView) return
@@ -406,7 +410,8 @@ export function ConversationView({
     if (!focusBack.current && !lost) return
     focusBack.current = false
     if (!kActive) return
-    requestAnimationFrame(() => {
+    const frame = requestAnimationFrame(() => {
+      if (termShownNow.current) return
       const m = mainEl.current
       if (!m) return
       // (Something there taken the keys already — a panel's terminal, as it came: left with them.)
@@ -417,6 +422,7 @@ export function ConversationView({
       const bar = m.querySelector<HTMLElement>('.convo-viewseg-btn.is-on') ?? m.querySelector<HTMLElement>('.convo-bar-more')
       ;(seen(box) ? box : other ?? bar)?.focus()
     })
+    return () => cancelAnimationFrame(frame)
   }, [termShown, kActive])
   const termToggle = useRef(() => {})
   termToggle.current = () => showTermView(!termShown)
@@ -426,6 +432,7 @@ export function ConversationView({
       if (!termViewKey(e) || underDialog(e)) return
       e.preventDefault()
       e.stopPropagation()
+      if (e.repeat) return
       termToggle.current()
     }
     window.addEventListener('keydown', onKey, true)
@@ -576,6 +583,7 @@ export function ConversationView({
   useOnHide(() => {
     setPicking(false)
     dropPickInTab()
+    if (!termShownNow.current) setKeptTermKey(null)
   })
   const pickingNow = useRef(picking)
   pickingNow.current = picking
@@ -1589,6 +1597,24 @@ export function ConversationView({
   // (Another agent in the pane — its process or session: the card's last tap,
   // its base the last one's repository's, is not this one's — review, 11-15.)
   const bindIdent = convo.bind ? [convo.bind.pid, convo.bind.start, convo.bind.session].join(' ') : ''
+  const currentTermKey = convo.of ? convo.of + ' ' + bindIdent : null
+  const dockTermOpen = dockable && dockOpen && !!convo.of && convo.status === 'ready' && !(changes && shownEdits) && !subs?.length && !bgCmd && dockTab === 'terminal'
+  const termKeep = resolveTermViewKeep({
+    keptKey: keptTermKey,
+    currentKey: currentTermKey,
+    canTermView,
+    termShown,
+    peerNeedsPane: dockTermOpen || !!inlinePanel,
+  })
+  useLayoutEffect(() => {
+    if (termKeep.keptKey !== keptTermKey) setKeptTermKey(termKeep.keptKey)
+  }, [termKeep.keptKey, keptTermKey])
+  const termSid = convo.of ? convo.of.split(' ')[0] : ''
+  const termPane = dockTerminal ? String(dockTerminal.press().pane ?? '') : ''
+  useEffect(() => {
+    if (!termKeep.mounted || termKeep.visible || !termSid || !termPane) return
+    return onPaneTerminalClaim(termSid, termPane, () => setKeptTermKey(null))
+  }, [termKeep.mounted, termKeep.visible, termSid, termPane])
   // (The Files tab asked for a file or a folder: by the page's file acts, while there is a dock.)
   const [filesAsk, setFilesAsk] = useState<FilesAsk | undefined>()
   useEffectOnChange(() => {
@@ -2395,9 +2421,11 @@ export function ConversationView({
         </p>
       )}
       {/* (Its terminal shown in its place: the thread kept under it, unseen — where it was read to stays —; the dock
-          below, the composer and the live screens it may hold, not there at all: one connection to the pane, the
-          terminal's. Review of c2ae00c.) */}
-      <div className={'convo-scroll-wrap' + (termShown ? ' is-term' : '')}>
+          below, the composer and the live screens it may hold, not there at all while the terminal is in front: one
+          connection to the pane, the terminal's. Once opened, the main terminal stays mounted in .convo-body so its
+          height never changes across Ctrl+` toggles and switching back is instant without reconnecting.) */}
+      <div className={'convo-body' + (termShown ? ' is-term' : '')}>
+      <div className="convo-scroll-wrap">
         <div className="convo-scroll" ref={box}>
           <div className="convo-col" ref={col}>
             <ShowTerminal.Provider value={onShowTerminal}>
@@ -2458,27 +2486,6 @@ export function ConversationView({
             {t('convo.latest')}
           </button>
         )}
-        {termShown && dockTerminal && convo.of && (
-          <div className="convo-termview">
-            <PanelWindow
-              key={'main ' + convo.of + ' ' + bindIdent}
-              sid={convo.of.split(' ')[0]}
-              active={active}
-              keys={kActive}
-              press={dockTerminal.press}
-              onSettled={convo.refresh}
-              toast={toast}
-              live={{
-                main: true,
-                onFull: dockTerminal.onFull,
-                letters: dockTerminal.letters,
-                who: convo.bind?.agent === 'claude' ? 'Claude Code' : agentName(convo.bind?.agent),
-                // (F6 out of it: to the bar's switch, as the dock's terminal goes to its tabs.)
-                onLeave: () => (mainEl.current?.querySelector<HTMLElement>('.convo-viewseg-btn.is-on') ?? mainEl.current?.querySelector<HTMLElement>('.convo-bar-more'))?.focus(),
-              }}
-            />
-          </div>
-        )}
       </div>
       {!termShown && (
       <div className="convo-dock">
@@ -2512,6 +2519,32 @@ export function ConversationView({
         {!inWb && runsAt(false)}
       </div>
       )}
+      {termKeep.mounted && dockTerminal && convo.of && (
+        <div
+          className={'convo-termview' + (termKeep.visible ? '' : ' is-hidden')}
+          inert={!termKeep.visible}
+          aria-hidden={termKeep.visible ? undefined : true}
+        >
+          <PanelWindow
+            key={'main ' + convo.of + ' ' + bindIdent}
+            sid={convo.of.split(' ')[0]}
+            active={active && termKeep.visible}
+            keys={kActive && termKeep.visible}
+            press={dockTerminal.press}
+            onSettled={convo.refresh}
+            toast={toast}
+            live={{
+              main: true,
+              onFull: dockTerminal.onFull,
+              letters: dockTerminal.letters,
+              who: convo.bind?.agent === 'claude' ? 'Claude Code' : agentName(convo.bind?.agent),
+              // (F6 out of it: to the bar's switch, as the dock's terminal goes to its tabs.)
+              onLeave: () => (mainEl.current?.querySelector<HTMLElement>('.convo-viewseg-btn.is-on') ?? mainEl.current?.querySelector<HTMLElement>('.convo-bar-more'))?.focus(),
+            }}
+          />
+        </div>
+      )}
+      </div>
       {/* (The pane the keys go to says its branch and quota on the status bar — in its terminal view too.) */}
       {inWb && kActive && wbSlot && createPortal(<StatusFacts runsRef={setRunsSlot} of={convo.status === 'ready' ? convo.of : undefined} meta={convo.status === 'ready' ? convo.meta : undefined} via={convo.bind?.via} auth={convo.bind?.auth} quota={convo.status === 'ready' ? quotaOf : undefined} />, wbSlot)}
       </div>

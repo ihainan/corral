@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useId, useRef, useState } from 'react'
+import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { Unicode11Addon } from '@xterm/addon-unicode11'
@@ -6,8 +6,10 @@ import { WebLinksAddon } from '@xterm/addon-web-links'
 import { t } from '../i18n'
 import { termScheme, usePrefs } from '../prefs'
 import { isCoarse } from '../components/ui'
+import { modalShown } from '../shown'
 import { darkTheme } from './themes'
 import type { PanelLive } from './PanelWindow'
+import { paneFocusAction, shouldResizePty, type TermDims } from './termViewKeep'
 
 const FONT_STACK = "'JetBrains Mono', 'SFMono-Regular', Menlo, Consolas, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', monospace"
 
@@ -77,7 +79,33 @@ export function PaneTerminal({
   liveRef.current = live
   const activeRef = useRef(active)
   activeRef.current = active
+  const prevActiveRef = useRef(false)
+  const lastSentSizeRef = useRef<TermDims | null>(null)
+  const appliedPrefsRef = useRef<{ fontSize: number; optionIsMeta: boolean; schemeId: string } | null>(null)
   const settleTimer = useRef<ReturnType<typeof setTimeout>>(undefined)
+
+  const syncFit = useCallback((sendResize: boolean) => {
+    const el = hostRef.current
+    const term = termRef.current
+    const fit = fitRef.current
+    if (!el || !term || !fit || el.clientWidth <= 0 || el.clientHeight <= 0) return
+    try {
+      const dims = fit.proposeDimensions()
+      if (dims && dims.cols > 0 && dims.rows > 0 && (dims.cols !== term.cols || dims.rows !== term.rows)) {
+        term.resize(dims.cols, dims.rows)
+      }
+      if (sendResize) {
+        const ws = wsRef.current
+        const next: TermDims = { cols: term.cols, rows: term.rows }
+        if (ws && ws.readyState === WebSocket.OPEN && shouldResizePty(lastSentSizeRef.current, next)) {
+          lastSentSizeRef.current = next
+          ws.send(JSON.stringify({ t: 'resize', cols: next.cols, rows: next.rows }))
+        }
+      }
+    } catch {
+      /* unmounted */
+    }
+  }, [])
 
   const scheduleSettle = useCallback(() => {
     clearTimeout(settleTimer.current)
@@ -106,9 +134,10 @@ export function PaneTerminal({
     const el = hostRef.current
     if (!el) return
     const main = !!liveRef.current?.main
+    const fontSize = main ? prefs.fontSize : Math.max(11, Math.min(16, prefs.fontSize - 1))
     const term = new Terminal({
       fontFamily: FONT_STACK,
-      fontSize: main ? prefs.fontSize : Math.max(11, Math.min(16, prefs.fontSize - 1)),
+      fontSize,
       lineHeight: 1.25,
       cursorBlink: true,
       scrollback: 3000,
@@ -116,6 +145,7 @@ export function PaneTerminal({
       macOptionIsMeta: prefs.optionIsMeta,
       theme: main ? termScheme().theme : PANEL_THEME,
     })
+    appliedPrefsRef.current = { fontSize, optionIsMeta: prefs.optionIsMeta, schemeId }
     const fit = new FitAddon()
     const uni = new Unicode11Addon()
     const links = new WebLinksAddon((_e, uri) => {
@@ -126,7 +156,6 @@ export function PaneTerminal({
     term.loadAddon(links)
     term.unicode.activeVersion = '11'
     term.open(el)
-    fit.fit()
 
     term.attachCustomKeyEventHandler((e) => {
       if (e.type === 'keydown' && e.key === 'Enter' && e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey) {
@@ -157,25 +186,24 @@ export function PaneTerminal({
 
     termRef.current = term
     fitRef.current = fit
+    syncFit(false)
 
-    if (activeRef.current && !isCoarse() && (!liveRef.current || main)) {
-      term.focus()
-    }
+    const act = paneFocusAction({
+      active: activeRef.current,
+      wasActive: false,
+      coarse: isCoarse(),
+      isLive: !!liveRef.current,
+      isMain: main,
+      modalOpen: modalShown(),
+      hasFocus: !!ta && document.activeElement === ta,
+    })
+    prevActiveRef.current = activeRef.current
+    if (act === 'focus') term.focus()
 
     let fitTimer: ReturnType<typeof setTimeout> | undefined
     const ro = new ResizeObserver(() => {
       clearTimeout(fitTimer)
-      fitTimer = setTimeout(() => {
-        try {
-          fit.fit()
-          const ws = wsRef.current
-          if (ws && ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify({ t: 'resize', cols: term.cols, rows: term.rows }))
-          }
-        } catch {
-          /* unmounted */
-        }
-      }, 40)
+      fitTimer = setTimeout(() => syncFit(true), 40)
     })
     ro.observe(el)
 
@@ -188,28 +216,47 @@ export function PaneTerminal({
       term.dispose()
       termRef.current = null
       fitRef.current = null
+      appliedPrefsRef.current = null
+      prevActiveRef.current = false
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sid, pane])
+
+  // Refit (if dimensions actually changed) and switch focus synchronously when
+  // a kept PaneTerminal toggles between hidden and visible.
+  useLayoutEffect(() => {
+    const term = termRef.current
+    if (!term) return
+    const wasActive = prevActiveRef.current
+    prevActiveRef.current = active
+    const act = paneFocusAction({
+      active,
+      wasActive,
+      coarse: isCoarse(),
+      isLive: !!liveRef.current,
+      isMain: !!liveRef.current?.main,
+      modalOpen: modalShown(),
+      hasFocus: !!term.textarea && document.activeElement === term.textarea,
+    })
+    if (active) syncFit(true)
+    if (act === 'focus') term.focus()
+    else if (act === 'blur') term.blur()
+  }, [active, syncFit])
 
   // Keep font size and Option-as-Meta synced with user preferences.
   useEffect(() => {
     const term = termRef.current
     if (!term) return
     const main = !!liveRef.current?.main
-    term.options.fontSize = main ? prefs.fontSize : Math.max(11, Math.min(16, prefs.fontSize - 1))
+    const fontSize = main ? prefs.fontSize : Math.max(11, Math.min(16, prefs.fontSize - 1))
+    const prev = appliedPrefsRef.current
+    if (prev && prev.fontSize === fontSize && prev.optionIsMeta === prefs.optionIsMeta && prev.schemeId === schemeId) return
+    appliedPrefsRef.current = { fontSize, optionIsMeta: prefs.optionIsMeta, schemeId }
+    term.options.fontSize = fontSize
     term.options.macOptionIsMeta = prefs.optionIsMeta
     if (main) term.options.theme = termScheme().theme
-    try {
-      fitRef.current?.fit()
-      const ws = wsRef.current
-      if (ws && ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ t: 'resize', cols: term.cols, rows: term.rows }))
-      }
-    } catch {
-      /* ignore */
-    }
-  }, [prefs.fontSize, prefs.optionIsMeta, schemeId])
+    syncFit(true)
+  }, [prefs.fontSize, prefs.optionIsMeta, schemeId, syncFit])
 
   // Open WebSocket stream to /api/sessions/{id}/pane-ws.
   useEffect(() => {
@@ -267,15 +314,9 @@ export function PaneTerminal({
     ws.onopen = () => {
       if (!alive) return
       opened = true
+      lastSentSizeRef.current = { cols, rows }
       setStatus('open')
-      if (termRef.current) {
-        try {
-          fitRef.current?.fit()
-          ws.send(JSON.stringify({ t: 'resize', cols: termRef.current.cols, rows: termRef.current.rows }))
-        } catch {
-          /* ignore */
-        }
-      }
+      syncFit(true)
     }
 
     ws.onmessage = (ev) => {
@@ -338,6 +379,7 @@ export function PaneTerminal({
       alive = false
       clearInterval(ping)
       clearPong()
+      lastSentSizeRef.current = null
       if (wsRef.current === ws) wsRef.current = null
       try {
         ws.close()
@@ -345,7 +387,7 @@ export function PaneTerminal({
         /* ignore */
       }
     }
-  }, [sid, pane, connSeq])
+  }, [sid, pane, connSeq, syncFit])
 
   const who = live?.who || t('panel.whoTerminal')
   const keyBar = isCoarse()
@@ -407,8 +449,25 @@ export function PaneTerminal({
             if (e.key === 'Escape') e.stopPropagation()
           }}
         />
+        {live?.main && status !== 'open' && (
+          <div className="convo-pty-bar is-overlay" role="status">
+            <span>{t(status === 'connecting' ? 'panel.ptyConnecting' : 'panel.ptyClosed')}</span>
+            {status === 'closed' && (
+              <button
+                type="button"
+                className="link-btn"
+                onClick={() => {
+                  termRef.current?.reset()
+                  setConnSeq((n) => n + 1)
+                }}
+              >
+                {t('panel.ptyReconnect')}
+              </button>
+            )}
+          </div>
+        )}
       </div>
-      {status !== 'open' && (
+      {!live?.main && status !== 'open' && (
         <div className="convo-pty-bar" role="status">
           <span>{t(status === 'connecting' ? 'panel.ptyConnecting' : 'panel.ptyClosed')}</span>
           {status === 'closed' && (

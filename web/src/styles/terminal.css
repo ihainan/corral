@@ -2902,8 +2902,10 @@ button.convo-queue-row.is-note:last-child { border-radius: 0 0 var(--r-lg) var(-
 .convo-pty-term .xterm { height: 100%; }
 /* UI 14: an agent's terminal in its conversation's place, the whole of it; and the bar's switch between the two —
    two icons in a sunken track, the one shown raised (Orca's). */
+.convo-body { flex: 1; min-height: 0; display: flex; flex-direction: column; position: relative; }
+.convo-body.is-term > :not(.convo-termview) { visibility: hidden; }
 .convo-termview { position: absolute; inset: 0; z-index: 4; display: flex; flex-direction: column; background: var(--term-bg); }
-.convo-scroll-wrap.is-term > :not(.convo-termview) { visibility: hidden; }
+.convo-termview.is-hidden { visibility: hidden; pointer-events: none; }
 .convo-panelwin.is-main { flex: 1; min-height: 0; border: 0; border-radius: 0; animation: none; }
 .convo-panelwin.is-main .convo-pty-wrap { height: auto; min-height: 0; flex: 1; padding: 8px 4px 4px 12px; }
 /* (xterm.css paints it black: the strip under the last row, as the terminal page's.) */
@@ -2915,6 +2917,7 @@ button.convo-queue-row.is-note:last-child { border-radius: 0 0 var(--r-lg) var(-
 .convo-viewseg-btn:focus-visible { outline: 2px solid var(--term-accent-text); outline-offset: 1px; }
 .convo-pty-term .xterm-viewport { overscroll-behavior: contain; }
 .convo-pty-bar { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 12px; background: var(--term-chrome); border-top: 1px solid var(--term-line); font-size: var(--fs-note); line-height: var(--lh-note); color: var(--term-fg-2); }
+.convo-pty-bar.is-overlay { position: absolute; left: 0; right: 0; bottom: 0; z-index: 2; }
 .convo-panelwin-stat.is-bad { color: var(--term-warn-text); }
 .convo-panelwin-statline { padding-top: 0; padding-bottom: 0; }
 .convo-panelwin-statline:has(.convo-panelwin-stat:empty) { height: 0; overflow: hidden; }
