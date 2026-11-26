@@ -1710,7 +1710,7 @@ details.adv > .form { margin-top: 16px; }
 .desk-split { display: flex; align-items: flex-start; min-width: 0; }
 .desk-split-main { flex: 1; min-width: 0; }
 .desk-aside {
-  position: sticky; top: 40px; flex: none; width: 340px; max-height: calc(100dvh - 40px - var(--wb-status)); overflow-y: auto; overscroll-behavior: contain;
+  position: sticky; top: 40px; flex: none; width: 340px; box-sizing: border-box; height: calc(100dvh - 40px - var(--wb-status)); /* (its line down the table's side whole, however little it says) */ overflow-y: auto; overscroll-behavior: contain;
   border-left: 1px solid var(--line); background: var(--bg); align-self: flex-start;
 }
 .desk-aside-head { display: flex; align-items: center; gap: 8px; height: 40px; box-sizing: border-box; padding: 0 8px 0 16px; border-bottom: 1px solid var(--line); }

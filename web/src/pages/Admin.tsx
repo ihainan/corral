@@ -253,7 +253,9 @@ export function AdminUsersPage() {
                 if (!deskRowKey(e)) return
                 if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
                   e.preventDefault()
-                  go(at < 0 ? 0 : at + (e.key === 'ArrowDown' ? 1 : -1))
+                  // (None chosen — Escape, the aside closed — the row in focus still the place to move from, as the audit list. Review b6-3.)
+                  const from = at >= 0 ? at : shownUsers.findIndex((u) => String(u.id) === (e.target as HTMLElement).closest('tr')?.dataset.user)
+                  go(from < 0 ? 0 : from + (e.key === 'ArrowDown' ? 1 : -1))
                 } else if (e.key === 'Home' || e.key === 'End') {
                   e.preventDefault()
                   go(e.key === 'Home' ? 0 : shownUsers.length - 1)

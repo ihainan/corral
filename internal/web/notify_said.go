@@ -192,7 +192,11 @@ func agyTailCommand(log string, n int) string {
 	return "[ -n \"$(find " + q + " -maxdepth 0 -mmin -" + strconv.Itoa(agyWrittenWithin) + " 2>/dev/null)\" ] && tail -c " + strconv.Itoa(n) + " -- " + q
 }
 
-const agyWrittenWithin = 5 // minutes
+// (A turn's end is written to the transcript as it ends, the alert sent as
+// soon as herdr says so: two minutes are room enough, and too short for the
+// pane to have gone on to another conversation the cache has not caught up
+// with — the one case where its words are not this turn's. Review b6-1.)
+const agyWrittenWithin = 2 // minutes
 
 // agyLastSaid: of a transcript's end, the agent's last words since the
 // person's last message ("" none). The first line, cut by the tail's

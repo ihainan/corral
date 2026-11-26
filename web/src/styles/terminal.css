@@ -2620,6 +2620,7 @@ button.convo-queue-row.is-note:last-child { border-radius: 0 0 var(--r-lg) var(-
 /* (Wider (720: the kinds, the folder and "closed only" side by side), its filters on one line and its list one list — doc UI item 17, 11-26: at 440 the kinds broke over two
    lines, the folder and "closed only" a third, each conversation a box of its own.) */
 .dialog.new-agent-dialog { max-width: min(720px, calc(100vw - 32px)); }
+.sheet-mode .dialog.new-agent-dialog { max-width: none; } /* (a phone's sheet the screen's width, as every dialog: review b6-4) */
 .new-agent-oldrow { display: flex; justify-content: space-between; gap: 12px; padding: 8px 10px; border: 1px solid var(--line); border-radius: var(--r-sm); background: none; text-align: left; cursor: pointer; color: var(--fg); font-size: var(--fs-sub); line-height: var(--lh-sub); }
 .new-agent-oldrow.on { border-color: var(--accent, #3b6cf6); background: var(--bg-subtle); }
 .new-agent-oldtitle { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }

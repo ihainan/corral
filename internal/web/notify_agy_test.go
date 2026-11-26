@@ -34,7 +34,7 @@ func TestAgyLastSaid(t *testing.T) {
 // Its tail read only where written lately, quoted; a description taken up to the next call's id only.
 func TestAgyTailCommand(t *testing.T) {
 	c := agyTailCommand("/home/u/.gemini/antigravity-cli/brain/x y/.system_generated/logs/transcript_full.jsonl", 1024)
-	if !strings.Contains(c, "find '/home/u/.gemini/antigravity-cli/brain/x y/") || !strings.Contains(c, "-mmin -5") || !strings.HasSuffix(c, "tail -c 1024 -- '/home/u/.gemini/antigravity-cli/brain/x y/.system_generated/logs/transcript_full.jsonl'") {
+	if !strings.Contains(c, "find '/home/u/.gemini/antigravity-cli/brain/x y/") || !strings.Contains(c, "-mmin -2") || !strings.HasSuffix(c, "tail -c 1024 -- '/home/u/.gemini/antigravity-cli/brain/x y/.system_generated/logs/transcript_full.jsonl'") {
 		t.Fatal(c)
 	}
 }
