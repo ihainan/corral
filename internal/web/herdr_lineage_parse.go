@@ -25,6 +25,7 @@ var (
 	herdrPaneTokenRe  = regexp.MustCompile(`\b(w[A-Za-z0-9]+:p[0-9A-Z]+)\b`) // (herdr numbers in digits and capitals: w2R:pA past p9)
 	herdrTermTokenRe  = regexp.MustCompile(`"terminal_id"\s*:\s*"([A-Za-z0-9:_.-]{1,100})"`)
 	agyTimestampRe    = regexp.MustCompile(`(?m)^\[\d{2}:\d{2}:\d{2}\]\s*`)
+	codexRunningRe    = regexp.MustCompile(`Process running with session ID (\d+)`)
 	codexExitCodeRe   = regexp.MustCompile(`(?i)(?:process exited with code|exit code:?)\s+(-?\d+)`)
 	agyExitCodeRe     = regexp.MustCompile(`(?i)command exited with code\s+(-?\d+)`)
 	simpleEnvAssignRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*=`)
@@ -35,6 +36,10 @@ var (
 	herdrSessionArgRe = regexp.MustCompile(`--session[= ]+["']?([^\s"';|&]+)`)
 	herdrSocketEnvRe  = regexp.MustCompile(`HERDR_SOCKET_PATH=["']?([^\s"';|&]+)`)
 	elsewhereRe       = regexp.MustCompile(`--remote\b|\bssh\s|\bdocker\s+exec\b|\bkubectl\s+exec\b|\bpodman\s+exec\b`)
+	// A herdr call whose output names panes it did not make (a listing, a
+	// lookup, the runtime state), or a call only asking for help: with one in
+	// the command, its output proves nothing about what the command made.
+	herdrNamesOthersRe = regexp.MustCompile(`\bherdr\b[^\n|;&]*?(?:\b(?:list|get|api|status)\b|--help\b|\s-h\b)`)
 )
 
 // lineageWindow is a parent's tool call that ran a herdr command making a
@@ -53,6 +58,7 @@ type lineageWindow struct {
 type windowPending struct {
 	at       int64
 	cmdPanes map[string]bool
+	sofar    string // (Codex: the output of a call still running, so far)
 }
 
 const lineageMaxWindows = 64
@@ -89,6 +95,11 @@ type lineageExtractor struct {
 	// Calls making a pane, by tool call id, waiting for their output; and
 	// the windows of those answered (taken by TakeWindows).
 	winPending map[string]windowPending
+	// Codex: a call answered "Process running with session ID N" goes on in
+	// write_stdin calls to session N; by session, and by those calls' ids,
+	// the call they go on.
+	winBySess  map[string]string
+	winByStdin map[string]string
 	windows    []lineageWindow
 }
 
@@ -105,7 +116,12 @@ func (e *lineageExtractor) TakeWindows() []lineageWindow {
 // makesPaneHere says a shell command runs a herdr call making a pane on this
 // extractor's herdr server (as far as the text says: none named elsewhere).
 func (e *lineageExtractor) makesPaneHere(cmd string) bool {
-	if len(cmd) > 65536 || !herdrMakesPaneRe.MatchString(cmd) || elsewhereRe.MatchString(cmd) {
+	if len(cmd) > 65536 {
+		return false
+	}
+	cmd = stripShellComments(cmd)
+	if !herdrMakesPaneRe.MatchString(cmd) || elsewhereRe.MatchString(cmd) ||
+		herdrNamesOthersRe.MatchString(cmd) {
 		return false
 	}
 	for _, m := range herdrSessionArgRe.FindAllStringSubmatch(cmd, -1) {
@@ -119,6 +135,50 @@ func (e *lineageExtractor) makesPaneHere(cmd string) bool {
 		}
 	}
 	return true
+}
+
+// stripShellComments drops what a shell would take for comments: from a #
+// at a word's start, outside quotes, to the line's end. (A heredoc's body is
+// read as lines too; at worst a # there hides a herdr call: a pane missed.)
+func stripShellComments(cmd string) string {
+	if !strings.Contains(cmd, "#") {
+		return cmd
+	}
+	var b strings.Builder
+	var quote byte
+	skip := false
+	for i := 0; i < len(cmd); i++ {
+		c := cmd[i]
+		if c == '\n' {
+			skip = false // (a quote spans lines: its state is kept)
+			b.WriteByte(c)
+			continue
+		}
+		if skip {
+			continue
+		}
+		switch {
+		case quote != 0:
+			if c == '\\' && quote == '"' && i+1 < len(cmd) {
+				b.WriteByte(c)
+				i++
+				c = cmd[i]
+			} else if c == quote {
+				quote = 0
+			}
+		case c == '\\' && i+1 < len(cmd):
+			b.WriteByte(c)
+			i++
+			c = cmd[i]
+		case c == '\'' || c == '"':
+			quote = c
+		case c == '#' && (i == 0 || cmd[i-1] == ' ' || cmd[i-1] == '\t' || cmd[i-1] == ';' || cmd[i-1] == '\n'):
+			skip = true
+			continue
+		}
+		b.WriteByte(c)
+	}
+	return b.String()
 }
 
 // windowBegins notes a call making a pane, begun at (log clock).
@@ -168,6 +228,65 @@ func (e *lineageExtractor) windowEnds(id string, at int64, failed bool, output s
 	e.windows = append(e.windows, lineageWindow{Panes: panes, From: w.at, To: at, Key: e.agent + ":" + id})
 }
 
+// windowGoesOn notes a Codex write_stdin call (id, its arguments) to the
+// session of a call making a pane still running.
+func (e *lineageExtractor) windowGoesOn(id string, args json.RawMessage) {
+	var asStr string
+	if json.Unmarshal(args, &asStr) == nil {
+		args = []byte(asStr)
+	}
+	var a struct {
+		SessionID json.Number `json:"session_id"`
+	}
+	if json.Unmarshal(args, &a) != nil || a.SessionID == "" {
+		return
+	}
+	orig, ok := e.winBySess[a.SessionID.String()]
+	if !ok {
+		return
+	}
+	if e.winByStdin == nil || len(e.winByStdin) >= lineageMaxPending {
+		e.winByStdin = map[string]string{}
+	}
+	e.winByStdin[id] = orig
+}
+
+// codexWindowAnswer takes the output of Codex call id at (log clock): of a
+// call making a pane, or of a write_stdin going on with one. While its
+// process runs, the output is kept and the window stays open; once it ends,
+// the window closes on all of it.
+func (e *lineageExtractor) codexWindowAnswer(id string, at int64, out string) {
+	orig := id
+	if o, ok := e.winByStdin[id]; ok {
+		delete(e.winByStdin, id)
+		orig = o
+	}
+	w, ok := e.winPending[orig]
+	if !ok {
+		return
+	}
+	all := w.sofar + "\n" + out
+	if m := codexRunningRe.FindStringSubmatch(out); m != nil && codexExitCodeRe.FindStringSubmatch(out) == nil {
+		if len(all) > 1<<20 {
+			delete(e.winPending, orig)
+			return
+		}
+		w.sofar = all
+		e.winPending[orig] = w
+		if e.winBySess == nil || len(e.winBySess) >= lineageMaxPending {
+			e.winBySess = map[string]string{}
+		}
+		e.winBySess[m[1]] = orig
+		return
+	}
+	for sid, o := range e.winBySess {
+		if o == orig {
+			delete(e.winBySess, sid)
+		}
+	}
+	e.windowEnds(orig, at, hasNonZeroExit(out, codexExitCodeRe), all)
+}
+
 // logMs reads a log row's timestamp (RFC 3339) as unix ms; 0 if none.
 func logMs(ts string) int64 {
 	if ts == "" {
@@ -209,6 +328,8 @@ func (e *lineageExtractor) Reset() {
 	e.createdByPane = nil
 	e.createdByTerm = nil
 	e.winPending = nil
+	e.winBySess = nil
+	e.winByStdin = nil
 	e.windows = nil
 }
 
@@ -481,6 +602,9 @@ func (e *lineageExtractor) feedCodexLine(line []byte) []lineageDiscovery {
 			}
 			switch p.Name {
 			case "exec_command", "shell_command", "shell", "bash", "run_command":
+			case "write_stdin":
+				e.windowGoesOn(p.CallID, p.Arguments)
+				return nil
 			default:
 				return nil
 			}
@@ -501,10 +625,7 @@ func (e *lineageExtractor) feedCodexLine(line []byte) []lineageDiscovery {
 			if p.CallID == "" {
 				return nil
 			}
-			if _, waits := e.winPending[p.CallID]; waits {
-				outText := extractCodexOutputText(p.Output)
-				e.windowEnds(p.CallID, logMs(row.Timestamp), hasNonZeroExit(outText, codexExitCodeRe), outText)
-			}
+			e.codexWindowAnswer(p.CallID, logMs(row.Timestamp), extractCodexOutputText(p.Output))
 			intents, ok := e.codexPending[p.CallID]
 			if !ok {
 				return nil

@@ -25,7 +25,6 @@ func TestLineageTrackerMetadataMoveAndSessionProtection(t *testing.T) {
 		knownPanes:   map[string]bool{},
 		paneLogs:     map[string]knownPaneLog{},
 		probedSize:   map[string]int64{},
-		retriedPane:  map[string]bool{},
 	}
 
 	// Snapshot 1: child pane carries corral_parent_pane metadata token.
@@ -152,7 +151,7 @@ func TestLineageChildNewConversationSameTerminal(t *testing.T) {
 		srv: h.srv, ownerID: 1, hostID: 10, server: "conv",
 		live: map[string]livePaneInfo{}, termToPane: map[string]string{},
 		knownPanes: map[string]bool{}, paneLogs: map[string]knownPaneLog{},
-		probedSize: map[string]int64{}, retriedPane: map[string]bool{},
+		probedSize: map[string]int64{},
 	}
 	snap := &herdr.Snapshot{
 		Version:    "0.8.0",
@@ -183,16 +182,15 @@ func TestLineageTrackerStaleChildTokenIgnored(t *testing.T) {
 	ctx := context.Background()
 
 	lt := &lineageTracker{
-		srv:         h.srv,
-		ownerID:     1,
-		hostID:      10,
-		server:      "srv-stale",
-		live:        map[string]livePaneInfo{},
-		termToPane:  map[string]string{},
-		knownPanes:  map[string]bool{},
-		paneLogs:    map[string]knownPaneLog{},
-		probedSize:  map[string]int64{},
-		retriedPane: map[string]bool{},
+		srv:        h.srv,
+		ownerID:    1,
+		hostID:     10,
+		server:     "srv-stale",
+		live:       map[string]livePaneInfo{},
+		termToPane: map[string]string{},
+		knownPanes: map[string]bool{},
+		paneLogs:   map[string]knownPaneLog{},
+		probedSize: map[string]int64{},
 	}
 
 	snap := &herdr.Snapshot{
@@ -236,7 +234,7 @@ func TestLineageMetadataCannotRebindManualIdentity(t *testing.T) {
 		srv: h.srv, ownerID: 1, hostID: 10, server: "review",
 		live: map[string]livePaneInfo{}, termToPane: map[string]string{},
 		knownPanes: map[string]bool{}, paneLogs: map[string]knownPaneLog{},
-		probedSize: map[string]int64{}, retriedPane: map[string]bool{},
+		probedSize: map[string]int64{},
 	}
 	snap := &herdr.Snapshot{
 		Version:    "0.8.0",
@@ -277,7 +275,7 @@ func TestLineageOtherTrackerObservesUnlink(t *testing.T) {
 			srv: h.srv, ownerID: 1, hostID: 10, server: "review-multi",
 			live: map[string]livePaneInfo{}, termToPane: map[string]string{},
 			knownPanes: map[string]bool{}, paneLogs: map[string]knownPaneLog{},
-			probedSize: map[string]int64{}, retriedPane: map[string]bool{},
+			probedSize: map[string]int64{},
 		}
 	}
 	snap := &herdr.Snapshot{
@@ -325,7 +323,7 @@ func TestLineageAgentStartedEnrichmentCannotResurrectUnlink(t *testing.T) {
 		srv: h.srv, ownerID: 1, hostID: 10, server: "review-enrich",
 		live: map[string]livePaneInfo{}, termToPane: map[string]string{},
 		knownPanes: map[string]bool{}, paneLogs: map[string]knownPaneLog{},
-		probedSize: map[string]int64{}, retriedPane: map[string]bool{},
+		probedSize: map[string]int64{},
 	}
 	snap := &herdr.Snapshot{
 		Version:    "0.8.0",

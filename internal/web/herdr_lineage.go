@@ -79,7 +79,6 @@ type lineageTracker struct {
 	probeRunning bool
 	lastProbeAt  time.Time
 	probedSize   map[string]int64 // logPath -> last scanned file size
-	retriedPane  map[string]bool  // child pane_id -> delayed retry already scheduled
 }
 
 func (s *Server) newLineageTracker(sess *term.Session, server, socket, herdrSession string) *lineageTracker {
@@ -96,7 +95,6 @@ func (s *Server) newLineageTracker(sess *term.Session, server, socket, herdrSess
 		knownPanes:   map[string]bool{},
 		paneLogs:     map[string]knownPaneLog{},
 		probedSize:   map[string]int64{},
-		retriedPane:  map[string]bool{},
 	}
 }
 
@@ -463,10 +461,20 @@ func (t *lineageTracker) noteBornLocked(live map[string]livePaneInfo, nowMs int6
 	for _, p := range live {
 		k := bornKey(p)
 		now[k] = true
-		if t.bornReady && !before[k] {
-			if _, had := t.born[k]; !had {
-				t.born[k] = nowMs
+		if !t.bornReady || before[k] {
+			continue
+		}
+		// The same pane, known by its id before and by its terminal now (herdr
+		// telling it only once an agent is seen in it): not come into being,
+		// its birth (if any) carried over.
+		if prev, ok := t.live[p.PaneID]; ok && prev.TerminalID == "" && p.TerminalID != "" {
+			if at, had := t.born[bornKey(prev)]; had {
+				t.born[k] = at
 			}
+			continue
+		}
+		if _, had := t.born[k]; !had {
+			t.born[k] = nowMs
 		}
 	}
 	for k := range t.born {
@@ -477,14 +485,35 @@ func (t *lineageTracker) noteBornLocked(live map[string]livePaneInfo, nowMs int6
 	t.bornReady = true
 }
 
-// noteClock keeps the host's clock ahead of the gateway's by off ms.
+// noteClock keeps the host's clock ahead of the gateway's by off ms. First
+// measured, or found moved, the parents' logs are read again (a window held
+// against the old reckoning is weighed anew, though no log grew), once the
+// probe's cooldown is past.
 func (t *lineageTracker) noteClock(off int64) {
 	if t == nil {
 		return
 	}
 	t.mu.Lock()
+	moved := !t.clockKnown || off-t.clockOff > windowSlackMs || t.clockOff-off > windowSlackMs
 	t.clockOff, t.clockKnown = off, true
+	var again []string
+	if moved {
+		for pane, p := range t.live {
+			if _, born := t.born[bornKey(p)]; born && !t.hasRowForLocked(pane, p.TerminalID) {
+				again = append(again, pane)
+			}
+		}
+	}
 	t.mu.Unlock()
+	if len(again) == 0 {
+		return
+	}
+	t.probeMu.Lock()
+	clear(t.probedSize)
+	t.probeMu.Unlock()
+	if t.sess != nil {
+		time.AfterFunc(lineageProbeCooldown, func() { t.probeCandidateParents(context.Background(), again) })
+	}
 }
 
 const (
@@ -834,7 +863,20 @@ func (t *lineageTracker) probeCandidateParents(ctx context.Context, newPanes []s
 			break
 		}
 	}
+	inUse := make(map[string]bool, len(t.paneLogs))
+	for _, kl := range t.paneLogs {
+		inUse[kl.logPath] = true
+	}
 	t.mu.Unlock()
+
+	// (Forget the sizes of logs no pane writes now: else one per log ever seen.)
+	t.probeMu.Lock()
+	for path := range t.probedSize {
+		if !inUse[path] {
+			delete(t.probedSize, path)
+		}
+	}
+	t.probeMu.Unlock()
 
 	if len(cands) == 0 {
 		return
@@ -917,7 +959,6 @@ func (t *lineageTracker) probeCandidateParents(ctx context.Context, newPanes []s
 			continue
 		}
 		t.retries[p] = n + 1
-		t.retriedPane[p] = true
 		retry = append(retry, p)
 		wait = max(wait, lineageRetryAfter[n])
 	}

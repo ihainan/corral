@@ -62,11 +62,18 @@ func TestLineageWindowsFromRealCommands(t *testing.T) {
 			want: []string{"w2Y:p3"},
 		},
 		{
-			name: "made and listed: the listing's panes are named too (the time tells them apart)",
+			// (A pane another parent made meanwhile would be in the listing,
+			// and born in the window: no window at all.)
+			name: "made and listed",
 			cmd:  `herdr tab create --workspace w2R --label x --no-focus | tail -1; herdr tab list --workspace w2R | grep -oE '"pane_id":"[^"]*"'`,
 			out:  `{"result":{"root_pane":{"pane_id":"w2R:p4"}}}` + "\n" + `"pane_id":"w2R:p1"` + "\n" + `"pane_id":"w2R:p4"`,
-			want: []string{"w2R:p4", "w2R:p1"},
 		},
+		{name: "made and looked up", cmd: `p=$(herdr tab create --label x | jq -r .result.root_pane.pane_id); herdr pane get $p`, out: `"pane_id":"w1:p9"`},
+		{name: "a listing, the making in a comment", cmd: "sleep 1; herdr tab list # herdr tab create", out: `"pane_id":"w1:p9"`},
+		{name: "the making in a comment only", cmd: "cat panes.txt # then herdr tab create", out: `w1:p9`},
+		{name: "a # in a quoted label", cmd: `herdr tab create --label 'a #b' --no-focus | grep -o 'w1:p[0-9]*'`, out: `w1:p9`, want: []string{"w1:p9"}},
+		{name: "help only", cmd: `herdr tab create --help; cat panes.txt`, out: `w1:p9`},
+		{name: "help, short", cmd: `herdr pane split -h`, out: `w1:p9`},
 		{name: "its own session named", cmd: `herdr --session default tab create --label x`, out: `"pane_id":"w1:p9"`, want: []string{"w1:p9"}},
 		{name: "another herdr session", cmd: `herdr --session 2 tab create --label x`, out: `"pane_id":"w1:p9"`},
 		{name: "another socket", cmd: `HERDR_SOCKET_PATH=/other.sock herdr tab create --label x`, out: `"pane_id":"w1:p9"`},
@@ -101,7 +108,7 @@ func windowTracker(h *harness) *lineageTracker {
 		socket: "/home/u/.config/herdr/herdr.sock", herdrSession: "default",
 		live: map[string]livePaneInfo{}, termToPane: map[string]string{},
 		knownPanes: map[string]bool{}, paneLogs: map[string]knownPaneLog{},
-		probedSize: map[string]int64{}, retriedPane: map[string]bool{},
+		probedSize: map[string]int64{},
 	}
 }
 
@@ -253,5 +260,101 @@ func TestPaneIDPatternsTakeLetters(t *testing.T) {
 		if scriptRe.MatchString(s) || herdrPaneTokenRe.MatchString(s) {
 			t.Errorf("%q taken for a pane", s)
 		}
+	}
+}
+
+// codexRow is a row of a Codex rollout log at ms (unix).
+func codexRow(ms int64, payload map[string]any) []byte {
+	b, _ := json.Marshal(map[string]any{"timestamp": time.UnixMilli(ms).UTC().Format(time.RFC3339Nano), "type": "response_item", "payload": payload})
+	return append(b, '\n')
+}
+
+// A Codex call left running ("Process running with session ID N") goes on in
+// write_stdin calls: its window stays open and takes their output, closing
+// when the process ends — not on the first answer, which names no pane yet.
+func TestLineageWindowCodexStillRunning(t *testing.T) {
+	const t0 = int64(1795600000000)
+	args, _ := json.Marshal(map[string]any{"cmd": `for x in a b; do herdr tab create --label m-$x --no-focus | grep -o '"pane_id":"[^"]*"'; sleep 20; done`})
+	poll, _ := json.Marshal(map[string]any{"session_id": 63529, "chars": "", "yield_time_ms": 30000})
+	other, _ := json.Marshal(map[string]any{"session_id": 777, "chars": ""})
+	var log []byte
+	log = append(log, codexRow(t0, map[string]any{"type": "function_call", "name": "exec_command", "call_id": "call_A", "arguments": string(args)})...)
+	log = append(log, codexRow(t0+1000, map[string]any{"type": "function_call_output", "call_id": "call_A", "output": "Chunk ID: a1\nWall time: 1.0 seconds\nProcess running with session ID 63529\nOutput:\n\"pane_id\":\"w1:p5\"\n"})...)
+	log = append(log, codexRow(t0+2000, map[string]any{"type": "function_call", "name": "write_stdin", "call_id": "call_B", "arguments": string(other)})...)
+	log = append(log, codexRow(t0+2100, map[string]any{"type": "function_call_output", "call_id": "call_B", "output": "Process exited with code 0\nOutput:\nw1:p8\n"})...)
+	log = append(log, codexRow(t0+30000, map[string]any{"type": "function_call", "name": "write_stdin", "call_id": "call_C", "arguments": string(poll)})...)
+	log = append(log, codexRow(t0+31000, map[string]any{"type": "function_call_output", "call_id": "call_C", "output": "Chunk ID: a2\nProcess running with session ID 63529\nOutput:\n"})...)
+	ex := newLineageExtractor("codex", "/s.sock", "default")
+	ex.Feed(log)
+	if ws := ex.TakeWindows(); len(ws) != 0 {
+		t.Fatalf("window closed while the process runs: %+v", ws)
+	}
+	var end []byte
+	end = append(end, codexRow(t0+40000, map[string]any{"type": "function_call", "name": "write_stdin", "call_id": "call_D", "arguments": string(poll)})...)
+	end = append(end, codexRow(t0+42000, map[string]any{"type": "function_call_output", "call_id": "call_D", "output": "Chunk ID: a3\nProcess exited with code 0\nOutput:\n\"pane_id\":\"w1:p6\"\n"})...)
+	ex.Feed(end)
+	ws := ex.TakeWindows()
+	if len(ws) != 1 || ws[0].From != t0 || ws[0].To != t0+42000 || ws[0].Key != "codex:call_A" || strings.Join(ws[0].Panes, ",") != "w1:p5,w1:p6" {
+		t.Fatalf("windows: %+v", ws)
+	}
+
+	// Failed in the end: no window.
+	ex2 := newLineageExtractor("codex", "/s.sock", "default")
+	ex2.Feed(log)
+	ex2.Feed([]byte(strings.ReplaceAll(string(end), "code 0", "code 1")))
+	if ws := ex2.TakeWindows(); len(ws) != 0 {
+		t.Fatalf("a failed run made a window: %+v", ws)
+	}
+}
+
+// A pane herdr first tells without its terminal, then with it (an agent seen
+// in it): the same pane, not come into being — a listing naming it in any
+// window later does not link it.
+func TestLineageBornTerminalLearnedLater(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	lt := windowTracker(h)
+	parent := herdr.Pane{ID: "w1:p1", WorkspaceID: "w1", Agent: "claude", TerminalID: "term-1"}
+	shell := herdr.Pane{ID: "w1:p3", WorkspaceID: "w1"}
+	lt.OnSnapshot(ctx, windowSnap(parent, shell))
+	lt.OnSnapshot(ctx, windowSnap(parent, herdr.Pane{ID: "w1:p3", WorkspaceID: "w1", Agent: "agy", TerminalID: "term-3"}))
+	lt.noteClock(0)
+	now := time.Now().UnixMilli()
+	lt.RecordWindow(ctx, "w1:p1", "term-1", "", lineageWindow{Panes: []string{"w1:p3"}, From: now - 1000, To: now + 1000, Key: "claude:k"})
+	if lt.hasRowForLocked("w1:p3", "term-3") {
+		t.Fatal("a pane there all along was linked once its terminal was told")
+	}
+	// Born while watched, its terminal told later: its birth kept.
+	lt.OnSnapshot(ctx, windowSnap(parent, herdr.Pane{ID: "w1:p3", WorkspaceID: "w1", Agent: "agy", TerminalID: "term-3"}, herdr.Pane{ID: "w1:p4", WorkspaceID: "w1"}))
+	at, ok := lt.born["pane:w1:p4"]
+	lt.OnSnapshot(ctx, windowSnap(parent, herdr.Pane{ID: "w1:p3", WorkspaceID: "w1", Agent: "agy", TerminalID: "term-3"}, herdr.Pane{ID: "w1:p4", WorkspaceID: "w1", Agent: "agy", TerminalID: "term-4"}))
+	if !ok || lt.born["term-4"] != at {
+		t.Fatalf("birth not carried over: %v %v", at, lt.born)
+	}
+}
+
+// The host's clock measured (or found moved) after the logs were read: the
+// sizes that would skip them are forgotten, so they are read again; a
+// measure within the slack forgets nothing.
+func TestLineageClockMeasuredRereads(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	lt := windowTracker(h)
+	parent := herdr.Pane{ID: "w1:p1", WorkspaceID: "w1", Agent: "claude", TerminalID: "term-1"}
+	lt.OnSnapshot(ctx, windowSnap(parent))
+	lt.OnSnapshot(ctx, windowSnap(parent, herdr.Pane{ID: "w1:p2", WorkspaceID: "w1", Agent: "agy", TerminalID: "term-2"}))
+	lt.probedSize["/log/a.jsonl"] = 100
+	lt.noteClock(10 * 60 * 1000)
+	if len(lt.probedSize) != 0 {
+		t.Fatal("first measure: logs not to be read again")
+	}
+	lt.probedSize["/log/a.jsonl"] = 100
+	lt.noteClock(10*60*1000 + 500)
+	if len(lt.probedSize) != 1 {
+		t.Fatal("a measure within the slack: logs read again")
+	}
+	lt.noteClock(0)
+	if len(lt.probedSize) != 0 {
+		t.Fatal("clock moved: logs not to be read again")
 	}
 }
