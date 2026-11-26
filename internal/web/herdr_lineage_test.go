@@ -91,8 +91,8 @@ func TestLineageTrackerMetadataMoveAndSessionProtection(t *testing.T) {
 		t.Fatalf("moved child lost lineage: %+v", movedChild)
 	}
 
-	// Symmetric occupant session protection: if parent's pane switches to a different
-	// agent session, the stale edge must NOT be applied.
+	// A new conversation in the parent's same terminal (a /clear, a new brief)
+	// is still the same parent: the edge stays (11-26).
 	snap3 := &herdr.Snapshot{
 		Version:    "0.8.0",
 		Workspaces: snap2.Workspaces,
@@ -108,8 +108,73 @@ func TestLineageTrackerMetadataMoveAndSessionProtection(t *testing.T) {
 	lt.OnSnapshot(ctx, snap3)
 	sum3 := summarize("default", snap3, &agentTimes{at: map[string]agentTime{}}, false)
 	lt.decorate(&sum3)
-	if sum3.Workspaces[1].Agents[0].ParentPane != "" {
-		t.Fatalf("expected lineage to be withheld when parent session changed, got %+v", sum3.Workspaces[1].Agents[0])
+	if sum3.Workspaces[1].Agents[0].ParentPane != "w1:p1" {
+		t.Fatalf("a new conversation in the parent's terminal lost the lineage: %+v", sum3.Workspaces[1].Agents[0])
+	}
+
+	// Occupant protection: another terminal in the parent's pane (its program
+	// replaced) — the stale edge must NOT be applied.
+	snap4 := &herdr.Snapshot{
+		Version:    "0.8.0",
+		Workspaces: snap2.Workspaces,
+		Agents: []herdr.Pane{
+			{
+				ID: "w1:p1", WorkspaceID: "w1", Agent: "claude", AgentStatus: "idle",
+				TerminalID:   "term-1-NEW",
+				AgentSession: &herdr.AgentSessionInfo{Value: "sess-parent-DIFFERENT"},
+			},
+			snap2.Agents[1],
+		},
+	}
+	lt.OnSnapshot(ctx, snap4)
+	sum4 := summarize("default", snap4, &agentTimes{at: map[string]agentTime{}}, false)
+	lt.decorate(&sum4)
+	if sum4.Workspaces[1].Agents[0].ParentPane != "" {
+		t.Fatalf("expected lineage to be withheld when the parent's terminal changed, got %+v", sum4.Workspaces[1].Agents[0])
+	}
+}
+
+// A child in its same terminal beginning a new conversation (Antigravity: a
+// new session id for a new brief) keeps its parent (11-26, ZGCAI Analysis mx-ui).
+func TestLineageChildNewConversationSameTerminal(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	_, err := h.srv.store.UpsertAgentLineage(ctx, store.AgentLineage{
+		OwnerID: 1, HostID: 10, Server: "conv",
+		ChildPane: "w1:p2", ChildTermID: "term-2", ChildSession: "agy-1",
+		ParentPane: "w1:p1", ParentTermID: "term-1", ParentSession: "ps1",
+		Source: store.LineageToolLog, State: store.LineageConfirmed,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	lt := &lineageTracker{
+		srv: h.srv, ownerID: 1, hostID: 10, server: "conv",
+		live: map[string]livePaneInfo{}, termToPane: map[string]string{},
+		knownPanes: map[string]bool{}, paneLogs: map[string]knownPaneLog{},
+		probedSize: map[string]int64{}, retriedPane: map[string]bool{},
+	}
+	snap := &herdr.Snapshot{
+		Version:    "0.8.0",
+		Workspaces: []herdr.Workspace{{ID: "w1", Label: "main", Number: 1}},
+		Agents: []herdr.Pane{
+			{ID: "w1:p1", WorkspaceID: "w1", Agent: "claude", TerminalID: "term-1", AgentSession: &herdr.AgentSessionInfo{Value: "ps1"}},
+			{ID: "w1:p2", WorkspaceID: "w1", Agent: "agy", TerminalID: "term-2", AgentSession: &herdr.AgentSessionInfo{Value: "agy-2"}},
+		},
+	}
+	lt.OnSnapshot(ctx, snap)
+	sum := summarize("default", snap, &agentTimes{at: map[string]agentTime{}}, false)
+	lt.decorate(&sum)
+	if sum.Workspaces[0].Agents[1].ParentPane != "w1:p1" {
+		t.Fatalf("a new conversation in the child's terminal lost its parent: %+v", sum.Workspaces[0].Agents[1])
+	}
+	// Another terminal in the child's pane: not the child it was.
+	snap.Agents[1].TerminalID = "term-2-NEW"
+	lt.OnSnapshot(ctx, snap)
+	sum = summarize("default", snap, &agentTimes{at: map[string]agentTime{}}, false)
+	lt.decorate(&sum)
+	if sum.Workspaces[0].Agents[1].ParentPane != "" {
+		t.Fatalf("another terminal in the child's pane kept the parent: %+v", sum.Workspaces[0].Agents[1])
 	}
 }
 
@@ -177,9 +242,9 @@ func TestLineageMetadataCannotRebindManualIdentity(t *testing.T) {
 		Version:    "0.8.0",
 		Workspaces: []herdr.Workspace{{ID: "w1", Label: "main", Number: 1}},
 		Agents: []herdr.Pane{
-			{ID: "w1:p1", WorkspaceID: "w1", Agent: "claude", TerminalID: "term-1", AgentSession: &herdr.AgentSessionInfo{Value: "ps2"}},
+			{ID: "w1:p1", WorkspaceID: "w1", Agent: "claude", TerminalID: "term-1b", AgentSession: &herdr.AgentSessionInfo{Value: "ps2"}},
 			{
-				ID: "w1:p2", WorkspaceID: "w1", Agent: "claude", TerminalID: "term-2",
+				ID: "w1:p2", WorkspaceID: "w1", Agent: "claude", TerminalID: "term-2b",
 				AgentSession: &herdr.AgentSessionInfo{Value: "cs2"},
 				Tokens:       map[string]string{"corral_parent_pane": "w1:p1", "corral_parent_term": "term-1"},
 			},

@@ -101,7 +101,7 @@ const agyTitlesScript = `import json, os, re, sqlite3, sys, urllib.parse
 
 sock = sys.argv[1]
 uid = os.geteuid()
-pane_re = re.compile(r'^w[0-9A-Za-z]+:p\d+$')
+pane_re = re.compile(r'^w[0-9A-Za-z]+:p[0-9A-Z]+$')
 lock_re = re.compile(r'^(.*)/presence/([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})\.lock$')
 noninter_flag_arg = {
     '-i', '--prompt-interactive', '--add-dir', '--agent', '--conversation',

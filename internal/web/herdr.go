@@ -885,6 +885,11 @@ func (s *Server) watchHerdr(sess *term.Session, h *store.Host) {
 			if want {
 				rounds.lookedOver(onGatewayClock(at, string(out), got), gen)
 			}
+			if err == nil {
+				if off, ok := hostClockAhead(string(out), got); ok {
+					lineage.noteClock(off)
+				}
+			}
 		}
 	}()
 	// The bindings are read beside the watch, not before it: a slow host
@@ -1636,24 +1641,33 @@ func onGatewayClock(at map[string]int64, out string, got int64) map[string]int64
 	if at == nil {
 		return nil
 	}
-	i := strings.LastIndex(out, "now=")
-	if i < 0 {
+	off, ok := hostClockAhead(out, got)
+	if !ok {
 		return nil
 	}
-	v, _, _ := strings.Cut(out[i+len("now="):], "\x00")
-	now, err := strconv.ParseInt(v, 10, 64)
-	if err != nil || now <= 0 {
-		return nil
-	}
-	if now < 1e11 { // (seconds: a date with no %N leaves it out, digits all the same)
-		now *= 1000
-	}
-	off := now - got // (the host ahead by; a little less than it is, by the way back)
 	m := make(map[string]int64, len(at))
 	for p, t := range at {
 		m[p] = t - off
 	}
 	return m
+}
+
+// hostClockAhead reads hostNowCommand's answer in out, got (gateway unix ms)
+// when it came: how far the host's clock is ahead of the gateway's.
+func hostClockAhead(out string, got int64) (int64, bool) {
+	i := strings.LastIndex(out, "now=")
+	if i < 0 {
+		return 0, false
+	}
+	v, _, _ := strings.Cut(out[i+len("now="):], "\x00")
+	now, err := strconv.ParseInt(v, 10, 64)
+	if err != nil || now <= 0 {
+		return 0, false
+	}
+	if now < 1e11 { // (seconds: a date with no %N leaves it out, digits all the same)
+		now *= 1000
+	}
+	return now - got, true // (the host ahead by; a little less than it is, by the way back)
 }
 
 func (s *Server) apiHerdrReply(w http.ResponseWriter, r *http.Request) {

@@ -23,8 +23,10 @@ const (
 	lineageProbeMaxFiles = 6
 	lineageProbePerFile  = 4 << 20  // 4 MiB tail per candidate parent log (covers heavy Claude/Codex logs)
 	lineageProbeMaxBytes = 12 << 20 // 12 MiB total budget per probe run
-	lineageMetadataTTLMs = 86400000  // 24h (herdr max ttl_ms)
+	lineageMetadataTTLMs = 86400000 // 24h (herdr max ttl_ms)
 )
+
+var lineageRetryAfter = []time.Duration{3 * time.Second, 15 * time.Second, 60 * time.Second}
 
 type livePaneInfo struct {
 	PaneID     string
@@ -61,6 +63,17 @@ type lineageTracker struct {
 	lastPruneAt time.Time
 	loaded      bool
 	poke        func()
+
+	// When each pane came into being, on the gateway's clock (unix ms): by
+	// its terminal, as first seen in a snapshot after the first one (the
+	// panes there before have no known birth). With clockOff, the host's
+	// clock ahead of the gateway's (clockKnown: measured), it is held against
+	// the windows of the parents' calls (RecordWindow).
+	born       map[string]int64
+	bornReady  bool
+	clockOff   int64
+	clockKnown bool
+	retries    map[string]int // child pane -> delayed probes scheduled
 
 	probeMu      sync.Mutex
 	probeRunning bool
@@ -274,10 +287,7 @@ func (t *lineageTracker) OnSnapshot(ctx context.Context, snap *herdr.Snapshot) {
 		if !hasChild {
 			continue
 		}
-		if r.ChildTermID != "" && childLive.TerminalID != "" && r.ChildTermID != childLive.TerminalID {
-			continue
-		}
-		if r.ChildSession != "" && childLive.Session != "" && r.ChildSession != childLive.Session {
+		if !sameOccupant(r.ChildTermID, r.ChildSession, childLive.TerminalID, childLive.Session) {
 			continue
 		}
 		needUpgrade := (r.ChildTermID == "" && childLive.TerminalID != "") ||
@@ -285,8 +295,7 @@ func (t *lineageTracker) OnSnapshot(ctx context.Context, snap *herdr.Snapshot) {
 		parentTerm := r.ParentTermID
 		parentSess := r.ParentSession
 		if pLive, hasParent := live[r.ParentPane]; hasParent {
-			parentCompatible := (r.ParentTermID == "" || pLive.TerminalID == "" || r.ParentTermID == pLive.TerminalID) &&
-				(r.ParentSession == "" || pLive.Session == "" || r.ParentSession == pLive.Session)
+			parentCompatible := sameOccupant(r.ParentTermID, r.ParentSession, pLive.TerminalID, pLive.Session)
 			if parentCompatible {
 				if parentTerm == "" && pLive.TerminalID != "" {
 					parentTerm = pLive.TerminalID
@@ -388,6 +397,7 @@ func (t *lineageTracker) OnSnapshot(ctx context.Context, snap *herdr.Snapshot) {
 	if changed {
 		_ = t.reloadLocked(sctx)
 	}
+	t.noteBornLocked(live, nowMs)
 	t.live = live
 	t.termToPane = termToPane
 	for _, p := range live {
@@ -430,6 +440,92 @@ func (t *lineageTracker) hasRowForLocked(pane, termID string) bool {
 		}
 	}
 	return false
+}
+
+func bornKey(p livePaneInfo) string {
+	if p.TerminalID != "" {
+		return p.TerminalID
+	}
+	return "pane:" + p.PaneID
+}
+
+// noteBornLocked notes the panes of a snapshot not in the last one as come
+// into being now (from the second snapshot on), and forgets the gone.
+func (t *lineageTracker) noteBornLocked(live map[string]livePaneInfo, nowMs int64) {
+	if t.born == nil {
+		t.born = map[string]int64{}
+	}
+	before := make(map[string]bool, len(t.live))
+	for _, p := range t.live {
+		before[bornKey(p)] = true
+	}
+	now := make(map[string]bool, len(live))
+	for _, p := range live {
+		k := bornKey(p)
+		now[k] = true
+		if t.bornReady && !before[k] {
+			if _, had := t.born[k]; !had {
+				t.born[k] = nowMs
+			}
+		}
+	}
+	for k := range t.born {
+		if !now[k] {
+			delete(t.born, k)
+		}
+	}
+	t.bornReady = true
+}
+
+// noteClock keeps the host's clock ahead of the gateway's by off ms.
+func (t *lineageTracker) noteClock(off int64) {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	t.clockOff, t.clockKnown = off, true
+	t.mu.Unlock()
+}
+
+const (
+	windowSlackMs   = 3000  // (the host's clock measured: what the measure and a snapshot's lag may be out by)
+	windowUnknownMs = 30000 // (not measured yet)
+	windowLagMs     = 2000  // (a pane made is seen in the snapshot read after the event: up to this late)
+)
+
+// RecordWindow links to parentPane each pane w's output names that came into
+// being while its call ran, and has no edge yet (one confirmed, or refused by
+// the person, stands). A pane there before the call — named by a listing in
+// its output — or born when the gateway was not watching, is not linked.
+func (t *lineageTracker) RecordWindow(ctx context.Context, parentPane, parentTerm, parentSess string, w lineageWindow) {
+	if !herdrPaneID.MatchString(parentPane) || w.To < w.From {
+		return
+	}
+	type hit struct{ pane, term string }
+	var hits []hit
+	t.mu.Lock()
+	slack := int64(windowUnknownMs)
+	if t.clockKnown {
+		slack = windowSlackMs
+	}
+	from, to := w.From-t.clockOff-slack, w.To-t.clockOff+slack+windowLagMs
+	pLive, hasParent := t.live[parentPane]
+	for _, pane := range w.Panes {
+		info, ok := t.live[pane]
+		if !ok || pane == parentPane || (hasParent && info.TerminalID != "" && info.TerminalID == pLive.TerminalID) {
+			continue
+		}
+		at, known := t.born[bornKey(info)]
+		if !known || at < from || at > to || t.hasRowForLocked(pane, info.TerminalID) {
+			continue
+		}
+		hits = append(hits, hit{pane, info.TerminalID})
+	}
+	t.mu.Unlock()
+	for _, h := range hits {
+		// (Its own evidence key: one call makes many panes, each its own edge.)
+		t.RecordToolLog(ctx, parentPane, parentTerm, parentSess, lineageDiscovery{ChildPane: h.pane, ChildTermID: h.term, EvidenceKey: w.Key + ":" + h.pane, Action: "window"})
+	}
 }
 
 // RecordCorralSpawn persists a confirmed corral_spawn edge from POST /api/sessions/{id}/agents.
@@ -624,20 +720,12 @@ func (t *lineageTracker) decorate(sum *herdrSummary) {
 			continue
 		}
 		// Child identity match.
-		if r.ChildTermID != "" && childLive.TerminalID != "" && r.ChildTermID != childLive.TerminalID {
-			continue
-		}
-		if r.ChildSession != "" && childLive.Session != "" && r.ChildSession != childLive.Session {
+		if !sameOccupant(r.ChildTermID, r.ChildSession, childLive.TerminalID, childLive.Session) {
 			continue
 		}
 		// Symmetric parent identity match (when parent pane is live).
-		if parentLive, hasParent := live[r.ParentPane]; hasParent {
-			if r.ParentTermID != "" && parentLive.TerminalID != "" && r.ParentTermID != parentLive.TerminalID {
-				continue
-			}
-			if r.ParentSession != "" && parentLive.Session != "" && r.ParentSession != parentLive.Session {
-				continue
-			}
+		if parentLive, hasParent := live[r.ParentPane]; hasParent && !sameOccupant(r.ParentTermID, r.ParentSession, parentLive.TerminalID, parentLive.Session) {
+			continue
 		}
 		byChild[r.ChildPane] = edge{
 			parentPane:    r.ParentPane,
@@ -802,28 +890,46 @@ func (t *lineageTracker) probeCandidateParents(ctx context.Context, newPanes []s
 			for _, d := range ex.Feed(data) {
 				t.RecordToolLog(pctx, cand.pane, cand.termID, cand.session, d)
 			}
+			for _, w := range ex.TakeWindows() {
+				t.RecordWindow(pctx, cand.pane, cand.termID, cand.session, w)
+			}
 		}
 		return nil
 	})
 
-	// Schedule at most 1 delayed retry (3s later) for any newly-appeared pane
-	// still unlinked (e.g. parent's tool_result flushed slightly after pane creation).
+	// Schedule up to 3 delayed retries (3s, 15s, 60s later) for any newly-appeared
+	// pane still unlinked: the parent's tool_result is written when its whole
+	// command ends (a `sleep` after the pane is made, an agent started in it).
 	var retry []string
+	var wait time.Duration
 	t.mu.Lock()
+	if t.retries == nil {
+		t.retries = map[string]int{}
+	}
 	for _, p := range newPanes {
 		info, ok := t.live[p]
 		if !ok || t.hasRowForLocked(p, info.TerminalID) {
+			delete(t.retries, p)
 			continue
 		}
-		if !t.retriedPane[p] {
-			t.retriedPane[p] = true
-			retry = append(retry, p)
+		n := t.retries[p]
+		if n >= len(lineageRetryAfter) {
+			continue
+		}
+		t.retries[p] = n + 1
+		t.retriedPane[p] = true
+		retry = append(retry, p)
+		wait = max(wait, lineageRetryAfter[n])
+	}
+	for p := range t.retries {
+		if _, ok := t.live[p]; !ok {
+			delete(t.retries, p)
 		}
 	}
 	t.mu.Unlock()
 
 	if len(retry) > 0 {
-		time.AfterFunc(3*time.Second, func() {
+		time.AfterFunc(wait, func() {
 			if ctx.Err() != nil {
 				return
 			}
@@ -834,6 +940,18 @@ func (t *lineageTracker) probeCandidateParents(ctx context.Context, newPanes []s
 			t.probeCandidateParents(ctx, retry)
 		})
 	}
+}
+
+// sameOccupant says a live pane is still held by the process an edge was
+// recorded for. Its terminal decides where the edge and the pane both know
+// one: an agent in it may begin a new conversation — Antigravity does, a new
+// session id for each brief it is sent — and is still the same child (or
+// parent). Only where a terminal id is missing does the agent session decide.
+func sameOccupant(rowTerm, rowSess, liveTerm, liveSess string) bool {
+	if rowTerm != "" && liveTerm != "" {
+		return rowTerm == liveTerm
+	}
+	return rowSess == "" || liveSess == "" || rowSess == liveSess
 }
 
 func clipLineageSession(s string) string {
@@ -863,7 +981,8 @@ func (s *Server) feedConvoLineage(sess *term.Session, st *convoState, raw []byte
 		st.lineageSocket = lt.socket
 	}
 	discoveries := st.lineage.Feed(raw)
-	if len(discoveries) == 0 {
+	windows := st.lineage.TakeWindows()
+	if len(discoveries) == 0 && len(windows) == 0 {
 		return
 	}
 	parentPane := st.pane
@@ -879,6 +998,9 @@ func (s *Server) feedConvoLineage(sess *term.Session, st *convoState, raw []byte
 	defer cancel()
 	for _, d := range discoveries {
 		lt.RecordToolLog(ctx, parentPane, parentTerm, parentSess, d)
+	}
+	for _, w := range windows {
+		lt.RecordWindow(ctx, parentPane, parentTerm, parentSess, w)
 	}
 }
 

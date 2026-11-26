@@ -6,6 +6,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // lineageDiscovery is a confirmed child-creation event extracted from a parent
@@ -21,13 +22,40 @@ type lineageDiscovery struct {
 
 var (
 	herdrTermIDRe     = regexp.MustCompile(`^[A-Za-z0-9:_.-]{1,100}$`)
-	herdrPaneTokenRe  = regexp.MustCompile(`\b(w[A-Za-z0-9]+:p\d+)\b`)
+	herdrPaneTokenRe  = regexp.MustCompile(`\b(w[A-Za-z0-9]+:p[0-9A-Z]+)\b`) // (herdr numbers in digits and capitals: w2R:pA past p9)
 	herdrTermTokenRe  = regexp.MustCompile(`"terminal_id"\s*:\s*"([A-Za-z0-9:_.-]{1,100})"`)
 	agyTimestampRe    = regexp.MustCompile(`(?m)^\[\d{2}:\d{2}:\d{2}\]\s*`)
 	codexExitCodeRe   = regexp.MustCompile(`(?i)(?:process exited with code|exit code:?)\s+(-?\d+)`)
 	agyExitCodeRe     = regexp.MustCompile(`(?i)command exited with code\s+(-?\d+)`)
 	simpleEnvAssignRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*=`)
+
+	// A herdr call that makes a pane, however it is written: in a loop, with
+	// its answer filtered, beside a heredoc. Only a lead for lineageWindow.
+	herdrMakesPaneRe  = regexp.MustCompile(`\bherdr\b[^\n|;&]*?\b(?:tab\s+create|workspace\s+create|pane\s+split)\b`)
+	herdrSessionArgRe = regexp.MustCompile(`--session[= ]+["']?([^\s"';|&]+)`)
+	herdrSocketEnvRe  = regexp.MustCompile(`HERDR_SOCKET_PATH=["']?([^\s"';|&]+)`)
+	elsewhereRe       = regexp.MustCompile(`--remote\b|\bssh\s|\bdocker\s+exec\b|\bkubectl\s+exec\b|\bpodman\s+exec\b`)
 )
+
+// lineageWindow is a parent's tool call that ran a herdr command making a
+// pane, with when it began and ended (on the log's clock, unix ms) and the
+// pane ids its output names. It proves nothing alone — the output of
+// `herdr tab list` names every pane — and counts only for a pane that came
+// into being while the call ran (lineageTracker.RecordWindow). Read so, a
+// call need not be understood: a loop, a filter, a heredoc are all as one.
+type lineageWindow struct {
+	Panes []string
+	From  int64
+	To    int64
+	Key   string
+}
+
+type windowPending struct {
+	at       int64
+	cmdPanes map[string]bool
+}
+
+const lineageMaxWindows = 64
 
 const (
 	lineageMaxPending = 128
@@ -57,6 +85,99 @@ type lineageExtractor struct {
 	// to enrich child_session on an already-created pane (never standalone confirmation).
 	createdByPane map[string]lineageDiscovery
 	createdByTerm map[string]lineageDiscovery
+
+	// Calls making a pane, by tool call id, waiting for their output; and
+	// the windows of those answered (taken by TakeWindows).
+	winPending map[string]windowPending
+	windows    []lineageWindow
+}
+
+// TakeWindows returns the windows found since it was last called.
+func (e *lineageExtractor) TakeWindows() []lineageWindow {
+	if e == nil {
+		return nil
+	}
+	w := e.windows
+	e.windows = nil
+	return w
+}
+
+// makesPaneHere says a shell command runs a herdr call making a pane on this
+// extractor's herdr server (as far as the text says: none named elsewhere).
+func (e *lineageExtractor) makesPaneHere(cmd string) bool {
+	if len(cmd) > 65536 || !herdrMakesPaneRe.MatchString(cmd) || elsewhereRe.MatchString(cmd) {
+		return false
+	}
+	for _, m := range herdrSessionArgRe.FindAllStringSubmatch(cmd, -1) {
+		if e.serverSession == "" || m[1] != e.serverSession {
+			return false
+		}
+	}
+	for _, m := range herdrSocketEnvRe.FindAllStringSubmatch(cmd, -1) {
+		if e.serverSocket == "" || m[1] != e.serverSocket {
+			return false
+		}
+	}
+	return true
+}
+
+// windowBegins notes a call making a pane, begun at (log clock).
+func (e *lineageExtractor) windowBegins(id string, at int64, cmd string) {
+	if id == "" || at <= 0 || !e.makesPaneHere(cmd) {
+		return
+	}
+	if e.winPending == nil || len(e.winPending) >= lineageMaxPending {
+		e.winPending = map[string]windowPending{}
+	}
+	var cmdPanes map[string]bool
+	for _, m := range herdrPaneTokenRe.FindAllStringSubmatch(cmd, -1) {
+		if cmdPanes == nil {
+			cmdPanes = map[string]bool{}
+		}
+		cmdPanes[m[1]] = true
+	}
+	e.winPending[id] = windowPending{at: at, cmdPanes: cmdPanes}
+}
+
+// windowEnds closes the call id at (log clock) with its output: a window of
+// the pane ids the output names, but those its command named itself (the
+// pane split, the pane an agent is started in).
+func (e *lineageExtractor) windowEnds(id string, at int64, failed bool, output string) {
+	w, ok := e.winPending[id]
+	if !ok {
+		return
+	}
+	delete(e.winPending, id)
+	if failed || at < w.at {
+		return
+	}
+	seen := map[string]bool{}
+	var panes []string
+	for _, m := range herdrPaneTokenRe.FindAllStringSubmatch(output, -1) {
+		if p := m[1]; !seen[p] && !w.cmdPanes[p] {
+			seen[p] = true
+			panes = append(panes, p)
+		}
+	}
+	if len(panes) == 0 || len(panes) > 64 {
+		return
+	}
+	if len(e.windows) >= lineageMaxWindows {
+		e.windows = e.windows[1:]
+	}
+	e.windows = append(e.windows, lineageWindow{Panes: panes, From: w.at, To: at, Key: e.agent + ":" + id})
+}
+
+// logMs reads a log row's timestamp (RFC 3339) as unix ms; 0 if none.
+func logMs(ts string) int64 {
+	if ts == "" {
+		return 0
+	}
+	t, err := time.Parse(time.RFC3339Nano, ts)
+	if err != nil {
+		return 0
+	}
+	return t.UnixMilli()
 }
 
 type agyPendingIntent struct {
@@ -87,6 +208,8 @@ func (e *lineageExtractor) Reset() {
 	e.seenIDs = nil
 	e.createdByPane = nil
 	e.createdByTerm = nil
+	e.winPending = nil
+	e.windows = nil
 }
 
 // Feed consumes newline-delimited raw JSONL bytes and returns any newly
@@ -195,6 +318,7 @@ func (e *lineageExtractor) feedClaudeLine(line []byte) []lineageDiscovery {
 	var row struct {
 		Type        string `json:"type"`
 		IsSidechain bool   `json:"isSidechain"`
+		Timestamp   string `json:"timestamp"`
 		Message     struct {
 			Content json.RawMessage `json:"content"`
 		} `json:"message"`
@@ -227,6 +351,7 @@ func (e *lineageExtractor) feedClaudeLine(line []byte) []lineageDiscovery {
 			if json.Unmarshal(b.Input, &in) != nil {
 				continue
 			}
+			e.windowBegins(b.ID, logMs(row.Timestamp), in.Command)
 			intents := e.classifyHerdrCommands(in.Command)
 			if len(intents) == 0 {
 				continue
@@ -243,6 +368,9 @@ func (e *lineageExtractor) feedClaudeLine(line []byte) []lineageDiscovery {
 		for _, b := range blocks {
 			if b.Type != "tool_result" || b.ToolUseID == "" {
 				continue
+			}
+			if _, waits := e.winPending[b.ToolUseID]; waits {
+				e.windowEnds(b.ToolUseID, logMs(row.Timestamp), b.IsError, extractClaudeToolResultText(b.Content))
 			}
 			intents, ok := e.claudePending[b.ToolUseID]
 			if !ok {
@@ -294,8 +422,9 @@ func (e *lineageExtractor) feedCodexLine(line []byte) []lineageDiscovery {
 		return nil
 	}
 	var row struct {
-		Type    string          `json:"type"`
-		Payload json.RawMessage `json:"payload"`
+		Type      string          `json:"type"`
+		Timestamp string          `json:"timestamp"`
+		Payload   json.RawMessage `json:"payload"`
 	}
 	if json.Unmarshal(line, &row) != nil {
 		return nil
@@ -356,6 +485,7 @@ func (e *lineageExtractor) feedCodexLine(line []byte) []lineageDiscovery {
 				return nil
 			}
 			cmd := extractCodexFuncCallCmd(p.Arguments)
+			e.windowBegins(p.CallID, logMs(row.Timestamp), cmd)
 			intents := e.classifyHerdrCommands(cmd)
 			if len(intents) == 0 {
 				return nil
@@ -370,6 +500,10 @@ func (e *lineageExtractor) feedCodexLine(line []byte) []lineageDiscovery {
 		case "function_call_output":
 			if p.CallID == "" {
 				return nil
+			}
+			if _, waits := e.winPending[p.CallID]; waits {
+				outText := extractCodexOutputText(p.Output)
+				e.windowEnds(p.CallID, logMs(row.Timestamp), hasNonZeroExit(outText, codexExitCodeRe), outText)
 			}
 			intents, ok := e.codexPending[p.CallID]
 			if !ok {
