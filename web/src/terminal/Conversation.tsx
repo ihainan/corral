@@ -1610,7 +1610,7 @@ export function ConversationView({
     if (termKeep.keptKey !== keptTermKey) setKeptTermKey(termKeep.keptKey)
   }, [termKeep.keptKey, keptTermKey])
   const termSid = convo.of ? convo.of.split(' ')[0] : ''
-  const termPane = dockTerminal ? String(dockTerminal.press().pane ?? '') : ''
+  const termPane = dockTerminal?.can ? String(dockTerminal.press().pane ?? '') : '' // (press() reads convo.bind: only once there is one)
   useEffect(() => {
     if (!termKeep.mounted || termKeep.visible || !termSid || !termPane) return
     return onPaneTerminalClaim(termSid, termPane, () => setKeptTermKey(null))
