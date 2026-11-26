@@ -97,7 +97,7 @@ type fakeClaudeRewindPane struct {
 	verifyErr     error
 	inFlight      *sync.WaitGroup
 	onPress       func(ctx context.Context, p *fakeClaudeRewindPane, keys []string) error
-	onCommitEnter func(ctx context.Context, p *fakeClaudeRewindPane, targetText string) error
+	onCommitEnter func(ctx context.Context, p *fakeClaudeRewindPane, targetText string) (claudeRewindCommit, error)
 	onScreen      func(ctx context.Context, p *fakeClaudeRewindPane) (string, error)
 	screenReads   int
 	pressCounter  int
@@ -129,14 +129,14 @@ func (f *fakeClaudeRewindPane) press(ctx context.Context, keys ...string) error 
 	return nil
 }
 
-func (f *fakeClaudeRewindPane) commitEnter(ctx context.Context, targetText string) error {
+func (f *fakeClaudeRewindPane) commitEnter(ctx context.Context, targetText string) (claudeRewindCommit, error) {
 	f.mu.Lock()
 	fn := f.onCommitEnter
 	f.mu.Unlock()
 	if fn != nil {
 		return fn(ctx, f, targetText)
 	}
-	return f.press(ctx, "enter")
+	return claudeRewindCommit{started: true}, f.press(ctx, "enter")
 }
 
 func (f *fakeClaudeRewindPane) waitInFlight(ctx context.Context) error {
@@ -907,7 +907,7 @@ func TestClaudeRewindOverlayLifecycle(t *testing.T) {
 	st1 := makeState(pid, start, baseLog)
 	known := st1.parser.(*convo.Claude).UserIDs()
 	key := rewindKey{paneKey: srv.convoReplyKey(s1, pane), sid: sid, pid: pid, start: start}
-	srv.rewinds.set(key, "u2", known)
+	srv.rewinds.set(key, "u2", known, t0.Add(10*time.Minute))
 
 	// 1. Immediate view on conn-1 sees u2, a2, u3, a3 as Gone (plus u2old/a2old).
 	genBefore := st1.gen
@@ -1126,19 +1126,19 @@ func TestClaudeRewindCommitScriptAtomicCheck(t *testing.T) {
 				t.Fatalf("regex metachar spoof matched: code=%d keys=%q, want code=35 keys=\"\"", code, keys)
 			}
 			out, code, keys := run(ccConfirmScreen("above", []string{metaTarget}, opts, 1), metaTarget)
-			if code != 0 || strings.TrimSpace(out) != "ok" || keys == "" {
+			if ok, _ := parseClaudeRewindCommitOut([]byte(out)); code != 0 || !ok || keys == "" {
 				t.Fatalf("exact regex metachar target failed: code=%d out=%q keys=%q", code, out, keys)
 			}
 
-			// 5) Valid "Restore conversation" + matching first line -> exits 0, sends Enter.
+			// 5) Valid "Restore conversation" + matching first line -> exits 0, sends Enter, reports remote timestamp.
 			out, code, keys = run(ccConfirmScreen("above", []string{"fix login", "second line"}, opts, 1), "fix login\nsecond line")
-			if code != 0 || strings.TrimSpace(out) != "ok" || keys == "" {
-				t.Fatalf("valid commit failed: code=%d out=%q keys=%q", code, out, keys)
+			if ok, remoteAt := parseClaudeRewindCommitOut([]byte(out)); code != 0 || !ok || remoteAt.IsZero() || keys == "" {
+				t.Fatalf("valid commit failed: code=%d out=%q remoteAt=%v keys=%q", code, out, remoteAt, keys)
 			}
 			// 6) Wrapped / ellipsis-truncated long first line -> exits 0, sends Enter.
 			longFirst := "refactor authentication middleware to validate signed cookies properly"
 			out, code, keys = run(ccConfirmScreen("above", []string{"refactor authentication middleware…"}, opts, 1), longFirst)
-			if code != 0 || strings.TrimSpace(out) != "ok" || keys == "" {
+			if ok, _ := parseClaudeRewindCommitOut([]byte(out)); code != 0 || !ok || keys == "" {
 				t.Fatalf("ellipsis commit failed: code=%d out=%q keys=%q", code, out, keys)
 			}
 		})
@@ -1153,10 +1153,10 @@ func TestClaudeRewindCommitRemoteMismatchRefusesEnter(t *testing.T) {
 	opts := []string{"Restore code and conversation", "Restore conversation", "Restore code", "Never mind"}
 	fp, plan := newStandardRewindFake(opts)
 	commitCalls := 0
-	fp.onCommitEnter = func(_ context.Context, _ *fakeClaudeRewindPane, _ string) error {
+	fp.onCommitEnter = func(_ context.Context, _ *fakeClaudeRewindPane, _ string) (claudeRewindCommit, error) {
 		commitCalls++
 		// Simulate remote atomic check exiting 35 without sending Enter.
-		return mapRewindExitErr(&sshxExitStub{35})
+		return evalCommitExec(sshx.ExecResult{Ended: true, Started: true}, &sshxExitStub{35})
 	}
 
 	_, err := claudeRewind(context.Background(), fp, plan)
@@ -1336,14 +1336,14 @@ func TestRewindStoreTTLEvictionAndFallback(t *testing.T) {
 	// Case 1: 2 expired (>7d) + 254 fresh (<7d) = 256. Inserting 1 new entry
 	// must evict BOTH expired entries and keep all 254 fresh entries (len=255).
 	cur = now.Add(-8 * 24 * time.Hour)
-	st.set(rewindKey{paneKey: "exp-0", sid: "s", pid: 1, start: 1}, "u1", nil)
-	st.set(rewindKey{paneKey: "exp-1", sid: "s", pid: 2, start: 1}, "u1", nil)
+	st.set(rewindKey{paneKey: "exp-0", sid: "s", pid: 1, start: 1}, "u1", nil, cur)
+	st.set(rewindKey{paneKey: "exp-1", sid: "s", pid: 2, start: 1}, "u1", nil, cur)
 	cur = now.Add(-24 * time.Hour)
 	for i := 2; i < rewindStoreMax; i++ {
-		st.set(rewindKey{paneKey: "fresh-" + strconv.Itoa(i), sid: "s", pid: int64(i), start: 1}, "u1", nil)
+		st.set(rewindKey{paneKey: "fresh-" + strconv.Itoa(i), sid: "s", pid: int64(i), start: 1}, "u1", nil, cur)
 	}
 	cur = now
-	st.set(rewindKey{paneKey: "new-entry", sid: "s", pid: 999, start: 1}, "u2", nil)
+	st.set(rewindKey{paneKey: "new-entry", sid: "s", pid: 999, start: 1}, "u2", nil, cur)
 
 	if st.get(rewindKey{paneKey: "exp-0", sid: "s", pid: 1, start: 1}) != nil {
 		t.Fatal("expired entry exp-0 was not evicted")
@@ -1362,10 +1362,10 @@ func TestRewindStoreTTLEvictionAndFallback(t *testing.T) {
 	st2 := &rewindStore{now: func() time.Time { return cur }}
 	for i := 0; i < rewindStoreMax; i++ {
 		cur = now.Add(-6*24*time.Hour + time.Duration(i)*time.Minute)
-		st2.set(rewindKey{paneKey: "k-" + strconv.Itoa(i), sid: "s", pid: int64(i), start: 1}, "u1", nil)
+		st2.set(rewindKey{paneKey: "k-" + strconv.Itoa(i), sid: "s", pid: int64(i), start: 1}, "u1", nil, cur)
 	}
 	cur = now
-	st2.set(rewindKey{paneKey: "overflow", sid: "s", pid: 999, start: 1}, "u2", nil)
+	st2.set(rewindKey{paneKey: "overflow", sid: "s", pid: 999, start: 1}, "u2", nil, cur)
 	if len(st2.m) != rewindStoreMax {
 		t.Fatalf("fallback store len = %d, want %d", len(st2.m), rewindStoreMax)
 	}
@@ -1431,5 +1431,659 @@ func TestClaudeRewindFullTextAndTooLong(t *testing.T) {
 	// Unmatched/missing row MUST be rejected with message_text_unavailable.
 	if _, err := claudeRewindTextFromRows(nil, id); err == nil || err.code != "message_text_unavailable" {
 		t.Fatalf("expected message_text_unavailable for missing row, got %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Round 3 regression tests (Items 1-7)
+// ---------------------------------------------------------------------------
+
+// setupFakeCommitEnv creates a fake host + tmux/herdr stubs for running
+// claudeRewindCommitSh end-to-end against real sh + awk.
+func setupFakeCommitEnv(t *testing.T, mode string) (run func(screen, target string, doubleQuote bool) (string, int, string), fullCmdLen func(target string) int) {
+	t.Helper()
+	const (
+		sid   = "11111111-2222-3333-4444-555555555555"
+		pid   = int64(4242)
+		start = int64(987654)
+		sock  = "/tmp/test-herdr.sock"
+	)
+	pane := "%7"
+	if mode == "herdr" {
+		pane = "w1:p1"
+	}
+	binDir, homeDir, fakeProc, _ := setupFakeRewindHost(t, pid, start, sid, pane, sock)
+	scrFile := filepath.Join(t.TempDir(), "screen.txt")
+	keyLog := filepath.Join(t.TempDir(), "keys.log")
+
+	if mode == "tmux" {
+		stub := "#!/bin/sh\n" +
+			"case \"$1\" in -u) shift ;; esac\n" +
+			"case \"$1\" in\n" +
+			"  display-message)\n" +
+			"    for a in \"$@\"; do last=$a; done\n" +
+			"    case \"$last\" in\n" +
+			"      *pane_pid*) echo '9001 0' ;;\n" +
+			"      *pane_tty*) echo '/dev/pts/9' ;;\n" +
+			"    esac ;;\n" +
+			"  capture-pane) cat " + sshx.QuoteShell(scrFile) + " ;;\n" +
+			"  send-keys) echo \"$*\" >> " + sshx.QuoteShell(keyLog) + " ;;\n" +
+			"esac\n"
+		if err := os.WriteFile(filepath.Join(binDir, "tmux"), []byte(stub), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	} else {
+		stub := "#!/bin/sh\n" +
+			"if [ \"$1\" = pane ] && [ \"$2\" = read ]; then\n" +
+			"  cat " + sshx.QuoteShell(scrFile) + "\n" +
+			"elif [ \"$1\" = pane ] && [ \"$2\" = send-keys ]; then\n" +
+			"  echo \"$*\" >> " + sshx.QuoteShell(keyLog) + "\n" +
+			"fi\n"
+		if err := os.WriteFile(filepath.Join(binDir, "herdr"), []byte(stub), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	fullCmdLen = func(target string) int {
+		sh, err := claudeRewindCommitSh(mode, pane, sock, "9001", pid, start, sid, target)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return len("sh -c " + sshx.QuoteShell(sh))
+	}
+
+	run = func(screen, target string, doubleQuote bool) (string, int, string) {
+		_ = os.Remove(keyLog)
+		if err := os.WriteFile(scrFile, []byte(screen), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		sh, err := claudeRewindCommitSh(mode, pane, sock, "9001", pid, start, sid, target)
+		if err != nil {
+			t.Fatal(err)
+		}
+		patched := strings.Replace(sh, `PATH="`, `PATH="`+binDir+`:`, 1)
+		patched = strings.ReplaceAll(patched, `"/proc/`, `"`+fakeProc+`/`)
+		cmdStr := patched
+		if doubleQuote {
+			cmdStr = "sh -c " + sshx.QuoteShell(patched)
+		}
+		cmd := exec.Command("sh", "-c", cmdStr)
+		cmd.Env = append(os.Environ(), "HOME="+homeDir)
+		out, err := cmd.CombinedOutput()
+		code := 0
+		if err != nil {
+			var ee *exec.ExitError
+			if errors.As(err, &ee) {
+				code = ee.ExitCode()
+			} else {
+				t.Fatalf("unexpected exec err: %v (out=%q)", err, string(out))
+			}
+		}
+		logged, _ := os.ReadFile(keyLog)
+		return string(out), code, string(logged)
+	}
+	return run, fullCmdLen
+}
+
+// Round 3 Item 1: Failure before remote commit script starts (e.g. herdr
+// snapshot cancel/error, ErrBusy, exec refused, or remote exit 31-35/126-127)
+// MUST be treated as Phase-1 failure and run cleanup, NOT rewind_uncertain.
+func TestClaudeRewindCommitNotStartedCleansUp(t *testing.T) {
+	fastRewindTimings(t)
+
+	t.Run("herdr snapshot canceled before remote script starts closes confirm panel", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		fp, plan := newStandardRewindFake(nil)
+		fp.onCommitEnter = func(_ context.Context, _ *fakeClaudeRewindPane, _ string) (claudeRewindCommit, error) {
+			cancel()
+			return claudeRewindCommit{started: false}, context.Canceled
+		}
+
+		_, err := claudeRewind(ctx, fp, plan)
+		if err == nil || err.code == "rewind_uncertain" {
+			t.Fatalf("got err=%v, must NOT be rewind_uncertain when remote script never started", err)
+		}
+		keys := fp.recordedKeys()
+		if len(keys) == 0 || keys[len(keys)-1] != "esc" {
+			t.Fatalf("expected esc cleanup to close confirm panel, keys=%v", keys)
+		}
+		fp.mu.Lock()
+		finalScr := fp.curScreen
+		fp.mu.Unlock()
+		if _, open := parseRewindConfirm(finalScr); open {
+			t.Fatal("confirm panel left open in terminal")
+		}
+	})
+
+	t.Run("herdr snapshot error before remote script starts closes confirm panel", func(t *testing.T) {
+		fp, plan := newStandardRewindFake(nil)
+		fp.onCommitEnter = func(_ context.Context, _ *fakeClaudeRewindPane, _ string) (claudeRewindCommit, error) {
+			return claudeRewindCommit{started: false}, errors.New("herdr dial failed")
+		}
+
+		_, err := claudeRewind(context.Background(), fp, plan)
+		if err == nil || err.code != "host_error" {
+			t.Fatalf("got err=%v, want host_error (not rewind_uncertain)", err)
+		}
+		keys := fp.recordedKeys()
+		if len(keys) == 0 || keys[len(keys)-1] != "esc" {
+			t.Fatalf("expected esc cleanup, keys=%v", keys)
+		}
+	})
+
+	t.Run("script failed to start (E2BIG / exit 126 / ErrBusy) treated as not started", func(t *testing.T) {
+		for _, tc := range []struct {
+			name string
+			res  sshx.ExecResult
+			err  error
+			code string
+		}{
+			{"ErrBusy before dispatch", sshx.ExecResult{Started: false}, sshx.ErrBusy, "busy"},
+			{"refused exec before start", sshx.ExecResult{Started: false}, errors.New("refused"), "host_error"},
+			{"sh exit 126 (E2BIG)", sshx.ExecResult{Ended: true, Started: true}, &sshxExitStub{126}, "host_error"},
+			{"sh exit 127 (not found)", sshx.ExecResult{Ended: true, Started: true}, &sshxExitStub{127}, "host_error"},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				fp, plan := newStandardRewindFake(nil)
+				fp.onCommitEnter = func(_ context.Context, _ *fakeClaudeRewindPane, _ string) (claudeRewindCommit, error) {
+					return evalCommitExec(tc.res, tc.err)
+				}
+				_, err := claudeRewind(context.Background(), fp, plan)
+				if err == nil || err.code != tc.code {
+					t.Fatalf("got err=%v, want %s", err, tc.code)
+				}
+				keys := fp.recordedKeys()
+				if len(keys) == 0 || keys[len(keys)-1] != "esc" {
+					t.Fatalf("expected esc cleanup when script did not start, keys=%v", keys)
+				}
+			})
+		}
+	})
+
+	t.Run("remote identity exit 31-34 is Phase-1 without Esc; started+lost is rewind_uncertain", func(t *testing.T) {
+		for _, code := range []int{31, 32, 33, 34} {
+			c, err := evalCommitExec(sshx.ExecResult{Ended: true, Started: true}, &sshxExitStub{code})
+			if c.started || !isIdentityErr(err) {
+				t.Fatalf("exit %d: got started=%v err=%v, want started=false identity err", code, c.started, err)
+			}
+		}
+		// Started + missing "ok" output -> committed / rewind_uncertain, NEVER Esc.
+		fp, plan := newStandardRewindFake(nil)
+		fp.onCommitEnter = func(_ context.Context, _ *fakeClaudeRewindPane, _ string) (claudeRewindCommit, error) {
+			return evalCommitExec(sshx.ExecResult{Ended: true, Started: true, Out: []byte("")}, nil)
+		}
+		_, err := claudeRewind(context.Background(), fp, plan)
+		if err == nil || err.code != "rewind_uncertain" {
+			t.Fatalf("missing ok output: got err=%v, want rewind_uncertain", err)
+		}
+		if slices.Contains(fp.recordedKeys(), "esc") {
+			t.Fatalf("must NOT press Esc after script started with uncertain outcome, keys=%v", fp.recordedKeys())
+		}
+	})
+}
+
+// Round 3 Item 2: Remote commit command length is strictly bounded even with
+// tens of thousands of single quotes, and shell metacharacters are never
+// executed as code.
+func TestClaudeRewindCommitScriptLengthLimitAndInjectionSafety(t *testing.T) {
+	opts := []string{"Restore code and conversation", "Restore conversation", "Never mind"}
+	run, fullCmdLen := setupFakeCommitEnv(t, "tmux")
+
+	// 20,000 single quotes on the first line (double-quoting without a cap
+	// would inflate to ~200 KiB and hit Linux MAX_ARG_STRLEN / E2BIG).
+	hugeQuotes := strings.Repeat("'", 20000) + "\nsecond line ignored"
+	cmdLen := fullCmdLen(hugeQuotes)
+	if cmdLen >= 64<<10 {
+		t.Fatalf("double-quoted commit command too long: %d bytes (want < 64 KiB)", cmdLen)
+	}
+	// Confirm panel showing ellipsis-truncated prefix of the huge first line matches.
+	out, code, keys := run(ccConfirmScreen("above", []string{strings.Repeat("'", 60) + "…"}, opts, 1), hugeQuotes, true)
+	if ok, _ := parseClaudeRewindCommitOut([]byte(out)); code != 0 || !ok || keys == "" {
+		t.Fatalf("huge quotes ellipsis match failed: code=%d out=%q keys=%q", code, out, keys)
+	}
+	// Confirm panel showing wrapped >= 2000 quotes also matches prefix when truncated.
+	wrappedQuotes := make([]string, 0, 25)
+	for range 25 {
+		wrappedQuotes = append(wrappedQuotes, strings.Repeat("'", 100))
+	}
+	out, code, keys = run(ccConfirmScreen("above", wrappedQuotes, opts, 1), hugeQuotes, true)
+	if ok, _ := parseClaudeRewindCommitOut([]byte(out)); code != 0 || !ok || keys == "" {
+		t.Fatalf("huge quotes wrapped prefix match failed: code=%d out=%q keys=%q", code, out, keys)
+	}
+	// Mismatched confirm screen must still exit 35 without sending Enter.
+	_, code, keys = run(ccConfirmScreen("above", []string{"different message"}, opts, 1), hugeQuotes, true)
+	if code != 35 || keys != "" {
+		t.Fatalf("huge quotes mismatch: code=%d keys=%q, want 35 and empty", code, keys)
+	}
+
+	// Shell metacharacters (single quotes, backslashes, $(), backticks, $HOME, newlines)
+	// MUST NEVER be executed as shell commands.
+	pwnDir := t.TempDir()
+	pwn1 := filepath.Join(pwnDir, "pwn1")
+	pwn2 := filepath.Join(pwnDir, "pwn2")
+	pwn3 := filepath.Join(pwnDir, "pwn3")
+	evilFirst := `fix ''' $(touch ` + pwn1 + `) ` + "`touch " + pwn2 + "`" + ` $HOME \n \`
+	evilTarget := evilFirst + "\n$(touch " + pwn3 + ")"
+	out, code, keys = run(ccConfirmScreen("above", []string{evilFirst}, opts, 1), evilTarget, true)
+	if ok, _ := parseClaudeRewindCommitOut([]byte(out)); code != 0 || !ok || keys == "" {
+		t.Fatalf("metachar target match failed: code=%d out=%q keys=%q", code, out, keys)
+	}
+	for _, p := range []string{pwn1, pwn2, pwn3} {
+		if _, err := os.Stat(p); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("shell injection executed: %s exists!", p)
+		}
+	}
+}
+
+// Round 3 Item 3: When an in-flight remote command outlives waitInFlight's
+// timeout during cancellation, releaseClaudeRewind waits for it to finish and
+// closes the late-opened panel BEFORE releasing the pane lock.
+func TestClaudeRewindDelayedInFlightCleanupBeforeUnlock(t *testing.T) {
+	fastRewindTimings(t)
+	origCleanup := claudeRewindCleanupWait
+	claudeRewindCleanupWait = 15 * time.Millisecond
+	t.Cleanup(func() { claudeRewindCleanupWait = origCleanup })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	var running sync.WaitGroup
+	aboveAll := "❯ first prompt\n● First answer\n\n❯ fix login\n● Second answer"
+	items := []string{"first prompt", "fix login", "(current)"}
+
+	cmdDone := make(chan struct{})
+	fp := &fakeClaudeRewindPane{
+		curScreen: ccNormalScreen(aboveAll, ""),
+		inFlight:  &running,
+	}
+	fp.onPress = func(_ context.Context, p *fakeClaudeRewindPane, keys []string) error {
+		k := strings.Join(keys, "+")
+		if k == "esc+esc" {
+			// Remote command finishes 60ms later (> 15ms claudeRewindCleanupWait)
+			// and opens the rewind picker long after inline waitInFlight timed out.
+			running.Add(1)
+			go func() {
+				defer running.Done()
+				time.Sleep(60 * time.Millisecond)
+				p.mu.Lock()
+				p.curScreen = ccPickerScreen(aboveAll, items, len(items)-1)
+				p.mu.Unlock()
+				close(cmdDone)
+			}()
+			cancel()
+			return context.Canceled
+		}
+		if k == "esc" {
+			p.curScreen = ccNormalScreen(aboveAll, "")
+		}
+		return nil
+	}
+
+	res, err := claudeRewind(ctx, fp, claudeRewindPlan{Steps: 1, TargetText: "fix login"})
+	if err == nil {
+		t.Fatal("expected cancellation error")
+	}
+	if !res.needsCleanup {
+		t.Fatal("expected res.needsCleanup=true when inline waitInFlight timed out")
+	}
+	// Inline cleanup timed out before the 60ms remote command finished.
+	select {
+	case <-cmdDone:
+		t.Fatal("expected claudeRewind to return after waitInFlight timeout before delayed command finished")
+	default:
+	}
+
+	unlocked := make(chan struct{})
+	go releaseClaudeRewind(&running, fp, res.needsCleanup, func() {
+		close(unlocked)
+	})
+
+	// Lock MUST remain held while the delayed command is still running.
+	select {
+	case <-unlocked:
+		t.Fatal("pane lock released before delayed remote command finished and cleanup ran")
+	case <-cmdDone:
+	}
+
+	// After the delayed command finishes and opens the picker, releaseClaudeRewind
+	// must close the picker with Esc and then unlock.
+	select {
+	case <-unlocked:
+	case <-time.After(2 * time.Second):
+		t.Fatal("pane lock was not released after delayed cleanup")
+	}
+	keys := fp.recordedKeys()
+	if len(keys) < 2 || keys[len(keys)-1] != "esc" {
+		t.Fatalf("expected deferred cleanup to press esc after delayed command opened picker, keys=%v", keys)
+	}
+	fp.mu.Lock()
+	finalScr := fp.curScreen
+	fp.mu.Unlock()
+	if _, open := parseRewindPicker(finalScr); open {
+		t.Fatal("rewind picker was still open after pane lock was released")
+	}
+
+	// Verify committed / rewind_uncertain NEVER triggers deferred Esc cleanup.
+	fp2, plan2 := newStandardRewindFake(nil)
+	fp2.onCommitEnter = func(_ context.Context, _ *fakeClaudeRewindPane, _ string) (claudeRewindCommit, error) {
+		return claudeRewindCommit{started: true}, errors.New("ssh timeout")
+	}
+	res2, err2 := claudeRewind(context.Background(), fp2, plan2)
+	if err2 == nil || err2.code != "rewind_uncertain" {
+		t.Fatalf("got err=%v, want rewind_uncertain", err2)
+	}
+	if res2.needsCleanup {
+		t.Fatal("committed/rewind_uncertain must have needsCleanup=false")
+	}
+	var wg2 sync.WaitGroup
+	releaseClaudeRewind(&wg2, fp2, res2.needsCleanup, func() {})
+	if slices.Contains(fp2.recordedKeys(), "esc") {
+		t.Fatalf("deferred release must NEVER press Esc after commit, keys=%v", fp2.recordedKeys())
+	}
+}
+
+// Round 3 Item 4: Go and remote awk handle Unicode whitespace (NBSP U+00A0,
+// fullwidth space U+3000, narrow NBSP U+202F, tabs) identically.
+func TestClaudeRewindUnicodeWhitespaceParity(t *testing.T) {
+	opts := []string{"Restore code and conversation", "Restore conversation", "Never mind"}
+	run, _ := setupFakeCommitEnv(t, "tmux")
+
+	target := "fix\u00a0login\u3000with\u202fspaces\tand  tabs"
+	screenQuote := "fix\u00a0login\u3000with\u202fspaces   and\ttabs"
+
+	if !matchPickerSelection(screenQuote, target) {
+		t.Fatal("Go matchPickerSelection failed with Unicode whitespace")
+	}
+	if !matchConfirmQuote([]string{screenQuote}, target) {
+		t.Fatal("Go matchConfirmQuote failed with Unicode whitespace")
+	}
+	// Remote awk must accept NBSP / U+3000 / U+202F on screen against Go-normalized TARGET_FIRST.
+	out, code, keys := run(ccConfirmScreen("above", []string{screenQuote}, opts, 1), target, true)
+	if ok, _ := parseClaudeRewindCommitOut([]byte(out)); code != 0 || !ok || keys == "" {
+		t.Fatalf("remote awk rejected Unicode whitespace match: code=%d out=%q keys=%q", code, out, keys)
+	}
+	// Also test plain spaces on screen when original target had NBSP/U+3000.
+	out, code, keys = run(ccConfirmScreen("above", []string{"fix login with spaces and tabs"}, opts, 1), target, true)
+	if ok, _ := parseClaudeRewindCommitOut([]byte(out)); code != 0 || !ok || keys == "" {
+		t.Fatalf("remote awk rejected ASCII-normalized screen vs Unicode target: code=%d out=%q keys=%q", code, out, keys)
+	}
+	// Different text must still be rejected.
+	_, code, keys = run(ccConfirmScreen("above", []string{"fix\u00a0logout\u3000now"}, opts, 1), target, true)
+	if code != 35 || keys != "" {
+		t.Fatalf("mismatched Unicode text should exit 35, got code=%d keys=%q", code, keys)
+	}
+}
+
+// Round 3 Item 5: Mixed line wraps (some wrap breaks mid-word without a space,
+// some at spaces) match on both Go and remote awk, while keeping the strict
+// "Restore conversation" selection requirement unchanged.
+func TestClaudeRewindMixedWrapConfirmMatch(t *testing.T) {
+	opts := []string{"Restore code and conversation", "Restore conversation", "Never mind"}
+	run, _ := setupFakeCommitEnv(t, "tmux")
+
+	// Single-line prompt where wrap 1 splits "superlongword" (no space) and wrap 2 splits before "gamma" (space).
+	target := "alpha beta superlongwordthathastowrap gamma delta"
+	mixedWrapped := []string{
+		"alpha beta superlong",
+		"wordthathastowrap",
+		"gamma delta",
+	}
+	if !matchConfirmQuote(mixedWrapped, target) {
+		t.Fatal("Go matchConfirmQuote failed on mixed-wrap single line")
+	}
+	out, code, keys := run(ccConfirmScreen("above", mixedWrapped, opts, 1), target, true)
+	if ok, _ := parseClaudeRewindCommitOut([]byte(out)); code != 0 || !ok || keys == "" {
+		t.Fatalf("remote awk failed on mixed-wrap single line: code=%d out=%q keys=%q", code, out, keys)
+	}
+
+	// Multi-line prompt whose first line has a mixed wrap across 2 lines, followed by line 2.
+	multiTarget := "alpha beta superlongwordthathastowrap gamma\nsecond line here"
+	multiWrapped := []string{
+		"alpha beta superlong",
+		"wordthathastowrap gamma",
+		"second line here",
+	}
+	if !matchConfirmQuote(multiWrapped, multiTarget) {
+		t.Fatal("Go matchConfirmQuote failed on mixed-wrap multiline")
+	}
+	out, code, keys = run(ccConfirmScreen("above", multiWrapped, opts, 1), multiTarget, true)
+	if ok, _ := parseClaudeRewindCommitOut([]byte(out)); code != 0 || !ok || keys == "" {
+		t.Fatalf("remote awk failed on mixed-wrap multiline: code=%d out=%q keys=%q", code, out, keys)
+	}
+
+	// Mixed-wrap + ellipsis truncation on Go and remote awk.
+	mixedEllipsis := []string{"alpha beta superlong", "wordthathasto…"}
+	if !matchConfirmQuote(mixedEllipsis, target) {
+		t.Fatal("Go matchConfirmQuote failed on mixed-wrap ellipsis")
+	}
+	out, code, keys = run(ccConfirmScreen("above", mixedEllipsis, opts, 1), target, true)
+	if ok, _ := parseClaudeRewindCommitOut([]byte(out)); code != 0 || !ok || keys == "" {
+		t.Fatalf("remote awk failed on mixed-wrap ellipsis: code=%d out=%q keys=%q", code, out, keys)
+	}
+
+	// Option requirement MUST remain strict: "Restore code and conversation" selected -> exit 35, no Enter!
+	_, code, keys = run(ccConfirmScreen("above", mixedWrapped, opts, 0), target, true)
+	if code != 35 || keys != "" {
+		t.Fatalf("wrong option selected with mixed wrap must exit 35, got code=%d keys=%q", code, keys)
+	}
+
+	// Different message sharing a prefix ("fix login bug" vs "fix login") MUST NOT match.
+	_, code, keys = run(ccConfirmScreen("above", []string{"fix login bug"}, opts, 1), "fix login", true)
+	if code != 35 || keys != "" {
+		t.Fatalf("prefix spoof must exit 35, got code=%d keys=%q", code, keys)
+	}
+}
+
+// Round 3 Item 6: Rewind settling uses the remote host's clock reported by the
+// commit script (or gateway - 10m fallback when unavailable), handling both
+// remote-slower (-5m) and remote-faster (+5m) clock skew.
+func TestClaudeRewindRemoteClockSkew(t *testing.T) {
+	const (
+		sid        = "11111111-1111-1111-1111-111111111111"
+		pane       = "w1:p1"
+		pid, start = int64(500), int64(9000)
+	)
+	gwNow := time.Date(2026, 11, 26, 10, 10, 0, 0, time.UTC)
+
+	makeServer := func() (*Server, *term.Session, rewindKey) {
+		srv := &Server{herdrSocks: herdrSockets{path: map[string]string{}}}
+		srv.rewinds.now = func() time.Time { return gwNow }
+		s := &term.Session{ID: "conn-1", OwnerID: 1, HostID: 1, Persistence: "herdr"}
+		srv.herdrSocks.set(s.ID, "/tmp/h.sock")
+		return srv, s, rewindKey{paneKey: srv.convoReplyKey(s, pane), sid: sid, pid: pid, start: start}
+	}
+	makeState := func(raw string) *convoState {
+		cl := convo.NewClaude()
+		cl.Feed([]byte(raw))
+		return &convoState{
+			gen:    convoGens.Add(1),
+			agent:  "claude",
+			sid:    sid,
+			parser: cl,
+			bind:   &convoBind{Pane: pane, PID: pid, Start: start, Session: sid, Agent: "claude"},
+		}
+	}
+	row := func(typ, id, parent, content string, at time.Time) string {
+		ts := at.UTC().Format(time.RFC3339Nano)
+		if typ == "user" {
+			return `{"type":"user","uuid":"` + id + `","parentUuid":` + parent + `,"timestamp":"` + ts + `","message":{"role":"user","content":"` + content + `"}}` + "\n"
+		}
+		return `{"type":"assistant","uuid":"` + id + `","parentUuid":` + parent + `,"timestamp":"` + ts + `","message":{"content":[{"type":"text","text":"` + content + `"}]}}` + "\n"
+	}
+
+	t.Run("remote 5 minutes slower than gateway settles new message", func(t *testing.T) {
+		remoteNow := gwNow.Add(-5 * time.Minute) // 10:05:00 vs gateway 10:10:00
+		srv, sess, key := makeServer()
+		base := row("user", "u1", "null", "first", remoteNow.Add(-4*time.Minute)) +
+			row("assistant", "a1", `"u1"`, "ans1", remoteNow.Add(-3*time.Minute)) +
+			row("user", "u2", `"a1"`, "second", remoteNow.Add(-2*time.Minute)) +
+			row("assistant", "a2", `"u2"`, "ans2", remoteNow.Add(-1*time.Minute))
+		st := makeState(base)
+		known := st.parser.(*convo.Claude).UserIDs()
+
+		srv.rewinds.set(key, "u2", known, remoteNow)
+		if got := srv.syncClaudeRewind(sess, st); got != "u2" {
+			t.Fatalf("expected active mark u2 before new message, got %q", got)
+		}
+
+		// New message written 10s later on remote host (10:05:10 — still 4m50s behind gateway clock!).
+		st.parser.Feed([]byte(row("user", "u3", `"a1"`, "new after rewind", remoteNow.Add(10*time.Second))))
+		if got := srv.syncClaudeRewind(sess, st); got != "" {
+			t.Fatalf("new message on slower remote clock did not settle rewind: target=%q", got)
+		}
+		if srv.rewinds.get(key) != nil {
+			t.Fatal("settled mark still present in store")
+		}
+	})
+
+	t.Run("remote 5 minutes slower fallback when remoteAt unavailable", func(t *testing.T) {
+		remoteNow := gwNow.Add(-5 * time.Minute)
+		srv, sess, key := makeServer()
+		base := row("user", "u1", "null", "first", remoteNow.Add(-4*time.Minute)) +
+			row("assistant", "a1", `"u1"`, "ans1", remoteNow.Add(-3*time.Minute)) +
+			row("user", "u2", `"a1"`, "second", remoteNow.Add(-2*time.Minute))
+		st := makeState(base)
+		known := st.parser.(*convo.Claude).UserIDs()
+
+		// Zero remoteAt falls back to gatewayNow - 10m (10:00:00).
+		srv.rewinds.set(key, "u2", known, time.Time{})
+		st.parser.Feed([]byte(row("user", "u3", `"a1"`, "new msg", remoteNow.Add(10*time.Second))))
+		if got := srv.syncClaudeRewind(sess, st); got != "" {
+			t.Fatalf("fallback clock slack did not settle new message on slower remote: target=%q", got)
+		}
+	})
+
+	t.Run("remote 5 minutes faster than gateway ignores prepended history and settles new msg", func(t *testing.T) {
+		remoteNow := gwNow.Add(5 * time.Minute) // 10:15:00 vs gateway 10:10:00
+		srv, sess, key := makeServer()
+		tail := row("user", "u2", `"a1"`, "second", remoteNow.Add(-2*time.Minute)) +
+			row("assistant", "a2", `"u2"`, "ans2", remoteNow.Add(-1*time.Minute))
+		st := makeState(tail)
+		known := st.parser.(*convo.Claude).UserIDs()
+		srv.rewinds.set(key, "u2", known, remoteNow)
+
+		// Another connection prepends earlier history (including an older rewind at 10:12:00,
+		// which is 2 minutes AFTER gateway clock 10:10:00, but 3 minutes BEFORE remote clock 10:15:00!).
+		earlier := convo.NewClaude()
+		earlier.Feed([]byte(
+			row("user", "u0", "null", "zero", remoteNow.Add(-6*time.Minute)) +
+				row("assistant", "a0", `"u0"`, "ans0", remoteNow.Add(-5*time.Minute)) +
+				row("user", "u1old", `"a0"`, "old try", remoteNow.Add(-4*time.Minute)) +
+				row("user", "u1", `"a0"`, "early retry", remoteNow.Add(-3*time.Minute)) +
+				row("assistant", "a1", `"u1"`, "ans1", remoteNow.Add(-2*time.Minute-30*time.Second)),
+		))
+		st2 := makeState(tail)
+		st2.parser.Prepend(earlier)
+		if got := srv.syncClaudeRewind(sess, st2); got != "u2" {
+			t.Fatalf("prepended history on faster remote prematurely settled rewind: target=%q", got)
+		}
+
+		// New message at 10:15:10 settles cleanly.
+		st2.parser.Feed([]byte(row("user", "u3", `"a1"`, "new msg", remoteNow.Add(10*time.Second))))
+		if got := srv.syncClaudeRewind(sess, st2); got != "" {
+			t.Fatalf("new message on faster remote did not settle rewind: target=%q", got)
+		}
+	})
+}
+
+// Round 3 Item 7: Retiring an old rewind mark M1 must compare generation/identity
+// so it NEVER deletes a newer mark M2 written to the same key by another connection.
+func TestRewindStoreCompareAndDeleteConcurrent(t *testing.T) {
+	const (
+		sid        = "11111111-1111-1111-1111-111111111111"
+		pane       = "w1:p1"
+		pid, start = int64(500), int64(9000)
+	)
+	t0 := time.Date(2026, 11, 26, 10, 0, 0, 0, time.UTC)
+
+	// 1. Deterministic interleaving: A reads M1 -> B retires M1 and writes M2 -> A tries to delete M1.
+	st := &rewindStore{now: func() time.Time { return t0 }}
+	key := rewindKey{paneKey: "p1", sid: sid, pid: pid, start: start}
+	st.set(key, "u2", map[string]bool{"u1": true, "u2": true}, t0)
+	m1 := st.get(key)
+	if m1 == nil || m1.gen == 0 {
+		t.Fatalf("expected non-zero gen for M1, got %+v", m1)
+	}
+	if !st.deleteIf(key, m1.gen) {
+		t.Fatal("B failed to retire M1 with matching gen")
+	}
+	st.set(key, "u1", map[string]bool{"u1": true}, t0.Add(time.Minute))
+	m2 := st.get(key)
+	if m2 == nil || m2.gen == m1.gen {
+		t.Fatalf("expected distinct gen for M2, m1=%+v m2=%+v", m1, m2)
+	}
+	if st.deleteIf(key, m1.gen) {
+		t.Fatal("A's stale deleteIf(M1.gen) wrongly deleted M2!")
+	}
+	if cur := st.get(key); cur == nil || cur.targetID != "u1" || cur.gen != m2.gen {
+		t.Fatalf("M2 was lost or corrupted: cur=%+v want=%+v", cur, m2)
+	}
+
+	// 2. Concurrent race test with syncClaudeRewind across multiple connections.
+	srv := &Server{herdrSocks: herdrSockets{path: map[string]string{}}}
+	srv.rewinds.now = func() time.Time { return t0 }
+	sessA := &term.Session{ID: "conn-A", OwnerID: 1, HostID: 1, Persistence: "herdr"}
+	sessB := &term.Session{ID: "conn-B", OwnerID: 1, HostID: 1, Persistence: "herdr"}
+	srv.herdrSocks.set(sessA.ID, "/tmp/h.sock")
+	srv.herdrSocks.set(sessB.ID, "/tmp/h.sock")
+	rkey := rewindKey{paneKey: srv.convoReplyKey(sessA, pane), sid: sid, pid: pid, start: start}
+
+	ts := func(d time.Duration) string { return t0.Add(d).Format(time.RFC3339Nano) }
+	logWithM1Settled := strings.Join([]string{
+		`{"type":"user","uuid":"u1","parentUuid":null,"timestamp":"` + ts(-4*time.Minute) + `","message":{"role":"user","content":"first"}}`,
+		`{"type":"assistant","uuid":"a1","parentUuid":"u1","timestamp":"` + ts(-3*time.Minute) + `","message":{"content":[{"type":"text","text":"ans1"}]}}`,
+		`{"type":"user","uuid":"u2","parentUuid":"a1","timestamp":"` + ts(-2*time.Minute) + `","message":{"role":"user","content":"second"}}`,
+		`{"type":"assistant","uuid":"a2","parentUuid":"u2","timestamp":"` + ts(-1*time.Minute) + `","message":{"content":[{"type":"text","text":"ans2"}]}}`,
+		`{"type":"user","uuid":"u3","parentUuid":"a1","timestamp":"` + ts(10*time.Second) + `","message":{"role":"user","content":"after m1"}}`,
+	}, "\n") + "\n"
+
+	for iter := range 100 {
+		knownM1 := map[string]bool{"u1": true, "u2": true}
+		knownM2 := map[string]bool{"u1": true, "u2": true, "u3": true}
+		srv.rewinds.set(rkey, "u2", knownM1, t0)
+
+		var wg sync.WaitGroup
+		startCh := make(chan struct{})
+		// 4 readers concurrently trying to retire M1 via syncClaudeRewind.
+		for range 4 {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				cl := convo.NewClaude()
+				cl.Feed([]byte(logWithM1Settled))
+				stA := &convoState{
+					gen:    convoGens.Add(1),
+					agent:  "claude",
+					sid:    sid,
+					parser: cl,
+					bind:   &convoBind{Pane: pane, PID: pid, Start: start, Session: sid, Agent: "claude"},
+				}
+				<-startCh
+				srv.syncClaudeRewind(sessA, stA)
+			}()
+		}
+		// Writer B retires M1 and installs M2 (target "u3", remoteAt t0+30s — unsettled by logWithM1Settled).
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			cl := convo.NewClaude()
+			cl.Feed([]byte(logWithM1Settled))
+			stB := &convoState{
+				gen:    convoGens.Add(1),
+				agent:  "claude",
+				sid:    sid,
+				parser: cl,
+				bind:   &convoBind{Pane: pane, PID: pid, Start: start, Session: sid, Agent: "claude"},
+			}
+			<-startCh
+			srv.syncClaudeRewind(sessB, stB)
+			srv.rewinds.set(rkey, "u3", knownM2, t0.Add(30*time.Second))
+		}()
+		close(startCh)
+		wg.Wait()
+
+		// M2 MUST ALWAYS survive — no reader retiring M1 may ever delete M2!
+		got := srv.rewinds.get(rkey)
+		if got == nil || got.targetID != "u3" {
+			t.Fatalf("iter %d: M2 was wrongly deleted by concurrent M1 retirement! got=%+v", iter, got)
+		}
 	}
 }

@@ -217,7 +217,11 @@ func matchEllipsisPrefix(got, wantFirst, wantAll string) bool {
 	if len([]rune(prefix)) < min(4, len([]rune(wantFirst))) {
 		return false
 	}
-	return strings.HasPrefix(wantFirst, prefix) || strings.HasPrefix(wantAll, prefix)
+	if strings.HasPrefix(wantFirst, prefix) || strings.HasPrefix(wantAll, prefix) {
+		return true
+	}
+	sqPref, sqFirst, sqAll := squeeze(prefix), squeeze(wantFirst), squeeze(wantAll)
+	return len([]rune(sqPref)) >= min(4, len([]rune(sqFirst))) && (strings.HasPrefix(sqFirst, sqPref) || strings.HasPrefix(sqAll, sqPref))
 }
 
 func matchPickerSelection(selected, targetText string) bool {
@@ -239,7 +243,16 @@ func matchConfirmQuote(quoted []string, targetText string) bool {
 	if strings.HasSuffix(got, "…") || strings.HasSuffix(got, "...") {
 		return matchEllipsisPrefix(got, wantFirst, wantAll)
 	}
-	return got == wantAll || got == wantFirst || (len(quoted) > 1 && squeeze(got) == squeeze(wantAll))
+	if got == wantAll || got == wantFirst {
+		return true
+	}
+	if len(quoted) > 1 {
+		sqGot := squeeze(got)
+		if sqGot == squeeze(wantAll) || sqGot == squeeze(wantFirst) {
+			return true
+		}
+	}
+	return false
 }
 
 func screenAboveAndBox(screen string) (above, box string, hasBox bool) {
@@ -400,19 +413,69 @@ func buildClaudeRewindPlan(entries []convo.Entry, targetID, fullText string) (cl
 	return claudeRewindPlan{Steps: steps, TargetText: target.text, Ambiguous: ambiguous, WithdrawnSnippets: snippets}, nil
 }
 
+type claudeRewindCommit struct {
+	started  bool
+	remoteAt time.Time
+}
+
 type claudeRewindPane interface {
 	verify(ctx context.Context) error
 	press(ctx context.Context, keys ...string) error
-	commitEnter(ctx context.Context, targetText string) error
+	commitEnter(ctx context.Context, targetText string) (claudeRewindCommit, error)
 	waitInFlight(ctx context.Context) error
 	screen(ctx context.Context) (string, error)
 	colorScreen(ctx context.Context) (string, error)
 }
 
 type claudeRewindResult struct {
-	OK      bool   `json:"ok"`
-	Text    string `json:"text,omitempty"`
-	Warning string `json:"warning,omitempty"`
+	OK           bool      `json:"ok"`
+	Text         string    `json:"text,omitempty"`
+	Warning      string    `json:"warning,omitempty"`
+	remoteAt     time.Time // remote host clock captured at commit time
+	needsCleanup bool      // true when Phase-1 cleanup could not finish before returning
+}
+
+// closeRewindPanel checks the screen and sends Esc only while a rewind picker
+// or confirm panel is visibly open. Returns true only when it verified the
+// panel is closed.
+func closeRewindPanel(ctx context.Context, pane claudeRewindPane, recheck bool) bool {
+	checked := false
+	pressed := false
+	for range 2 {
+		scr, serr := pane.screen(ctx)
+		if serr != nil {
+			return isIdentityErr(serr)
+		}
+		_, isPk := parseRewindPicker(scr)
+		_, isCf := parseRewindConfirm(scr)
+		if !isPk && !isCf {
+			if recheck && !checked && !pressed {
+				checked = true
+				sleepCtx(ctx, claudeRewindStep)
+				scr, serr = pane.screen(ctx)
+				if serr != nil {
+					return isIdentityErr(serr)
+				}
+				_, isPk = parseRewindPicker(scr)
+				_, isCf = parseRewindConfirm(scr)
+			}
+			if !isPk && !isCf {
+				return true
+			}
+		}
+		if perr := pane.press(ctx, "esc"); perr != nil {
+			return isIdentityErr(perr)
+		}
+		pressed = true
+		sleepCtx(ctx, claudeRewindStep)
+	}
+	scr, serr := pane.screen(ctx)
+	if serr != nil {
+		return isIdentityErr(serr)
+	}
+	_, isPk := parseRewindPicker(scr)
+	_, isCf := parseRewindConfirm(scr)
+	return !isPk && !isCf
 }
 
 func claudeRewind(ctx context.Context, pane claudeRewindPane, plan claudeRewindPlan) (claudeRewindResult, *rewindError) {
@@ -469,48 +532,25 @@ func claudeRewind(ctx context.Context, pane claudeRewindPane, plan claudeRewindP
 	// remote commands to finish first, then presses Esc ONLY while a rewind
 	// panel is visibly open and NEVER after identity change or commit.
 	committed := false
+	keysSent := false
 	cleanup := func(cause error) (claudeRewindResult, *rewindError) {
 		re := asRewindErr(cause)
-		if committed || isIdentityErr(re) {
+		if committed || isIdentityErr(re) || !keysSent {
 			return claudeRewindResult{}, re
 		}
-		cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 8*time.Second)
+		cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), claudeRewindCleanupWait)
 		defer cancel()
 		if pane.waitInFlight(cctx) != nil {
-			return claudeRewindResult{}, re
+			return claudeRewindResult{needsCleanup: true}, re
 		}
-		checkedAfterCancel := false
-		for range 2 {
-			scr, serr := pane.screen(cctx)
-			if serr != nil {
-				break
-			}
-			_, isPk := parseRewindPicker(scr)
-			_, isCf := parseRewindConfirm(scr)
-			if !isPk && !isCf {
-				if !checkedAfterCancel && ctx.Err() != nil {
-					checkedAfterCancel = true
-					sleepCtx(cctx, claudeRewindStep)
-					scr, serr = pane.screen(cctx)
-					if serr != nil {
-						break
-					}
-					_, isPk = parseRewindPicker(scr)
-					_, isCf = parseRewindConfirm(scr)
-				}
-				if !isPk && !isCf {
-					break
-				}
-			}
-			if pane.press(cctx, "esc") != nil {
-				break
-			}
-			sleepCtx(cctx, claudeRewindStep)
+		if !closeRewindPanel(cctx, pane, ctx.Err() != nil) {
+			return claudeRewindResult{needsCleanup: true}, re
 		}
 		return claudeRewindResult{}, re
 	}
 
 	// Open picker via rapid double-Esc, step up to target, verify selection.
+	keysSent = true
 	if err := pane.press(ctx, "esc", "esc"); err != nil {
 		return cleanup(err)
 	}
@@ -613,14 +653,13 @@ func claudeRewind(ctx context.Context, pane claudeRewindPane, plan claudeRewindP
 		return cleanup(rwErr(http.StatusConflict, "confirm_mismatch", "confirmation screen did not match Restore conversation and target"))
 	}
 
-	// Phase 2: COMMIT — atomic remote verify+Enter. NEVER press Esc once Enter may have been sent.
-	enterErr := pane.commitEnter(ctx, plan.TargetText)
+	// Phase 2: COMMIT — atomic remote verify+Enter. Only once the remote commit
+	// script has actually started (and did not actively exit before Enter) do we
+	// enter the committed state where Esc is forbidden.
+	commit, enterErr := pane.commitEnter(ctx, plan.TargetText)
 	if enterErr != nil {
-		if isIdentityErr(enterErr) {
-			return claudeRewindResult{}, asRewindErr(enterErr)
-		}
-		if re := asRewindErr(enterErr); re.code == "confirm_mismatch" {
-			return cleanup(re)
+		if !commit.started || isIdentityErr(enterErr) || asRewindErr(enterErr).code == "confirm_mismatch" {
+			return cleanup(enterErr)
 		}
 	}
 	committed = true
@@ -661,7 +700,7 @@ func claudeRewind(ctx context.Context, pane claudeRewindPane, plan claudeRewindP
 		return claudeRewindResult{}, rwErr(http.StatusBadGateway, "rewind_uncertain", "could not confirm whether rewind succeeded; check the terminal")
 	}
 
-	res := claudeRewindResult{OK: true, Text: plan.TargetText}
+	res := claudeRewindResult{OK: true, Text: plan.TargetText, remoteAt: commit.remoteAt}
 	if idleInput(postScr, checkGreyed(vctx)) == nil {
 		return res, nil
 	}

@@ -53,6 +53,10 @@ type ExecResult struct {
 	// whatever the status. When false (cancelled, timed out, connection lost,
 	// too much output) the command may still be running there.
 	Ended bool
+	// Started: true once the SSH "exec" request may have been dispatched to
+	// the host. False when Exec failed before dispatching (ErrBusy, pre-cancel,
+	// channel open failure, or the host explicitly refused the exec request).
+	Started bool
 }
 
 // ExitError is a command's non-zero exit status.
@@ -84,16 +88,31 @@ func Exec(ctx context.Context, c *ssh.Client, cmd string, limit int, opt ExecOpt
 		err error
 	}
 	res := make(chan result, 1)
+	var stateMu sync.Mutex
+	var execSent, abandoned bool
+	beforeExec := func() bool {
+		stateMu.Lock()
+		defer stateMu.Unlock()
+		if abandoned || ctx.Err() != nil {
+			return false
+		}
+		execSent = true
+		return true
+	}
 	go func() {
 		defer release()
-		r, err := runCommand(ctx, c, cmd, limit, opt)
+		r, err := runCommand(ctx, c, cmd, limit, opt, beforeExec)
 		res <- result{r, err}
 	}()
 	select {
 	case r := <-res:
 		return r.r, r.err
 	case <-ctx.Done():
-		return ExecResult{}, ctx.Err()
+		stateMu.Lock()
+		abandoned = true
+		started := execSent
+		stateMu.Unlock()
+		return ExecResult{Started: started}, ctx.Err()
 	}
 }
 
@@ -101,7 +120,7 @@ func Exec(ctx context.Context, c *ssh.Client, cmd string, limit int, opt ExecOpt
 // request stream is closed (the host closed the channel, or the connection
 // ended) and the goroutines reading it have returned. It opens the channel
 // itself rather than through ssh.Session, which hides that stream.
-func runCommand(ctx context.Context, c *ssh.Client, cmd string, limit int, opt ExecOptions) (ExecResult, error) {
+func runCommand(ctx context.Context, c *ssh.Client, cmd string, limit int, opt ExecOptions, beforeExec func() bool) (ExecResult, error) {
 	ch, reqs, err := c.OpenChannel("session", nil) // waits for the host to answer, or for the connection to end
 	if err != nil {
 		return ExecResult{}, err
@@ -133,16 +152,23 @@ func runCommand(ctx context.Context, c *ssh.Client, cmd string, limit int, opt E
 	}
 	stop := context.AfterFunc(ctx, func() { ch.Close() })
 	defer stop()
+	if beforeExec != nil && !beforeExec() {
+		end()
+		if err := ctx.Err(); err != nil {
+			return ExecResult{}, err
+		}
+		return ExecResult{}, context.Canceled
+	}
 	ok, err := ch.SendRequest("exec", true, ssh.Marshal(&struct{ Command string }{cmd}))
 	if err != nil || !ok {
 		end()
+		if err == nil && !ok {
+			return ExecResult{}, errors.New("the host refused to run the command")
+		}
 		if ctx.Err() != nil {
-			return ExecResult{}, ctx.Err()
+			return ExecResult{Started: true}, ctx.Err()
 		}
-		if err == nil {
-			err = errors.New("the host refused to run the command")
-		}
-		return ExecResult{}, err
+		return ExecResult{Started: true}, err
 	}
 	var readErr, writeErr error // the input copy's, set before its wg.Done
 	if opt.Stdin != nil {
@@ -203,14 +229,14 @@ func runCommand(ctx context.Context, c *ssh.Client, cmd string, limit int, opt E
 	// (the cancel above, going over the limit, or a failed input).
 	wg.Wait()
 	ch.Close()
-	r := ExecResult{Out: buf, Ended: exitStatus >= 0 && !over}
+	r := ExecResult{Out: buf, Ended: exitStatus >= 0 && !over, Started: true}
 	switch {
 	case over:
 		return r, ErrOutputTooLarge
 	case readErr != nil:
 		return r, fmt.Errorf("reading the command's input: %w", readErr)
 	case ctx.Err() != nil:
-		return ExecResult{}, ctx.Err()
+		return ExecResult{Started: true}, ctx.Err()
 	case exitStatus < 0:
 		return r, errors.New("the remote command ended without an exit status")
 	case exitStatus > 0:
