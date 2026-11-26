@@ -35,6 +35,7 @@ import { attach, ATTACH_LABEL, AttachStrip, PICTURE_PATH, takeOut, type Going } 
 import { answerable, asking, callOut, useConversation, type ConvoEntry } from '../terminal/conversation'
 import { ackBg, answeredHerdr, convoTitles, expectSession, paneWaits, waitingTitle, isAgy, isCodex, isDevin, isOpenCode, listAgents, paneName, paneTitle, readSessionsNow, readsLog, useRunningSessions, type AgentRow, type AgentStatus } from '../terminal/agents'
 import { normalizeProjectPath, reorderPinned, rowTasks, type RowCmds, type RowTask } from '../terminal/agentOrder'
+import { convoLastUserMs, mergeRowTasks, reconcileAgentStatus } from '../terminal/sideState'
 import { conversationReadable, prefetchConversation } from '../terminal/conversation'
 import { holdTermMode, tmuxKey } from '../terminal/chatSend'
 import { camesAfter, containedInMessage, isCommand, pairSent, sameMessage, squeezed, type Submission } from '../terminal/sentSeen'
@@ -1626,8 +1627,34 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
     setViewing(null)
     setReading(null)
   }, [sid])
-  // What the bar says of it: herdr's word for a herdr agent (as the session
-  // list has it, every few seconds); a tmux one's from its process file.
+  // Single reconciled status & background-task view shared by both the
+  // conversation header and the sidebar's row for this agent.
+  const convoWorkingSince = useMemo(() => convoLastUserMs(convo.entries) ?? (convo.changedAt || undefined), [convo.entries, convo.changedAt])
+  const liveConvoRunning = useMemo(() => {
+    if (convo.status !== 'ready' || convo.failing || !convo.bind) return undefined
+    if (herdr && convo.bind.pane !== cur.pane) return undefined
+    return convo.running
+  }, [convo.status, convo.failing, convo.bind, convo.running, herdr, cur.pane])
+  const reconciled = useMemo(() => {
+    if (!herdr || !row) return null
+    const raw = (['blocked', 'working', 'done', 'idle', 'unknown'] as const).includes(row.a.status as AgentStatus) ? (row.a.status as AgentStatus) : 'unknown'
+    return reconcileAgentStatus({
+      herdrStatus: row.status,
+      herdrRawStatus: raw,
+      herdrSince: row.a.since,
+      herdrLost: row.lost,
+      bg: row.lost ? undefined : row.bg,
+      bgChecking: row.a.bg === 'checking',
+      bgSince: row.a.bg_since,
+      convoLive: !row.lost && !convo.failing && convo.bind?.pane === row.a.pane_id,
+      convoAgent: convo.bind?.agent,
+      convoStatus: convo.agentStatus,
+      convoWaitingFor: convo.waitingFor,
+      convoWorkingSince,
+    })
+  }, [herdr, row, convo.failing, convo.bind, convo.agentStatus, convo.waitingFor, convoWorkingSince])
+  // What the bar says of it: reconciled from herdr and the live conversation
+  // for a herdr agent; a tmux one's from its process file / log.
   const agent = useMemo((): ConvoAgent | null => {
     if (!herdr) {
       if (!convo.bind) return null
@@ -1636,32 +1663,18 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
       // log's not answered yet, where that file says nothing.)
       const asks = st === 'waiting' ? answerable(convo.waitingFor) : !!st && asking(convo.entries)
       const dialog = st === 'waiting' && !asks
-      return { title: convoTitle || convo.bind.title, status: asks ? 'blocked' : st === 'busy' ? 'working' : st === 'idle' || dialog ? 'idle' : 'unknown', dialog, cmds: st && st !== 'waiting' ? convo.bgCmds : undefined, program: convo.bind.agent }
+      const status = asks ? 'blocked' : st === 'busy' ? 'working' : st === 'idle' || dialog ? 'idle' : 'unknown'
+      const cmds = st && st !== 'waiting' ? convo.bgCmds : undefined
+      return { title: convoTitle || convo.bind.title, status, dialog, cmds, tasks: mergeRowTasks(rowTasks(undefined, cmds), liveConvoRunning, { blocked: status === 'blocked' }), program: convo.bind.agent }
     }
-    if (!row) return null
+    if (!row || !reconciled) return null
     // (A Codex's: its thread's name, as the gateway has it, before its log's
     // first message, which a session imported or compacted begins with what
     // is no name.)
     const title = ((isCodex(row.a.agent) || isAgy(row.a.agent)) && row.a.thread_title) || (convo.bind?.pane === row.a.pane_id && convoTitle) || paneName(row.a) || dirName(row.a.cwd)
-    // (herdr's name for a workspace at home, "~": nothing to tell)
-    // (Its turn over, with subagents out or that being read for: the thread
-    // is of a turn that ended, whatever the list says of the agent.)
-    const ended = !row.lost && (row.a.bg === 'running' || row.a.bg === 'checking') && (row.a.status === 'done' || row.a.status === 'idle')
-    const herdrSays = row.lost ? 'unknown' : ended && row.bg !== 'stale' ? (row.a.status as 'done' | 'idle') : row.status
-    const bg = row.lost ? undefined : row.bg
-    // (This pane's Claude Code or Antigravity CLI, its process/screen read: of it, and of no other agent.)
-    const ownCC = !row.lost && convo.bind?.pane === row.a.pane_id && (convo.bind.agent ?? 'claude') === 'claude' && !convo.failing
-    const ownAgy = !row.lost && convo.bind?.pane === row.a.pane_id && convo.bind.agent === 'agy' && !convo.failing
-    // (Asking, as Claude Code's session file or Antigravity CLI's live screen says:
-    // herdr may call it idle while a permission prompt or question sits on screen.)
-    const ccAsks = (ownCC || ownAgy) && convo.agentStatus === 'waiting' && answerable(convo.waitingFor)
-    const status = ccAsks && herdrSays !== 'unknown' ? 'blocked' : herdrSays
-    // (A dialog of Claude Code's own open, /usage say: herdr calls it idle,
-    // its session file says it waits. Of this pane's process only, and of
-    // Claude Code's: no other agent says so.)
-    const dialog = ownCC && status !== 'blocked' && convo.agentStatus === 'waiting' && !answerable(convo.waitingFor)
-    return { where: row.ws === '~' ? '' : row.ws, title, status, bg, dialog, cmds: cmdsOf(row), tasks: tasksOf(row), other: readsLog(row.a.agent) ? undefined : row.a.agent, program: row.a.agent }
-  }, [herdr, row, convo.bind, convo.agentStatus, convo.waitingFor, convo.bgCmds, convo.failing, convoTitle, convo.entries])
+    const tasks = mergeRowTasks(tasksOf(row), liveConvoRunning, { blocked: reconciled.sideStatus === 'blocked', lost: row.lost })
+    return { where: row.ws === '~' ? '' : row.ws, title, status: reconciled.viewStatus, bg: reconciled.bg, dialog: reconciled.dialog, cmds: cmdsOf(row), tasks, other: readsLog(row.a.agent) ? undefined : row.a.agent, program: row.a.agent }
+  }, [herdr, row, reconciled, convo.bind, convo.agentStatus, convo.waitingFor, convo.bgCmds, convo.failing, convoTitle, convo.entries, liveConvoRunning])
   // (The tab of the agents' page says which conversation is in front.)
   useEffect(() => {
     onHead?.(agent ? { title: agent.title ?? '', program: agent.program, status: agent.bg && agent.status !== 'blocked' ? 'bg' : agent.status } : null)
@@ -1721,7 +1734,7 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
   // and the person gone on meanwhile: it stayed "done" however often it was
   // opened.)
   const shownNone = convo.status === 'none' && Date.now() - freshSince >= NONE_SEEN_AFTER_MS
-  const doneHere = herdr && active && !document.hidden && someoneHere() && (convo.status === 'ready' || convo.status === 'none') && !convo.failing && (convo.readAt() >= freshSince || shownNone) && row && !row.lost && row.status === 'done' && row.a.status === 'done' && !row.bg && row.a.bg !== 'checking' ? { pane: row.a.pane_id, round: row.a.round ?? 0, session: row.a.session ?? '', fresh: freshSince } : undefined
+  const doneHere = herdr && active && !document.hidden && someoneHere() && (convo.status === 'ready' || convo.status === 'none') && !convo.failing && (convo.readAt() >= freshSince || shownNone) && row && !row.lost && row.status === 'done' && row.a.status === 'done' && agent?.status === 'done' && !row.bg && row.a.bg !== 'checking' ? { pane: row.a.pane_id, round: row.a.round ?? 0, session: row.a.session ?? '', fresh: freshSince } : undefined
   const doneKey = doneHere && JSON.stringify(doneHere)
   // (Done and in front, its fresh read not in yet: looked at again every 2s —
   // a read that brought nothing new draws nothing, so nothing else asks.)
@@ -1744,7 +1757,7 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
   // conversation to read — all its view would have shown — the round it was
   // in front for is marked seen. One with a conversation is not: that is to
   // be seen. (The gateway marks nothing of a round over meanwhile.)
-  const doneVisit = herdr && active && !document.hidden && row && !row.lost && row.status === 'done' && row.a.status === 'done' && !row.bg ? JSON.stringify({ sid, pane: row.a.pane_id, round: row.a.round ?? 0, session: row.a.session ?? '' }) : ''
+  const doneVisit = herdr && active && !document.hidden && row && !row.lost && row.status === 'done' && row.a.status === 'done' && agent?.status === 'done' && !row.bg ? JSON.stringify({ sid, pane: row.a.pane_id, round: row.a.round ?? 0, session: row.a.session ?? '' }) : ''
   const seenSent = useRef('')
   const convoStatus = useRef(convo.status)
   convoStatus.current = convo.status
@@ -1864,24 +1877,35 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
         const r = e.row
         const named = ((isCodex(r.a.agent) || isAgy(r.a.agent)) && r.a.thread_title) || (current && convo.bind?.pane === r.a.pane_id && convoTitle) || keptTitle(titles, e) || paneName(r.a)
         const said = named || dirName(r.a.cwd) || r.a.agent
-        const st = current && agent && !r.bg ? agent.status : r.status
+        const st = current && reconciled ? reconciled.sideStatus : r.status
+        const bg = current && reconciled ? reconciled.bg : (r.lost ? undefined : r.bg)
+        const since = current && reconciled ? reconciled.since : (r.lost ? r.a.since : r.bg ? r.a.bg_since : r.a.since)
+        const tasks = current ? mergeRowTasks(tasksOf(r), liveConvoRunning, { blocked: st === 'blocked', lost: r.lost }) : tasksOf(r)
         const parentKey = r.lost || !r.a.parent_pane ? undefined : agentKey(e.s, r.a.parent_pane)
         const sameWsParent = !!parentKey && wsByKey.get(parentKey) === r.wsId
-        return { key: e.key, ...labelOf(e, said, hosts, !!named, sameWsParent), now: r.lost || r.bg || st !== 'blocked' ? undefined : glanceOf(e.s.id, e.pane, st, r.a.since) || undefined /* (said only of one waiting on the person) */, program: r.a.agent, status: st, liveStatus: st, lost: r.lost, lastStatus: r.lost && r.last && r.last !== 'unknown' ? r.last : undefined, lostAt: r.lost ? r.lostAt : undefined, bg: r.lost ? undefined : r.bg, failed: failedOf(r, st), model: r.lost ? undefined : r.a.model, glance: r.lost || r.bg ? undefined : () => glanceOf(e.s.id, e.pane, st, r.a.since), cmds: cmdsOf(r), tasks: tasksOf(r), since: r.lost ? r.a.since : r.bg ? r.a.bg_since : r.a.since, current, inSplit: !isSecondary && !!splitKey && e.key === splitKey, pinned: pinAt(e.key), projectKey: normalizeProjectPath(r.a.cwd), sessionGroup: sessionGroupOf(e, all), parentKey, lineageSource: r.lost ? undefined : r.a.lineage_source, onPick: (how) => onPick(e, how), menu: () => rowMenu.current(e) }
+        return { key: e.key, ...labelOf(e, said, hosts, !!named, sameWsParent), now: r.lost || bg || st !== 'blocked' ? undefined : glanceOf(e.s.id, e.pane, st, r.a.since) || undefined /* (said only of one waiting on the person) */, program: r.a.agent, status: st, liveStatus: st, lost: r.lost, lastStatus: r.lost && r.last && r.last !== 'unknown' ? r.last : undefined, lostAt: r.lost ? r.lostAt : undefined, bg, failed: failedOf(r, st), model: r.lost ? undefined : r.a.model, glance: r.lost || bg ? undefined : () => glanceOf(e.s.id, e.pane, st, r.a.since), cmds: cmdsOf(r), tasks, since, current, inSplit: !isSecondary && !!splitKey && e.key === splitKey, pinned: pinAt(e.key), projectKey: normalizeProjectPath(r.a.cwd), sessionGroup: sessionGroupOf(e, all), parentKey, lineageSource: r.lost ? undefined : r.a.lineage_source, onPick: (how) => onPick(e, how), menu: () => rowMenu.current(e) }
       }
       const title = (current && agent?.title) || keptTitle(titles, e) || `${e.s.host_name} · ${sessionWhich(e.s, all)}`
-      return { key: e.key, title, where: whereOf(e, hosts), program: current ? agent?.program : undefined, status: current && agent ? agent.status : 'unknown', cmds: current ? agent?.cmds : tmuxCmdsOf(e), tasks: rowTasks(undefined, current ? agent?.cmds : tmuxCmdsOf(e)), current, inSplit: !isSecondary && !!splitKey && e.key === splitKey, pinned: pinAt(e.key), sessionGroup: sessionGroupOf(e, all), onPick: (how) => onPick(e, how), menu: () => rowMenu.current(e) }
+      const tmuxStatus = current && agent ? agent.status : 'unknown'
+      const tmuxCmds = current ? agent?.cmds : tmuxCmdsOf(e)
+      const tmuxTasks = current ? mergeRowTasks(rowTasks(undefined, tmuxCmds), liveConvoRunning, { blocked: tmuxStatus === 'blocked' }) : rowTasks(undefined, tmuxCmds)
+      return { key: e.key, title, where: whereOf(e, hosts), program: current ? agent?.program : undefined, status: tmuxStatus, liveStatus: tmuxStatus, cmds: tmuxCmds, tasks: tmuxTasks, since: current && tmuxStatus === 'working' ? convoWorkingSince : undefined, current, inSplit: !isSecondary && !!splitKey && e.key === splitKey, pinned: pinAt(e.key), sessionGroup: sessionGroupOf(e, all), onPick: (how) => onPick(e, how), menu: () => rowMenu.current(e) }
     })
     return placedAs ? out.map((r) => (r.current ? { ...r, placeAs: placedAs } : r)) : out
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [entries, cur, agent, convoTitle, all, titles, onPick, placedAs, pins, splitKey, isSecondary])
+  }, [entries, cur, agent, reconciled, liveConvoRunning, convoWorkingSince, convoTitle, all, titles, onPick, placedAs, pins, splitKey, isSecondary])
   const shown = rows.find((r) => r.current)
   const known = !!shown && shown.status !== 'unknown'
   useEffect(() => {
     if (!active) return setPlacedAs(undefined)
-    if (known && shown) setPlacedAs((p) => p ?? { status: shown.status, since: shown.since, cmds: shown.cmds })
+    if (!known || !shown) return
+    setPlacedAs((p) => {
+      if (!p) return shown.status === 'done' ? { status: shown.status, since: shown.since, cmds: shown.cmds } : undefined
+      if (p.status === 'done' && shown.status !== 'done' && shown.status !== 'idle') return undefined
+      return p
+    })
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [active, known])
+  }, [active, known, shown?.status])
 
   // Stop and "send now": pressed by the gateway in the agent's pane, for the
   // process the conversation shows; what became of it is said for a while.

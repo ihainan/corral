@@ -9,6 +9,7 @@ import (
 
 	"github.com/pkg/sftp"
 
+	"github.com/ihainan/corral/internal/convo"
 	"github.com/ihainan/corral/internal/sftplite"
 )
 
@@ -100,5 +101,37 @@ func TestShellWord(t *testing.T) {
 		if got := shellWord(status); got != want {
 			t.Errorf("shellWord(%q) = %q, want %q", status, got, want)
 		}
+	}
+}
+
+func TestHerdrProcStatus(t *testing.T) {
+	cases := map[string]string{
+		"busy":                      "busy",
+		"idle":                      "idle",
+		"waiting:permission prompt": "waiting:permission prompt",
+		"waiting:dialog open":       "waiting:dialog open",
+		"shell":                     "",
+		"":                          "",
+		"other":                     "",
+	}
+	for in, want := range cases {
+		if got := herdrProcStatus(in); got != want {
+			t.Errorf("herdrProcStatus(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestRunningSigOf(t *testing.T) {
+	if got := runningSigOf(nil); got != "" {
+		t.Fatalf("empty: %q", got)
+	}
+	a := runningSigOf([]convo.Running{{ID: "b2", Kind: "cmd"}, {ID: "a1", Kind: "agent"}})
+	b := runningSigOf([]convo.Running{{ID: "a1", Kind: "agent"}, {ID: "b2", Kind: "cmd"}})
+	if a != b || a != "agent:a1,cmd:b2" {
+		t.Fatalf("order-independent sig: a=%q b=%q", a, b)
+	}
+	c := runningSigOf([]convo.Running{{ID: "a1", Kind: "agent"}})
+	if a == c {
+		t.Fatalf("sig did not change when item ended: %q", c)
 	}
 }
