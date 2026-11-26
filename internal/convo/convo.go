@@ -457,6 +457,11 @@ type Meta struct {
 	// Answer is the latest answer read: its tokens and how long it took
 	// (Claude Code's logs); nil, none read.
 	Answer *Answer `json:"answer,omitempty"`
+	// TurnOut: the tokens the model has written in the turn under way — since
+	// the person's last message — as Claude Code's spinner counts them ("↓ 1.2k
+	// tokens"): each answer of the turn once, the one being written as far as
+	// its rows say. Claude Code's; 0 where not known.
+	TurnOut int64 `json:"turn_out,omitempty"`
 	// Quota is the subscription's use as the log last said it (Codex's,
 	// signed in to an account: through a relay it says none); nil, none.
 	Quota *Quota `json:"quota,omitempty"`

@@ -764,6 +764,7 @@ export function ConversationView({
     setChanges({ key, path })
   }, [])
   const unshow = useCallback(() => setChanges(null), [])
+  const turnLive = useMemo(() => ({ out: convo.meta?.turn_out, effort: convo.meta?.effort }), [convo.meta?.turn_out, convo.meta?.effort])
   const openSub = useCallback((s: Sub) => {
     setChanges(null)
     setBgCmd(null)
@@ -2391,7 +2392,9 @@ export function ConversationView({
         <div className="convo-scroll" ref={box}>
           <div className="convo-col" ref={col}>
             <ShowTerminal.Provider value={onShowTerminal}>
-              <OpenSub.Provider value={openSub}>{body}</OpenSub.Provider>
+              <OpenSub.Provider value={openSub}>
+                <TurnLive.Provider value={turnLive}>{body}</TurnLive.Provider>
+              </OpenSub.Provider>
             </ShowTerminal.Provider>
           </div>
         </div>
@@ -3268,7 +3271,8 @@ function EffortSaid({ level }: { level: string }) {
 function EffortSlider({ levels, value, now, onPick }: { levels: readonly string[]; value?: string; now?: string; onPick: (level: string) => void }) {
   const track = useRef<HTMLDivElement>(null)
   const n = levels.length
-  const i = Math.max(0, levels.indexOf(value ?? ''))
+  // (-1: none known — nothing marked, rather than the lowest said to be it. Review b8-3.)
+  const i = levels.indexOf(value ?? '')
   const pos = (k: number) => (n > 1 ? (k / (n - 1)) * 100 : 100)
   const at = (x: number) => {
     const r = track.current?.getBoundingClientRect()
@@ -3295,8 +3299,8 @@ function EffortSlider({ levels, value, now, onPick }: { levels: readonly string[
         aria-label={t('convo.effort')}
         aria-valuemin={0}
         aria-valuemax={Math.max(0, n - 1)}
-        aria-valuenow={i}
-        aria-valuetext={value ? effortName(value) : undefined}
+        aria-valuenow={i >= 0 ? i : undefined}
+        aria-valuetext={i >= 0 && value ? effortName(value) : undefined}
         onPointerDown={(e) => {
           e.preventDefault()
           e.currentTarget.focus()
@@ -3306,13 +3310,19 @@ function EffortSlider({ levels, value, now, onPick }: { levels: readonly string[
         onPointerMove={(e) => {
           if (e.currentTarget.hasPointerCapture?.(e.pointerId)) pick(at(e.clientX))
         }}
+        onKeyDown={(e) => {
+          // (Home / End: its ends. ← → are the menu's own, ↑ ↓ move on through the menu. Review b8-2.)
+          if (e.key !== 'Home' && e.key !== 'End') return
+          e.preventDefault()
+          pick(levels[e.key === 'Home' ? 0 : n - 1])
+        }}
       >
         <span className="convo-effort-rail" />
-        <span className="convo-effort-fill" style={{ width: pos(i) + '%' }} />
+        {i >= 0 && <span className="convo-effort-fill" style={{ width: pos(i) + '%' }} />}
         {levels.map((l, k) => (
           <span key={l} className={'convo-effort-stop' + (k <= i ? ' is-on' : '')} style={{ left: pos(k) + '%' }} />
         ))}
-        <span className="convo-effort-thumb" style={{ left: pos(i) + '%' }} />
+        {i >= 0 && <span className="convo-effort-thumb" style={{ left: pos(i) + '%' }} />}
         {levels.map((l, k) => (
           <span key={l} className={'convo-effort-name' + (k === i ? ' is-current' : '')} style={{ left: pos(k) + '%' }} aria-hidden="true">
             {effortName(l)}
@@ -3431,13 +3441,14 @@ function Runs({ head, statusAt, modelAt, quiet, meta, goal, active, mode, model,
         if (open === 'model' && inside(document.activeElement)) modelBtn.current?.focus()
         if (open === 'effort' && inside(document.activeElement)) effortBtn.current?.focus()
         if (open === 'mode' && inside(document.activeElement)) modeBtn.current?.focus()
+        if (open === 'ctx' && (inside(document.activeElement) || document.activeElement === document.body)) ctxBtn.current?.focus() // (opened from the model's menu too, its button gone: review b8-1)
         setOpen(false)
       } else if (open === 'model' && mergedNow.current && (e.key === 'ArrowLeft' || e.key === 'ArrowRight') && menu.current?.contains(document.activeElement)) {
         // (As in Claude Code's own picker: ← → for how hard it thinks, wherever the focus is in the list.)
         e.preventDefault()
         moveEffort.current(e.key === 'ArrowRight' ? 1 : -1)
       } else if ((open === 'model' || open === 'effort' || open === 'mode') && (e.key === 'ArrowDown' || e.key === 'ArrowUp') && menu.current?.contains(document.activeElement)) {
-        const all = [...menu.current.querySelectorAll<HTMLElement>('button')]
+        const all = [...menu.current.querySelectorAll<HTMLElement>('button, [role="slider"]')] // (the effort's slider a stop as well: review b8-2)
         const at = all.indexOf(document.activeElement as HTMLElement)
         e.preventDefault()
         all[(at + (e.key === 'ArrowDown' ? 1 : all.length - 1)) % all.length]?.focus()
@@ -3821,7 +3832,9 @@ function Runs({ head, statusAt, modelAt, quiet, meta, goal, active, mode, model,
               const chosen = (toModel ?? '') === o.label
               const [name, says] = named(o)
               // (The chosen one says how hard it will think, beside its name — as Antigravity's rows: doc UI item 24.)
-              const level = chosen && toEffort && (merged || model.efforts) ? (model.efforts ? t(EFFORT_WORDS[toEffort] ?? 'convo.effort') : effortName(toEffort)) : ''
+              // (A Codex's, none chosen yet: the one it is on, by the word its log says. Review b8-4.)
+              const rowEffort = model.efforts ? stage.effort ?? (now ? CODEX_EFFORTS.find((k) => effortWord(k) === nowEffort) : undefined) : toEffort
+              const level = chosen && rowEffort && (merged || model.efforts) ? (model.efforts ? t(EFFORT_WORDS[rowEffort] ?? 'convo.effort') : effortName(rowEffort)) : ''
               // (Chosen, not taken: the button under the list takes it — the focus goes there.)
               const pick = (effort?: string) => {
                 setStage((st) => ({ model: o.label, effort: effort ?? (model.efforts ? undefined : st.effort) }))
@@ -3871,7 +3884,15 @@ function Runs({ head, statusAt, modelAt, quiet, meta, goal, active, mode, model,
           )}
           {/* (Where the usage is, from where the model is chosen — Antigravity's "View Usage": the context's pop-up.) */}
           {used > 0 && model.list !== null && (
-            <button type="button" className="convo-models-usage" onClick={() => setOpen('ctx')}>
+            <button
+              type="button"
+              className="convo-models-usage"
+              onClick={() => {
+                // (The focus to the usage's own button — this one goes with the menu: review b8-1.)
+                setOpen('ctx')
+                ctxBtn.current?.focus()
+              }}
+            >
               <GaugeIcon size={14} aria-hidden="true" />
               <span>{t('convo.viewUsage')}</span>
               <ChevronRight size={14} aria-hidden="true" />
@@ -6314,6 +6335,9 @@ export const recapText = (s: string) => s.replace(/\s*\((?:disable|turn off)[^()
 // A subagent sent off, whose own conversation can be shown: by its id.
 type Sub = { agent: string; title?: string }
 const OpenSub = createContext<((s: Sub) => void) | undefined>(undefined)
+// The turn under way, as Claude Code's spinner line says it beside its seconds — "(9s · ↓ 1.2k tokens · thinking
+// with high effort)": the tokens written so far and how hard it thinks, for the line of the step under way (doc UI 30).
+const TurnLive = createContext<{ out?: number; effort?: string }>({})
 // (In a subagent's conversation "the person" is the agent that sent it: what it
 // wrote is written in Markdown, for a model, and shown so.)
 const WordsAsWritten = createContext(false)
@@ -7257,6 +7281,17 @@ function Work({ it, open, onToggle, onCopy }: { it: Extract<Item, { kind: 'work'
   const between = !busy && !!it.live && !thought && !sum
   const [shine, setShine] = useState<HTMLSpanElement | null>(null)
   useRunWhileSeen(shine, (!!busy && !asks) || between)
+  // (At work: its seconds, then what Claude Code's spinner says beside them — the turn's tokens so far, and while
+  // it thinks how hard: doc UI 30.)
+  const turn = useContext(TurnLive)
+  const liveFigures = (secs: boolean) =>
+    [
+      secs && since > 0 && now >= since ? duration(now - since) : '',
+      it.live && turn.out ? t('convo.live.tokens', { n: tokens(turn.out) }) : '',
+      it.live && busy && !busy.tool && turn.effort ? t('convo.live.effort', { e: effortName(turn.effort).toLowerCase() }) : '',
+    ]
+      .filter(Boolean)
+      .join(' · ')
   // Shut, what is said of it without opening: the subagents it sent off, by
   // name, each to be read; and with calls beside it the last of what it
   // thought, a line (at most one for a run, however long it thought).
@@ -7305,11 +7340,12 @@ function Work({ it, open, onToggle, onCopy }: { it: Extract<Item, { kind: 'work'
           ) : busy ? (
             <span className="convo-work-text is-live">
               <span ref={setShine} className="convo-shimmer">{busy.tool ? liveText(busy.tool) : t('convo.live.thinking')}</span>
-              {since > 0 && now >= since && <span className="convo-live-time">{duration(now - since)}</span>}
+              {liveFigures(true) && <span className="convo-live-time">{liveFigures(true)}</span>}
             </span>
           ) : between ? (
             <span className="convo-work-text is-live">
               <span ref={setShine} className="convo-shimmer">{head}</span>
+              {liveFigures(false) && <span className="convo-live-time">{liveFigures(false)}</span>}
             </span>
           ) : (
             <span className="convo-work-text">{head || sum}</span>
@@ -7330,7 +7366,7 @@ function Work({ it, open, onToggle, onCopy }: { it: Extract<Item, { kind: 'work'
         ) : busy ? (
           <span className="convo-work-text is-live">
             <span ref={setShine} className="convo-shimmer">{busy.tool ? liveText(busy.tool) : t('convo.live.thinking')}</span>
-            {since > 0 && now >= since && <span className="convo-live-time">{duration(now - since)}</span>}
+            {liveFigures(true) && <span className="convo-live-time">{liveFigures(true)}</span>}
             {chev}
           </span>
         ) : (

@@ -213,6 +213,7 @@ export interface ConvoMeta {
   cost?: ConvoCost // the latest of what the session used, as the log read said it (convo.Cost)
   quota?: ConvoQuota // the subscription's use, as the log last said it (Codex's; convo.Quota)
   answer?: ConvoAnswer // the latest answer read: its tokens and how long it took (Claude Code's; convo.Answer)
+  turn_out?: number // tokens written in the turn under way, as Claude Code's spinner counts them (convo.Meta's TurnOut)
 }
 
 // The session's latest answer, of the log's own rows (convo.Answer): the
@@ -420,7 +421,7 @@ const sameBind = (a?: ConvoBind, b?: ConvoBind) =>
   a === b || (!!a && !!b && a.pane === b.pane && a.pid === b.pid && a.start === b.start && a.session === b.session && a.title === b.title && a.agent === b.agent && a.via === b.via && a.auth === b.auth)
 
 const sameMeta = (a?: ConvoMeta, b?: ConvoMeta) =>
-  a === b || (!!a && !!b && a.model === b.model && a.mode === b.mode && a.effort === b.effort && a.branch === b.branch && a.forked === b.forked && a.history_partial === b.history_partial && a.context === b.context && a.window === b.window && a.window_by === b.window_by && JSON.stringify(a.cost) === JSON.stringify(b.cost) && JSON.stringify(a.quota) === JSON.stringify(b.quota) && JSON.stringify(a.answer) === JSON.stringify(b.answer))
+  a === b || (!!a && !!b && a.model === b.model && a.mode === b.mode && a.effort === b.effort && a.branch === b.branch && a.forked === b.forked && a.history_partial === b.history_partial && a.context === b.context && a.window === b.window && a.window_by === b.window_by && JSON.stringify(a.cost) === JSON.stringify(b.cost) && JSON.stringify(a.quota) === JSON.stringify(b.quota) && JSON.stringify(a.answer) === JSON.stringify(b.answer) && a.turn_out === b.turn_out)
 
 const POLL = 2000
 const ACTIVE = 1000 // (after an answer that brought something: more is likely coming)

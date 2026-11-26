@@ -124,12 +124,19 @@ type Claude struct {
 		wide  bool
 		sent  time.Time
 	}
-	answerID    string // the requestId of the answer Meta's Answer is of
-	taskBase    []taskItem
-	taskOps     []taskOp
-	taskOpsFull bool              // more were made than are kept: the list is not made again (see Prepend)
-	late        map[string]taskOp // (while Prepend pairs results: their changes, to be made in their turn)
-	tree        rowTree           // what each row hangs on, to tell what a rewind took back (see rewound)
+	answerID string // the requestId of the answer Meta's Answer is of
+	// The turn under way's tokens (Meta's TurnOut): of its answers done, and
+	// of the one being written; turnBegun: a message of the person's read in
+	// this part; turnFirst: the first answer read in it before one was (to
+	// tell, as parts are joined, an answer cut in two from two answers).
+	turnDone, turnCur int64
+	turnBegun         bool
+	turnFirst         string
+	taskBase          []taskItem
+	taskOps           []taskOp
+	taskOpsFull       bool              // more were made than are kept: the list is not made again (see Prepend)
+	late              map[string]taskOp // (while Prepend pairs results: their changes, to be made in their turn)
+	tree              rowTree           // what each row hangs on, to tell what a rewind took back (see rewound)
 }
 
 // taskOp is a change made to the task list; or (orphan: the result's call
@@ -597,7 +604,26 @@ func (c *Claude) Prepend(other Parser) {
 		c.meta.Cost = o.meta.Cost // (running totals: the later stands, never added to)
 	}
 	if c.meta.Answer == nil {
-		c.meta.Answer = o.meta.Answer // (of the latest answer read: the later part's stands)
+		// (Of the latest answer read: the later part's stands. Its requestId
+		// with it, so that a further row of it read after is the same answer.)
+		c.meta.Answer, c.answerID = o.meta.Answer, o.answerID
+	}
+	// (The turn under way begun before c's part: o's answers of it counted
+	// too — the one c's part begins with once, where o's part ends in it.)
+	if !c.turnBegun {
+		if c.turnFirst == "" {
+			c.turnDone, c.turnCur = c.turnDone+o.turnDone, o.turnCur
+		} else {
+			c.turnDone += o.turnDone
+			if o.answerID != c.turnFirst {
+				c.turnDone += o.turnCur
+			}
+		}
+		if o.turnFirst != "" {
+			c.turnFirst = o.turnFirst
+		}
+		c.turnBegun = o.turnBegun
+		c.meta.TurnOut = c.turnDone + c.turnCur
 	}
 	if c.lastReq.model == "" {
 		// (Its sent comes along: of no use here, as the rows of this part
@@ -1149,6 +1175,7 @@ func (c *Claude) user(r *claudeRow) {
 		}
 		c.add(r, role, []Part{textPart(KindText, text)})
 		if role == RoleUser {
+			c.turnBegins()
 			// (A shell command the person typed with "!": shown so, it waited
 			// as the command alone.)
 			if strings.Contains(s, "<bash-input>") {
@@ -1242,6 +1269,7 @@ func (c *Claude) user(r *claudeRow) {
 	}
 	c.add(r, role, parts)
 	if role == RoleUser && len(parts) > 0 {
+		c.turnBegins()
 		c.arrived(arrivalOfParts(parts))
 		c.wasSaid(partsText(parts))
 	}
@@ -1955,9 +1983,24 @@ func (c *Claude) answered(r *claudeRow, out int64) {
 		if out > c.meta.Answer.Out {
 			c.meta.Answer.Out = out
 		}
+		if out > c.turnCur {
+			c.turnCur = out
+		}
+		c.meta.TurnOut = c.turnDone + c.turnCur
 		return
 	}
 	c.answerID, c.meta.Answer = id, &Answer{Out: out, Ms: ms}
+	c.turnDone, c.turnCur = c.turnDone+c.turnCur, out
+	if !c.turnBegun && c.turnFirst == "" {
+		c.turnFirst = id
+	}
+	c.meta.TurnOut = c.turnDone + c.turnCur
+}
+
+// turnBegins: a message of the person's — the turn's tokens counted from
+// nought.
+func (c *Claude) turnBegins() {
+	c.turnDone, c.turnCur, c.turnBegun, c.meta.TurnOut = 0, 0, true, 0
 }
 
 // compacted: what filled the context before is gone; how full it is now is
