@@ -841,7 +841,36 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
   margin-left: 6px; padding: 0 6px; border-radius: 999px; background: color-mix(in srgb, var(--term-fg) 7%, transparent);
   color: var(--term-fg-3); font-size: var(--fs-note); line-height: var(--lh-note); font-weight: 400; white-space: nowrap;
 }
-.convo-models-effort.is-now:not(.is-current) { border-style: dashed; }
+/* (How hard it thinks: the chosen model's level beside its name, and on the composer's chip — the accent, as Antigravity's
+   picker says it: doc UI item 24.) */
+.convo-models-level { margin-left: 6px; color: var(--term-accent-text); font-weight: 600; }
+.convo-runs-model-effort { margin-left: 0.35em; color: var(--term-accent-text); font-weight: 600; }
+/* (The level as a slider under the models, its stops named under it; the chosen part of the rail in the accent, no gradient.) */
+.convo-effort { margin: 6px 8px 2px; padding: 10px 12px 6px; border-radius: var(--r); background: color-mix(in srgb, var(--term-accent-text) 7%, transparent); }
+.convo-effort-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; font-size: var(--fs-sub); line-height: var(--lh-sub); font-weight: 500; color: var(--term-fg); }
+.convo-effort-said { display: inline-flex; align-items: baseline; gap: 8px; }
+.convo-effort-was { color: var(--term-fg-3); font-size: var(--fs-note); line-height: var(--lh-note); font-weight: 400; }
+.convo-effort-value { color: var(--term-accent-text); font-weight: 600; }
+.convo-effort-track { position: relative; height: 38px; margin: 6px 10px 0; cursor: pointer; touch-action: none; outline: none; }
+.convo-effort-track:focus-visible .convo-effort-thumb { box-shadow: 0 0 0 2px var(--term-bg), 0 0 0 4px var(--term-accent-text); }
+.convo-effort-rail, .convo-effort-fill { position: absolute; left: 0; top: 8px; height: 4px; border-radius: 999px; }
+.convo-effort-rail { right: 0; background: var(--term-line); }
+.convo-effort-fill { background: var(--term-accent-text); }
+.convo-effort-stop { position: absolute; top: 7px; width: 6px; height: 6px; margin-left: -3px; border-radius: 50%; background: var(--term-bg); box-shadow: 0 0 0 1px var(--term-line); }
+.convo-effort-stop.is-on { background: var(--term-accent-text); box-shadow: none; }
+.convo-effort-thumb {
+  position: absolute; top: 2px; width: 16px; height: 16px; margin-left: -8px; border-radius: 50%;
+  background: var(--term-bg); box-shadow: 0 0 0 1.5px var(--term-accent-text); transition: left 0.12s var(--ease);
+}
+.convo-effort-name { position: absolute; top: 20px; transform: translateX(-50%); white-space: nowrap; font-size: var(--fs-note); line-height: var(--lh-note); color: var(--term-fg-3); }
+.convo-effort-name.is-current { color: var(--term-accent-text); font-weight: 600; }
+.convo-models-usage {
+  display: flex; align-items: center; gap: 8px; width: calc(100% - 8px); margin: 2px 4px 0; padding: 8px; border: 0; border-radius: var(--r-sm);
+  background: none; color: var(--term-fg-2); font: inherit; font-size: var(--fs-sub); line-height: var(--lh-sub); text-align: left; cursor: pointer;
+}
+.convo-models-usage span { flex: 1; min-width: 0; }
+.convo-models-usage:hover, .convo-models-usage:focus-visible { background: var(--term-hover); color: var(--term-fg); outline: none; }
+@media (prefers-reduced-motion: reduce) { .convo-effort-thumb { transition: none; } }
 .convo-models-foot { display: flex; flex-direction: column; gap: 8px; margin: 6px 8px 2px; padding-top: 8px; border-top: 1px solid var(--term-line); }
 .convo-models-foot .convo-runs-note { margin: 0; }
 .convo-models-apply { width: 100%; max-width: 100%; min-width: 0; justify-content: center; overflow: hidden; }

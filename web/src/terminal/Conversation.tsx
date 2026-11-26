@@ -3260,6 +3260,69 @@ function EffortSaid({ level }: { level: string }) {
   return <span>{effortName(level)}</span>
 }
 
+// How hard it thinks, in the model's menu: a slider of the levels, the one
+// chosen said at its head (and what it is on now, while another is chosen)
+// — as Antigravity's picker has it (doc UI item 24, 11-26), no gradient. A
+// tap or a drag on it; ← → anywhere in the menu move it too (the menu's own
+// keys, as Claude Code's picker).
+function EffortSlider({ levels, value, now, onPick }: { levels: readonly string[]; value?: string; now?: string; onPick: (level: string) => void }) {
+  const track = useRef<HTMLDivElement>(null)
+  const n = levels.length
+  const i = Math.max(0, levels.indexOf(value ?? ''))
+  const pos = (k: number) => (n > 1 ? (k / (n - 1)) * 100 : 100)
+  const at = (x: number) => {
+    const r = track.current?.getBoundingClientRect()
+    if (!r || r.width <= 0 || n < 2) return levels[n - 1]
+    return levels[Math.round(Math.min(1, Math.max(0, (x - r.left) / r.width)) * (n - 1))]
+  }
+  const pick = (l: string | undefined) => {
+    if (l && l !== value) onPick(l)
+  }
+  return (
+    <div className="convo-effort">
+      <div className="convo-effort-head">
+        <span>{t('convo.effort')}</span>
+        <span className="convo-effort-said">
+          {now && value && now !== value && <span className="convo-effort-was">{t('convo.modelNowTag')} {effortName(now)}</span>}
+          {value && <span className="convo-effort-value">{effortName(value)}</span>}
+        </span>
+      </div>
+      <div
+        ref={track}
+        className="convo-effort-track"
+        role="slider"
+        tabIndex={0}
+        aria-label={t('convo.effort')}
+        aria-valuemin={0}
+        aria-valuemax={Math.max(0, n - 1)}
+        aria-valuenow={i}
+        aria-valuetext={value ? effortName(value) : undefined}
+        onPointerDown={(e) => {
+          e.preventDefault()
+          e.currentTarget.focus()
+          e.currentTarget.setPointerCapture?.(e.pointerId)
+          pick(at(e.clientX))
+        }}
+        onPointerMove={(e) => {
+          if (e.currentTarget.hasPointerCapture?.(e.pointerId)) pick(at(e.clientX))
+        }}
+      >
+        <span className="convo-effort-rail" />
+        <span className="convo-effort-fill" style={{ width: pos(i) + '%' }} />
+        {levels.map((l, k) => (
+          <span key={l} className={'convo-effort-stop' + (k <= i ? ' is-on' : '')} style={{ left: pos(k) + '%' }} />
+        ))}
+        <span className="convo-effort-thumb" style={{ left: pos(i) + '%' }} />
+        {levels.map((l, k) => (
+          <span key={l} className={'convo-effort-name' + (k === i ? ' is-current' : '')} style={{ left: pos(k) + '%' }} aria-hidden="true">
+            {effortName(l)}
+          </span>
+        ))}
+      </div>
+    </div>
+  )
+}
+
 function compactThreshold(window: number, agentKind?: string, observedPre?: number, configuredAt?: number): { at: number; pct: number; source: 'setting' | 'observed' | 'estimate' } {
   if (configuredAt && configuredAt > 0 && configuredAt <= window) {
     return { at: configuredAt, pct: Math.round((configuredAt / window) * 100), source: 'setting' }
@@ -3633,7 +3696,7 @@ function Runs({ head, statusAt, modelAt, quiet, meta, goal, active, mode, model,
               {going && model.busy
                 ? t('convo.modelGoing', { what: going })
                 : modelShowsEffort
-                  ? t('convo.modelEffortChip', { m: shortModelName(shownModel!), e: effortName(shownEffort!) })
+                  ? <>{shortModelName(shownModel!)}<span className="convo-runs-model-effort">{effortName(shownEffort!)}</span></>
                   : shortModelName(shownModel!)}
             </span>
             {going && model.busy ? <Loader size={12} className="convo-running-spin" aria-hidden="true" /> : <ChevronsUpDown size={12} aria-hidden="true" />}
@@ -3645,7 +3708,7 @@ function Runs({ head, statusAt, modelAt, quiet, meta, goal, active, mode, model,
           >
             <ModelGlyph model={shownModel!} size={13} />
             <span className="convo-runs-model-name">
-              {modelShowsEffort ? t('convo.modelEffortChip', { m: shortModelName(shownModel!), e: effortName(shownEffort!) }) : shortModelName(shownModel!)}
+              {modelShowsEffort ? <>{shortModelName(shownModel!)}<span className="convo-runs-model-effort">{effortName(shownEffort!)}</span></> : shortModelName(shownModel!)}
             </span>
           </span>
         ))}
@@ -3743,6 +3806,7 @@ function Runs({ head, statusAt, modelAt, quiet, meta, goal, active, mode, model,
                   />
                 </div>
               )}
+              {merged && effort && mergedEfforts.length > 0 && <p className="convo-models-group" aria-hidden="true">{t('convo.model')}</p>}
               <div className="convo-models-scroll">
                 {model.list
                   .filter((o) => {
@@ -3756,6 +3820,8 @@ function Runs({ head, statusAt, modelAt, quiet, meta, goal, active, mode, model,
               const now = nowOf(o)
               const chosen = (toModel ?? '') === o.label
               const [name, says] = named(o)
+              // (The chosen one says how hard it will think, beside its name — as Antigravity's rows: doc UI item 24.)
+              const level = chosen && toEffort && (merged || model.efforts) ? (model.efforts ? t(EFFORT_WORDS[toEffort] ?? 'convo.effort') : effortName(toEffort)) : ''
               // (Chosen, not taken: the button under the list takes it — the focus goes there.)
               const pick = (effort?: string) => {
                 setStage((st) => ({ model: o.label, effort: effort ?? (model.efforts ? undefined : st.effort) }))
@@ -3775,6 +3841,7 @@ function Runs({ head, statusAt, modelAt, quiet, meta, goal, active, mode, model,
                     <ModelGlyph model={o.label} desc={o.desc} size={15} />
                     <span className="convo-models-label">
                       {name}
+                      {level && <span className="convo-models-level">{level}</span>}
                       {now && !chosen && <span className="convo-models-now">{t('convo.modelNowTag')}</span>}
                     </span>
                     {says && <span className="convo-models-desc">{says}</span>}
@@ -3800,24 +3867,15 @@ function Runs({ head, statusAt, modelAt, quiet, meta, goal, active, mode, model,
               the models) and as the chat apps have come to. A Codex's
               efforts are already chosen with its model, above. */}
           {merged && effort && mergedEfforts.length > 0 && (
-            <>
-              <p className="convo-models-group" aria-hidden="true">{t('convo.effort')}</p>
-              <div className="convo-models-efforts" role="group" aria-label={t('convo.effort')}>
-                {mergedEfforts.map((e) => (
-                  <button
-                    key={e}
-                    type="button"
-                    role="menuitemradio"
-                    aria-checked={toEffort === e}
-                    className={'convo-models-effort' + (toEffort === e ? ' is-current' : '') + (nowEffort === e ? ' is-now' : '')}
-                    title={nowEffort === e ? t('convo.modelNowTag') : undefined}
-                    onClick={() => setStage((st) => ({ ...st, effort: e }))}
-                  >
-                    {effortName(e)}
-                  </button>
-                ))}
-              </div>
-            </>
+            <EffortSlider levels={mergedEfforts} value={toEffort} now={nowEffort} onPick={(e) => setStage((st) => ({ ...st, effort: e }))} />
+          )}
+          {/* (Where the usage is, from where the model is chosen — Antigravity's "View Usage": the context's pop-up.) */}
+          {used > 0 && model.list !== null && (
+            <button type="button" className="convo-models-usage" onClick={() => setOpen('ctx')}>
+              <GaugeIcon size={14} aria-hidden="true" />
+              <span>{t('convo.viewUsage')}</span>
+              <ChevronRight size={14} aria-hidden="true" />
+            </button>
           )}
           {model.list !== null && (() => {
             const applyLabel = modelMoved || effortMoved ? (modelMoved || model.efforts ? t('convo.applySwitch', { what: toSaid }) : t('convo.applyEffort', { e: effortName(toEffort!) })) : t('convo.applyNone')
