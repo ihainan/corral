@@ -6,6 +6,7 @@ import { PhoneBack, useSession } from '../app'
 import { auditAction, auditDetail, auditTarget, byDay, clockText, sessionHosts, spanFrom, whenText, type DaySpan } from './pageText'
 import { Confirm, CopyButton, Dialog, EmptyState, Field, LoadError, Menu, useToast } from '../components/ui'
 import { deskRowKey, useDeskPages } from '../workbench'
+import { Avatar } from '../components/Avatar'
 
 type UserFilter = 'all' | 'admin' | 'disabled' | 'no2fa'
 const USER_FILTERS: UserFilter[] = ['all', 'admin', 'disabled', 'no2fa']
@@ -192,7 +193,13 @@ export function AdminUsersPage() {
       setSel(u.id)
       pageEl.current?.querySelector<HTMLElement>(`tr[data-user="${u.id}"]`)?.focus()
     }
-    const cols = ['user', 'name', 'role', 'sessions', 'created', 'state'] as const
+    const cols = ['user', 'role', 'sessions', 'active', 'created', 'state'] as const
+    const chosen = at >= 0 ? shownUsers[at] : null
+    const waysOf = (u: AdminUser) => [u.totp ? t('admin.state.twoStep') : '', u.sso?.length ? (u.has_password ? 'SSO' : t('admin.state.ssoOnly')) : ''].filter(Boolean)
+    const closeAside = () => {
+      if (chosen) pageEl.current?.querySelector<HTMLElement>(`tr[data-user="${chosen.id}"]`)?.focus()
+      setSel(null)
+    }
     return (
       <main className="page page-desk" ref={pageEl}>
         <div className="desk-bar">
@@ -232,6 +239,8 @@ export function AdminUsersPage() {
           )}
         </div>
         {shownUsers.length > 0 && (
+          <div className="desk-split">
+          <div className="desk-split-main">
           <table className="desk-table desk-users" aria-label={t('admin.users')}>
             <thead>
               <tr>
@@ -248,12 +257,16 @@ export function AdminUsersPage() {
                 } else if (e.key === 'Home' || e.key === 'End') {
                   e.preventDefault()
                   go(e.key === 'Home' ? 0 : shownUsers.length - 1)
+                } else if (e.key === 'Escape' && deskRowKey(e) === 'row' && sel !== null) {
+                  e.preventDefault()
+                  setSel(null)
                 }
               }}
             >
               {shownUsers.map((u, i) => {
                 const on = u.id === sel
-                const ways = [u.totp ? t('admin.state.twoStep') : '', u.sso?.length ? (u.has_password ? 'SSO' : t('admin.state.ssoOnly')) : ''].filter(Boolean)
+                const ways = waysOf(u)
+                const named = !!u.display_name && u.display_name !== u.username
                 return (
                   <tr
                     key={u.id}
@@ -269,15 +282,20 @@ export function AdminUsersPage() {
                       e.currentTarget.querySelector<HTMLElement>('.desk-col-menu .icon-btn')?.click()
                     }}
                   >
+                    {/* (Who, at a glance: their picture, the name they go by, then the one they sign in with — doc UI item 25.) */}
                     <td className="desk-col-user">
                       <span className="desk-name">
-                        <span className="desk-ellipsis desk-mono">{u.username}</span>
+                        <Avatar id={u.id} at={u.avatar_at} name={u.display_name || u.username} className="desk-avatar" />
+                        <span className="desk-ellipsis">
+                          {named && <span className="desk-user-name">{u.display_name}</span>}
+                          <span className={'desk-mono' + (named ? ' desk-user-login' : '')}>{u.username}</span>
+                        </span>
                         {u.id === me?.id && <span className="you">{t('admin.you')}</span>}
                       </span>
                     </td>
-                    <td><span className="desk-ellipsis">{u.display_name && u.display_name !== u.username ? u.display_name : ''}</span></td>
                     <td className={u.role === 'admin' ? undefined : 'desk-dim'}>{u.role === 'admin' ? t('admin.roleAdmin') : t('admin.roleMember')}</td>
                     <td className="tnum desk-dim">{u.open_sessions || ''}</td>
+                    <td className="desk-dim" title={u.last_seen_at ? new Date(u.last_seen_at * 1000).toLocaleString() : undefined}>{u.last_seen_at ? whenText(u.last_seen_at) : '—'}</td>
                     <td className="desk-dim" title={new Date(u.created_at * 1000).toLocaleString()}>{whenText(u.created_at)}</td>
                     <td>
                       <span className="desk-ellipsis" title={u.sso?.map((x) => x.username_hint || x.email || x.subject).join(', ') || undefined}>
@@ -300,6 +318,58 @@ export function AdminUsersPage() {
               })}
             </tbody>
           </table>
+          </div>
+          {chosen && (
+            <aside className="desk-aside" aria-label={chosen.display_name || chosen.username}>
+              <div className="desk-aside-head">
+                <h2>{chosen.display_name || chosen.username}</h2>
+                <button type="button" className="icon-btn" onClick={closeAside} aria-label={t('common.close')} title={t('common.close')}>
+                  <X size={16} />
+                </button>
+              </div>
+              <div className="desk-aside-who">
+                <Avatar id={chosen.id} at={chosen.avatar_at} name={chosen.display_name || chosen.username} className="desk-avatar is-large" />
+                <div className="desk-aside-who-t">
+                  <span className="desk-mono">{chosen.username}</span>
+                  <span className="desk-dim">
+                    {chosen.role === 'admin' ? t('admin.roleAdmin') : t('admin.roleMember')}
+                    {chosen.disabled && <> · <span className="state-danger">{t('admin.disabled')}</span></>}
+                  </span>
+                </div>
+              </div>
+              <dl className="desk-aside-list">
+                <div>
+                  <dt>{t('admin.aside.signIn')}</dt>
+                  <dd>{[chosen.has_password ? t('admin.state.password') : '', ...waysOf(chosen)].filter(Boolean).join(' · ')}</dd>
+                </div>
+                {!!chosen.sso?.length && (
+                  <div>
+                    <dt>{t('admin.aside.sso')}</dt>
+                    <dd>
+                      <ul className="desk-aside-links">
+                        {chosen.sso.map((x) => (
+                          <li key={x.subject}>{[x.name, x.email || x.username_hint].filter(Boolean).join(' · ') || x.subject}</li>
+                        ))}
+                      </ul>
+                    </dd>
+                  </div>
+                )}
+                <div>
+                  <dt>{t('admin.col.sessions')}</dt>
+                  <dd>{chosen.open_sessions || t('admin.aside.none')}</dd>
+                </div>
+                <div>
+                  <dt>{t('admin.col.active')}</dt>
+                  <dd>{chosen.last_seen_at ? new Date(chosen.last_seen_at * 1000).toLocaleString() : t('admin.aside.notSeen')}</dd>
+                </div>
+                <div>
+                  <dt>{t('admin.col.created')}</dt>
+                  <dd>{new Date(chosen.created_at * 1000).toLocaleString()}</dd>
+                </div>
+              </dl>
+            </aside>
+          )}
+          </div>
         )}
         {dialog}
       </main>
@@ -349,7 +419,8 @@ export function AdminUsersPage() {
         <ul className="rows">
           {shownUsers.map((u) => (
             <li className="row" key={u.id}>
-              <div className="row-main no-icon">
+              <div className="row-main has-avatar">
+                <Avatar id={u.id} at={u.avatar_at} name={u.display_name || u.username} className="desk-avatar row-avatar" />
                 <span className="row-title">
                   {u.display_name || u.username}
                   {u.id === me?.id && <span className="you">{t('admin.you')}</span>}

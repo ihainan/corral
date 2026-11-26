@@ -309,6 +309,25 @@ func (s *Store) TouchLoginSession(ctx context.Context, tokenHash string) error {
 	return err
 }
 
+// LastSeenByUser: of each account with a sign-in still kept, when it was
+// last used (unix seconds) — the users page's "last active".
+func (s *Store) LastSeenByUser(ctx context.Context) (map[int64]int64, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT user_id, MAX(last_seen_at) FROM login_sessions GROUP BY user_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[int64]int64{}
+	for rows.Next() {
+		var id, at int64
+		if err := rows.Scan(&id, &at); err != nil {
+			return nil, err
+		}
+		out[id] = at
+	}
+	return out, rows.Err()
+}
+
 func (s *Store) DeleteLoginSession(ctx context.Context, tokenHash string) error {
 	_, err := s.db.ExecContext(ctx, `DELETE FROM login_sessions WHERE token_hash = ?`, tokenHash)
 	return err

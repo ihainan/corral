@@ -520,6 +520,9 @@ div.row-main:hover { background: none; }
 .row-main.no-icon > .row-meta { grid-column: 2; }
 .row-sub { grid-column: 2 / 3; font-size: var(--fs-sub); line-height: var(--lh-sub); color: var(--fg-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-variant-numeric: tabular-nums; }
 .row-main.no-icon .row-sub { grid-column: 1 / 2; }
+/* (A user's row: their picture, over both its lines — doc UI item 25.) */
+.row-main.has-avatar { grid-template-columns: 32px minmax(0, 1fr) auto; }
+.row-main > .row-avatar { grid-column: 1; grid-row: 1 / span 2; width: 32px; height: 32px; }
 .row-session { border-bottom: 0; }
 .row-session .row-main { padding-left: 38px; grid-template-columns: 6px minmax(0, 1fr) auto; min-height: 44px; padding-top: 6px; padding-bottom: 6px; }
 .row-session .dot { grid-row: 1; }
@@ -1749,7 +1752,20 @@ details.adv > .form { margin-top: 16px; }
 .desk-recs .desk-col-len { width: 120px; }
 .desk-recs .desk-col-size { width: 120px; }
 .desk-bar > .icon-btn { width: 28px; height: 28px; }
-.desk-users .desk-col-user { width: 20%; }
+.desk-users .desk-col-user { width: 32%; }
+.desk-users .desk-col-active { width: 140px; }
+/* (A user's picture before their names: doc UI item 25.) */
+.desk-avatar {
+  flex: none; width: 22px; height: 22px; border-radius: 50%; display: grid; place-items: center;
+  background: var(--accent-soft); color: var(--accent-text); font-size: var(--fs-note); line-height: var(--lh-note); font-weight: 600;
+}
+.desk-avatar.has-img { background: none; overflow: hidden; }
+.desk-avatar img { width: 100%; height: 100%; display: block; border-radius: 50%; object-fit: cover; }
+.desk-avatar.is-large { width: 40px; height: 40px; font-size: var(--fs-ui); line-height: var(--lh-ui); }
+.desk-user-name { color: var(--fg); }
+.desk-user-login { margin-left: 8px; color: var(--fg-3); }
+.desk-aside-who { display: flex; align-items: center; gap: 12px; padding: 12px 16px 0; min-width: 0; }
+.desk-aside-who-t { display: flex; flex-direction: column; min-width: 0; font-size: var(--fs-sub); line-height: var(--lh-sub); }
 .desk-users .desk-col-role { width: 96px; }
 .desk-users .desk-col-sessions { width: 80px; }
 .desk-users .desk-col-created { width: 140px; }

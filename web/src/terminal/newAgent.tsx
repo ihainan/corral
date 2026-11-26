@@ -327,7 +327,7 @@ export function NewAgentDialog({
   const pickedRunning = picked ? running.get(picked.id) : undefined
 
   return (
-    <Dialog title={t(parent ? 'newAgent.subagentTitle' : 'newAgent.title')} onClose={close} icon={parent ? <GitFork size={18} /> : tab === 'resume' ? <History size={18} /> : <Bot size={18} />}>
+    <Dialog title={t(parent ? 'newAgent.subagentTitle' : 'newAgent.title')} onClose={close} className="new-agent-dialog" icon={parent ? <GitFork size={18} /> : tab === 'resume' ? <History size={18} /> : <Bot size={18} />}>
       <form className="new-agent" onSubmit={submit}>
         {parent && (
           <p className="new-agent-parent">
@@ -530,9 +530,12 @@ export function NewAgentDialog({
                             {open ? t(fork && (o.kind === 'claude' || o.kind === 'codex') ? 'newAgent.running' : 'newAgent.open') : relativeTime(o.modified)}
                           </span>
                         </span>
-                        {snippet && <span className="new-agent-res-snip">{snippet}</span>}
-                        <span className="new-agent-res-dir" title={o.dir}>
-                          {shortDir(o.dir)}
+                        {/* (Its second line: how it began, its folder at the end — doc UI item 17, 11-26.) */}
+                        <span className="new-agent-res-sub">
+                          <span className="new-agent-res-snip">{snippet}</span>
+                          <span className="new-agent-res-dir" title={o.dir}>
+                            {shortDir(o.dir)}
+                          </span>
                         </span>
                       </span>
                     </button>

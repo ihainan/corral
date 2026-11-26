@@ -672,6 +672,7 @@ func (s *Server) writeAccountError(w http.ResponseWriter, r *http.Request, err e
 type adminUserView struct {
 	*store.User
 	Sessions    int                   `json:"open_sessions"`
+	LastSeen    int64                 `json:"last_seen_at,omitempty"` // (its sign-ins kept: when one was last used)
 	HasPassword bool                  `json:"has_password"`
 	SSO         []*store.OIDCIdentity `json:"sso,omitempty"`
 }
@@ -690,6 +691,7 @@ func (s *Server) apiAdminListUsers(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	seen, _ := s.store.LastSeenByUser(r.Context()) // (not known: not said)
 	out := make([]adminUserView, 0, len(users))
 	for _, u := range users {
 		n := 0
@@ -698,7 +700,7 @@ func (s *Server) apiAdminListUsers(w http.ResponseWriter, r *http.Request) {
 				n++
 			}
 		}
-		out = append(out, adminUserView{User: u, Sessions: n, HasPassword: u.HasPassword(), SSO: ids[u.ID]})
+		out = append(out, adminUserView{User: u, Sessions: n, LastSeen: seen[u.ID], HasPassword: u.HasPassword(), SSO: ids[u.ID]})
 	}
 	writeJSON(w, http.StatusOK, out)
 }

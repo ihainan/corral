@@ -128,6 +128,8 @@ export interface AdminUser {
   totp: boolean
   created_at: number
   open_sessions: number
+  last_seen_at?: number // its sign-ins kept: when one was last used (unix seconds)
+  avatar_at?: number // when its picture was set (none: its initial is shown)
   has_password: boolean // false: single sign-on its only way in
   sso?: SSOIdentity[] // its bindings to single sign-on
 }

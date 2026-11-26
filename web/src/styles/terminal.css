@@ -2616,7 +2616,10 @@ button.convo-queue-row.is-note:last-child { border-radius: 0 0 var(--r-lg) var(-
 .new-agent-old > .link-btn { align-self: flex-start; } /* (at the fields' edge, not centred between them) */
 .new-agent .field > span { font-size: var(--fs-sub); line-height: var(--lh-sub); font-weight: 500; color: var(--fg-2); }
 .new-agent-olds { display: flex; flex-direction: column; gap: 4px; max-height: 240px; overflow: auto; }
-.new-agent-olds.is-search { max-height: 280px; }
+.new-agent-olds.is-search { max-height: 340px; gap: 0; border: 1px solid var(--line); border-radius: var(--r); }
+/* (Wider (720: the kinds, the folder and "closed only" side by side), its filters on one line and its list one list — doc UI item 17, 11-26: at 440 the kinds broke over two
+   lines, the folder and "closed only" a third, each conversation a box of its own.) */
+.dialog.new-agent-dialog { max-width: min(720px, calc(100vw - 32px)); }
 .new-agent-oldrow { display: flex; justify-content: space-between; gap: 12px; padding: 8px 10px; border: 1px solid var(--line); border-radius: var(--r-sm); background: none; text-align: left; cursor: pointer; color: var(--fg); font-size: var(--fs-sub); line-height: var(--lh-sub); }
 .new-agent-oldrow.on { border-color: var(--accent, #3b6cf6); background: var(--bg-subtle); }
 .new-agent-oldtitle { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
@@ -2634,9 +2637,9 @@ button.convo-queue-row.is-note:last-child { border-radius: 0 0 var(--r-lg) var(-
   font: inherit; font-size: var(--fs-sub); line-height: var(--lh-sub); outline: none;
 }
 .new-agent-search-clear { flex: none; padding: 2px; }
-.new-agent-filters { display: flex; flex-direction: column; gap: 6px; }
+.new-agent-filters { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 16px; }
 .new-agent-chips { display: flex; flex-wrap: wrap; gap: 4px; }
-.new-agent-subfilters { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; }
+.new-agent-subfilters { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
 .new-agent-chip {
   display: inline-flex; align-items: center; gap: 4px; padding: 4px 8px;
   border: 1px solid var(--line); border-radius: 999px; background: none; color: var(--fg-2);
@@ -2647,17 +2650,20 @@ button.convo-queue-row.is-note:last-child { border-radius: 0 0 var(--r-lg) var(-
 .new-agent-closed-check { display: inline-flex; align-items: center; gap: 6px; font-size: var(--fs-note); line-height: var(--lh-note); color: var(--fg-2); cursor: pointer; }
 .new-agent-empty { margin: 8px 0; text-align: center; }
 .new-agent-resrow {
-  display: flex; align-items: flex-start; gap: 10px; width: 100%; padding: 8px 10px;
-  border: 1px solid var(--line); border-radius: var(--r); background: none; text-align: left;
+  flex: none; display: flex; align-items: flex-start; gap: 10px; width: 100%; padding: 8px 12px;
+  border: 0; border-top: 1px solid var(--line); border-radius: 0; background: none; text-align: left;
   cursor: pointer; color: var(--fg); font-size: var(--fs-sub); line-height: var(--lh-sub);
 }
+.new-agent-resrow:first-child { border-top: 0; }
 .new-agent-resrow:hover { background: var(--bg-hover); }
-.new-agent-resrow.on { border-color: var(--accent, #3b6cf6); background: var(--bg-subtle); }
+.new-agent-resrow.on { background: var(--accent-soft, var(--bg-subtle)); }
+.new-agent-resrow:focus-visible { outline: none; box-shadow: var(--focus); position: relative; }
 .new-agent-res-ic { flex: none; display: inline-flex; align-items: center; padding-top: 2px; }
 .new-agent-res-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
 .new-agent-res-top { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
-.new-agent-res-snip { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--fs-note); line-height: var(--lh-note); color: var(--fg-2); }
-.new-agent-res-dir { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono); font-size: var(--fs-note); line-height: var(--lh-note); color: var(--fg-3); }
+.new-agent-res-sub { display: flex; align-items: baseline; gap: 12px; min-width: 0; }
+.new-agent-res-snip { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--fs-note); line-height: var(--lh-note); color: var(--fg-2); }
+.new-agent-res-dir { flex: 0 1 auto; max-width: 50%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono); font-size: var(--fs-note); line-height: var(--lh-note); color: var(--fg-3); }
 .convo-models-search {
   display: flex; align-items: center; gap: 6px; padding: 4px 8px; margin: 2px 4px 6px;
   border: 1px solid var(--term-line); border-radius: var(--r-sm); background: var(--term-surface, var(--term-bg));
