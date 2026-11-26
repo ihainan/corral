@@ -375,10 +375,23 @@ func summarize(session string, s *herdr.Snapshot, times *agentTimes, old bool) h
 }
 
 func agentSession(p herdr.Pane) string {
-	if p.AgentSession == nil || len(p.AgentSession.Value) > 128 {
+	if p.AgentSession == nil || len(p.AgentSession.Value) > 128 || !herdrSessionOK(p.Agent, p.AgentSession.Source, p.AgentSession.Agent, p.AgentSession.Value) {
 		return ""
 	}
 	return p.AgentSession.Value
+}
+
+// herdrSessionOK says whether a session herdr gives a pane can be taken as
+// its agent's. Claude Code's hooks are run by others that honour them, Devin
+// CLI among them, and herdr's hook for Claude Code reports the session they
+// are given as Claude Code's: a Devin started inside (or under) a Claude Code
+// pane, its environment that pane's, has its session ("cuddly-dime") taken as
+// that pane's (herdr 0.8 drops such a report only for a pane it sees as
+// Devin's). Claude Code's own ids are UUIDs: one that is not, said of Claude
+// Code, is some other agent's, and none is taken.
+func herdrSessionOK(paneAgent, source, agent, value string) bool {
+	claude := strings.Contains(strings.ToLower(paneAgent), "claude") || strings.EqualFold(agent, "claude") || strings.EqualFold(source, "herdr:claude")
+	return !claude || convoUUID.MatchString(value)
 }
 
 // herdrSockets remembers which herdr socket each terminal session is

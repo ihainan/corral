@@ -200,10 +200,10 @@ func TestLineageTrackerStaleChildTokenIgnored(t *testing.T) {
 			{ID: "w1:p1", WorkspaceID: "w1", Agent: "claude", TerminalID: "term-1"},
 			{
 				ID: "w1:p2", WorkspaceID: "w1", Agent: "claude", TerminalID: "term-2",
-				AgentSession: &herdr.AgentSessionInfo{Value: "sess-new"},
+				AgentSession: &herdr.AgentSessionInfo{Value: "5f0c2a8e-1b3d-4c6e-9a7f-2e4d6b8c0a1f"}, // (a Claude Code id: a UUID)
 				Tokens: map[string]string{
 					"corral_parent_pane":   "w1:p1",
-					"corral_child_session": "sess-old",
+					"corral_child_session": "7a1e3c5b-2d4f-4e6a-8b9c-0d1e2f3a4b5c",
 				},
 			},
 		},

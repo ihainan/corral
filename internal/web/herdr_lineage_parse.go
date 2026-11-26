@@ -1504,8 +1504,11 @@ type herdrResultPayload struct {
 	Agent *struct {
 		PaneID       string `json:"pane_id"`
 		TerminalID   string `json:"terminal_id"`
+		Agent        string `json:"agent"`
 		AgentSession *struct {
-			Value string `json:"value"`
+			Source string `json:"source"`
+			Agent  string `json:"agent"`
+			Value  string `json:"value"`
 		} `json:"agent_session"`
 	} `json:"agent"`
 }
@@ -1726,7 +1729,7 @@ func (e *lineageExtractor) discoveryFromPayload(action string, payload herdrResu
 		}
 		termID := sanitizeTermID(payload.Agent.TerminalID)
 		session := ""
-		if payload.Agent.AgentSession != nil && len(payload.Agent.AgentSession.Value) <= 128 {
+		if as := payload.Agent.AgentSession; as != nil && len(as.Value) <= 128 && herdrSessionOK(payload.Agent.Agent, as.Source, as.Agent, as.Value) {
 			session = payload.Agent.AgentSession.Value
 		}
 		// Enrichment only: only emits if this extractor already saw creation of this pane/term!
