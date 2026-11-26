@@ -2199,8 +2199,50 @@ func goneFrom(entries []*Entry, from int) {
 // Codex's says none.
 type codexLimits struct {
 	LimitID   *string           `json:"limit_id"`
+	PlanType  *string           `json:"plan_type"`
 	Primary   *codexLimitWindow `json:"primary"`
 	Secondary *codexLimitWindow `json:"secondary"`
+}
+
+// codexPlanName maps Codex's rate_limits.plan_type enum (from Codex's rollout
+// log / app-server PlanType schema) to OpenAI's official plan display name.
+// Unknown or unrecognized values return "" so callers omit the tier.
+func codexPlanName(raw *string) string {
+	if raw == nil {
+		return ""
+	}
+	switch strings.ToLower(strings.TrimSpace(*raw)) {
+	case "free":
+		return "ChatGPT Free"
+	case "go":
+		return "ChatGPT Go"
+	case "plus":
+		return "ChatGPT Plus"
+	case "pro":
+		return "ChatGPT Pro"
+	case "prolite":
+		return "ChatGPT Pro Lite"
+	case "promax":
+		return "ChatGPT Pro Max"
+	case "team":
+		return "ChatGPT Team"
+	case "business", "self_serve_business_prolite", "self_serve_business_usage_based":
+		return "ChatGPT Business"
+	case "enterprise", "ent26", "enterprise_cbp_automation", "enterprise_cbp_usage_based":
+		return "ChatGPT Enterprise"
+	case "edu", "education":
+		return "ChatGPT Edu"
+	case "edu_plus":
+		return "ChatGPT Edu Plus"
+	case "edu_pro":
+		return "ChatGPT Edu Pro"
+	case "sci":
+		return "Academic Researchers"
+	case "sci_plus":
+		return "Academic Researchers Plus"
+	default:
+		return ""
+	}
 }
 
 type codexLimitWindow struct {
@@ -2220,7 +2262,7 @@ func (l *codexLimits) quota(at string, old *Quota) *Quota {
 	if t, err := time.Parse(time.RFC3339Nano, at); err == nil {
 		said = t.Unix()
 	}
-	var q Quota
+	q := Quota{Plan: codexPlanName(l.PlanType)}
 	for _, w := range []*codexLimitWindow{l.Primary, l.Secondary} {
 		if w == nil || w.Used == nil || *w.Used < 0 || *w.Used > 100 || w.ResetsAt <= 0 || w.ResetsAt > 1e12 {
 			continue

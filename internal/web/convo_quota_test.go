@@ -296,3 +296,205 @@ func TestAgyQuotaPollerStaleWhileRevalidateAndSingleflight(t *testing.T) {
 	}
 	t.Fatalf("expected async background refresh to update cached quota to 20")
 }
+
+func TestQuotaOfAgyUsageWithCreditsPlan(t *testing.T) {
+	now := time.Date(2026, 11, 26, 12, 0, 0, 0, time.UTC)
+	usageJSON := `{"status":"SUCCESS","command":{"name":"usage","data":{"groups":[
+		{"name":"Gemini Models","buckets":[
+			{"id":"gemini-5h","window":"5h","remaining_fraction":0.99,"reset_time":"2026-11-26T17:00:00Z"},
+			{"id":"gemini-weekly","window":"weekly","remaining_fraction":1,"reset_time":"2026-12-03T12:00:00Z"}
+		]}
+	]}}}`
+	creditsUltra := `{"status":"SUCCESS","command":{"name":"credits","data":{"remaining_credits":25000,"plan_name":"Google AI Ultra","upgrade_uri":"https://one.google.com"}}}`
+	creditsPro := `{"status":"SUCCESS","command":{"name":"credits","data":{"remaining_credits":1000,"plan_name":"  Google AI   Pro  "}}}`
+	creditsUnknown := `{"status":"SUCCESS","command":{"name":"credits","data":{"remaining_credits":0,"plan_name":"Unknown"}}}`
+	creditsEmpty := `{"status":"SUCCESS","command":{"name":"credits","data":{"remaining_credits":0}}}`
+
+	q, ok := quotaOfAgyUsage([]byte(usageJSON+"\n"+creditsUltra), now)
+	if !ok || !q.Known || q.Plan != "Google AI Ultra" || len(q.Groups) != 1 {
+		t.Fatalf("usage + ultra credits: ok=%v q=%+v", ok, q)
+	}
+	q, ok = quotaOfAgyUsage([]byte(usageJSON+"\n"+creditsPro), now)
+	if !ok || !q.Known || q.Plan != "Google AI Pro" {
+		t.Fatalf("usage + pro credits: ok=%v q=%+v", ok, q)
+	}
+	// Unknown or missing plan_name must remain empty (never "Unknown").
+	for _, tail := range []string{creditsUnknown, creditsEmpty, `{"status":"ERROR"}`, `warning: credits unavailable`} {
+		q, ok := quotaOfAgyUsage([]byte(usageJSON+"\n"+tail), now)
+		if !ok || !q.Known || q.Plan != "" || len(q.Groups) != 1 {
+			t.Errorf("tail %q: ok=%v q=%+v", tail, ok, q)
+		}
+	}
+	// Credits alone without usage must not pass as valid quota.
+	if _, ok := quotaOfAgyUsage([]byte(creditsUltra), now); ok {
+		t.Error("credits without usage should fail")
+	}
+
+	// Verify agyQuotaCommand runs both /usage and /credits and tolerates /credits failure.
+	home := t.TempDir()
+	bin := filepath.Join(home, ".local", "bin")
+	os.MkdirAll(bin, 0o755)
+	fakeAgy := filepath.Join(bin, "agy")
+	os.WriteFile(fakeAgy, []byte("#!/bin/sh\nif [ \"$2\" = \"/usage\" ]; then\n  printf '%s\\n' '"+usageJSON+"'\nelif [ \"$2\" = \"/credits\" ]; then\n  printf '%s\\n' '"+creditsUltra+"'\nfi\n"), 0o755)
+	c := exec.Command("sh", "-c", agyQuotaCommand())
+	c.Env = append(os.Environ(), "HOME="+home)
+	out, err := c.Output()
+	if err != nil {
+		t.Fatalf("agyQuotaCommand exec failed: %v", err)
+	}
+	if q, ok := quotaOfAgyUsage(out, now); !ok || !q.Known || q.Plan != "Google AI Ultra" {
+		t.Fatalf("agyQuotaCommand parsed: ok=%v q=%+v out=%q", ok, q, out)
+	}
+	// If /credits exits non-zero, /usage output is still returned cleanly.
+	os.WriteFile(fakeAgy, []byte("#!/bin/sh\nif [ \"$2\" = \"/usage\" ]; then\n  printf '%s\\n' '"+usageJSON+"'\nelse\n  exit 1\nfi\n"), 0o755)
+	c = exec.Command("sh", "-c", agyQuotaCommand())
+	c.Env = append(os.Environ(), "HOME="+home)
+	out, err = c.Output()
+	if err != nil {
+		t.Fatalf("agyQuotaCommand should tolerate /credits failure: %v", err)
+	}
+	if q, ok := quotaOfAgyUsage(out, now); !ok || !q.Known || q.Plan != "" {
+		t.Fatalf("agyQuotaCommand without credits: ok=%v q=%+v", ok, q)
+	}
+}
+
+func TestPlanOfClaudeAuthStatus(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{
+			name: "claude max",
+			raw:  `{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty","email":"user@example.com","orgId":"org-1","subscriptionType":"max"}`,
+			want: "Claude Max",
+		},
+		{
+			name: "claude pro",
+			raw:  `{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty","subscriptionType":"pro"}`,
+			want: "Claude Pro",
+		},
+		{
+			name: "claude team",
+			raw:  `{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty","subscriptionType":"team"}`,
+			want: "Claude Team",
+		},
+		{
+			name: "claude enterprise",
+			raw:  `{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty","subscriptionType":"enterprise"}`,
+			want: "Claude Enterprise",
+		},
+		{
+			name: "claude max 20x via rateLimitTier",
+			raw:  `{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty","subscriptionType":"max","rateLimitTier":"default_claude_max_20x"}`,
+			want: "Claude Max 20x",
+		},
+		{
+			name: "claude max 5x via rateLimitTier",
+			raw:  `{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty","subscriptionType":"max","rateLimitTier":"default_claude_max_5x"}`,
+			want: "Claude Max 5x",
+		},
+		{
+			name: "api key auth ignored",
+			raw:  `{"loggedIn":true,"authMethod":"api_key","apiProvider":"firstParty","subscriptionType":"max"}`,
+			want: "",
+		},
+		{
+			name: "bedrock provider ignored",
+			raw:  `{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"bedrock","subscriptionType":"enterprise"}`,
+			want: "",
+		},
+		{
+			name: "logged out",
+			raw:  `{"loggedIn":false,"authMethod":"none","subscriptionType":"max"}`,
+			want: "",
+		},
+		{
+			name: "unknown subscriptionType omitted",
+			raw:  `{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty","subscriptionType":"unknown"}`,
+			want: "",
+		},
+		{
+			name: "invalid json",
+			raw:  `not json`,
+			want: "",
+		},
+	}
+	for _, tc := range cases {
+		if got := planOfClaudeAuthStatus([]byte(tc.raw)); got != tc.want {
+			t.Errorf("%s: got %q, want %q", tc.name, got, tc.want)
+		}
+	}
+
+	cmd := exec.Command("sh", "-n")
+	cmd.Stdin = strings.NewReader(claudeAuthStatusCommand())
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("claudeAuthStatusCommand sh -n failed: %v\n%s", err, out)
+	}
+}
+
+func TestClaudePlanCache(t *testing.T) {
+	now := time.Date(2026, 11, 26, 12, 0, 0, 0, time.UTC)
+	var mu sync.Mutex
+	clock := func() time.Time {
+		mu.Lock()
+		defer mu.Unlock()
+		return now
+	}
+	advance := func(d time.Duration) {
+		mu.Lock()
+		now = now.Add(d)
+		mu.Unlock()
+	}
+
+	c := &claudePlanCache{nowFn: clock, wait: 100 * time.Millisecond}
+	var calls int
+	fetch := func(ctx context.Context) (string, error) {
+		mu.Lock()
+		calls++
+		mu.Unlock()
+		return "Claude Max", nil
+	}
+	if got := c.get(context.Background(), "1\x001\x00acc-1", fetch); got != "Claude Max" {
+		t.Fatalf("cold get = %q, want Claude Max", got)
+	}
+	// Second call within TTL hits cache without calling fetch again.
+	if got := c.get(context.Background(), "1\x001\x00acc-1", fetch); got != "Claude Max" {
+		t.Fatalf("cached get = %q, want Claude Max", got)
+	}
+	mu.Lock()
+	if calls != 1 {
+		t.Fatalf("expected 1 fetch call, got %d", calls)
+	}
+	mu.Unlock()
+
+	// Advancing past TTL refreshes.
+	advance(claudePlanFresh + time.Minute)
+	if got := c.get(context.Background(), "1\x001\x00acc-1", func(context.Context) (string, error) {
+		mu.Lock()
+		calls++
+		mu.Unlock()
+		return "Claude Pro", nil
+	}); got != "Claude Pro" {
+		t.Fatalf("refreshed get = %q, want Claude Pro", got)
+	}
+
+	// A slow fetch beyond wait budget returns "" without blocking quota, and populates cache once done.
+	done := make(chan struct{})
+	slow := func(context.Context) (string, error) {
+		<-done
+		return "Claude Team", nil
+	}
+	if got := c.get(context.Background(), "1\x002\x00acc-2", slow); got != "" {
+		t.Fatalf("slow get = %q, want empty on wait timeout", got)
+	}
+	close(done)
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if got := c.get(context.Background(), "1\x002\x00acc-2", slow); got == "Claude Team" {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("expected background completion of slow fetch to populate cache")
+}

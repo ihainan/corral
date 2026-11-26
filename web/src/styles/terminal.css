@@ -2755,6 +2755,7 @@ button.convo-queue-row.is-note:last-child { border-radius: 0 0 var(--r-lg) var(-
 /* The usage popover's blocks (11-14): one heading look, one rule and room between them. */
 .convo-pop-sec + .convo-pop-sec { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--term-line); }
 .convo-pop-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; margin: 0 0 6px; font-size: var(--fs-note); line-height: var(--lh-note); font-weight: 600; color: var(--term-fg-2); }
+.convo-quota-plan { font-weight: 500; color: var(--term-fg); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .convo-quota-group + .convo-quota-group { margin-top: 8px; padding-top: 8px; border-top: 1px dashed var(--term-line); }
 .convo-quota-ghead { display: flex; align-items: center; gap: 6px; margin: 0 0 2px; font-size: var(--fs-note); line-height: var(--lh-note); font-weight: 500; color: var(--term-fg); }
 .convo-cost-total { font-size: var(--fs-sub); line-height: var(--lh-sub); color: var(--term-fg); font-variant-numeric: tabular-nums; }

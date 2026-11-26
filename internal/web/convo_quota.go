@@ -1,15 +1,19 @@
 package web
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/ihainan/corral/internal/sshx"
 	"github.com/ihainan/corral/internal/term"
@@ -49,9 +53,45 @@ type quotaGroup struct {
 type quotaInfo struct {
 	Known     bool         `json:"known"`
 	UpdatedAt int64        `json:"updated_at,omitempty"` // unix seconds
+	Plan      string       `json:"plan,omitempty"`
 	FiveHour  *quotaWindow `json:"five_hour,omitempty"`
 	Weekly    *quotaWindow `json:"weekly,omitempty"`
 	Groups    []quotaGroup `json:"groups,omitempty"` // per-model-group quota (agy)
+}
+
+// cleanPlanName normalizes a provider-reported plan display name, dropping
+// placeholder/unknown strings and unsafe control characters so callers never
+// show "Unknown" or garbage.
+func cleanPlanName(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" || utf8.RuneCountInString(s) > 80 {
+		return ""
+	}
+	for _, r := range s {
+		if r < 0x20 || r == 0x7f {
+			return ""
+		}
+	}
+	s = strings.Join(strings.Fields(s), " ")
+	switch strings.ToLower(s) {
+	case "", "unknown", "none", "null", "n/a", "unspecified":
+		return ""
+	}
+	return s
+}
+
+// quotaAccountOfConfig extracts oauthAccount.accountUuid from quotaReadCommand's
+// output so per-account plan lookups can be keyed safely without re-reading the file.
+func quotaAccountOfConfig(raw []byte) string {
+	var c struct {
+		Account *struct {
+			UUID string `json:"accountUuid"`
+		} `json:"oauthAccount"`
+	}
+	if json.Unmarshal(raw, &c) != nil || c.Account == nil {
+		return ""
+	}
+	return strings.TrimSpace(c.Account.UUID)
 }
 
 // quotaOfConfig reads what quotaReadCommand printed: the quota kept (Known false where
@@ -172,6 +212,194 @@ END {
   print "}"
 }' "$f"`
 	return "sh -c " + sshx.QuoteShell(script)
+}
+
+const (
+	claudeAuthStatusMax   = 16 << 10
+	claudePlanFresh       = 60 * time.Minute
+	claudePlanFailBackoff = 5 * time.Minute
+	claudePlanFetchLimit  = 10 * time.Second
+	claudePlanWaitLimit   = 4 * time.Second
+)
+
+// claudeAuthStatusCommand runs Claude Code's own public `claude auth status`
+// command, which prints non-secret account/subscription status JSON without
+// reading credential tokens or starting a model turn. Fixed script.
+func claudeAuthStatusCommand() string {
+	script := `PATH="$HOME/.local/bin:$HOME/bin:$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
+command -v claude >/dev/null 2>&1 || exit 127
+cd "$HOME" || exit 1
+DISABLE_TELEMETRY=1 DISABLE_ERROR_REPORTING=1 DISABLE_AUTOUPDATER=1 CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 exec claude auth status </dev/null 2>/dev/null`
+	return "sh -c " + sshx.QuoteShell(script)
+}
+
+// claudePlanName maps subscriptionType and optional rateLimitTier from
+// `claude auth status` to Anthropic's official Claude plan names.
+func claudePlanName(subType, rateLimitTier string) string {
+	tier := strings.ToLower(strings.TrimSpace(rateLimitTier))
+	switch {
+	case strings.Contains(tier, "max_20x"):
+		return "Claude Max 20x"
+	case strings.Contains(tier, "max_5x"):
+		return "Claude Max 5x"
+	case strings.Contains(tier, "claude_pro"):
+		return "Claude Pro"
+	case strings.Contains(tier, "claude_team"):
+		return "Claude Team"
+	case strings.Contains(tier, "claude_enterprise"):
+		return "Claude Enterprise"
+	}
+	switch strings.ToLower(strings.TrimSpace(subType)) {
+	case "pro":
+		return "Claude Pro"
+	case "max":
+		return "Claude Max"
+	case "max_5x":
+		return "Claude Max 5x"
+	case "max_20x":
+		return "Claude Max 20x"
+	case "team":
+		return "Claude Team"
+	case "enterprise":
+		return "Claude Enterprise"
+	case "free":
+		return "Claude Free"
+	default:
+		return ""
+	}
+}
+
+// planOfClaudeAuthStatus parses the public JSON output of `claude auth status`
+// and returns Anthropic's official plan name, or "" when unavailable or not a
+// first-party subscription sign-in.
+func planOfClaudeAuthStatus(raw []byte) string {
+	var doc struct {
+		LoggedIn         bool   `json:"loggedIn"`
+		AuthMethod       string `json:"authMethod"`
+		APIProvider      string `json:"apiProvider"`
+		SubscriptionType string `json:"subscriptionType"`
+		RateLimitTier    string `json:"rateLimitTier"`
+	}
+	if json.Unmarshal(raw, &doc) != nil || !doc.LoggedIn {
+		return ""
+	}
+	switch strings.ToLower(strings.TrimSpace(doc.AuthMethod)) {
+	case "api_key", "anthropic_api_key", "bedrock", "vertex", "foundry", "none":
+		return ""
+	}
+	if p := strings.ToLower(strings.TrimSpace(doc.APIProvider)); p != "" && p != "firstparty" {
+		return ""
+	}
+	return claudePlanName(doc.SubscriptionType, doc.RateLimitTier)
+}
+
+type claudePlanEntry struct {
+	plan string
+	at   time.Time
+}
+
+type claudePlanFlight struct {
+	done chan struct{}
+	plan string
+}
+
+// claudePlanCache caches Claude Code's subscription tier per (owner, host, account)
+// with singleflight deduplication and a bounded wait budget so quota responses
+// stay fast even if `claude auth status` is unavailable or slow.
+type claudePlanCache struct {
+	mu     sync.Mutex
+	cache  map[string]claudePlanEntry
+	flight map[string]*claudePlanFlight
+	nowFn  func() time.Time
+	wait   time.Duration
+}
+
+func (c *claudePlanCache) now() time.Time {
+	if c.nowFn != nil {
+		return c.nowFn()
+	}
+	return time.Now()
+}
+
+func (c *claudePlanCache) waitLimit() time.Duration {
+	if c.wait > 0 {
+		return c.wait
+	}
+	return claudePlanWaitLimit
+}
+
+func (c *claudePlanCache) get(ctx context.Context, key string, fetch func(context.Context) (string, error)) string {
+	now := c.now()
+	c.mu.Lock()
+	if ent, ok := c.cache[key]; ok {
+		ttl := claudePlanFresh
+		if ent.plan == "" {
+			ttl = claudePlanFailBackoff
+		}
+		if now.Sub(ent.at) < ttl {
+			c.mu.Unlock()
+			return ent.plan
+		}
+	}
+	if c.flight == nil {
+		c.flight = map[string]*claudePlanFlight{}
+	}
+	fl, inFlight := c.flight[key]
+	if !inFlight {
+		fl = &claudePlanFlight{done: make(chan struct{})}
+		c.flight[key] = fl
+	}
+	c.mu.Unlock()
+
+	if !inFlight {
+		go func() {
+			fctx, cancel := context.WithTimeout(context.Background(), claudePlanFetchLimit)
+			plan, err := fetch(fctx)
+			cancel()
+			if err != nil {
+				plan = ""
+			}
+			at := c.now()
+			c.mu.Lock()
+			if c.cache == nil {
+				c.cache = map[string]claudePlanEntry{}
+			}
+			if len(c.cache) > 64 {
+				for k, v := range c.cache {
+					if at.Sub(v.at) >= claudePlanFresh {
+						delete(c.cache, k)
+					}
+				}
+			}
+			c.cache[key] = claudePlanEntry{plan: plan, at: at}
+			delete(c.flight, key)
+			fl.plan = plan
+			close(fl.done)
+			c.mu.Unlock()
+		}()
+	}
+
+	timer := time.NewTimer(c.waitLimit())
+	defer timer.Stop()
+	select {
+	case <-fl.done:
+		return fl.plan
+	case <-timer.C:
+		return ""
+	case <-ctx.Done():
+		return ""
+	}
+}
+
+func (s *Server) fetchClaudePlan(ctx context.Context, sess *term.Session) (string, error) {
+	if sess == nil || sess.State() != term.StateRunning {
+		return "", errors.New("session not running")
+	}
+	res, err := sshx.Exec(ctx, sess.Client(), claudeAuthStatusCommand(), claudeAuthStatusMax, sshx.ExecOptions{})
+	if err != nil {
+		return "", err
+	}
+	return planOfClaudeAuthStatus(res.Out), nil
 }
 
 const (
@@ -375,24 +603,30 @@ func (s *Server) warmAgyQuota(sess *term.Session) {
 	s.agyQuota.warm(key, sess, s.fetchAgyQuota)
 }
 
-// agyQuotaCommand runs `agy -p /usage --output-format json`, which prints
-// Antigravity's subscription quota buckets as JSON without starting a turn or
-// spending any tokens. Fixed script.
+// agyQuotaCommand runs `agy -p /usage --output-format json` followed by
+// `agy -p /credits --output-format json`, both official read-only print-mode
+// slash commands that print quota buckets and plan_name as JSON without
+// starting a turn or spending any tokens. A `/credits` failure is ignored so
+// quota display never degrades on older builds or API-key setups. Fixed script.
 func agyQuotaCommand() string {
 	script := `PATH="$HOME/.local/bin:$HOME/bin:$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
 command -v agy >/dev/null 2>&1 || exit 127
-exec agy -p /usage --output-format json </dev/null 2>/dev/null`
+agy -p /usage --output-format json </dev/null 2>/dev/null || exit $?
+printf '\n'
+agy -p /credits --output-format json </dev/null 2>/dev/null || true`
 	return "sh -c " + sshx.QuoteShell(script)
 }
 
-// quotaOfAgyUsage parses the JSON output of `agy -p /usage --output-format json`.
+// quotaOfAgyUsage parses the JSON output of `agy -p /usage --output-format json`
+// (and optional trailing `agy -p /credits --output-format json` for plan_name).
 func quotaOfAgyUsage(raw []byte, now time.Time) (quotaInfo, bool) {
-	var doc struct {
+	type agyDoc struct {
 		Status  string `json:"status"`
 		Command *struct {
 			Name string `json:"name"`
 			Data *struct {
-				Groups []struct {
+				PlanName string `json:"plan_name"`
+				Groups   []struct {
 					Name    string `json:"name"`
 					Buckets []struct {
 						Window            string   `json:"window"`
@@ -403,45 +637,76 @@ func quotaOfAgyUsage(raw []byte, now time.Time) (quotaInfo, bool) {
 			} `json:"data"`
 		} `json:"command"`
 	}
-	if json.Unmarshal(raw, &doc) != nil || doc.Command == nil || doc.Command.Data == nil {
-		return quotaInfo{}, false
-	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
 	var q quotaInfo
-	for _, g := range doc.Command.Data.Groups {
-		name := g.Name
-		if name == "" {
+	var gotUsage bool
+	var usagePlan string
+	for {
+		var doc agyDoc
+		if err := dec.Decode(&doc); err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			// Trailing garbage after a valid /usage object (e.g. /credits warning)
+			// must not discard the quota we already parsed.
+			break
+		}
+		if doc.Command == nil || doc.Command.Data == nil {
 			continue
 		}
-		var qg quotaGroup
-		qg.Name = name
-		for _, b := range g.Buckets {
-			if b.RemainingFraction == nil || math.IsNaN(*b.RemainingFraction) {
-				continue
+		switch doc.Command.Name {
+		case "credits":
+			if p := cleanPlanName(doc.Command.Data.PlanName); p != "" {
+				q.Plan = p
 			}
-			rem := *b.RemainingFraction
-			if rem < 0 {
-				rem = 0
-			} else if rem > 1 {
-				rem = 1
+		case "usage", "":
+			gotUsage = true
+			if p := cleanPlanName(doc.Command.Data.PlanName); p != "" {
+				usagePlan = p
 			}
-			used := math.Round((1-rem)*1000) / 10
-			var resetSec int64
-			if b.ResetTime != "" {
-				if at, err := time.Parse(time.RFC3339Nano, b.ResetTime); err == nil {
-					resetSec = at.Unix()
+			for _, g := range doc.Command.Data.Groups {
+				name := g.Name
+				if name == "" {
+					continue
+				}
+				var qg quotaGroup
+				qg.Name = name
+				for _, b := range g.Buckets {
+					if b.RemainingFraction == nil || math.IsNaN(*b.RemainingFraction) {
+						continue
+					}
+					rem := *b.RemainingFraction
+					if rem < 0 {
+						rem = 0
+					} else if rem > 1 {
+						rem = 1
+					}
+					used := math.Round((1-rem)*1000) / 10
+					var resetSec int64
+					if b.ResetTime != "" {
+						if at, err := time.Parse(time.RFC3339Nano, b.ResetTime); err == nil {
+							resetSec = at.Unix()
+						}
+					}
+					w := &quotaWindow{Used: used, ResetsAt: resetSec}
+					switch b.Window {
+					case "5h":
+						qg.FiveHour = w
+					case "weekly":
+						qg.Weekly = w
+					}
+				}
+				if qg.FiveHour != nil || qg.Weekly != nil {
+					q.Groups = append(q.Groups, qg)
 				}
 			}
-			w := &quotaWindow{Used: used, ResetsAt: resetSec}
-			switch b.Window {
-			case "5h":
-				qg.FiveHour = w
-			case "weekly":
-				qg.Weekly = w
-			}
 		}
-		if qg.FiveHour != nil || qg.Weekly != nil {
-			q.Groups = append(q.Groups, qg)
-		}
+	}
+	if !gotUsage {
+		return quotaInfo{}, false
+	}
+	if q.Plan == "" {
+		q.Plan = usagePlan
 	}
 	if len(q.Groups) > 0 {
 		q.Known = true
@@ -497,6 +762,12 @@ func (s *Server) apiConversationQuota(w http.ResponseWriter, r *http.Request) {
 		// (Not read whole, say: not that there is none. The page keeps what it had.)
 		writeError(w, http.StatusBadGateway, "no_quota", "Claude Code's record could not be read")
 		return
+	}
+	if signedIn {
+		planKey := fmt.Sprintf("%d\x00%d\x00%s", sess.OwnerID, sess.HostID, quotaAccountOfConfig(res.Out))
+		q.Plan = s.claudePlan.get(r.Context(), planKey, func(fctx context.Context) (string, error) {
+			return s.fetchClaudePlan(fctx, sess)
+		})
 	}
 	// Grown old, or none yet: asked for afresh, for the next look. (Not waited for.)
 	old := !q.Known || now.Unix()-q.UpdatedAt >= int64(quotaEvery/time.Second)
