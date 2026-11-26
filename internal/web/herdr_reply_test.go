@@ -30,6 +30,8 @@ type fakeHerdr struct {
 	// closes the connection without answering.
 	onSend string
 	tabs   []any // the snapshot's tabs
+	panes  []any // the snapshot's panes
+	agents []any // the snapshot's agent panes
 }
 
 func newFakeHerdr(t *testing.T) *fakeHerdr {
@@ -73,7 +75,7 @@ func (f *fakeHerdr) serve(c net.Conn) {
 		f.mu.Lock()
 		switch req.Method {
 		case "session.snapshot":
-			result = map[string]any{"snapshot": map[string]any{"version": "0.9.5", "focused_workspace_id": "w1", "workspaces": []any{}, "panes": []any{}, "tabs": f.tabs}}
+			result = map[string]any{"snapshot": map[string]any{"version": "0.9.5", "focused_workspace_id": "w1", "workspaces": []any{}, "panes": f.panes, "agents": f.agents, "tabs": f.tabs}}
 		case "pane.read":
 			result = map[string]any{"read": map[string]any{"text": f.screen}}
 		case "pane.zoom", "tab.create", "pane.split", "pane.focus_direction", "tab.focus", "workspace.rename", "tab.rename", "pane.rename":
@@ -107,6 +109,12 @@ func (f *fakeHerdr) serve(c net.Conn) {
 func (f *fakeHerdr) setScreen(s string) {
 	f.mu.Lock()
 	f.screen = s
+	f.mu.Unlock()
+}
+
+func (f *fakeHerdr) setSnapshot(panes, agents []any) {
+	f.mu.Lock()
+	f.panes, f.agents = panes, agents
 	f.mu.Unlock()
 }
 

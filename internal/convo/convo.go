@@ -92,6 +92,7 @@ const (
 	TroubleCut     = "cut"     // the answer ran into the model's limit
 	TroubleHook    = "hook"    // a hook of the person's failed
 	TroubleLimit   = "limit"   // the account's usage limit is reached (Until: when it can go on)
+	TroubleBig     = "big"
 )
 
 // Entry is one row of the log that the view shows. Seq orders entries;
@@ -250,6 +251,7 @@ type Trouble struct {
 	// seconds when known precisely, so the view formats it in local time.
 	Until    string `json:"until,omitempty"`
 	ResetsAt int64  `json:"resets_at,omitempty"`
+	Bytes    int64  `json:"bytes,omitempty"`
 }
 
 // Noted is a file the turn was given without it being said in the

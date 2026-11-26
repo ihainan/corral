@@ -78,6 +78,11 @@ func isCodexAgent(agent string) bool { return strings.Contains(strings.ToLower(a
 
 // isOpenCodeAgent: herdr says the pane runs OpenCode (as the page tells it: agents.ts isOpenCode).
 func isOpenCodeAgent(agent string) bool { return strings.Contains(strings.ToLower(agent), "opencode") }
+
+func isDevinAgent(agent string) bool {
+	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(agent)), "devin")
+}
+
 func isAgyAgent(agent string) bool {
 	a := strings.ToLower(strings.TrimSpace(agent))
 	return a == "agy" || strings.Contains(a, "antigravity")

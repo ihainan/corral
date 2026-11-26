@@ -6057,7 +6057,7 @@ function sameItem(a: Item, b: Item): boolean {
 // any, are behind a tap: they can run long and are often in English.
 // (A trouble is told from another by what it is of, so that a log read
 // anew does not leave the one in its place opened out.)
-const troubleKey = (tr: ConvoTrouble) => [tr.kind, tr.name ?? '', tr.status ?? '', (tr.text ?? '').slice(0, 40)].join('|')
+const troubleKey = (tr: ConvoTrouble) => [tr.kind, tr.name ?? '', tr.status ?? '', (tr.text ?? '').slice(0, 40), tr.bytes ?? ''].join('|')
 
 function TroubleNote({ t: tr }: { t: ConvoTrouble }) {
   const [open, setOpen] = useState(false)
@@ -6079,6 +6079,9 @@ function TroubleNote({ t: tr }: { t: ConvoTrouble }) {
       head = w ? t('convo.trouble.limitUntil', { w }) : t('convo.trouble.limit')
       break
     }
+    case 'big':
+      head = t('convo.trouble.big', { n: ((tr.bytes ?? 0) / 1048576).toFixed(1) })
+      break
     default: {
       const why = tr.secs ? t('convo.trouble.hookTimedOut', { n: tr.secs }) : tr.status ? t('convo.trouble.hookExit', { n: tr.status }) : ''
       head = tr.name ? t('convo.trouble.hook', { h: tr.name + (why ? ' · ' + why : '') }) : why ? t('convo.trouble.hook', { h: why }) : t('convo.trouble.hookPlain')

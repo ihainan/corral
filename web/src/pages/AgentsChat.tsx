@@ -3771,7 +3771,7 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
       reviewing={reviewing}
       pending={panelOpen ? shownSent.map((p) => (p.state === 'waiting' && isCommand(p.text) ? { ...p, opened: true } : p)) : shownSent}
       ask={
-        waits && replyTo ? (
+        !readOnly && waits && replyTo ? (
           // (One a pane, and a process in it: nothing of another's carries over. Not tied to a terminal: no size to wait for.)
           <InlineReply key={replyTo.key} target={replyTo} resizedAt={0} active={kActive} held={() => false} call={asked} pending={pendingCall} onAnswered={(yes) => {
             setAnswered(yes)

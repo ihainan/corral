@@ -71,6 +71,8 @@ type dvRow struct {
 	Fail  string       `json:"fail"`
 	Title string       `json:"title"`
 	Mode  string       `json:"mode"`
+	Bytes int64        `json:"bytes"`
+	Role  string       `json:"role"`
 }
 
 type dvToolCall struct {
@@ -201,6 +203,8 @@ func (c *Devin) line(raw []byte) {
 		c.result(r)
 	case "sum":
 		c.summary(r)
+	case "big":
+		c.big(r)
 	default:
 		c.Skipped++
 	}
@@ -222,6 +226,18 @@ func (c *Devin) trim() {
 
 func (c *Devin) mark(kind, fin string) {
 	c.last, c.lastFin, c.known = kind, fin, true
+}
+
+func (c *Devin) big(r dvRow) {
+	switch r.Role {
+	case "user":
+		c.mark("u", "")
+	case "assistant":
+		c.mark("a", "")
+	case "tool":
+		c.mark("r", "")
+	}
+	c.add(&Entry{Role: RoleNote, Parts: []Part{{Kind: KindTrouble, Trouble: &Trouble{Kind: TroubleBig, Bytes: r.Bytes}}}})
 }
 
 func (c *Devin) user(r dvRow) {

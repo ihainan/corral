@@ -114,6 +114,7 @@ const dvQueryScript = `import sqlite3, json, re, sys
 from urllib.parse import quote
 db, mode, sid = sys.argv[1], sys.argv[2], sys.argv[3]
 BUDGET = 6 << 20
+BIG = 1 << 20
 out = sys.stdout
 def line(o):
     return json.dumps(o, ensure_ascii=False, separators=(',', ':')) + '\n'
@@ -245,29 +246,38 @@ def row(n, m):
         return o
     return None
 def fetch(ids):
-    got = {}
     for i in range(0, len(ids), 400):
         part = ids[i:i + 400]
-        q = 'select node_id, chat_message from message_nodes where session_id = ? and node_id in (' + ','.join('?' * len(part)) + ')'
-        for n, cm in c.execute(q, [sid] + part):
+        q = 'select node_id, length(chat_message) from message_nodes where session_id = ? and node_id in (' + ','.join('?' * len(part)) + ')'
+        sizes = dict(c.execute(q, [sid] + part))
+        for n in part:
+            size = sizes.get(n)
+            if size is None:
+                continue
+            if size > BIG:
+                yield n, size, None
+                continue
+            r = c.execute('select chat_message from message_nodes where session_id = ? and node_id = ?', (sid, n)).fetchone()
+            if not r:
+                continue
             try:
-                m = json.loads(cm)
+                m = json.loads(r[0])
             except ValueError:
                 continue
             if isinstance(m, dict):
-                got[n] = m
-    return got
+                yield n, size, m
 def emit(ids, first, cut_front):
     # (The rows of ids, at most BUDGET of them: from the end where the
     # front is cut, else from the start. The first printed, and how many
     # rows are before it.)
-    got = fetch(ids)
     ls = []
-    for n in ids:
-        if n in got:
-            o = row(n, got[n])
-            if o is not None:
-                ls.append((n, line(o)))
+    for n, size, m in fetch(ids):
+        if m is None:
+            o = {'k': 'big', 'n': n, 'bytes': size, 'role': nodes.get(n, (None, None, ''))[2]}
+        else:
+            o = row(n, m)
+        if o is not None:
+            ls.append((n, line(o)))
     size, keep = 0, []
     for n, l in (reversed(ls) if cut_front else ls):
         if size + len(l.encode()) > BUDGET:
@@ -281,10 +291,11 @@ def emit(ids, first, cut_front):
         out.write(line({'k': 'older', 'n': first + dropped}))
     for _, l in keep:
         out.write(l)
-    return len(keep) == len(ls)
+    return len(keep) == len(ls), keep[-1][0] if keep else None
 def tail(n):
     i = back(max(0, len(rows) - n))
     emit(rows[i:], i, True)
+cur = tip
 if mode == 'tail':
     tail(int(sys.argv[4]))
 elif mode == 'since':
@@ -295,7 +306,9 @@ elif mode == 'since':
         if len(new) > int(sys.argv[5]) * 4:
             out.write(line({'k': 'reset'})); tail(int(sys.argv[5]))
         else:
-            emit(new, 0, False)
+            whole, last = emit(new, 0, False)
+            if not whole:
+                cur = last if last is not None else old
     else:
         out.write(line({'k': 'reset'})); tail(int(sys.argv[5]))
 else:
@@ -306,7 +319,7 @@ else:
         j = rows.index(floor)
         i = back(max(0, j - n))
         emit(rows[i:j], i, True)
-out.write(line({'k': 'cur', 'tip': tip}))
+out.write(line({'k': 'cur', 'tip': cur}))
 `
 
 // dvQueryCommand: fixed, the database's path (one the locating found open
@@ -444,7 +457,7 @@ func dvRows(out []byte) (r dvRead, tip int64, reset, ok bool) {
 			r.older, r.hasOlder = x.N, true
 		case "s":
 			head = append(append([]byte(nil), l...), '\n')
-		case "u", "a", "r", "sum":
+		case "u", "a", "r", "sum", "big":
 			b.Write(l)
 			b.WriteByte('\n')
 		}

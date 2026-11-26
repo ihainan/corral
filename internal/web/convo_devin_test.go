@@ -29,7 +29,7 @@ c = sqlite3.connect(sys.argv[1])
 c.execute('create table if not exists sessions (id text primary key, working_directory text not null, backend_type text not null, model text not null, agent_mode text not null, created_at int not null, last_activity_at int not null, title text, main_chain_id int, shell_last_seen_index int default 0, cogs_json text, workspace_dirs text, hidden int not null default 0, metadata text)')
 c.execute('create table if not exists message_nodes (row_id integer primary key autoincrement, session_id text not null, node_id int not null, parent_node_id int, chat_message text not null, created_at int not null, metadata text, unique(session_id, node_id))')
 c.execute('create table if not exists prompt_history (id integer primary key autoincrement, content text not null, timestamp int not null, session_id text not null, is_shell int not null default 0)')
-a = json.loads(sys.argv[2])
+a = json.load(open(sys.argv[2]))
 for n, p, role, extra in a['nodes']:
     node_md = extra.pop('_node', None)
     m = {'message_id': 'm-%d' % n, 'role': role}
@@ -56,7 +56,11 @@ func dvMake(t *testing.T, db string, nodes []dvNode, tip int, extra map[string]a
 		arg[k] = v
 	}
 	b, _ := json.Marshal(arg)
-	if out, err := exec.Command("python3", "-c", dvMakeScript, db, string(b)).CombinedOutput(); err != nil {
+	f := filepath.Join(t.TempDir(), "nodes.json")
+	if err := os.WriteFile(f, b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command("python3", "-c", dvMakeScript, db, f).CombinedOutput(); err != nil {
 		t.Fatalf("%v %s", err, out)
 	}
 }
@@ -233,6 +237,57 @@ func TestDevinQuerySince(t *testing.T) {
 	}
 }
 
+func TestDevinQuerySinceOverBudget(t *testing.T) {
+	db := filepath.Join(t.TempDir(), "sessions.db")
+	dvMake(t, db, []dvNode{sys0(0, -1), user(1, 0, "start")}, 1, nil)
+	_, tip, _ := dvFeed(t, convo.NewDevin(), dvRun(t, db, "tail", "200"))
+	if tip != 1 {
+		t.Fatalf("tail tip %d", tip)
+	}
+	const added = 100
+	nodes := make([]dvNode, 0, added)
+	for i := 2; i < 2+added; i++ {
+		text := "message " + strconv.Itoa(i) + " " + strings.Repeat("x", 65536)
+		nodes = append(nodes, user(i, i-1, text))
+	}
+	end := 1 + added
+	dvMake(t, db, nodes, end, nil)
+	var got []int64
+	cursor := tip
+	for poll := 0; poll < 8 && cursor < int64(end); poll++ {
+		out := dvRun(t, db, "since", strconv.FormatInt(cursor, 10), "200")
+		r, next, reset, ok := dvRows(out)
+		if !ok || reset {
+			t.Fatalf("poll %d: ok %v reset %v", poll, ok, reset)
+		}
+		before := len(got)
+		for _, l := range strings.Split(strings.TrimSpace(string(r.lines)), "\n") {
+			var x struct {
+				K string `json:"k"`
+				N int64  `json:"n"`
+			}
+			if json.Unmarshal([]byte(l), &x) == nil && x.K == "u" {
+				got = append(got, x.N)
+			}
+		}
+		if len(got) == before && next <= cursor {
+			t.Fatalf("poll %d made no progress: cursor %d next %d", poll, cursor, next)
+		}
+		cursor = next
+	}
+	if cursor != int64(end) {
+		t.Fatalf("cursor %d after the polls, want %d", cursor, end)
+	}
+	if len(got) != added {
+		t.Fatalf("%d rows read, want %d", len(got), added)
+	}
+	for i, n := range got {
+		if want := int64(i + 2); n != want {
+			t.Fatalf("row %d is node %d, want %d (out of order or repeated)", i, n, want)
+		}
+	}
+}
+
 // Read from its end, then back: what is before the first read, with a
 // result whose call is in it paired; a compacted one's summary, and what it
 // summed up before it.
@@ -297,6 +352,27 @@ func TestDevinQueryOlderAndCompacted(t *testing.T) {
 	}
 }
 
+func TestDevinQueryHugeMessage(t *testing.T) {
+	db := filepath.Join(t.TempDir(), "sessions.db")
+	dvMake(t, db, []dvNode{
+		sys0(0, -1),
+		user(1, 0, "before"),
+		user(2, 1, "huge "+strings.Repeat("x", 1100000)),
+		user(3, 2, "after"),
+	}, 3, nil)
+	p := convo.NewDevin()
+	dvFeed(t, p, dvRun(t, db, "tail", "200"))
+	want := []string{"user text:before", "note trouble:big", "user text:after"}
+	if got := dvSaid(p); strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("read:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+	es := p.Since(0)
+	tr := es[1].Parts[0].Trouble
+	if tr == nil || tr.Bytes < 1<<20 {
+		t.Fatalf("the large message's note: %+v", tr)
+	}
+}
+
 func TestDevinQueryNoSession(t *testing.T) {
 	db := filepath.Join(t.TempDir(), "sessions.db")
 	dvMake(t, db, []dvNode{sys0(0, -1)}, 0, nil)
@@ -311,6 +387,30 @@ func TestDevinQueryNoSession(t *testing.T) {
 	out, err = exec.Command("sh", "-c", dvQueryCommand(filepath.Join(t.TempDir(), "x", "sessions.db"), "tail", dvSID, "200")).Output()
 	if err != nil || !strings.Contains(string(out), `"k":"none"`) {
 		t.Errorf("no database: %v %s", err, out)
+	}
+}
+
+func TestDevinLivePanelKeyRefused(t *testing.T) {
+	h := newHarness(t)
+	admin := h.admin()
+	hd := newFakeHerdr(t)
+	pane := map[string]any{"pane_id": "w1:p1", "workspace_id": "w1", "tab_id": "t1", "agent": "devin", "agent_status": "working", "cwd": "/w"}
+	hd.setSnapshot(nil, []any{pane})
+	_, id := herdrReplyEnv(t, h, admin, hd)
+	eventually(t, "herdr did not report the Devin pane", func() bool {
+		p, ok := h.srv.herdrSocks.paneOf(id, "w1:p1")
+		return ok && p.Agent == "devin"
+	})
+	r := admin.do("POST", "/api/sessions/"+id+"/conversation/panel", map[string]any{
+		"pane": "w1:p1", "pid": 100, "start": 200, "session": sidA,
+		"keys": []string{"a"}, "live": true,
+	})
+	mustStatus(t, r, 409, "a key to Devin's live panel")
+	if r.code() != "unsupported" {
+		t.Fatalf("answer: %s", r.Body)
+	}
+	if typed := hd.typed(); len(typed) != 0 {
+		t.Fatalf("typed into Devin's pane: %v", typed)
 	}
 }
 

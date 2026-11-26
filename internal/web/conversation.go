@@ -4270,6 +4270,11 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 			}
 			turn = release
 		} else {
+			if hasPane && isDevinAgent(hp.Agent) {
+				reason = "unsupported"
+				writeError(w, http.StatusConflict, "unsupported", "Devin's conversation is only read here: reply in its terminal")
+				return
+			}
 			if codexPane && panelLetter.MatchString(b.Keys[0]) && !hexDigest.MatchString(b.Digest) {
 				reason = "bad_request"
 				writeError(w, http.StatusBadRequest, "bad_request", "a key to Codex's terminal goes with the screen it was pressed on")
