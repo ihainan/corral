@@ -4,6 +4,23 @@ import { ChevronDown, ChevronRight } from 'lucide-react'
 import { api, ApiError, errorText } from '../api'
 import { t, type I18nKey } from '../i18n'
 import { cardLooker } from './cardLooker'
+import {
+  activeBusyKey,
+  expireCardSettle,
+  failCardPress,
+  finishCardPress,
+  initialCardState,
+  pollCardFailed,
+  pollCardFound,
+  resetCardState,
+  SETTLE_MS,
+  startCardPress,
+  visibleCard,
+  type CardViewState,
+  type ClaudeCard,
+} from './cardState'
+
+export type { ClaudeCard }
 
 // Claude Code's card above its input box (its you-should-know plugin: "Heads
 // up", "You should know"), read off the pane's screen by the gateway (see
@@ -11,23 +28,37 @@ import { cardLooker } from './cardLooker'
 // composer, folded to a line; its keys pressed from here where the gateway
 // finds the card and an empty box as shown.
 
-export interface ClaudeCard {
-  state: 'offer' | 'explained' | 'making' | 'folded' | 'ready' | 'failed' | 'other'
-  tag?: string
-  text: string
-  choices: { key: string; label: string }[] | null
-  actionable: boolean
-  empty: boolean
-}
-
 type Body = { pane: string; pid: number; start: number; session: string }
+
+const REFUSED: Record<string, I18nKey> = {
+  card_gone: 'card.gone',
+  card_changed: 'card.changed',
+  screen_changed: 'card.changed',
+  card_box_typed: 'card.typed',
+  card_unreadable: 'card.unreadable',
+  card_just_pressed: 'card.justPressed',
+  agent_waiting: 'card.waiting',
+}
 
 // useClaudeCard: the card of the conversation in front (key: which one; ''
 // none), looked for on its own times (cardLooker.ts); shared: a look of the
 // suggestion's begun, the card in its answer to be taken in.
 export function useClaudeCard(sid: string, key: string, turnKey: string, body: () => Body | null) {
-  const [card, setCard] = useState<ClaudeCard | null>(null)
-  const [stale, setStale] = useState(false) // (the last look failed: shown as it was, not to be answered)
+  const [view, setView] = useState<CardViewState>(() => initialCardState())
+  const viewRef = useRef(view)
+  viewRef.current = view
+  const commit = useCallback((next: CardViewState) => {
+    viewRef.current = next
+    setView(next)
+  }, [])
+  const update = useCallback((fn: (s: CardViewState) => CardViewState) => {
+    const next = fn(viewRef.current)
+    if (next !== viewRef.current) {
+      viewRef.current = next
+      setView(next)
+    }
+    return next
+  }, [])
   const now = useRef({ sid, body })
   now.current = { sid, body }
   const looker = useMemo(
@@ -45,20 +76,16 @@ export function useClaudeCard(sid: string, key: string, turnKey: string, body: (
         setInterval: (f, ms) => setInterval(f, ms),
         clearInterval: (t) => clearInterval(t as ReturnType<typeof setInterval>),
         now: () => Date.now(),
-        found: (c) => {
-          setCard(c)
-          setStale(false)
-        },
-        failed: () => setStale(true),
+        found: (c) => update((s) => pollCardFound(s, c, Date.now())),
+        failed: () => update((s) => pollCardFailed(s)),
       }),
-    [],
+    [update],
   )
   useEffect(() => () => looker.stop(), [looker])
   // Another conversation: nothing of the last one's.
   // (Another conversation's: none of the last one's — not as it is shown again from a tab behind, the card kept.)
   useEffectOnChange(() => {
-    setCard(null)
-    setStale(false)
+    commit(resetCardState(viewRef.current))
   }, [key])
   useEffect(() => {
     looker.bind(key)
@@ -70,18 +97,53 @@ export function useClaudeCard(sid: string, key: string, turnKey: string, body: (
   useEffect(() => {
     if (key && turnKey) looker.turnEnded()
   }, [key, turnKey, looker])
+  // End the settle window if the card never changed or disappeared on its own.
+  const settleUntil = view.pending?.phase === 'settling' ? view.pending.until : 0
+  useEffect(() => {
+    if (!settleUntil) return
+    const wait = Math.max(0, settleUntil - Date.now())
+    const timer = window.setTimeout(() => update((s) => expireCardSettle(s, Date.now())), wait)
+    return () => clearTimeout(timer)
+  }, [settleUntil, update])
   // (A look of the suggestion's begun, the card in its answer: see cardLooker's shared.)
   const shared = useCallback(() => looker.shared(), [looker])
   const press = useCallback(
-    async (k: string): Promise<void> => {
+    async (k: string, label = ''): Promise<void> => {
       const b = now.current.body()
-      if (!b || !card) return
-      await api('POST', `/api/sessions/${sid}/conversation/card`, { ...b, key: k, card: { state: card.state, tag: card.tag ?? '', text: card.text, choices: card.choices ?? [] } }, { timeoutMs: 20000 })
-      looker.pressed()
+      if (!b) return
+      const cur = viewRef.current
+      const started = startCardPress(cur, k, label)
+      if (!started.accepted || !cur.card) return
+      const target = cur.card
+      commit(started.state)
+      try {
+        await api(
+          'POST',
+          `/api/sessions/${now.current.sid}/conversation/card`,
+          { ...b, key: k, card: { state: target.state, tag: target.tag ?? '', text: target.text, choices: target.choices ?? [] } },
+          { timeoutMs: 20000 },
+        )
+        const after = update((s) => finishCardPress(s, started.pressId, Date.now(), SETTLE_MS))
+        if (after.pending?.id === started.pressId) looker.pressed()
+      } catch (e) {
+        const code = e instanceof ApiError ? e.code : ''
+        const msg = e instanceof ApiError && REFUSED[e.code] ? t(REFUSED[e.code]) : errorText(e)
+        update((s) => failCardPress(s, started.pressId, code, msg))
+        if (code === 'card_changed' || code === 'screen_changed') looker.look()
+      }
     },
-    [sid, card, looker],
+    [commit, update, looker],
   )
-  return { card, stale, shared, press }
+  const ts = Date.now()
+  return {
+    card: visibleCard(view, ts),
+    stale: view.stale,
+    busyKey: activeBusyKey(view, ts),
+    error: view.error,
+    errorSeq: view.errorSeq,
+    shared,
+    press,
+  }
 }
 
 const LABELS: Record<string, I18nKey> = {
@@ -100,30 +162,36 @@ const LABELS: Record<string, I18nKey> = {
 }
 const TAGS: Record<string, I18nKey> = { 'Heads up': 'card.headsUp', 'You should know': 'card.shouldKnow' }
 
-const REFUSED: Record<string, I18nKey> = {
-  card_gone: 'card.gone',
-  card_changed: 'card.changed',
-  screen_changed: 'card.changed',
-  card_box_typed: 'card.typed',
-  card_unreadable: 'card.unreadable',
-  card_just_pressed: 'card.justPressed',
-  agent_waiting: 'card.waiting',
-}
-
-export function CardNotice({ card, stale, onPress }: { card: ClaudeCard; stale: boolean; onPress: (key: string) => Promise<void> }) {
+export function CardNotice({
+  card,
+  stale,
+  busyKey,
+  error,
+  errorSeq,
+  onPress,
+}: {
+  card: ClaudeCard
+  stale: boolean
+  busyKey?: string | null
+  error?: string
+  errorSeq?: number
+  onPress: (key: string, label: string) => Promise<void>
+}) {
   // (Folded to a line at first; opened again for the same words. Opened by
-  // itself once "Learn more" was pressed: its explanation is what was asked.)
-  const [open, setOpen] = useState(false)
+  // itself once "Learn more" was pressed: its explanation is what was asked,
+  // or when a dismissed card is restored because the background press failed.)
+  const [open, setOpen] = useState(() => !!error)
   const openFor = useRef<string | null>(null)
-  const [busy, setBusy] = useState(false)
-  const [said, setSaid] = useState('')
   useEffect(() => {
     if (openFor.current !== null && openFor.current !== card.text) {
       setOpen(true)
       openFor.current = null
     }
-    setSaid('')
   }, [card.text])
+  useEffect(() => {
+    if (error) setOpen(true)
+  }, [error, errorSeq])
+  const busy = !!busyKey
   const tag = card.tag ? (TAGS[card.tag] ? t(TAGS[card.tag]) : card.tag) : ''
   const first = card.text.split('\n')[0]
   const why = stale ? t('card.stale') : !card.actionable ? t('card.unreadable') : !card.empty ? t('card.typed') : ''
@@ -144,27 +212,27 @@ export function CardNotice({ card, stale, onPress }: { card: ClaudeCard; stale: 
           {!state && <p className="claude-card-text">{card.text}</p>}
           {!!card.choices?.length && (
             <div className="claude-card-keys">
-              {card.choices.map((c) => (
-                <button
-                  key={c.key}
-                  type="button"
-                  className="btn btn-ghost claude-card-key"
-                  disabled={!!why || busy}
-                  onClick={() => {
-                    setBusy(true)
-                    setSaid('')
-                    if (c.label === 'Learn more') openFor.current = card.text
-                    onPress(c.key)
-                      .catch((e) => setSaid(e instanceof ApiError && REFUSED[e.code] ? t(REFUSED[e.code]) : errorText(e)))
-                      .finally(() => setBusy(false))
-                  }}
-                >
-                  {LABELS[c.label] ? t(LABELS[c.label]) : c.label}
-                </button>
-              ))}
+              {card.choices.map((c) => {
+                const pressing = busyKey === c.key
+                return (
+                  <button
+                    key={c.key}
+                    type="button"
+                    className={'btn btn-ghost claude-card-key' + (pressing ? ' is-busy' : '')}
+                    aria-busy={pressing || undefined}
+                    disabled={!!why || busy}
+                    onClick={() => {
+                      if (c.label === 'Learn more') openFor.current = card.text
+                      void onPress(c.key, c.label)
+                    }}
+                  >
+                    {pressing ? t('card.sending') : LABELS[c.label] ? t(LABELS[c.label]) : c.label}
+                  </button>
+                )
+              })}
             </div>
           )}
-          {(why || said) && <p className="claude-card-why">{said || why}</p>}
+          {(why || error) && <p className="claude-card-why">{error || why}</p>}
         </div>
       )}
     </div>

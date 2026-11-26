@@ -3,6 +3,7 @@ import { ArrowLeft, Bot, Brain, ChevronDown, ChevronRight, Film, Keyboard, KeyRo
 import { disablePush, enablePush, pushState, syncPush, type PushState } from '../push'
 import { api, ApiError, authGen, errorText, type Me } from '../api'
 import { getLang, hasKey, setLang, t, type I18nKey, type Lang } from '../i18n'
+import { reloadPage } from '../leaveGuard'
 import { setPrefs, usePrefs } from '../prefs'
 import { linkHandler, navigate } from '../router'
 import { rememberSettingsScroll, signOut, takeSettingsScroll, useSession } from '../app'
@@ -50,7 +51,7 @@ interface SettingsCatDef {
 }
 
 const SETTINGS_CATS: SettingsCatDef[] = [
-  { id: 'general', group: 'general', labelKey: 'settings.cat.general', keywords: 'appearance theme dark light system language 中文 english 外观 主题 深色 浅色 语言', icon: (p) => <SlidersHorizontal {...p} /> },
+  { id: 'general', group: 'general', labelKey: 'settings.cat.general', keywords: 'appearance theme dark light system language confirm leave close tab cmd+w ctrl+w 中文 english 外观 主题 深色 浅色 语言 关闭 离开 确认 误关', icon: (p) => <SlidersHorizontal {...p} /> },
   { id: 'chat', group: 'general', labelKey: 'settings.cat.chat', keywords: 'chat mode agents composer enter send newline pinned thought thinking translate summarize model api key chime sound bell tone notification push alert 对话 智能体 回车 换行 置顶 思考 翻译 总结 模型 密钥 提示音 铃声 推送 通知', icon: (p) => <Bot {...p} /> },
   { id: 'terminal', group: 'terminal', labelKey: 'settings.cat.terminal', keywords: 'terminal theme scheme color font size webgl screen reader clipboard option meta alt 终端 配色 字体 剪贴板 读屏', icon: (p) => <SquareTerminal {...p} /> },
   { id: 'touch', group: 'terminal', labelKey: 'settings.cat.touch', keywords: 'touch keybar keyboard custom keys macro 触控 键栏 按键 自定义 快捷键', icon: (p) => <Keyboard {...p} /> },
@@ -330,7 +331,7 @@ function SettingsWorkbench({ modal, initialCat, onClose }: { modal?: boolean; in
   const switchLang = (v: Lang) => {
     setLang(v)
     setLangState(v)
-    location.reload()
+    reloadPage()
   }
   const stepFont = (d: number) => setPrefs({ fontSize: Math.min(FONT_MAX, Math.max(FONT_MIN, prefs.fontSize + d)) })
 
@@ -424,6 +425,12 @@ function SettingsWorkbench({ modal, initialCat, onClose }: { modal?: boolean; in
                     onChange={(v) => setPrefs({ keysFirst: v })}
                   />
                 </Setting>
+                <Switch
+                  label={t('settings.confirmLeave')}
+                  hint={t('settings.confirmLeaveHint', { key: isMac ? '⌘W' : 'Ctrl+W' })}
+                  checked={prefs.confirmLeave}
+                  onChange={(v) => setPrefs({ confirmLeave: v })}
+                />
                 <a className="setting setting-link" href="/THIRD-PARTY-NOTICES.txt" target="_blank" rel="noopener">
                   <span className="setting-label"><span>{t('settings.notices')}</span></span>
                   <ChevronRight size={15} className="chev" aria-hidden="true" />
@@ -705,7 +712,7 @@ export function SettingsPage() {
   const switchLang = (v: Lang) => {
     setLang(v)
     setLangState(v)
-    location.reload()
+    reloadPage()
   }
   // Back from a page opened here (phones): where the list was.
   useLayoutEffect(() => {
@@ -832,6 +839,12 @@ export function SettingsPage() {
           </Setting>
           {/* (Option is a Mac key: elsewhere the setting means nothing — ux1101 PG-23.) */}
           {isMac && <Switch label={t('settings.optionIsMeta')} hint={t('settings.optionIsMetaHint')} checked={prefs.optionIsMeta} onChange={(v) => setPrefs({ optionIsMeta: v })} />}
+          <Switch
+            label={t('settings.confirmLeave')}
+            hint={t('settings.confirmLeaveHint', { key: isMac ? '⌘W' : 'Ctrl+W' })}
+            checked={prefs.confirmLeave}
+            onChange={(v) => setPrefs({ confirmLeave: v })}
+          />
         </div>
       </section>
 

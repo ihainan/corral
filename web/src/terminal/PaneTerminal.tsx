@@ -4,6 +4,7 @@ import { FitAddon } from '@xterm/addon-fit'
 import { Unicode11Addon } from '@xterm/addon-unicode11'
 import { WebLinksAddon } from '@xterm/addon-web-links'
 import { t } from '../i18n'
+import { isActiveTerminalStatus, setLeaveGuardTerminal } from '../leaveGuard'
 import { termScheme, usePrefs } from '../prefs'
 import { isCoarse } from '../components/ui'
 import { modalShown } from '../shown'
@@ -128,6 +129,11 @@ export function PaneTerminal({
   sendBytesRef.current = sendBytes
 
   useEffect(() => () => clearTimeout(settleTimer.current), [])
+  useEffect(() => {
+    const token = Symbol('pane-terminal')
+    setLeaveGuardTerminal(token, isActiveTerminalStatus(status))
+    return () => setLeaveGuardTerminal(token, false)
+  }, [status])
 
   // Mount xterm.js once per (sid, pane) instance.
   useEffect(() => {

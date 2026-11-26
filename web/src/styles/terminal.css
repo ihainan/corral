@@ -992,11 +992,12 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 /* A message's pictures, small, over its words: one at its own shape, 180 high;
    more in one frame — two side by side, three one big and two, four and on in
    two columns (an odd last across both). Fixed heights: a picture coming in
-   moves nothing under it. */
+   moves nothing under it; scale-down keeps the whole image visible without
+   cropping or upscaling small screenshots. */
 .convo-thumbs { display: grid; gap: 2px; max-width: 100%; border-radius: var(--r-lg); overflow: hidden; }
 .convo-thumb { position: relative; display: block; min-width: 0; padding: 0; border: 0; background: color-mix(in srgb, var(--term-fg) 6%, transparent); cursor: zoom-in; overflow: hidden; }
 .convo-thumb:disabled { cursor: default; }
-.convo-thumb > img { display: block; width: 100%; height: 100%; object-fit: cover; }
+.convo-thumb > img { display: block; width: 100%; height: 100%; object-fit: scale-down; }
 .convo-thumb-mark { display: grid; place-items: center; width: 100%; height: 100%; color: var(--term-fg-3); }
 .convo-thumb.is-gone { cursor: pointer; }
 .convo-thumb:focus-visible { outline: 2px solid var(--term-accent-text); outline-offset: -2px; }
@@ -2820,6 +2821,7 @@ button.convo-queue-row.is-note:last-child { border-radius: 0 0 var(--r-lg) var(-
 .claude-card-text { margin: 0; font-size: var(--fs-sub); line-height: var(--lh-sub); color: var(--term-fg); white-space: pre-wrap; overflow-wrap: anywhere; max-height: 40vh; overflow-y: auto; }
 .claude-card-keys { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
 .claude-card-key { height: 30px; padding: 0 10px; font-size: var(--fs-sub); line-height: var(--lh-sub); border: 1px solid var(--term-line); color: var(--term-fg); }
+.claude-card-key.is-busy { border-color: var(--term-accent-text); color: var(--term-accent-text); }
 .claude-card-why { margin: 6px 0 0; font-size: var(--fs-note); line-height: var(--lh-note); color: var(--term-fg-3); }
 @media (pointer: coarse) { .claude-card-key { height: 38px; } .claude-card-head { padding: 10px 12px; } }
 

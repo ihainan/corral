@@ -1,5 +1,6 @@
 import { useSyncExternalStore } from 'react'
 import { api, authGen, unauthorized } from './api'
+import { reloadPage } from './leaveGuard'
 import { resolveScheme, type Scheme } from './terminal/themes'
 import { controlChars } from './terminal/macro'
 import { sanitizeLayout, type KeyLayout } from './terminal/layout'
@@ -37,6 +38,7 @@ export interface Prefs {
   // With a terminal focused, whose keys are they: the terminal's (Corral's own shortcuts
   // that a terminal could use let go) or Corral's (workbench 11-23).
   keysFirst: 'terminal' | 'corral'
+  confirmLeave: boolean // confirm before closing/refreshing with open terminals or unsent drafts
 }
 
 // A key of one's own: what it is called on the key bar, and what it sends
@@ -50,7 +52,7 @@ export const maxPinned = 20 // (as the server's maxPinned)
 
 // Phones get a slightly smaller default so common output fits without wrapping.
 const phone = window.matchMedia('(pointer: coarse) and (max-width: 599px)').matches
-const defaults: Prefs = { theme: 'system', termTheme: 'corral-dark', termThemeDark: 'corral-dark', termThemeLight: 'corral-light', fontSize: phone ? 13 : 14, keybar: true, optionIsMeta: true, webgl: false, remoteClipboard: true, tapKeyboard: false, composerEnter: 'send', customKeys: [], keyLayout: null, pinnedAgents: [], sidebarGroup: 'status', sidebarSort: 'recent', pinFixedOrder: false, sidebarNestChildren: true, chime: 'all', chimeTone: 'bell', chimeBells: true, keysFirst: 'terminal' }
+const defaults: Prefs = { theme: 'system', termTheme: 'corral-dark', termThemeDark: 'corral-dark', termThemeLight: 'corral-light', fontSize: phone ? 13 : 14, keybar: true, optionIsMeta: true, webgl: false, remoteClipboard: true, tapKeyboard: false, composerEnter: 'send', customKeys: [], keyLayout: null, pinnedAgents: [], sidebarGroup: 'status', sidebarSort: 'recent', pinFixedOrder: false, sidebarNestChildren: true, chime: 'all', chimeTone: 'bell', chimeBells: true, keysFirst: 'terminal', confirmLeave: true }
 
 // The local copy is kept per account (several people may share a device);
 // until the account is known the last one used here paints the first frame.
@@ -216,7 +218,7 @@ document.addEventListener('visibilitychange', () => {
 
 window.addEventListener('storage', (e) => {
   // Another tab signed in as someone else: this page's account is gone.
-  if (e.key === LAST && owner !== null && e.newValue !== String(owner)) location.reload()
+  if (e.key === LAST && owner !== null && e.newValue !== String(owner)) reloadPage()
   // Another tab of this browser changed a setting: follow it at once, except
   // for fields changed here that are still being saved.
   if (owner !== null && e.key === cacheKey(owner) && e.newValue) {
@@ -257,7 +259,7 @@ function sanitize(raw: unknown): Partial<Prefs> {
   if (o.chimeTone === 'bell' || o.chimeTone === 'soft' || o.chimeTone === 'ping') out.chimeTone = o.chimeTone
   if (o.sidebarGroup === 'status' || o.sidebarGroup === 'project' || o.sidebarGroup === 'session') out.sidebarGroup = o.sidebarGroup
   if (o.sidebarSort === 'recent' || o.sidebarSort === 'smart' || o.sidebarSort === 'name') out.sidebarSort = o.sidebarSort
-  for (const k of ['keybar', 'optionIsMeta', 'webgl', 'remoteClipboard', 'tapKeyboard', 'chimeBells', 'pinFixedOrder', 'sidebarNestChildren'] as const) if (typeof o[k] === 'boolean') out[k] = o[k] as boolean
+  for (const k of ['keybar', 'optionIsMeta', 'webgl', 'remoteClipboard', 'tapKeyboard', 'chimeBells', 'pinFixedOrder', 'sidebarNestChildren', 'confirmLeave'] as const) if (typeof o[k] === 'boolean') out[k] = o[k] as boolean
   if (Array.isArray(o.customKeys) && o.customKeys.length <= maxCustomKeys) {
     const text = (v: unknown, max: number) => typeof v === 'string' && v.trim() !== '' && [...v].length <= max && !controlChars.test(v)
     const keys = o.customKeys.filter((k): k is CustomKey => !!k && typeof k === 'object' && text(k.label, 12) && text(k.keys, 200))

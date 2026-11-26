@@ -309,7 +309,8 @@ var settingRules = map[string]func(json.RawMessage) bool{
 	"chimeTone":       oneOf("bell", "soft", "ping"),
 	"chimeBells":      isBool,
 	// Who has the keys with a terminal focused: it (Corral's own shortcuts let go) or Corral.
-	"keysFirst": oneOf("terminal", "corral"),
+	"keysFirst":    oneOf("terminal", "corral"),
+	"confirmLeave": isBool,
 }
 
 // validSetting is true for a known setting with a valid value. null is no
