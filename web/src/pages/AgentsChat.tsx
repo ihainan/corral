@@ -21,6 +21,7 @@ import { convoTarget, herdrTarget, InlineReply } from '../terminal/ReplyDialog'
 import { SessionOpDialog, type SessionOp } from '../terminal/sessionOps'
 import { NEW_AGENT, NewAgentDialog, takeNewAgentAsk, type NewSubagentParent } from '../terminal/newAgent'
 import { type CodexRewind, ForkDialog, LinkParentDialog, type LinkPane, RenameDialog, type RenameTarget, RewindDialog, type RewindTarget } from '../terminal/agentOps'
+import { isRewindIdle } from '../terminal/rewindIdle'
 import { agentWho, ChimeCounter, chime, countsOf } from '../terminal/chime'
 import { AgentList, CODEX_EFFORTS, ComposerModelSlot, ConversationView, glanceOf, type ConvoAgent, type ConvoLineageBar, type ConvoListRow, type ConvoPending, type ConvoSplitPane, type ConvoWent, type FileActs, type ModelOpt } from '../terminal/Conversation'
 import { saveTranslateConfig, useTranslateConfig } from '../terminal/thoughtTranslate'
@@ -3888,11 +3889,7 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
             }
           : undefined
       }
-      rewindIdle={
-        (cur.row
-          ? cur.row.status === 'idle' || cur.row.status === 'done'
-          : cur.s.persistence === 'tmux' && (agent?.status === 'idle' || agent?.status === 'done')) && !agent?.dialog
-      }
+      rewindIdle={isRewindIdle(agent, cur.row?.status, cur.s.persistence)}
     />
     {viewing && active && (
       <PictureDialog

@@ -90,15 +90,17 @@ func ccConfirmScreen(above string, quoted []string, opts []string, selected int)
 // fakeClaudeRewindPane simulates Claude Code 2.1.330 TUI transitions and
 // identity checks for deterministic testing.
 type fakeClaudeRewindPane struct {
-	mu           sync.Mutex
-	curScreen    string
-	curColor     string
-	keys         []string
-	verifyErr    error
-	onPress      func(ctx context.Context, p *fakeClaudeRewindPane, keys []string) error
-	onScreen     func(ctx context.Context, p *fakeClaudeRewindPane) (string, error)
-	screenReads  int
-	pressCounter int
+	mu            sync.Mutex
+	curScreen     string
+	curColor      string
+	keys          []string
+	verifyErr     error
+	inFlight      *sync.WaitGroup
+	onPress       func(ctx context.Context, p *fakeClaudeRewindPane, keys []string) error
+	onCommitEnter func(ctx context.Context, p *fakeClaudeRewindPane, targetText string) error
+	onScreen      func(ctx context.Context, p *fakeClaudeRewindPane) (string, error)
+	screenReads   int
+	pressCounter  int
 }
 
 func (f *fakeClaudeRewindPane) verify(ctx context.Context) error {
@@ -125,6 +127,20 @@ func (f *fakeClaudeRewindPane) press(ctx context.Context, keys ...string) error 
 		return f.onPress(ctx, f, keys)
 	}
 	return nil
+}
+
+func (f *fakeClaudeRewindPane) commitEnter(ctx context.Context, targetText string) error {
+	f.mu.Lock()
+	fn := f.onCommitEnter
+	f.mu.Unlock()
+	if fn != nil {
+		return fn(ctx, f, targetText)
+	}
+	return f.press(ctx, "enter")
+}
+
+func (f *fakeClaudeRewindPane) waitInFlight(ctx context.Context) error {
+	return waitGroupCtx(ctx, f.inFlight)
 }
 
 func (f *fakeClaudeRewindPane) screen(ctx context.Context) (string, error) {
@@ -385,7 +401,7 @@ func TestClaudeRewindDuplicateText(t *testing.T) {
 		{Seq: 2, ID: "a1", Role: convo.RoleAssistant, Parts: []convo.Part{{Kind: convo.KindText, Text: "ok 1"}}},
 		{Seq: 3, ID: "u2", Role: convo.RoleUser, Parts: []convo.Part{{Kind: convo.KindText, Text: "continue"}}},
 	}
-	plan, perr := buildClaudeRewindPlan(entries, "u1")
+	plan, perr := buildClaudeRewindPlan(entries, "u1", "")
 	if perr != nil {
 		t.Fatalf("buildClaudeRewindPlan error: %v", perr)
 	}
@@ -851,16 +867,19 @@ func TestClaudeRewindOverlayLifecycle(t *testing.T) {
 	const pid, start = int64(500), int64(9000)
 
 	// Log already contains an earlier rewind (u2old -> u2) plus u3 after u2.
+	t0 := time.Date(2026, 11, 26, 10, 0, 0, 0, time.UTC)
+	ts := func(d time.Duration) string { return t0.Add(d).Format(time.RFC3339Nano) }
 	baseLog := strings.Join([]string{
-		`{"type":"user","uuid":"u1","parentUuid":null,"message":{"role":"user","content":"first"}}`,
-		`{"type":"assistant","uuid":"a1","parentUuid":"u1","message":{"content":[{"type":"text","text":"ans1"}]}}`,
-		`{"type":"user","uuid":"u2old","parentUuid":"a1","message":{"role":"user","content":"old try"}}`,
-		`{"type":"assistant","uuid":"a2old","parentUuid":"u2old","message":{"content":[{"type":"text","text":"old ans"}]}}`,
-		`{"type":"user","uuid":"u2","parentUuid":"a1","message":{"role":"user","content":"second"}}`,
-		`{"type":"assistant","uuid":"a2","parentUuid":"u2","message":{"content":[{"type":"text","text":"ans2"}]}}`,
-		`{"type":"user","uuid":"u3","parentUuid":"a2","message":{"role":"user","content":"third"}}`,
-		`{"type":"assistant","uuid":"a3","parentUuid":"u3","message":{"content":[{"type":"text","text":"ans3"}]}}`,
+		`{"type":"user","uuid":"u1","parentUuid":null,"timestamp":"` + ts(1*time.Minute) + `","message":{"role":"user","content":"first"}}`,
+		`{"type":"assistant","uuid":"a1","parentUuid":"u1","timestamp":"` + ts(2*time.Minute) + `","message":{"content":[{"type":"text","text":"ans1"}]}}`,
+		`{"type":"user","uuid":"u2old","parentUuid":"a1","timestamp":"` + ts(3*time.Minute) + `","message":{"role":"user","content":"old try"}}`,
+		`{"type":"assistant","uuid":"a2old","parentUuid":"u2old","timestamp":"` + ts(4*time.Minute) + `","message":{"content":[{"type":"text","text":"old ans"}]}}`,
+		`{"type":"user","uuid":"u2","parentUuid":"a1","timestamp":"` + ts(5*time.Minute) + `","message":{"role":"user","content":"second"}}`,
+		`{"type":"assistant","uuid":"a2","parentUuid":"u2","timestamp":"` + ts(6*time.Minute) + `","message":{"content":[{"type":"text","text":"ans2"}]}}`,
+		`{"type":"user","uuid":"u3","parentUuid":"a2","timestamp":"` + ts(7*time.Minute) + `","message":{"role":"user","content":"third"}}`,
+		`{"type":"assistant","uuid":"a3","parentUuid":"u3","timestamp":"` + ts(8*time.Minute) + `","message":{"content":[{"type":"text","text":"ans3"}]}}`,
 	}, "\n") + "\n"
+	srv.rewinds.now = func() time.Time { return t0.Add(10 * time.Minute) }
 
 	makeState := func(p, stTime int64, raw string) *convoState {
 		cl := convo.NewClaude()
@@ -912,11 +931,22 @@ func TestClaudeRewindOverlayLifecycle(t *testing.T) {
 		t.Fatal("rewind record deleted on state rebuild")
 	}
 
-	// 3. Another Corral connection (conn-2) viewing the same pane + process sees Gone too.
+	// 3. Another Corral connection (conn-2) viewing the same pane + process sees Gone too,
+	// even after loading earlier history (not in knownUsers) with timestamps before rewind.
 	st2 := makeState(pid, start, baseLog)
+	earlier := convo.NewClaude()
+	earlier.Feed([]byte(strings.Join([]string{
+		`{"type":"user","uuid":"u0","parentUuid":null,"timestamp":"` + ts(-5*time.Minute) + `","message":{"role":"user","content":"zero"}}`,
+		`{"type":"assistant","uuid":"a0","parentUuid":"u0","timestamp":"` + ts(-4*time.Minute) + `","message":{"content":[{"type":"text","text":"ans0"}]}}`,
+		`{"type":"user","uuid":"u0b","parentUuid":"a0","timestamp":"` + ts(-3*time.Minute) + `","message":{"role":"user","content":"zero retry"}}`,
+	}, "\n") + "\n"))
+	st2.parser.Prepend(earlier)
 	target2 := srv.syncClaudeRewind(s2, st2)
 	if target2 != "u2" {
-		t.Fatalf("conn-2 did not see rewind record: target=%q", target2)
+		t.Fatalf("conn-2 did not keep rewind record after prepending earlier history: target=%q", target2)
+	}
+	if srv.rewinds.get(key) == nil {
+		t.Fatal("rewind record deleted when conn-2 loaded earlier history")
 	}
 	g2 := goneSet(overlayRewindEntries(st2, target2, st2.parser.Since(0)))
 	if !g2["u2"] || !g2["u3"] || g2["u1"] {
@@ -933,8 +963,8 @@ func TestClaudeRewindOverlayLifecycle(t *testing.T) {
 		t.Fatalf("restarted process wrongly marked u2/u3 gone: %v", gR)
 	}
 
-	// 5. New user message hanging on a1 (before u2) settles the rewind and deletes the record.
-	newMsg := `{"type":"user","uuid":"u4","parentUuid":"a1","message":{"role":"user","content":"new direction"}}` + "\n"
+	// 5. New user message hanging on a1 (before u2) with timestamp after rewind settles the rewind.
+	newMsg := `{"type":"user","uuid":"u4","parentUuid":"a1","timestamp":"` + ts(11*time.Minute) + `","message":{"role":"user","content":"new direction"}}` + "\n"
 	st1.parser.Feed([]byte(newMsg))
 	genBeforeSettle := st1.gen
 	if targetAfter := srv.syncClaudeRewind(s1, st1); targetAfter != "" {
@@ -949,5 +979,457 @@ func TestClaudeRewindOverlayLifecycle(t *testing.T) {
 	gAfter := goneSet(st1.parser.Since(0))
 	if gAfter["u1"] || gAfter["a1"] || !gAfter["u2"] || !gAfter["u3"] || gAfter["u4"] {
 		t.Fatalf("post-settle native gone set wrong: %v", gAfter)
+	}
+}
+
+// setupFakeRewindHost creates a fake /proc tree, HOME/.claude/sessions/<pid>.json,
+// and bin directory for executing real claudeRewind* shell scripts in unit tests.
+func setupFakeRewindHost(t *testing.T, pid, start int64, sid, pane, sock string) (binDir, homeDir, fakeProc, sessFile string) {
+	t.Helper()
+	binDir = t.TempDir()
+	homeDir = t.TempDir()
+	fakeProc = t.TempDir()
+	pdir := filepath.Join(fakeProc, strconv.FormatInt(pid, 10))
+	if err := os.MkdirAll(filepath.Join(pdir, "fd"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("/dev/pts/9", filepath.Join(pdir, "fd", "0")); err != nil {
+		t.Fatal(err)
+	}
+	envBytes := "HERDR_PANE_ID=" + pane + "\x00HERDR_SOCKET_PATH=" + sock + "\x00"
+	if err := os.WriteFile(filepath.Join(pdir, "environ"), []byte(envBytes), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// /proc/$pid/stat: after ") ", f3=pgrp(pid), f6=tpgid(pid), f20=start.
+	statLine := strconv.FormatInt(pid, 10) + " (claude) S 1 " + strconv.FormatInt(pid, 10) + " " + strconv.FormatInt(pid, 10) +
+		" 34816 " + strconv.FormatInt(pid, 10) + " 0 0 0 0 0 0 0 0 0 0 0 0 0 " + strconv.FormatInt(start, 10) + " 0\n"
+	if err := os.WriteFile(filepath.Join(pdir, "stat"), []byte(statLine), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sessDir := filepath.Join(homeDir, ".claude", "sessions")
+	if err := os.MkdirAll(sessDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sessFile = filepath.Join(sessDir, strconv.FormatInt(pid, 10)+".json")
+	if err := os.WriteFile(sessFile, []byte(`{"sessionId":"`+sid+`","procStart":`+strconv.FormatInt(start, 10)+`}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return binDir, homeDir, fakeProc, sessFile
+}
+
+func runRewindSh(t *testing.T, sh, binDir, homeDir, fakeProc string) (string, int) {
+	t.Helper()
+	patched := strings.Replace(sh, `PATH="`, `PATH="`+binDir+`:`, 1)
+	patched = strings.ReplaceAll(patched, `"/proc/`, `"`+fakeProc+`/`)
+	cmd := exec.Command("sh", "-c", patched)
+	cmd.Env = append(os.Environ(), "HOME="+homeDir)
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		return string(out), 0
+	}
+	var ee *exec.ExitError
+	if errors.As(err, &ee) {
+		return string(out), ee.ExitCode()
+	}
+	t.Fatalf("unexpected exec err: %v (out=%q)", err, string(out))
+	return "", -1
+}
+
+// Item 1: Atomic remote commit-Enter script checks identity + live captured screen
+// in the same shell invocation before issuing Enter.
+func TestClaudeRewindCommitScriptAtomicCheck(t *testing.T) {
+	const (
+		sid  = "11111111-2222-3333-4444-555555555555"
+		pid  = int64(4242)
+		start = int64(987654)
+		sock = "/tmp/test-herdr.sock"
+	)
+	opts := []string{"Restore code and conversation", "Restore conversation", "Restore code", "Never mind"}
+
+	for _, mode := range []string{"tmux", "herdr"} {
+		t.Run(mode, func(t *testing.T) {
+			pane := "%7"
+			if mode == "herdr" {
+				pane = "w1:p1"
+			}
+			binDir, homeDir, fakeProc, _ := setupFakeRewindHost(t, pid, start, sid, pane, sock)
+			scrFile := filepath.Join(t.TempDir(), "screen.txt")
+			keyLog := filepath.Join(t.TempDir(), "keys.log")
+
+			if mode == "tmux" {
+				stub := "#!/bin/sh\n" +
+					"case \"$1\" in\n" +
+					"  -u) shift ;;\n" +
+					"esac\n" +
+					"case \"$1\" in\n" +
+					"  display-message)\n" +
+					"    for a in \"$@\"; do last=$a; done\n" +
+					"    case \"$last\" in\n" +
+					"      *pane_pid*) echo '9001 0' ;;\n" +
+					"      *pane_tty*) echo '/dev/pts/9' ;;\n" +
+					"    esac ;;\n" +
+					"  capture-pane) cat " + sshx.QuoteShell(scrFile) + " ;;\n" +
+					"  send-keys) echo \"$*\" >> " + sshx.QuoteShell(keyLog) + " ;;\n" +
+					"esac\n"
+				if err := os.WriteFile(filepath.Join(binDir, "tmux"), []byte(stub), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				stub := "#!/bin/sh\n" +
+					"if [ \"$1\" = pane ] && [ \"$2\" = read ]; then\n" +
+					"  cat " + sshx.QuoteShell(scrFile) + "\n" +
+					"elif [ \"$1\" = pane ] && [ \"$2\" = send-keys ]; then\n" +
+					"  echo \"$*\" >> " + sshx.QuoteShell(keyLog) + "\n" +
+					"fi\n"
+				if err := os.WriteFile(filepath.Join(binDir, "herdr"), []byte(stub), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			run := func(screen, target string) (string, int, string) {
+				_ = os.Remove(keyLog)
+				if err := os.WriteFile(scrFile, []byte(screen), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				sh, err := claudeRewindCommitSh(mode, pane, sock, "9001", pid, start, sid, target)
+				if err != nil {
+					t.Fatal(err)
+				}
+				out, code := runRewindSh(t, sh, binDir, homeDir, fakeProc)
+				logged, _ := os.ReadFile(keyLog)
+				return out, code, string(logged)
+			}
+
+			// 1) Option changed to "Restore code and conversation" -> MUST exit 35 and NEVER send Enter.
+			_, code, keys := run(ccConfirmScreen("above", []string{"fix login", "second line"}, opts, 0), "fix login\nsecond line")
+			if code != 35 || keys != "" {
+				t.Fatalf("code restore selected: code=%d keys=%q, want code=35 keys=\"\"", code, keys)
+			}
+
+			// 2) Wrong quoted message even with "Restore conversation" selected -> MUST exit 35, no Enter.
+			_, code, keys = run(ccConfirmScreen("above", []string{"other prompt"}, opts, 1), "fix login\nsecond line")
+			if code != 35 || keys != "" {
+				t.Fatalf("quote mismatch: code=%d keys=%q, want code=35 keys=\"\"", code, keys)
+			}
+
+			// 3) Quoted confirm screen above normal prompt box -> MUST exit 35, no Enter.
+			fakeAbove := ccNormalScreen(ccConfirmScreen("chat", []string{"fix login"}, opts, 1), "")
+			_, code, keys = run(fakeAbove, "fix login")
+			if code != 35 || keys != "" {
+				t.Fatalf("quoted confirm above prompt box: code=%d keys=%q, want code=35 keys=\"\"", code, keys)
+			}
+
+			// 4) Regex metacharacters in target are compared as fixed strings, not regex.
+			metaTarget := `fix foo.*bar [a-z]+ (test) $1 \n`
+			_, code, keys = run(ccConfirmScreen("above", []string{`fix fooXbar a (test) $1 \n`}, opts, 1), metaTarget)
+			if code != 35 || keys != "" {
+				t.Fatalf("regex metachar spoof matched: code=%d keys=%q, want code=35 keys=\"\"", code, keys)
+			}
+			out, code, keys := run(ccConfirmScreen("above", []string{metaTarget}, opts, 1), metaTarget)
+			if code != 0 || strings.TrimSpace(out) != "ok" || keys == "" {
+				t.Fatalf("exact regex metachar target failed: code=%d out=%q keys=%q", code, out, keys)
+			}
+
+			// 5) Valid "Restore conversation" + matching first line -> exits 0, sends Enter.
+			out, code, keys = run(ccConfirmScreen("above", []string{"fix login", "second line"}, opts, 1), "fix login\nsecond line")
+			if code != 0 || strings.TrimSpace(out) != "ok" || keys == "" {
+				t.Fatalf("valid commit failed: code=%d out=%q keys=%q", code, out, keys)
+			}
+			// 6) Wrapped / ellipsis-truncated long first line -> exits 0, sends Enter.
+			longFirst := "refactor authentication middleware to validate signed cookies properly"
+			out, code, keys = run(ccConfirmScreen("above", []string{"refactor authentication middleware…"}, opts, 1), longFirst)
+			if code != 0 || strings.TrimSpace(out) != "ok" || keys == "" {
+				t.Fatalf("ellipsis commit failed: code=%d out=%q keys=%q", code, out, keys)
+			}
+		})
+	}
+	if re := mapRewindExitErr(&sshxExitStub{35}); asRewindErr(re).code != "confirm_mismatch" || isIdentityErr(re) {
+		t.Fatalf("exit 35 mapped to %v, want non-identity confirm_mismatch", re)
+	}
+}
+
+func TestClaudeRewindCommitRemoteMismatchRefusesEnter(t *testing.T) {
+	fastRewindTimings(t)
+	opts := []string{"Restore code and conversation", "Restore conversation", "Restore code", "Never mind"}
+	fp, plan := newStandardRewindFake(opts)
+	commitCalls := 0
+	fp.onCommitEnter = func(_ context.Context, _ *fakeClaudeRewindPane, _ string) error {
+		commitCalls++
+		// Simulate remote atomic check exiting 35 without sending Enter.
+		return mapRewindExitErr(&sshxExitStub{35})
+	}
+
+	_, err := claudeRewind(context.Background(), fp, plan)
+	if err == nil || err.code != "confirm_mismatch" {
+		t.Fatalf("got err=%v, want confirm_mismatch", err)
+	}
+	if commitCalls != 1 {
+		t.Fatalf("commitEnter calls = %d, want 1", commitCalls)
+	}
+	keys := fp.recordedKeys()
+	enters := 0
+	for _, k := range keys {
+		if k == "enter" {
+			enters++
+		}
+	}
+	if enters != 1 {
+		t.Fatalf("expected only picker enter (1), got %d, keys=%v", enters, keys)
+	}
+	if keys[len(keys)-1] != "esc" {
+		t.Fatalf("expected esc cleanup after remote mismatch refused commit, keys=%v", keys)
+	}
+}
+
+// Item 2: Identity is re-checked between consecutive keys (especially Esc, Esc)
+// inside the same remote shell script.
+func TestClaudeRewindPressChecksIdentityBetweenEscs(t *testing.T) {
+	const (
+		sid   = "11111111-2222-3333-4444-555555555555"
+		sid2  = "99999999-2222-3333-4444-555555555555"
+		pid   = int64(4242)
+		start = int64(987654)
+		sock  = "/tmp/test-herdr.sock"
+	)
+
+	for _, mode := range []string{"tmux", "herdr"} {
+		t.Run(mode, func(t *testing.T) {
+			pane := "%7"
+			if mode == "herdr" {
+				pane = "w1:p1"
+			}
+			binDir, homeDir, fakeProc, sessFile := setupFakeRewindHost(t, pid, start, sid, pane, sock)
+			keyLog := filepath.Join(t.TempDir(), "keys.log")
+			// After the first key is sent, mutate sessionId so the second key's check MUST fail (exit 33).
+			mutate := `printf '{"sessionId":"` + sid2 + `","procStart":` + strconv.FormatInt(start, 10) + `}' > ` + sshx.QuoteShell(sessFile)
+
+			if mode == "tmux" {
+				stub := "#!/bin/sh\n" +
+					"case \"$1\" in -u) shift ;; esac\n" +
+					"case \"$1\" in\n" +
+					"  display-message)\n" +
+					"    for a in \"$@\"; do last=$a; done\n" +
+					"    case \"$last\" in\n" +
+					"      *pane_pid*) echo '9001 0' ;;\n" +
+					"      *pane_tty*) echo '/dev/pts/9' ;;\n" +
+					"    esac ;;\n" +
+					"  send-keys)\n" +
+					"    echo \"$*\" >> " + sshx.QuoteShell(keyLog) + "\n" +
+					"    " + mutate + " ;;\n" +
+					"esac\n"
+				if err := os.WriteFile(filepath.Join(binDir, "tmux"), []byte(stub), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				stub := "#!/bin/sh\n" +
+					"if [ \"$1\" = pane ] && [ \"$2\" = send-keys ]; then\n" +
+					"  echo \"$*\" >> " + sshx.QuoteShell(keyLog) + "\n" +
+					"  " + mutate + "\n" +
+					"fi\n"
+				if err := os.WriteFile(filepath.Join(binDir, "herdr"), []byte(stub), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			sh, err := claudeRewindPressSh(mode, pane, sock, "9001", pid, start, sid, []string{"esc", "esc"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, code := runRewindSh(t, sh, binDir, homeDir, fakeProc)
+			if code != 33 {
+				t.Fatalf("expected exit 33 (session_changed) before 2nd esc, got %d", code)
+			}
+			logged, _ := os.ReadFile(keyLog)
+			sent := strings.Split(strings.TrimSpace(string(logged)), "\n")
+			if len(sent) != 1 || sent[0] == "" {
+				t.Fatalf("expected exactly 1 key sent before identity check failed, got %q", string(logged))
+			}
+		})
+	}
+}
+
+// Item 3: Cleanup waits for in-flight remote commands to complete before reading
+// screen and deciding whether to press Esc.
+func TestClaudeRewindCancelWaitsInFlightBeforeCleanup(t *testing.T) {
+	fastRewindTimings(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	var wg sync.WaitGroup
+	aboveAll := "❯ first prompt\n● First answer\n\n❯ fix login\n● Second answer"
+	items := []string{"first prompt", "fix login", "(current)"}
+	fp := &fakeClaudeRewindPane{
+		curScreen: ccNormalScreen(aboveAll, ""),
+		inFlight:  &wg,
+	}
+	fp.onPress = func(pctx context.Context, p *fakeClaudeRewindPane, keys []string) error {
+		k := strings.Join(keys, "+")
+		if k == "esc+esc" {
+			// Simulate sshx.Exec returning immediately on cancel while the remote
+			// command finishes 15ms later and opens the rewind picker.
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				time.Sleep(15 * time.Millisecond)
+				p.mu.Lock()
+				p.curScreen = ccPickerScreen(aboveAll, items, len(items)-1)
+				p.mu.Unlock()
+			}()
+			cancel()
+			return context.Canceled
+		}
+		if k == "esc" {
+			p.curScreen = ccNormalScreen(aboveAll, "")
+		}
+		return nil
+	}
+
+	_, err := claudeRewind(ctx, fp, claudeRewindPlan{Steps: 1, TargetText: "fix login"})
+	if err == nil {
+		t.Fatal("expected cancellation error")
+	}
+	keys := fp.recordedKeys()
+	if len(keys) < 2 || keys[len(keys)-1] != "esc" {
+		t.Fatalf("cleanup did not wait for late esc+esc and close picker; keys=%v", keys)
+	}
+	fp.mu.Lock()
+	finalScr := fp.curScreen
+	fp.mu.Unlock()
+	if _, open := parseRewindPicker(finalScr); open {
+		t.Fatal("rewind picker was left open after cancellation cleanup")
+	}
+}
+
+// Item 4: Footer detection matches ONLY the exact trimmed footer line
+// "Enter to continue · Esc to cancel", never message text containing substrings.
+func TestClaudeRewindFooterExactLineMatch(t *testing.T) {
+	msgWithHints := "Fix dialog: Enter to continue or Esc to cancel"
+	pickerScr := ccPickerScreen("above", []string{"first", msgWithHints, "(current)"}, 1)
+	pk, ok := parseRewindPicker(pickerScr)
+	if !ok {
+		t.Fatal("parseRewindPicker failed when a user message contained footer substrings")
+	}
+	if pk.selected != msgWithHints {
+		t.Fatalf("picker selected = %q, want %q", pk.selected, msgWithHints)
+	}
+
+	opts := []string{"Restore code and conversation", "Restore conversation", "Never mind"}
+	confirmScr := ccConfirmScreen("above", []string{msgWithHints, "Enter to continue · Esc to cancel"}, opts, 1)
+	cf, ok := parseRewindConfirm(confirmScr)
+	if !ok {
+		t.Fatal("parseRewindConfirm failed when quoted message contained footer text")
+	}
+	sel, selOK := cf.selectedOption()
+	if !selOK || sel.label != "Restore conversation" {
+		t.Fatalf("confirm selected = %+v ok=%v, want Restore conversation", sel, selOK)
+	}
+	if !matchConfirmQuote(cf.quoted, msgWithHints+"\nEnter to continue · Esc to cancel") {
+		t.Fatalf("quoted lines = %v did not match full message", cf.quoted)
+	}
+}
+
+// Item 6: rewindStore evicts expired (>7d) marks first at capacity; only falls back
+// to oldest mark when all 256 marks are still within 7 days.
+func TestRewindStoreTTLEvictionAndFallback(t *testing.T) {
+	now := time.Date(2026, 11, 26, 12, 0, 0, 0, time.UTC)
+	cur := now
+	st := &rewindStore{now: func() time.Time { return cur }}
+
+	// Case 1: 2 expired (>7d) + 254 fresh (<7d) = 256. Inserting 1 new entry
+	// must evict BOTH expired entries and keep all 254 fresh entries (len=255).
+	cur = now.Add(-8 * 24 * time.Hour)
+	st.set(rewindKey{paneKey: "exp-0", sid: "s", pid: 1, start: 1}, "u1", nil)
+	st.set(rewindKey{paneKey: "exp-1", sid: "s", pid: 2, start: 1}, "u1", nil)
+	cur = now.Add(-24 * time.Hour)
+	for i := 2; i < rewindStoreMax; i++ {
+		st.set(rewindKey{paneKey: "fresh-" + strconv.Itoa(i), sid: "s", pid: int64(i), start: 1}, "u1", nil)
+	}
+	cur = now
+	st.set(rewindKey{paneKey: "new-entry", sid: "s", pid: 999, start: 1}, "u2", nil)
+
+	if st.get(rewindKey{paneKey: "exp-0", sid: "s", pid: 1, start: 1}) != nil {
+		t.Fatal("expired entry exp-0 was not evicted")
+	}
+	if st.get(rewindKey{paneKey: "exp-1", sid: "s", pid: 2, start: 1}) != nil {
+		t.Fatal("expired entry exp-1 was not evicted")
+	}
+	if len(st.m) != rewindStoreMax-1 {
+		t.Fatalf("store len = %d, want %d (both expired evicted, all fresh kept)", len(st.m), rewindStoreMax-1)
+	}
+	if st.get(rewindKey{paneKey: "fresh-2", sid: "s", pid: 2, start: 1}) == nil {
+		t.Fatal("fresh entry fresh-2 was wrongly evicted")
+	}
+
+	// Case 2: All 256 entries are within 7 days -> fallback evicts oldest entry.
+	st2 := &rewindStore{now: func() time.Time { return cur }}
+	for i := 0; i < rewindStoreMax; i++ {
+		cur = now.Add(-6*24*time.Hour + time.Duration(i)*time.Minute)
+		st2.set(rewindKey{paneKey: "k-" + strconv.Itoa(i), sid: "s", pid: int64(i), start: 1}, "u1", nil)
+	}
+	cur = now
+	st2.set(rewindKey{paneKey: "overflow", sid: "s", pid: 999, start: 1}, "u2", nil)
+	if len(st2.m) != rewindStoreMax {
+		t.Fatalf("fallback store len = %d, want %d", len(st2.m), rewindStoreMax)
+	}
+	if st2.get(rewindKey{paneKey: "k-0", sid: "s", pid: 0, start: 1}) != nil {
+		t.Fatal("oldest entry k-0 was not evicted on fallback")
+	}
+	if st2.get(rewindKey{paneKey: "k-1", sid: "s", pid: 1, start: 1}) == nil {
+		t.Fatal("second-oldest entry k-1 was wrongly evicted")
+	}
+}
+
+// Item 7: Long messages (>64 KiB, <=100 KiB) restore full text from the session log;
+// >100 KiB or unreadable full text is refused instead of refilling truncated text.
+func TestClaudeRewindFullTextAndTooLong(t *testing.T) {
+	const id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+	// 80 KiB message: exceeds 64 KiB display parser clip, fits within 100 KiB maxSendText.
+	text80K := "long prompt first line\n" + strings.Repeat("0123456789abcdef", 5<<10) + "\nEND_MARKER"
+	row80K := `{"type":"user","uuid":"` + id + `","parentUuid":null,"message":{"role":"user","content":` + strconv.Quote(text80K) + `}}` + "\n"
+
+	cl := convo.NewClaude()
+	cl.Feed([]byte(row80K))
+	entries := cl.Since(0)
+	if len(entries) != 1 || !entries[0].Parts[0].Truncated {
+		t.Fatalf("expected display entry truncated at 64 KiB, got %+v", entries)
+	}
+
+	// Without fullText, buildClaudeRewindPlan MUST refuse rather than returning truncated text.
+	if _, err := buildClaudeRewindPlan(entries, id, ""); err == nil || err.code != "message_text_unavailable" {
+		t.Fatalf("expected message_text_unavailable for truncated entry without fullText, got %v", err)
+	}
+
+	// Reading row via claudeRewindRowCommand + claudeRewindTextFromRows yields complete 80 KiB text.
+	logFile := filepath.Join(t.TempDir(), "session.jsonl")
+	if err := os.WriteFile(logFile, []byte(row80K), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	grepOut, gerr := exec.Command("sh", "-c", claudeRewindRowCommand(logFile, id)).Output()
+	if gerr != nil {
+		t.Fatalf("claudeRewindRowCommand failed: %v", gerr)
+	}
+	full, rerr := claudeRewindTextFromRows(grepOut, id)
+	if rerr != nil {
+		t.Fatalf("claudeRewindTextFromRows failed: %v", rerr)
+	}
+	if full != text80K {
+		t.Fatalf("full text len=%d want %d", len(full), len(text80K))
+	}
+	plan, perr := buildClaudeRewindPlan(entries, id, full)
+	if perr != nil {
+		t.Fatalf("buildClaudeRewindPlan failed: %v", perr)
+	}
+	if plan.TargetText != text80K {
+		t.Fatalf("plan.TargetText len=%d want %d (untruncated)", len(plan.TargetText), len(text80K))
+	}
+
+	// 110 KiB message (> 100 KiB maxSendText) MUST be rejected with message_too_long.
+	text110K := "huge prompt\n" + strings.Repeat("x", maxSendText+4096)
+	row110K := `{"type":"user","uuid":"` + id + `","parentUuid":null,"message":{"role":"user","content":` + strconv.Quote(text110K) + `}}` + "\n"
+	if _, err := claudeRewindTextFromRows([]byte(row110K), id); err == nil || err.code != "message_too_long" {
+		t.Fatalf("expected message_too_long for >100 KiB message, got %v", err)
+	}
+
+	// Unmatched/missing row MUST be rejected with message_text_unavailable.
+	if _, err := claudeRewindTextFromRows(nil, id); err == nil || err.code != "message_text_unavailable" {
+		t.Fatalf("expected message_text_unavailable for missing row, got %v", err)
 	}
 }

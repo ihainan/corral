@@ -1,5 +1,11 @@
 package convo
 
+import (
+	"encoding/json"
+	"strings"
+	"time"
+)
+
 // What a rewind took back, in Claude Code's log.
 //
 // Each row of the conversation names the row it follows (uuid,
@@ -383,18 +389,27 @@ func (c *Claude) SeqOf(id string) (int, bool) {
 	return 0, false
 }
 
-// RewindSettled reports whether a new user message (not in knownUsers) has
-// appeared in the log with its parentUuid pointing before targetID, meaning
-// Claude Code's JSONL log has taken over the rewind.
-func (c *Claude) RewindSettled(targetID string, knownUsers map[string]bool) bool {
+// RewindSettled reports whether a new user message written after since (and
+// not in knownUsers) has appeared in the log with its parentUuid pointing
+// before targetID, meaning Claude Code's JSONL log has taken over the rewind.
+func (c *Claude) RewindSettled(targetID string, since time.Time, knownUsers map[string]bool) bool {
 	t := &c.tree
 	tOrd, hasTarget := t.at[targetID]
 	for _, e := range c.entries {
 		if e.Role != RoleUser || e.ID == "" || knownUsers[e.ID] {
 			continue
 		}
+		if !since.IsZero() {
+			ts, err := time.Parse(time.RFC3339Nano, e.Time)
+			if err != nil || !ts.After(since) {
+				continue
+			}
+		}
 		ord, ok := t.at[e.ID]
 		if !ok {
+			continue
+		}
+		if hasTarget && ord <= tOrd {
 			continue
 		}
 		parent := t.up[ord-t.base]
@@ -424,4 +439,80 @@ func (c *Claude) RewindSettled(targetID string, knownUsers map[string]bool) bool
 		}
 	}
 	return false
+}
+
+// ClaudeUserTextOf extracts the full, untruncated user text from a raw JSONL
+// line of Claude Code's session log matching uuid. Unlike Claude.Feed, it does
+// not clip text parts to maxText (64 KiB).
+func ClaudeUserTextOf(line []byte, uuid string) (string, bool) {
+	if uuid == "" {
+		return "", false
+	}
+	var r claudeRow
+	if json.Unmarshal(line, &r) != nil || r.IsSidechain || !strings.EqualFold(r.UUID, uuid) {
+		return "", false
+	}
+	if r.Type == "system" && r.Subtype == "local_command" {
+		var s string
+		if json.Unmarshal(r.Content, &s) == nil {
+			if text, ok := slashCommand(s); ok {
+				return clean(text), true
+			}
+		}
+		return "", false
+	}
+	if r.Type != "user" || r.IsMeta || r.IsCompactSummary || r.PromptSource == "system" || r.Message == nil {
+		return "", false
+	}
+	var s string
+	if json.Unmarshal(r.Message.Content, &s) == nil {
+		if _, ok := shellOutput(s); ok {
+			return "", false
+		}
+		if n, notice := noticeOf(s); notice && taskEnded(n) != nil {
+			return "", false
+		}
+		role, text := classifyUserText(s)
+		if role != RoleUser || word(r.TurnOrigin) == "scheduled" {
+			return "", false
+		}
+		return clean(text), true
+	}
+	var blocks []claudeBlock
+	if json.Unmarshal(r.Message.Content, &blocks) != nil {
+		return "", false
+	}
+	results := 0
+	images := false
+	for _, b := range blocks {
+		if b.Type == "tool_result" {
+			results++
+		} else if b.Type == "image" {
+			images = true
+		}
+	}
+	var parts []string
+	for _, b := range blocks {
+		if b.Type != "text" {
+			continue
+		}
+		if n, notice := noticeOf(b.Text); notice && taskEnded(n) != nil {
+			continue
+		}
+		if _, ok := shellOutput(b.Text); ok {
+			continue
+		}
+		if role, text := classifyUserText(b.Text); role == RoleUser {
+			if images {
+				text = noImageTokens(text)
+			}
+			if text != "" {
+				parts = append(parts, clean(text))
+			}
+		}
+	}
+	if len(parts) == 0 || (results == 0 && word(r.TurnOrigin) == "scheduled") {
+		return "", false
+	}
+	return strings.Join(parts, "\n"), true
 }

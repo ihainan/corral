@@ -5,6 +5,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 )
 
 // treeRow is a row of a Claude Code log as the tree tests write it.
@@ -366,13 +367,19 @@ func TestClaudeRewindManyTriesAcrossPrepend(t *testing.T) {
 	}
 }
 
+func treeRowAt(kind, id, parent, body string, at time.Time) string {
+	raw := treeRow(kind, id, parent, body)
+	return raw[:len(raw)-1] + fmt.Sprintf(`,"timestamp":%q}`, at.UTC().Format(time.RFC3339Nano))
+}
+
 func TestClaudeRewindSettled(t *testing.T) {
+	t0 := time.Date(2026, 11, 26, 10, 0, 0, 0, time.UTC)
 	c := NewClaude()
 	c.Feed(lines(
-		treeRow("user", "u1", "", "first"),
-		treeRow("text", "a1", "u1", "ok1"),
-		treeRow("user", "u2", "a1", "second"),
-		treeRow("text", "a2", "u2", "ok2"),
+		treeRowAt("user", "u1", "", "first", t0),
+		treeRowAt("text", "a1", "u1", "ok1", t0.Add(time.Second)),
+		treeRowAt("user", "u2", "a1", "second", t0.Add(2*time.Second)),
+		treeRowAt("text", "a2", "u2", "ok2", t0.Add(3*time.Second)),
 	))
 	known := c.UserIDs()
 	if !known["u1"] || !known["u2"] || len(known) != 2 {
@@ -381,30 +388,115 @@ func TestClaudeRewindSettled(t *testing.T) {
 	if seq, ok := c.SeqOf("u2"); !ok || seq <= 0 {
 		t.Fatalf("SeqOf(u2) = %d, %v", seq, ok)
 	}
+	tRewind := t0.Add(10 * time.Second)
 	// Existing messages alone must not settle the rewind.
-	if c.RewindSettled("u2", known) {
+	if c.RewindSettled("u2", tRewind, known) {
 		t.Fatal("settled with no new user message")
 	}
 	// A new user message hanging AFTER u2 (on a2) must not settle a rewind to before u2.
-	c.Feed(lines(treeRow("user", "u3", "a2", "still on old branch")))
-	if c.RewindSettled("u2", known) {
+	c.Feed(lines(treeRowAt("user", "u3", "a2", "still on old branch", tRewind.Add(time.Second))))
+	if c.RewindSettled("u2", tRewind, known) {
 		t.Fatal("settled on a message whose parent is after target")
 	}
-	// A new user message hanging BEFORE u2 (on a1) settles the rewind.
-	c.Feed(lines(treeRow("user", "u4", "a1", "rewound branch")))
-	if !c.RewindSettled("u2", known) {
+	// A new user message hanging BEFORE u2 (on a1) with timestamp after tRewind settles the rewind.
+	c.Feed(lines(treeRowAt("user", "u4", "a1", "rewound branch", tRewind.Add(2*time.Second))))
+	if !c.RewindSettled("u2", tRewind, known) {
 		t.Fatal("did not settle after new message hanging before target")
 	}
 
 	// Rewinding to before the very first message (root parentUuid: null).
 	c2 := NewClaude()
-	c2.Feed(lines(treeRow("user", "u1", "", "first"), treeRow("text", "a1", "u1", "ok1")))
+	c2.Feed(lines(treeRowAt("user", "u1", "", "first", t0), treeRowAt("text", "a1", "u1", "ok1", t0.Add(time.Second))))
 	k2 := c2.UserIDs()
-	if c2.RewindSettled("u1", k2) {
+	if c2.RewindSettled("u1", tRewind, k2) {
 		t.Fatal("root rewind settled early")
 	}
-	c2.Feed(lines(treeRow("user", "u2", "", "fresh start")))
-	if !c2.RewindSettled("u1", k2) {
+	c2.Feed(lines(treeRowAt("user", "u2", "", "fresh start", tRewind.Add(time.Second))))
+	if !c2.RewindSettled("u1", tRewind, k2) {
 		t.Fatal("root rewind did not settle after new root user message")
+	}
+}
+
+func TestClaudeRewindSettledIgnoresPrependedHistory(t *testing.T) {
+	t0 := time.Date(2026, 11, 26, 10, 0, 0, 0, time.UTC)
+	// Connection 1 only read the tail of a long log (u2..a3) and rewound to u2.
+	tailRows := []string{
+		treeRowAt("user", "u2", "a1", "tail msg 1", t0.Add(10*time.Minute)),
+		treeRowAt("text", "a2", "u2", "tail ans 1", t0.Add(10*time.Minute+time.Second)),
+		treeRowAt("user", "u3", "a2", "tail msg 2", t0.Add(11*time.Minute)),
+		treeRowAt("text", "a3", "u3", "tail ans 2", t0.Add(11*time.Minute+time.Second)),
+	}
+	conn1 := NewClaude()
+	conn1.Feed(lines(tailRows...))
+	knownFromTail := conn1.UserIDs()
+	tRewind := t0.Add(12 * time.Minute)
+
+	// Connection 2 also loaded earlier history (including an older rewind u1old -> u1)
+	// whose user IDs are NOT in knownFromTail.
+	older := NewClaude()
+	older.Feed(lines(
+		treeRowAt("user", "u0", "", "early 0", t0.Add(time.Minute)),
+		treeRowAt("text", "a0", "u0", "early ans 0", t0.Add(time.Minute+time.Second)),
+		treeRowAt("user", "u1old", "a0", "old try", t0.Add(2*time.Minute)),
+		treeRowAt("text", "a1old", "u1old", "old ans", t0.Add(2*time.Minute+time.Second)),
+		treeRowAt("user", "u1", "a0", "retried early", t0.Add(3*time.Minute)),
+		treeRowAt("text", "a1", "u1", "early ans 1", t0.Add(3*time.Minute+time.Second)),
+	))
+	conn2 := NewClaude()
+	conn2.Feed(lines(tailRows...))
+	conn2.Prepend(older)
+
+	if conn2.RewindSettled("u2", tRewind, knownFromTail) {
+		t.Fatal("prepended earlier history (not in knownUsers) must NOT settle rewind")
+	}
+
+	// A message with timestamp <= tRewind (even appended) must not settle either.
+	conn2.Feed(lines(treeRowAt("user", "u-early-ts", "a1", "clock before rewind", tRewind)))
+	if conn2.RewindSettled("u2", tRewind, knownFromTail) {
+		t.Fatal("message not strictly after tRewind must not settle rewind")
+	}
+
+	// Only a genuinely newer user message (timestamp > tRewind) hanging before u2 settles it.
+	conn2.Feed(lines(treeRowAt("user", "u4", "a1", "new post-rewind msg", tRewind.Add(time.Second))))
+	if !conn2.RewindSettled("u2", tRewind, knownFromTail) {
+		t.Fatal("new user message after tRewind hanging before target did not settle rewind")
+	}
+}
+
+func TestClaudeUserTextOfFullLength(t *testing.T) {
+	const id = "11111111-2222-3333-4444-555555555555"
+	longText := "first line\n" + strings.Repeat("abcdefgh", 10<<10) + "\nfinal tail marker"
+	if len(longText) <= maxText {
+		t.Fatalf("test text must exceed maxText (%d), got %d", maxText, len(longText))
+	}
+	row := fmt.Sprintf(`{"type":"user","uuid":%q,"parentUuid":null,"message":{"role":"user","content":%q}}`, id, longText)
+
+	// Display parser clips to maxText (64 KiB) with Truncated=true.
+	c := NewClaude()
+	c.Feed(lines(row))
+	if len(c.entries) != 1 || !c.entries[0].Parts[0].Truncated || len(c.entries[0].Parts[0].Text) >= len(longText) {
+		t.Fatalf("expected display parser to truncate to maxText, got entries=%+v", c.entries)
+	}
+
+	// ClaudeUserTextOf returns the complete untruncated text.
+	got, ok := ClaudeUserTextOf([]byte(row), id)
+	if !ok || got != longText {
+		t.Fatalf("ClaudeUserTextOf ok=%v len=%d want %d", ok, len(got), len(longText))
+	}
+
+	// Multi-block array content with an image strips [Image #1] and preserves full text.
+	blockRow := fmt.Sprintf(`{"type":"user","uuid":%q,"parentUuid":null,"message":{"role":"user","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"AAAA"}},{"type":"text","text":%q}]}}`, id, "[Image #1] "+longText)
+	gotBlock, ok := ClaudeUserTextOf([]byte(blockRow), id)
+	if !ok || gotBlock != longText {
+		t.Fatalf("block ClaudeUserTextOf ok=%v len=%d want %d", ok, len(gotBlock), len(longText))
+	}
+
+	// Non-matching UUID, meta, and tool_result rows must be rejected.
+	if _, ok := ClaudeUserTextOf([]byte(row), "99999999-2222-3333-4444-555555555555"); ok {
+		t.Fatal("wrong uuid matched")
+	}
+	toolRow := fmt.Sprintf(`{"type":"user","uuid":%q,"parentUuid":"a1","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"ok"}]}}`, id)
+	if _, ok := ClaudeUserTextOf([]byte(toolRow), id); ok {
+		t.Fatal("tool_result row matched as user text")
 	}
 }

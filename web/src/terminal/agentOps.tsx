@@ -307,6 +307,8 @@ const REWIND_ERR_KEYS: Record<string, I18nKey> = {
   input_not_empty: 'rewind.err.input_not_empty',
   ambiguous_message: 'rewind.err.ambiguous_message',
   message_not_found: 'rewind.err.message_not_found',
+  message_too_long: 'rewind.err.message_too_long',
+  message_text_unavailable: 'rewind.err.message_text_unavailable',
   not_ready: 'rewind.notReady',
   picker_not_opened: 'rewind.err.picker_not_opened',
   target_mismatch: 'rewind.err.target_mismatch',

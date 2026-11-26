@@ -17,6 +17,8 @@ import (
 // ▔ divider line (and rejects if a normal prompt box follows it), so prose in
 // the conversation transcript can never spoof a picker or confirm screen.
 
+const rewindPanelFooter = "Enter to continue · Esc to cancel"
+
 var (
 	rewindOptLineRe  = regexp.MustCompile(`^\s*(❯)?\s*(\d+)\.\s+(.+?)\s*$`)
 	rewindAgoOnlyRe  = regexp.MustCompile(`^\((?:just now|\d+[smhd]\s+ago|[^()]*\bago)\)$`)
@@ -90,7 +92,7 @@ func parseRewindPicker(screen string) (rewindPicker, bool) {
 		if t == "Rewind" {
 			hasTitle, startIdx = true, i+1
 		}
-		if strings.Contains(t, "Restore the code and/or conversation") || strings.Contains(t, "Enter to continue") {
+		if strings.Contains(t, "Restore the code and/or conversation") || t == rewindPanelFooter {
 			hasHint = true
 		}
 	}
@@ -103,7 +105,7 @@ func parseRewindPicker(screen string) (rewindPicker, bool) {
 		if t == "" || strings.HasPrefix(t, "Restore the code and/or conversation") {
 			continue
 		}
-		if strings.Contains(t, "Enter to continue") || strings.Contains(t, "Esc to cancel") {
+		if t == rewindPanelFooter {
 			break
 		}
 		if strings.HasPrefix(t, "❯") {
@@ -166,7 +168,7 @@ func parseRewindConfirm(screen string) (rewindConfirm, bool) {
 		if t == "" {
 			continue
 		}
-		if strings.Contains(t, "Enter to continue") || strings.Contains(t, "Esc to cancel") {
+		if t == rewindPanelFooter {
 			break
 		}
 		if m := rewindOptLineRe.FindStringSubmatch(raw); m != nil {
@@ -283,20 +285,33 @@ type claudeRewindPlan struct {
 	WithdrawnSnippets []string
 }
 
-func entryUserText(e convo.Entry) string {
+func entryUserText(e convo.Entry) (text string, truncated bool) {
 	var parts []string
 	for _, p := range e.Parts {
 		if p.Kind == convo.KindText && p.Text != "" {
 			parts = append(parts, p.Text)
+			if p.Truncated {
+				truncated = true
+			}
 		}
 	}
-	return strings.Join(parts, "\n")
+	return strings.Join(parts, "\n"), truncated
 }
 
-func buildClaudeRewindPlan(entries []convo.Entry, targetID string) (claudeRewindPlan, *rewindError) {
+func hasActiveRewindTarget(entries []convo.Entry, targetID string) bool {
+	for _, e := range entries {
+		if e.Role == convo.RoleUser && !e.Gone && !e.Mid && e.ID != "" && e.ID == targetID {
+			return true
+		}
+	}
+	return false
+}
+
+func buildClaudeRewindPlan(entries []convo.Entry, targetID, fullText string) (claudeRewindPlan, *rewindError) {
 	type activeUser struct {
 		idx         int
 		text, first string
+		truncated   bool
 	}
 	var users []activeUser
 	targetIdx := -1
@@ -304,16 +319,31 @@ func buildClaudeRewindPlan(entries []convo.Entry, targetID string) (claudeRewind
 		if e.Role != convo.RoleUser || e.Gone || e.Mid || e.ID == "" {
 			continue
 		}
-		txt := entryUserText(e)
+		txt, trunc := entryUserText(e)
 		if e.ID == targetID {
 			targetIdx = len(users)
 		}
-		users = append(users, activeUser{idx: i, text: txt, first: oneSpaced(firstNonEmptyLine(txt))})
+		users = append(users, activeUser{idx: i, text: txt, first: oneSpaced(firstNonEmptyLine(txt)), truncated: trunc})
 	}
 	if targetIdx < 0 {
 		return claudeRewindPlan{}, rwErr(http.StatusConflict, "message_not_found", "that message is no longer in the active conversation")
 	}
 	target := users[targetIdx]
+	if fullText != "" {
+		if len(fullText) > maxSendText {
+			return claudeRewindPlan{}, rwErr(http.StatusConflict, "message_too_long", "message exceeds the 100 KiB composer limit and cannot be restored completely")
+		}
+		target.text = fullText
+		target.first = oneSpaced(firstNonEmptyLine(fullText))
+		target.truncated = false
+	} else {
+		if target.truncated {
+			return claudeRewindPlan{}, rwErr(http.StatusConflict, "message_text_unavailable", "could not read the full original text of this message from the session log")
+		}
+		if len(target.text) > maxSendText {
+			return claudeRewindPlan{}, rwErr(http.StatusConflict, "message_too_long", "message exceeds the 100 KiB composer limit and cannot be restored completely")
+		}
+	}
 	if target.first == "" {
 		return claudeRewindPlan{}, rwErr(http.StatusConflict, "not_ready", "cannot match an empty message in the rewind list")
 	}
@@ -373,6 +403,8 @@ func buildClaudeRewindPlan(entries []convo.Entry, targetID string) (claudeRewind
 type claudeRewindPane interface {
 	verify(ctx context.Context) error
 	press(ctx context.Context, keys ...string) error
+	commitEnter(ctx context.Context, targetText string) error
+	waitInFlight(ctx context.Context) error
 	screen(ctx context.Context) (string, error)
 	colorScreen(ctx context.Context) (string, error)
 }
@@ -433,16 +465,21 @@ func claudeRewind(ctx context.Context, pane claudeRewindPane, plan claudeRewindP
 		}
 	}
 
-	// Phase 1 cleanup: independent bounded context; presses Esc ONLY while a
-	// rewind panel is visibly open and NEVER after identity change or commit.
+	// Phase 1 cleanup: independent bounded context; waits for all in-flight
+	// remote commands to finish first, then presses Esc ONLY while a rewind
+	// panel is visibly open and NEVER after identity change or commit.
 	committed := false
 	cleanup := func(cause error) (claudeRewindResult, *rewindError) {
 		re := asRewindErr(cause)
 		if committed || isIdentityErr(re) {
 			return claudeRewindResult{}, re
 		}
-		cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 8*time.Second)
 		defer cancel()
+		if pane.waitInFlight(cctx) != nil {
+			return claudeRewindResult{}, re
+		}
+		checkedAfterCancel := false
 		for range 2 {
 			scr, serr := pane.screen(cctx)
 			if serr != nil {
@@ -450,7 +487,22 @@ func claudeRewind(ctx context.Context, pane claudeRewindPane, plan claudeRewindP
 			}
 			_, isPk := parseRewindPicker(scr)
 			_, isCf := parseRewindConfirm(scr)
-			if (!isPk && !isCf) || pane.press(cctx, "esc") != nil {
+			if !isPk && !isCf {
+				if !checkedAfterCancel && ctx.Err() != nil {
+					checkedAfterCancel = true
+					sleepCtx(cctx, claudeRewindStep)
+					scr, serr = pane.screen(cctx)
+					if serr != nil {
+						break
+					}
+					_, isPk = parseRewindPicker(scr)
+					_, isCf = parseRewindConfirm(scr)
+				}
+				if !isPk && !isCf {
+					break
+				}
+			}
+			if pane.press(cctx, "esc") != nil {
 				break
 			}
 			sleepCtx(cctx, claudeRewindStep)
@@ -561,11 +613,17 @@ func claudeRewind(ctx context.Context, pane claudeRewindPane, plan claudeRewindP
 		return cleanup(rwErr(http.StatusConflict, "confirm_mismatch", "confirmation screen did not match Restore conversation and target"))
 	}
 
-	// Phase 2: COMMIT — final Enter issued. NEVER press Esc from here on.
-	committed = true
-	if enterErr := pane.press(ctx, "enter"); isIdentityErr(enterErr) {
-		return claudeRewindResult{}, asRewindErr(enterErr)
+	// Phase 2: COMMIT — atomic remote verify+Enter. NEVER press Esc once Enter may have been sent.
+	enterErr := pane.commitEnter(ctx, plan.TargetText)
+	if enterErr != nil {
+		if isIdentityErr(enterErr) {
+			return claudeRewindResult{}, asRewindErr(enterErr)
+		}
+		if re := asRewindErr(enterErr); re.code == "confirm_mismatch" {
+			return cleanup(re)
+		}
 	}
+	committed = true
 	vctx, vcancel := context.WithTimeout(context.WithoutCancel(ctx), claudeRewindPostWait+2*time.Second)
 	defer vcancel()
 	var postScr, postBox string
