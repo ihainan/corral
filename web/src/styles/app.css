@@ -1130,6 +1130,16 @@ details.adv > .form { margin-top: 16px; }
   border: 0; background: none; color: var(--fg); text-align: left; cursor: pointer; border-radius: var(--r); font-size: var(--fs-ui); line-height: var(--lh-ui);
 }
 .files-icon { display: flex; color: var(--fg-3); flex: none; }
+.files-lead { display: flex; align-items: center; gap: 2px; flex: none; }
+/* (A tree, as VS Code's explorer: a level in for each folder opened, its chevron turned.) */
+.files-row { --depth: 0; }
+.files-row > .files-entry, .files-tree-note { padding-left: calc(4px + var(--depth) * 16px); }
+.files-twisty { display: flex; width: 16px; justify-content: center; color: var(--fg-3); transition: transform 0.12s; }
+.files-twisty.is-open { transform: rotate(90deg); }
+.files-tree-note { min-height: 32px; padding-right: 12px; padding-left: calc(4px + var(--depth) * 16px + 18px); color: var(--fg-3); font-size: var(--fs-note); line-height: var(--lh-note); gap: 6px; flex-wrap: wrap; }
+.files-tree-note:hover { background: none; }
+.files-tree-error { color: var(--danger); overflow-wrap: anywhere; }
+@media (prefers-reduced-motion: reduce) { .files-twisty { transition: none; } }
 .file-type-icon { display: block; flex: none; user-select: none; }
 .files-icon.dir { color: var(--fg-3); } /* (Not a colour of its own: its shape says folder — ux1101 T37.) */
 .files-name { flex: 1; min-width: 0; display: flex; align-items: center; gap: 6px; }
@@ -1157,7 +1167,7 @@ details.adv > .form { margin-top: 16px; }
   .files-tools { padding: 2px 10px 8px; }
   .files-filter { padding: 0 16px 10px; }
   .files-entry { display: grid; grid-template-columns: auto minmax(0, 1fr); column-gap: 12px; row-gap: 1px; }
-  .files-icon { grid-row: span 2; }
+  .files-lead { grid-row: span 2; }
   .files-meta { gap: 10px; }
   .files-meta > span, .files-meta > span:last-child { min-width: 0; text-align: left; }
   .files-tools { padding-left: 10px; padding-right: 10px; }

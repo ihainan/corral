@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState, type FormEvent } from 'react'
 import { useEffectOnChange, useWhenGone } from '../shown'
-import { ArrowUp, Check, Clock, Copy, Download, Eye, FileQuestion, Folder, FolderPlus, House, Image as ImageIcon, LocateFixed, MoreHorizontal, Pencil, PencilLine, RotateCw, Search, SquareTerminal, Trash2, Upload, X } from 'lucide-react'
+import { ArrowUp, Check, ChevronRight, Clock, Copy, Download, Eye, FileQuestion, Folder, FolderPlus, House, Image as ImageIcon, LocateFixed, MoreHorizontal, Pencil, PencilLine, RotateCw, Search, SquareTerminal, Trash2, Upload, X } from 'lucide-react'
 import { FileTypeIcon } from './fileIcons'
 import { api, ApiError, errorText, postFile, type FileEntry, type FileListing } from '../api'
 import { getLang, t } from '../i18n'
@@ -18,6 +18,7 @@ type Props = {
   onClose: () => void
 }
 
+type Kid = { entries?: FileEntry[]; truncated?: boolean; error?: string; loading: boolean }
 type Upload = { key: number; name: string; progress: number; error?: string; abort: AbortController }
 
 const HIDDEN_KEY = 'corral.files.hidden'
@@ -126,6 +127,13 @@ function FilesPanel({ sessionId, start, reveal, onPath, onInsert, onClose, docke
   uploadsRef.current = uploads
   const pendingAsk = useRef<((ok: boolean) => void) | null>(null)
   // The file asked to be shown: marked while its folder is the one listed.
+  // The folders opened in place under the one listed, as a tree (VS Code's
+  // explorer): each by its full path, its listing fetched when opened.
+  // Cleared on going to another folder; fetched again when it is reloaded.
+  const [opened, setOpened] = useState<Record<string, Kid>>({})
+  const openedRef = useRef(opened)
+  openedRef.current = opened
+  const kidSeq = useRef<Record<string, number>>({})
   const marked = reveal ? { dir: cleanPath(parent(reveal)), name: reveal.slice(reveal.lastIndexOf('/') + 1) } : null
   const markedSaid = useRef(false)
   const kept = useWhenGone()
@@ -157,7 +165,11 @@ function FilesPanel({ sessionId, start, reveal, onPath, onInsert, onClose, docke
       want.current = l.path
       setListing(l)
       setListingN(n)
-      if (l.path !== listedPath.current) setFilterQ('')
+      if (l.path !== listedPath.current) {
+        setFilterQ('')
+        setOpened({})
+        kidSeq.current = {}
+      } else Object.keys(openedRef.current).forEach((d) => void fetchKid(d))
       listedPath.current = l.path
       setPath(l.path)
       onPath(l.path)
@@ -181,10 +193,35 @@ function FilesPanel({ sessionId, start, reveal, onPath, onInsert, onClose, docke
   }
   const reload = () => path !== null && load(path)
 
+  // fetchKid lists a folder opened in the tree (only the latest ask of each is shown).
+  const fetchKid = async (dir: string) => {
+    const n = (kidSeq.current[dir] ?? 0) + 1
+    kidSeq.current[dir] = n
+    const put = (k: Kid) => setOpened((o) => (o[dir] ? { ...o, [dir]: k } : o)) // (closed meanwhile: stays closed)
+    put({ ...openedRef.current[dir], loading: true })
+    try {
+      const l = await api<FileListing>('GET', base + '?path=' + encodeURIComponent(dir), undefined, { timeoutMs: 30000 })
+      if (alive.current && kidSeq.current[dir] === n) put({ entries: l.entries, truncated: l.truncated, loading: false })
+    } catch (e) {
+      if (alive.current && kidSeq.current[dir] === n) put({ error: errorText(e), loading: false })
+    }
+  }
+  // (Closed: the folders opened under it close with it.)
+  const under = (key: string, dir: string) => key === dir || key.startsWith(dir === '/' ? '/' : dir + '/')
+  const closeKids = (dir: string) =>
+    setOpened((o) => Object.fromEntries(Object.entries(o).filter(([k]) => !under(k, dir))))
+  const toggleKid = (dir: string) => {
+    if (openedRef.current[dir]) return closeKids(dir)
+    setOpened((o) => ({ ...o, [dir]: { loading: true } }))
+    openedRef.current = { ...openedRef.current, [dir]: { loading: true } }
+    void fetchKid(dir)
+  }
+
   // refresh shows a change made in dir, if the panel is (still) going there:
   // at once, or after the navigation under way.
   const refresh = (dir: string) => {
     if (!alive.current) return
+    if (openedRef.current[dir]) void fetchKid(dir)
     // Where the navigation under way goes is not known yet: refresh after it.
     if (want.current === null) refreshAfter.current = true
     if (want.current !== dir) return
@@ -280,10 +317,7 @@ function FilesPanel({ sessionId, start, reveal, onPath, onInsert, onClose, docke
   }
 
   const saveHostFile = useDownload()
-  const download = (e: FileEntry) => {
-    if (path === null) return
-    saveHostFile(sessionId, join(path, e.name))
-  }
+  const download = (dir: string, e: FileEntry) => saveHostFile(sessionId, join(dir, e.name))
 
   // Uploads wait in one queue and go one after another, each into the folder
   // shown when it was chosen; only one question is asked at a time.
@@ -363,17 +397,15 @@ function FilesPanel({ sessionId, start, reveal, onPath, onInsert, onClose, docke
       refresh(dir)
     })
   }
-  const rename = (e: FileEntry) => {
-    if (path === null) return
-    const dir = path
+  // (dir: the folder it is in — the one listed, or one opened under it.)
+  const rename = (dir: string, e: FileEntry) => {
     nameDialog(t('files.rename'), e.name, t('files.rename'), async (name) => {
       await api('POST', base + '/rename', { path: join(dir, e.name), name })
+      closeKids(join(dir, e.name))
       refresh(dir)
     })
   }
-  const remove = (e: FileEntry) => {
-    if (path === null) return
-    const dir = path
+  const remove = (dir: string, e: FileEntry) => {
     showDialog((close) =>
       <Confirm
         title={t('files.deleteTitle')}
@@ -383,20 +415,21 @@ function FilesPanel({ sessionId, start, reveal, onPath, onInsert, onClose, docke
         onClose={close}
         onConfirm={async () => {
           await api('POST', base + '/delete', { path: join(dir, e.name) }, { timeoutMs: 150000 })
+          closeKids(join(dir, e.name))
           refresh(dir)
         }}
       />,
     )
   }
 
-  const items = (e: FileEntry): MenuItem[] => {
-    const full = path === null ? '' : join(path, e.name)
+  const items = (dir: string, e: FileEntry): MenuItem[] => {
+    const full = join(dir, e.name)
     return [
       e.type === 'file' && previewable(e.name) ? { label: t(IMAGE_EXT.test(e.name) ? 'convo.path.view' : 'preview.item'), icon: IMAGE_EXT.test(e.name) ? <ImageIcon size={16} /> : <Eye size={16} />, onSelect: () => look(full) } : null,
       e.type === 'dir'
         ? { label: t('files.open'), icon: <Folder size={16} />, onSelect: () => void load(full) }
         : e.type === 'file'
-          ? { label: t('files.download'), icon: <Download size={16} />, onSelect: () => download(e) }
+          ? { label: t('files.download'), icon: <Download size={16} />, onSelect: () => download(dir, e) }
           : null,
       { label: t('files.insertPath'), icon: <SquareTerminal size={16} />, onSelect: () => leave(() => onInsert(full)) },
       {
@@ -406,8 +439,8 @@ function FilesPanel({ sessionId, start, reveal, onPath, onInsert, onClose, docke
           if (await copyText(full)) toast(t('common.copied'))
         },
       },
-      { label: t('files.rename'), icon: <Pencil size={16} />, separator: true, onSelect: () => rename(e) },
-      { label: t('common.delete'), icon: <Trash2 size={16} />, danger: true, onSelect: () => remove(e) },
+      { label: t('files.rename'), icon: <Pencil size={16} />, separator: true, onSelect: () => rename(dir, e) },
+      { label: t('common.delete'), icon: <Trash2 size={16} />, danger: true, onSelect: () => remove(dir, e) },
     ].filter(Boolean) as MenuItem[]
   }
 
@@ -421,6 +454,55 @@ function FilesPanel({ sessionId, start, reveal, onPath, onInsert, onClose, docke
   }
 
   const crumbs = path === null ? [] : path.split('/').filter(Boolean)
+
+  // rows draws an entry of dir, and under an opened folder what is in it, a level in.
+  const shownKids = (list: FileEntry[]) => sortEntries(list.filter((e) => hidden || !e.name.startsWith('.')), byTime)
+  const note = (key: string, depth: number, body: React.ReactNode) => (
+    <li key={key} className="files-row files-tree-note" style={{ '--depth': depth } as React.CSSProperties}>{body}</li>
+  )
+  const rows = (dir: string, e: FileEntry, depth: number): React.ReactNode[] => {
+    const full = join(dir, e.name)
+    const kid = e.type === 'dir' ? opened[full] : undefined
+    const out: React.ReactNode[] = [
+      <li
+        key={full}
+        className={'files-row' + (depth === 0 && markHere && e.name === marked!.name ? ' is-marked' : '')}
+        data-name={depth === 0 ? e.name : undefined}
+        style={{ '--depth': depth } as React.CSSProperties}
+      >
+        <EntryButton
+          entry={e}
+          expanded={e.type === 'dir' ? !!kid : undefined}
+          items={() => items(dir, e)}
+          onOpen={() => toggleKid(full)}
+          onEnter={() => void load(full)}
+          onLook={e.type === 'file' && previewable(e.name) ? () => look(full) : undefined}
+        />
+        <Menu
+          label={e.name}
+          heading={e.name}
+          items={() => items(dir, e)}
+          button={(open, toggle) => (
+            <button className="icon-btn files-more" aria-expanded={open} aria-label={t('files.actionsFor', { name: e.name })} onClick={toggle}>
+              <MoreHorizontal size={18} />
+            </button>
+          )}
+        />
+      </li>,
+    ]
+    if (!kid) return out
+    const inside = kid.entries ? shownKids(kid.entries) : []
+    for (const c of inside) out.push(...rows(full, c, depth + 1))
+    if (kid.error) {
+      out.push(note(full + '/:error', depth + 1, <>
+        <span className="files-tree-error">{kid.error}</span>{' '}
+        <button className="link-btn" onClick={() => void fetchKid(full)}>{t('common.retry')}</button>
+      </>))
+    } else if (!kid.entries) out.push(note(full + '/:loading', depth + 1, t('common.loading')))
+    else if (inside.length === 0) out.push(note(full + '/:empty', depth + 1, t('files.emptyShort')))
+    if (kid.truncated) out.push(note(full + '/:cut', depth + 1, t('files.truncated', { n: kid.entries!.length })))
+    return out
+  }
 
   // Drag and drop is handled for the whole panel, its backdrop and the
   // layers it opens (React passes their events up through the portals), so
@@ -619,21 +701,7 @@ function FilesPanel({ sessionId, start, reveal, onPath, onInsert, onClose, docke
         ) : (
           <>
             <ul className={'files-list' + (loading ? ' loading' : '')} ref={listRef}>
-              {entries.map((e) => (
-                <li key={e.name} className={'files-row' + (markHere && e.name === marked!.name ? ' is-marked' : '')} data-name={e.name}>
-                  <EntryButton entry={e} items={() => items(e)} onOpen={() => void load(join(path!, e.name))} onLook={e.type === 'file' && previewable(e.name) ? () => look(join(path!, e.name)) : undefined} />
-                  <Menu
-                    label={e.name}
-                    heading={e.name}
-                    items={() => items(e)}
-                    button={(open, toggle) => (
-                      <button className="icon-btn files-more" aria-expanded={open} aria-label={t('files.actionsFor', { name: e.name })} onClick={toggle}>
-                        <MoreHorizontal size={18} />
-                      </button>
-                    )}
-                  />
-                </li>
-              ))}
+              {entries.flatMap((e) => rows(path!, e, 0))}
             </ul>
             {entries.length === 0 && (
               <p className="hint files-note">
@@ -686,12 +754,17 @@ function DockFrame({ children }: { title: string; onClose: () => void; wide?: bo
 
 // A folder opens; a file that can be looked at is (onLook); any other shows
 // what can be done with it (as its ⋯ does for every one).
-function EntryButton({ entry: e, items, onOpen, onLook }: { entry: FileEntry; items: () => MenuItem[]; onOpen: () => void; onLook?: () => void }) {
+// A folder opens in place (onOpen: shown or hidden, under it), gone into with
+// a double click or its menu's Open (onEnter); ← and → close and open it.
+function EntryButton({ entry: e, expanded, items, onOpen, onEnter, onLook }: { entry: FileEntry; expanded?: boolean; items: () => MenuItem[]; onOpen: () => void; onEnter: () => void; onLook?: () => void }) {
   // (Of its kind, by its name, as VS Code draws it; one of no known kind — a link to nothing — as before.)
   const icon = e.type === 'dir' || e.type === 'file' ? <FileTypeIcon name={e.name} dir={e.type === 'dir'} /> : <FileQuestion size={18} />
   const body = (
     <>
-      <span className={'files-icon' + (e.type === 'dir' ? ' dir' : '')} aria-hidden="true">{icon}</span>
+      <span className="files-lead" aria-hidden="true">
+        <span className={'files-twisty' + (expanded ? ' is-open' : '')}>{e.type === 'dir' && <ChevronRight size={14} />}</span>
+        <span className={'files-icon' + (e.type === 'dir' ? ' dir' : '')}>{icon}</span>
+      </span>
       <span className="files-name">
         <span className="files-label">{e.name}</span>
         {e.link && <span className="files-link" aria-label={t('files.link')} title={t('files.link')}>↗</span>}
@@ -703,7 +776,22 @@ function EntryButton({ entry: e, items, onOpen, onLook }: { entry: FileEntry; it
     </>
   )
   if (e.type === 'dir') {
-    return <button className="files-entry" onClick={onOpen}>{body}</button>
+    return (
+      <button
+        className="files-entry"
+        aria-expanded={expanded}
+        onClick={onOpen}
+        onDoubleClick={onEnter}
+        onKeyDown={(ev) => {
+          if ((ev.key === 'ArrowRight' && !expanded) || (ev.key === 'ArrowLeft' && expanded)) {
+            ev.preventDefault()
+            onOpen()
+          }
+        }}
+      >
+        {body}
+      </button>
+    )
   }
   if (onLook) return <button className="files-entry" onClick={onLook}>{body}</button>
   return (
