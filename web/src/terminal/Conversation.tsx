@@ -7601,12 +7601,24 @@ function Thinking({ text, live }: { text: string; live?: boolean }) {
             )}
           </div>
         )}
+        {open && isSummary && translated && (
+          <div className="convo-thinking-bar">
+            <button
+              type="button"
+              className="convo-thinking-toggle"
+              aria-pressed={showOrig}
+              onClick={() => setShowOrig((v) => !v)}
+            >
+              {t(showOrig ? 'convo.translate.hideOriginal' : 'convo.translate.showOriginal')}
+            </button>
+          </div>
+        )}
       </div>
       {open && (
         <div className="convo-thinking">
           {isSummary ? (
             <>
-              <Markdown text={text} />
+              {(!translated || showOrig) && <Markdown text={text} />}
               {(translated || tr.status === 'loading' || tr.status === 'error') && (
                 <div className="convo-thinking-summary">
                   <div className="convo-thinking-summary-head">

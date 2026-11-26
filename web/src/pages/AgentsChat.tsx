@@ -3368,6 +3368,20 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
       onSelect: () => setRenaming({ sessionId: e.s.id, ws: { id: r.wsId, label: r.ws }, tab: r.a.tab ? { id: r.a.tab, label: r.a.tab_label ?? '' } : undefined, pane: { id: r.a.pane_id, label: r.a.label ?? '' } }),
     }
   }
+  const copySessionItem = (e: Entry): MenuItem | null => {
+    const shown = e.key === cur.key && e.s.id === cur.s.id
+    const bound = shown && convo.bind && (!e.pane || convo.bind.pane === e.pane) ? convo.bind.session : ''
+    const sess = bound && bound !== NO_SESSION ? bound : (e.row?.a.session || '')
+    if (!sess || sess === NO_SESSION) return null
+    return {
+      label: t('convo.copySession'),
+      icon: <Copy size={16} />,
+      onSelect: async () => {
+        const ok = await copyText(sess).catch(() => false)
+        toast(ok ? t('convo.sessionCopied', { id: sess.slice(0, 8) }) : t('convo.sessionCopyFailed'), !ok)
+      },
+    }
+  }
   // Pinning one, or letting it go.
   const pinItem = (key: string): MenuItem => {
     const pinnedNow = pins.includes(key)
@@ -3514,6 +3528,7 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
     forkItem(e),
     newSubagentItem(e),
     renameItem(e),
+    copySessionItem(e),
     linkItem(e),
     unlinkItem(e),
     closable(e) ? { label: t('agents.close'), icon: <Power size={16} />, danger: true, separator: true, onSelect: () => setClosing(e) } : null,
@@ -3601,6 +3616,7 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
     ((f) => f && { ...f, separator: false })(forkItem(cur)),
     newSubagentItem(cur),
     renameItem(cur),
+    copySessionItem(cur),
     linkItem(cur),
     unlinkItem(cur),
     ((on, sum) => ({
@@ -3641,11 +3657,6 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
           })),
         }
       : null,
-    // (Its session's id, as the agent's own resume takes it: claude --resume, codex resume.)
-    ((sess) =>
-      sess && sess !== NO_SESSION
-        ? { label: t('convo.copySession'), icon: <Copy size={16} />, ...(bound && opsOf.length ? {} : { separator: true, group: t('menu.group.convo') }), onSelect: async () => void ((await copyText(sess)) && toast(t('convo.sessionCopied', { id: sess.slice(0, 8) }))) }
-        : null)(convo.bind?.session),
     workingChildEntries.length >= 2
       ? {
           label: t('convo.fleet.stopAll', { n: workingChildEntries.length }),

@@ -129,6 +129,12 @@ export function PaneTerminal({
     fit.fit()
 
     term.attachCustomKeyEventHandler((e) => {
+      if (e.type === 'keydown' && e.key === 'Enter' && e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey) {
+        e.preventDefault()
+        e.stopPropagation()
+        sendBytesRef.current('\x1b\r')
+        return false
+      }
       if (e.type === 'keydown' && liveRef.current && e.key === 'F6' && !e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey) {
         e.preventDefault()
         e.stopPropagation()
