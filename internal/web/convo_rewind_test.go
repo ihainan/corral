@@ -96,10 +96,11 @@ type fakeClaudeRewindPane struct {
 	keys          []string
 	verifyErr     error
 	inFlight      *inFlightCounter
-	onPress       func(ctx context.Context, p *fakeClaudeRewindPane, keys []string) error
-	onPickerEnter func(ctx context.Context, p *fakeClaudeRewindPane, targetText string) error
-	onCommitEnter func(ctx context.Context, p *fakeClaudeRewindPane, targetText string) (claudeRewindCommit, error)
-	onScreen      func(ctx context.Context, p *fakeClaudeRewindPane) (string, error)
+	onPress          func(ctx context.Context, p *fakeClaudeRewindPane, keys []string) error
+	onPickerEnter    func(ctx context.Context, p *fakeClaudeRewindPane, targetText string) error
+	onCommitEnter    func(ctx context.Context, p *fakeClaudeRewindPane, targetText string) (claudeRewindCommit, error)
+	onCommitEnterOpt func(ctx context.Context, p *fakeClaudeRewindPane, targetText string, restoreCode bool, expectedFiles []string) (claudeRewindCommit, error)
+	onScreen         func(ctx context.Context, p *fakeClaudeRewindPane) (string, error)
 	screenReads   int
 	pressCounter  int
 }
@@ -140,10 +141,14 @@ func (f *fakeClaudeRewindPane) pickerEnter(ctx context.Context, targetText strin
 	return f.press(ctx, "enter")
 }
 
-func (f *fakeClaudeRewindPane) commitEnter(ctx context.Context, targetText string) (claudeRewindCommit, error) {
+func (f *fakeClaudeRewindPane) commitEnter(ctx context.Context, targetText string, restoreCode bool, expectedFiles []string) (claudeRewindCommit, error) {
 	f.mu.Lock()
+	fnOpt := f.onCommitEnterOpt
 	fn := f.onCommitEnter
 	f.mu.Unlock()
+	if fnOpt != nil {
+		return fnOpt(ctx, f, targetText, restoreCode, expectedFiles)
+	}
 	if fn != nil {
 		return fn(ctx, f, targetText)
 	}
@@ -2643,4 +2648,956 @@ func TestClaudeRewindClosePanelFallbackAndStillOpenError(t *testing.T) {
 			t.Fatalf("expected exactly 2 Esc attempts before returning panel_not_closed, got %d (keys=%v)", escCount, fp.recordedKeys())
 		}
 	})
+}
+
+// ---------------------------------------------------------------------------
+// Restore code + conversation tests (modeled on real Claude Code 2.1.330 screens)
+// ---------------------------------------------------------------------------
+
+// Real Claude Code 2.1.330 screen fixtures adapted from captured screens
+// (single-file and multi-file code restore confirmation panels, dynamic
+// option descriptions, and post-rewind screen).
+const (
+	realCCAboveThreeTurns = `● Write(a.txt)
+  ⎿  Wrote 1 line to a.txt
+      1 v1
+
+● Reply two.
+
+✻ Churned for 0s · done 2:28 PM
+
+❯ third message
+
+● Write(a.txt)
+  ⎿  Added 2 lines, removed 1 line
+      1 -v1
+      1 +v2
+      2 +more
+
+● Reply three.
+
+✻ Worked for 0s · done 2:28 PM`
+
+	realCCAboveTwoFiles = `✻ Churned for 0s · done 2:30 PM
+
+❯ third message
+
+● Write(a.txt)
+  ⎿  Added 2 lines, removed 1 line
+      1 -v1
+      1 +v2
+      2 +more
+
+● Write(sub/b.txt)
+  ⎿  Wrote 3 lines to sub/b.txt
+      1 b1
+      2 b2
+      3 b3
+
+● Reply three.
+
+✻ Cooked for 0s · done 2:30 PM`
+
+	realCCScreenPostRewind = ` ▐▛███▛█   Claude Code v2.1.330
+▝▜██████▀  Opus 5.5 · API Usage Billing
+ ▝▝   ▝▝   ~/rwc1153452
+
+❯ first message
+
+● Reply one.
+
+✻ Crunched for 0s · done 2:28 PM
+
+❯ second message
+
+● Write(a.txt)
+  ⎿  Wrote 1 line to a.txt
+      1 v1
+
+● Reply two.
+
+✻ Churned for 0s · done 2:28 PM
+
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ third message
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ auto mode on (shift+tab to cycle)
+`
+
+	realCCScreenPostClear = ` ▐▛███▛█   Claude Code v2.1.330
+▝▜██████▀  Opus 5.5 · API Usage Billing
+ ▝▝   ▝▝   ~/rwc1153452
+
+❯ first message
+
+● Reply one.
+
+✻ Crunched for 0s · done 2:28 PM
+
+❯ second message
+
+● Write(a.txt)
+  ⎿  Wrote 1 line to a.txt
+      1 v1
+
+● Reply two.
+
+✻ Churned for 0s · done 2:28 PM
+
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ auto mode on (shift+tab to cycle)
+`
+)
+
+func realCCPickerScreen(above string, thirdSummary string, selected int) string {
+	type row struct{ msg, summary string }
+	rows := []row{
+		{"first message", "No code changes"},
+		{"second message", "a.txt +1"},
+		{"third message", thirdSummary},
+		{"(current)", ""},
+	}
+	var b strings.Builder
+	b.WriteString(above)
+	b.WriteString("\n" + ccOverline + "\n")
+	b.WriteString("  Rewind\n\n")
+	b.WriteString("  Restore the code and/or conversation to the point before…\n\n")
+	for i, r := range rows {
+		prefix := "    "
+		if i == selected {
+			prefix = "  ❯ "
+		}
+		b.WriteString(prefix + r.msg + "\n")
+		if r.summary != "" {
+			b.WriteString("    " + r.summary + "\n")
+		}
+		b.WriteString("\n")
+	}
+	b.WriteString("  Enter to continue · Esc to cancel\n")
+	return b.String()
+}
+
+func realCCConfirmScreen(above, quoted, codeDesc string, hasCodeOpts bool, selected int) string {
+	opts := []string{
+		"Restore conversation",
+		"Summarize from here",
+		"Summarize up to here",
+		"Never mind",
+	}
+	if hasCodeOpts {
+		opts = []string{
+			"Restore code and conversation",
+			"Restore conversation",
+			"Restore code",
+			"Summarize from here",
+			"Summarize up to here",
+			"Never mind",
+		}
+	}
+	var convLine, codeLine string
+	selLabel := ""
+	if selected >= 0 && selected < len(opts) {
+		selLabel = opts[selected]
+	}
+	switch selLabel {
+	case "Restore code and conversation":
+		convLine = "The conversation goes back to before this message."
+		codeLine = codeDesc
+	case "Restore conversation":
+		convLine = "The conversation goes back to before this message."
+		codeLine = "The code will be unchanged."
+	case "Restore code":
+		convLine = "The conversation will be unchanged."
+		codeLine = codeDesc
+	case "Summarize from here":
+		convLine = "Messages after this point will be summarized."
+	case "Summarize up to here":
+		convLine = "Earlier messages will be summarized. This message and later ones stay as they are."
+	default:
+		convLine = "The conversation will be unchanged."
+		codeLine = "The code will be unchanged."
+	}
+
+	var b strings.Builder
+	b.WriteString(above)
+	b.WriteString("\n" + ccOverline + "\n")
+	b.WriteString("  Rewind\n\n")
+	b.WriteString("  Restore to the point before you sent this message:\n\n")
+	b.WriteString("  │ " + quoted + "\n")
+	b.WriteString("  │ (5s ago)\n\n")
+	if convLine != "" {
+		b.WriteString("  " + convLine + "\n")
+	}
+	if codeLine != "" {
+		b.WriteString("  " + codeLine + "\n")
+	}
+	b.WriteString("\n")
+	for i, o := range opts {
+		prefix := "    "
+		if i == selected {
+			prefix = "  ❯ "
+		}
+		b.WriteString(prefix + strconv.Itoa(i+1) + ". " + o + "\n")
+	}
+	b.WriteString("\n  ⚠ Restored files go back whole, losing later changes by anyone. Bash changes to other files are not\n  undone.\n")
+	return b.String()
+}
+
+func newRealCCCodeRewindFake(above, thirdSummary, codeDesc string, hasCodeOpts bool) (*fakeClaudeRewindPane, claudeRewindPlan) {
+	state := "normal"
+	pickerIdx := 3 // (current)
+	optIdx := 0
+	optCount := 4
+	if hasCodeOpts {
+		optCount = 6
+	}
+	normalScreen := ccNormalScreen(above, "")
+	fp := &fakeClaudeRewindPane{curScreen: normalScreen}
+	fp.onPress = func(_ context.Context, p *fakeClaudeRewindPane, keys []string) error {
+		k := strings.Join(keys, "+")
+		switch state {
+		case "normal":
+			if k == "esc+esc" {
+				state = "picker"
+				pickerIdx = 3
+				p.curScreen = realCCPickerScreen(above, thirdSummary, pickerIdx)
+			}
+		case "picker":
+			switch k {
+			case "up":
+				if pickerIdx > 0 {
+					pickerIdx--
+				}
+				p.curScreen = realCCPickerScreen(above, thirdSummary, pickerIdx)
+			case "down":
+				if pickerIdx < 3 {
+					pickerIdx++
+				}
+				p.curScreen = realCCPickerScreen(above, thirdSummary, pickerIdx)
+			case "enter":
+				state = "confirm"
+				optIdx = 0
+				p.curScreen = realCCConfirmScreen(above, "third message", codeDesc, hasCodeOpts, optIdx)
+			case "esc":
+				state = "normal"
+				p.curScreen = normalScreen
+			}
+		case "confirm":
+			switch k {
+			case "down":
+				if optIdx < optCount-1 {
+					optIdx++
+				}
+				p.curScreen = realCCConfirmScreen(above, "third message", codeDesc, hasCodeOpts, optIdx)
+			case "up":
+				if optIdx > 0 {
+					optIdx--
+				}
+				p.curScreen = realCCConfirmScreen(above, "third message", codeDesc, hasCodeOpts, optIdx)
+			case "enter":
+				state = "rewound"
+				p.curScreen = realCCScreenPostRewind
+			case "esc":
+				state = "normal"
+				p.curScreen = normalScreen
+			}
+		case "rewound":
+			if k == "ctrl+c" {
+				p.curScreen = realCCScreenPostClear
+			}
+		}
+		return nil
+	}
+	plan := claudeRewindPlan{
+		Steps:             1,
+		TargetText:        "third message",
+		WithdrawnSnippets: []string{"third message", "Reply three."},
+	}
+	return fp, plan
+}
+
+func TestClaudeRewindRestoreCodeSuccess(t *testing.T) {
+	fastRewindTimings(t)
+	fp, plan := newRealCCCodeRewindFake(
+		realCCAboveThreeTurns,
+		"a.txt +2 -1",
+		"The code will be restored +1 -2 in a.txt.",
+		true,
+	)
+	plan.RestoreCode = true
+	plan.ExpectedFiles = []string{"a.txt"}
+
+	res, err := claudeRewind(context.Background(), fp, plan)
+	if err != nil {
+		t.Fatalf("expected success, got err: %v", err)
+	}
+	if !res.OK || !res.RestoredCode || res.Warning != "" || res.Text != "third message" {
+		t.Fatalf("unexpected result: %+v", res)
+	}
+	// Cursor is already on default option 1 ("Restore code and conversation"):
+	// must NOT press down/up before commit Enter.
+	wantKeys := []string{"esc+esc", "up", "enter", "enter", "ctrl+c"}
+	if got := fp.recordedKeys(); !slices.Equal(got, wantKeys) {
+		t.Fatalf("keys = %v, want %v", got, wantKeys)
+	}
+}
+
+func TestClaudeRewindConversationOnlyMovesToSecondOptionOnRealScreen(t *testing.T) {
+	fastRewindTimings(t)
+	fp, plan := newRealCCCodeRewindFake(
+		realCCAboveThreeTurns,
+		"a.txt +2 -1",
+		"The code will be restored +1 -2 in a.txt.",
+		true,
+	)
+	plan.RestoreCode = false
+
+	res, err := claudeRewind(context.Background(), fp, plan)
+	if err != nil {
+		t.Fatalf("expected success, got err: %v", err)
+	}
+	if !res.OK || res.RestoredCode || res.Warning != "" {
+		t.Fatalf("unexpected result: %+v", res)
+	}
+	// Must move down from option 1 to option 2 ("Restore conversation").
+	wantKeys := []string{"esc+esc", "up", "enter", "down", "enter", "ctrl+c"}
+	if got := fp.recordedKeys(); !slices.Equal(got, wantKeys) {
+		t.Fatalf("keys = %v, want %v", got, wantKeys)
+	}
+}
+
+func TestClaudeRewindRestoreCodeNoCodeChangesOption(t *testing.T) {
+	fastRewindTimings(t)
+	fp, plan := newRealCCCodeRewindFake(
+		realCCAboveThreeTurns,
+		"No code changes",
+		"The code will be unchanged.",
+		false, // 4-option confirm screen without code restore
+	)
+	plan.RestoreCode = true
+	plan.ExpectedFiles = []string{"a.txt"}
+
+	_, err := claudeRewind(context.Background(), fp, plan)
+	if err == nil || err.code != "no_code_changes" {
+		t.Fatalf("got err=%v, want no_code_changes", err)
+	}
+	keys := fp.recordedKeys()
+	enters := 0
+	for _, k := range keys {
+		if k == "enter" {
+			enters++
+		}
+	}
+	if enters != 1 {
+		t.Fatalf("must not press commit enter when no code option exists; enters=%d keys=%v", enters, keys)
+	}
+	if keys[len(keys)-1] != "esc" {
+		t.Fatalf("expected esc cleanup, keys=%v", keys)
+	}
+}
+
+func TestClaudeRewindRestoreCodeFileMismatch(t *testing.T) {
+	fastRewindTimings(t)
+	cases := []struct {
+		name     string
+		codeDesc string
+		expected []string
+	}{
+		{"different_file", "The code will be restored +1 -2 in a.txt.", []string{"b.txt"}},
+		{"extra_file_on_screen", "The code will be restored +1 -5 in a.txt and b.txt.", []string{"a.txt"}},
+		{"missing_file_on_screen", "The code will be restored +1 -2 in a.txt.", []string{"a.txt", "b.txt"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fp, plan := newRealCCCodeRewindFake(realCCAboveThreeTurns, "a.txt +2 -1", tc.codeDesc, true)
+			plan.RestoreCode = true
+			plan.ExpectedFiles = tc.expected
+
+			_, err := claudeRewind(context.Background(), fp, plan)
+			if err == nil || err.code != "code_mismatch" {
+				t.Fatalf("got err=%v, want code_mismatch", err)
+			}
+			keys := fp.recordedKeys()
+			enters := 0
+			for _, k := range keys {
+				if k == "enter" {
+					enters++
+				}
+			}
+			if enters != 1 {
+				t.Fatalf("must not press commit enter on file mismatch; enters=%d keys=%v", enters, keys)
+			}
+			if keys[len(keys)-1] != "esc" {
+				t.Fatalf("expected esc cleanup, keys=%v", keys)
+			}
+		})
+	}
+}
+
+func TestClaudeRewindRestoreCodeTwoFiles(t *testing.T) {
+	fastRewindTimings(t)
+	fp, plan := newRealCCCodeRewindFake(
+		realCCAboveTwoFiles,
+		"2 files changed +5 -1",
+		"The code will be restored +1 -5 in a.txt and b.txt.",
+		true,
+	)
+	plan.RestoreCode = true
+	// Reverse order and subdir path: must match by basename set {"a.txt", "b.txt"}.
+	plan.ExpectedFiles = []string{"sub/b.txt", "a.txt"}
+
+	res, err := claudeRewind(context.Background(), fp, plan)
+	if err != nil {
+		t.Fatalf("expected success, got err: %v", err)
+	}
+	if !res.OK || !res.RestoredCode {
+		t.Fatalf("unexpected result: %+v", res)
+	}
+	wantKeys := []string{"esc+esc", "up", "enter", "enter", "ctrl+c"}
+	if got := fp.recordedKeys(); !slices.Equal(got, wantKeys) {
+		t.Fatalf("keys = %v, want %v", got, wantKeys)
+	}
+}
+
+func TestClaudeRewindRestoreCodeOptionChangedBeforeCommit(t *testing.T) {
+	fastRewindTimings(t)
+	for _, tc := range []struct {
+		name     string
+		movedIdx int // 1 = Restore conversation, 2 = Restore code
+	}{
+		{"changed_to_conversation_only", 1},
+		{"changed_to_restore_code_only", 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fp, plan := newRealCCCodeRewindFake(
+				realCCAboveThreeTurns,
+				"a.txt +2 -1",
+				"The code will be restored +1 -2 in a.txt.",
+				true,
+			)
+			plan.RestoreCode = true
+			plan.ExpectedFiles = []string{"a.txt"}
+
+			sawConfirm := false
+			confirmReads := 0
+			fp.onScreen = func(_ context.Context, p *fakeClaudeRewindPane) (string, error) {
+				if _, ok := parseRewindConfirm(p.curScreen); ok {
+					sawConfirm = true
+				}
+				if sawConfirm {
+					confirmReads++
+					// Second confirm read is preCommitScr: someone moved the cursor!
+					if confirmReads == 2 {
+						p.curScreen = realCCConfirmScreen(
+							realCCAboveThreeTurns,
+							"third message",
+							"The code will be restored +1 -2 in a.txt.",
+							true,
+							tc.movedIdx,
+						)
+					}
+				}
+				return p.curScreen, nil
+			}
+
+			_, err := claudeRewind(context.Background(), fp, plan)
+			if err == nil || err.code != "confirm_mismatch" {
+				t.Fatalf("got err=%v, want confirm_mismatch", err)
+			}
+			keys := fp.recordedKeys()
+			enters := 0
+			for _, k := range keys {
+				if k == "enter" {
+					enters++
+				}
+			}
+			if enters != 1 {
+				t.Fatalf("must not press commit enter when option changed; enters=%d keys=%v", enters, keys)
+			}
+			if keys[len(keys)-1] != "esc" {
+				t.Fatalf("expected esc cleanup, keys=%v", keys)
+			}
+		})
+	}
+}
+
+func TestClaudeRewindRestoreCodeUnrecognizedDescLine(t *testing.T) {
+	fastRewindTimings(t)
+	badDescs := []struct {
+		name string
+		desc string
+	}{
+		{"n_files_summary", "The code will be restored +1 -5 in 3 files."},
+		{"and_more_summary", "The code will be restored +1 -5 in a.txt, b.txt and 2 other files."},
+		{"ellipsis_unicode", "The code will be restored +1 -5 in a.txt, b.txt…"},
+		{"ellipsis_ascii", "The code will be restored +1 -5 in a.txt, b.txt..."},
+		{"unchanged_line", "The code will be unchanged."},
+		{"missing_in_clause", "The code will be restored +1 -2."},
+		{"empty_desc", ""},
+	}
+	for _, tc := range badDescs {
+		t.Run(tc.name, func(t *testing.T) {
+			fp, plan := newRealCCCodeRewindFake(realCCAboveThreeTurns, "a.txt +2 -1", tc.desc, true)
+			plan.RestoreCode = true
+			plan.ExpectedFiles = []string{"a.txt"}
+
+			_, err := claudeRewind(context.Background(), fp, plan)
+			if err == nil || err.code != "code_mismatch" {
+				t.Fatalf("got err=%v, want code_mismatch", err)
+			}
+			keys := fp.recordedKeys()
+			enters := 0
+			for _, k := range keys {
+				if k == "enter" {
+					enters++
+				}
+			}
+			if enters != 1 {
+				t.Fatalf("must not press commit enter on unrecognized desc line %q; enters=%d keys=%v", tc.desc, enters, keys)
+			}
+			if keys[len(keys)-1] != "esc" {
+				t.Fatalf("expected esc cleanup, keys=%v", keys)
+			}
+		})
+	}
+}
+
+func TestClaudeRewindRestoreCodeRemoteCodeMismatchCleansUp(t *testing.T) {
+	fastRewindTimings(t)
+	fp, plan := newRealCCCodeRewindFake(
+		realCCAboveThreeTurns,
+		"a.txt +2 -1",
+		"The code will be restored +1 -2 in a.txt.",
+		true,
+	)
+	plan.RestoreCode = true
+	plan.ExpectedFiles = []string{"a.txt"}
+	fp.onCommitEnterOpt = func(_ context.Context, _ *fakeClaudeRewindPane, _ string, restoreCode bool, expectedFiles []string) (claudeRewindCommit, error) {
+		if !restoreCode || !slices.Equal(expectedFiles, []string{"a.txt"}) {
+			t.Fatalf("unexpected commitEnter args: restoreCode=%v expectedFiles=%v", restoreCode, expectedFiles)
+		}
+		// Simulate remote host-side awk exiting 37 without sending Enter.
+		return evalCommitExec(sshx.ExecResult{Ended: true, Started: true}, &sshxExitStub{37})
+	}
+
+	_, err := claudeRewind(context.Background(), fp, plan)
+	if err == nil || err.code != "code_mismatch" {
+		t.Fatalf("got err=%v, want code_mismatch", err)
+	}
+	keys := fp.recordedKeys()
+	enters := 0
+	for _, k := range keys {
+		if k == "enter" {
+			enters++
+		}
+	}
+	if enters != 1 {
+		t.Fatalf("must not press commit enter when remote script exited 37; enters=%d keys=%v", enters, keys)
+	}
+	if keys[len(keys)-1] != "esc" {
+		t.Fatalf("expected esc cleanup after remote exit 37, keys=%v", keys)
+	}
+}
+
+func TestClaudeRewindCommitScriptCodeRestoreAtomicCheck(t *testing.T) {
+	const (
+		sid   = "11111111-2222-3333-4444-555555555555"
+		pid   = int64(4242)
+		start = int64(987654)
+		sock  = "/tmp/test-herdr.sock"
+	)
+
+	for _, mode := range []string{"tmux", "herdr"} {
+		t.Run(mode, func(t *testing.T) {
+			pane := "%7"
+			if mode == "herdr" {
+				pane = "w1:p1"
+			}
+			binDir, homeDir, fakeProc, _ := setupFakeRewindHost(t, pid, start, sid, pane, sock)
+			scrFile := filepath.Join(t.TempDir(), "screen.txt")
+			keyLog := filepath.Join(t.TempDir(), "keys.log")
+
+			if mode == "tmux" {
+				stub := "#!/bin/sh\n" +
+					"case \"$1\" in\n" +
+					"  -u) shift ;;\n" +
+					"esac\n" +
+					"case \"$1\" in\n" +
+					"  display-message)\n" +
+					"    for a in \"$@\"; do last=$a; done\n" +
+					"    case \"$last\" in\n" +
+					"      *pane_pid*) echo '9001 0' ;;\n" +
+					"      *pane_tty*) echo '/dev/pts/9' ;;\n" +
+					"    esac ;;\n" +
+					"  capture-pane) cat " + sshx.QuoteShell(scrFile) + " ;;\n" +
+					"  send-keys) echo \"$*\" >> " + sshx.QuoteShell(keyLog) + " ;;\n" +
+					"esac\n"
+				if err := os.WriteFile(filepath.Join(binDir, "tmux"), []byte(stub), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				stub := "#!/bin/sh\n" +
+					"if [ \"$1\" = pane ] && [ \"$2\" = read ]; then\n" +
+					"  cat " + sshx.QuoteShell(scrFile) + "\n" +
+					"elif [ \"$1\" = pane ] && [ \"$2\" = send-keys ]; then\n" +
+					"  echo \"$*\" >> " + sshx.QuoteShell(keyLog) + "\n" +
+					"fi\n"
+				if err := os.WriteFile(filepath.Join(binDir, "herdr"), []byte(stub), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			run := func(screen, target string, restoreCode bool, files []string) (string, int, string) {
+				_ = os.Remove(keyLog)
+				if err := os.WriteFile(scrFile, []byte(screen), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				sh, err := claudeRewindCommitOptSh(mode, pane, sock, "9001", pid, start, sid, target, restoreCode, files)
+				if err != nil {
+					t.Fatal(err)
+				}
+				out, code := runRewindSh(t, sh, binDir, homeDir, fakeProc)
+				logged, _ := os.ReadFile(keyLog)
+				return out, code, string(logged)
+			}
+
+			// 1) Single file real screen -> exit 0, sends Enter.
+			scrOne := realCCConfirmScreen(realCCAboveThreeTurns, "third message", "The code will be restored +1 -2 in a.txt.", true, 0)
+			out, code, keys := run(scrOne, "third message", true, []string{"sub/a.txt"})
+			if ok, remoteAt := parseClaudeRewindCommitOut([]byte(out)); code != 0 || !ok || remoteAt.IsZero() || keys == "" {
+				t.Fatalf("single file code restore failed: code=%d out=%q keys=%q", code, out, keys)
+			}
+
+			// 2) Two files real screen ("a.txt and b.txt") -> exit 0, sends Enter regardless of order.
+			scrTwo := realCCConfirmScreen(realCCAboveTwoFiles, "third message", "The code will be restored +1 -5 in a.txt and b.txt.", true, 0)
+			out, code, keys = run(scrTwo, "third message", true, []string{"sub/b.txt", "a.txt"})
+			if ok, _ := parseClaudeRewindCommitOut([]byte(out)); code != 0 || !ok || keys == "" {
+				t.Fatalf("two files code restore failed: code=%d out=%q keys=%q", code, out, keys)
+			}
+			// Two distinct paths sharing the same basename ("src/b.txt", "test/b.txt") -> "b.txt and b.txt." passes!
+			scrTwoSame := realCCConfirmScreen(realCCAboveTwoFiles, "third message", "The code will be restored -2 in b.txt and b.txt.", true, 0)
+			out, code, keys = run(scrTwoSame, "third message", true, []string{"src/b.txt", "test/b.txt"})
+			if ok, _ := parseClaudeRewindCommitOut([]byte(out)); code != 0 || !ok || keys == "" {
+				t.Fatalf("two duplicate-basename paths failed: code=%d out=%q keys=%q", code, out, keys)
+			}
+			// Two different basenames must NOT match "a.txt and a.txt.".
+			scrTwoDupMismatch := realCCConfirmScreen(realCCAboveTwoFiles, "third message", "The code will be restored -2 in a.txt and a.txt.", true, 0)
+			_, code, keys = run(scrTwoDupMismatch, "third message", true, []string{"a.txt", "sub/b.txt"})
+			if code != 37 || keys != "" {
+				t.Fatalf("two different basenames matched duplicate screen: code=%d keys=%q, want 37 and empty", code, keys)
+			}
+
+			// 3) Real 4-file (.brief/screens3/screen-3.txt, with duplicate basename src/b.txt & test/b.txt)
+			//    and 10-file (.brief/screens3/screen-4.txt) "in <name> and N other files." screens -> exit 0.
+			fourPaths := []string{"a.txt", "src/b.txt", "src/c.txt", "test/b.txt"}
+			scrFour := realCCConfirmScreen(realCCAboveTwoFiles, "third message", "The code will be restored -4 in a.txt and 3 other files.", true, 0)
+			out, code, keys = run(scrFour, "third message", true, fourPaths)
+			if ok, _ := parseClaudeRewindCommitOut([]byte(out)); code != 0 || !ok || keys == "" {
+				t.Fatalf("4-file code restore failed: code=%d out=%q keys=%q", code, out, keys)
+			}
+			// Wrapped 10-file screen -> exit 0.
+			tenPaths := []string{"d1.txt", "d2.txt", "d3.txt", "d4.txt", "d5.txt", "d6.txt", "a.txt", "src/b.txt", "src/c.txt", "test/b.txt"}
+			for _, desc := range []string{
+				"The code will be restored -10 in d1.txt and 9 other files.",
+				"The code will be restored -10 in d1.txt and\n  9 other files.",
+			} {
+				scrTen := realCCConfirmScreen(realCCAboveTwoFiles, "first message", desc, true, 0)
+				out, code, keys = run(scrTen, "first message", true, tenPaths)
+				if ok, _ := parseClaudeRewindCommitOut([]byte(out)); code != 0 || !ok || keys == "" {
+					t.Fatalf("10-file (%q) failed: code=%d out=%q keys=%q", desc, code, out, keys)
+				}
+			}
+			// 3+ files: wrong count, unknown first name, or non-"and N other files" comma shapes -> MUST exit 37, no Enter.
+			for _, badMany := range []struct {
+				desc  string
+				files []string
+			}{
+				{"The code will be restored -4 in a.txt and 2 other files.", fourPaths},
+				{"The code will be restored -4 in a.txt and 4 other files.", fourPaths},
+				{"The code will be restored -4 in z.txt and 3 other files.", fourPaths},
+				{"The code will be restored +3 -1 in a.txt, b.txt and c.txt.", []string{"a.txt", "b.txt", "c.txt"}},
+				{"The code will be restored +3 -1 in a.txt, b.txt, and c.txt.", []string{"a.txt", "b.txt", "c.txt"}},
+				{"The code will be restored -4 in 4 files.", fourPaths},
+				{"The code will be restored -2 in a.txt and 1 other file.", []string{"a.txt", "b.txt"}},
+				{"The code will be restored -2 in a.txt and 1 other files.", []string{"a.txt", "b.txt"}},
+				{"The code will be restored -4 in a.txt and 03 other files.", fourPaths},
+			} {
+				scrBadMany := realCCConfirmScreen(realCCAboveTwoFiles, "third message", badMany.desc, true, 0)
+				_, code, keys = run(scrBadMany, "third message", true, badMany.files)
+				if code != 37 || keys != "" {
+					t.Fatalf("bad many desc %q for %v: code=%d keys=%q, want 37 and empty", badMany.desc, badMany.files, code, keys)
+				}
+			}
+
+			// 4) Selection moved to option 3 ("Restore code" only, which STILL has the
+			//    matching "The code will be restored +1 -2 in a.txt." line!) -> MUST exit 35, no Enter.
+			scrOpt3 := realCCConfirmScreen(realCCAboveThreeTurns, "third message", "The code will be restored +1 -2 in a.txt.", true, 2)
+			_, code, keys = run(scrOpt3, "third message", true, []string{"a.txt"})
+			if code != 35 || keys != "" {
+				t.Fatalf("option 3 selected: code=%d keys=%q, want 35 and empty", code, keys)
+			}
+
+			// 5) Selection moved to option 2 ("Restore conversation") when code restore requested -> exit 35, no Enter.
+			scrOpt2 := realCCConfirmScreen(realCCAboveThreeTurns, "third message", "The code will be restored +1 -2 in a.txt.", true, 1)
+			_, code, keys = run(scrOpt2, "third message", true, []string{"a.txt"})
+			if code != 35 || keys != "" {
+				t.Fatalf("option 2 selected: code=%d keys=%q, want 35 and empty", code, keys)
+			}
+
+			// 6) Conversation-only request on option 1 -> exit 35, no Enter; on option 2 -> exit 0, sends Enter.
+			_, code, keys = run(scrOne, "third message", false, nil)
+			if code != 35 || keys != "" {
+				t.Fatalf("conv-only on option 1: code=%d keys=%q, want 35 and empty", code, keys)
+			}
+			out, code, keys = run(scrOpt2, "third message", false, nil)
+			if ok, _ := parseClaudeRewindCommitOut([]byte(out)); code != 0 || !ok || keys == "" {
+				t.Fatalf("conv-only on option 2 failed: code=%d out=%q keys=%q", code, out, keys)
+			}
+
+			// 7) File mismatch -> MUST exit 37, no Enter.
+			_, code, keys = run(scrTwo, "third message", true, []string{"a.txt"})
+			if code != 37 || keys != "" {
+				t.Fatalf("file mismatch (extra on screen): code=%d keys=%q, want 37 and empty", code, keys)
+			}
+			_, code, keys = run(scrOne, "third message", true, []string{"a.txt", "b.txt"})
+			if code != 37 || keys != "" {
+				t.Fatalf("file mismatch (missing on screen): code=%d keys=%q, want 37 and empty", code, keys)
+			}
+
+			// 8) Unrecognizable code description lines -> MUST exit 37, no Enter.
+			for _, desc := range []string{
+				"The code will be restored +1 -5 in 3 files.",
+				"The code will be restored +1 -5 in a.txt, b.txt and 2 more.",
+				"The code will be restored +1 -5 in a.txt…",
+				"The code will be unchanged.",
+				"",
+			} {
+				scrBad := realCCConfirmScreen(realCCAboveThreeTurns, "third message", desc, true, 0)
+				_, code, keys = run(scrBad, "third message", true, []string{"a.txt"})
+				if code != 37 || keys != "" {
+					t.Fatalf("unrecognized desc %q: code=%d keys=%q, want 37 and empty", desc, code, keys)
+				}
+			}
+
+			// 9) Quoted user message trying to spoof "The code will be restored ..." -> MUST exit 37, no Enter.
+			scrSpoof := realCCConfirmScreen(realCCAboveThreeTurns, "The code will be restored +1 -2 in a.txt.", "The code will be unchanged.", true, 0)
+			_, code, keys = run(scrSpoof, "The code will be restored +1 -2 in a.txt.", true, []string{"a.txt"})
+			if code != 37 || keys != "" {
+				t.Fatalf("quoted spoof matched: code=%d keys=%q, want 37 and empty", code, keys)
+			}
+
+			// 10) Regex/shell metacharacters in filename -> exact match, no injection.
+			evilFile := `a+b[1]'$HOME.txt`
+			scrEvil := realCCConfirmScreen(realCCAboveThreeTurns, "third message", "The code will be restored +1 -2 in "+evilFile+".", true, 0)
+			out, code, keys = run(scrEvil, "third message", true, []string{evilFile})
+			if ok, _ := parseClaudeRewindCommitOut([]byte(out)); code != 0 || !ok || keys == "" {
+				t.Fatalf("metachar filename failed: code=%d out=%q keys=%q", code, out, keys)
+			}
+
+			// 11) Direct awk guard: OPT_WANT outside the 2 allowlisted labels MUST exit 35.
+			for _, badOpt := range []string{"", "Restore code", "Summarize from here", "Never mind"} {
+				cmd := exec.Command("awk", claudeRewindCommitAwk)
+				cmd.Env = append(os.Environ(), "LC_ALL=C", "TARGET_FIRST=third message", "TARGET_TRUNC=0", "OPT_WANT="+badOpt, "EXPECT_FILES=a.txt")
+				cmd.Stdin = strings.NewReader(scrOpt3)
+				err := cmd.Run()
+				var ee *exec.ExitError
+				if !errors.As(err, &ee) || ee.ExitCode() != 35 {
+					t.Fatalf("OPT_WANT=%q: got err=%v, want exit 35", badOpt, err)
+				}
+			}
+		})
+	}
+	if re := mapRewindExitErr(&sshxExitStub{37}); asRewindErr(re).code != "code_mismatch" || isIdentityErr(re) {
+		t.Fatalf("exit 37 mapped to %v, want non-identity code_mismatch", re)
+	}
+}
+
+func TestClaudeRewindRestoreCodeManyFilesRealScreens(t *testing.T) {
+	fastRewindTimings(t)
+	fourPaths := []string{"a.txt", "src/b.txt", "src/c.txt", "test/b.txt"}
+	tenPaths := []string{"d1.txt", "d2.txt", "d3.txt", "d4.txt", "d5.txt", "d6.txt", "a.txt", "src/b.txt", "src/c.txt", "test/b.txt"}
+
+	t.Run("four_files_with_duplicate_basename", func(t *testing.T) {
+		fp, plan := newRealCCCodeRewindFake(
+			realCCAboveTwoFiles,
+			"4 files changed +4",
+			"The code will be restored -4 in a.txt and 3 other files.",
+			true,
+		)
+		plan.RestoreCode = true
+		plan.ExpectedFiles = fourPaths
+
+		res, err := claudeRewind(context.Background(), fp, plan)
+		if err != nil {
+			t.Fatalf("expected success, got err: %v", err)
+		}
+		if !res.OK || !res.RestoredCode {
+			t.Fatalf("unexpected result: %+v", res)
+		}
+		wantKeys := []string{"esc+esc", "up", "enter", "enter", "ctrl+c"}
+		if got := fp.recordedKeys(); !slices.Equal(got, wantKeys) {
+			t.Fatalf("keys = %v, want %v", got, wantKeys)
+		}
+	})
+
+	t.Run("ten_files_across_turns", func(t *testing.T) {
+		fp, plan := newRealCCCodeRewindFake(
+			realCCAboveTwoFiles,
+			"4 files changed +4",
+			"The code will be restored -10 in d1.txt and 9 other files.",
+			true,
+		)
+		plan.RestoreCode = true
+		plan.ExpectedFiles = tenPaths
+
+		res, err := claudeRewind(context.Background(), fp, plan)
+		if err != nil {
+			t.Fatalf("expected success, got err: %v", err)
+		}
+		if !res.OK || !res.RestoredCode {
+			t.Fatalf("unexpected result: %+v", res)
+		}
+	})
+
+	t.Run("two_paths_same_basename", func(t *testing.T) {
+		fp, plan := newRealCCCodeRewindFake(
+			realCCAboveTwoFiles,
+			"2 files changed +2",
+			"The code will be restored -2 in b.txt and b.txt.",
+			true,
+		)
+		plan.RestoreCode = true
+		plan.ExpectedFiles = []string{"src/b.txt", "test/b.txt"}
+
+		res, err := claudeRewind(context.Background(), fp, plan)
+		if err != nil {
+			t.Fatalf("expected success, got err: %v", err)
+		}
+		if !res.OK || !res.RestoredCode {
+			t.Fatalf("unexpected result: %+v", res)
+		}
+	})
+
+	t.Run("wrong_other_files_count_refuses_enter", func(t *testing.T) {
+		fp, plan := newRealCCCodeRewindFake(
+			realCCAboveTwoFiles,
+			"4 files changed +4",
+			"The code will be restored -4 in a.txt and 2 other files.",
+			true,
+		)
+		plan.RestoreCode = true
+		plan.ExpectedFiles = fourPaths
+
+		_, err := claudeRewind(context.Background(), fp, plan)
+		if err == nil || err.code != "code_mismatch" {
+			t.Fatalf("got err=%v, want code_mismatch", err)
+		}
+		keys := fp.recordedKeys()
+		if keys[len(keys)-1] != "esc" {
+			t.Fatalf("expected esc cleanup, keys=%v", keys)
+		}
+	})
+
+	t.Run("first_name_not_in_expected_refuses_enter", func(t *testing.T) {
+		fp, plan := newRealCCCodeRewindFake(
+			realCCAboveTwoFiles,
+			"4 files changed +4",
+			"The code will be restored -4 in other.txt and 3 other files.",
+			true,
+		)
+		plan.RestoreCode = true
+		plan.ExpectedFiles = fourPaths
+
+		_, err := claudeRewind(context.Background(), fp, plan)
+		if err == nil || err.code != "code_mismatch" {
+			t.Fatalf("got err=%v, want code_mismatch", err)
+		}
+		keys := fp.recordedKeys()
+		if keys[len(keys)-1] != "esc" {
+			t.Fatalf("expected esc cleanup, keys=%v", keys)
+		}
+	})
+}
+
+func TestClaudeRewindNormalizeFilesAndParseParity(t *testing.T) {
+	// Distinct paths sharing a basename (a.txt and dir/a.txt) MUST both be counted!
+	bases, cleaned, err := normalizeRewindFiles([]string{"sub/b.txt", "a.txt", "dir/a.txt", "sub/b.txt"})
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if !slices.Equal(bases, []string{"a.txt", "a.txt", "b.txt"}) {
+		t.Fatalf("bases = %v, want [a.txt a.txt b.txt]", bases)
+	}
+	if !slices.Equal(cleaned, []string{"sub/b.txt", "a.txt", "dir/a.txt"}) {
+		t.Fatalf("cleaned = %v", cleaned)
+	}
+	for _, bad := range [][]string{
+		nil,
+		{},
+		{""},
+		{"   "},
+		{"a.txt\nb.txt"},
+		{"a.txt\x00"},
+		{"/"},
+	} {
+		if _, _, err := normalizeRewindFiles(bad); err == nil {
+			t.Fatalf("expected error for bad files %q", bad)
+		}
+	}
+
+	fourPaths := []string{"a.txt", "src/b.txt", "src/c.txt", "test/b.txt"}
+	tenPaths := []string{"d1.txt", "d2.txt", "d3.txt", "d4.txt", "d5.txt", "d6.txt", "a.txt", "src/b.txt", "src/c.txt", "test/b.txt"}
+
+	goodCases := []struct {
+		line  string
+		paths []string
+	}{
+		{"The code will be restored +1 -2 in a.txt.", []string{"a.txt"}},
+		{"The code will be restored +1 in a.txt.", []string{"sub/a.txt"}},
+		{"The code will be restored -2 in a.txt.", []string{"a.txt"}},
+		{"The code will be restored in a.txt.", []string{"a.txt"}},
+		{"The code will be restored +1,200 -5 in a.txt.", []string{"a.txt"}},
+		{"The code will be restored +1 -5 in a.txt and b.txt.", []string{"sub/b.txt", "a.txt"}},
+		{"The code will be restored -2 in b.txt and b.txt.", []string{"src/b.txt", "test/b.txt"}},
+		{"The code will be restored -4 in a.txt and 3 other files.", fourPaths},
+		{"The code will be restored -4 in b.txt and 3 other files.", fourPaths},
+		{"The code will be restored -10 in d1.txt and 9 other files.", tenPaths},
+	}
+	for _, tc := range goodCases {
+		got, ok := parseRewindCodeFiles(tc.line)
+		if !ok || !matchRewindCodeFiles(got, ok, tc.paths) {
+			t.Fatalf("parse/match(%q, %v) = (%+v, %v), want match", tc.line, tc.paths, got, ok)
+		}
+	}
+
+	mismatchCases := []struct {
+		line  string
+		paths []string
+	}{
+		{"The code will be unchanged.", []string{"a.txt"}},
+		{"The code will be restored +1 -2.", []string{"a.txt"}},
+		{"The code will be restored +1 -2 in .", []string{"a.txt"}},
+		{"The code will be restored +1 -2 in a.txt…", []string{"a.txt"}},
+		{"The code will be restored +1 -2 in a.txt...", []string{"a.txt"}},
+		{"The code will be restored +1 -5 in a.txt and a.txt.", []string{"a.txt", "b.txt"}},
+		{"The code will be restored -2 in b.txt.", []string{"src/b.txt", "test/b.txt"}},
+		{"The code will be restored -2 in a.txt and 1 other file.", []string{"a.txt", "b.txt"}},
+		{"The code will be restored -2 in a.txt and 1 other files.", []string{"a.txt", "b.txt"}},
+		{"The code will be restored +3 -1 in a.txt, b.txt and c.txt.", []string{"a.txt", "b.txt", "c.txt"}},
+		{"The code will be restored +3 -1 in a.txt, b.txt, and c.txt.", []string{"a.txt", "b.txt", "c.txt"}},
+		{"The code will be restored -4 in 4 files.", fourPaths},
+		{"The code will be restored -4 in a.txt and 2 other files.", fourPaths},
+		{"The code will be restored -4 in z.txt and 3 other files.", fourPaths},
+		{"The code will be restored -4 in a.txt and 03 other files.", fourPaths},
+		{"The code will be restored -10 in d1.txt and 8 other files.", tenPaths},
+		{"The code will be restored +1 -2 in a.txt and b.txt and c.txt.", []string{"a.txt", "b.txt", "c.txt"}},
+	}
+	for _, tc := range mismatchCases {
+		got, ok := parseRewindCodeFiles(tc.line)
+		if matchRewindCodeFiles(got, ok, tc.paths) {
+			t.Fatalf("expected mismatch for (%q, %v), got %+v", tc.line, tc.paths, got)
+		}
+	}
 }

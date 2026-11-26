@@ -1,9 +1,10 @@
 import { useState, type FormEvent } from 'react'
-import { CornerDownRight, GitBranch, RotateCcw, TextCursorInput } from 'lucide-react'
+import { CornerDownRight, GitBranch, RotateCcw, TextCursorInput, TriangleAlert } from 'lucide-react'
 import { api, ApiError, errorText, type SessionInfo } from '../api'
 import { t, type I18nKey } from '../i18n'
 import { Dialog } from '../components/ui'
 import { expectSession, renamedHerdr } from './agents'
+import { formatRewindFiles, rewindDialogState, type RewindEditedFile, type RewindMode } from './rewindFiles'
 
 // What the conversation page does to an agent's place rather than to its
 // conversation: a copy of the conversation started in a workspace of its
@@ -296,6 +297,7 @@ export interface RewindTarget {
   session: string
   messageId: string
   text: string
+  files?: RewindEditedFile[]
 }
 
 const REWIND_ERR_KEYS: Record<string, I18nKey> = {
@@ -313,6 +315,8 @@ const REWIND_ERR_KEYS: Record<string, I18nKey> = {
   picker_not_opened: 'rewind.err.picker_not_opened',
   target_mismatch: 'rewind.err.target_mismatch',
   confirm_mismatch: 'rewind.err.confirm_mismatch',
+  code_mismatch: 'rewind.err.code_mismatch',
+  no_code_changes: 'rewind.err.no_code_changes',
   option_not_found: 'rewind.err.option_not_found',
   panel_not_closed: 'rewind.err.panel_not_closed',
   rewind_uncertain: 'rewind.err.rewind_uncertain',
@@ -327,32 +331,42 @@ export function RewindDialog({
   onClose,
 }: {
   target: RewindTarget
-  onDone: (text: string, warning?: string) => void
+  onDone: (text: string, warning?: string, restoredFiles?: number) => void
   onRefresh: () => void
   onClose: () => void
 }) {
+  const [mode, setMode] = useState<RewindMode>('conversation')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
+  const files = target.files ?? []
+  const state = rewindDialogState(mode, files.length)
+  const fileSummary = formatRewindFiles(files)
   const submit = async (e?: FormEvent) => {
     e?.preventDefault()
     if (busy) return
     setBusy(true)
     setError('')
+    const restoreCode = state.mode === 'code'
+    const body: Record<string, unknown> = {
+      pane: target.pane,
+      terminal_id: target.terminalId ?? '',
+      pid: target.pid,
+      start: target.start,
+      session: target.session,
+      message_id: target.messageId,
+    }
+    if (restoreCode) {
+      body.restore_code = true
+      body.files = files.map((f) => f.path)
+    }
     try {
-      const r = await api<{ ok: boolean; text?: string; warning?: string }>(
+      const r = await api<{ ok: boolean; text?: string; warning?: string; restored_code?: boolean }>(
         'POST',
         `/api/sessions/${encodeURIComponent(target.sessionId)}/conversation/rewind`,
-        {
-          pane: target.pane,
-          terminal_id: target.terminalId ?? '',
-          pid: target.pid,
-          start: target.start,
-          session: target.session,
-          message_id: target.messageId,
-        },
+        body,
         { timeoutMs: 60000 },
       )
-      onDone(r.text ?? target.text, r.warning)
+      onDone(r.text ?? target.text, r.warning, restoreCode ? files.length : 0)
     } catch (err) {
       if (err instanceof ApiError) {
         if (err.code === 'terminal_changed' || err.code === 'process_changed' || err.code === 'session_changed') {
@@ -368,9 +382,60 @@ export function RewindDialog({
   }
   const close = () => !busy && onClose()
   return (
-    <Dialog title={t('rewind.confirmTitle')} onClose={close} busy={busy} icon={<RotateCcw size={18} />}>
+    <Dialog
+      title={t('rewind.confirmTitle')}
+      onClose={close}
+      busy={busy}
+      icon={state.danger ? <TriangleAlert size={18} /> : <RotateCcw size={18} />}
+      tone={state.danger ? 'danger' : undefined}
+    >
       <form className="form" onSubmit={submit}>
-        <p className="lead">{t('rewind.confirmBody')}</p>
+        {state.hasCodeOption && (
+          <div className="seg" role="radiogroup" aria-label={t('rewind.modeLabel')}>
+            <button
+              type="button"
+              role="radio"
+              aria-checked={state.mode === 'conversation'}
+              aria-pressed={state.mode === 'conversation'}
+              disabled={busy}
+              onClick={() => {
+                setMode('conversation')
+                setError('')
+              }}
+            >
+              {t('rewind.modeConversation')}
+            </button>
+            <button
+              type="button"
+              role="radio"
+              aria-checked={state.mode === 'code'}
+              aria-pressed={state.mode === 'code'}
+              disabled={busy}
+              onClick={() => {
+                setMode('code')
+                setError('')
+              }}
+            >
+              {t('rewind.modeCode')}
+            </button>
+          </div>
+        )}
+        <p className="lead">{t(state.bodyKey)}</p>
+        {state.mode === 'code' && fileSummary.total > 0 && (
+          <div className="rewind-files">
+            <div className="rewind-files-label">{t('rewind.filesLabel', { n: fileSummary.total })}</div>
+            <ul className="rewind-files-list">
+              {fileSummary.shown.map((f) => (
+                <li key={f.path} className="rewind-file" title={f.path}>
+                  {f.label}
+                </li>
+              ))}
+              {fileSummary.more > 0 && (
+                <li className="rewind-file is-more">{t('rewind.filesMore', { n: fileSummary.more })}</li>
+              )}
+            </ul>
+          </div>
+        )}
         {error && (
           <p className="err" role="alert">
             {error}
@@ -380,8 +445,8 @@ export function RewindDialog({
           <button type="button" className="btn btn-ghost" disabled={busy} onClick={close}>
             {t('common.cancel')}
           </button>
-          <button type="submit" className="btn btn-primary" disabled={busy}>
-            {t(busy ? 'rewind.busy' : 'rewind.confirmTitle')}
+          <button type="submit" className={'btn ' + (state.danger ? 'btn-danger' : 'btn-primary')} disabled={busy}>
+            {t(busy ? 'rewind.busy' : state.confirmKey)}
           </button>
         </div>
       </form>

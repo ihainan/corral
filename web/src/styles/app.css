@@ -634,6 +634,11 @@ html.modal-open, html.modal-open body { overflow: hidden; }
 .dialog .btn-danger { background: var(--danger-fill); border-color: var(--danger-fill); color: var(--accent-fg); }
 .dialog .btn-danger:hover { background: var(--danger-fill-hover); border-color: var(--danger-fill-hover); }
 .dialog .btn-danger:disabled, .dialog .btn-danger:disabled:hover { background: var(--bg-subtle); border-color: var(--line); color: var(--fg-3); }
+.rewind-files { display: flex; flex-direction: column; gap: 6px; padding: 10px 12px; border-radius: var(--r); background: var(--bg-subtle); border: 1px solid var(--line); }
+.rewind-files-label { font-size: var(--fs-note); line-height: var(--lh-note); font-weight: 500; color: var(--fg-2); }
+.rewind-files-list { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 6px; }
+.rewind-file { font-family: var(--font-mono); font-size: var(--fs-note); line-height: var(--lh-note); color: var(--fg); background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-sm); padding: 2px 6px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rewind-file.is-more { font-family: inherit; color: var(--fg-3); background: transparent; border-color: transparent; padding: 2px 4px; }
 @media (max-width: 520px) {
   .overlay.sheet-mode { place-items: end stretch; padding: 0; }
   .sheet-mode .dialog { max-width: none; border-radius: var(--r-xl) var(--r-xl) 0 0; padding-bottom: calc(20px + env(safe-area-inset-bottom, 0px)); animation: rise 0.2s var(--ease); }
