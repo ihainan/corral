@@ -194,16 +194,26 @@ export function extractAskRegion(text: string): string[] | null {
   const tabLimit = Math.max(0, firstOpt - 60)
   let firstNonBlank = -1
   let nonBlankCount = 0
+  let hitRule = false
   for (let j = firstOpt - 1; j >= tabLimit; j--) {
     const l = lines[j]
-    if (MULTI_TAB.test(l)) return nonBlankCount > 0 ? lines.slice(j, end + 1) : null
-    if (isRule(l)) return firstNonBlank >= 0 && LONE_TAB.test(lines[firstNonBlank]) && nonBlankCount >= 2 ? lines.slice(firstNonBlank, end + 1) : null
+    if (isRule(l)) {
+      hitRule = true
+      break
+    }
     if (l.trim()) {
       firstNonBlank = j
       nonBlankCount++
     }
   }
-  if (tabLimit === 0 && firstNonBlank >= 0 && LONE_TAB.test(lines[firstNonBlank]) && nonBlankCount >= 2) return lines.slice(firstNonBlank, end + 1)
+  if (
+    (hitRule || tabLimit === 0) &&
+    firstNonBlank >= 0 &&
+    nonBlankCount >= 2 &&
+    (MULTI_TAB.test(lines[firstNonBlank]) || LONE_TAB.test(lines[firstNonBlank]))
+  ) {
+    return lines.slice(firstNonBlank, end + 1)
+  }
   return null
 }
 

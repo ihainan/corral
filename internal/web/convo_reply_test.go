@@ -825,4 +825,22 @@ time.sleep(30)`)
 	if got := runKeys("reply:"+d0, []string{"down"}); got != 9 || wrote() != "" {
 		t.Fatalf("already answered (not waiting): exit %d, typed %q", got, wrote())
 	}
+
+	// 6. Question body containing a tab-like line ("☐ Preview ✔ Submit"):
+	//    changing the real question above it MUST be refused (exit 10).
+	state("waiting", "input needed")
+	fakeTabQ := func(lead, timer string) string {
+		return makeScreen("✽ Orchestrating… ("+timer+")", tabsQ2, lead+"\n☐ Preview ✔ Submit\nChoose:", "全部关闭", "Type something.", 1,
+			"Enter to select · Tab/Arrow keys to navigate · Esc to cancel", timer)
+	}
+	sFakeStg := fakeTabQ("Delete staging?", "13m 18s")
+	_, dFakeStg, _ := screenOf([]byte(sFakeStg))
+	os.WriteFile(screenFile, []byte(fakeTabQ("Delete staging?", "13m 19s")), 0o644)
+	if got := runKeys("reply:"+dFakeStg, []string{"down"}); got != 0 || wrote() != "pane send-keys p1 down" {
+		t.Fatalf("fake tab in body, timer tick only: exit %d, typed %q", got, wrote())
+	}
+	os.WriteFile(screenFile, []byte(fakeTabQ("Delete production?", "13m 19s")), 0o644)
+	if got := runKeys("reply:"+dFakeStg, []string{"down"}); got != 10 || wrote() != "" {
+		t.Fatalf("fake tab in body, question changed staging->production: exit %d, typed %q", got, wrote())
+	}
 }

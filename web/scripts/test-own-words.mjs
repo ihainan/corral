@@ -254,6 +254,61 @@ await run('ownWordsDoesNotPressEnterWhenPastedTextWraps', async () => {
   assert.equal(enterSent, false, 'must not send enter when pasted row wrapped')
 })
 
+// Verify fake tab-like line inside question body cannot drop earlier question lines.
+await run('fakeTabLineInQuestionBodyStillDetectsQuestionChange', async () => {
+  const stgBody = 'Delete staging?\n☐ Preview ✔ Submit\nChoose:'
+  const prdBody = 'Delete production?\n☐ Preview ✔ Submit\nChoose:'
+
+  // Multi-tab dialog: timer tick keeps frame equal, question change above fake tab line MUST differ.
+  const mStg = makeAsk({ question: stgBody, bgTimer: '13m 18s', spinner: '✽ Orchestrating… (13m 18s)' })
+  const mTim = makeAsk({ question: stgBody, bgTimer: '13m 19s', spinner: '* Pondering… (13m 19s)' })
+  const mPrd = makeAsk({ question: prdBody, bgTimer: '13m 18s', spinner: '✽ Orchestrating… (13m 18s)' })
+  assert.ok(extractAskRegion(mStg)?.some((l) => l.includes('Delete staging?')), 'multi-tab region must include question above fake tab line')
+  assert.equal(frame(mStg, 4), frame(mTim, 4), 'background timer tick must not change frame')
+  assert.notEqual(frame(mStg, 4), frame(mPrd, 4), 'question change above fake tab line must change frame')
+
+  // Lone-tab dialog with fake tab line in body.
+  const makeLone = (body, spinner) =>
+    [
+      spinner,
+      '────────────────────────────────────────────────────────────',
+      '☐ Action',
+      '',
+      body,
+      '❯ 1. Yes',
+      '  2. No',
+      '  3. Type something.',
+      'Enter to select · ↑/↓ to navigate · Esc to cancel',
+    ].join('\n')
+  const lStg = makeLone(stgBody, '✽ Orchestrating… (13m 18s)')
+  const lTim = makeLone(stgBody, '* Pondering… (13m 19s)')
+  const lPrd = makeLone(prdBody, '✽ Orchestrating… (13m 18s)')
+  assert.equal(frame(lStg, 3), frame(lTim, 3), 'lone-tab timer tick must not change frame')
+  assert.notEqual(frame(lStg, 3), frame(lPrd, 3), 'lone-tab question change above fake tab line must change frame')
+
+  // No rule and no real tab bar above fake tab line: must fall back and still detect question change.
+  const makeBare = (body) =>
+    [body, '❯ 1. Yes', '  2. No', '  3. Type something.', 'Enter to select · ↑/↓ to navigate · Esc to cancel'].join('\n')
+  assert.equal(extractAskRegion(makeBare(stgBody)), null)
+  assert.notEqual(frame(makeBare(stgBody), 3), frame(makeBare(prdBody), 3))
+
+  // End-to-end ownWords must refuse before sending any key when staging -> production.
+  let called = false
+  const target = {
+    key: 'k',
+    agent: 'claude',
+    screen: async () => ({ text: mPrd, digest: 'd1' }),
+    reply: async () => {
+      called = true
+    },
+    fill: async () => {
+      called = true
+    },
+  }
+  await assert.rejects(() => ownWords(target, { text: mStg, digest: 'd0' }, questionOwn(4), '自定义回复', () => true), NotAsShown)
+  assert.equal(called, false, 'must not send any keys when question above fake tab line changed')
+})
+
 if (failures.length) {
   console.error('FAIL:\n' + failures.join('\n\n'))
   process.exit(1)
