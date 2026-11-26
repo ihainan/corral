@@ -114,24 +114,29 @@ assert.equal(labels.get('~'), '~')
   ]
 
   const nested = buildAgentGroups(rows, { group: 'status', sort: 'recent', nestChildren: true })
-  // c3 (blocked) MUST rise to uncollapsible todo with crossParentTitle; p + c1 + c2 move together into working!
-  assert.deepEqual(nested.map((g) => g.kind), ['todo', 'working', 'idle'])
+  // Any blocked member pulls its entire parent-child tree into uncollapsible todo so
+  // the subagent stays attached to its parent instead of being detached.
+  assert.deepEqual(nested.map((g) => g.kind), ['todo', 'idle'])
   assert.equal(nested[0].collapsible, false)
-  assert.deepEqual(nested[0].rows.map((r) => r.key), ['c3'])
-  assert.equal(nested[0].rows[0].crossParentTitle, 'Orchestrator')
-  assert.deepEqual(nested[1].rows.map((r) => r.key), ['p', 'c1', 'c2'])
-  assert.equal(nested[1].rows[0].nestDepth, 0)
-  assert.deepEqual(nested[1].rows[0].childKeys, ['c1', 'c2'])
-  assert.equal(nested[1].rows[1].nestDepth, 1)
-  assert.equal(nested[1].rows[1].nestedParentKey, 'p')
-  assert.equal(nested[1].rows[2].nestDepth, 1)
-  assert.equal(nested[1].rows[2].viaParentTitle, 'Worker 1')
+  assert.deepEqual(nested[0].rows.map((r) => r.key), ['p', 'c3', 'c1', 'c2'])
+  assert.equal(nested[0].rows[0].nestDepth, 0)
+  assert.deepEqual(nested[0].rows[0].childKeys, ['c3', 'c1', 'c2'])
+  assert.equal(nested[0].rows[1].nestDepth, 1)
+  assert.equal(nested[0].rows[1].nestedParentKey, 'p')
+  assert.equal(nested[0].rows[1].viaParentTitle, undefined)
+  assert.equal(nested[0].rows[2].nestDepth, 1)
+  assert.equal(nested[0].rows[2].nestedParentKey, 'p')
+  assert.equal(nested[0].rows[3].nestDepth, 1)
+  assert.equal(nested[0].rows[3].nestedParentKey, 'p')
+  assert.equal(nested[0].rows[3].viaParentTitle, 'Worker 1')
+  assert.deepEqual(nested[1].rows.map((r) => r.key), ['solo'])
 
-  // Collapsed parent hides non-current children in listOrder, but keeps current child visible.
+  // Collapsed parent hides non-current non-blocked children in listOrder,
+  // while keeping live-blocked (c3) and current (c2) children visible under p.
   const withCurrentKid = rows.map((r) => (r.key === 'c2' ? { ...r, current: true } : r))
   assert.deepEqual(
     listOrder(withCurrentKid, { group: 'status', sort: 'recent', nestChildren: true, collapsedParents: ['p'] }).map((r) => r.key),
-    ['c3', 'p', 'c2', 'solo'],
+    ['p', 'c3', 'c2', 'solo'],
   )
 
   // Opt-out (nestChildren: false) restores completely flat grouping.
@@ -194,7 +199,7 @@ assert.equal(labels.get('~'), '~')
   assert.deepEqual(keys.sort(), ['cyc1', 'cyc2', 'orphan'])
 }
 
-// 10. Pinned parent nests unpinned non-blocked children/grandchildren directly inside Pinned
+// 10. Pinned parent nests ALL unpinned descendants (including live-blocked) directly inside Pinned
 {
   const rows = [
     row({ key: 'pinA', title: 'Model Hub CYY', pinned: 0, status: 'idle', since: 200, projectKey: '/repo/ai' }),
@@ -209,20 +214,23 @@ assert.equal(labels.get('~'), '~')
     const groups = buildAgentGroups(rows, { group, sort: 'recent', pinFixed: true, nestChildren: true })
     const pinnedGrp = groups.find((g) => g.kind === 'pinned')
     const todoGrp = groups.find((g) => g.kind === 'todo')
-    assert.ok(pinnedGrp && todoGrp, `mode=${group}`)
-    // pinA stays first (pinFixed), with sub2 (more recent) and sub1 nested right under pinA, then pinB.
-    assert.deepEqual(pinnedGrp.rows.map((r) => r.key), ['pinA', 'sub2', 'sub1', 'pinB'])
-    assert.deepEqual(pinnedGrp.rows[0].childKeys, ['sub2', 'sub1'])
+    assert.ok(pinnedGrp, `mode=${group}`)
+    // Blocked child stays nested at the top of its pinned parent's subtree instead of
+    // being detached into todo (collapsed UI surfaces live-blocked children in place).
+    assert.equal(todoGrp, undefined, `mode=${group}`)
+    assert.equal(pinnedGrp.blockedCount, 1, `mode=${group}`)
+    // pinA stays first (pinFixed), with subBlocked at top of its subtree, then sub2, sub1, then pinB.
+    assert.deepEqual(pinnedGrp.rows.map((r) => r.key), ['pinA', 'subBlocked', 'sub2', 'sub1', 'pinB'])
+    assert.deepEqual(pinnedGrp.rows[0].childKeys, ['subBlocked', 'sub2', 'sub1'])
     assert.equal(pinnedGrp.rows[1].nestDepth, 1)
     assert.equal(pinnedGrp.rows[1].nestedParentKey, 'pinA')
-    assert.equal(pinnedGrp.rows[1].viaParentTitle, 'antigravity')
+    assert.equal(pinnedGrp.rows[1].viaParentTitle, undefined)
     assert.equal(pinnedGrp.rows[2].nestDepth, 1)
     assert.equal(pinnedGrp.rows[2].nestedParentKey, 'pinA')
-    // Blocked child ALWAYS surfaces in uncollapsible todo, never hidden under pinned parent.
-    assert.equal(todoGrp.collapsible, false)
-    assert.deepEqual(todoGrp.rows.map((r) => r.key), ['subBlocked'])
-    assert.equal(todoGrp.rows[0].crossParentTitle, 'Model Hub CYY')
-    // sub1 and sub2 must NOT be duplicated in any other group.
+    assert.equal(pinnedGrp.rows[2].viaParentTitle, 'antigravity')
+    assert.equal(pinnedGrp.rows[3].nestDepth, 1)
+    assert.equal(pinnedGrp.rows[3].nestedParentKey, 'pinA')
+    // Descendants must NOT be duplicated in any other group.
     const allKeys = groups.flatMap((g) => g.rows.map((r) => r.key))
     assert.equal(allKeys.length, new Set(allKeys).size)
   }
