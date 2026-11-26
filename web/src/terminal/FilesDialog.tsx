@@ -133,7 +133,8 @@ function FilesPanel({ sessionId, start, reveal, onPath, onInsert, onClose, docke
   const [opened, setOpened] = useState<Record<string, Kid>>({})
   const openedRef = useRef(opened)
   openedRef.current = opened
-  const kidSeq = useRef<Record<string, number>>({})
+  const kidSeq = useRef<Record<string, number>>({}) // (each folder's latest ask: numbered from kidN, never reused — review, 11-26)
+  const kidN = useRef(0)
   const marked = reveal ? { dir: cleanPath(parent(reveal)), name: reveal.slice(reveal.lastIndexOf('/') + 1) } : null
   const markedSaid = useRef(false)
   const kept = useWhenGone()
@@ -168,8 +169,12 @@ function FilesPanel({ sessionId, start, reveal, onPath, onInsert, onClose, docke
       if (l.path !== listedPath.current) {
         setFilterQ('')
         setOpened({})
+        openedRef.current = {}
         kidSeq.current = {}
-      } else Object.keys(openedRef.current).forEach((d) => void fetchKid(d))
+      } else {
+        prune(l.path, l)
+        refetchKids(Object.keys(openedRef.current))
+      }
       listedPath.current = l.path
       setPath(l.path)
       onPath(l.path)
@@ -195,21 +200,49 @@ function FilesPanel({ sessionId, start, reveal, onPath, onInsert, onClose, docke
 
   // fetchKid lists a folder opened in the tree (only the latest ask of each is shown).
   const fetchKid = async (dir: string) => {
-    const n = (kidSeq.current[dir] ?? 0) + 1
+    const n = ++kidN.current
     kidSeq.current[dir] = n
     const put = (k: Kid) => setOpened((o) => (o[dir] ? { ...o, [dir]: k } : o)) // (closed meanwhile: stays closed)
     put({ ...openedRef.current[dir], loading: true })
     try {
       const l = await api<FileListing>('GET', base + '?path=' + encodeURIComponent(dir), undefined, { timeoutMs: 30000 })
-      if (alive.current && kidSeq.current[dir] === n) put({ entries: l.entries, truncated: l.truncated, loading: false })
+      if (alive.current && kidSeq.current[dir] === n) {
+        put({ entries: l.entries, truncated: l.truncated, loading: false })
+        prune(dir, l)
+      }
     } catch (e) {
       if (alive.current && kidSeq.current[dir] === n) put({ error: errorText(e), loading: false })
     }
   }
   // (Closed: the folders opened under it close with it.)
   const under = (key: string, dir: string) => key === dir || key.startsWith(dir === '/' ? '/' : dir + '/')
-  const closeKids = (dir: string) =>
-    setOpened((o) => Object.fromEntries(Object.entries(o).filter(([k]) => !under(k, dir))))
+  const closeAll = (gone: string[]) => {
+    if (gone.length === 0) return
+    const keep = (k: string) => !gone.some((g) => under(k, g))
+    openedRef.current = Object.fromEntries(Object.entries(openedRef.current).filter(([k]) => keep(k)))
+    setOpened((o) => Object.fromEntries(Object.entries(o).filter(([k]) => keep(k))))
+  }
+  const closeKids = (dir: string) => closeAll([dir])
+  // prune closes the folders opened under dir that its new listing no longer
+  // has (gone or renamed from elsewhere): one of the name come back is listed
+  // anew, not shown as it was (review, 11-26). A listing cut short says nothing of what it left out.
+  const prune = (dir: string, l: FileListing) => {
+    if (l.truncated) return
+    const there = new Set(l.entries.filter((e) => e.type === 'dir').map((e) => join(dir, e.name)))
+    closeAll(Object.keys(openedRef.current).filter((k) => k !== dir && parent(k) === dir && !there.has(k)))
+  }
+  // refetchKids lists the opened folders again, a few at a time: the host
+  // serves a session only so many at once, and the rest would answer "busy" (review, 11-26).
+  const refetchKids = (dirs: string[]) => {
+    let i = 0
+    const next = async (): Promise<void> => {
+      while (i < dirs.length) {
+        const d = dirs[i++]
+        if (alive.current && openedRef.current[d]) await fetchKid(d)
+      }
+    }
+    for (let k = 0; k < Math.min(3, dirs.length); k++) void next()
+  }
   const toggleKid = (dir: string) => {
     if (openedRef.current[dir]) return closeKids(dir)
     setOpened((o) => ({ ...o, [dir]: { loading: true } }))
@@ -455,6 +488,9 @@ function FilesPanel({ sessionId, start, reveal, onPath, onInsert, onClose, docke
 
   const crumbs = path === null ? [] : path.split('/').filter(Boolean)
 
+  // (Where an entry opened under the folder listed is, from it: said to a screen reader, as the
+  // indent shows it — review, 11-26.)
+  const rel = (p: string) => (path === '/' ? p.slice(1) : p.slice((path ?? '').length + 1))
   // rows draws an entry of dir, and under an opened folder what is in it, a level in.
   const shownKids = (list: FileEntry[]) => sortEntries(list.filter((e) => hidden || !e.name.startsWith('.')), byTime)
   const note = (key: string, depth: number, body: React.ReactNode) => (
@@ -472,6 +508,7 @@ function FilesPanel({ sessionId, start, reveal, onPath, onInsert, onClose, docke
       >
         <EntryButton
           entry={e}
+          where={depth > 0 ? rel(dir) : undefined}
           expanded={e.type === 'dir' ? !!kid : undefined}
           items={() => items(dir, e)}
           onOpen={() => toggleKid(full)}
@@ -483,7 +520,7 @@ function FilesPanel({ sessionId, start, reveal, onPath, onInsert, onClose, docke
           heading={e.name}
           items={() => items(dir, e)}
           button={(open, toggle) => (
-            <button className="icon-btn files-more" aria-expanded={open} aria-label={t('files.actionsFor', { name: e.name })} onClick={toggle}>
+            <button className="icon-btn files-more" aria-expanded={open} aria-label={t('files.actionsFor', { name: depth > 0 ? rel(full) : e.name })} onClick={toggle}>
               <MoreHorizontal size={18} />
             </button>
           )}
@@ -499,7 +536,12 @@ function FilesPanel({ sessionId, start, reveal, onPath, onInsert, onClose, docke
         <button className="link-btn" onClick={() => void fetchKid(full)}>{t('common.retry')}</button>
       </>))
     } else if (!kid.entries) out.push(note(full + '/:loading', depth + 1, t('common.loading')))
-    else if (inside.length === 0) out.push(note(full + '/:empty', depth + 1, t('files.emptyShort')))
+    else if (inside.length === 0 && !hidden && kid.entries.length > 0) {
+      out.push(note(full + '/:hidden', depth + 1, <>
+        {t('files.onlyHidden', { n: kid.entries.length })}{' '}
+        <button className="link-btn" onClick={toggleHidden}>{t('files.showHidden')}</button>
+      </>))
+    } else if (inside.length === 0) out.push(note(full + '/:empty', depth + 1, t('files.emptyShort')))
     if (kid.truncated) out.push(note(full + '/:cut', depth + 1, t('files.truncated', { n: kid.entries!.length })))
     return out
   }
@@ -756,7 +798,7 @@ function DockFrame({ children }: { title: string; onClose: () => void; wide?: bo
 // what can be done with it (as its ⋯ does for every one).
 // A folder opens in place (onOpen: shown or hidden, under it), gone into with
 // a double click or its menu's Open (onEnter); ← and → close and open it.
-function EntryButton({ entry: e, expanded, items, onOpen, onEnter, onLook }: { entry: FileEntry; expanded?: boolean; items: () => MenuItem[]; onOpen: () => void; onEnter: () => void; onLook?: () => void }) {
+function EntryButton({ entry: e, where, expanded, items, onOpen, onEnter, onLook }: { entry: FileEntry; where?: string; expanded?: boolean; items: () => MenuItem[]; onOpen: () => void; onEnter: () => void; onLook?: () => void }) {
   // (Of its kind, by its name, as VS Code draws it; one of no known kind — a link to nothing — as before.)
   const icon = e.type === 'dir' || e.type === 'file' ? <FileTypeIcon name={e.name} dir={e.type === 'dir'} /> : <FileQuestion size={18} />
   const body = (
@@ -767,6 +809,7 @@ function EntryButton({ entry: e, expanded, items, onOpen, onEnter, onLook }: { e
       </span>
       <span className="files-name">
         <span className="files-label">{e.name}</span>
+        {where && <span className="sr-only">{t('files.inFolder', { dir: where })}</span>}
         {e.link && <span className="files-link" aria-label={t('files.link')} title={t('files.link')}>↗</span>}
       </span>
       <span className="files-meta">
