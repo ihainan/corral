@@ -105,6 +105,131 @@ func TestScreenDigestSteady(t *testing.T) {
 	if a == c {
 		t.Error("another choice is the same screen")
 	}
+	if strings.Contains(steadyAwk, "'") {
+		t.Fatal("steadyAwk contains a single quote")
+	}
+	// Multi-tab AskUserQuestion + Review screens: Go and every installed awk
+	// agree byte-for-byte, and volatile chrome outside the dialog is ignored.
+	askBase := strings.Join([]string{
+		"✽ Orchestrating… (13m 18s · ↓ 44.1k tokens)",
+		"────────────────────────────────────────────────────────────",
+		"←  ☒ 登录范围  ☐ 密码登录  ☐ 生产应用  ☐ 写入授权  ✔ Submit  →",
+		"",
+		"接入统一登录后，博客原来的账号密码登录怎么处理?",
+		"",
+		"❯ 1. 只留给机构与导入账号 (Recommended)",
+		"     个人一律走统一登录；4 个公众号机构账号和定时导入程序仍用密码。",
+		"  2. 全部关闭",
+		"     只能统一登录。",
+		"  3. 全部保留",
+		"     两种方式并存，登录页同时显示。",
+		"  4. Type something.",
+		"────────────────────────────────────────────────────────────",
+		"  5. Chat about this",
+		"",
+		"Enter to select · Tab/Arrow keys to navigate · Esc to cancel",
+		"  ● main",
+		"  ◯ general-purpose  Run Codex adversarial review of P…  13m 18s",
+		"  2 background tasks running · Run Codex adversarial review  13m 18s",
+		"  Tip: use Tab to switch questions",
+	}, "\n") + "\n"
+	askTicked := strings.Join([]string{
+		"* Pondering… (13m 19s · ↓ 45.2k tokens)",
+		"✻ Waiting for 2 background agents to finish",
+		"────────────────────────────────────────────────────────────",
+		"←  ☒ 登录范围  ☐ 密码登录  ☐ 生产应用  ☐ 写入授权  ✔ Submit  →",
+		"",
+		"接入统一登录后，博客原来的账号密码登录怎么处理?",
+		"",
+		"❯ 1. 只留给机构与导入账号 (Recommended)",
+		"     个人一律走统一登录；4 个公众号机构账号和定时导入程序仍用密码。",
+		"  2. 全部关闭",
+		"     只能统一登录。",
+		"  3. 全部保留",
+		"     两种方式并存，登录页同时显示。",
+		"  4. Type something.",
+		"────────────────────────────────────────────────────────────",
+		"  5. Chat about this",
+		"",
+		"Enter to submit · Tab/Arrow keys to navigate ·",
+		"Esc to cancel",
+		"  ● main",
+		"  ◯ general-purpose  Run Codex adversarial review of P…  13m 19s",
+		"  Opus 5.5 │ Ctx 182.0K │ $12.34 (13m19s)",
+	}, "\n") + "\n"
+	loneAsk := strings.Join([]string{
+		"✶ Compacting conversation… (4s)",
+		"────────────────────────────────────────────────────────────",
+		" ☐ 部署策略",
+		"",
+		"今晚要灰度吗?",
+		"❯ 1. 先灰度 10%",
+		"  2. 全量发布",
+		"  3. Type something.",
+		"Enter to select · ↑/↓ to navigate · Esc to cancel",
+	}, "\n") + "\n"
+	reviewAsk := strings.Join([]string{
+		"✽ Orchestrating… (13m 18s)",
+		"←  ☒ 登录范围  ☒ 密码登录  ✔ Submit  →",
+		"",
+		"Review your answers",
+		"",
+		" │ ● 接入统一登录后，博客原来的账号密码登录怎么处理?",
+		"   → 机构账号特殊处理",
+		"",
+		"❯ 1. Submit answers",
+		"  2. Cancel",
+		"  ● main",
+		"  ◯ general-purpose  Run Codex  13m 18s",
+	}, "\n") + "\n"
+	staleAboveBash := strings.Join([]string{
+		"←  ☒ Scope  ☐ Style  ✔ Submit  →",
+		"Which style?",
+		"❯ 1. Minimal",
+		"  2. Type something.",
+		"Enter to select · ↑/↓ to navigate · Esc to cancel",
+		"────────────────────────────────────────────────────────────",
+		" Bash command",
+		"   rm important.txt",
+		" Do you want to proceed?",
+		" ❯ 1. Yes",
+		"   2. No",
+		" Esc to cancel",
+	}, "\n") + "\n"
+	for _, s := range []string{askBase, askTicked, loneAsk, reviewAsk, staleAboveBash, "✶ Compacting conversation… (12s)\n  ● main\n  ◯ worker  14s\n"} {
+		for _, awk := range []string{"awk", "mawk", "gawk", "busybox awk", "original-awk"} {
+			if _, err := exec.LookPath(strings.Fields(awk)[0]); err != nil {
+				continue
+			}
+			pipe := strings.ReplaceAll(steadyPipe, "LC_ALL=C awk", "LC_ALL=C "+awk) + " | sha256sum"
+			cmd := exec.Command("sh", "-c", pipe)
+			cmd.Stdin = strings.NewReader(s)
+			out, err := cmd.Output()
+			if err != nil {
+				t.Fatalf("%s: %v", awk, err)
+			}
+			_, gw, _ := screenOf([]byte(s))
+			if host, _, _ := strings.Cut(string(out), " "); host != gw {
+				t.Errorf("%s parity mismatch:\nhost: %s\ngw:   %s\ninput:\n%s", awk, host, gw, s)
+			}
+		}
+	}
+	_, dBase, _ := screenOf([]byte(askBase))
+	_, dTicked, _ := screenOf([]byte(askTicked))
+	if dBase != dTicked {
+		t.Error("background timer/spinner/status/footer change changed AskUserQuestion digest")
+	}
+	// Panel digest also ignores multi-word spinner and agent timer changes.
+	if panelDigest([]byte("✶ Compacting conversation… (1s)\n❯ Auto-compact  true\n  ● main\n  ◯ worker  9s\n")) !=
+		panelDigest([]byte("✽ Waiting for 2 background tasks… (13m 18s)\n❯ Auto-compact  true\n  ● main\n  ◯ worker  10s\n")) {
+		t.Error("panelDigest changed when spinner/agent timer ticked")
+	}
+	// Stale AskUserQuestion above a Bash permission prompt MUST NOT mask command changes.
+	_, dBash1, _ := screenOf([]byte(staleAboveBash))
+	_, dBash2, _ := screenOf([]byte(strings.Replace(staleAboveBash, "rm important.txt", "rm -rf /", 1)))
+	if dBash1 == dBash2 {
+		t.Error("stale AskUserQuestion in scrollback masked Bash permission prompt change")
+	}
 }
 
 // What names the terminal shown, on the gateway and the host alike; what moves
@@ -152,6 +277,8 @@ func TestLookDigest(t *testing.T) {
 	}
 	same := [][2]string{
 		{"✽ Nucleating… (23s)\nbox\n", "* Pondering… (24s · ↓ 3k tokens)\nbox\n"},
+		{"✶ Compacting conversation… (1s)\nbox\n", "✽ Waiting for 2 background tasks… (13m 18s)\nbox\n"},
+		{"✻ Waiting for 1 background agent to finish\nbox\n", "✽ Orchestrating… (13m 18s)\nbox\n"},
 		{"  ◯ main\n  ● general-purpose  Count      9s\n", "  ◯ main\n  ● general-purpose  Count     10s\n"},
 		{"❯ ● general-purpose  Count 22s\n  ◯ main\n", "❯ ● general-purpose  Count 23s\n  ◯ main\n"},
 		{"◯ main\n● task 59s\n\n", "◯ main\n● task 1m 0s\n\n"},
