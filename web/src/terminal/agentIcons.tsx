@@ -12,7 +12,7 @@ import { Cpu, SquareTerminal } from 'lucide-react'
 // grad: the mark is painted in its maker's colours down its height (their
 // colour icon, where the mono one would be a black blob); color is then
 // the one the tile is tinted in.
-type Mark = { name: string; color?: string; grad?: string[]; d: string; even?: boolean; multi?: 'agy' }
+type Mark = { name: string; color?: string; grad?: string[]; d: string; vb?: string; even?: boolean; multi?: 'agy' }
 
 const AGY_MASK_D =
   'M21.751 22.607c1.34 1.005 3.35.335 1.508-1.508C17.73 15.74 18.904 1 12.037 1 5.17 1 6.342 15.74.815 21.1c-2.01 2.009.167 2.511 1.507 1.506 5.192-3.517 4.857-9.714 9.715-9.714 4.857 0 4.522 6.197 9.714 9.715z'
@@ -36,8 +36,9 @@ const MARKS: Record<string, Mark> = {
   codex: { name: 'Codex', color: '#3941FF', grad: ['#B1A7FF', '#7A9DFF', '#3941FF'], d: 'M8.086.457a6.105 6.105 0 013.046-.415c1.333.153 2.521.72 3.564 1.7a.117.117 0 00.107.029c1.408-.346 2.762-.224 4.061.366l.063.03.154.076c1.357.703 2.33 1.77 2.918 3.198.278.679.418 1.388.421 2.126a5.655 5.655 0 01-.18 1.631.167.167 0 00.04.155 5.982 5.982 0 011.578 2.891c.385 1.901-.01 3.615-1.183 5.14l-.182.22a6.063 6.063 0 01-2.934 1.851.162.162 0 00-.108.102c-.255.736-.511 1.364-.987 1.992-1.199 1.582-2.962 2.462-4.948 2.451-1.583-.008-2.986-.587-4.21-1.736a.145.145 0 00-.14-.032c-.518.167-1.04.191-1.604.185a5.924 5.924 0 01-2.595-.622 6.058 6.058 0 01-2.146-1.781c-.203-.269-.404-.522-.551-.821a7.74 7.74 0 01-.495-1.283 6.11 6.11 0 01-.017-3.064.166.166 0 00.008-.074.115.115 0 00-.037-.064 5.958 5.958 0 01-1.38-2.202 5.196 5.196 0 01-.333-1.589 6.915 6.915 0 01.188-2.132c.45-1.484 1.309-2.648 2.577-3.493.282-.188.55-.334.802-.438.286-.12.573-.22.861-.304a.129.129 0 00.087-.087A6.016 6.016 0 015.635 2.31C6.315 1.464 7.132.846 8.086.457zm-.804 7.85a.848.848 0 00-1.473.842l1.694 2.965-1.688 2.848a.849.849 0 001.46.864l1.94-3.272a.849.849 0 00.007-.854l-1.94-3.393zm5.446 6.24a.849.849 0 000 1.695h4.848a.849.849 0 000-1.696h-4.848z', even: true },
   gemini: { name: 'Gemini', color: '#3186FF', d: 'M20.616 10.835a14.147 14.147 0 01-4.45-3.001 14.111 14.111 0 01-3.678-6.452.503.503 0 00-.975 0 14.134 14.134 0 01-3.679 6.452 14.155 14.155 0 01-4.45 3.001c-.65.28-1.318.505-2.002.678a.502.502 0 000 .975c.684.172 1.35.397 2.002.677a14.147 14.147 0 014.45 3.001 14.112 14.112 0 013.679 6.453.502.502 0 00.975 0c.172-.685.397-1.351.677-2.003a14.145 14.145 0 013.001-4.45 14.113 14.113 0 016.453-3.678.503.503 0 000-.975 13.245 13.245 0 01-2.003-.678z', even: true },
   opencode: { name: 'OpenCode', d: 'M16 6H8v12h8V6zm4 16H4V2h16v20z', even: true },
-  // (A stand-in, a plain D: no mark of Devin's own is in the repository.)
-  devin: { name: 'Devin', d: 'M5 3h7a9 9 0 010 18H5V3zm3 3v12h4a6 6 0 000-12H8z', even: true },
+  // From Devicons (https://devicons.io/icons/devin); Cognition's trademark,
+  // shown here only to say which program runs.
+  devin: { name: 'Devin', vb: '0 0 600 600', d: 'M38.3 201.7V77.6c0-5.5 3-10.5 7.7-13.3l107.5-62a15 15 0 0 1 15.3 0l107.5 62c4.7 2.8 7.6 7.8 7.6 13.3V141a62.4 62.4 0 0 0 92.4 53.3l55-31.7a15 15 0 0 1 15.2 0l107.5 62c4.7 2.8 7.7 7.9 7.7 13.3V362c0 5.5-3 10.5-7.7 13.3l-107.5 62a15 15 0 0 1-15.3 0L376.8 406a62.4 62.4 0 0 0-92.9 53.1v63.4c0 5.5-3 10.5-7.6 13.2l-107.5 62.1a15 15 0 0 1-15.3 0L46 535.7a15 15 0 0 1-7.7-13.3V398.3c0-5.5 3-10.5 7.7-13.3l107.5-62a15 15 0 0 1 15.3 0l55 31.8a62.4 62.4 0 0 0 92.3-54A66 66 0 0 0 285 246a62 62 0 0 0-61.2-.6l-55.2 32a15 15 0 0 1-15.3 0L45.9 214.9a15 15 0 0 1-7.6-13.2' },
   agy: { name: 'Antigravity', color: '#3186FF', d: AGY_MASK_D, even: true, multi: 'agy' },
   qwen: { name: 'Qwen', color: '#615CED', d: 'M19.713 2.825h-5.907c0-.251-.066-.503-.196-.728L12.819.728A1.46 1.46 0 0 0 11.559 0h-1.58c-.52 0-1 .275-1.26.728l-2.42 4.19a1.45 1.45 0 0 0 0 1.453l.791 1.37c.26.448.74.727 1.26.727h11.36c.52 0 1-.275 1.26-.728l.79-1.37a1.45 1.45 0 0 0 0-1.451l-.79-1.37a1.46 1.46 0 0 0-1.26-.728zM.195 9.905l2.951 5.115a1.46 1.46 0 0 0-.531.531l-.791 1.37a1.45 1.45 0 0 0 0 1.452l.79 1.37c.26.448.74.727 1.26.727h4.84c.52 0 1-.275 1.26-.728l.79-1.37a1.45 1.45 0 0 0 0-1.451L5.086 7.083a1.46 1.46 0 0 0-1.26-.728h-1.58c-.52 0-1 .276-1.26.728l-.79 1.37a1.45 1.45 0 0 0 0 1.452m15.888 13.367 2.951-5.115c.217.125.469.196.728.196h1.582c.52 0 1-.275 1.26-.728l.79-1.37a1.45 1.45 0 0 0 0-1.451l-2.42-4.191a1.46 1.46 0 0 0-1.259-.728h-1.582c-.52 0-1 .276-1.259.728l-5.678 9.838a1.45 1.45 0 0 0 0 1.452l.79 1.37c.26.448.74.727 1.26.727h1.582c.52 0 1-.275 1.26-.728z', even: true },
   cursor: { name: 'Cursor', d: 'M22.106 5.68L12.5.135a.998.998 0 00-.998 0L1.893 5.68a.84.84 0 00-.419.726v11.186c0 .3.16.577.42.727l9.607 5.547a.999.999 0 00.998 0l9.608-5.547a.84.84 0 00.42-.727V6.407a.84.84 0 00-.42-.726zm-.603 1.176L12.228 22.92c-.063.108-.228.064-.228-.061V12.34a.59.59 0 00-.295-.51l-9.11-5.26c-.107-.062-.063-.228.062-.228h18.55c.264 0 .428.286.296.514z', even: true },
@@ -90,7 +91,7 @@ export function AgentGlyph({ program, size = 16 }: { program: string; size?: num
     )
   }
   return (
-    <svg className="agent-glyph" viewBox="0 0 24 24" width={size} height={size} fill={m.grad ? `url(#${uid})` : m.color ?? 'currentColor'} fillRule={m.even ? 'evenodd' : undefined} clipRule={m.even ? 'evenodd' : undefined} aria-hidden="true">
+    <svg className="agent-glyph" viewBox={m.vb ?? '0 0 24 24'} width={size} height={size} fill={m.grad ? `url(#${uid})` : m.color ?? 'currentColor'} fillRule={m.even ? 'evenodd' : undefined} clipRule={m.even ? 'evenodd' : undefined} aria-hidden="true">
       {m.grad && (
         <defs>
           <linearGradient id={uid} x1="0" y1="0" x2="0" y2="1">
@@ -128,7 +129,7 @@ export function ModelGlyph({ model, desc, size = 14, className = 'convo-model-ic
   const grad = useId()
   if (!m) return <Cpu size={size} className={className + ' is-fallback'} aria-hidden="true" />
   return (
-    <svg className={className} viewBox="0 0 24 24" width={size} height={size} fill={m.grad ? `url(#${grad})` : m.color ?? 'currentColor'} fillRule={m.even ? 'evenodd' : undefined} clipRule={m.even ? 'evenodd' : undefined} aria-hidden="true">
+    <svg className={className} viewBox={m.vb ?? '0 0 24 24'} width={size} height={size} fill={m.grad ? `url(#${grad})` : m.color ?? 'currentColor'} fillRule={m.even ? 'evenodd' : undefined} clipRule={m.even ? 'evenodd' : undefined} aria-hidden="true">
       {m.grad && (
         <defs>
           <linearGradient id={grad} x1="0" y1="0" x2="0" y2="1">
