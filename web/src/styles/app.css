@@ -150,7 +150,8 @@ code, .mono { font-family: var(--font-mono); font-size: var(--fs-sub); }
   color: var(--wb-fg-3, var(--fg-3));
 }
 .wb-rail-item:hover { background: var(--wb-hover, var(--bg-hover)); color: var(--wb-fg, var(--fg)); text-decoration: none; }
-.wb-rail-item[aria-current='page'] { background: var(--wb-active, var(--bg-active)); color: var(--wb-fg, var(--fg)); }
+/* (Which page: the accent's tint, its mark in the accent — more than the hover's shade, and no bar: doc UI item 29, 11-26.) */
+.wb-rail-item[aria-current='page'] { background: var(--wb-accent-soft, var(--accent-soft)); color: var(--wb-accent, var(--accent-text, var(--accent))); }
 .wb-rail-item:focus-visible { outline: none; box-shadow: var(--wb-focus, var(--focus)); }
 @media (pointer: coarse) { .wb-rail-item { width: 44px; height: 44px; } }
 .wb-rail-gap { flex: 1; }

@@ -1,7 +1,8 @@
 import { askTask, taskTaken, TASK_ASK_FOR, type TaskAsked } from './bgTaskOpen'
+import { DRAFTS_EVENT, hasAgentDraft } from './drafts'
 import { createContext, Fragment, memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
-import { Activity, ArrowDown, History, ArrowDownAZ, ArrowUp, ArrowUpDown, Bot, Check, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, ChevronsDownUp, ChevronsUpDown, Clock, Columns2, Copy, Cpu, Download, Eye, FilePen, FileText, Folder, FolderOpen, Gauge as GaugeIcon, GitBranch, GitFork, Hand, Image as ImageIcon, ImageOff, Info, Keyboard, ListChecks, ListOrdered, Loader, LogOut, MessageCircleQuestion, MessagesSquare, MoreHorizontal, MoreVertical, PanelLeft, PanelRight, Pin, Plus, Radar, RotateCw, Search, Server, Settings, ShieldOff, Sparkles, SquarePlus, SquareTerminal, Target, TextCursorInput, TriangleAlert, X } from 'lucide-react'
+import { Activity, ArrowDown, History, ArrowDownAZ, ArrowUp, ArrowUpDown, Bot, Check, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, ChevronsDownUp, ChevronsUpDown, Clock, Columns2, Copy, Cpu, Download, Eye, FilePen, FileText, Folder, FolderOpen, Gauge as GaugeIcon, PencilLine, GitBranch, GitFork, Hand, Image as ImageIcon, ImageOff, Info, Keyboard, ListChecks, ListOrdered, Loader, LogOut, MessageCircleQuestion, MessagesSquare, MoreHorizontal, MoreVertical, PanelLeft, PanelRight, Pin, Plus, Radar, RotateCw, Search, Server, Settings, ShieldOff, Sparkles, SquarePlus, SquareTerminal, Target, TextCursorInput, TriangleAlert, X } from 'lucide-react'
 import { t, getLang, type I18nKey } from '../i18n'
 import { api } from '../api'
 import { setPrefs, usePrefs } from '../prefs'
@@ -783,7 +784,7 @@ export function ConversationView({
     if (Date.now() - taskAsked.at > TASK_ASK_FOR) return
     const t = taskAsked.task
     if (t.kind === 'agent') openSub({ agent: t.id, title: t.name || undefined })
-    else openCmd({ id: t.id, kind: 'cmd', what: t.name, cmd: t.name || undefined, out: t.out, ts: t.since ? new Date(t.since).toISOString() : undefined })
+    else openCmd({ id: t.id, kind: 'cmd', what: t.name, cmd: t.cmd || t.name || undefined, out: t.out, ts: t.since ? new Date(t.since).toISOString() : undefined })
   }, [taskAsked, active, convo.status, convo.of, openSub, openCmd])
   // What it left running in the background, as its processes on the host
   // say (its turn over; not said while it asks something): the bar counts
@@ -791,7 +792,7 @@ export function ConversationView({
   const hostCmds = agent?.cmds && agent.status !== 'blocked' ? agent.cmds : undefined
   const hostCmd = (id: string): ConvoRunning | undefined => {
     const c = hostCmds?.list.find((x) => x.task === id)
-    return c && { id, kind: 'cmd', what: c.title ?? '', cmd: c.title, out: c.out, ts: c.since ? new Date(c.since).toISOString() : undefined }
+    return c && { id, kind: 'cmd', what: c.desc || c.title || '', cmd: c.title, out: c.out, ts: c.since ? new Date(c.since).toISOString() : undefined }
   }
   // On a touch screen, a subagent's panel is a screen of its own: the phone's
   // back (a swipe, its key) shuts it, as it would a page, rather than leaving
@@ -3034,7 +3035,7 @@ function BgPanel({ of, r, gone, nav, onClose, active }: { of: string; r: ConvoRu
 // Commands an agent left running in the background, said beside where it
 // is: how many, and, held over, which and for how long.
 export function BgCmds({ cmds }: { cmds: RowCmds }) {
-  const hint = cmds.list.map((c) => [c.title || t('convo.bgCmd'), c.since ? t('convo.bgCmdFor', { for: duration(Math.max(Date.now() - c.since, 0)) }) : ''].filter(Boolean).join(' · '))
+  const hint = cmds.list.map((c) => [c.desc || c.title || t('convo.bgCmd'), c.since ? t('convo.bgCmdFor', { for: duration(Math.max(Date.now() - c.since, 0)) }) : ''].filter(Boolean).join(' · '))
   if (cmds.n > cmds.list.length) hint.push(t('convo.bgCmdsMore', { n: cmds.n - cmds.list.length }))
   return (
     <span className="convo-list-cmds" title={hint.join('\n')}>
@@ -4677,7 +4678,14 @@ export function AgentList({ rows, menus, onPicked, placed, query: given, onQuery
   // Which parent rows have their nested children folded shut.
   const [parentFolded, setParentFoldedNow] = useState<string[]>(() => keptNames(SIDE_PARENT_FOLD_KEY))
   // Hover preview card for desktop pointers (replaces the raw multi-line OS title tooltip).
-  const [rowTip, setRowTip] = useState<{ key: string; rect: { top: number; bottom: number; left: number; right: number } } | null>(null)
+  // (Which have words typed and not sent: told by drafts.ts as one comes or goes.)
+  const [, setDraftsSeen] = useState(0)
+  useEffect(() => {
+    const on = () => setDraftsSeen((n) => n + 1)
+    window.addEventListener(DRAFTS_EVENT, on)
+    return () => window.removeEventListener(DRAFTS_EVENT, on)
+  }, [])
+  const [rowTip, setRowTip] = useState<{ key: string; task?: RowTask; rect: { top: number; bottom: number; left: number; right: number } } | null>(null)
   const tipTimer = useRef<number | null>(null)
   const clearRowTip = useCallback(() => {
     if (tipTimer.current !== null) {
@@ -4686,13 +4694,13 @@ export function AgentList({ rows, menus, onPicked, placed, query: given, onQuery
     }
     setRowTip(null)
   }, [])
-  const scheduleRowTip = useCallback((key: string, el: HTMLElement) => {
+  const scheduleRowTip = useCallback((key: string, el: HTMLElement, task?: RowTask) => {
     if (isCoarse()) return
     if (tipTimer.current !== null) window.clearTimeout(tipTimer.current)
     const rect = el.getBoundingClientRect()
     tipTimer.current = window.setTimeout(() => {
       tipTimer.current = null
-      setRowTip({ key, rect: { top: rect.top, bottom: rect.bottom, left: rect.left, right: rect.right } })
+      setRowTip({ key, task, rect: { top: rect.top, bottom: rect.bottom, left: rect.left, right: rect.right } })
     }, 320)
   }, [])
   useEffect(() => {
@@ -4960,17 +4968,27 @@ export function AgentList({ rows, menus, onPicked, placed, query: given, onQuery
           // (Its dot there: work left going but not seen to — a grey ring of its own, not
           // a done's green or nothing; what waits on the person first — review of 11-23.)
           const iconDot = !flat ? '' : failed ? 'failed' : r.status === 'blocked' ? 'blocked' : r.bg === 'running' || r.cmds ? 'bg' : r.bg === 'stale' ? 'stale' : mark
+          // (Words typed to it and not sent, it not in front: "Draft" where its time was, a pencil
+          // before — as a chat app marks one; no more weight than its time had. Doc UI item 20, 11-26.)
+          const drafted = !r.current && hasAgentDraft(r.key)
           const whenEl =
-            since || bgWords || (!flat && mark) ? (
+            since || bgWords || drafted || (!flat && mark) ? (
               <span className="convo-list-when">
                 {!flat && mark && <span className={'convo-list-sdot is-' + mark} aria-hidden="true" />}
                 {/* (The words in their own span: a single-line row's menu button
                     takes their place on hover or focus, and its mark stays.) */}
-                {(bgWords || since) && (
+                {(bgWords || since || drafted) && (
                   <span className="convo-list-when-t">
                     {bgWords && <span className={'convo-list-bg' + (bgWords === 'stale' ? ' is-stale' : '')}>{t(bgWords === 'bg' ? 'convo.list.bg' : 'convo.list.bgStale')}</span>}
-                    {bgWords && since && ' · '}
-                    {since}
+                    {bgWords && (since || drafted) && ' · '}
+                    {drafted ? (
+                      <span className="convo-list-draft" title={since || undefined}>
+                        <PencilLine size={11} aria-hidden="true" />
+                        {t('convo.list.draft')}
+                      </span>
+                    ) : (
+                      since
+                    )}
                   </span>
                 )}
               </span>
@@ -5170,7 +5188,12 @@ export function AgentList({ rows, menus, onPicked, placed, query: given, onQuery
                       key={x.kind + x.id}
                       type="button"
                       className="convo-bgrow"
-                      title={x.name || undefined}
+                      title={isTouchOnly ? x.name || undefined : undefined}
+                      onMouseEnter={(e) => {
+                        // (Its own card, of the command: what it does, its words, how long — doc UI item 19.)
+                        if (!rowMenu && !isTouchOnly) scheduleRowTip(r.key, e.currentTarget, x)
+                      }}
+                      onMouseLeave={clearRowTip}
                       onClick={() => {
                         clearRowTip()
                         onPicked?.()
@@ -5179,7 +5202,7 @@ export function AgentList({ rows, menus, onPicked, placed, query: given, onQuery
                       }}
                     >
                       <span className={'convo-bgdot' + (x.live ? ' is-live' : '')} aria-hidden="true" />
-                      <span className={'convo-bgrow-n' + (x.kind === 'cmd' ? ' is-cmd' : '')}>{x.name || t(x.kind === 'cmd' ? 'convo.bgCmd' : 'convo.bgTasks.agent')}</span>
+                      <span className={'convo-bgrow-n' + (x.kind === 'cmd' && (!x.cmd || x.name === x.cmd) ? ' is-cmd' : '')}>{x.name || t(x.kind === 'cmd' ? 'convo.bgCmd' : 'convo.bgTasks.agent')}</span>
                       {x.since && <span className="convo-bgrow-d">{shortFor(now - x.since)}</span>}
                     </button>
                   ))}
@@ -5298,7 +5321,43 @@ export function AgentList({ rows, menus, onPicked, placed, query: given, onQuery
       {rowMenu && menuRow && (
         <MenuLayer label={t('convo.rowMenu', { name: menuRow.title })} anchor={rowMenu.anchor} at={rowMenu.at} sheet={rowMenu.sheet} trigger={menuTrigger} items={menuItems(menuRow)} onClose={closeMenu} />
       )}
-      {!rowMenu && rowTip && (() => {
+      {!rowMenu && rowTip?.task && (() => {
+        // (A command or subagent it set going: its own card, plainer than an agent's — what it does in
+        // the agent's words, how long it has run, the command's words whole, where its output goes. 11-26.)
+        const x = rowTip.task
+        const cardW = 320
+        const vw = typeof window !== 'undefined' ? window.innerWidth : 1280
+        const vh = typeof window !== 'undefined' ? window.innerHeight : 800
+        const left = rowTip.rect.right + 10 + cardW <= vw - 8 ? rowTip.rect.right + 10 : Math.max(8, rowTip.rect.left - cardW - 10)
+        const top = Math.min(Math.max(8, rowTip.rect.top - 4), Math.max(8, vh - 200))
+        const isCmd = x.kind === 'cmd'
+        const words = isCmd && x.cmd && x.cmd !== x.name ? x.cmd : ''
+        const outName = x.out ? x.out.slice(x.out.lastIndexOf('/') + 1) : ''
+        return (
+          <div className="convo-row-tip is-task" role="tooltip" style={{ top, left }}>
+            <div className="convo-row-tip-head">
+              <span className="convo-row-tip-taskic" aria-hidden="true">{isCmd ? <SquareTerminal size={14} /> : <Bot size={14} />}</span>
+              <div className="convo-row-tip-titles">
+                <div className={'convo-row-tip-title' + (isCmd && !words && x.name ? ' is-mono' : '')}>{x.name || t(isCmd ? 'convo.rowTip.bgCmd' : 'convo.bgTasks.agent')}</div>
+                <div className="convo-row-tip-state">
+                  <span className={'convo-bgdot' + (x.live || isCmd ? ' is-live' : '')} aria-hidden="true" />
+                  <span>{isCmd ? t('convo.rowTip.bgCmd') : t('convo.bgTasks.agent')}</span>
+                  {x.since && <span className="convo-row-tip-time">{t('convo.bgCmdFor', { for: duration(Math.max(now - x.since, 0)) })}</span>}
+                </div>
+              </div>
+            </div>
+            {words && <pre className="convo-row-tip-code">{words}</pre>}
+            {outName && (
+              <div className="convo-row-tip-row">
+                <FileText size={12} aria-hidden="true" />
+                <span className="convo-row-tip-val is-mono">{outName}</span>
+              </div>
+            )}
+            <div className="convo-row-tip-hint">{t(isCmd ? 'convo.rowTip.openCmd' : 'convo.rowTip.openSub')}</div>
+          </div>
+        )
+      })()}
+      {!rowMenu && rowTip && !rowTip.task && (() => {
         const tipRow = rows.find((r) => r.key === rowTip.key)
         if (!tipRow) return null
         const tipSince = stamp(tipRow, now)
@@ -5331,7 +5390,9 @@ export function AgentList({ rows, menus, onPicked, placed, query: given, onQuery
         // (More of it, doc UI item 9, 11-24: what it is at — the step under way, or how its answer begins —, the
         // model that answered, why its turn failed. What waits on the person is said above already.)
         const tipGlance = tipRow.status !== 'blocked' ? (tipRow.glance?.() ?? '') : ''
-        const tipModel = tipRow.model ? modelName(tipRow.model) : ''
+        const tipModel = tipRow.model ? shortModelName(tipRow.model) : ''
+        // (Its folder as one reads it: the home folder "~".)
+        const tipFolder = tipRow.projectKey ? tipRow.projectKey.replace(/^\/(?:home|Users)\/[^/]+(?=\/|$)|^\/root(?=\/|$)/, '~') : ''
         const cardW = 320
         const vw = typeof window !== 'undefined' ? window.innerWidth : 1280
         const vh = typeof window !== 'undefined' ? window.innerHeight : 800
@@ -5339,13 +5400,20 @@ export function AgentList({ rows, menus, onPicked, placed, query: given, onQuery
         const top = Math.min(Math.max(8, rowTip.rect.top - 4), Math.max(8, vh - 240))
         return (
           <div className="convo-row-tip" role="tooltip" style={{ top, left }}>
+            {/* (Its state a dot and words under its names, not a badge beside them: the title had the
+                card's width to itself no more and broke over three lines — doc UI item 22, 11-26.) */}
             <div className="convo-row-tip-head">
               <AgentIcon program={tipRow.program} size={18} bare />
               <div className="convo-row-tip-titles">
                 <div className="convo-row-tip-title">{tipRow.title}</div>
                 {tipRow.where && tipRow.where !== tipRow.title && <div className="convo-row-tip-sub">{tipRow.where}</div>}
+                {tipStatusKey && (
+                  <div className={'convo-row-tip-state is-' + tipStatusTone}>
+                    <span className="convo-row-tip-dot" aria-hidden="true" />
+                    <span>{t(tipStatusKey)}</span>
+                  </div>
+                )}
               </div>
-              {tipStatusKey && <span className={'convo-row-tip-badge is-' + tipStatusTone}>{t(tipStatusKey)}</span>}
             </div>
             {tipRow.status === 'blocked' && tipRow.now && (
               <div className="convo-row-tip-wait">
@@ -5380,10 +5448,10 @@ export function AgentList({ rows, menus, onPicked, placed, query: given, onQuery
                     {tipSince && <span className="convo-row-tip-time">{tipSince}</span>}
                   </div>
                 )}
-                {tipRow.projectKey && (
+                {tipFolder && (
                   <div className="convo-row-tip-row">
                     <Folder size={12} aria-hidden="true" />
-                    <span className="convo-row-tip-val is-mono">{tipRow.projectKey}</span>
+                    <span className="convo-row-tip-val is-mono" title={tipRow.projectKey}>{tipFolder}</span>
                   </div>
                 )}
                 {tipModel && (
@@ -5399,9 +5467,9 @@ export function AgentList({ rows, menus, onPicked, placed, query: given, onQuery
                 {tipRow.bg === 'running' && <div className="convo-row-tip-bgnote">{t('convo.list.bgAgents')}</div>}
                 {tipRow.bg === 'stale' && <div className="convo-row-tip-bgnote is-stale">{t('convo.status.bgStale')}</div>}
                 {cmds.slice(0, 3).map((c, idx) => (
-                  <div key={idx} className="convo-row-tip-cmd">
+                  <div key={idx} className={'convo-row-tip-cmd' + (c.desc ? ' is-said' : '')}>
                     <SquareTerminal size={11} aria-hidden="true" />
-                    <span>{c.title || '?'}</span>
+                    <span>{c.desc || c.title || '?'}</span>
                   </div>
                 ))}
                 {cmds.length > 3 && <div className="convo-row-tip-more">{t('convo.rowTip.moreCmds', { n: cmds.length - 3 })}</div>}

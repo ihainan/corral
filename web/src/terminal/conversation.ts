@@ -272,7 +272,7 @@ interface Answer {
   agent_status?: 'busy' | 'idle' | 'waiting'
   waiting_for?: string // (with waiting: "permission prompt", "input needed", "sandbox request", "worker request", "dialog open", "other")
   bg_cmds?: number // (tmux) a Claude Code at rest: the commands it left running in the background
-  bg_cmd_list?: { task: string; title?: string; since?: number; out?: string }[]
+  bg_cmd_list?: { task: string; title?: string; desc?: string; since?: number; out?: string }[]
   quiet_ms?: number // (how long since its log last grew, by the gateway's clock)
   title?: string
   tasks?: ConvoTask[]
@@ -290,8 +290,8 @@ interface Answer {
 }
 
 // (tmux) What a Claude Code at rest left running, as the answer says it.
-const cmdsOf = (a: { bg_cmds?: number; bg_cmd_list?: { task: string; title?: string; since?: number; out?: string }[] }): RowCmds | undefined =>
-  a.bg_cmds ? { n: a.bg_cmds, list: (a.bg_cmd_list ?? []).map((c) => ({ task: c.task, title: c.title, since: c.since, out: c.out })) } : undefined
+const cmdsOf = (a: { bg_cmds?: number; bg_cmd_list?: { task: string; title?: string; desc?: string; since?: number; out?: string }[] }): RowCmds | undefined =>
+  a.bg_cmds ? { n: a.bg_cmds, list: (a.bg_cmd_list ?? []).map((c) => ({ task: c.task, title: c.title, desc: c.desc, since: c.since, out: c.out })) } : undefined
 
 export type ConvoStatus = 'loading' | 'ready' | 'none' | 'error'
 

@@ -17,7 +17,7 @@ html.term-mode body { position: fixed; inset: 0; }
   --wb-chrome: var(--term-chrome); --wb-line: var(--term-line); --wb-hover: var(--term-hover); --wb-active: var(--term-row-current);
   --wb-fg: var(--term-fg); --wb-fg-2: var(--term-fg-2); --wb-fg-3: var(--term-fg-3);
   --wb-warn: var(--term-warn-text); --wb-ok: var(--term-ok-text); --wb-danger: var(--term-danger-text);
-  --wb-focus: inset 0 0 0 2px var(--term-accent-text);
+  --wb-focus: inset 0 0 0 2px var(--term-accent-text); --wb-accent: var(--term-accent-text); --wb-accent-soft: var(--term-accent-soft);
 }
 .term-root.wb-on { padding: 0 0 var(--wb-status) var(--wb-rail); }
 /* (The status bar under them keeps the home indicator's strip (--wb-status): none kept again — review E, 11-24) */
@@ -1106,7 +1106,8 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 }
 .convo-work-head { font-size: var(--fs-sub); line-height: var(--lh-sub); color: var(--term-fg-way); }
 .convo-work-head { align-self: flex-start; }
-.convo-work-said { margin: 0 0 2px 24px; color: var(--term-fg-way); font-size: var(--fs-sub); line-height: var(--lh-sub); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* (Its last thought's line in full — a sentence or two, as they mostly are; one run long cut at three. 11-26.) */
+.convo-work-said { margin: 0 0 2px 24px; color: var(--term-fg-way); font-size: var(--fs-sub); line-height: var(--lh-sub); overflow-wrap: anywhere; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; line-clamp: 3; overflow: hidden; }
 .convo-work-sent { list-style: none; margin: 0 0 4px 24px; padding: 0; display: grid; gap: 2px; color: var(--term-fg-2); font-size: var(--fs-sub); line-height: var(--lh-sub); }
 .convo-work-sent li { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .convo-work-sent .link-btn { color: inherit; font: inherit; }
@@ -1378,7 +1379,7 @@ button.gch-ut:hover { background: var(--term-hover); }
 .convo-tray .convo-panelwin-view { flex: 1; }
 /* (Expanded: over the whole of the thread's column.) */
 .convo-tray.is-expanded { max-width: none; }
-.convo-tray-expand { flex: none; }
+.convo-tray-expand, .convo-tray-full { flex: none; }
 .convo-tray-note { display: flex; flex-direction: column; align-items: flex-start; gap: 12px; padding: 24px 16px; color: var(--term-fg-2); font-size: var(--fs-sub); line-height: var(--lh-sub); }
 .convo-tray-note p { margin: 0; }
 .convo-tray-hint { flex: none; margin: 0; padding: 8px 16px 0; color: var(--term-fg-3); font-size: var(--fs-note); line-height: var(--lh-note); }
@@ -2039,6 +2040,7 @@ button.convo-queue-row.is-note:last-child { border-radius: 0 0 var(--r-lg) var(-
 .convo-list-bg.is-stale { color: var(--term-fg-3); font-weight: 400; }
 /* (Its time beside it in the plain grey: one colour of meaning in the line, not the background's and a status's.) */
 .convo-list-row .convo-list-when:has(.convo-list-bg) { color: var(--term-fg-3); font-weight: 400; }
+.convo-list-draft { display: inline-flex; align-items: center; gap: 3px; color: var(--term-fg-2); font-weight: 400; }
 .convo-list-meta { display: flex; align-items: baseline; gap: 8px; min-width: 0; font-size: var(--fs-note); line-height: var(--lh-note); color: var(--term-fg-3); }
 .convo-list-meta .convo-list-where { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* The one being read: a shade and heavier letters, no colour (its title is
@@ -2067,8 +2069,25 @@ button.convo-queue-row.is-note:last-child { border-radius: 0 0 var(--r-lg) var(-
 }
 .convo-row-tip-head { display: flex; align-items: flex-start; gap: 8px; min-width: 0; }
 .convo-row-tip-titles { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
-.convo-row-tip-title { font-size: var(--fs-ui); line-height: var(--lh-ui); font-weight: 600; color: var(--term-fg); overflow-wrap: anywhere; }
-.convo-row-tip-sub { font-size: var(--fs-note); line-height: var(--lh-note); color: var(--term-fg-2); overflow-wrap: anywhere; }
+/* (Two lines at most of each: a long name, a long first message, cut — doc UI item 22.) */
+.convo-row-tip-title { font-size: var(--fs-ui); line-height: var(--lh-ui); font-weight: 600; color: var(--term-fg); overflow-wrap: anywhere; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; }
+.convo-row-tip-title.is-mono { font-family: var(--font-mono); font-weight: 500; font-size: var(--fs-sub); line-height: var(--lh-sub); }
+.convo-row-tip-sub { font-size: var(--fs-note); line-height: var(--lh-note); color: var(--term-fg-2); overflow-wrap: anywhere; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; }
+.convo-row-tip-state { display: flex; align-items: center; gap: 6px; margin-top: 2px; min-width: 0; font-size: var(--fs-note); line-height: var(--lh-note); color: var(--term-fg-3); }
+.convo-row-tip-state .convo-row-tip-time { margin-left: auto; }
+.convo-row-tip-dot { flex: none; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+.convo-row-tip-state.is-blocked { color: var(--term-warn-text); }
+.convo-row-tip-state.is-working, .convo-row-tip-state.is-bg { color: var(--term-accent-text); }
+.convo-row-tip-state.is-done { color: var(--term-ok-text); }
+/* A command's (or subagent's) card: its mark in a small square, not an agent's; its words a block of code. */
+.convo-row-tip.is-task { gap: 8px; }
+.convo-row-tip-taskic { flex: none; width: 24px; height: 24px; display: grid; place-items: center; border-radius: var(--r); background: color-mix(in srgb, var(--term-fg) 7%, transparent); color: var(--term-fg-2); }
+.convo-row-tip-code {
+  margin: 0; padding: 6px 8px; border-radius: var(--r); background: color-mix(in srgb, var(--term-fg) 5%, transparent); color: var(--term-fg-2);
+  font-family: var(--font-mono); font-size: var(--fs-note); line-height: var(--lh-note); white-space: pre-wrap; overflow-wrap: anywhere;
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 4; line-clamp: 4; overflow: hidden;
+}
+.convo-row-tip-hint { font-size: var(--fs-note); line-height: var(--lh-note); color: var(--term-fg-3); }
 .convo-row-tip-badge {
   flex: none; padding: 2px 6px; border-radius: 999px; font-size: var(--fs-note); line-height: var(--lh-note); font-weight: 500;
   background: color-mix(in srgb, var(--term-fg) 8%, transparent); color: var(--term-fg-2); white-space: nowrap;
@@ -2111,6 +2130,7 @@ button.convo-queue-row.is-note:last-child { border-radius: 0 0 var(--r-lg) var(-
 }
 .convo-row-tip-cmd svg { flex: none; opacity: 0.72; }
 .convo-row-tip-cmd span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.convo-row-tip-cmd.is-said { font-family: var(--font-ui); }
 .convo-row-tip-more { font-size: var(--fs-note); line-height: var(--lh-note); color: var(--term-fg-3); }
 /* Where it is (its workspace, what the agent called it): up to two lines.
    How it is going is said by its dot (and its group). */

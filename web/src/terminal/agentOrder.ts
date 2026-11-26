@@ -58,7 +58,7 @@ export interface ConvoListRow {
 // them (what each runs, when it began, unix ms).
 export interface RowCmds {
   n: number
-  list: { task?: string; title?: string; since?: number; out?: string }[]
+  list: { task?: string; title?: string; desc?: string; since?: number; out?: string }[] // (desc: what the agent said it does)
 }
 
 // One thing an agent set going in the background, as its row lists them: a
@@ -69,6 +69,7 @@ export interface RowTask {
   kind: 'agent' | 'cmd'
   id: string
   name: string
+  cmd?: string // (a command's words, where its name is what the agent said it does)
   since?: number
   out?: string
   live?: boolean
@@ -78,7 +79,7 @@ export interface RowTask {
 export function rowTasks(agents?: { id: string; what?: string; since?: number }[], cmds?: RowCmds): RowTask[] | undefined {
   const l: RowTask[] = [
     ...(agents ?? []).map((a): RowTask => ({ kind: 'agent', id: a.id, name: a.what || '', since: a.since, live: true })),
-    ...(cmds?.list ?? []).filter((c) => c.task).map((c): RowTask => ({ kind: 'cmd', id: c.task!, name: c.title || '', since: c.since, out: c.out })),
+    ...(cmds?.list ?? []).filter((c) => c.task).map((c): RowTask => ({ kind: 'cmd', id: c.task!, name: c.desc || c.title || '', cmd: c.title || undefined, since: c.since, out: c.out })),
   ]
   return l.length ? l : undefined
 }

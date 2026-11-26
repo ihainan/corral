@@ -8,7 +8,7 @@
 // in this browser); what each tab shows is per conversation, kept while the
 // page is.
 import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react'
-import { FolderOpen, GitCompareArrows, Info, Maximize2, Minimize2, SquareTerminal, X } from 'lucide-react'
+import { FolderOpen, GitCompareArrows, Info, Maximize2, Minimize2, SquareArrowOutUpRight, SquareTerminal, X } from 'lucide-react'
 import { api } from '../api'
 import { t } from '../i18n'
 import { usePrefs } from '../prefs'
@@ -221,6 +221,11 @@ export function Dock({
             </button>
           ))}
         </div>
+        {tab === 'terminal' && terminal?.can && (
+          <button type="button" className="icon-btn convo-tray-full" onClick={terminal.onFull} aria-label={t('panel.full')} title={t('panel.full')}>
+            <SquareArrowOutUpRight size={16} strokeWidth={1.75} />
+          </button>
+        )}
         {(canExpand || !!expanded) && (
           <button type="button" className="icon-btn convo-tray-expand" aria-pressed={!!expanded} onClick={() => onExpand(!expanded)} aria-label={t(expanded ? 'dock.collapse' : 'dock.expand')} title={t(expanded ? 'dock.collapse' : 'dock.expand')}>
             {expanded ? <Minimize2 size={16} strokeWidth={1.75} /> : <Maximize2 size={16} strokeWidth={1.75} />}
@@ -248,7 +253,7 @@ export function Dock({
         ) : tab === 'changes' ? (
           <DockChanges key={of + ' ' + ident} of={of} sid={sid} pane={pane} start={start} acts={acts} />
         ) : terminal?.can ? (
-          <PanelWindow key={of + ' ' + ident} sid={sid} active={active} press={terminal.press} onSettled={onSettled} toast={toast} live={{ onFull: terminal.onFull, letters: terminal.letters, who: terminal.who, onComposer: terminal.onComposer, onLeave: () => root.current?.querySelector<HTMLElement>('.convo-tray-tab[aria-selected="true"]')?.focus() }} />
+          <PanelWindow key={of + ' ' + ident} sid={sid} active={active} press={terminal.press} onSettled={onSettled} toast={toast} live={{ bare: true, onFull: terminal.onFull, letters: terminal.letters, who: terminal.who, onComposer: terminal.onComposer, onLeave: () => root.current?.querySelector<HTMLElement>('.convo-tray-tab[aria-selected="true"]')?.focus() }} />
         ) : (
           <div className="convo-tray-note">
             <p>{t('dock.noScreen')}</p>

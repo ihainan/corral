@@ -346,17 +346,17 @@ export function PaneTerminal({
 
   return (
     <div className={'convo-panelwin' + (live?.main ? ' is-main' : '')} role="group" aria-label={t(live ? 'panel.liveTitle' : 'panel.title')}>
-      {!live?.main && (
+      {!live?.main && (!live?.bare || backToCard) && (
       <div className={'convo-panelwin-head' + (live ? ' is-live' : '')}>
         {!live && <span className="convo-panelwin-title">{t('panel.title')}</span>}
-        {!isCoarse() && <span className="convo-panelwin-hint">{t(live ? 'panel.liveHint' : 'panel.hint')}</span>}
+        {!isCoarse() && !live?.bare && <span className="convo-panelwin-hint">{t(live ? 'panel.liveHint' : 'panel.hint')}</span>}
         <div className="convo-panelwin-head-acts">
           {backToCard && (
             <button type="button" className="link-btn convo-panelwin-close" onClick={backToCard}>
               {t('notice.backToCard')}
             </button>
           )}
-          {fullAction && (
+          {fullAction && !live?.bare && (
             <button type="button" className="link-btn convo-panelwin-close" onClick={fullAction}>
               {t('panel.full')}
             </button>

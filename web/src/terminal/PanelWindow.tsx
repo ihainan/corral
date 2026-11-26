@@ -91,7 +91,7 @@ const runStyle = (r: AnsiRun): React.CSSProperties => {
 // (onLeave: where F6 takes the focus from its screen — the dock's tabs; none: its own head's first button.)
 // (who: the program the keys go to, as named to the person ("Claude Code"); onComposer: the message box, gone back to.)
 // (main: the conversation's whole place, its terminal view — no head of its own, the person's terminal scheme and size. UI 14, 11-25.)
-export type PanelLive = { onClose?: () => void; onFull?: () => void; note?: string; letters?: boolean; onLeave?: () => void; who?: string; onComposer?: () => void; canNotice?: boolean; onNoticeSent?: () => void; main?: boolean }
+export type PanelLive = { onClose?: () => void; onFull?: () => void; note?: string; letters?: boolean; onLeave?: () => void; who?: string; onComposer?: () => void; canNotice?: boolean; onNoticeSent?: () => void; main?: boolean; bare?: boolean }
 const PTY_TRIES = 2
 // active: in sight (its screen read, said when old); keys: whether it may take the keys as it comes — not so the side
 // of a split without them (review of 36e1069). Unsaid, as active.
@@ -497,17 +497,19 @@ export function PanelWindow({ sid, active, keys, press, onSettled, toast, live, 
   )
   return (
     <div className="convo-panelwin" role="group" aria-label={t(live ? 'panel.liveTitle' : 'panel.title')}>
+      {/* (Bare — the dock's tab: no line over it, its whole-terminal button in the tab row; one only to go back to a card.) */}
+      {(!live?.bare || (allowNotice && notice && rawView)) && (
       <div className={'convo-panelwin-head' + (live ? ' is-live' : '')}>
         {/* (Live: one short line — what a click does, and where words go; the rest said once its keys are taken.) */}
         {!live && <span className="convo-panelwin-title">{t('panel.title')}</span>}
-        {!isCoarse() && <span className="convo-panelwin-hint">{t(live ? 'panel.liveHint' : 'panel.hint')}</span>}
+        {!isCoarse() && !live?.bare && <span className="convo-panelwin-hint">{t(live ? 'panel.liveHint' : 'panel.hint')}</span>}
         <div className="convo-panelwin-head-acts">
           {allowNotice && notice && rawView && (
             <button type="button" className="link-btn convo-panelwin-close" onClick={() => setRawView(false)}>
               {t('notice.backToCard')}
             </button>
           )}
-          {fullAction && (
+          {fullAction && !live?.bare && (
             <button type="button" className="link-btn convo-panelwin-close" onClick={fullAction}>
               {t('panel.full')}
             </button>
@@ -525,6 +527,7 @@ export function PanelWindow({ sid, active, keys, press, onSettled, toast, live, 
           )}
         </div>
       </div>
+      )}
       {live?.note && <p className="convo-panelwin-note">{live.note}</p>}
       {/* (Its keys taken: said plainly, with the ways out — F6, or back to the message box.) */}
       {live && taking && !isCoarse() && (

@@ -339,7 +339,7 @@ export interface HerdrAgent {
   model?: string
   // Commands it left running in the background (done or idle): how many, the first listed.
   bg_cmds?: number
-  bg_cmd_list?: { task: string; title?: string; since?: number; out?: string }[]
+  bg_cmd_list?: { task: string; title?: string; desc?: string; since?: number; out?: string }[]
   // (Claude Code at work: bg_cmds and bg_cmd_list tell those it set going in the background only.)
   // Claude Code: the subagents it sent off in the background still at it, the latest first.
   bg_agent_list?: { id: string; what?: string; since?: number }[]

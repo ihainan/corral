@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ihainan/corral/internal/convo"
 	"github.com/ihainan/corral/internal/herdr"
 	"github.com/ihainan/corral/internal/sshx"
 	"github.com/ihainan/corral/internal/term"
@@ -26,7 +27,12 @@ import (
 const (
 	saidCodexWait = 2 * time.Second // (all of it: finding the log, reading its end)
 	saidCodexTail = 64 << 10
+	saidAgyTail   = 256 << 10 // (its log carries tool results whole: a turn's end further back)
 )
+
+// Antigravity CLI (11-26, its alert said only its command line): its
+// transcript, where the conversation's own reading has it, its end read
+// as Codex's is, the last of its words since the person's last message.
 
 // lastAnswer: what tr's agent said last in the turn of round, its
 // whitespace made single, at most maxSaid letters; "" where not known (not
@@ -37,6 +43,9 @@ func (s *Server) lastAnswer(sess *term.Session, tr herdr.Transition, round int64
 		if t := p.said(tr.Pane.ID, round); t != "" {
 			return t
 		}
+	}
+	if a := strings.ToLower(tr.Pane.Agent); a == "agy" || strings.Contains(a, "antigravity") {
+		return s.agyLastAnswer(sess, tr.Pane)
 	}
 	if !strings.Contains(strings.ToLower(tr.Pane.Agent), "codex") {
 		return ""
@@ -140,4 +149,55 @@ func oneLineSaid(t string) string {
 		t = string(r[:maxSaid])
 	}
 	return t
+}
+
+// agyLastAnswer: what an Antigravity CLI said last, from the end of the
+// transcript its conversation reads ("" where that is not had, not read
+// in time, or nothing said since the person's last message).
+func (s *Server) agyLastAnswer(sess *term.Session, pane herdr.Pane) string {
+	st := s.convos.peek(sess.ID + "\x00" + pane.ID)
+	if st == nil {
+		return ""
+	}
+	st.mu.Lock()
+	log, agent, reason, sub := st.log, st.agent, st.reason, st.sub
+	st.mu.Unlock()
+	l, ok := cleanRemotePath(log)
+	if agent != "agy" || reason != "" || sub || !ok || !strings.Contains(l, "/brain/") || !strings.HasSuffix(l, "/.system_generated/logs/transcript_full.jsonl") {
+		return ""
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), saidCodexWait)
+	defer cancel()
+	out, err := sshx.Output(ctx, sess.Client(), codexTailCommand(l, saidAgyTail), saidAgyTail+1024)
+	if err != nil {
+		return ""
+	}
+	return agyLastSaid(out)
+}
+
+// agyLastSaid: of a transcript's end, the agent's last words since the
+// person's last message ("" none). The first line, cut by the tail's
+// start, is skipped by the parser.
+func agyLastSaid(tail []byte) string {
+	p := convo.NewAgy()
+	p.Feed(tail)
+	es := p.Since(0)
+	for i := len(es) - 1; i >= 0; i-- {
+		e := es[i]
+		if e.Gone {
+			continue
+		}
+		if e.Role == convo.RoleUser {
+			return ""
+		}
+		if e.Role != convo.RoleAssistant {
+			continue
+		}
+		for j := len(e.Parts) - 1; j >= 0; j-- {
+			if x := e.Parts[j]; x.Kind == convo.KindText && x.Tool == nil && strings.TrimSpace(x.Text) != "" {
+				return oneLineSaid(x.Text)
+			}
+		}
+	}
+	return ""
 }

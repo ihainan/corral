@@ -2,6 +2,7 @@ package web
 
 import (
 	"context"
+	"encoding/json"
 	"github.com/ihainan/corral/internal/term"
 	"regexp"
 	"slices"
@@ -55,6 +56,9 @@ type bgCmd struct {
 	// Out: the file its output goes to (none for a Monitor's), for the page
 	// to show its end, as of one the log told of.
 	Out string `json:"out,omitempty"`
+	// Desc: what the agent said the command does (a Claude Code call's
+	// description), where its log tells it; the page names it so.
+	Desc string `json:"desc,omitempty"`
 	// quiet: a Monitor's — in the background by its nature, whatever the
 	// agent's log says (see bgTaskIDs). (Not sent.)
 	quiet bool
@@ -491,7 +495,7 @@ for k in $kids; do
   *) t=$(tr '\0\n\t' '   ' <"/proc/$k/cmdline" 2>/dev/null | awk -v "m=&& eval '" '` + cmdEvalAwk + `' | head -c 400);;
   esac
   printf 'cmd\t%s\t%s\t%s\t%s\n' "$k" "$st" "$(printf '%s' "$l" | tr '\t\n' '  ')" "$t"
-  case $l in */tasks/*.output*) x=${l##*/tasks/}; seen="$seen ${x%%.output*}";; esac
+  case $l in */tasks/*.output*) x=${l##*/tasks/}; seen="$seen ${x%%.output*}"; y=${l%/tasks/*}; pairs="$pairs ${y##*/}/${x%%.output*}";; esac
   case $l in
   codex:*)
     # (Its parents, a few up: a command in Codex's sandbox is told by
@@ -517,6 +521,27 @@ for a in "$@"; do
     grep -o '"backgroundTaskId":"[A-Za-z0-9_-]*"' "$f" | sed 's/^"backgroundTaskId":"//; s/"$//' | sort -u | while IFS= read -r id; do
       case " $seen " in *" $id "*) printf 'bgid\t%s\t%s\n' "$s" "$id";; esac
     done
+    break
+  done
+done
+# (Of each command a Claude Code's task file tells, what the agent said it does — its call's
+# "description", as the agent's own page shows it: the call is the one whose result names the
+# task. At most 16, a grep or two of its log each.)
+i=0; told=
+for p in $pairs; do
+  [ "$i" -lt 16 ] || break
+  case " $told " in *" $p "*) continue;; esac
+  told="$told $p"
+  s=${p%%/*}; id=${p#*/}
+  case $s in *[!0-9a-fA-F-]*|"") continue;; esac
+  case $id in *[!A-Za-z0-9_-]*|"") continue;; esac
+  for f in "$HOME"/.claude/projects/*/"$s".jsonl; do
+    [ -f "$f" ] || continue
+    i=$((i + 1))
+    tu=$(grep -m 1 -F "\"backgroundTaskId\":\"$id\"" "$f" | grep -o '"tool_use_id":"[A-Za-z0-9_-]*"' | head -n 1 | cut -d'"' -f4)
+    [ -n "$tu" ] || break
+    w=$(grep -m 1 -F "\"id\":\"$tu\"" "$f" | sed "s/^.*\"id\":\"$tu\"//; s/\"type\":\"tool_use\".*//" | grep -oE '"description":"([^"\\]|\\.)*"' | head -n 1 | head -c 600)
+    [ -n "$w" ] && printf 'desc\t%s\t%s\t{%s}\n' "$s" "$id" "$w"
     break
   done
 done
@@ -611,6 +636,7 @@ func parseCmdScan(out string) (cmds map[string][]bgCmd, whole bool) {
 	}
 	var all, wrappers []found
 	anc := map[string][]string{} // (a Codex's command's process → its parents, nearest first)
+	desc := map[string]string{}  // (session + " " + task → what the agent said it does)
 	for _, line := range strings.Split(out, "\n") {
 		f := strings.SplitN(line, "\t", 5)
 		switch {
@@ -620,6 +646,15 @@ func parseCmdScan(out string) (cmds map[string][]bgCmd, whole bool) {
 			for _, a := range strings.Split(f[2], ",") {
 				if cmdPID.MatchString(a) {
 					anc[f[1]] = append(anc[f[1]], a)
+				}
+			}
+		case len(f) == 4 && f[0] == "desc" && convoUUID.MatchString(f[1]) && cmdTaskID.MatchString(f[2]):
+			var d struct {
+				Description string `json:"description"`
+			}
+			if json.Unmarshal([]byte(f[3]), &d) == nil {
+				if w := cmdTitle(d.Description); w != "" {
+					desc[strings.ToLower(f[1])+" "+f[2]] = w
 				}
 			}
 		case len(f) == 3 && f[0] == "clock":
@@ -687,6 +722,7 @@ func parseCmdScan(out string) (cmds map[string][]bgCmd, whole bool) {
 		if btime > 0 && hz > 0 && hz <= 100000 && c.start < (1<<62)/1000 {
 			c.cmd.Since = btime*1000 + c.start*1000/hz
 		}
+		c.cmd.Desc = desc[c.session+" "+c.cmd.Task]
 		got[c.session] = append(got[c.session], c.cmd)
 	}
 	return got, whole

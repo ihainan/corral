@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"path"
 	"regexp"
 	"strconv"
 	"strings"
@@ -573,7 +574,21 @@ func titleSays(title, program string) bool {
 	if len([]rune(t)) < 6 {
 		return false
 	}
-	return !strings.EqualFold(t, program) && !strings.EqualFold(t, "Claude Code") && !strings.EqualFold(t, "Antigravity") && !strings.EqualFold(t, "Antigravity CLI")
+	if strings.EqualFold(t, program) || strings.EqualFold(t, "Claude Code") || strings.EqualFold(t, "Antigravity") || strings.EqualFold(t, "Antigravity CLI") {
+		return false
+	}
+	// (A command line — "agy --model gemini-4-neon-high --mode auto", the
+	// title a program left as it began — says nothing of what it did: 11-26.)
+	f := strings.Fields(t)
+	if program != "" && strings.EqualFold(path.Base(f[0]), program) {
+		return false
+	}
+	for _, w := range f[1:] {
+		if strings.HasPrefix(w, "--") || (len(w) == 2 && w[0] == '-' && w[1] != '-') {
+			return false
+		}
+	}
+	return true
 }
 
 // agentProgram: the program's name as people call it, and in Chinese.

@@ -11,9 +11,22 @@ const drafts = new Map<string, string>()
 
 export const getDraft = (session: string) => drafts.get(session) ?? ''
 export function keepDraft(session: string, text: string) {
+  const had = drafts.has(session)
   if (text) drafts.set(session, text)
   else drafts.delete(session)
   saveSoon()
+  if (had !== !!text) draftsChanged()
+}
+
+// Which agents have words typed and not sent (the agents page's list marks
+// them, doc UI item 20): told when one comes or goes, not at each key.
+export const DRAFTS_EVENT = 'corral:drafts'
+const draftsChanged = () => typeof window !== 'undefined' && window.dispatchEvent(new Event(DRAFTS_EVENT))
+// (An agent's composer's: "agents <row key>", a tmux pane's after it.)
+export const hasAgentDraft = (rowKey: string) => {
+  const k = 'agents ' + rowKey
+  for (const [d, v] of drafts) if ((d === k || d.startsWith(k + ' ')) && v.trim()) return true
+  return false
 }
 
 // Sent messages, oldest first, across this account's sessions.
@@ -198,6 +211,7 @@ export function draftsFor(uid: number | null) {
   }
   if (uid === null || !saved || saved.uid !== uid) {
     tabStore.remove(STORE)
+    draftsChanged()
     return
   }
   for (const [k, v] of Object.entries(saved.drafts ?? {})) if (typeof v === 'string' && v) drafts.set(k, v)
@@ -208,6 +222,7 @@ export function draftsFor(uid: number | null) {
       attached.set(a.label, { label: a.label, send: a.send, path: a.path, name: a.name, image: !!a.image, host: a.host })
   if (Number.isInteger(saved.fn)) attachN = Math.max(attachN, saved.fn as number)
   for (const [k, v] of Object.entries(saved.sent ?? {})) if (Array.isArray(v) && v.length) sent[k] = v
+  draftsChanged()
 }
 function save() {
   saveTimer = undefined

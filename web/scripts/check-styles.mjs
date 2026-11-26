@@ -33,6 +33,19 @@ for (const f of files) {
     for (const [rx, what] of RULES) if (rx.test(line)) bad.push(`${relative(web, f)}:${i + 1}: ${what}: ${line.trim().slice(0, 120)}`)
   })
 }
+// (Drawn as a thin box of its own — a ::before 2px wide along an edge, the
+// fourth way, 11-26: caught before the build, not by the person. A 1px one
+// is a tree's or a divider's line; a pane's grip, what one drags, is not a mark.)
+for (const f of files.filter((x) => x.endsWith('.css'))) {
+  const text = readFileSync(f, 'utf8')
+  for (const m of text.matchAll(/([^{}]*::?(?:before|after)[^{}]*)\{([^{}]*)\}/g)) {
+    const body = m[2]
+    if (!/-grip\b/.test(m[1]) && /(?:^|[;\s])width\s*:\s*[2-4](?:\.\d+)?px/.test(body) && /(?:^|[;\s])top\s*:/.test(body) && /(?:^|[;\s])bottom\s*:/.test(body) && /background/.test(body)) {
+      const line = text.slice(0, m.index + m[1].length).split('\n').length
+      bad.push(`${relative(web, f)}:${line}: a thin box drawn along an edge (a bar): ${m[1].trim().slice(0, 120)}`)
+    }
+  }
+}
 if (bad.length) {
   console.error(bad.join('\n'))
   console.error('left-edge bars are not used in this project: tint the element, or weight its words, instead')
