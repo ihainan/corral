@@ -530,7 +530,6 @@ html.kb-open .keybar { padding-bottom: 6px; }
 @media (pointer: coarse) { .term-tab, .term-tab-new { height: 40px; } .term-tab-new { width: 40px; } }
 
 /* "+": a host to open */
-.new-tab { width: min(440px, calc(100vw - 32px)); }
 .new-tab-search { display: flex; align-items: center; gap: 8px; height: 40px; padding: 0 12px; margin-bottom: 8px; border: 1px solid var(--line-input); border-radius: var(--r-md, 8px); color: var(--fg-3); }
 .new-tab-search:focus-within { border-color: var(--accent); box-shadow: var(--focus); }
 .new-tab-search input {
@@ -2642,7 +2641,7 @@ button.convo-queue-row.is-note:last-child { border-radius: 0 0 var(--r-lg) var(-
 @media (pointer: coarse) {
   .convo-side .list-search, .convo-picker .list-search, .agents-phone .list-search { padding-left: 11px; } /* (as the rows, 12 there) */
 }
-.new-agent { display: flex; flex-direction: column; gap: 14px; }
+.new-agent { display: flex; flex-direction: column; gap: 14px; container-type: inline-size; container-name: new-agent; }
 .new-agent .seg button { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .new-agent-parent {
   display: inline-flex; align-items: center; gap: 6px; align-self: flex-start; margin: 0; padding: 4px 10px;
@@ -2661,9 +2660,9 @@ button.convo-queue-row.is-note:last-child { border-radius: 0 0 var(--r-lg) var(-
 .new-agent-kinds button { display: inline-flex; align-items: center; justify-content: center; gap: 4px; padding: 0 4px; font-size: var(--fs-note); line-height: var(--lh-note); }
 .new-agent-kinds button > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .new-agent-kinds .agent-glyph { flex: none; }
-@media (max-width: 520px) {
-  .new-agent-kinds button { flex-direction: column; gap: 2px; height: auto; padding: 4px 2px; }
-  .new-agent-kinds button > span { max-width: 100%; }
+@container new-agent (max-width: 480px) {
+  .new-agent-kinds { grid-auto-flow: row; grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .new-agent-kinds button { padding: 0 6px; }
 }
 .new-agent-more { display: flex; flex-direction: column; gap: 10px; }
 .new-agent-more-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
@@ -2738,7 +2737,7 @@ button.convo-queue-row.is-note:last-child { border-radius: 0 0 var(--r-lg) var(-
 /* The input history on the host: what was sent, a page at a time, to put back in the composer */
 .host-history { display: flex; flex-direction: column; gap: 10px; }
 .host-history-list > [role=listitem] { display: flex; flex-direction: column; }
-.host-history-list { display: flex; flex-direction: column; gap: 4px; max-height: min(52vh, 460px); overflow: auto; overscroll-behavior: contain; }
+.host-history-list { display: flex; flex-direction: column; gap: 4px; flex: 0 1 auto; min-height: 0; max-height: min(52vh, 460px); overflow: auto; overscroll-behavior: contain; }
 .host-history-row {
   display: flex; flex-direction: column; gap: 3px; padding: 8px 10px; border: 1px solid var(--line); border-radius: var(--r-sm);
   background: none; color: var(--fg); text-align: left; font: inherit; cursor: pointer;
@@ -2751,7 +2750,8 @@ button.convo-queue-row.is-note:last-child { border-radius: 0 0 var(--r-lg) var(-
 .host-history-meta { display: flex; flex-wrap: wrap; gap: 4px 10px; font-size: var(--fs-note); line-height: var(--lh-note); color: var(--fg-3); }
 .host-history-project { max-width: 18em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .host-history-flag { color: var(--fg-2); }
-.host-history-foot { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+.host-history-foot { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 12px; }
+.host-history-foot > :last-child { margin-left: auto; }
 @media (pointer: coarse) { .host-history-row { padding: 11px 12px; } }
 
 /* What the session used, under its context */
@@ -2976,6 +2976,7 @@ html.kb-open .convo-runs-pop.is-sheet { padding-bottom: 16px; }
    its words as the invite dialog's (ux1101 T42, T43). */
 .dialog.ports-dialog .lead { text-wrap: balance; }
 .dialog.ports-dialog .section h2 { font-size: var(--fs-sub); line-height: var(--lh-sub); font-weight: 600; color: var(--fg-2); }
+.dialog.ports-dialog .row-main.no-icon { grid-template-columns: auto minmax(0, 1fr); }
 .ports-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .ports-head .icon-btn { margin-right: -8px; }
 .spin { animation: spin 0.9s linear infinite; }
