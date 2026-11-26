@@ -27,6 +27,11 @@ export interface ConvoListRow {
   // Real-time status distinct from frozen placeAs.status so approval alerts
   // ("blocked") always surface immediately in the uncollapsible attention group.
   liveStatus?: 'working' | 'blocked' | 'done' | 'idle' | 'unknown'
+  // Herdr status stream lost: keep status='unknown' so live alerts/counts do
+  // not treat stale state as current, while grouping falls back to lastStatus.
+  lost?: boolean
+  lastStatus?: 'working' | 'blocked' | 'done' | 'idle'
+  lostAt?: number // (unix ms) when the status connection was lost
   bg?: 'running' | 'stale' // (its turn over, subagents still out)
   model?: string // (the model its last turn was answered by, where known: said on a child's row)
   failed?: string // (done, not seen yet: the API error its turn ended on — workbench 11-23)
@@ -101,11 +106,20 @@ export interface AgentGroup {
 // Live blocked check: always evaluates real-time status (never frozen placeAs).
 export const isLiveBlocked = (r: ConvoListRow) => (r.liveStatus ?? r.status) === 'blocked'
 
+// Grouping status: when herdr is lost (status === 'unknown'), group by the
+// last known status before disconnect instead of dumping every row into Other.
+const groupStatus = (r: ConvoListRow): ConvoListRow['status'] =>
+  r.lost && r.status === 'unknown' && r.lastStatus ? r.lastStatus : r.status
+const isStaleBlocked = (r: ConvoListRow) => !!r.lost && r.status === 'unknown' && r.lastStatus === 'blocked'
+const isDone = (r: ConvoListRow) => groupStatus(r) === 'done'
+const isIdleMember = (r: ConvoListRow) => (r.lost && r.status === 'unknown' ? r.lastStatus === 'idle' : (r.since ?? 0) > 0)
+
 function groupCounts(rows: ConvoListRow[]) {
   let blockedCount = 0
   let workingCount = 0
   let doneCount = 0
   for (const r of rows) {
+    if (r.lost) continue
     if (isLiveBlocked(r)) blockedCount++
     else if (working(r)) workingCount++
     else if (r.status === 'done') doneCount++
@@ -119,8 +133,8 @@ function groupCounts(rows: ConvoListRow[]) {
 // (A turn over with commands it left running in the background — a build, a
 // server — counts as at work, as the person asked (11-04): even a server
 // that runs on keeps it there, and not "done, not looked at".)
-const working = (r: ConvoListRow) => !isLiveBlocked(r) && (r.status === 'working' || !!r.cmds)
-const forYou = (r: ConvoListRow) => isLiveBlocked(r) || (r.status === 'done' && !working(r))
+const working = (r: ConvoListRow) => !isLiveBlocked(r) && (groupStatus(r) === 'working' || !!r.cmds)
+const forYou = (r: ConvoListRow) => isLiveBlocked(r) || ((isStaleBlocked(r) || isDone(r)) && !working(r))
 // (Those pinned first, whatever their status; in no other group.)
 export const pinned = (r: ConvoListRow) => r.pinned !== undefined
 export const GROUPS: { name: I18nKey; of: (r: ConvoListRow) => boolean }[] = [
@@ -135,8 +149,8 @@ export const GROUPS: { name: I18nKey; of: (r: ConvoListRow) => boolean }[] = [
 function smartRank(r: ConvoListRow): number {
   if (isLiveBlocked(r)) return 0
   if (working(r)) return 1
-  if (r.status === 'done') return 2
-  if (r.status === 'idle') return 3
+  if (isStaleBlocked(r) || isDone(r)) return 2
+  if (groupStatus(r) === 'idle') return 3
   return 4
 }
 
@@ -461,7 +475,7 @@ export function buildAgentGroups(rows: ConvoListRow[], opts: OrderOpts = {}): Ag
       // Exact flat Status-mode behavior.
       const blockedRows = sortRows(remaining.filter(isLiveBlocked), sort).map((r) => stripNestMeta(r, allByKey, false))
       const nonBlocked = remaining.filter((r) => !isLiveBlocked(r))
-      const doneRows = sortRows(nonBlocked.filter((r) => r.status === 'done' && !working(r)), sort).map((r) => stripNestMeta(r, allByKey, false))
+      const doneRows = sortRows(nonBlocked.filter((r) => (isStaleBlocked(r) || isDone(r)) && !working(r)), sort).map((r) => stripNestMeta(r, allByKey, false))
       const todoRows = [...blockedRows, ...doneRows]
       if (todoRows.length) {
         out.push({ id: 'convo.group.todo', labelKey: 'convo.group.todo', kind: 'todo', rows: todoRows, collapsible: false, ...groupCounts(todoRows) })
@@ -471,8 +485,8 @@ export function buildAgentGroups(rows: ConvoListRow[], opts: OrderOpts = {}): Ag
         out.push({ id: 'convo.group.working', labelKey: 'convo.group.working', kind: 'working', rows: workRows, collapsible: true, ...groupCounts(workRows) })
       }
       const recentRows = sortRows(nonBlocked.filter((r) => !forYou(r) && !working(r)), sort).map((r) => stripNestMeta(r, allByKey, false))
-      const idle = recentRows.filter((p) => (p.since ?? 0) > 0)
-      const other = recentRows.filter((p) => (p.since ?? 0) <= 0)
+      const idle = recentRows.filter(isIdleMember)
+      const other = recentRows.filter((p) => !isIdleMember(p))
       if (idle.length) out.push({ id: 'convo.group.idle', labelKey: 'convo.group.idle', kind: 'idle', rows: idle, collapsible: true, ...groupCounts(idle) })
       if (other.length) out.push({ id: 'convo.group.other', labelKey: 'convo.group.other', kind: 'other', rows: other, collapsible: true, ...groupCounts(other) })
       return out
@@ -491,12 +505,13 @@ export function buildAgentGroups(rows: ConvoListRow[], opts: OrderOpts = {}): Ag
     for (const t of forest.trees) {
       const members = [t.root, ...t.children]
       const hasBlocked = members.some(isLiveBlocked)
-      const hasDone = members.some((m) => m.status === 'done' && !working(m))
+      const hasDone = members.some((m) => (isStaleBlocked(m) || isDone(m)) && !working(m))
       const hasWorking = members.some(working)
+      const hasIdle = members.some(isIdleMember)
       if (hasBlocked) blockedTrees.push(...members)
       else if (hasDone) doneTrees.push(...members)
       else if (hasWorking) workTrees.push(...members)
-      else if (t.maxSince > 0) idleTrees.push(...members)
+      else if (hasIdle) idleTrees.push(...members)
       else otherTrees.push(...members)
     }
 

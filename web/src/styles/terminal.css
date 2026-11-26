@@ -2027,10 +2027,14 @@ button.convo-queue-row.is-note:last-child { border-radius: 0 0 var(--r-lg) var(-
 }
 .convo-list-split { flex: none; display: inline-flex; align-items: center; color: var(--term-accent-text); }
 .convo-list-line .convo-list-split { align-self: center; margin-left: -4px; }
+.convo-list-lost { flex: none; display: inline-flex; align-items: center; color: var(--term-fg-3); }
+.convo-list-line .convo-list-lost { align-self: center; margin-left: -4px; }
 .convo-list-row {
   display: flex; align-items: flex-start; gap: 10px; width: 100%; padding: 8px 10px; border: 0; border-radius: var(--r);
   background: none; color: var(--term-fg); font: inherit; text-align: left; cursor: pointer;
 }
+.convo-list-row.is-lost { opacity: 0.68; }
+.convo-list-row.is-lost:hover, .convo-list-row.is-lost[aria-current='true'] { opacity: 0.88; }
 .convo-list-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
 .convo-list-row:hover { background: var(--term-row-hover); --dot-ring: var(--term-row-hover); }
 .convo-list-row:focus-visible { outline: 2px solid var(--term-accent-text); outline-offset: -2px; }
@@ -2103,6 +2107,7 @@ button.convo-queue-row.is-note:last-child { border-radius: 0 0 var(--r-lg) var(-
 .convo-row-tip-title.is-mono { font-family: var(--font-mono); font-weight: 500; font-size: var(--fs-sub); line-height: var(--lh-sub); }
 .convo-row-tip-sub { font-size: var(--fs-note); line-height: var(--lh-note); color: var(--term-fg-2); overflow-wrap: anywhere; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; }
 .convo-row-tip-state { display: flex; align-items: center; gap: 6px; margin-top: 2px; min-width: 0; font-size: var(--fs-note); line-height: var(--lh-note); color: var(--term-fg-3); }
+.convo-row-tip-state svg { flex: none; }
 .convo-row-tip-state .convo-row-tip-time { margin-left: auto; }
 .convo-row-tip-dot { flex: none; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
 .convo-row-tip-state.is-blocked { color: var(--term-warn-text); }
@@ -3042,6 +3047,7 @@ html.kb-open .convo-runs-pop.is-sheet { padding-bottom: 16px; }
 /* (Less room than two or three of its letters: none of it, not a lone "≨" or "(" that reads as noise — 11-24.) */
 @container where (max-width: 2.5em) { .convo-list-where-t { opacity: 0; } }
 .convo-list-groups.is-flat .convo-list-line > .convo-list-split,
+.convo-list-groups.is-flat .convo-list-line > .convo-list-lost,
 .convo-list-groups.is-flat .convo-list-line > .convo-list-pin { margin-left: 0; }
 /* Its state on its icon's corner, ringed in the row's own shade (opaque, so the
    ring hides the mark under it: the dark rows' shades are see-through). */

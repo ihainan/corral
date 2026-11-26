@@ -19,6 +19,7 @@ export interface AgentRow {
   status: AgentStatus
   last?: AgentStatus // (herdr lost: what it said last)
   lost?: boolean // (the gateway lost herdr after this summary)
+  lostAt?: number // (unix ms) when the gateway first lost herdr
   // Its turn over, subagents it sent off still out: it works on in the
   // background ("running"), or has for so long that it is to be looked at
   // ("stale"; see BG_STALE).
@@ -111,7 +112,7 @@ export function listAgents(sessions: SessionInfo[]): { rows: AgentRow[]; others:
         // (Of two tabs' word, a current summary's over one the gateway lost.)
         if (had && !(had.lost && !m.lost)) continue
         const known = (STATUS_ORDER as string[]).includes(a.status) ? (a.status as AgentStatus) : 'unknown'
-        byKey.set(key, m.lost ? { key, s, a, ws: w.label, wsId: w.id, status: 'unknown', lost: true, last: known === 'unknown' ? undefined : known } : { key, s, a, ws: w.label, wsId: w.id, ...withBg(key, a, known, now) })
+        byKey.set(key, m.lost ? { key, s, a, ws: w.label, wsId: w.id, status: 'unknown', lost: true, lostAt: m.lost_at, last: known === 'unknown' ? undefined : known } : { key, s, a, ws: w.label, wsId: w.id, ...withBg(key, a, known, now) })
       }
     }
   }

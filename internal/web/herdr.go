@@ -138,8 +138,10 @@ type herdrSummary struct {
 	FocusedAgent string `json:"focused_agent,omitempty"`
 	FocusedPane  string `json:"focused_pane,omitempty"` // (what closing a pane closes)
 	// Lost: the gateway lost herdr after this summary; it is what was so
-	// then, not now, until the next one.
-	Lost bool `json:"lost,omitempty"`
+	// then, not now, until the next one. LostAt is when the current disconnect
+	// began (unix ms).
+	Lost   bool  `json:"lost,omitempty"`
+	LostAt int64 `json:"lost_at,omitempty"`
 	// Keys: the bindings of herdr.KeyNames the host's config.toml sets
 	// (read when the watch began), for the shortcut panel's keys; until
 	// read, or if it could not be, KeysUnknown (none are pressed then).
@@ -998,6 +1000,9 @@ func (s *Server) watchHerdr(sess *term.Session, h *store.Host) {
 		},
 	)
 	latest = w.Latest
+	w.SessionID = sess.ID
+	w.ServerName = name
+	w.Log = s.log
 	go s.recheckSeen(ctx, sess, rounds, w.Latest) // (see recheck)
 	s.herdrSocks.setServer(sess.ID, server, sess.OwnerID, w.LatestAt, w.Again)
 	// An agent looked at: the last summary goes again, with it no longer
@@ -1058,6 +1063,9 @@ func (s *Server) watchHerdr(sess *term.Session, h *store.Host) {
 		sum := summarize(name, snap, times, true)
 		rounds.number(&sum, true)
 		sum.Lost = true
+		if at := w.LostAt(); !at.IsZero() {
+			sum.LostAt = at.UnixMilli()
+		}
 		publish(sum)
 	}
 	w.Run(ctx)

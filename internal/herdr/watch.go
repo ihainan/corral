@@ -4,12 +4,15 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 
 	"golang.org/x/crypto/ssh"
+
+	"github.com/ihainan/corral/internal/sshx"
 )
 
 // Transition is an agent status change in one pane.
@@ -20,6 +23,26 @@ type Transition struct {
 }
 
 var errStreamEnded = errors.New("herdr event stream ended")
+
+const (
+	stepDial      = "dial"
+	stepSnapshot  = "snapshot"
+	stepSubscribe = "subscribe"
+	stepStream    = "stream"
+	stepRefresh   = "refresh"
+)
+
+type watchError struct {
+	step string
+	err  error
+}
+
+func (e *watchError) Error() string { return e.err.Error() }
+func (e *watchError) Unwrap() error { return e.err }
+
+func shouldLogFailure(n int) bool {
+	return n > 0 && (n&(n-1)) == 0
+}
 
 // Watcher keeps a fresh snapshot of a herdr session and reports agent status
 // changes. Following herdr's guidance, events are only a signal to re-read the
@@ -35,10 +58,20 @@ type Watcher struct {
 	// OnEvent, if set, is called for each decoded herdr event envelope
 	// (e.g. "pane_moved") before the watcher refreshes its snapshot.
 	OnEvent func(event string, data json.RawMessage)
+	// SessionID and ServerName identify the Corral session and herdr server
+	// in disconnect/recovery logs.
+	SessionID  string
+	ServerName string
+	// Log receives disconnect and recovery logs (defaults to slog.Default()).
+	Log *slog.Logger
+
+	baseBackoff time.Duration // defaults to time.Second; overridden in tests
+	maxBackoff  time.Duration // defaults to time.Minute; overridden in tests
 
 	mu     sync.Mutex
 	last   *Snapshot
 	lastAt time.Time // (when last was read)
+	lostAt time.Time // (when the current failure streak began; zero when healthy)
 	again  chan struct{}
 }
 
@@ -69,34 +102,106 @@ func (w *Watcher) LatestAt() (*Snapshot, time.Time) {
 	return w.last, w.lastAt
 }
 
+// LostAt returns when the current consecutive failure streak started, or zero
+// when the watcher is healthy.
+func (w *Watcher) LostAt() time.Time {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.lostAt
+}
+
+func (w *Watcher) logger() *slog.Logger {
+	if w.Log != nil {
+		return w.Log
+	}
+	return slog.Default()
+}
+
 // Run blocks until ctx ends, reconnecting with backoff after failures.
 func (w *Watcher) Run(ctx context.Context) {
-	backoff := time.Second
+	base := w.baseBackoff
+	if base <= 0 {
+		base = time.Second
+	}
+	capBackoff := w.maxBackoff
+	if capBackoff <= 0 {
+		capBackoff = time.Minute
+	}
+	backoff := base
+	var (
+		failCount   int
+		firstFailAt time.Time
+	)
+	onConnected := func() {
+		if failCount == 0 {
+			return
+		}
+		downFor := time.Since(firstFailAt).Round(time.Millisecond)
+		w.logger().Info("herdr watch recovered",
+			"session", w.SessionID,
+			"server", w.ServerName,
+			"socket", w.socketPath,
+			"failures", failCount,
+			"down_for", downFor,
+		)
+		failCount = 0
+		firstFailAt = time.Time{}
+		w.mu.Lock()
+		w.lostAt = time.Time{}
+		w.mu.Unlock()
+	}
 	for ctx.Err() == nil {
 		began := time.Now()
-		err := w.once(ctx)
+		err := w.once(ctx, onConnected)
 		if ctx.Err() != nil {
 			return
 		}
 		// A connection that ran a while before it ended starts the waits over.
 		if err == nil || time.Since(began) > 30*time.Second {
-			backoff = time.Second
+			backoff = base
 		}
-		if err != nil && w.OnLost != nil {
-			w.OnLost()
+		if err != nil {
+			now := time.Now()
+			failCount++
+			if failCount == 1 {
+				firstFailAt = now
+				w.mu.Lock()
+				w.lostAt = now
+				w.mu.Unlock()
+			}
+			if shouldLogFailure(failCount) {
+				step := "unknown"
+				var we *watchError
+				if errors.As(err, &we) {
+					step = we.step
+				}
+				w.logger().Warn("herdr watch lost",
+					"session", w.SessionID,
+					"server", w.ServerName,
+					"socket", w.socketPath,
+					"step", step,
+					"busy", errors.Is(err, sshx.ErrBusy),
+					"failures", failCount,
+					"down_for", now.Sub(firstFailAt).Round(time.Millisecond),
+					"err", err,
+				)
+			}
+			if w.OnLost != nil {
+				w.OnLost()
+			}
 		}
 		select {
 		case <-ctx.Done():
 			return
 		case <-time.After(backoff):
 		}
-		backoff = min(backoff*2, time.Minute)
+		backoff = min(backoff*2, capBackoff)
 	}
 }
 
 // once refreshes the snapshot, subscribes, and returns when the pane set changes
 // (so the per-pane subscriptions are rebuilt) or the stream breaks.
-func (w *Watcher) once(ctx context.Context) error {
+func (w *Watcher) once(ctx context.Context, onConnected func()) error {
 	snap, err := w.refresh(ctx)
 	if err != nil {
 		return err
@@ -118,26 +223,29 @@ func (w *Watcher) once(ctx context.Context) error {
 
 	ev, err := Dial(ctx, w.client, w.socketPath)
 	if err != nil {
-		return err
+		return &watchError{step: stepDial, err: err}
 	}
 	if err := ev.StartSubscribe(ctx, extSubs); err != nil {
 		ev.Close()
 		var apiErr *APIError
 		if !errors.As(err, &apiErr) {
-			return err
+			return &watchError{step: stepSubscribe, err: err}
 		}
 		// Older herdr versions reject newer subscription types (pane.moved / pane.updated)
 		// and close the connection after an error: re-Dial cleanly with legacy subscriptions.
 		ev, err = Dial(ctx, w.client, w.socketPath)
 		if err != nil {
-			return err
+			return &watchError{step: stepDial, err: err}
 		}
 		if err := ev.StartSubscribe(ctx, baseSubs); err != nil {
 			ev.Close()
-			return err
+			return &watchError{step: stepSubscribe, err: err}
 		}
 	}
 	defer ev.Close()
+	if onConnected != nil {
+		onConnected()
+	}
 
 	sctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -172,7 +280,7 @@ func (w *Watcher) once(ctx context.Context) error {
 			if err == nil {
 				err = errStreamEnded // (an ended stream is a lost one: the state is old until the next snapshot)
 			}
-			return err
+			return &watchError{step: stepStream, err: err}
 		case <-kick:
 			time.Sleep(250 * time.Millisecond) // let bursts settle
 			for len(kick) > 0 {
@@ -183,7 +291,11 @@ func (w *Watcher) once(ctx context.Context) error {
 		}
 		s, err := w.refresh(ctx)
 		if err != nil {
-			return err
+			var we *watchError
+			if errors.As(err, &we) {
+				err = we.err
+			}
+			return &watchError{step: stepRefresh, err: err}
 		}
 		if paneSet(s) != paneKey {
 			return nil // resubscribe with the new pane list
@@ -194,12 +306,12 @@ func (w *Watcher) once(ctx context.Context) error {
 func (w *Watcher) refresh(ctx context.Context) (*Snapshot, error) {
 	c, err := Dial(ctx, w.client, w.socketPath)
 	if err != nil {
-		return nil, err
+		return nil, &watchError{step: stepDial, err: err}
 	}
 	defer c.Close()
 	snap, err := c.Snapshot(ctx)
 	if err != nil {
-		return nil, err
+		return nil, &watchError{step: stepSnapshot, err: err}
 	}
 	w.mu.Lock()
 	prev := w.last

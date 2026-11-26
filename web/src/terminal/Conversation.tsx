@@ -2,7 +2,7 @@ import { askTask, taskTaken, TASK_ASK_FOR, type TaskAsked } from './bgTaskOpen'
 import { DRAFTS_EVENT, hasAgentDraft } from './drafts'
 import { createContext, Fragment, memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
-import { Activity, ArrowDown, History, ArrowDownAZ, ArrowUp, ArrowUpDown, Bot, Check, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, ChevronsDownUp, ChevronsUpDown, Clock, Columns2, Copy, Cpu, Download, Eye, FilePen, FileText, Folder, FolderOpen, Gauge as GaugeIcon, PencilLine, GitBranch, GitFork, Hand, Image as ImageIcon, ImageOff, Info, Keyboard, ListChecks, ListOrdered, Loader, LogOut, MessageCircleQuestion, MessagesSquare, MoreHorizontal, MoreVertical, PanelLeft, PanelRight, Pin, Plus, Radar, RotateCw, Search, Server, Settings, ShieldOff, Sparkles, SquarePlus, SquareTerminal, Target, TextCursorInput, TriangleAlert, X } from 'lucide-react'
+import { Activity, ArrowDown, History, ArrowDownAZ, ArrowUp, ArrowUpDown, Bot, Check, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, ChevronsDownUp, ChevronsUpDown, Clock, Columns2, Copy, Cpu, Download, Eye, FilePen, FileText, Folder, FolderOpen, Gauge as GaugeIcon, PencilLine, GitBranch, GitFork, Hand, Image as ImageIcon, ImageOff, Info, Keyboard, ListChecks, ListOrdered, Loader, LogOut, MessageCircleQuestion, MessagesSquare, MoreHorizontal, MoreVertical, PanelLeft, PanelRight, Pin, Plus, Radar, RotateCw, Search, Server, Settings, ShieldOff, Sparkles, SquarePlus, SquareTerminal, Target, TextCursorInput, TriangleAlert, WifiOff, X } from 'lucide-react'
 import { t, getLang, type I18nKey } from '../i18n'
 import { api } from '../api'
 import { setPrefs, usePrefs } from '../prefs'
@@ -5075,6 +5075,7 @@ export function AgentList({ rows, menus, onPicked, placed, query: given, onQuery
             ) : null
           const oneLine = flat || isSingleChild
           const whereText = isChild ? childSub : r.where && r.where !== r.title ? r.where : ''
+          const lostHint = r.lost ? (r.lostAt ? t('convo.list.lostSince', { time: hhmm(new Date(r.lostAt)) }) : t('convo.list.lost')) : ''
           const item = (
             <div
               key={r.key}
@@ -5107,7 +5108,7 @@ export function AgentList({ rows, menus, onPicked, placed, query: given, onQuery
             >
             <button
               type="button"
-              className={'convo-list-row is-' + r.status + (failed ? ' is-failed' : '') + (isNestedVisual ? ' is-nested' : '') + (isChild ? ' is-child' : '') + (hi === r.key ? ' is-hi' : '')}
+              className={'convo-list-row is-' + r.status + (r.lost ? ' is-lost' : '') + (failed ? ' is-failed' : '') + (isNestedVisual ? ' is-nested' : '') + (isChild ? ' is-child' : '') + (hi === r.key ? ' is-hi' : '')}
               data-row={r.key}
               aria-current={r.current || undefined}
               onClick={(e) => {
@@ -5140,6 +5141,12 @@ export function AgentList({ rows, menus, onPicked, placed, query: given, onQuery
               <span className="convo-list-text">
                 <span className="convo-list-line">
                   <span className="convo-list-title">{r.title}</span>
+                  {r.lost && (
+                    <span className="convo-list-lost" title={lostHint}>
+                      <WifiOff size={12} aria-hidden="true" />
+                      <span className="sr-only">{lostHint}</span>
+                    </span>
+                  )}
                   {r.inSplit && (
                     <span className="convo-list-split" title={t('convo.split.rowBadge')}>
                       <Columns2 size={12} aria-hidden="true" />
@@ -5493,6 +5500,12 @@ export function AgentList({ rows, menus, onPicked, placed, query: given, onQuery
                   <div className={'convo-row-tip-state is-' + tipStatusTone}>
                     <span className="convo-row-tip-dot" aria-hidden="true" />
                     <span>{t(tipStatusKey)}</span>
+                  </div>
+                )}
+                {tipRow.lost && (
+                  <div className="convo-row-tip-state is-lost">
+                    <WifiOff size={12} aria-hidden="true" />
+                    <span>{tipRow.lostAt ? t('convo.list.lostSince', { time: hhmm(new Date(tipRow.lostAt)) }) : t('convo.list.lost')}</span>
                   </div>
                 )}
               </div>
