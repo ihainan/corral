@@ -484,6 +484,7 @@ type Meta struct {
 type Quota struct {
 	// UpdatedAt is when the older of its windows was said (unix seconds).
 	UpdatedAt int64        `json:"updated_at,omitempty"`
+	Plan      string       `json:"plan,omitempty"`
 	FiveHour  *QuotaWindow `json:"five_hour,omitempty"`
 	Weekly    *QuotaWindow `json:"weekly,omitempty"`
 }
@@ -502,6 +503,9 @@ func (q *Quota) withOlder(older *Quota) *Quota {
 		return older
 	}
 	n := *q
+	if older != nil && n.Plan == "" {
+		n.Plan = older.Plan
+	}
 	if older != nil && n.FiveHour == nil {
 		n.FiveHour = older.FiveHour
 	}

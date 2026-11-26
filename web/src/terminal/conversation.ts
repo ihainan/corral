@@ -235,6 +235,7 @@ export interface ConvoQuotaWindow {
 }
 export interface ConvoQuota {
   updated_at?: number // when the older of its windows was said (unix seconds)
+  plan?: string
   five_hour?: ConvoQuotaWindow
   weekly?: ConvoQuotaWindow
 }

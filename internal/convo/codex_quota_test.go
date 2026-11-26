@@ -66,3 +66,104 @@ func TestCodexQuotaPrepend(t *testing.T) {
 		}
 	}
 }
+
+func TestCodexQuotaPlan(t *testing.T) {
+	cases := []struct {
+		planType any
+		want     string
+	}{
+		{"free", "ChatGPT Free"},
+		{"go", "ChatGPT Go"},
+		{"plus", "ChatGPT Plus"},
+		{"pro", "ChatGPT Pro"},
+		{"PRO", "ChatGPT Pro"},
+		{"prolite", "ChatGPT Pro Lite"},
+		{"promax", "ChatGPT Pro Max"},
+		{"team", "ChatGPT Team"},
+		{"business", "ChatGPT Business"},
+		{"self_serve_business_prolite", "ChatGPT Business"},
+		{"self_serve_business_usage_based", "ChatGPT Business"},
+		{"enterprise", "ChatGPT Enterprise"},
+		{"ent26", "ChatGPT Enterprise"},
+		{"enterprise_cbp_automation", "ChatGPT Enterprise"},
+		{"enterprise_cbp_usage_based", "ChatGPT Enterprise"},
+		{"edu", "ChatGPT Edu"},
+		{"edu_plus", "ChatGPT Edu Plus"},
+		{"edu_pro", "ChatGPT Edu Pro"},
+		{"sci", "Academic Researchers"},
+		{"sci_plus", "Academic Researchers Plus"},
+		{"unknown", ""},
+		{"", ""},
+		{nil, ""},
+		{"some_unrecognized_internal_plan", ""},
+	}
+	for _, tc := range cases {
+		c := NewCodex()
+		c.Feed([]byte(codexLimitsLine(t, "2026-10-30T07:00:00.000Z", map[string]any{
+			"limit_id":  "codex",
+			"plan_type": tc.planType,
+			"primary":   window(25, 300, 1791302615),
+			"secondary": window(10, 10080, 1791581449),
+		})))
+		q := c.Meta().Quota
+		if q == nil {
+			t.Fatalf("plan_type=%v: expected quota", tc.planType)
+		}
+		if q.Plan != tc.want {
+			t.Errorf("plan_type=%v: got plan %q, want %q", tc.planType, q.Plan, tc.want)
+		}
+	}
+
+	// Plan is preserved when a subsequent update omits plan_type, and updated when a newer row reports a new plan.
+	c := NewCodex()
+	c.Feed([]byte(codexLimitsLine(t, "2026-10-30T07:00:00.000Z", map[string]any{
+		"limit_id":  "codex",
+		"plan_type": "plus",
+		"primary":   window(20, 300, 1791302615),
+	})))
+	c.Feed([]byte(codexLimitsLine(t, "2026-10-30T07:05:00.000Z", map[string]any{
+		"limit_id": "codex",
+		"primary":  window(30, 300, 1791302615),
+	})))
+	if got := c.Meta().Quota.Plan; got != "ChatGPT Plus" {
+		t.Fatalf("omitted plan_type dropped previous plan: got %q, want ChatGPT Plus", got)
+	}
+	c.Feed([]byte(codexLimitsLine(t, "2026-10-30T07:10:00.000Z", map[string]any{
+		"limit_id":  "codex",
+		"plan_type": "pro",
+		"primary":   window(35, 300, 1791302615),
+	})))
+	if got := c.Meta().Quota.Plan; got != "ChatGPT Pro" {
+		t.Fatalf("newer plan_type did not override: got %q, want ChatGPT Pro", got)
+	}
+
+	// Prepend preserves older plan when the later tail lacks plan_type, and keeps later plan when both have one.
+	early := codexLimitsLine(t, "2026-10-30T06:00:00.000Z", map[string]any{
+		"limit_id":  "codex",
+		"plan_type": "pro",
+		"primary":   window(10, 300, 1791302615),
+	})
+	lateNoPlan := codexLimitsLine(t, "2026-10-30T07:00:00.000Z", map[string]any{
+		"limit_id": "codex",
+		"primary":  window(40, 300, 1791302615),
+	})
+	lateWithPlan := codexLimitsLine(t, "2026-10-30T07:00:00.000Z", map[string]any{
+		"limit_id":  "codex",
+		"plan_type": "enterprise",
+		"primary":   window(40, 300, 1791302615),
+	})
+	a1, b1 := NewCodex(), NewCodex()
+	a1.Feed([]byte(early))
+	b1.Feed([]byte(lateNoPlan))
+	b1.Prepend(a1)
+	if got := b1.Meta().Quota.Plan; got != "ChatGPT Pro" {
+		t.Errorf("prepend fallback plan = %q, want ChatGPT Pro", got)
+	}
+	a2, b2 := NewCodex(), NewCodex()
+	a2.Feed([]byte(early))
+	b2.Feed([]byte(lateWithPlan))
+	b2.Prepend(a2)
+	if got := b2.Meta().Quota.Plan; got != "ChatGPT Enterprise" {
+		t.Errorf("prepend newer plan = %q, want ChatGPT Enterprise", got)
+	}
+}

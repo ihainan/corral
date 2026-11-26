@@ -48,6 +48,7 @@ import { duration, hhmm, when } from './convoTime'
 import { category, isNote, items, ms, partTime, sameEdits, toolName, verbOf, type Category, type Edits, type Item, type Verb } from './convoItems'
 import { useThoughtTranslation } from './thoughtTranslate'
 import { parseApiError, type ParsedApiError } from './apiError'
+import { pickQuotaPlan, quotaPlanLabel, quotaTitleText } from './quotaPlan'
 
 // The conversation view: the agent's log as turns, over the terminal (which
 // stays mounted under it). Each turn is what the person wrote, then one line
@@ -4168,6 +4169,7 @@ interface QuotaGroup {
 interface Quota {
   known: boolean
   updated_at?: number // (unix seconds)
+  plan?: string
   five_hour?: { used: number; resets_at: number }
   weekly?: { used: number; resets_at: number }
   groups?: QuotaGroup[]
@@ -4227,10 +4229,11 @@ function QuotaPart({ sid, session, agent }: { sid: string; session: string; agen
     }
   }, [key, sid, session, agent])
   const shown = !seen ? undefined : seen.q === 'failed' ? seen.last : seen.q.known ? seen.q : undefined
+  const plan = pickQuotaPlan(shown, seen && seen.q !== 'failed' ? seen.q.plan : undefined)
   const now = Date.now() / 1000
   const stale = shown?.updated_at && now - shown.updated_at > 1200 ? Math.round((now - shown.updated_at) / 60) : 0
   return (
-    <QuotaView shown={shown}>
+    <QuotaView shown={shown} plan={plan}>
       {!seen && <p className="convo-runs-note">{t('quota.reading')}</p>}
       {seen && !shown && <p className="convo-runs-note">{t(seen.q === 'failed' ? 'quota.failed' : 'quota.none')}</p>}
       {seen?.q === 'failed' && shown && <p className="convo-runs-note">{t('quota.failedKept', { at: quotaClock((seen.lastAt ?? 0) / 1000) })}</p>}
@@ -4244,9 +4247,10 @@ function QuotaPart({ sid, session, agent }: { sid: string; session: string; agen
 function QuotaSaid({ quota }: { quota?: ConvoQuota }) {
   useRedraw(30000)
   const shown = quota && (quota.five_hour || quota.weekly) ? quota : undefined
+  const plan = pickQuotaPlan(shown, quota?.plan)
   const now = Date.now() / 1000
   return (
-    <QuotaView shown={shown}>
+    <QuotaView shown={shown} plan={plan}>
       {!shown && <p className="convo-runs-note">{t('quota.noneCodex')}</p>}
       {!!shown?.updated_at && now - shown.updated_at > 600 && <p className="convo-runs-note">{t('quota.saidAt', { at: quotaClock(shown.updated_at) })}</p>}
     </QuotaView>
@@ -4307,7 +4311,7 @@ export function QuotaChip({ of }: { of: QuotaOf }) {
   // (Said as Orca's bottom bar says it, as the person asked (11-23): used, whose plan (its agent's mark), each
   // window's part and how long until it resets — "This week 8%" alone read as nothing in particular. More on hover.)
   const title = [
-    t('quota.title'),
+    quotaTitleText(t('quota.title'), shown?.plan),
     ...wins.map(([name, used, end]) => t(name) + t('wb.quotaSep') + (end <= now ? t('quota.reset') : t('quota.used', { n: Math.round(used), at: resetClock(end) }))),
     [at ? t('wb.quotaAt', { at: quotaClock(at) }) : '', failed ? t('quota.failed') : ''].filter(Boolean).join(' · '),
   ].filter(Boolean).join('\n')
@@ -4442,12 +4446,20 @@ function resetClock(sec: number) {
 
 // The two windows' use, bars at 80% and 95% coloured; then what is said of it.
 // For agy (groups), each model family shows its remaining quota percentage and reset time.
-function QuotaView({ shown, children }: { shown?: { five_hour?: ConvoQuotaWindow; weekly?: ConvoQuotaWindow; groups?: QuotaGroup[] }; children?: ReactNode }) {
+function QuotaView({ shown, plan, children }: { shown?: { plan?: string; five_hour?: ConvoQuotaWindow; weekly?: ConvoQuotaWindow; groups?: QuotaGroup[] }; plan?: string; children?: ReactNode }) {
   const clock = resetClock
   const now = Date.now() / 1000
+  const tier = quotaPlanLabel(plan ?? shown?.plan)
   return (
     <section className="convo-pop-sec convo-quota">
-      <h3 className="convo-pop-head">{t('quota.title')}</h3>
+      <h3 className="convo-pop-head">
+        <span>{t('quota.title')}</span>
+        {tier && (
+          <span className="convo-quota-plan" title={t('quota.plan', { plan: tier })}>
+            {tier}
+          </span>
+        )}
+      </h3>
       {shown?.groups?.length
         ? shown.groups.map((g) => (
             <div key={g.name} className="convo-quota-group">
