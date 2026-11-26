@@ -1,5 +1,6 @@
 import type { ConvoEntry, ConvoEvent, ConvoPart, ConvoTool } from './conversation'
 import { t, type I18nKey } from '../i18n'
+import { isEditTool } from './rewindFiles'
 
 // The conversation view's list, from the log's entries: no React, no DOM
 // (convoItems.test.mts runs it as it is).
@@ -466,17 +467,13 @@ export const sameEdits = (a: Edits | null, b: Edits | null) =>
 export type Category = 'cmd' | 'read' | 'edit' | 'search' | 'web' | 'agent' | 'other'
 
 export function category(name: string): Category {
+  if (isEditTool(name)) return 'edit'
   switch (name) {
     case 'Bash':
     case 'BashOutput':
       return 'cmd'
     case 'Read':
       return 'read'
-    case 'Edit':
-    case 'MultiEdit':
-    case 'Write':
-    case 'NotebookEdit':
-      return 'edit'
     case 'Grep':
     case 'Glob':
     case 'WebSearch':

@@ -22,6 +22,7 @@ import { SessionOpDialog, type SessionOp } from '../terminal/sessionOps'
 import { NEW_AGENT, NewAgentDialog, takeNewAgentAsk, type NewSubagentParent } from '../terminal/newAgent'
 import { type CodexRewind, ForkDialog, LinkParentDialog, type LinkPane, RenameDialog, type RenameTarget, RewindDialog, type RewindTarget } from '../terminal/agentOps'
 import { isRewindIdle } from '../terminal/rewindIdle'
+import { rewindEditedFiles } from '../terminal/rewindFiles'
 import { agentWho, ChimeCounter, chime, countsOf } from '../terminal/chime'
 import { AgentList, CODEX_EFFORTS, ComposerModelSlot, ConversationView, glanceOf, type ConvoAgent, type ConvoLineageBar, type ConvoListRow, type ConvoPending, type ConvoSplitPane, type ConvoWent, type FileActs, type ModelOpt } from '../terminal/Conversation'
 import { saveTranslateConfig, useTranslateConfig } from '../terminal/thoughtTranslate'
@@ -3899,6 +3900,7 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
                 session: b.session,
                 messageId: entry.id,
                 text,
+                files: rewindEditedFiles(convo.entries, entry.id),
               })
             }
           : undefined
@@ -3977,7 +3979,7 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
       <RewindDialog
         target={rewinding}
         onRefresh={() => convo.refresh()}
-        onDone={(text, warning) => {
+        onDone={(text, warning, restoredFiles) => {
           setRewinding(null)
           setDraft(text)
           requestAnimationFrame(() => {
@@ -3988,6 +3990,7 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
           })
           convo.refresh()
           if (warning === 'input_not_cleared') toast(t('rewind.err.input_not_cleared'), true)
+          else if (restoredFiles && restoredFiles > 0) toast(t(restoredFiles === 1 ? 'rewind.doneCode1' : 'rewind.doneCode', { n: restoredFiles }))
         }}
         onClose={() => setRewinding(null)}
       />

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"maps"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -28,6 +29,10 @@ const (
 	rewindClockSlack           = 10 * time.Minute
 	rewindMaxSteps             = 200
 	rewindConfirmOpt           = "Restore conversation"
+	rewindConfirmCodeOpt       = "Restore code and conversation"
+	rewindMaxFiles             = 200
+	rewindMaxFileBytes         = 512
+	rewindMaxFilesTotalBytes   = 4096
 	claudeRewindTargetMaxRunes = 2000
 )
 
@@ -588,8 +593,14 @@ END {
 // ▔ rule: confirm header present, quoted first line matches ENVIRON["TARGET_FIRST"]
 // via fixed-string space-stripped comparison (never regex; runs under LC_ALL=C
 // so UTF-8 Unicode whitespace byte escapes work across gawk/mawk/BSD awk), and
-// the sole ❯ line is strictly "❯ <digits>. Restore conversation". Exits 35 on
-// any mismatch.
+// the sole ❯ line is strictly "❯ <digits>. <OPT_WANT>" where OPT_WANT must be
+// either "Restore conversation" or "Restore code and conversation".
+// When OPT_WANT is "Restore code and conversation", it also verifies that the
+// description line matches Claude Code's exact file-count format against
+// ENVIRON["EXPECT_FILES"] (one basename per distinct path, preserving
+// duplicates): 1 file "in <f>.", 2 files "in <f1> and <f2>.", 3+ files
+// "in <f> and <N> other files." with N+1 == count and <f> in expected basenames
+// (exiting 37 on mismatch). Exits 35 on option/quote mismatch without sending Enter.
 const claudeRewindCommitAwk = claudeRewindAwkCommon + `
 function is_ago_only(s) {
   return (s ~ /^\((just now|[0-9]+[smhd][ \t]+ago|[^()]*[ \t]+ago)\)$/)
@@ -599,9 +610,52 @@ function strip_ago_tail(s,    r) {
   sub(/[ \t]+\((just now|[0-9]+[smhd][ \t]+ago)\)$/, "", r)
   return r
 }
+function match_code_line(line, exp_list, exp_cnt,    s, pos, left, right, tail, num_str, other_n, name, i, found) {
+  if (exp_cnt < 1) return 0
+  if (line !~ /^The code will be restored( [+-][0-9]+(,[0-9]+)*)* in /) return 0
+  s = line
+  sub(/^The code will be restored( [+-][0-9]+(,[0-9]+)*)* in /, "", s)
+  s = trim(s)
+  if (s == "" || has_ellipsis(s)) return 0
+  if (substr(s, length(s), 1) == ".") {
+    s = trim(substr(s, 1, length(s) - 1))
+  }
+  if (s == "" || has_ellipsis(s) || index(s, ell) > 0 || index(s, "...") > 0) return 0
+  if (exp_cnt == 1) {
+    if (index(s, " and ") > 0) return 0
+    return (s == exp_list[1])
+  }
+  if (exp_cnt == 2) {
+    pos = index(s, " and ")
+    if (pos == 0) return 0
+    left = trim(substr(s, 1, pos - 1))
+    right = trim(substr(s, pos + 5))
+    if (left == "" || right == "" || index(right, " and ") > 0) return 0
+    if (right ~ /^[0-9]+ other files?$/) return 0
+    return ((left == exp_list[1] && right == exp_list[2]) || (left == exp_list[2] && right == exp_list[1]))
+  }
+  if (s !~ / and [1-9][0-9]* other files$/) return 0
+  tail = s
+  sub(/^.* and /, "", tail)
+  num_str = tail
+  sub(/ other files$/, "", num_str)
+  other_n = num_str + 0
+  if (other_n < 2 || other_n + 1 != exp_cnt) return 0
+  name = trim(substr(s, 1, length(s) - length(" and " tail)))
+  if (name == "") return 0
+  found = 0
+  for (i = 1; i <= exp_cnt; i++) {
+    if (name == exp_list[i]) { found = 1; break }
+  }
+  return found
+}
 END {
+  opt_want = ENVIRON["OPT_WANT"]
+  if (opt_want != "Restore conversation" && opt_want != "Restore code and conversation") exit 35
+  want_code = (opt_want == "Restore code and conversation")
   want_ns = nospace(want)
   if (want_ns == "" || last_bar == 0) exit 35
+  if (has_normal_box(last_bar + 1, NR)) exit 35
   hdr = 0
   for (i = last_bar + 1; i <= NR; i++) {
     t = trim(lines[i])
@@ -613,6 +667,9 @@ END {
   sel_count = 0
   sel_ok = 0
   qn = 0
+  code_blocks = 0
+  code_line = ""
+  in_code = 0
   for (i = last_bar + 1; i <= NR; i++) {
     t = trim(lines[i])
     if (i > hdr && !ended && t == footer) {
@@ -623,6 +680,7 @@ END {
       sel_count++
       if (i > hdr && !ended) {
         in_opts = 1
+        if (in_code == 1) in_code = 2
         rest = substr(t, length(arrow) + 1)
         sub(/^[ \t]+/, "", rest)
         if (rest ~ /^[0-9]+\.[ \t]+/) {
@@ -632,16 +690,37 @@ END {
       }
       continue
     }
-    if (ended || i <= hdr || t == "") continue
+    if (ended || i <= hdr) continue
+    if (t == "") {
+      if (in_code == 1) in_code = 2
+      continue
+    }
     if (t ~ /^[0-9]+\.[ \t]+/) {
       in_opts = 1
+      if (in_code == 1) in_code = 2
       continue
     }
     if (!in_opts && substr(t, 1, length(pipe)) == pipe) {
+      if (in_code == 1) in_code = 2
       body = onespace(substr(t, length(pipe) + 1))
       if (body != "") {
         qn++
         q[qn] = body
+      }
+      continue
+    }
+    if (!in_opts) {
+      os = onespace(lines[i])
+      if (os == "The code will be restored" || substr(os, 1, 26) == "The code will be restored ") {
+        code_blocks++
+        code_line = os
+        in_code = 1
+      } else if (in_code == 1) {
+        if (substr(os, 1, 17) == "The conversation " || substr(os, 1, 9) == "The code " || substr(os, 1, 3) == "⚠") {
+          in_code = 2
+        } else {
+          code_line = code_line " " os
+        }
       }
     }
   }
@@ -670,6 +749,19 @@ END {
     }
   }
   if (!q_ok) exit 35
+  if (want_code) {
+    if (code_blocks != 1) exit 37
+    n_exp = split(ENVIRON["EXPECT_FILES"], exp_arr, "\n")
+    exp_cnt = 0
+    for (i = 1; i <= n_exp; i++) {
+      f = trim(exp_arr[i])
+      if (f != "") {
+        exp_cnt++
+        exp_list[exp_cnt] = f
+      }
+    }
+    if (!match_code_line(code_line, exp_list, exp_cnt)) exit 37
+  }
 }
 `
 
@@ -700,9 +792,9 @@ func parseClaudeRewindCommitOut(out []byte) (bool, time.Time) {
 }
 
 // claudeRewindGuardedEnterSh builds the atomic remote script that verifies
-// identity, captures the live screen, validates it with awkProg (exiting
-// mismatchExit without sending Enter on mismatch), and sends Enter.
-func claudeRewindGuardedEnterSh(mode, pane, socket, tmuxPanePID string, pid, start int64, sid, targetText, awkProg string, mismatchExit int, withTimestamp bool) (string, error) {
+// identity, captures the live screen, validates it with awkProg (preserving
+// awk's non-zero exit code without sending Enter), and sends Enter.
+func claudeRewindGuardedEnterSh(mode, pane, socket, tmuxPanePID string, pid, start int64, sid, targetText, awkProg string, mismatchExit int, withTimestamp bool, extraEnv [][2]string) (string, error) {
 	wantFirst, wantTrunc := claudeRewindTargetPrefix(targetText)
 	if wantFirst == "" {
 		return "", errors.New("empty target first line")
@@ -720,7 +812,13 @@ func claudeRewindGuardedEnterSh(mode, pane, socket, tmuxPanePID string, pid, sta
 	} else {
 		b.WriteString(`scr=$(HERDR_SOCKET_PATH="$sock" herdr pane read "$pane" --source visible 2>/dev/null 9>&-) || exit ` + exitCode + "\n")
 	}
-	b.WriteString("printf '%s\\n' \"$scr\" | LC_ALL=C TARGET_FIRST=" + q(wantFirst) + " TARGET_TRUNC=" + truncFlag + " awk " + q(awkProg) + " || exit " + exitCode + "\n")
+	var envBuf strings.Builder
+	envBuf.WriteString("LC_ALL=C TARGET_FIRST=" + q(wantFirst) + " TARGET_TRUNC=" + truncFlag)
+	for _, kv := range extraEnv {
+		envBuf.WriteString(" " + kv[0] + "=" + q(kv[1]))
+	}
+	b.WriteString("printf '%s\\n' \"$scr\" | " + envBuf.String() + " awk " + q(awkProg) + "\n")
+	b.WriteString("rc=$?\n[ \"$rc\" -eq 0 ] || exit \"$rc\"\n")
 	if withTimestamp {
 		b.WriteString("ts=$(date -u +%s 2>/dev/null || true)\n")
 	}
@@ -742,7 +840,7 @@ func claudeRewindGuardedEnterSh(mode, pane, socket, tmuxPanePID string, pid, sta
 // (not a confirm screen), and only then sends Enter. Exits 36 on mismatch
 // without sending Enter.
 func claudeRewindPickerEnterSh(mode, pane, socket, tmuxPanePID string, pid, start int64, sid, targetText string) (string, error) {
-	return claudeRewindGuardedEnterSh(mode, pane, socket, tmuxPanePID, pid, start, sid, targetText, claudeRewindPickerAwk, 36, false)
+	return claudeRewindGuardedEnterSh(mode, pane, socket, tmuxPanePID, pid, start, sid, targetText, claudeRewindPickerAwk, 36, false, nil)
 }
 
 // claudeRewindCommitSh atomically verifies identity, captures the live screen,
@@ -750,7 +848,85 @@ func claudeRewindPickerEnterSh(mode, pane, socket, tmuxPanePID string, pid, star
 // and only then sends Enter in the same remote script. Exits 35 on mismatch
 // without sending Enter. Prints "ok <remote_unix_sec>" on success.
 func claudeRewindCommitSh(mode, pane, socket, tmuxPanePID string, pid, start int64, sid, targetText string) (string, error) {
-	return claudeRewindGuardedEnterSh(mode, pane, socket, tmuxPanePID, pid, start, sid, targetText, claudeRewindCommitAwk, 35, true)
+	return claudeRewindCommitOptSh(mode, pane, socket, tmuxPanePID, pid, start, sid, targetText, false, nil)
+}
+
+// claudeRewindCommitOptSh builds the atomic remote commit script for either
+// conversation-only rewind (restoreCode=false) or code+conversation rewind
+// (restoreCode=true, verifying the exact expected filename set on the confirm
+// screen and exiting 37 on code mismatch without sending Enter).
+func claudeRewindCommitOptSh(mode, pane, socket, tmuxPanePID string, pid, start int64, sid, targetText string, restoreCode bool, expectedFiles []string) (string, error) {
+	optWant := rewindConfirmOpt
+	var expectEnv string
+	if restoreCode {
+		optWant = rewindConfirmCodeOpt
+		norm, _, err := normalizeRewindFiles(expectedFiles)
+		if err != nil {
+			return "", err
+		}
+		expectEnv = strings.Join(norm, "\n")
+	}
+	extraEnv := [][2]string{
+		{"OPT_WANT", optWant},
+		{"EXPECT_FILES", expectEnv},
+	}
+	return claudeRewindGuardedEnterSh(mode, pane, socket, tmuxPanePID, pid, start, sid, targetText, claudeRewindCommitAwk, 35, true, extraEnv)
+}
+
+func rewindFileBase(p string) string {
+	s := strings.TrimSpace(p)
+	s = strings.TrimRight(s, "/\\")
+	if s == "" {
+		return ""
+	}
+	if i := strings.LastIndexAny(s, "/\\"); i >= 0 {
+		s = s[i+1:]
+	}
+	return strings.TrimSpace(s)
+}
+
+// normalizeRewindFiles validates the client-supplied file paths for code
+// restore, deduplicating by distinct path while preserving basename
+// multiplicity when two distinct paths share a filename (e.g. src/b.txt and
+// test/b.txt count as 2 files). Returns (sorted basenames per distinct path
+// for screen matching, cleaned distinct paths for audit logging).
+func normalizeRewindFiles(files []string) (bases []string, cleaned []string, err error) {
+	if len(files) == 0 {
+		return nil, nil, errors.New("files list is required when restore_code is true")
+	}
+	if len(files) > rewindMaxFiles {
+		return nil, nil, errors.New("too many files")
+	}
+	seenPath := make(map[string]bool, len(files))
+	totalBytes := 0
+	for _, raw := range files {
+		if strings.ContainsAny(raw, "\r\n\x00") {
+			return nil, nil, errors.New("invalid file name")
+		}
+		trimmed := strings.TrimRight(strings.TrimSpace(raw), "/\\")
+		if trimmed == "" || len(trimmed) > rewindMaxFileBytes {
+			return nil, nil, errors.New("invalid file name")
+		}
+		base := rewindFileBase(trimmed)
+		if base == "" {
+			return nil, nil, errors.New("invalid file name")
+		}
+		if seenPath[trimmed] {
+			continue
+		}
+		seenPath[trimmed] = true
+		cleaned = append(cleaned, trimmed)
+		totalBytes += len(base) + 1
+		if totalBytes > rewindMaxFilesTotalBytes {
+			return nil, nil, errors.New("files list too large")
+		}
+		bases = append(bases, base)
+	}
+	if len(bases) == 0 {
+		return nil, nil, errors.New("files list is required when restore_code is true")
+	}
+	slices.Sort(bases)
+	return bases, cleaned, nil
 }
 
 func claudeRewindTmuxPaneSh(pane string) string {
@@ -808,9 +984,11 @@ func mapRewindExitErr(err error) error {
 		case 34:
 			return rwErr(http.StatusConflict, "terminal_changed", "the terminal in this pane changed")
 		case 35:
-			return rwErr(http.StatusConflict, "confirm_mismatch", "confirmation screen did not match Restore conversation and target")
+			return rwErr(http.StatusConflict, "confirm_mismatch", "confirmation screen did not match expected option and target")
 		case 36:
 			return rwErr(http.StatusConflict, "target_mismatch", "selected message in rewind list does not match target")
+		case 37:
+			return rwErr(http.StatusConflict, "code_mismatch", "files to restore do not match the expected list")
 		}
 	}
 	return err
@@ -888,7 +1066,7 @@ func evalCommitExec(res sshx.ExecResult, err error) (claudeRewindCommit, error) 
 		var exitErr *sshx.ExitError
 		if res.Ended && errors.As(err, &exitErr) {
 			switch exitErr.Status {
-			case 31, 32, 33, 34, 35, 126, 127:
+			case 31, 32, 33, 34, 35, 37, 126, 127:
 				return claudeRewindCommit{started: false}, mapRewindExitErr(err)
 			}
 		}
@@ -973,11 +1151,11 @@ func (p *herdrClaudeRewindPane) pickerEnter(ctx context.Context, targetText stri
 	return nil
 }
 
-func (p *herdrClaudeRewindPane) commitEnter(ctx context.Context, targetText string) (claudeRewindCommit, error) {
+func (p *herdrClaudeRewindPane) commitEnter(ctx context.Context, targetText string, restoreCode bool, expectedFiles []string) (claudeRewindCommit, error) {
 	if err := p.checkHerdrSnapshot(ctx); err != nil {
 		return claudeRewindCommit{started: false}, err
 	}
-	sh, err := claudeRewindCommitSh("herdr", p.pane, p.socket, "", p.pid, p.start, p.sid, targetText)
+	sh, err := claudeRewindCommitOptSh("herdr", p.pane, p.socket, "", p.pid, p.start, p.sid, targetText, restoreCode, expectedFiles)
 	if err != nil {
 		return claudeRewindCommit{started: false}, err
 	}
@@ -1050,8 +1228,8 @@ func (p *tmuxClaudeRewindPane) pickerEnter(ctx context.Context, targetText strin
 	return nil
 }
 
-func (p *tmuxClaudeRewindPane) commitEnter(ctx context.Context, targetText string) (claudeRewindCommit, error) {
-	sh, err := claudeRewindCommitSh("tmux", p.pane, "", p.panePID, p.pid, p.start, p.sid, targetText)
+func (p *tmuxClaudeRewindPane) commitEnter(ctx context.Context, targetText string, restoreCode bool, expectedFiles []string) (claudeRewindCommit, error) {
+	sh, err := claudeRewindCommitOptSh("tmux", p.pane, "", p.panePID, p.pid, p.start, p.sid, targetText, restoreCode, expectedFiles)
 	if err != nil {
 		return claudeRewindCommit{started: false}, err
 	}
@@ -1102,12 +1280,14 @@ func (s *Server) apiConversationRewind(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var b struct {
-		Pane       string `json:"pane"`
-		PID        int64  `json:"pid"`
-		Start      int64  `json:"start"`
-		Session    string `json:"session"`
-		TerminalID string `json:"terminal_id"`
-		MessageID  string `json:"message_id"`
+		Pane        string   `json:"pane"`
+		PID         int64    `json:"pid"`
+		Start       int64    `json:"start"`
+		Session     string   `json:"session"`
+		TerminalID  string   `json:"terminal_id"`
+		MessageID   string   `json:"message_id"`
+		RestoreCode bool     `json:"restore_code"`
+		Files       []string `json:"files"`
 	}
 	if err := readJSON(r, &b); err != nil {
 		writeError(w, http.StatusBadRequest, "bad_request", "invalid request body")
@@ -1123,6 +1303,15 @@ func (s *Server) apiConversationRewind(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "bad_request", "valid pane, process, session and message_id are required")
 		return
 	}
+	var auditFiles []string
+	if b.RestoreCode {
+		var ferr error
+		_, auditFiles, ferr = normalizeRewindFiles(b.Files)
+		if ferr != nil {
+			writeError(w, http.StatusBadRequest, "bad_request", ferr.Error())
+			return
+		}
+	}
 	outcome, reason := "refused", ""
 	defer func() {
 		if reason == "terminal_changed" || reason == "process_changed" || reason == "session_changed" {
@@ -1130,7 +1319,10 @@ func (s *Server) apiConversationRewind(w http.ResponseWriter, r *http.Request) {
 		}
 		actx, acancel := context.WithTimeout(context.WithoutCancel(r.Context()), 5*time.Second)
 		defer acancel()
-		detail := map[string]any{"session": sess.ID, "pane": b.Pane, "pid": b.PID, "start": b.Start, "claude_session": b.Session, "message_id": b.MessageID, "outcome": outcome}
+		detail := map[string]any{"session": sess.ID, "pane": b.Pane, "pid": b.PID, "start": b.Start, "claude_session": b.Session, "message_id": b.MessageID, "restore_code": b.RestoreCode, "outcome": outcome}
+		if b.RestoreCode && len(auditFiles) > 0 {
+			detail["files"] = auditFiles
+		}
 		if reason != "" {
 			detail["reason"] = reason
 		}
@@ -1295,6 +1487,8 @@ func (s *Server) apiConversationRewind(w http.ResponseWriter, r *http.Request) {
 		fail(perr)
 		return
 	}
+	plan.RestoreCode = b.RestoreCode
+	plan.ExpectedFiles = auditFiles
 
 	if sess.Persistence == "herdr" {
 		pane = &herdrClaudeRewindPane{sess: sess, inflight: &running, socket: socket, pane: b.Pane, terminalID: liveTermID, pid: front.pid, start: front.start, sid: front.sid}
