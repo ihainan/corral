@@ -447,10 +447,10 @@ textarea.input { height: auto; min-height: var(--h-input); padding: 8px 12px; li
 .row2 { display: flex; gap: 12px; }
 .row2 > * { flex: 1; min-width: 0; }
 .row2 > .port { flex: 0 0 96px; }
-.seg { display: inline-flex; padding: 2px; gap: 2px; border-radius: var(--r); background: var(--bg-subtle); box-shadow: inset 0 0 0 1px var(--line); width: 100%; }
+.seg { display: inline-flex; padding: 2px; gap: 2px; border-radius: var(--r); background: var(--bg-subtle); box-shadow: inset 0 0 0 1px var(--line); width: 100%; max-width: 100%; }
 .seg button {
-  flex: 1; height: calc(var(--h-input) - 4px); border: 0; border-radius: var(--r-sm); background: transparent; color: var(--fg-2);
-  font-size: var(--fs-ui); line-height: var(--lh-ui); font-weight: 500; cursor: pointer; padding: 0 8px; white-space: nowrap;
+  flex: 1 1 auto; min-width: 0; height: calc(var(--h-input) - 4px); border: 0; border-radius: var(--r-sm); background: transparent; color: var(--fg-2);
+  font-size: var(--fs-ui); line-height: var(--lh-ui); font-weight: 500; cursor: pointer; padding: 0 8px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .seg button:hover { color: var(--fg); }
 .scheme-slot { margin: 12px 0 4px; }
@@ -554,12 +554,13 @@ div.row-main:hover { background: none; }
 .setting { display: flex; align-items: center; gap: 16px; padding: 10px 0; min-height: var(--row-min); border-bottom: 1px solid var(--line); }
 .setting-label { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
 .setting-label .hint { max-width: 52ch; }
-.setting-control { flex: none; display: flex; align-items: center; gap: 8px; }
+.setting-control { flex: none; display: flex; align-items: center; gap: 8px; max-width: 100%; }
 .setting-control .seg { width: auto; }
+.setting-control .seg button { flex: 0 0 auto; }
 /* With a hint under its name, the control sits by the name, not halfway down the hint. */
 .setting:has(.setting-label .hint) { align-items: flex-start; }
 .setting:has(.setting-label .hint) > .setting-control { min-height: 20px; }
-.settings-group { border-top: 1px solid var(--line); }
+.settings-group { border-top: 1px solid var(--line); container-type: inline-size; container-name: settings-group; }
 a.setting { color: inherit; }
 a.setting:hover { text-decoration: none; background: var(--bg-hover); }
 .setting .chev { color: var(--fg-3); }
@@ -609,7 +610,8 @@ html.modal-open, html.modal-open body { overflow: hidden; }
   background: var(--surface); border-radius: var(--r-lg); box-shadow: var(--shadow-pop); padding: 20px;
   display: flex; flex-direction: column; gap: 16px; cursor: default;
 }
-.dialog h2 { font-size: var(--fs-title); line-height: var(--lh-title); font-weight: 600; }
+.dialog h2 { font-size: var(--fs-title); line-height: var(--lh-title); font-weight: 600; overflow-wrap: anywhere; }
+.dialog .lead { overflow-wrap: anywhere; }
 .dialog-actions { display: flex; gap: 8px; justify-content: flex-end; flex-wrap: wrap; }
 /* A dialog's head (Dialog in ui.tsx, 11-14): what it is for on a tinted
    square, the title and a line under it; its close in the corner. */
@@ -624,7 +626,7 @@ html.modal-open, html.modal-open body { overflow: hidden; }
 .dialog-icon.is-warn { background: color-mix(in srgb, var(--warn) 14%, var(--surface)); color: var(--warn); }
 .dialog-head-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
 .dialog .dialog-head h2 { font-size: var(--fs-head); line-height: var(--lh-head); }
-.dialog-sub { font-size: var(--fs-sub); line-height: var(--lh-sub); color: var(--fg-2); }
+.dialog-sub { font-size: var(--fs-sub); line-height: var(--lh-sub); color: var(--fg-2); overflow-wrap: anywhere; }
 /* Its buttons set off by a rule from edge to edge (a dialog of the usual inset only). */
 .dialog:not(.dlg):not(.files-dialog) > .dialog-actions:last-child,
 .dialog:not(.dlg):not(.files-dialog) > form:last-child > .dialog-actions:last-child {
@@ -636,10 +638,10 @@ html.modal-open, html.modal-open body { overflow: hidden; }
 .dialog .btn-danger:disabled, .dialog .btn-danger:disabled:hover { background: var(--bg-subtle); border-color: var(--line); color: var(--fg-3); }
 @media (max-width: 520px) {
   .overlay.sheet-mode { place-items: end stretch; padding: 0; }
-  .sheet-mode .dialog { max-width: none; border-radius: var(--r-xl) var(--r-xl) 0 0; padding-bottom: calc(20px + env(safe-area-inset-bottom, 0px)); animation: rise 0.2s var(--ease); }
-  .sheet-mode .dialog-actions > .btn { flex: 1; }
+  .overlay.sheet-mode > .dialog { width: 100%; max-width: none; border-radius: var(--r-xl) var(--r-xl) 0 0; padding-bottom: calc(20px + env(safe-area-inset-bottom, 0px)); animation: rise 0.2s var(--ease); }
+  .sheet-mode .dialog-actions > .btn { flex: 1 0 auto; }
   /* (The keyboard covers the home indicator: no room kept for it.) */
-  :where(html.kb-open) .sheet-mode .dialog { padding-bottom: 20px; }
+  :where(html.kb-open) .overlay.sheet-mode > .dialog { padding-bottom: 20px; }
 }
 /* A dialog whose body is a thing to look at (DialogHead in ui.tsx): one head
    row — its mark, what it is (a small word over it where that helps), a line
@@ -675,7 +677,7 @@ html.modal-open, html.modal-open body { overflow: hidden; }
   .dlg-tools { order: 3; flex: 1 0 100%; justify-content: flex-end; margin-top: -4px; }
   .dlg-body { padding: 4px 16px 16px; }
   .dlg-foot { padding: 12px 16px; }
-  .dlg-foot > .btn { flex: 1; }
+  .dlg-foot > .btn { flex: 1 0 auto; }
 }
 .handle { width: 36px; height: 4px; border-radius: 2px; background: var(--line-strong); margin: -8px auto 0; flex: none; }
 
@@ -788,7 +790,7 @@ html.theme-switching *, html.theme-switching *::before, html.theme-switching *::
 .audit-item[open] .audit-chev { transform: rotate(90deg); }
 .audit-item pre { margin: 6px 0 0; font-family: var(--font-mono); font-size: var(--fs-note); line-height: var(--lh-note); color: var(--fg-2); white-space: pre-wrap; word-break: break-all; }
 
-.port-share { height: 30px; padding: 0 8px; font-size: var(--fs-sub); line-height: var(--lh-sub); width: auto; justify-self: start; }
+.port-share { height: 30px; padding: 0 8px; font-size: var(--fs-sub); line-height: var(--lh-sub); width: auto; max-width: 100%; min-width: 0; justify-self: start; }
 @media (pointer: coarse) { .port-share { height: 36px; font-size: var(--fs-input-touch); } }
 
 /* Settings extras */
@@ -807,17 +809,42 @@ label.setting { cursor: pointer; }
 .setting .stepper { gap: 2px; padding: 2px; border-radius: var(--r); background: var(--bg-subtle); box-shadow: inset 0 0 0 1px var(--line); }
 .setting .stepper .icon-btn { width: 32px; height: 32px; color: var(--fg-2); }
 @media (pointer: coarse) { .setting .stepper .icon-btn { width: 40px; height: 40px; } .setting .stepper .icon-btn::after { inset: -2px 0; } }
-.setting-wide .setting-control .input { width: 220px; }
-@media (max-width: 479.98px) {
-  /* (A choice with words under its name stacks; a short one — theme, language —
-     keeps its row, its label left and the choice right: 11-05.) */
-  .setting:has(.seg):has(.setting-label .hint) { flex-direction: column; align-items: stretch; gap: 8px; }
-  .setting:has(.seg):has(.setting-label .hint) > .setting-control { align-self: stretch; }
-  .setting:has(.seg):has(.setting-label .hint) .seg { width: 100%; }
-  .setting:has(.seg):not(:has(.setting-label .hint)) .seg button { padding: 0 10px; }
+.setting-wide .setting-control .input { width: 220px; max-width: 100%; }
+/* Container-driven stacking for settings rows (both the desktop settings modal
+   and the mobile settings page): switches, steppers, shortcuts and single-action
+   rows keep a clean single row (label+hint left, control right); wide controls
+   stack cleanly below the label and hint when the group is narrow. */
+@container settings-group (max-width: 540px) {
+  .setting:has(.seg):has(.setting-label .hint),
+  .setting:has(.input:not(.switch)),
+  .setting:has(select),
+  .setting:has(.settings-inline),
+  .setting:has(.sm-key-inline),
   .setting-wide { flex-direction: column; align-items: stretch; gap: 8px; }
-  .setting-wide > .setting-control { align-self: stretch; flex-wrap: wrap; }
+  .setting:has(.seg):has(.setting-label .hint) > .setting-control,
+  .setting:has(.input:not(.switch)) > .setting-control,
+  .setting:has(select) > .setting-control,
+  .setting:has(.settings-inline) > .setting-control,
+  .setting:has(.sm-key-inline) > .setting-control,
+  .setting-wide > .setting-control { align-self: stretch; width: 100%; flex-wrap: wrap; justify-content: flex-start; }
+  .setting:has(.seg):has(.setting-label .hint) .seg,
+  .setting:has(.settings-inline) .settings-inline,
+  .setting:has(.sm-key-inline) .sm-key-inline,
+  .setting:has(.input:not(.switch)) .sm-field-input,
+  .setting:has(select) .sm-select { width: 100%; }
+  .setting:has(.seg):has(.setting-label .hint) .seg button,
+  .setting:has(.settings-inline) .seg button { flex: 1 1 auto; }
+  .setting:has(.settings-inline) .seg { flex: 1 1 auto; }
   .setting-wide .setting-control .input { flex: 1; width: auto; min-width: 0; }
+}
+@container settings-group (max-width: 440px) {
+  .setting:has(.scheme-btn),
+  .setting:has(.setting-control > :nth-child(2)) { flex-direction: column; align-items: stretch; gap: 8px; }
+  .setting:has(.scheme-btn) > .setting-control,
+  .setting:has(.setting-control > :nth-child(2)) > .setting-control { align-self: stretch; width: 100%; flex-wrap: wrap; justify-content: flex-start; }
+  .setting:has(.scheme-btn) .scheme-btn { width: 100%; justify-content: space-between; }
+  .setting:has(.seg):not(:has(.setting-label .hint)) .seg button { padding: 0 10px; }
+  .sm-card-foot { flex-wrap: wrap; }
 }
 .stepper .icon-btn:disabled { opacity: 0.4; cursor: default; }
 
@@ -844,7 +871,7 @@ details.adv > .form { margin-top: 16px; }
 .scheme-scroll { overflow-y: auto; margin: 0 -20px; padding: 0 20px; min-height: 0; flex: 1; }
 .dialog-wide { overflow: hidden; }
 .scheme-group { font-size: var(--fs-note); line-height: var(--lh-note); font-weight: 500; color: var(--fg-3); margin: 16px 0 6px; }
-.scheme-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 4px; }
+.scheme-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 200px), 1fr)); gap: 4px; }
 .scheme-option {
   display: flex; align-items: center; gap: 10px; min-height: 52px; padding: 6px 8px; border: 0; border-radius: var(--r);
   background: none; color: var(--fg); text-align: left; cursor: pointer;
@@ -854,9 +881,10 @@ details.adv > .form { margin-top: 16px; }
 .scheme-name { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; font-size: var(--fs-ui); line-height: var(--lh-ui); font-weight: 500; }
 .scheme-name .hint { font-weight: 400; font-size: var(--fs-note); line-height: var(--lh-note); }
 .scheme-check { color: var(--accent-text); flex: none; }
-.scheme-btn { gap: 8px; padding-left: 6px; height: auto; min-height: var(--h-btn); background: var(--bg-subtle); border-color: var(--line); } /* (as the choices and the stepper beside it — pages-1113) */
+.scheme-btn { gap: 8px; padding-left: 6px; height: auto; min-height: var(--h-btn); max-width: 100%; background: var(--bg-subtle); border-color: var(--line); } /* (as the choices and the stepper beside it — pages-1113) */
 .scheme-btn:hover { background: var(--bg-hover); }
-.scheme-current { display: inline-flex; align-items: center; gap: 8px; }
+.scheme-current { display: inline-flex; align-items: center; gap: 8px; min-width: 0; }
+.scheme-current > span:last-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .scheme-current .swatch { width: 40px; height: 24px; padding: 3px 5px; font-size: 9px; }
 .scheme-current .swatch-dots i { width: 4px; height: 4px; }
 .scheme-current .swatch-dots { gap: 2px; }
@@ -999,7 +1027,7 @@ details.adv > .form { margin-top: 16px; }
 .dialog.picture-dialog { max-width: min(1100px, calc(100vw - 32px)); }
 /* A long paste in the composer, read whole before it goes. */
 .dialog.attach-paste-dialog { max-width: min(860px, calc(100vw - 32px)); }
-.attach-paste-text { margin: 0; padding: 12px 16px; max-height: min(70vh, 640px); overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font-family: var(--font-mono); font-size: var(--fs-sub); line-height: var(--lh-sub); color: var(--fg); border-top: 1px solid var(--line); }
+.attach-paste-text { margin: 0; padding: 12px 16px; flex: 1 1 auto; min-height: 0; max-height: min(70vh, 640px); overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font-family: var(--font-mono); font-size: var(--fs-sub); line-height: var(--lh-sub); color: var(--fg); border-top: 1px solid var(--line); }
 .picture-stage { position: relative; flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
 .picture-body { flex: 1 1 auto; min-height: 160px; overflow: auto; display: grid; place-items: center; background: var(--bg-subtle); border-top: 1px solid var(--line); }
 .picture-img.is-big { cursor: zoom-in; }
@@ -1516,16 +1544,16 @@ details.adv > .form { margin-top: 16px; }
 /* Desktop two-column Settings modal & workbench ------------------------------- */
 .dialog.settings-modal {
   width: min(900px, calc(100vw - 48px)); max-width: 900px;
-  height: min(660px, calc(var(--vv-h, 100dvh) - 48px));
   max-height: calc(var(--vv-h, 100dvh) - 48px);
   border: 1px solid var(--line); border-radius: var(--r-lg);
   box-shadow: 0 24px 64px rgba(0, 0, 0, 0.22), 0 0 0 1px rgba(16, 18, 24, 0.06);
+  container-type: inline-size; container-name: sm-shell;
 }
-.page-settings-desktop { max-width: 960px; padding: 24px; }
-.sm-shell { flex: 1; min-height: 0; display: flex; background: var(--bg); color: var(--fg); }
-.sm-shell.is-page { height: min(680px, calc(100dvh - 80px)); border: 1px solid var(--line); border-radius: var(--r-lg); overflow: hidden; }
+.page-settings-desktop { max-width: 960px; padding: 24px; container-type: inline-size; container-name: sm-shell; }
+.sm-shell { flex: 1; min-height: 0; width: 100%; display: flex; background: var(--bg); color: var(--fg); }
+.sm-shell.is-page { max-height: calc(100dvh - 80px); border: 1px solid var(--line); border-radius: var(--r-lg); overflow: hidden; }
 .sm-side {
-  flex: none; width: 228px; display: flex; flex-direction: column;
+  flex: none; width: 228px; min-height: 0; display: flex; flex-direction: column;
   background: var(--bg-subtle); border-right: 1px solid var(--line);
 }
 .sm-side-top {
@@ -1582,7 +1610,7 @@ details.adv > .form { margin-top: 16px; }
 .sm-nav-item[aria-current='page'] { background: var(--bg-active); color: var(--fg); }
 .sm-nav-item[aria-current='page'] svg { color: var(--fg); }
 .sm-nav-item:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
-.sm-main { flex: 1; min-width: 0; display: flex; flex-direction: column; background: var(--bg); }
+.sm-main { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; background: var(--bg); }
 .sm-head {
   flex: none; height: 48px; box-sizing: border-box;
   display: flex; align-items: center; justify-content: space-between; gap: 12px;
@@ -1607,10 +1635,11 @@ details.adv > .form { margin-top: 16px; }
   border: 1px solid var(--line); border-radius: var(--r-lg);
   background: var(--surface); overflow: hidden;
 }
-.sm-body .settings-group .setting { padding: 10px 14px; min-height: 44px; border-bottom: 1px solid var(--line); }
+.sm-body .settings-group .setting { padding: 12px 14px; min-height: 44px; border-bottom: 1px solid var(--line); }
 .sm-body .settings-group > .setting:last-child,
 .sm-body .settings-group > :last-child > .setting:last-child { border-bottom: 0; }
-.sm-body .setting-label > span:first-child { font-size: var(--fs-sub); line-height: var(--lh-sub); font-weight: 500; color: var(--fg); }
+.sm-body .setting-label > :first-child { font-size: var(--fs-sub); line-height: var(--lh-sub); font-weight: 500; color: var(--fg); }
+.sm-body .setting-control { flex-wrap: wrap; justify-content: flex-end; }
 .sm-body .hint { font-size: var(--fs-note); line-height: var(--lh-note); color: var(--fg-3); }
 .sm-body .seg button { font-size: var(--fs-note); line-height: var(--lh-note); }
 .sm-body .btn { font-size: var(--fs-sub); line-height: var(--lh-sub); }
@@ -1628,10 +1657,26 @@ details.adv > .form { margin-top: 16px; }
   border: 1px solid var(--line); border-radius: var(--r-sm); background: var(--bg-subtle);
   color: var(--fg-2); font-family: var(--font-mono); font-size: var(--fs-note); line-height: var(--lh-note);
 }
-.sm-select { width: 180px; height: 30px; padding: 0 8px; font-size: var(--fs-sub); line-height: var(--lh-sub); }
-.sm-field-input { width: 240px; height: 30px; padding: 0 10px; font-size: var(--fs-sub); line-height: var(--lh-sub); }
-.sm-key-inline { display: flex; align-items: center; gap: 6px; }
-.sm-key-inline > .sm-field-input { width: 180px; }
+.sm-select { width: 180px; max-width: 100%; height: 30px; padding: 0 32px 0 8px; font-size: var(--fs-sub); line-height: var(--lh-sub); }
+.sm-field-input { width: 240px; max-width: 100%; height: 30px; padding: 0 10px; font-size: var(--fs-sub); line-height: var(--lh-sub); }
+.sm-key-inline { display: flex; align-items: center; gap: 6px; max-width: 100%; }
+.sm-key-inline > .sm-field-input { width: 180px; flex: 1 1 auto; min-width: 0; }
+@container sm-shell (max-width: 780px) {
+  .sm-side { width: 196px; }
+}
+@container sm-shell (max-width: 640px) {
+  .sm-shell { flex-direction: column; }
+  .sm-side { width: auto; border-right: 0; border-bottom: 1px solid var(--line); }
+  .sm-shell.is-modal .sm-side-top { display: none; }
+  .sm-search-wrap { padding: 8px 12px; }
+  .sm-nav { flex-direction: row; flex-wrap: nowrap; overflow-x: auto; gap: 4px; padding: 8px 12px; scrollbar-width: none; }
+  .sm-nav::-webkit-scrollbar { display: none; }
+  .sm-group { display: contents; }
+  .sm-group-label { display: none; }
+  .sm-nav-item { width: auto; flex: none; white-space: nowrap; }
+  .sm-head { padding: 0 12px 0 16px; }
+  .sm-body { padding: 16px 16px 24px; }
+}
 .sm-card-foot {
   display: flex; align-items: center; justify-content: space-between; gap: 12px;
   padding: 10px 14px; background: var(--bg-subtle); border-top: 1px solid var(--line);
@@ -1742,23 +1787,11 @@ details.adv > .form { margin-top: 16px; }
 .desk-aside-list { margin: 0; padding: 12px 16px 16px; display: flex; flex-direction: column; gap: 12px; }
 .desk-aside-list dt { font-size: var(--fs-note); line-height: var(--lh-note); color: var(--fg-3); }
 .desk-aside-list dd { margin: 0; font-size: var(--fs-sub); line-height: var(--lh-sub); color: var(--fg); white-space: pre-wrap; overflow-wrap: anywhere; }
-/* The settings as a desktop's preferences (UI 12): the dialog the window's height less 96, the same whichever group
-   is open; each setting a row of a two-column form — its label right-aligned in a 180 column, its control right after
-   it, what it does under the control (as macOS's and VS Code's settings) —; groups parted by a rule, not each a card. */
+/* Settings modal on wide windows: leave breathing room above and below, while
+   letting height follow content instead of stretching into blank space on tall
+   portrait windows. */
 @media (min-width: 900px) {
-  .dialog.settings-modal { height: calc(var(--vv-h, 100dvh) - 96px); max-height: calc(var(--vv-h, 100dvh) - 96px); }
-  .sm-body .settings-group { border: 0; border-radius: 0; background: none; overflow: visible; }
-  .sm-body .settings-group .setting {
-    display: grid; grid-template-columns: 180px minmax(0, 1fr); grid-template-areas: 'label ctl' '. hint';
-    column-gap: 16px; row-gap: 4px; align-items: center; min-height: 0; padding: 8px 0; border-bottom: 0;
-  }
-  .sm-body .settings-group .setting > .setting-label { display: contents; }
-  .sm-body .settings-group .setting > .setting-label > :first-child { grid-area: label; justify-self: end; text-align: right; }
-  .sm-body .settings-group .setting > .setting-label > .hint { grid-area: hint; max-width: 60ch; }
-  .sm-body .settings-group .setting > .setting-control { grid-area: ctl; justify-self: start; min-width: 0; flex-wrap: wrap; }
-  .sm-body .settings-group .setting:has(.setting-label .hint) > .setting-control { min-height: 0; }
-  .sm-body .section + .section { padding-top: 16px; border-top: 1px solid var(--line); }
-  .sm-body .settings-group .sm-card-foot { margin-top: 8px; border: 1px solid var(--line); border-radius: var(--r); }
+  .dialog.settings-modal { max-height: calc(var(--vv-h, 100dvh) - 96px); }
 }
 /* Keys, recordings and users as tables too (UI 12, fourth batch). */
 .desk-table .desk-col-when { width: 140px; }
