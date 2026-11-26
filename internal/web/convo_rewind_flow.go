@@ -77,36 +77,89 @@ func (p rewindPicker) matchCount(targetText string) int {
 	return n
 }
 
+func isRewindConfirmOptionLabel(label string) bool {
+	switch strings.ToLower(strings.TrimSpace(label)) {
+	case "restore code and conversation",
+		"restore conversation",
+		"restore code",
+		"summarize from here",
+		"summarize up to here",
+		"never mind":
+		return true
+	}
+	return false
+}
+
+func isRewindConfirmOptionLine(raw string) bool {
+	m := rewindOptLineRe.FindStringSubmatch(raw)
+	return m != nil && isRewindConfirmOptionLabel(m[3])
+}
+
+func hasRewindConfirmOptions(panel []string) bool {
+	optLines, knownOpts := 0, 0
+	for _, raw := range panel {
+		if m := rewindOptLineRe.FindStringSubmatch(raw); m != nil {
+			optLines++
+			if isRewindConfirmOptionLabel(m[3]) {
+				knownOpts++
+			}
+		}
+	}
+	return optLines >= 2 && knownOpts >= 1
+}
+
+// isRewindPanelOpen reports whether a rewind picker or confirm panel appears
+// open strictly below the last ▔ divider (with no normal prompt box below it).
+// Intentionally lightweight so cleanup never relies on full screen parsing.
+func isRewindPanelOpen(screen string) bool {
+	panel, ok := rewindPanelLines(screen)
+	if !ok {
+		return false
+	}
+	for _, raw := range panel {
+		t := strings.TrimSpace(raw)
+		if t == "Rewind" || t == rewindPanelFooter || isRewindConfirmOptionLine(raw) {
+			return true
+		}
+	}
+	return false
+}
+
 func parseRewindPicker(screen string) (rewindPicker, bool) {
 	panel, ok := rewindPanelLines(screen)
 	if !ok {
 		return rewindPicker{}, false
 	}
+	if hasRewindConfirmOptions(panel) {
+		return rewindPicker{}, false
+	}
 	var hasTitle, hasHint bool
 	startIdx := -1
+	footerIdx := -1
 	for i, raw := range panel {
 		t := strings.TrimSpace(raw)
-		if strings.Contains(t, "Restore to the point before you sent this message:") {
-			return rewindPicker{}, false
-		}
-		if t == "Rewind" {
+		if !hasTitle && t == "Rewind" {
 			hasTitle, startIdx = true, i+1
 		}
 		if strings.Contains(t, "Restore the code and/or conversation") || t == rewindPanelFooter {
 			hasHint = true
 		}
+		if t == rewindPanelFooter {
+			footerIdx = i
+		}
 	}
 	if !hasTitle || !hasHint || startIdx < 0 {
 		return rewindPicker{}, false
 	}
+	endIdx := len(panel)
+	if footerIdx >= startIdx {
+		endIdx = footerIdx
+	}
 	var pk rewindPicker
-	for _, raw := range panel[startIdx:] {
+	for _, raw := range panel[startIdx:endIdx] {
 		t := strings.TrimSpace(raw)
 		if t == "" || strings.HasPrefix(t, "Restore the code and/or conversation") {
 			continue
-		}
-		if t == rewindPanelFooter {
-			break
 		}
 		if strings.HasPrefix(t, "❯") {
 			val := strings.TrimSpace(strings.TrimPrefix(t, "❯"))
@@ -152,24 +205,32 @@ func parseRewindConfirm(screen string) (rewindConfirm, bool) {
 		return rewindConfirm{}, false
 	}
 	hdr := -1
+	footerIdx := -1
 	for i, raw := range panel {
-		if strings.Contains(strings.TrimSpace(raw), "Restore to the point before you sent this message:") {
+		t := strings.TrimSpace(raw)
+		if hdr < 0 && strings.Contains(t, "Restore to the point before you sent this message:") {
 			hdr = i
-			break
+		}
+		if t == rewindPanelFooter {
+			footerIdx = i
 		}
 	}
-	if hdr < 0 {
+	startIdx := 0
+	if hdr >= 0 {
+		startIdx = hdr + 1
+	} else if !hasRewindConfirmOptions(panel) {
 		return rewindConfirm{}, false
 	}
+	endIdx := len(panel)
+	if footerIdx >= startIdx {
+		endIdx = footerIdx
+	}
 	var cf rewindConfirm
-	inOpts, selectedCount := false, 0
-	for _, raw := range panel[hdr+1:] {
+	inOpts, selectedCount, knownOpts := false, 0, 0
+	for _, raw := range panel[startIdx:endIdx] {
 		t := strings.TrimSpace(raw)
 		if t == "" {
 			continue
-		}
-		if t == rewindPanelFooter {
-			break
 		}
 		if m := rewindOptLineRe.FindStringSubmatch(raw); m != nil {
 			inOpts = true
@@ -178,7 +239,11 @@ func parseRewindConfirm(screen string) (rewindConfirm, bool) {
 			if sel {
 				selectedCount++
 			}
-			cf.options = append(cf.options, rewindOption{num: n, label: strings.TrimSpace(m[3]), selected: sel})
+			label := strings.TrimSpace(m[3])
+			if isRewindConfirmOptionLabel(label) {
+				knownOpts++
+			}
+			cf.options = append(cf.options, rewindOption{num: n, label: label, selected: sel})
 			continue
 		}
 		if !inOpts && strings.HasPrefix(t, "│") {
@@ -194,7 +259,7 @@ func parseRewindConfirm(screen string) (rewindConfirm, bool) {
 			cf.quoted[len(cf.quoted)-1] = trimmed
 		}
 	}
-	if len(cf.options) < 2 || selectedCount != 1 {
+	if len(cf.options) < 2 || selectedCount != 1 || knownOpts < 1 {
 		return rewindConfirm{}, false
 	}
 	return cf, true
@@ -421,6 +486,7 @@ type claudeRewindCommit struct {
 type claudeRewindPane interface {
 	verify(ctx context.Context) error
 	press(ctx context.Context, keys ...string) error
+	pickerEnter(ctx context.Context, targetText string) error
 	commitEnter(ctx context.Context, targetText string) (claudeRewindCommit, error)
 	waitInFlight(ctx context.Context) error
 	screen(ctx context.Context) (string, error)
@@ -435,47 +501,66 @@ type claudeRewindResult struct {
 	needsCleanup bool      // true when Phase-1 cleanup could not finish before returning
 }
 
+type rewindCloseStatus int
+
+const (
+	rewindCloseDone rewindCloseStatus = iota
+	rewindCloseStillOpen
+	rewindCloseIncomplete
+)
+
 // closeRewindPanel checks the screen and sends Esc only while a rewind picker
-// or confirm panel is visibly open. Returns true only when it verified the
-// panel is closed.
-func closeRewindPanel(ctx context.Context, pane claudeRewindPane, recheck bool) bool {
+// or confirm panel is visibly open. Returns rewindCloseDone once verified
+// closed (or after an identity change, when no further keys may be sent),
+// rewindCloseStillOpen if the panel remains visibly open after two Esc presses,
+// or rewindCloseIncomplete if screen reads/presses failed due to transport/ctx.
+func closeRewindPanel(ctx context.Context, pane claudeRewindPane, recheck bool) rewindCloseStatus {
 	checked := false
 	pressed := false
 	for range 2 {
 		scr, serr := pane.screen(ctx)
 		if serr != nil {
-			return isIdentityErr(serr)
+			if isIdentityErr(serr) {
+				return rewindCloseDone
+			}
+			return rewindCloseIncomplete
 		}
-		_, isPk := parseRewindPicker(scr)
-		_, isCf := parseRewindConfirm(scr)
-		if !isPk && !isCf {
+		if !isRewindPanelOpen(scr) {
 			if recheck && !checked && !pressed {
 				checked = true
 				sleepCtx(ctx, claudeRewindStep)
 				scr, serr = pane.screen(ctx)
 				if serr != nil {
-					return isIdentityErr(serr)
+					if isIdentityErr(serr) {
+						return rewindCloseDone
+					}
+					return rewindCloseIncomplete
 				}
-				_, isPk = parseRewindPicker(scr)
-				_, isCf = parseRewindConfirm(scr)
 			}
-			if !isPk && !isCf {
-				return true
+			if !isRewindPanelOpen(scr) {
+				return rewindCloseDone
 			}
 		}
 		if perr := pane.press(ctx, "esc"); perr != nil {
-			return isIdentityErr(perr)
+			if isIdentityErr(perr) {
+				return rewindCloseDone
+			}
+			return rewindCloseIncomplete
 		}
 		pressed = true
 		sleepCtx(ctx, claudeRewindStep)
 	}
 	scr, serr := pane.screen(ctx)
 	if serr != nil {
-		return isIdentityErr(serr)
+		if isIdentityErr(serr) {
+			return rewindCloseDone
+		}
+		return rewindCloseIncomplete
 	}
-	_, isPk := parseRewindPicker(scr)
-	_, isCf := parseRewindConfirm(scr)
-	return !isPk && !isCf
+	if !isRewindPanelOpen(scr) {
+		return rewindCloseDone
+	}
+	return rewindCloseStillOpen
 }
 
 func claudeRewind(ctx context.Context, pane claudeRewindPane, plan claudeRewindPlan) (claudeRewindResult, *rewindError) {
@@ -502,10 +587,7 @@ func claudeRewind(ctx context.Context, pane claudeRewindPane, plan claudeRewindP
 	if err != nil {
 		return claudeRewindResult{}, asRewindErr(err)
 	}
-	if _, ok := parseRewindPicker(initialScreen); ok {
-		return claudeRewindResult{}, rwErr(http.StatusConflict, "not_ready", "a rewind panel is already open")
-	}
-	if _, ok := parseRewindConfirm(initialScreen); ok {
+	if isRewindPanelOpen(initialScreen) {
 		return claudeRewindResult{}, rwErr(http.StatusConflict, "not_ready", "a rewind panel is already open")
 	}
 	if ierr := idleInput(initialScreen, checkGreyed(ctx)); ierr != nil {
@@ -543,10 +625,14 @@ func claudeRewind(ctx context.Context, pane claudeRewindPane, plan claudeRewindP
 		if pane.waitInFlight(cctx) != nil {
 			return claudeRewindResult{needsCleanup: true}, re
 		}
-		if !closeRewindPanel(cctx, pane, ctx.Err() != nil) {
+		switch closeRewindPanel(cctx, pane, ctx.Err() != nil) {
+		case rewindCloseDone:
+			return claudeRewindResult{}, re
+		case rewindCloseStillOpen:
+			return claudeRewindResult{}, rwErr(http.StatusBadGateway, "panel_not_closed", "could not close the rewind panel; press Esc in the terminal")
+		default:
 			return claudeRewindResult{needsCleanup: true}, re
 		}
-		return claudeRewindResult{}, re
 	}
 
 	// Open picker via rapid double-Esc, step up to target, verify selection.
@@ -593,8 +679,9 @@ func claudeRewind(ctx context.Context, pane claudeRewindPane, plan claudeRewindP
 		return cleanup(rwErr(http.StatusConflict, "target_mismatch", "selected message in rewind list does not match target"))
 	}
 
-	// Enter confirm screen, verify quoted message, select exact "Restore conversation".
-	if err := pane.press(ctx, "enter"); err != nil {
+	// Atomically verify picker + selected target on host before sending Enter
+	// (so an intervening Enter in the terminal cannot turn this into a confirm-screen Enter).
+	if err := pane.pickerEnter(ctx, plan.TargetText); err != nil {
 		return cleanup(err)
 	}
 	var cf rewindConfirm

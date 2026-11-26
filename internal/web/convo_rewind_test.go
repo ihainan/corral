@@ -95,8 +95,9 @@ type fakeClaudeRewindPane struct {
 	curColor      string
 	keys          []string
 	verifyErr     error
-	inFlight      *sync.WaitGroup
+	inFlight      *inFlightCounter
 	onPress       func(ctx context.Context, p *fakeClaudeRewindPane, keys []string) error
+	onPickerEnter func(ctx context.Context, p *fakeClaudeRewindPane, targetText string) error
 	onCommitEnter func(ctx context.Context, p *fakeClaudeRewindPane, targetText string) (claudeRewindCommit, error)
 	onScreen      func(ctx context.Context, p *fakeClaudeRewindPane) (string, error)
 	screenReads   int
@@ -129,6 +130,16 @@ func (f *fakeClaudeRewindPane) press(ctx context.Context, keys ...string) error 
 	return nil
 }
 
+func (f *fakeClaudeRewindPane) pickerEnter(ctx context.Context, targetText string) error {
+	f.mu.Lock()
+	fn := f.onPickerEnter
+	f.mu.Unlock()
+	if fn != nil {
+		return fn(ctx, f, targetText)
+	}
+	return f.press(ctx, "enter")
+}
+
 func (f *fakeClaudeRewindPane) commitEnter(ctx context.Context, targetText string) (claudeRewindCommit, error) {
 	f.mu.Lock()
 	fn := f.onCommitEnter
@@ -140,7 +151,7 @@ func (f *fakeClaudeRewindPane) commitEnter(ctx context.Context, targetText strin
 }
 
 func (f *fakeClaudeRewindPane) waitInFlight(ctx context.Context) error {
-	return waitGroupCtx(ctx, f.inFlight)
+	return f.inFlight.Wait(ctx)
 }
 
 func (f *fakeClaudeRewindPane) screen(ctx context.Context) (string, error) {
@@ -1253,21 +1264,21 @@ func TestClaudeRewindPressChecksIdentityBetweenEscs(t *testing.T) {
 func TestClaudeRewindCancelWaitsInFlightBeforeCleanup(t *testing.T) {
 	fastRewindTimings(t)
 	ctx, cancel := context.WithCancel(context.Background())
-	var wg sync.WaitGroup
+	var inflight inFlightCounter
 	aboveAll := "❯ first prompt\n● First answer\n\n❯ fix login\n● Second answer"
 	items := []string{"first prompt", "fix login", "(current)"}
 	fp := &fakeClaudeRewindPane{
 		curScreen: ccNormalScreen(aboveAll, ""),
-		inFlight:  &wg,
+		inFlight:  &inflight,
 	}
 	fp.onPress = func(pctx context.Context, p *fakeClaudeRewindPane, keys []string) error {
 		k := strings.Join(keys, "+")
 		if k == "esc+esc" {
 			// Simulate sshx.Exec returning immediately on cancel while the remote
 			// command finishes 15ms later and opens the rewind picker.
-			wg.Add(1)
+			inflight.Add()
 			go func() {
-				defer wg.Done()
+				defer inflight.Done()
 				time.Sleep(15 * time.Millisecond)
 				p.mu.Lock()
 				p.curScreen = ccPickerScreen(aboveAll, items, len(items)-1)
@@ -1685,7 +1696,7 @@ func TestClaudeRewindDelayedInFlightCleanupBeforeUnlock(t *testing.T) {
 	t.Cleanup(func() { claudeRewindCleanupWait = origCleanup })
 
 	ctx, cancel := context.WithCancel(context.Background())
-	var running sync.WaitGroup
+	var running inFlightCounter
 	aboveAll := "❯ first prompt\n● First answer\n\n❯ fix login\n● Second answer"
 	items := []string{"first prompt", "fix login", "(current)"}
 
@@ -1699,7 +1710,7 @@ func TestClaudeRewindDelayedInFlightCleanupBeforeUnlock(t *testing.T) {
 		if k == "esc+esc" {
 			// Remote command finishes 60ms later (> 15ms claudeRewindCleanupWait)
 			// and opens the rewind picker long after inline waitInFlight timed out.
-			running.Add(1)
+			running.Add()
 			go func() {
 				defer running.Done()
 				time.Sleep(60 * time.Millisecond)
@@ -1773,8 +1784,8 @@ func TestClaudeRewindDelayedInFlightCleanupBeforeUnlock(t *testing.T) {
 	if res2.needsCleanup {
 		t.Fatal("committed/rewind_uncertain must have needsCleanup=false")
 	}
-	var wg2 sync.WaitGroup
-	releaseClaudeRewind(&wg2, fp2, res2.needsCleanup, func() {})
+	var running2 inFlightCounter
+	releaseClaudeRewind(&running2, fp2, res2.needsCleanup, func() {})
 	if slices.Contains(fp2.recordedKeys(), "esc") {
 		t.Fatalf("deferred release must NEVER press Esc after commit, keys=%v", fp2.recordedKeys())
 	}
@@ -2086,4 +2097,550 @@ func TestRewindStoreCompareAndDeleteConcurrent(t *testing.T) {
 			t.Fatalf("iter %d: M2 was wrongly deleted by concurrent M1 retirement! got=%+v", iter, got)
 		}
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Round 4 regression tests (Items 1-3)
+// ---------------------------------------------------------------------------
+
+// setupFakePickerEnv creates a fake host + tmux/herdr stubs for running
+// claudeRewindPickerEnterSh end-to-end against real sh + awk.
+func setupFakePickerEnv(t *testing.T, mode string) (run func(screen, target string, doubleQuote bool) (string, int, string), fullCmdLen func(target string) int) {
+	t.Helper()
+	const (
+		sid   = "11111111-2222-3333-4444-555555555555"
+		pid   = int64(4242)
+		start = int64(987654)
+		sock  = "/tmp/test-herdr.sock"
+	)
+	pane := "%7"
+	if mode == "herdr" {
+		pane = "w1:p1"
+	}
+	binDir, homeDir, fakeProc, _ := setupFakeRewindHost(t, pid, start, sid, pane, sock)
+	scrFile := filepath.Join(t.TempDir(), "screen.txt")
+	keyLog := filepath.Join(t.TempDir(), "keys.log")
+
+	if mode == "tmux" {
+		stub := "#!/bin/sh\n" +
+			"case \"$1\" in -u) shift ;; esac\n" +
+			"case \"$1\" in\n" +
+			"  display-message)\n" +
+			"    for a in \"$@\"; do last=$a; done\n" +
+			"    case \"$last\" in\n" +
+			"      *pane_pid*) echo '9001 0' ;;\n" +
+			"      *pane_tty*) echo '/dev/pts/9' ;;\n" +
+			"    esac ;;\n" +
+			"  capture-pane) cat " + sshx.QuoteShell(scrFile) + " ;;\n" +
+			"  send-keys) echo \"$*\" >> " + sshx.QuoteShell(keyLog) + " ;;\n" +
+			"esac\n"
+		if err := os.WriteFile(filepath.Join(binDir, "tmux"), []byte(stub), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	} else {
+		stub := "#!/bin/sh\n" +
+			"if [ \"$1\" = pane ] && [ \"$2\" = read ]; then\n" +
+			"  cat " + sshx.QuoteShell(scrFile) + "\n" +
+			"elif [ \"$1\" = pane ] && [ \"$2\" = send-keys ]; then\n" +
+			"  echo \"$*\" >> " + sshx.QuoteShell(keyLog) + "\n" +
+			"fi\n"
+		if err := os.WriteFile(filepath.Join(binDir, "herdr"), []byte(stub), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	fullCmdLen = func(target string) int {
+		sh, err := claudeRewindPickerEnterSh(mode, pane, sock, "9001", pid, start, sid, target)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return len("sh -c " + sshx.QuoteShell(sh))
+	}
+
+	run = func(screen, target string, doubleQuote bool) (string, int, string) {
+		_ = os.Remove(keyLog)
+		if err := os.WriteFile(scrFile, []byte(screen), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		sh, err := claudeRewindPickerEnterSh(mode, pane, sock, "9001", pid, start, sid, target)
+		if err != nil {
+			t.Fatal(err)
+		}
+		patched := strings.Replace(sh, `PATH="`, `PATH="`+binDir+`:`, 1)
+		patched = strings.ReplaceAll(patched, `"/proc/`, `"`+fakeProc+`/`)
+		cmdStr := patched
+		if doubleQuote {
+			cmdStr = "sh -c " + sshx.QuoteShell(patched)
+		}
+		cmd := exec.Command("sh", "-c", cmdStr)
+		cmd.Env = append(os.Environ(), "HOME="+homeDir)
+		out, err := cmd.CombinedOutput()
+		code := 0
+		if err != nil {
+			var ee *exec.ExitError
+			if errors.As(err, &ee) {
+				code = ee.ExitCode()
+			} else {
+				t.Fatalf("unexpected exec err: %v (out=%q)", err, string(out))
+			}
+		}
+		logged, _ := os.ReadFile(keyLog)
+		return string(out), code, string(logged)
+	}
+	return run, fullCmdLen
+}
+
+// Round 4 Item 1: Atomic remote picker-Enter script checks identity + live
+// screen below the last ▔ rule, requiring a Rewind picker (NOT a confirm page)
+// whose sole ❯ row matches target's first line before sending Enter.
+func TestClaudeRewindPickerEnterScriptAtomicCheck(t *testing.T) {
+	opts := []string{"Restore code and conversation", "Restore conversation", "Restore code", "Never mind"}
+
+	for _, mode := range []string{"tmux", "herdr"} {
+		t.Run(mode, func(t *testing.T) {
+			run, fullCmdLen := setupFakePickerEnv(t, mode)
+
+			// 1) User already pressed Enter in terminal -> confirm screen with
+			// "Restore code and conversation" selected. MUST exit 36, NEVER send Enter!
+			_, code, keys := run(ccConfirmScreen("above", []string{"fix login"}, opts, 0), "fix login\nsecond line", true)
+			if code != 36 || keys != "" {
+				t.Fatalf("confirm screen with code restore selected: code=%d keys=%q, want 36 and empty", code, keys)
+			}
+
+			// 2) Confirm screen even with "Restore conversation" selected -> MUST exit 36, no Enter.
+			_, code, keys = run(ccConfirmScreen("above", []string{"fix login"}, opts, 1), "fix login", true)
+			if code != 36 || keys != "" {
+				t.Fatalf("confirm screen (conversation only): code=%d keys=%q, want 36 and empty", code, keys)
+			}
+
+			// 3) Picker open on wrong message or (current) -> MUST exit 36, no Enter.
+			_, code, keys = run(ccPickerScreen("above", []string{"first", "fix login", "(current)"}, 0), "fix login", true)
+			if code != 36 || keys != "" {
+				t.Fatalf("wrong picker selection: code=%d keys=%q, want 36 and empty", code, keys)
+			}
+			_, code, keys = run(ccPickerScreen("above", []string{"first", "fix login", "(current)"}, 2), "(current)", true)
+			if code != 36 || keys != "" {
+				t.Fatalf("(current) selected: code=%d keys=%q, want 36 and empty", code, keys)
+			}
+
+			// 4) Quoted picker in transcript above normal prompt box -> MUST exit 36, no Enter.
+			quotedAbove := ccNormalScreen(ccPickerScreen("chat", []string{"fix login", "(current)"}, 0), "")
+			_, code, keys = run(quotedAbove, "fix login", true)
+			if code != 36 || keys != "" {
+				t.Fatalf("quoted picker above prompt box: code=%d keys=%q, want 36 and empty", code, keys)
+			}
+
+			// 5) Valid picker selection -> exits 0, prints ok, sends Enter.
+			out, code, keys := run(ccPickerScreen("above", []string{"first", "fix login", "(current)"}, 1), "fix login\nsecond line", true)
+			if code != 0 || strings.TrimSpace(out) != "ok" || keys == "" {
+				t.Fatalf("valid picker enter failed: code=%d out=%q keys=%q", code, out, keys)
+			}
+
+			// 6) Unicode whitespace and ellipsis rules match Go's matchPickerSelection.
+			unicodeTarget := "fix\u00a0login\u3000with\u202fspaces\tand  tabs"
+			out, code, keys = run(ccPickerScreen("above", []string{"fix login with spaces and tabs", "(current)"}, 0), unicodeTarget, true)
+			if code != 0 || strings.TrimSpace(out) != "ok" || keys == "" {
+				t.Fatalf("unicode whitespace match failed: code=%d out=%q keys=%q", code, out, keys)
+			}
+			longFirst := "refactor authentication middleware to validate signed cookies properly"
+			out, code, keys = run(ccPickerScreen("above", []string{"refactor authentication middleware…", "(current)"}, 0), longFirst, true)
+			if code != 0 || strings.TrimSpace(out) != "ok" || keys == "" {
+				t.Fatalf("ellipsis match failed: code=%d out=%q keys=%q", code, out, keys)
+			}
+			out, code, keys = run(ccPickerScreen("above", []string{"refactor authentication middleware ...", "(current)"}, 0), longFirst, true)
+			if code != 0 || strings.TrimSpace(out) != "ok" || keys == "" {
+				t.Fatalf("ascii ellipsis match failed: code=%d out=%q keys=%q", code, out, keys)
+			}
+			// Too-short ellipsis prefix (< 4 chars) must be rejected.
+			_, code, keys = run(ccPickerScreen("above", []string{"fix...", "(current)"}, 0), "fix login", true)
+			if code != 36 || keys != "" {
+				t.Fatalf("short ellipsis prefix should exit 36, got code=%d keys=%q", code, keys)
+			}
+			// Prefix without ellipsis must be rejected.
+			_, code, keys = run(ccPickerScreen("above", []string{"fix login", "(current)"}, 0), "fix login bug", true)
+			if code != 36 || keys != "" {
+				t.Fatalf("non-ellipsis prefix should exit 36, got code=%d keys=%q", code, keys)
+			}
+
+			// 7) Regex metacharacters and shell injection safety + huge quote length cap.
+			metaTarget := `fix foo.*bar [a-z]+ (test) $1 \n`
+			_, code, keys = run(ccPickerScreen("above", []string{`fix fooXbar a (test) $1 \n`, "(current)"}, 0), metaTarget, true)
+			if code != 36 || keys != "" {
+				t.Fatalf("regex metachar spoof matched: code=%d keys=%q", code, keys)
+			}
+			out, code, keys = run(ccPickerScreen("above", []string{metaTarget, "(current)"}, 0), metaTarget, true)
+			if code != 0 || strings.TrimSpace(out) != "ok" || keys == "" {
+				t.Fatalf("exact regex metachar failed: code=%d out=%q keys=%q", code, out, keys)
+			}
+
+			hugeQuotes := strings.Repeat("'", 20000) + "\nsecond"
+			if cmdLen := fullCmdLen(hugeQuotes); cmdLen >= 64<<10 {
+				t.Fatalf("double-quoted picker enter command too long: %d bytes", cmdLen)
+			}
+			out, code, keys = run(ccPickerScreen("above", []string{strings.Repeat("'", 60) + "…", "(current)"}, 0), hugeQuotes, true)
+			if code != 0 || strings.TrimSpace(out) != "ok" || keys == "" {
+				t.Fatalf("huge quotes ellipsis match failed: code=%d out=%q keys=%q", code, out, keys)
+			}
+
+			pwnFile := filepath.Join(t.TempDir(), "pwn")
+			evil := `fix ''' $(touch ` + pwnFile + `) $HOME`
+			out, code, keys = run(ccPickerScreen("above", []string{evil, "(current)"}, 0), evil, true)
+			if code != 0 || strings.TrimSpace(out) != "ok" || keys == "" {
+				t.Fatalf("shell metachar match failed: code=%d out=%q keys=%q", code, out, keys)
+			}
+			if _, err := os.Stat(pwnFile); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("shell injection executed: %s exists", pwnFile)
+			}
+
+			// 8) Special message first lines in picker (confirm header, "Rewind", footer).
+			for _, special := range []string{
+				"Restore to the point before you sent this message:",
+				"Rewind",
+				rewindPanelFooter,
+			} {
+				scr := ccPickerScreen("above", []string{"first", special, "(current)"}, 1)
+				out, code, keys = run(scr, special, true)
+				if code != 0 || strings.TrimSpace(out) != "ok" || keys == "" {
+					t.Fatalf("special message %q in picker failed: code=%d out=%q keys=%q", special, code, out, keys)
+				}
+			}
+		})
+	}
+	if re := mapRewindExitErr(&sshxExitStub{36}); asRewindErr(re).code != "target_mismatch" || isIdentityErr(re) {
+		t.Fatalf("exit 36 mapped to %v, want non-identity target_mismatch", re)
+	}
+}
+
+// Round 4 Item 1 (flow): If someone presses Enter in the terminal before
+// pickerEnter arrives, putting Claude Code on the confirm page with
+// "Restore code and conversation" selected, pickerEnter refuses (exit 36)
+// without sending Enter and Phase-1 cleanup closes the confirm page with Esc.
+func TestClaudeRewindPickerEnterRefusesConfirmAndCleansUp(t *testing.T) {
+	fastRewindTimings(t)
+	opts := []string{"Restore code and conversation", "Restore conversation", "Restore code", "Never mind"}
+	fp, plan := newStandardRewindFake(opts)
+	pickerEnterCalled := 0
+	fp.onPickerEnter = func(_ context.Context, p *fakeClaudeRewindPane, _ string) error {
+		pickerEnterCalled++
+		// Simulate user pressing Enter in terminal right before our Enter arrives:
+		// confirm screen is now open with "Restore code and conversation" selected!
+		p.mu.Lock()
+		p.curScreen = ccConfirmScreen("above", []string{"fix login", "check edge cases too"}, opts, 0)
+		p.mu.Unlock()
+		return mapRewindExitErr(&sshxExitStub{36})
+	}
+	// Make sure Esc on confirm closes back to normal.
+	origPress := fp.onPress
+	fp.onPress = func(ctx context.Context, p *fakeClaudeRewindPane, keys []string) error {
+		if strings.Join(keys, "+") == "esc" && isRewindPanelOpen(p.curScreen) {
+			p.curScreen = ccNormalScreen("❯ first prompt\n● First answer", "")
+			return nil
+		}
+		return origPress(ctx, p, keys)
+	}
+
+	_, err := claudeRewind(context.Background(), fp, plan)
+	if err == nil || err.code != "target_mismatch" {
+		t.Fatalf("got err=%v, want target_mismatch", err)
+	}
+	if pickerEnterCalled != 1 {
+		t.Fatalf("pickerEnterCalled = %d, want 1", pickerEnterCalled)
+	}
+	keys := fp.recordedKeys()
+	if slices.Contains(keys, "enter") {
+		t.Fatalf("must NEVER send Enter when confirm screen already appeared, keys=%v", keys)
+	}
+	if len(keys) == 0 || keys[len(keys)-1] != "esc" {
+		t.Fatalf("expected Phase-1 cleanup to press Esc and close confirm screen, keys=%v", keys)
+	}
+	fp.mu.Lock()
+	finalScr := fp.curScreen
+	fp.mu.Unlock()
+	if isRewindPanelOpen(finalScr) {
+		t.Fatal("confirm panel left open after pickerEnter refusal")
+	}
+}
+
+// Round 4 Item 2: inFlightCounter supports Wait timeout followed by repeated
+// Add/Done cycles under -race without panicking, and wakes Wait promptly when
+// count drops to 0.
+func TestInFlightCounterTimeoutAndReuseRace(t *testing.T) {
+	// 1. Nil counter and idle counter return immediately.
+	var nilCounter *inFlightCounter
+	if err := nilCounter.Wait(context.Background()); err != nil {
+		t.Fatalf("nil Wait err = %v", err)
+	}
+	var c inFlightCounter
+	cancelledCtx, cancelNow := context.WithCancel(context.Background())
+	cancelNow()
+	if err := c.Wait(cancelledCtx); err != nil {
+		t.Fatalf("idle counter Wait should return nil immediately, got %v", err)
+	}
+
+	// 2. Repeated rounds: Wait times out while count > 0, then more Add/Done
+	// calls happen concurrently while earlier ops are still running (the exact
+	// pattern that panicked sync.WaitGroup with "reused before previous Wait has returned").
+	for round := range 40 {
+		c.Add()
+		shortCtx, cancel := context.WithTimeout(context.Background(), 2*time.Millisecond)
+		err := c.Wait(shortCtx)
+		cancel()
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("round %d: expected DeadlineExceeded, got %v", round, err)
+		}
+
+		// Immediately add/done concurrently while the first op is still in-flight!
+		var workers sync.WaitGroup
+		for range 4 {
+			workers.Add(1)
+			go func() {
+				defer workers.Done()
+				for range 10 {
+					c.Add()
+					time.Sleep(time.Microsecond * 50)
+					c.Done()
+				}
+			}()
+		}
+		// Another timed-out waiter racing with Add/Done.
+		wctx, wcancel := context.WithTimeout(context.Background(), time.Millisecond)
+		_ = c.Wait(wctx)
+		wcancel()
+
+		workers.Wait()
+		c.Done()
+
+		// Now count is 0: Wait must return immediately.
+		finalCtx, fcancel := context.WithTimeout(context.Background(), time.Second)
+		if err := c.Wait(finalCtx); err != nil {
+			fcancel()
+			t.Fatalf("round %d: Wait after draining failed: %v", round, err)
+		}
+		fcancel()
+	}
+
+	// 3. Wait wakes promptly when count drops to 0.
+	c.Add()
+	c.Add()
+	waitDone := make(chan error, 1)
+	start := time.Now()
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		waitDone <- c.Wait(ctx)
+	}()
+	time.Sleep(15 * time.Millisecond)
+	c.Done()
+	select {
+	case err := <-waitDone:
+		t.Fatalf("Wait returned early while 1 op still in-flight: err=%v", err)
+	case <-time.After(10 * time.Millisecond):
+	}
+	c.Done()
+	select {
+	case err := <-waitDone:
+		if err != nil {
+			t.Fatalf("Wait returned error after count reached 0: %v", err)
+		}
+		if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
+			t.Fatalf("Wait took too long to wake after count reached 0: %v", elapsed)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Wait did not wake after count reached 0")
+	}
+}
+
+// Round 4 Item 3: Messages whose first line equals the confirm header,
+// "Rewind", or the footer hint ("Enter to continue · Esc to cancel") can be
+// rewound normally AND always trigger Esc cleanup on failure.
+func TestClaudeRewindSpecialMessageFirstLines(t *testing.T) {
+	fastRewindTimings(t)
+	specials := []struct {
+		name string
+		text string
+	}{
+		{"confirm_header", "Restore to the point before you sent this message:"},
+		{"rewind_title", "Rewind"},
+		{"footer_hint", rewindPanelFooter},
+	}
+
+	makeFake := func(msg string) (*fakeClaudeRewindPane, claudeRewindPlan) {
+		aboveAll := "❯ first prompt\n● First answer\n\n❯ " + msg + "\n● Second answer\n\n❯ add tests\n● Third answer"
+		aboveKept := "❯ first prompt\n● First answer"
+		items := []string{"first prompt", msg, "add tests", "(current)"}
+		opts := []string{"Restore code and conversation", "Restore conversation", "Never mind"}
+		state := "normal"
+		pickerIdx := len(items) - 1
+		optIdx := 0
+
+		fp := &fakeClaudeRewindPane{curScreen: ccNormalScreen(aboveAll, "")}
+		fp.onPress = func(_ context.Context, p *fakeClaudeRewindPane, keys []string) error {
+			k := strings.Join(keys, "+")
+			switch state {
+			case "normal":
+				if k == "esc+esc" {
+					state = "picker"
+					pickerIdx = len(items) - 1
+					p.curScreen = ccPickerScreen(aboveAll, items, pickerIdx)
+				}
+			case "picker":
+				switch k {
+				case "up":
+					if pickerIdx > 0 {
+						pickerIdx--
+					}
+					p.curScreen = ccPickerScreen(aboveAll, items, pickerIdx)
+				case "enter":
+					state = "confirm"
+					optIdx = 0
+					p.curScreen = ccConfirmScreen(aboveAll, []string{items[pickerIdx]}, opts, optIdx)
+				case "esc":
+					state = "normal"
+					p.curScreen = ccNormalScreen(aboveAll, "")
+				}
+			case "confirm":
+				switch k {
+				case "down":
+					if optIdx < len(opts)-1 {
+						optIdx++
+					}
+					p.curScreen = ccConfirmScreen(aboveAll, []string{items[pickerIdx]}, opts, optIdx)
+				case "enter":
+					state = "rewound"
+					p.curScreen = ccNormalScreen(aboveKept, msg)
+				case "esc":
+					state = "normal"
+					p.curScreen = ccNormalScreen(aboveAll, "")
+				}
+			case "rewound":
+				if k == "ctrl+c" {
+					p.curScreen = ccNormalScreen(aboveKept, "")
+				}
+			}
+			return nil
+		}
+		plan := claudeRewindPlan{
+			Steps:             2,
+			TargetText:        msg,
+			WithdrawnSnippets: []string{"Second answer", "add tests", "Third answer"},
+		}
+		return fp, plan
+	}
+
+	for _, tc := range specials {
+		t.Run(tc.name+"/normal_rewind_completes", func(t *testing.T) {
+			fp, plan := makeFake(tc.text)
+			res, err := claudeRewind(context.Background(), fp, plan)
+			if err != nil {
+				t.Fatalf("normal rewind for %q failed: %v", tc.text, err)
+			}
+			if !res.OK || res.Warning != "" || res.Text != tc.text {
+				t.Fatalf("unexpected result for %q: %+v", tc.text, res)
+			}
+			wantKeys := []string{"esc+esc", "up", "up", "enter", "down", "enter", "ctrl+c"}
+			if got := fp.recordedKeys(); !slices.Equal(got, wantKeys) {
+				t.Fatalf("keys = %v, want %v", got, wantKeys)
+			}
+		})
+
+		t.Run(tc.name+"/failure_cleanup_presses_esc", func(t *testing.T) {
+			fp, plan := makeFake(tc.text)
+			plan.Steps = 1 // lands on "add tests", mismatch while special message is visible in picker
+			_, err := claudeRewind(context.Background(), fp, plan)
+			if err == nil || err.code != "target_mismatch" {
+				t.Fatalf("got err=%v, want target_mismatch", err)
+			}
+			keys := fp.recordedKeys()
+			if len(keys) == 0 || keys[len(keys)-1] != "esc" {
+				t.Fatalf("cleanup must press esc when special message %q is in picker, keys=%v", tc.text, keys)
+			}
+			fp.mu.Lock()
+			finalScr := fp.curScreen
+			fp.mu.Unlock()
+			if isRewindPanelOpen(finalScr) {
+				t.Fatalf("panel remained open after cleanup for %q", tc.text)
+			}
+		})
+	}
+}
+
+// Round 4 Item 3 (cleanup resilience): closeRewindPanel detects open panels
+// without requiring full picker/confirm parsing, ignores quoted panels above a
+// normal prompt box, and returns explicit error code "panel_not_closed" when
+// two Esc presses fail to close the panel.
+func TestClaudeRewindClosePanelFallbackAndStillOpenError(t *testing.T) {
+	fastRewindTimings(t)
+
+	// 1. Minimal/unparseable panel fragments below ▔ still trigger Esc.
+	fragments := []struct {
+		name   string
+		screen string
+	}{
+		{"title_only", "chat\n" + ccOverline + "\nRewind\nsome unexpected content\n"},
+		{"footer_only", "chat\n" + ccOverline + "\nsome unexpected content\n" + rewindPanelFooter + "\n"},
+		{"confirm_opt_only", "chat\n" + ccOverline + "\n  1. Restore conversation\n  2. Never mind\n"},
+	}
+	for _, tc := range fragments {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, ok := parseRewindPicker(tc.screen); ok {
+				t.Fatalf("expected fragment %q not to parse as full picker", tc.name)
+			}
+			if _, ok := parseRewindConfirm(tc.screen); ok {
+				t.Fatalf("expected fragment %q not to parse as full confirm", tc.name)
+			}
+			if !isRewindPanelOpen(tc.screen) {
+				t.Fatalf("expected isRewindPanelOpen=true for %q", tc.name)
+			}
+			fp := &fakeClaudeRewindPane{curScreen: tc.screen}
+			fp.onPress = func(_ context.Context, p *fakeClaudeRewindPane, keys []string) error {
+				if strings.Join(keys, "+") == "esc" {
+					p.curScreen = ccNormalScreen("chat", "")
+				}
+				return nil
+			}
+			if st := closeRewindPanel(context.Background(), fp, false); st != rewindCloseDone {
+				t.Fatalf("closeRewindPanel = %v, want rewindCloseDone", st)
+			}
+			if got := fp.recordedKeys(); !slices.Equal(got, []string{"esc"}) {
+				t.Fatalf("keys = %v, want [esc]", got)
+			}
+		})
+	}
+
+	// 2. Quoted panel text above a normal prompt box is NOT treated as open.
+	quotedNormal := ccNormalScreen("chat\n"+ccOverline+"\nRewind\n1. Restore conversation\n"+rewindPanelFooter, "")
+	if isRewindPanelOpen(quotedNormal) {
+		t.Fatal("quoted panel above normal prompt box must NOT be treated as open")
+	}
+
+	// 3. When panel stays open after 2 Esc presses, claudeRewind returns explicit
+	// error code "panel_not_closed" telling the user to press Esc in the terminal.
+	t.Run("stuck_panel_after_two_escs_returns_panel_not_closed", func(t *testing.T) {
+		fp, plan := newStandardRewindFake(nil)
+		plan.Steps = 1 // triggers target_mismatch -> cleanup
+		orig := fp.onPress
+		fp.onPress = func(ctx context.Context, p *fakeClaudeRewindPane, keys []string) error {
+			if strings.Join(keys, "+") == "esc" {
+				// Simulate panel ignoring Esc and remaining open.
+				return nil
+			}
+			return orig(ctx, p, keys)
+		}
+		res, err := claudeRewind(context.Background(), fp, plan)
+		if err == nil || err.code != "panel_not_closed" {
+			t.Fatalf("got res=%+v err=%v, want panel_not_closed", res, err)
+		}
+		if !strings.Contains(err.msg, "Esc") {
+			t.Fatalf("error message should tell user to press Esc, got %q", err.msg)
+		}
+		escCount := 0
+		for _, k := range fp.recordedKeys() {
+			if k == "esc" {
+				escCount++
+			}
+		}
+		if escCount != 2 {
+			t.Fatalf("expected exactly 2 Esc attempts before returning panel_not_closed, got %d (keys=%v)", escCount, fp.recordedKeys())
+		}
+	})
 }

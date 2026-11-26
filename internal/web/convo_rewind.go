@@ -397,13 +397,10 @@ func claudeRewindPressSh(mode, pane, socket, tmuxPanePID string, pid, start int6
 	return b.String(), nil
 }
 
-// claudeRewindCommitAwk verifies the captured screen strictly below the last
-// ▔ rule: confirm header present, quoted first line matches ENVIRON["TARGET_FIRST"]
-// via fixed-string space-stripped comparison (never regex; runs under LC_ALL=C
-// so UTF-8 Unicode whitespace byte escapes work across gawk/mawk/BSD awk), and
-// the sole ❯ line is strictly "❯ <digits>. Restore conversation". Exits 35 on
-// any mismatch.
-const claudeRewindCommitAwk = `
+// claudeRewindAwkCommon provides shared UTF-8-aware (under LC_ALL=C) whitespace
+// normalization, overline/rule detection, and ellipsis prefix matching helpers
+// used by both claudeRewindPickerAwk and claudeRewindCommitAwk.
+const claudeRewindAwkCommon = `
 BEGIN {
   want = ENVIRON["TARGET_FIRST"]
   want_trunc = (ENVIRON["TARGET_TRUNC"] == "1")
@@ -430,6 +427,10 @@ function trim(s) {
   sub(/[ \t]+$/, "", s)
   return s
 }
+function rtrim(s) {
+  sub(/[ \t\r]+$/, "", s)
+  return s
+}
 function onespace(s) {
   s = normspace(s)
   sub(/^ +/, "", s)
@@ -447,6 +448,149 @@ function is_bar(s,    tmp, n) {
   n = gsub(/▔/, "", tmp)
   return (n >= 8 && tmp == "")
 }
+function is_rule_plain(s,    tmp, n) {
+  tmp = rtrim(s)
+  n = gsub(/─/, "", tmp)
+  n += gsub(/━/, "", tmp)
+  return (n >= 8 && tmp == "")
+}
+function is_box_top(s,    tmp) {
+  if (is_rule_plain(s)) return 1
+  tmp = rtrim(s)
+  if (length(tmp) >= 4 && (substr(tmp, length(tmp) - 3) == " ─" || substr(tmp, length(tmp) - 3) == " ━")) {
+    gsub(/─/, "", tmp)
+    gsub(/━/, "", tmp)
+    gsub(/ /, "", tmp)
+    return (tmp != "")
+  }
+  return 0
+}
+function is_box_foot(top, line) {
+  top = rtrim(top)
+  line = rtrim(line)
+  if (line == top) return 1
+  if (is_rule_plain(top)) return 0
+  return is_rule_plain(line)
+}
+function has_normal_box(start, stop,    i, j, t, lim) {
+  for (i = stop - 1; i >= start + 1; i--) {
+    t = trim(lines[i])
+    if (substr(t, 1, length(arrow)) != arrow || !is_box_top(lines[i - 1])) continue
+    lim = i + 10
+    if (lim > stop) lim = stop
+    for (j = i + 1; j <= lim; j++) {
+      if (is_box_foot(lines[i - 1], lines[j])) return 1
+    }
+  }
+  return 0
+}
+function has_ellipsis(g) {
+  return ((length(g) >= length(ell) && substr(g, length(g) - length(ell) + 1) == ell) ||
+          (length(g) >= 3 && substr(g, length(g) - 2) == "..."))
+}
+function strip_ellipsis(g) {
+  if (length(g) >= length(ell) && substr(g, length(g) - length(ell) + 1) == ell) {
+    return substr(g, 1, length(g) - length(ell))
+  }
+  if (length(g) >= 3 && substr(g, length(g) - 2) == "...") {
+    return substr(g, 1, length(g) - 3)
+  }
+  return ""
+}
+function match_ellipsis(g, w,    pref, minlen) {
+  if (!has_ellipsis(g)) return 0
+  pref = strip_ellipsis(g)
+  sub(/ +$/, "", pref)
+  minlen = 4
+  if (length(w) < minlen) minlen = length(w)
+  if (length(pref) < minlen || length(pref) == 0) return 0
+  return (substr(w, 1, length(pref)) == pref)
+}
+function is_confirm_opt_label(s,    l) {
+  l = tolower(onespace(s))
+  return (l == "restore code and conversation" ||
+          l == "restore conversation" ||
+          l == "restore code" ||
+          l == "summarize from here" ||
+          l == "summarize up to here" ||
+          l == "never mind")
+}
+{
+  sub(/\r$/, "")
+  lines[NR] = $0
+  if (is_bar($0)) last_bar = NR
+}
+`
+
+// claudeRewindPickerAwk verifies the captured screen strictly below the last
+// ▔ rule: panel is the Rewind picker (not a confirm screen and not followed by
+// a normal prompt box), and the sole ❯ row matches ENVIRON["TARGET_FIRST"]
+// using the same whitespace and ellipsis rules as Go's matchPickerSelection.
+// Exits 36 on any mismatch.
+const claudeRewindPickerAwk = claudeRewindAwkCommon + `
+END {
+  want_os = onespace(want)
+  want_ns = nospace(want)
+  if (want_os == "" || last_bar == 0) exit 36
+  if (has_normal_box(last_bar + 1, NR)) exit 36
+  title_idx = 0
+  footer_idx = 0
+  has_hint = 0
+  opt_lines = 0
+  known_opts = 0
+  sel_count = 0
+  sel_idx = 0
+  sel_text = ""
+  for (i = last_bar + 1; i <= NR; i++) {
+    t = trim(lines[i])
+    if (title_idx == 0 && t == "Rewind") {
+      title_idx = i
+    }
+    if (index(t, "Restore the code and/or conversation") > 0 || t == footer) {
+      has_hint = 1
+    }
+    if (t == footer) {
+      footer_idx = i
+    }
+    opt_cand = t
+    if (substr(opt_cand, 1, length(arrow)) == arrow) {
+      sel_count++
+      sel_idx = i
+      sel_text = trim(substr(t, length(arrow) + 1))
+      opt_cand = sel_text
+    }
+    if (opt_cand ~ /^[0-9]+\.[ \t]+/) {
+      opt_lines++
+      sub(/^[0-9]+\.[ \t]+/, "", opt_cand)
+      if (is_confirm_opt_label(opt_cand)) known_opts++
+    }
+  }
+  if (title_idx == 0 || !has_hint) exit 36
+  if (opt_lines >= 2 && known_opts >= 1) exit 36
+  if (sel_count != 1 || sel_idx <= title_idx) exit 36
+  if (footer_idx > title_idx && sel_idx >= footer_idx) exit 36
+  sel_os = onespace(sel_text)
+  sel_ns = nospace(sel_text)
+  if (sel_os == "" || sel_os == "(current)") exit 36
+  p_ok = 0
+  if (has_ellipsis(sel_os)) {
+    if (match_ellipsis(sel_os, want_os) || match_ellipsis(sel_ns, want_ns)) p_ok = 1
+  } else if (sel_os == want_os) {
+    p_ok = 1
+  } else if (want_trunc && length(sel_os) >= length(want_os) && substr(sel_os, 1, length(want_os)) == want_os) {
+    p_ok = 1
+  }
+  if (!p_ok) exit 36
+}
+`
+
+// claudeRewindCommitAwk verifies the captured screen strictly below the last
+// ▔ rule: confirm header present, quoted first line matches ENVIRON["TARGET_FIRST"]
+// via fixed-string space-stripped comparison (never regex; runs under LC_ALL=C
+// so UTF-8 Unicode whitespace byte escapes work across gawk/mawk/BSD awk), and
+// the sole ❯ line is strictly "❯ <digits>. Restore conversation". Exits 35 on
+// any mismatch.
+const claudeRewindCommitAwk = claudeRewindAwkCommon + `
 function is_ago_only(s) {
   return (s ~ /^\((just now|[0-9]+[smhd][ \t]+ago|[^()]*[ \t]+ago)\)$/)
 }
@@ -454,24 +598,6 @@ function strip_ago_tail(s,    r) {
   r = s
   sub(/[ \t]+\((just now|[0-9]+[smhd][ \t]+ago)\)$/, "", r)
   return r
-}
-function match_ellipsis(g, w,    pref, minlen) {
-  if (length(g) >= length(ell) && substr(g, length(g) - length(ell) + 1) == ell) {
-    pref = substr(g, 1, length(g) - length(ell))
-  } else if (length(g) >= 3 && substr(g, length(g) - 2) == "...") {
-    pref = substr(g, 1, length(g) - 3)
-  } else {
-    return 0
-  }
-  minlen = 4
-  if (length(w) < minlen) minlen = length(w)
-  if (length(pref) < minlen || length(pref) == 0) return 0
-  return (substr(w, 1, length(pref)) == pref)
-}
-{
-  sub(/\r$/, "")
-  lines[NR] = $0
-  if (is_bar($0)) last_bar = NR
 }
 END {
   want_ns = nospace(want)
@@ -573,11 +699,10 @@ func parseClaudeRewindCommitOut(out []byte) (bool, time.Time) {
 	return true, time.Time{}
 }
 
-// claudeRewindCommitSh atomically verifies identity, captures the live screen,
-// confirms "Restore conversation" and target's first line on the confirm panel,
-// and only then sends Enter in the same remote script. Exits 35 on mismatch
-// without sending Enter. Prints "ok <remote_unix_sec>" on success.
-func claudeRewindCommitSh(mode, pane, socket, tmuxPanePID string, pid, start int64, sid, targetText string) (string, error) {
+// claudeRewindGuardedEnterSh builds the atomic remote script that verifies
+// identity, captures the live screen, validates it with awkProg (exiting
+// mismatchExit without sending Enter on mismatch), and sends Enter.
+func claudeRewindGuardedEnterSh(mode, pane, socket, tmuxPanePID string, pid, start int64, sid, targetText, awkProg string, mismatchExit int, withTimestamp bool) (string, error) {
 	wantFirst, wantTrunc := claudeRewindTargetPrefix(targetText)
 	if wantFirst == "" {
 		return "", errors.New("empty target first line")
@@ -586,23 +711,46 @@ func claudeRewindCommitSh(mode, pane, socket, tmuxPanePID string, pid, start int
 	if wantTrunc {
 		truncFlag = "1"
 	}
+	exitCode := strconv.Itoa(mismatchExit)
 	q := sshx.QuoteShell
 	var b strings.Builder
 	b.WriteString(claudeRewindCheckSh(mode, pane, socket, tmuxPanePID, pid, start, sid))
 	if mode == "tmux" {
-		b.WriteString(`scr=$(tmux -u capture-pane -p -t "$pane" 2>/dev/null 9>&-) || exit 35` + "\n")
+		b.WriteString(`scr=$(tmux -u capture-pane -p -t "$pane" 2>/dev/null 9>&-) || exit ` + exitCode + "\n")
 	} else {
-		b.WriteString(`scr=$(HERDR_SOCKET_PATH="$sock" herdr pane read "$pane" --source visible 2>/dev/null 9>&-) || exit 35` + "\n")
+		b.WriteString(`scr=$(HERDR_SOCKET_PATH="$sock" herdr pane read "$pane" --source visible 2>/dev/null 9>&-) || exit ` + exitCode + "\n")
 	}
-	b.WriteString("printf '%s\\n' \"$scr\" | LC_ALL=C TARGET_FIRST=" + q(wantFirst) + " TARGET_TRUNC=" + truncFlag + " awk " + q(claudeRewindCommitAwk) + " || exit 35\n")
-	b.WriteString("ts=$(date -u +%s 2>/dev/null || true)\n")
+	b.WriteString("printf '%s\\n' \"$scr\" | LC_ALL=C TARGET_FIRST=" + q(wantFirst) + " TARGET_TRUNC=" + truncFlag + " awk " + q(awkProg) + " || exit " + exitCode + "\n")
+	if withTimestamp {
+		b.WriteString("ts=$(date -u +%s 2>/dev/null || true)\n")
+	}
 	if mode == "tmux" {
 		b.WriteString(`tmux send-keys -t "$pane" 'Enter' 9>&- || exit 6` + "\n")
 	} else {
 		b.WriteString(`HERDR_SOCKET_PATH="$sock" herdr pane send-keys "$pane" 'enter' >/dev/null 2>&1 9>&- || exit 6` + "\n")
 	}
-	b.WriteString("printf 'ok %s\\n' \"$ts\"\n")
+	if withTimestamp {
+		b.WriteString("printf 'ok %s\\n' \"$ts\"\n")
+	} else {
+		b.WriteString("echo ok\n")
+	}
 	return b.String(), nil
+}
+
+// claudeRewindPickerEnterSh atomically verifies identity, captures the live
+// screen, confirms the Rewind picker is open with target's first line selected
+// (not a confirm screen), and only then sends Enter. Exits 36 on mismatch
+// without sending Enter.
+func claudeRewindPickerEnterSh(mode, pane, socket, tmuxPanePID string, pid, start int64, sid, targetText string) (string, error) {
+	return claudeRewindGuardedEnterSh(mode, pane, socket, tmuxPanePID, pid, start, sid, targetText, claudeRewindPickerAwk, 36, false)
+}
+
+// claudeRewindCommitSh atomically verifies identity, captures the live screen,
+// confirms "Restore conversation" and target's first line on the confirm panel,
+// and only then sends Enter in the same remote script. Exits 35 on mismatch
+// without sending Enter. Prints "ok <remote_unix_sec>" on success.
+func claudeRewindCommitSh(mode, pane, socket, tmuxPanePID string, pid, start int64, sid, targetText string) (string, error) {
+	return claudeRewindGuardedEnterSh(mode, pane, socket, tmuxPanePID, pid, start, sid, targetText, claudeRewindCommitAwk, 35, true)
 }
 
 func claudeRewindTmuxPaneSh(pane string) string {
@@ -629,11 +777,11 @@ func claudeRewindTextFromRows(out []byte, uuid string) (string, *rewindError) {
 	return "", rwErr(http.StatusConflict, "message_text_unavailable", "could not read the full original text of this message from the session log")
 }
 
-func (s *Server) claudeRewindFullText(ctx context.Context, sess *term.Session, wg *sync.WaitGroup, logPath, uuid string) (string, *rewindError) {
+func (s *Server) claudeRewindFullText(ctx context.Context, sess *term.Session, inflight *inFlightCounter, logPath, uuid string) (string, *rewindError) {
 	if logPath == "" {
 		return "", rwErr(http.StatusConflict, "message_text_unavailable", "could not read the full original text of this message from the session log")
 	}
-	out, err := claudeRewindExec(ctx, sess, wg, claudeRewindRowCommand(logPath, uuid), imageLineMax, 3*time.Second)
+	out, err := claudeRewindExec(ctx, sess, inflight, claudeRewindRowCommand(logPath, uuid), imageLineMax, 3*time.Second)
 	if err != nil {
 		if errors.Is(err, sshx.ErrOutputTooLarge) {
 			return "", rwErr(http.StatusConflict, "message_too_long", "message exceeds the 100 KiB composer limit and cannot be restored completely")
@@ -661,36 +809,73 @@ func mapRewindExitErr(err error) error {
 			return rwErr(http.StatusConflict, "terminal_changed", "the terminal in this pane changed")
 		case 35:
 			return rwErr(http.StatusConflict, "confirm_mismatch", "confirmation screen did not match Restore conversation and target")
+		case 36:
+			return rwErr(http.StatusConflict, "target_mismatch", "selected message in rewind list does not match target")
 		}
 	}
 	return err
 }
 
-func waitGroupCtx(ctx context.Context, wg *sync.WaitGroup) error {
-	if wg == nil {
+// inFlightCounter tracks in-flight remote commands with cancellable Wait(ctx).
+// Unlike sync.WaitGroup, a Wait that times out can safely be followed by new
+// Add/Done calls on the same counter without panicking.
+type inFlightCounter struct {
+	mu   sync.Mutex
+	n    int
+	zero chan struct{}
+}
+
+func (c *inFlightCounter) Add() {
+	c.mu.Lock()
+	if c.n == 0 {
+		c.zero = make(chan struct{})
+	}
+	c.n++
+	c.mu.Unlock()
+}
+
+func (c *inFlightCounter) Done() {
+	c.mu.Lock()
+	c.n--
+	if c.n < 0 {
+		c.mu.Unlock()
+		panic("inFlightCounter: negative counter")
+	}
+	if c.n == 0 && c.zero != nil {
+		close(c.zero)
+		c.zero = nil
+	}
+	c.mu.Unlock()
+}
+
+func (c *inFlightCounter) Wait(ctx context.Context) error {
+	if c == nil {
 		return nil
 	}
-	done := make(chan struct{})
-	go func() {
-		wg.Wait()
-		close(done)
-	}()
-	select {
-	case <-done:
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
+	for {
+		c.mu.Lock()
+		if c.n == 0 {
+			c.mu.Unlock()
+			return nil
+		}
+		ch := c.zero
+		c.mu.Unlock()
+		select {
+		case <-ch:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
 	}
 }
 
-func claudeRewindExecResult(ctx context.Context, sess *term.Session, wg *sync.WaitGroup, cmd string, limit int, await time.Duration) (sshx.ExecResult, error) {
-	wg.Add(1)
-	res, err := sshx.Exec(ctx, sess.Client(), cmd, limit, sshx.ExecOptions{AwaitSlot: await, Release: wg.Done})
+func claudeRewindExecResult(ctx context.Context, sess *term.Session, inflight *inFlightCounter, cmd string, limit int, await time.Duration) (sshx.ExecResult, error) {
+	inflight.Add()
+	res, err := sshx.Exec(ctx, sess.Client(), cmd, limit, sshx.ExecOptions{AwaitSlot: await, Release: inflight.Done})
 	return res, err
 }
 
-func claudeRewindExec(ctx context.Context, sess *term.Session, wg *sync.WaitGroup, cmd string, limit int, await time.Duration) ([]byte, error) {
-	res, err := claudeRewindExecResult(ctx, sess, wg, cmd, limit, await)
+func claudeRewindExec(ctx context.Context, sess *term.Session, inflight *inFlightCounter, cmd string, limit int, await time.Duration) ([]byte, error) {
+	res, err := claudeRewindExecResult(ctx, sess, inflight, cmd, limit, await)
 	return res.Out, err
 }
 
@@ -718,7 +903,7 @@ func evalCommitExec(res sshx.ExecResult, err error) (claudeRewindCommit, error) 
 
 type herdrClaudeRewindPane struct {
 	sess                     *term.Session
-	wg                       *sync.WaitGroup
+	inflight                 *inFlightCounter
 	socket, pane, terminalID string
 	pid, start               int64
 	sid                      string
@@ -748,7 +933,7 @@ func (p *herdrClaudeRewindPane) verify(ctx context.Context) error {
 	if err := p.checkHerdrSnapshot(ctx); err != nil {
 		return err
 	}
-	_, err := claudeRewindExec(ctx, p.sess, p.wg, "sh -c "+sshx.QuoteShell(claudeRewindCheckSh("herdr", p.pane, p.socket, "", p.pid, p.start, p.sid)), 128, 3*time.Second)
+	_, err := claudeRewindExec(ctx, p.sess, p.inflight, "sh -c "+sshx.QuoteShell(claudeRewindCheckSh("herdr", p.pane, p.socket, "", p.pid, p.start, p.sid)), 128, 3*time.Second)
 	return mapRewindExitErr(err)
 }
 
@@ -760,7 +945,25 @@ func (p *herdrClaudeRewindPane) press(ctx context.Context, keys ...string) error
 	if err != nil {
 		return err
 	}
-	out, err := claudeRewindExec(ctx, p.sess, p.wg, "sh -c "+sshx.QuoteShell(sh), 128, 0)
+	out, err := claudeRewindExec(ctx, p.sess, p.inflight, "sh -c "+sshx.QuoteShell(sh), 128, 0)
+	if err != nil {
+		return mapRewindExitErr(err)
+	}
+	if strings.TrimSpace(string(out)) != "ok" {
+		return errors.New("key delivery unconfirmed")
+	}
+	return nil
+}
+
+func (p *herdrClaudeRewindPane) pickerEnter(ctx context.Context, targetText string) error {
+	if err := p.checkHerdrSnapshot(ctx); err != nil {
+		return err
+	}
+	sh, err := claudeRewindPickerEnterSh("herdr", p.pane, p.socket, "", p.pid, p.start, p.sid, targetText)
+	if err != nil {
+		return err
+	}
+	out, err := claudeRewindExec(ctx, p.sess, p.inflight, "sh -c "+sshx.QuoteShell(sh), 128, 0)
 	if err != nil {
 		return mapRewindExitErr(err)
 	}
@@ -778,12 +981,12 @@ func (p *herdrClaudeRewindPane) commitEnter(ctx context.Context, targetText stri
 	if err != nil {
 		return claudeRewindCommit{started: false}, err
 	}
-	res, err := claudeRewindExecResult(ctx, p.sess, p.wg, "sh -c "+sshx.QuoteShell(sh), 128, 0)
+	res, err := claudeRewindExecResult(ctx, p.sess, p.inflight, "sh -c "+sshx.QuoteShell(sh), 128, 0)
 	return evalCommitExec(res, err)
 }
 
 func (p *herdrClaudeRewindPane) waitInFlight(ctx context.Context) error {
-	return waitGroupCtx(ctx, p.wg)
+	return p.inflight.Wait(ctx)
 }
 
 func (p *herdrClaudeRewindPane) screen(ctx context.Context) (string, error) {
@@ -806,14 +1009,14 @@ func (p *herdrClaudeRewindPane) colorScreen(ctx context.Context) (string, error)
 
 type tmuxClaudeRewindPane struct {
 	sess          *term.Session
-	wg            *sync.WaitGroup
+	inflight      *inFlightCounter
 	pane, panePID string
 	pid, start    int64
 	sid           string
 }
 
 func (p *tmuxClaudeRewindPane) verify(ctx context.Context) error {
-	_, err := claudeRewindExec(ctx, p.sess, p.wg, "sh -c "+sshx.QuoteShell(claudeRewindCheckSh("tmux", p.pane, "", p.panePID, p.pid, p.start, p.sid)), 128, 3*time.Second)
+	_, err := claudeRewindExec(ctx, p.sess, p.inflight, "sh -c "+sshx.QuoteShell(claudeRewindCheckSh("tmux", p.pane, "", p.panePID, p.pid, p.start, p.sid)), 128, 3*time.Second)
 	return mapRewindExitErr(err)
 }
 
@@ -822,7 +1025,22 @@ func (p *tmuxClaudeRewindPane) press(ctx context.Context, keys ...string) error 
 	if err != nil {
 		return err
 	}
-	out, err := claudeRewindExec(ctx, p.sess, p.wg, "sh -c "+sshx.QuoteShell(sh), 128, 0)
+	out, err := claudeRewindExec(ctx, p.sess, p.inflight, "sh -c "+sshx.QuoteShell(sh), 128, 0)
+	if err != nil {
+		return mapRewindExitErr(err)
+	}
+	if strings.TrimSpace(string(out)) != "ok" {
+		return errors.New("key delivery unconfirmed")
+	}
+	return nil
+}
+
+func (p *tmuxClaudeRewindPane) pickerEnter(ctx context.Context, targetText string) error {
+	sh, err := claudeRewindPickerEnterSh("tmux", p.pane, "", p.panePID, p.pid, p.start, p.sid, targetText)
+	if err != nil {
+		return err
+	}
+	out, err := claudeRewindExec(ctx, p.sess, p.inflight, "sh -c "+sshx.QuoteShell(sh), 128, 0)
 	if err != nil {
 		return mapRewindExitErr(err)
 	}
@@ -837,23 +1055,23 @@ func (p *tmuxClaudeRewindPane) commitEnter(ctx context.Context, targetText strin
 	if err != nil {
 		return claudeRewindCommit{started: false}, err
 	}
-	res, err := claudeRewindExecResult(ctx, p.sess, p.wg, "sh -c "+sshx.QuoteShell(sh), 128, 0)
+	res, err := claudeRewindExecResult(ctx, p.sess, p.inflight, "sh -c "+sshx.QuoteShell(sh), 128, 0)
 	return evalCommitExec(res, err)
 }
 
 func (p *tmuxClaudeRewindPane) waitInFlight(ctx context.Context) error {
-	return waitGroupCtx(ctx, p.wg)
+	return p.inflight.Wait(ctx)
 }
 
 func (p *tmuxClaudeRewindPane) screen(ctx context.Context) (string, error) {
 	sh := claudeRewindCheckSh("tmux", p.pane, "", p.panePID, p.pid, p.start, p.sid) + `tmux -u capture-pane -p -t "$pane" 2>/dev/null 9>&-`
-	out, err := claudeRewindExec(ctx, p.sess, p.wg, "sh -c "+sshx.QuoteShell(sh), 256<<10, 5*time.Second)
+	out, err := claudeRewindExec(ctx, p.sess, p.inflight, "sh -c "+sshx.QuoteShell(sh), 256<<10, 5*time.Second)
 	return string(out), mapRewindExitErr(err)
 }
 
 func (p *tmuxClaudeRewindPane) colorScreen(ctx context.Context) (string, error) {
 	sh := claudeRewindCheckSh("tmux", p.pane, "", p.panePID, p.pid, p.start, p.sid) + `tmux -u capture-pane -p -e -t "$pane" 2>/dev/null 9>&-`
-	out, err := claudeRewindExec(ctx, p.sess, p.wg, "sh -c "+sshx.QuoteShell(sh), 512<<10, 5*time.Second)
+	out, err := claudeRewindExec(ctx, p.sess, p.inflight, "sh -c "+sshx.QuoteShell(sh), 512<<10, 5*time.Second)
 	return string(out), mapRewindExitErr(err)
 }
 
@@ -861,16 +1079,16 @@ func (p *tmuxClaudeRewindPane) colorScreen(ctx context.Context) (string, error) 
 // runs a final bounded panel cleanup if a Phase-1 failure/cancellation did not
 // finish cleaning up in time, waits for any cleanup command to complete, and
 // only then releases the pane lock.
-func releaseClaudeRewind(running *sync.WaitGroup, pane claudeRewindPane, needsCleanup bool, unlock func()) {
+func releaseClaudeRewind(running *inFlightCounter, pane claudeRewindPane, needsCleanup bool, unlock func()) {
 	if running != nil {
-		running.Wait()
+		_ = running.Wait(context.Background())
 	}
 	if needsCleanup && pane != nil {
 		cctx, cancel := context.WithTimeout(context.Background(), claudeRewindCleanupWait)
 		closeRewindPanel(cctx, pane, true)
 		cancel()
 		if running != nil {
-			running.Wait()
+			_ = running.Wait(context.Background())
 		}
 	}
 	if unlock != nil {
@@ -946,7 +1164,7 @@ func (s *Server) apiConversationRewind(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusTooManyRequests, "busy", "another operation on this pane is still under way")
 		return
 	}
-	var running sync.WaitGroup
+	var running inFlightCounter
 	var pane claudeRewindPane
 	cleanupNeeded := false
 	defer func() {
@@ -1079,9 +1297,9 @@ func (s *Server) apiConversationRewind(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if sess.Persistence == "herdr" {
-		pane = &herdrClaudeRewindPane{sess: sess, wg: &running, socket: socket, pane: b.Pane, terminalID: liveTermID, pid: front.pid, start: front.start, sid: front.sid}
+		pane = &herdrClaudeRewindPane{sess: sess, inflight: &running, socket: socket, pane: b.Pane, terminalID: liveTermID, pid: front.pid, start: front.start, sid: front.sid}
 	} else {
-		pane = &tmuxClaudeRewindPane{sess: sess, wg: &running, pane: b.Pane, panePID: tmuxPanePID, pid: front.pid, start: front.start, sid: front.sid}
+		pane = &tmuxClaudeRewindPane{sess: sess, inflight: &running, pane: b.Pane, panePID: tmuxPanePID, pid: front.pid, start: front.start, sid: front.sid}
 	}
 	res, rwerr := claudeRewind(ctx, pane, plan)
 	if rwerr != nil {

@@ -314,6 +314,7 @@ const REWIND_ERR_KEYS: Record<string, I18nKey> = {
   target_mismatch: 'rewind.err.target_mismatch',
   confirm_mismatch: 'rewind.err.confirm_mismatch',
   option_not_found: 'rewind.err.option_not_found',
+  panel_not_closed: 'rewind.err.panel_not_closed',
   rewind_uncertain: 'rewind.err.rewind_uncertain',
   busy: 'rewind.err.busy',
   unsupported: 'rewind.err.unsupported',
