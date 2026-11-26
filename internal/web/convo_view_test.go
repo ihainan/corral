@@ -90,6 +90,9 @@ var ownerMade = []struct {
 	{"a status line under the list is not the box's", "──────────\n❯ \n──────────\n  ● main\n❯ ◯ Explore  x\n  ? for shortcuts\n", "list", "list"},
 	{"a ❯ off the list, a status line: still unsure", "──────────\n❯ \n──────────\n  ⏸ manual mode on\n  ❯ something\n", "none", "none"},
 	{"main-agent is not main", "──────────\n❯ \n──────────\n  ◯ main-agent  x\n  ● main\n", "main", "main"},
+	// Real working screens from user reports (pop-1: spinner + background 1 shell; pop-2: spinner + auto mode).
+	{"working spinner with background shell (pop-1)", "Fetching the full issue doc\n* Reticulating… (48s · ↓ 1.4k tokens)\n  └ Tip: Hit shift+tab\n\n──────────\n❯ \n──────────\n  Opus 5.5·H | Ctx 342.6K (34.3% / u 42.8%) | $474.35 (24h57m) | +7408 -17\n  ⏵⏵ auto mode on · 1 shell · esc to interrupt · ↓ to manage\n", "main", "main"},
+	{"working spinner after send (pop-2)", "> 帮我开好实验 2\n\n* Enchanting… (7s · ↓ 5 tokens · thinking with high effort)\n  └ Tip: Use ctrl+v to paste images\n\n──────────\n❯ \n──────────\n  Opus 5.5·H | Ctx 132.6K (13.3% / u 16.6%) | $5.61 (24m) | +15 -0 | main ✓\n  ⏵⏵ auto mode on (shift+tab to cycle) · esc to interrupt\n", "main", "main"},
 }
 
 // ownerLocale: the locale the awk runs in (C, and a UTF-8 one: a host may have either).
@@ -161,7 +164,11 @@ func runOwnerCases(t *testing.T, check func(name, screen, before, after string))
 
 // (Put in the host's script between single quotes: none of their own.)
 func TestAwkHoldsNoQuote(t *testing.T) {
-	for name, prog := range map[string]string{"claudeOwnerAwk": claudeOwnerAwk, "cardRegionAwk": cardRegionAwk} {
+	for name, prog := range map[string]string{
+		"claudeOwnerAwk":      claudeOwnerAwk,
+		"claudeBoxSqueezeAwk": claudeBoxSqueezeAwk,
+		"cardRegionAwk":       cardRegionAwk,
+	} {
 		if strings.Contains(prog, "'") {
 			t.Fatalf("%s holds a single quote: the script around it breaks", name)
 		}

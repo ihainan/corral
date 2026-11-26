@@ -455,14 +455,20 @@ END {
 
 func init() { claudeOwnerAwk = strings.ReplaceAll(claudeOwnerAwk, "FOOT", strconv.Itoa(ownerFoot)) }
 
+// claudeBoxSqueezeAwk squeezes blanks and line breaks out of a box or message
+// text so boxbefore() can tell when Claude Code's greyed-out suggestion already
+// has the exact words being pasted (even wrapped across lines).
+var claudeBoxSqueezeAwk = strings.ReplaceAll(`{ gsub(/[ \t\r]/, ""); gsub(/NBSP/, ""); s = s $0 } END { print s }`, "NBSP", "\u00a0")
+
 // The gate's exits for who has the box (convoGated: 13–15 before anything
-// is typed, 16 typed and Enter held back).
+// is typed, 16 typed and Enter held back, 19 screen could not be read before typing).
 const (
 	exitOwnerSubagent = 13
 	exitOwnerOther    = 14
 	exitOwnerNone     = 15
 	exitOwnerTyped    = 16
 	exitOwnerLast     = exitOwnerTyped
+	exitOwnerUnread   = 19
 )
 
 // ownerRefusal: the error of a gate's exit for who has the input box

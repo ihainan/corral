@@ -8,7 +8,7 @@ import { navigate, onNavigate } from '../router'
 import { heldOpen, onHeldOpen, onOpenRequest, takeHeld } from '../notifyopen'
 import { isDark, maxPinned, setChromeColor, setPrefs, usePrefs } from '../prefs'
 import { local } from '../storage'
-import { CLOSE_MENUS, Confirm, copyText, Menu, useToast, type MenuItem } from '../components/ui'
+import { CLOSE_MENUS, Confirm, copyText, Menu, useToast, type MenuItem, type ToastAction } from '../components/ui'
 import { chromeVars, corralDark, corralLight } from '../terminal/themes'
 import { HostHistoryDialog } from '../terminal/hostHistory'
 import { CardNotice, useClaudeCard, type ClaudeCard } from '../terminal/cardNotice'
@@ -39,6 +39,7 @@ import { conversationReadable, prefetchConversation } from '../terminal/conversa
 import { holdTermMode, tmuxKey } from '../terminal/chatSend'
 import { camesAfter, containedInMessage, isCommand, pairSent, sameMessage, squeezed, type Submission } from '../terminal/sentSeen'
 import { viewRefusal } from '../terminal/sendView'
+import { decideLiveTerminal, liveFor, shouldClearLiveTerminal } from '../terminal/liveTerminalPolicy'
 import { agentKey, sessionWhich } from '../terminal/sessionName'
 import { pickKey as isPickKey } from '../terminal/pageKeys'
 import { firstShown, hideBox, keptBox, KeptPart, KeptView, letGoBox, modalShown, useEffectOnChange, useShownAt, useWhenGone, type KeptBox } from '../shown'
@@ -1395,9 +1396,6 @@ function queueRows(queued: { text: string; ts?: string; from?: string; note?: bo
     return [{ key: -(ms * 100 + n), ts: q.ts, text: q.text }]
   })
 }
-// (A message refused for what is up in the terminal, or what could not be made out there.)
-// (Whose terminal is shown there, a message refused: Claude Code's, OpenCode's, Codex's.)
-const liveFor = (agent?: string) => (agent ?? 'claude') === 'claude' || agent === 'opencode' || agent === 'codex' || agent === 'agy'
 // (A Codex's commands that only show something in its terminal, and their menu words.)
 const CODEX_LOOKS: [string, 'ops.codexStatus' | 'ops.codexPs' | 'ops.codexDiff' | 'ops.codexMcp'][] = [
   ['/status', 'ops.codexStatus'],
@@ -1405,7 +1403,6 @@ const CODEX_LOOKS: [string, 'ops.codexStatus' | 'ops.codexPs' | 'ops.codexDiff' 
   ['/diff', 'ops.codexDiff'],
   ['/mcp', 'ops.codexMcp'],
 ]
-const LIVE_ON = new Set(['agent_waiting', 'agent_busy', 'no_input', 'other_view', 'subagent_view', 'typed_other_view', 'typed_not_sent', 'no_screen', 'cannot_verify', 'box_draft', 'draft', 'picker', 'unknown'])
 // (See the note on these where they are used.)
 const LOOK_AFTER_MS = 4000
 const LOOK_WITHIN_MS = 60000 // (later, as a page opened anew: a screen of now says nothing of then)
@@ -1541,7 +1538,7 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
   onSplitSwap?: () => void
   onSplitExpand?: () => void
   onNewSubagent?: (parent: NewSubagentParent) => void
-  toast: (s: string, error?: boolean) => void
+  toast: (s: string, error?: boolean, action?: ToastAction) => void
   composerEnter: string
 }) {
   const kActive = keysActive ?? active
@@ -1897,13 +1894,23 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
     const timer = setTimeout(() => setSaid((s) => (s?.n === said.n ? null : s)), said.took ? 1500 : said.what === 'stop' ? 15000 : 8000)
     return () => clearTimeout(timer)
   }, [said])
-  const refusal = (e: unknown) => {
+  const liveUiNow = useRef({ waits: false, panelOpen: false })
+  const applyLive = (code: string | undefined, agentKind?: string): ToastAction | undefined => {
+    const decision = decideLiveTerminal({
+      code,
+      agent: agentKind,
+      hasBind: !!convo.bind,
+      waits: liveUiNow.current.waits,
+      panelOpen: liveUiNow.current.panelOpen,
+    })
+    if (decision === 'refresh') convo.refresh()
+    else if (decision === 'open') setLiveOf(bindKey)
+    else if (decision === 'hint') return { label: t('convo.showTerminal'), run: () => setLiveOf(bindKey) }
+    return undefined
+  }
+  const refusal = (e: unknown, apply = true) => {
     if (!(e instanceof ApiError)) return errorText(e)
-    // (What stopped it is up there, or could not be made out: the terminal, here, to deal with it.
-    // For Antigravity CLI waiting on a prompt, refresh immediately so the native AskCard opens
-    // instead of popping up the raw terminal window.)
-    if (e.code === 'agent_waiting' && convo.bind?.agent === 'agy') convo.refresh()
-    else if (LIVE_ON.has(e.code) && liveFor(convo.bind?.agent) && convo.bind) setLiveOf(bindKey)
+    if (apply) applyLive(e.code, convo.bind?.agent)
     // (Claude Code's input box not this conversation's: said what to do in the terminal.)
     const v = viewRefusal(e.code)
     if (v) return v
@@ -1927,6 +1934,10 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
     if (e.code === 'unknown') return t('convo.err.unknown')
     if (e.code === 'host_error' || e.code === 'unsupported' || e.code === 'bad_request') return t('convo.err.other')
     return errorText(e)
+  }
+  const toastRefusal = (e: unknown) => {
+    const action = e instanceof ApiError ? applyLive(e.code, convo.bind?.agent) : undefined
+    toast(refusal(e, false), true, action)
   }
   const press = (what: 'stop' | 'now') => {
     const b = convo.bind
@@ -1960,7 +1971,7 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
     api('POST', `/api/sessions/${sid}/conversation/close-dialog`, { pane: b.pane, pid: b.pid, start: b.start, session: b.session }, { timeoutMs: PRESS_MS })
       .then(settle)
       .catch((e) => {
-        if (!(e instanceof ApiError && e.code === 'no_dialog')) toast(refusal(e), true) // (closed already: the read says so)
+        if (!(e instanceof ApiError && e.code === 'no_dialog')) toastRefusal(e) // (closed already: the read says so)
         settle()
       })
   }
@@ -2015,7 +2026,7 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
       .catch((e) => {
         // (Unless it was refused before any key went, where it is is not known.)
         if (!(e instanceof ApiError && NOTHING_PRESSED.includes(e.code))) unknown()
-        toast(refusal(e), true)
+        toastRefusal(e)
       })
       .finally(() => setModeBusy(false))
   }
@@ -2085,7 +2096,7 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
         setEffortNow({ effort: took, bind, was })
         toast(t('convo.effortSet', { e: t(`convo.effort.${took}` as I18nKey) }))
       })
-      .catch((e) => toast(refusal(e), true))
+      .catch((e) => toastRefusal(e))
       .finally(() => setEffortBusy(false))
   }
 
@@ -2121,9 +2132,10 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
       .catch((e) => {
         // (Said in the menu as well as in the toast: left on "reading" it
         // would look as though the picker were still being waited for.)
-        const why = refusal(e)
+        const action = e instanceof ApiError ? applyLive(e.code, convo.bind?.agent) : undefined
+        const why = refusal(e, false)
         setModels((m) => (m?.bind === bind ? { list: null, bind, unread: true, error: why } : m))
-        toast(why, true)
+        toast(why, true, action)
       })
       .finally(() => setModelBusy(false))
   }
@@ -2155,7 +2167,7 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
         }
         convo.refresh()
       })
-      .catch((e) => toast(refusal(e), true))
+      .catch((e) => toastRefusal(e))
       .finally(() => setModelBusy(false))
   }
 
@@ -2748,9 +2760,10 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
     }
   }, [lookPlan, bindKey, sid])
   const waits = waitsFor || (lookPlan && planAsked)
+  liveUiNow.current = { waits, panelOpen }
   useEffect(() => {
-    if (waits && liveOf === bindKey) setLiveOf(null)
-  }, [waits, liveOf, bindKey])
+    if (shouldClearLiveTerminal({ waits, panelOpen }) && liveOf === bindKey) setLiveOf(null)
+  }, [waits, panelOpen, liveOf, bindKey])
   useEffect(() => {
     if (!askKey) return
     let a = suggestAsks.get(askKey)
@@ -2948,10 +2961,7 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
           drop()
           return
         }
-        // (What stopped it is up there, or could not be made out: the terminal, here, to deal with it.
-        // For Antigravity CLI waiting on a prompt, refresh immediately so the native AskCard opens.)
-        if (e instanceof ApiError && e.code === 'agent_waiting' && b.agent === 'agy') convo.refresh()
-        else if (e instanceof ApiError && LIVE_ON.has(e.code) && liveFor(b.agent)) setLiveOf(bindKey)
+        const liveHint = e instanceof ApiError ? applyLive(e.code, b.agent) : undefined
         // Whether it went is not known (the gateway lost the host on the way,
         // or the answer was lost on its way here): it is looked for as one
         // sent, the draft staying until it is seen.
@@ -2966,7 +2976,7 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
         }
         if (e instanceof ApiError && (e.code === 'unknown' || e.code === 'network')) {
           // (It is looked for as one sent; the draft comes back until it is seen.)
-          toast(t('agents.sendUnknown'), true)
+          toast(t('agents.sendUnknown'), true, liveHint)
           putBack()
           mark({ state: 'waiting', was })
         } else {
@@ -2987,7 +2997,7 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
             convo.refresh()
             return toast(t('agents.changedRefresh'), true)
           }
-          toast(refusal(e), true)
+          toast(refusal(e, false), true, liveHint)
         }
       })
       .finally(() => {
@@ -3274,9 +3284,8 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
       (e) => {
         // (Another agent in the pane: read at once, as for a send — the dialog says why.)
         if (e instanceof ApiError && e.code === 'agent_changed') convo.refresh()
-        // (Refused for what is up in its terminal: the terminal, here, as for a message.)
-        if (e instanceof ApiError && e.code === 'agent_waiting' && b.agent === 'agy') convo.refresh()
-        else if (e instanceof ApiError && LIVE_ON.has(e.code) && liveFor(b.agent)) setLiveOf(bindKey)
+        // (Refused for a confirmed terminal blocker: open the inline terminal.)
+        if (e instanceof ApiError) applyLive(e.code, b.agent)
         throw e
       },
     )
@@ -3667,7 +3676,7 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
               if (!b) return
               runOp(b, cmd).then(
                 () => setLiveOf(bindKey),
-                (e) => toast(refusal(e), true),
+                (e) => toastRefusal(e),
               )
             },
           })),

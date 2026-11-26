@@ -164,6 +164,10 @@ func (s *Server) convoModeTo(w http.ResponseWriter, ctx context.Context, sess *t
 			*reason = "send_failed"
 			writeError(w, http.StatusConflict, "refused", "the pane did not take the key")
 			return
+		case errors.As(err, &exitErr) && exitErr.Status == exitOwnerUnread:
+			*reason = "no_screen"
+			writeError(w, http.StatusBadGateway, "no_screen", "the pane's screen could not be read")
+			return
 		case errors.As(err, &exitErr) && exitErr.Status >= exitOwnerSubagent && exitErr.Status <= exitOwnerLast:
 			*reason, _, _ = writeOwnerRefusal(w, err) // (Claude Code's input box not the conversation's: nothing pressed)
 			return
