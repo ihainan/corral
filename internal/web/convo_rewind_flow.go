@@ -5,7 +5,6 @@ import (
 	"errors"
 	"net/http"
 	"regexp"
-	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -26,8 +25,6 @@ var (
 	rewindAgoTailRe      = regexp.MustCompile(`\s+\((?:just now|\d+[smhd]\s+ago)\)$`)
 	rewindDiffLineRe     = regexp.MustCompile(`^(?:No code changes|\d+\s+files?\s+changed\b|Restores?\b|\+\d+\s+-\d+)`)
 	rewindCodeRestoredRe = regexp.MustCompile(`^The code will be restored(?: [+-][0-9]+(?:,[0-9]+)*)* in `)
-	rewindCodeManyRe     = regexp.MustCompile(`^(.+) and ([1-9][0-9]*) other files$`)
-	rewindCodeOtherRe    = regexp.MustCompile(`^[0-9]+ other files?$`)
 )
 
 func isOverlineRule(line string) bool {
@@ -189,86 +186,141 @@ type rewindOption struct {
 	selected bool
 }
 
-type rewindCodeDesc struct {
-	kind  string   // "one", "two", or "many"
-	files []string // 1 name for "one", 2 names for "two", [firstName] for "many"
-	total int      // 1 for "one", 2 for "two", N+1 for "many"
-}
-
 type rewindConfirm struct {
 	quoted     []string
 	options    []rewindOption
 	codeLine   string
 	codeBlocks int
-	codeDesc   rewindCodeDesc
-	codeDescOK bool
 }
 
-func hasRewindEllipsis(s string) bool {
-	return strings.HasSuffix(s, "…") || strings.HasSuffix(s, "...")
-}
-
-// parseRewindCodeFiles parses Claude Code 2.1.330's confirmation description
-// line into its exact shape:
-//   - 1 file:   "The code will be restored +1 -2 in a.txt."
-//   - 2 files:  "The code will be restored +1 -5 in a.txt and b.txt."
-//   - 3+ files: "The code will be restored -4 in a.txt and 3 other files."
-//
-// Any other shape (truncated ellipsis, "in N files.", comma-separated lists
-// without "and N other files", etc.) returns false or fails count matching so
-// callers fail closed.
-func parseRewindCodeFiles(line string) (rewindCodeDesc, bool) {
-	loc := rewindCodeRestoredRe.FindStringIndex(line)
-	if loc == nil {
-		return rewindCodeDesc{}, false
-	}
-	s := strings.TrimSpace(line[loc[1]:])
-	if s == "" || hasRewindEllipsis(s) {
-		return rewindCodeDesc{}, false
-	}
-	if strings.HasSuffix(s, ".") {
-		s = strings.TrimSpace(strings.TrimSuffix(s, "."))
-	}
-	if s == "" || hasRewindEllipsis(s) || strings.Contains(s, "…") || strings.Contains(s, "...") {
-		return rewindCodeDesc{}, false
-	}
-	if m := rewindCodeManyRe.FindStringSubmatch(s); m != nil {
-		name := strings.TrimSpace(m[1])
-		otherN, err := strconv.Atoi(m[2])
-		if err != nil || name == "" || otherN < 2 {
-			return rewindCodeDesc{}, false
-		}
-		return rewindCodeDesc{kind: "many", files: []string{name}, total: otherN + 1}, true
-	}
-	if pos := strings.Index(s, " and "); pos >= 0 {
-		left := strings.TrimSpace(s[:pos])
-		right := strings.TrimSpace(s[pos+5:])
-		if left == "" || right == "" || strings.Contains(right, " and ") || rewindCodeOtherRe.MatchString(right) {
-			return rewindCodeDesc{}, false
-		}
-		return rewindCodeDesc{kind: "two", files: []string{left, right}, total: 2}, true
-	}
-	return rewindCodeDesc{kind: "one", files: []string{s}, total: 1}, true
-}
-
-func matchRewindCodeFiles(desc rewindCodeDesc, descOK bool, expectedPaths []string) bool {
-	if !descOK || len(expectedPaths) == 0 {
+// matchRewindCodeLine verifies Claude Code 2.1.330's confirmation description
+// line by constructing the exact expected "in ..." suffix from expectedPaths
+// (instead of splitting the screen text on " and ", which breaks filenames
+// containing " and "):
+//   - 1 file:   "in <name>."
+//   - 2 files:  "in <name1> and <name2>." (either order)
+//   - 3+ files: "in <any expected name> and <N-1> other files."
+func matchRewindCodeLine(line string, expectedPaths []string) bool {
+	if line == "" || len(expectedPaths) == 0 {
 		return false
 	}
+	loc := rewindCodeRestoredRe.FindStringIndex(line)
+	if loc == nil {
+		return false
+	}
+	// rewindCodeRestoredRe ends with " in ", so keep "in " at the start of tail.
+	tail := line[loc[1]-3:]
 	expBases, _, err := normalizeRewindFiles(expectedPaths)
-	if err != nil || len(expBases) == 0 || desc.total != len(expBases) {
+	if err != nil || len(expBases) == 0 {
 		return false
 	}
 	switch len(expBases) {
 	case 1:
-		return desc.kind == "one" && len(desc.files) == 1 && desc.files[0] == expBases[0]
+		return tail == "in "+expBases[0]+"."
 	case 2:
-		return desc.kind == "two" && len(desc.files) == 2 &&
-			((desc.files[0] == expBases[0] && desc.files[1] == expBases[1]) ||
-				(desc.files[0] == expBases[1] && desc.files[1] == expBases[0]))
+		return tail == "in "+expBases[0]+" and "+expBases[1]+"." ||
+			tail == "in "+expBases[1]+" and "+expBases[0]+"."
 	default:
-		return desc.kind == "many" && len(desc.files) == 1 && slices.Contains(expBases, desc.files[0])
+		suffix := " and " + strconv.Itoa(len(expBases)-1) + " other files."
+		for _, name := range expBases {
+			if tail == "in "+name+suffix {
+				return true
+			}
+		}
+		return false
 	}
+}
+
+func isRewindEditTool(name string) bool {
+	switch name {
+	case "Edit", "MultiEdit", "Write", "NotebookEdit":
+		return true
+	}
+	return false
+}
+
+// rewindEditedFiles collects the distinct full paths modified by Claude's edit
+// tools (Write/Edit/MultiEdit/NotebookEdit) in active entries strictly after
+// targetID, matching web/src/terminal/rewindFiles.ts identically.
+func rewindEditedFiles(entries []convo.Entry, targetID string) []string {
+	if targetID == "" {
+		return nil
+	}
+	targetIdx := -1
+	for i, e := range entries {
+		if e.Role == convo.RoleUser && !e.Gone && !e.Mid && e.ID == targetID {
+			targetIdx = i
+			break
+		}
+	}
+	if targetIdx < 0 {
+		return nil
+	}
+	seen := make(map[string]bool)
+	var out []string
+	for _, e := range entries[targetIdx+1:] {
+		if e.Gone {
+			continue
+		}
+		for _, p := range e.Parts {
+			if p.Kind != convo.KindTool || p.Tool == nil || p.Tool.Error {
+				continue
+			}
+			if !isRewindEditTool(p.Tool.Name) {
+				continue
+			}
+			raw := p.Tool.Detail
+			if nl := strings.IndexByte(raw, '\n'); nl >= 0 {
+				raw = raw[:nl]
+			}
+			raw = strings.TrimRight(strings.TrimSpace(raw), "/\\")
+			if raw == "" || seen[raw] || rewindFileBase(raw) == "" {
+				continue
+			}
+			seen[raw] = true
+			out = append(out, raw)
+		}
+	}
+	return out
+}
+
+func samePathSet(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	set := make(map[string]bool, len(a))
+	for _, p := range a {
+		set[p] = true
+	}
+	if len(set) != len(b) {
+		return false
+	}
+	for _, p := range b {
+		if !set[p] {
+			return false
+		}
+	}
+	return true
+}
+
+// verifyRewindCodePaths compares the client-supplied full paths against the
+// freshly read session log before any keys are sent to the terminal.
+func verifyRewindCodePaths(entries []convo.Entry, targetID string, requestedFiles []string) ([]string, *rewindError) {
+	if len(requestedFiles) == 0 {
+		return nil, rwErr(http.StatusConflict, "no_code_changes", "no restorable code changes after this message")
+	}
+	_, reqPaths, err := normalizeRewindFiles(requestedFiles)
+	if err != nil {
+		return nil, rwErr(http.StatusBadRequest, "bad_request", err.Error())
+	}
+	logPaths := rewindEditedFiles(entries, targetID)
+	if len(logPaths) == 0 {
+		return nil, rwErr(http.StatusConflict, "no_code_changes", "no restorable code changes after this message")
+	}
+	if !samePathSet(reqPaths, logPaths) {
+		return nil, rwErr(http.StatusConflict, "code_mismatch", "files to restore do not match the session log")
+	}
+	return logPaths, nil
 }
 
 func (c rewindConfirm) selectedOption() (rewindOption, bool) {
@@ -357,9 +409,6 @@ func parseRewindConfirm(screen string) (rewindConfirm, bool) {
 				}
 			}
 		}
-	}
-	if cf.codeBlocks == 1 {
-		cf.codeDesc, cf.codeDescOK = parseRewindCodeFiles(cf.codeLine)
 	}
 	if len(cf.quoted) > 1 && rewindAgoOnlyRe.MatchString(cf.quoted[len(cf.quoted)-1]) {
 		cf.quoted = cf.quoted[:len(cf.quoted)-1]
@@ -683,7 +732,7 @@ func claudeRewind(ctx context.Context, pane claudeRewindPane, plan claudeRewindP
 		return claudeRewindResult{}, rwErr(http.StatusConflict, "not_ready", "invalid rewind target")
 	}
 	if plan.RestoreCode && len(plan.ExpectedFiles) == 0 {
-		return claudeRewindResult{}, rwErr(http.StatusBadRequest, "bad_request", "files list is required when restore_code is true")
+		return claudeRewindResult{}, rwErr(http.StatusConflict, "no_code_changes", "no restorable code changes after this message")
 	}
 	if err := pane.verify(ctx); err != nil {
 		return claudeRewindResult{}, asRewindErr(err)
@@ -864,7 +913,7 @@ func claudeRewind(ctx context.Context, pane claudeRewindPane, plan claudeRewindP
 	if !ok || !selOK || !strings.EqualFold(selOpt.label, wantOpt) || !matchConfirmQuote(preCf.quoted, plan.TargetText) {
 		return cleanup(rwErr(http.StatusConflict, "confirm_mismatch", "confirmation screen did not match expected option and target"))
 	}
-	if plan.RestoreCode && !matchRewindCodeFiles(preCf.codeDesc, preCf.codeDescOK, plan.ExpectedFiles) {
+	if plan.RestoreCode && (preCf.codeBlocks != 1 || !matchRewindCodeLine(preCf.codeLine, plan.ExpectedFiles)) {
 		return cleanup(rwErr(http.StatusConflict, "code_mismatch", "files to restore do not match the expected list"))
 	}
 
