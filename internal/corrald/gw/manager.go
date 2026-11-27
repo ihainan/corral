@@ -273,10 +273,14 @@ type sharedConn struct {
 	capDegraded map[string]bool
 
 	// agent.watch subscription state for this shared connection.
-	watchSubscribed     bool
+	// Mutated ONLY through Manager.mutateWatchState.
+	watchRemoteActive   bool
+	watchHealthy        bool
 	watchClient         *Client
 	watchLogsSig        string
+	watchCoveredHosts   map[int64]struct{}
 	watchUnsubCancel    chan struct{}
+	watchUnsubDue       bool
 	watchReconciling    bool
 	watchReconcileAgain bool
 
@@ -291,13 +295,14 @@ type sharedConn struct {
 
 func newSharedConn(key accountKey) *sharedConn {
 	return &sharedConn{
-		key:           key,
-		uid:           -1,
-		hostRefs:      make(map[int64]*hostRef),
-		unackedWrites: make(map[string]string),
-		capFailures:   make(map[string]int),
-		capDegraded:   make(map[string]bool),
-		stopCh:        make(chan struct{}),
+		key:               key,
+		uid:               -1,
+		hostRefs:          make(map[int64]*hostRef),
+		unackedWrites:     make(map[string]string),
+		capFailures:       make(map[string]int),
+		capDegraded:       make(map[string]bool),
+		watchCoveredHosts: make(map[int64]struct{}),
+		stopCh:            make(chan struct{}),
 	}
 }
 
@@ -594,25 +599,19 @@ func (m *Manager) ReportCapFailure(hostID int64, client *Client, capName string,
 	if errors.As(err, &rpcErr) && (rpcErr.Code == proto.ErrMethodNotFound || rpcErr.Code == proto.ErrNotSupported) {
 		immediate = true
 	}
-	sc.mu.Lock()
-	if client != nil && sc.client != client {
-		sc.mu.Unlock()
-		return
-	}
-	wasDegraded := sc.capDegraded[capName]
-	if immediate {
-		sc.capDegraded[capName] = true
-	} else {
-		sc.capFailures[capName]++
-		if sc.capFailures[capName] >= m.capFailureThreshold {
-			sc.capDegraded[capName] = true
+	m.mutateWatchState(sc, nil, func() {
+		if client != nil && sc.client != client {
+			return
 		}
-	}
-	nowDegraded := sc.capDegraded[capName]
-	sc.mu.Unlock()
-	if capName == "watch" && !wasDegraded && nowDegraded {
-		m.notifyCoverageForConn(sc)
-	}
+		if immediate {
+			sc.capDegraded[capName] = true
+		} else {
+			sc.capFailures[capName]++
+			if sc.capFailures[capName] >= m.capFailureThreshold {
+				sc.capDegraded[capName] = true
+			}
+		}
+	})
 }
 
 // CallMutating executes a mutating RPC (e.g. pane.send / pane.answer) with T1's
@@ -1041,10 +1040,11 @@ func (m *Manager) Pause(ctx context.Context, userID, hostID int64, corralUser st
 	}
 	sc := m.sharedConnForHost(hostID, fp, sshUser)
 	if sc != nil {
-		sc.mu.Lock()
-		client := sc.client
-		delete(sc.hostRefs, hostID)
-		sc.mu.Unlock()
+		var client *Client
+		m.mutateWatchState(sc, []int64{hostID}, func() {
+			client = sc.client
+			delete(sc.hostRefs, hostID)
+		})
 
 		remaining := -1
 		if client != nil && !client.Closed() {
@@ -2607,9 +2607,23 @@ func (m *Manager) runUpdateOp(ctx context.Context, rop *runningOp, op *store.Cor
 		client = sc.client
 		sc.mu.Unlock()
 		defer func() {
-			sc.mu.Lock()
-			sc.updating = false
-			sc.mu.Unlock()
+			var triggerRecovery bool
+			m.mutateWatchState(sc, nil, func() {
+				sc.updating = false
+				if sc.client == nil || sc.client.Closed() {
+					sc.clearWatchStateLocked()
+					if !sc.intentionalClose && !sc.reconnecting && !sc.recovering && len(sc.hostRefs) > 0 {
+						triggerRecovery = true
+					}
+				}
+			})
+			if triggerRecovery {
+				m.wg.Add(1)
+				go func() {
+					defer m.wg.Done()
+					m.handleUnexpectedDisconnect(sc)
+				}()
+			}
 		}()
 	}
 
@@ -2922,49 +2936,55 @@ func (m *Manager) attachAndHello(
 	// Transfer SSH release ownership to sc now that Dial+Hello succeeded (Item 2).
 	newRelease := own.take()
 
-	sc.mu.Lock()
-	oldClient := sc.client
-	oldSSH := sc.sshClient
-	oldRelease := sc.sshRelease
-	sc.client = client
-	sc.sshClient = sshClient
-	if sshClient != oldSSH {
-		sc.sshRelease = newRelease
-	} else if newRelease != nil && oldRelease == nil {
-		sc.sshRelease = newRelease
-	}
-	sc.socketPath = socketPath
-	if probe != nil {
-		sc.machineID = probe.MachineID
-		sc.homeDir = probe.Home
-		sc.uid = probe.UIDInt64()
-		sc.libDir = probe.LibDir
-		sc.stateDir = probe.StateDir
-	}
-	sc.hello = hello
-	sc.health = health
-	if sc.epoch != hello.Epoch {
-		sc.epoch = hello.Epoch
-		sc.lastSeq = hello.Seq
-	} else if hello.Seq > sc.lastSeq {
-		sc.lastSeq = hello.Seq
-	}
-	clear(sc.capFailures)
-	clear(sc.capDegraded)
-	sc.addFailedReleasesLocked(ch.FailedReleases)
-	// Hydrate persisted post-update crash window after gateway restart (Item 22).
-	if sc.updatedAt.IsZero() && ch.UpdateReadyAt > 0 && ch.UpdateTargetRel > 0 && ch.UpdateTargetRel == hello.Release {
-		sc.updatedAt = time.Unix(ch.UpdateReadyAt, 0)
-		sc.updateTargetVer = ch.UpdateTargetVer
-		sc.updateTargetRel = ch.UpdateTargetRel
-		sc.updateCrashCount = ch.UpdateCrashCount
-		sc.prevVersion = ch.UpdatedFromVer
-		sc.prevRelease = ch.UpdatedFromRel
-		sc.prevRelTarget = ch.UpdatedFromTarget
-	}
-	sc.intentionalClose = false
-	sc.hostRefs[hostID] = &hostRef{HostID: hostID, OwnerID: userID, CorralUser: corralUser}
-	sc.mu.Unlock()
+	var oldClient *Client
+	var oldSSH *ssh.Client
+	var oldRelease func()
+	m.mutateWatchState(sc, []int64{hostID}, func() {
+		oldClient = sc.client
+		oldSSH = sc.sshClient
+		oldRelease = sc.sshRelease
+		if oldClient != client {
+			sc.clearWatchStateLocked()
+		}
+		sc.client = client
+		sc.sshClient = sshClient
+		if sshClient != oldSSH {
+			sc.sshRelease = newRelease
+		} else if newRelease != nil && oldRelease == nil {
+			sc.sshRelease = newRelease
+		}
+		sc.socketPath = socketPath
+		if probe != nil {
+			sc.machineID = probe.MachineID
+			sc.homeDir = probe.Home
+			sc.uid = probe.UIDInt64()
+			sc.libDir = probe.LibDir
+			sc.stateDir = probe.StateDir
+		}
+		sc.hello = hello
+		sc.health = health
+		if sc.epoch != hello.Epoch {
+			sc.epoch = hello.Epoch
+			sc.lastSeq = hello.Seq
+		} else if hello.Seq > sc.lastSeq {
+			sc.lastSeq = hello.Seq
+		}
+		clear(sc.capFailures)
+		clear(sc.capDegraded)
+		sc.addFailedReleasesLocked(ch.FailedReleases)
+		// Hydrate persisted post-update crash window after gateway restart (Item 22).
+		if sc.updatedAt.IsZero() && ch.UpdateReadyAt > 0 && ch.UpdateTargetRel > 0 && ch.UpdateTargetRel == hello.Release {
+			sc.updatedAt = time.Unix(ch.UpdateReadyAt, 0)
+			sc.updateTargetVer = ch.UpdateTargetVer
+			sc.updateTargetRel = ch.UpdateTargetRel
+			sc.updateCrashCount = ch.UpdateCrashCount
+			sc.prevVersion = ch.UpdatedFromVer
+			sc.prevRelease = ch.UpdatedFromRel
+			sc.prevRelTarget = ch.UpdatedFromTarget
+		}
+		sc.intentionalClose = false
+		sc.hostRefs[hostID] = &hostRef{HostID: hostID, OwnerID: userID, CorralUser: corralUser}
+	})
 
 	if oldClient != nil && oldClient != client {
 		_ = oldClient.Close()
@@ -3038,14 +3058,24 @@ func (m *Manager) handleDaemonEvent(sc *sharedConn, ev proto.Event) {
 			m.wg.Add(1)
 			go func() {
 				defer m.wg.Done()
-				defer func() {
-					sc.mu.Lock()
-					sc.reconnecting = false
-					sc.mu.Unlock()
-				}()
 				rctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-				defer cancel()
-				_ = m.reconnectSharedConn(rctx, sc, nil, nil)
+				err := m.reconnectSharedConn(rctx, sc, nil, nil)
+				cancel()
+				if err != nil {
+					var triggerRecovery bool
+					m.mutateWatchState(sc, nil, func() {
+						sc.reconnecting = false
+						if sc.client == nil || sc.client.Closed() {
+							sc.clearWatchStateLocked()
+							if !sc.intentionalClose && !sc.updating && !sc.recovering && len(sc.hostRefs) > 0 {
+								triggerRecovery = true
+							}
+						}
+					})
+					if triggerRecovery {
+						m.handleUnexpectedDisconnect(sc)
+					}
+				}
 			}()
 		}
 	case proto.EventAgentChanged:
@@ -3159,7 +3189,8 @@ func (m *Manager) reconnectSharedConn(ctx context.Context, sc *sharedConn, overr
 	// Re-subscribe agent.watch immediately on the new client before swapping
 	// sc.client when any browser is actively watching this account (zero-gap
 	// handoff / reconnect).
-	var newWatchSub bool
+	var newWatchRemote bool
+	var newWatchHealthy bool
 	var newWatchSig string
 	var newWatchDegraded bool
 	if isWatchHealthOK(health) {
@@ -3171,11 +3202,16 @@ func (m *Manager) reconnectSharedConn(ctx context.Context, sc *sharedConn, overr
 			wctx, wcancel := context.WithTimeout(ctx, watchRPCTimeout)
 			wres, werr := newClient.Watch(wctx, extraLogs)
 			wcancel()
-			if werr != nil || !watchResultHealthy(wres) {
+			if werr != nil || wres == nil || !wres.Watching {
 				newWatchDegraded = true
 			} else {
-				newWatchSub = true
+				newWatchRemote = true
 				newWatchSig = watchLogsSignature(extraLogs)
+				if watchResultHealthy(wres) {
+					newWatchHealthy = true
+				} else {
+					newWatchDegraded = true
+				}
 			}
 		}
 	}
@@ -3183,40 +3219,40 @@ func (m *Manager) reconnectSharedConn(ctx context.Context, sc *sharedConn, overr
 	// Transfer SSH ownership to sc so caller does not close the live SSH conn (Item 2).
 	newRelease := own.take()
 
-	sc.mu.Lock()
-	oldSSH := sc.sshClient
-	oldRelease := sc.sshRelease
-	sc.cancelUnsubTimerLocked()
-	sc.client = newClient
-	if sshClient != oldSSH {
-		sc.sshClient = sshClient
-		sc.sshRelease = newRelease
-	} else if newRelease != nil && oldRelease == nil {
-		sc.sshRelease = newRelease
-	}
-	sc.hello = hello
-	sc.health = health
-	if sc.epoch != hello.Epoch {
-		sc.epoch = hello.Epoch
-		sc.lastSeq = hello.Seq
-	} else if hello.Seq > sc.lastSeq {
-		sc.lastSeq = hello.Seq
-	}
-	clear(sc.capFailures)
-	clear(sc.capDegraded)
-	if newWatchDegraded {
-		sc.capDegraded["watch"] = true
-	}
-	if newWatchSub {
-		sc.watchSubscribed = true
-		sc.watchClient = newClient
-		sc.watchLogsSig = newWatchSig
-	} else {
-		sc.watchSubscribed = false
-		sc.watchClient = nil
-		sc.watchLogsSig = ""
-	}
-	sc.mu.Unlock()
+	var oldSSH *ssh.Client
+	var oldRelease func()
+	m.mutateWatchState(sc, nil, func() {
+		oldSSH = sc.sshClient
+		oldRelease = sc.sshRelease
+		sc.clearWatchStateLocked()
+		sc.reconnecting = false
+		sc.client = newClient
+		if sshClient != oldSSH {
+			sc.sshClient = sshClient
+			sc.sshRelease = newRelease
+		} else if newRelease != nil && oldRelease == nil {
+			sc.sshRelease = newRelease
+		}
+		sc.hello = hello
+		sc.health = health
+		if sc.epoch != hello.Epoch {
+			sc.epoch = hello.Epoch
+			sc.lastSeq = hello.Seq
+		} else if hello.Seq > sc.lastSeq {
+			sc.lastSeq = hello.Seq
+		}
+		clear(sc.capFailures)
+		clear(sc.capDegraded)
+		if newWatchDegraded {
+			sc.capDegraded["watch"] = true
+		}
+		if newWatchRemote {
+			sc.watchRemoteActive = true
+			sc.watchHealthy = newWatchHealthy
+			sc.watchClient = newClient
+			sc.watchLogsSig = newWatchSig
+		}
+	})
 
 	if oldClient != nil && oldClient != newClient {
 		_ = oldClient.Close()
@@ -3231,7 +3267,6 @@ func (m *Manager) reconnectSharedConn(ctx context.Context, sc *sharedConn, overr
 		m.monitorConn(sc, newClient)
 	}()
 	m.scheduleWatchReconcile(sc)
-	m.notifyCoverageForConn(sc)
 	return nil
 }
 
@@ -3245,20 +3280,17 @@ func (m *Manager) monitorConn(sc *sharedConn, client *Client) {
 		case <-sc.stopCh:
 			return
 		case <-client.Done():
-			sc.mu.Lock()
-			isCurrent := sc.client == client
-			intentional := sc.intentionalClose || sc.updating || sc.reconnecting
-			if isCurrent && sc.watchClient == client {
-				sc.cancelUnsubTimerLocked()
-				sc.watchSubscribed = false
-				sc.watchClient = nil
-				sc.watchLogsSig = ""
-			}
-			sc.mu.Unlock()
+			var isCurrent, intentional bool
+			m.mutateWatchState(sc, nil, func() {
+				isCurrent = sc.client == client
+				intentional = sc.intentionalClose || sc.updating || sc.reconnecting
+				if sc.watchClient == client {
+					sc.clearWatchStateLocked()
+				}
+			})
 			if !isCurrent || intentional {
 				return
 			}
-			m.notifyCoverageForConn(sc)
 			m.handleUnexpectedDisconnect(sc)
 			return
 		case <-ticker.C:
@@ -3276,23 +3308,22 @@ func (m *Manager) monitorConn(sc *sharedConn, client *Client) {
 				continue
 			}
 			now := time.Now().Unix()
-			sc.mu.Lock()
-			prevWatchOK := isWatchHealthOK(sc.health)
-			sc.health = health
-			nowWatchOK := isWatchHealthOK(health)
-			refs := make([]int64, 0, len(sc.hostRefs))
-			for id := range sc.hostRefs {
-				refs = append(refs, id)
-			}
-			sc.mu.Unlock()
+			var prevWatchOK, nowWatchOK bool
+			var refs []int64
+			m.mutateWatchState(sc, nil, func() {
+				prevWatchOK = isWatchHealthOK(sc.health)
+				sc.health = health
+				nowWatchOK = isWatchHealthOK(health)
+				refs = make([]int64, 0, len(sc.hostRefs))
+				for id := range sc.hostRefs {
+					refs = append(refs, id)
+				}
+			})
 			for _, hostID := range refs {
 				_ = m.store.TouchCorraldLastOK(context.Background(), hostID, now)
 			}
-			if prevWatchOK != nowWatchOK {
-				m.notifyCoverageForConn(sc)
-				if nowWatchOK {
-					m.scheduleWatchReconcile(sc)
-				}
+			if !prevWatchOK && nowWatchOK {
+				m.scheduleWatchReconcile(sc)
 			}
 		}
 	}
@@ -3335,10 +3366,22 @@ func (m *Manager) handleUnexpectedDisconnect(sc *sharedConn) {
 	}
 	sc.mu.Unlock()
 
+	recovered := false
 	defer func() {
+		var retryDrop bool
 		sc.mu.Lock()
 		sc.recovering = false
+		if recovered && !sc.intentionalClose && !sc.updating && !sc.reconnecting && len(sc.hostRefs) > 0 && sc.client != nil && sc.client.Closed() {
+			retryDrop = true
+		}
 		sc.mu.Unlock()
+		if retryDrop {
+			m.wg.Add(1)
+			go func() {
+				defer m.wg.Done()
+				m.handleUnexpectedDisconnect(sc)
+			}()
+		}
 	}()
 
 	if len(refs) == 0 {
@@ -3375,6 +3418,7 @@ func (m *Manager) handleUnexpectedDisconnect(sc *sharedConn) {
 		}
 
 		if m.tryRestartSharedConn(sc, refs) {
+			recovered = true
 			sc.mu.Lock()
 			var restartVer string
 			var restartRel int64
@@ -4236,16 +4280,18 @@ func (m *Manager) detachHost(hostID int64) {
 	}
 	m.mu.Unlock()
 	if sc != nil {
-		sc.mu.Lock()
-		delete(sc.hostRefs, hostID)
-		empty := len(sc.hostRefs) == 0
-		sc.mu.Unlock()
+		var empty bool
+		m.mutateWatchState(sc, []int64{hostID}, func() {
+			delete(sc.hostRefs, hostID)
+			empty = len(sc.hostRefs) == 0
+		})
 		if empty {
 			m.closeSharedConn(sc, true)
 		} else {
 			m.scheduleWatchReconcile(sc)
-			m.notifyCoverageChanged([]int64{hostID})
 		}
+	} else {
+		m.notifyCoverageChanged([]int64{hostID})
 	}
 }
 
@@ -4258,33 +4304,33 @@ func (m *Manager) detachHostFromKey(hostID int64, wantKey accountKey) {
 	sc := m.conns[wantKey]
 	m.mu.Unlock()
 	if sc != nil {
-		sc.mu.Lock()
-		delete(sc.hostRefs, hostID)
-		empty := len(sc.hostRefs) == 0
-		sc.mu.Unlock()
+		var empty bool
+		m.mutateWatchState(sc, []int64{hostID}, func() {
+			delete(sc.hostRefs, hostID)
+			empty = len(sc.hostRefs) == 0
+		})
 		if empty {
 			m.closeSharedConn(sc, true)
 		} else {
 			m.scheduleWatchReconcile(sc)
-			m.notifyCoverageChanged([]int64{hostID})
 		}
+	} else {
+		m.notifyCoverageChanged([]int64{hostID})
 	}
 }
 
 func (m *Manager) closeSharedConn(sc *sharedConn, removeFromMap bool) {
-	affected := m.connHostIDs(sc)
-	sc.mu.Lock()
-	sc.intentionalClose = true
-	sc.cancelUnsubTimerLocked()
-	sc.watchSubscribed = false
-	sc.watchClient = nil
-	sc.watchLogsSig = ""
-	client := sc.client
-	sc.client = nil
-	rel := sc.sshRelease
-	sc.sshRelease = nil
-	sc.sshClient = nil
-	sc.mu.Unlock()
+	var client *Client
+	var rel func()
+	m.mutateWatchState(sc, nil, func() {
+		sc.intentionalClose = true
+		sc.clearWatchStateLocked()
+		client = sc.client
+		sc.client = nil
+		rel = sc.sshRelease
+		sc.sshRelease = nil
+		sc.sshClient = nil
+	})
 
 	sc.stop()
 	if client != nil {
@@ -4299,9 +4345,6 @@ func (m *Manager) closeSharedConn(sc *sharedConn, removeFromMap bool) {
 			delete(m.conns, sc.key)
 		}
 		m.mu.Unlock()
-	}
-	if len(affected) > 0 {
-		m.notifyCoverageChanged(affected)
 	}
 }
 
@@ -4516,14 +4559,14 @@ func (m *Manager) SetHealthCapsForTest(hostID int64, caps map[string]string) {
 	if sc == nil {
 		return
 	}
-	sc.mu.Lock()
-	if sc.health == nil {
-		sc.health = &proto.HealthResult{}
-	}
-	sc.health.Caps = caps
-	nowWatchOK := isWatchHealthOK(sc.health)
-	sc.mu.Unlock()
-	m.notifyCoverageForConn(sc)
+	var nowWatchOK bool
+	m.mutateWatchState(sc, nil, func() {
+		if sc.health == nil {
+			sc.health = &proto.HealthResult{}
+		}
+		sc.health.Caps = caps
+		nowWatchOK = isWatchHealthOK(sc.health)
+	})
 	if nowWatchOK {
 		m.scheduleWatchReconcile(sc)
 	}

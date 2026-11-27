@@ -17,13 +17,17 @@ const {
   CONVO_POLL_COVERED,
   CONVO_POLL_DEFAULT,
   CONVO_POLL_MORE,
+  PUSH_PING_EVERY,
+  PUSH_PONG_TIMEOUT,
   PUSH_RECONNECT_BACKOFFS,
   PushEventClient,
   SOCKET_OPEN,
   agentsNextPollDelay,
+  allVisibleHostsCovered,
   convoNextPollDelay,
   createAgentsHintCoalescer,
   createConvoScheduler,
+  createSerializedRefresher,
   matchesConvoHint,
   nextReconnectDelay,
   parsePushMessage,
@@ -388,6 +392,183 @@ function makeFakeSocket() {
   assert.equal(flushes, 1)
 
   coalescer.cancel()
+}
+
+// 5. Regression A.4: Heartbeat pong timeout detects half-open sockets, drops
+//    coverage immediately, and triggers reconnect backoff.
+{
+  const clock = makeClock()
+  const sockets = []
+  const client = new PushEventClient({
+    createSocket: () => {
+      const s = makeFakeSocket()
+      sockets.push(s)
+      return s
+    },
+    isHidden: () => false,
+    timers: clock.timers,
+    pingEveryMs: PUSH_PING_EVERY,
+    pongTimeoutMs: PUSH_PONG_TIMEOUT,
+  })
+  let stateNotifies = 0
+  client.onStateChange(() => stateNotifies++)
+  client.watchHosts(Symbol('hb'), [1])
+  client.setActive(true)
+  sockets[0].emitOpen()
+  sockets[0].emitMsg({ t: 'cover', hosts: [1] })
+  assert.equal(client.isConnected(), true)
+  assert.equal(client.isHostCovered(1), true)
+
+  // First ping answered with pong -> stays connected & covered.
+  clock.advance(PUSH_PING_EVERY)
+  assert.equal(sockets[0].sent.at(-1), '{"t":"ping"}')
+  clock.advance(2000)
+  sockets[0].emitMsg({ t: 'pong' })
+  clock.advance(PUSH_PONG_TIMEOUT)
+  assert.equal(client.isConnected(), true)
+  assert.equal(client.isHostCovered(1), true)
+
+  // Second ping answered by any non-pong message -> also clears timeout.
+  clock.advance(PUSH_PING_EVERY - 2000 - PUSH_PONG_TIMEOUT)
+  assert.equal(sockets[0].sent.filter((s) => s === '{"t":"ping"}').length, 2)
+  clock.advance(3000)
+  sockets[0].emitMsg({ t: 'agents', host: 1 })
+  clock.advance(PUSH_PONG_TIMEOUT)
+  assert.equal(client.isConnected(), true)
+
+  // Third ping gets NO pong / NO message -> times out at PUSH_PONG_TIMEOUT,
+  // drops coverage immediately, closes stale socket, and schedules reconnect.
+  clock.advance(PUSH_PING_EVERY - 3000 - PUSH_PONG_TIMEOUT)
+  assert.equal(sockets[0].sent.filter((s) => s === '{"t":"ping"}').length, 3)
+  const beforeNotifies = stateNotifies
+  clock.advance(PUSH_PONG_TIMEOUT - 1)
+  assert.equal(client.isConnected(), true)
+  assert.equal(client.isHostCovered(1), true)
+  clock.advance(1)
+  assert.equal(client.isConnected(), false)
+  assert.equal(client.isHostCovered(1), false)
+  assert.equal(sockets[0].closed, true)
+  assert.equal(stateNotifies > beforeNotifies, true)
+
+  // Reconnect triggers after 1s initial backoff.
+  clock.advance(999)
+  assert.equal(sockets.length, 1)
+  clock.advance(1)
+  assert.equal(sockets.length, 2)
+
+  client.setActive(false)
+}
+
+// 6. Regression A.5: createSerializedRefresher (used by Hosts.tsx) keeps at
+//    most 1 request in flight and coalesces burst triggers into 1 follow-up.
+{
+  let inFlight = 0
+  let maxConcurrent = 0
+  let started = 0
+  let release = null
+  const refresher = createSerializedRefresher(() => {
+    started++
+    inFlight++
+    maxConcurrent = Math.max(maxConcurrent, inFlight)
+    return new Promise((resolve) => {
+      release = () => {
+        inFlight--
+        release = null
+        resolve()
+      }
+    })
+  })
+
+  const p1 = refresher.trigger()
+  assert.equal(started, 1)
+  assert.equal(refresher.inFlight(), true)
+  // 20 triggers while #1 is in flight -> MUST NOT overlap!
+  for (let i = 0; i < 20; i++) void refresher.trigger()
+  assert.equal(started, 1)
+  assert.equal(maxConcurrent, 1)
+
+  // Finish #1 -> runs exactly ONE follow-up (#2).
+  release()
+  await Promise.resolve()
+  await Promise.resolve()
+  assert.equal(started, 2)
+  assert.equal(maxConcurrent, 1)
+  assert.equal(refresher.inFlight(), true)
+
+  // Finish #2 -> settles cleanly with no extra runs.
+  release()
+  await p1
+  assert.equal(started, 2)
+  assert.equal(refresher.inFlight(), false)
+  refresher.stop()
+}
+
+// 7. Regression A.6: List polling slows to 60s ONLY when ALL visible hosts
+//    (and session hosts) are covered; any single uncovered host keeps original interval.
+{
+  const coveredSet = new Set([1])
+  const isCov = (id) => coveredSet.has(id)
+
+  // Before /api/hosts loads: never slow down even if current session host is covered.
+  assert.equal(
+    allVisibleHostsCovered({
+      connected: true,
+      visibleHostsLoaded: false,
+      visibleHosts: [],
+      sessionHosts: [1],
+      isHostCovered: isCov,
+    }),
+    false,
+  )
+
+  // Mixed environment: host 1 (has session) is covered, host 2 (no session yet) is NOT covered -> MUST NOT slow!
+  assert.equal(
+    allVisibleHostsCovered({
+      connected: true,
+      visibleHostsLoaded: true,
+      visibleHosts: [1, 2],
+      sessionHosts: [1],
+      isHostCovered: isCov,
+    }),
+    false,
+  )
+
+  // Both visible hosts covered -> slows to 60s!
+  coveredSet.add(2)
+  assert.equal(
+    allVisibleHostsCovered({
+      connected: true,
+      visibleHostsLoaded: true,
+      visibleHosts: [1, 2],
+      sessionHosts: [1],
+      isHostCovered: isCov,
+    }),
+    true,
+  )
+
+  // Session on an additional uncovered host 3 -> MUST NOT slow!
+  assert.equal(
+    allVisibleHostsCovered({
+      connected: true,
+      visibleHostsLoaded: true,
+      visibleHosts: [1, 2],
+      sessionHosts: [1, 3],
+      isHostCovered: isCov,
+    }),
+    false,
+  )
+
+  // Disconnected push channel -> MUST NOT slow!
+  assert.equal(
+    allVisibleHostsCovered({
+      connected: false,
+      visibleHostsLoaded: true,
+      visibleHosts: [1, 2],
+      sessionHosts: [1],
+      isHostCovered: isCov,
+    }),
+    false,
+  )
 }
 
 console.log('test-push-events.mjs: all assertions passed')

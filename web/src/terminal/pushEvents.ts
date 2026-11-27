@@ -24,6 +24,10 @@ export function watchPushHosts(source: symbol, hosts: number[]): () => void {
   return client.watchHosts(source, hosts)
 }
 
+export function isPushConnected(): boolean {
+  return client.isConnected()
+}
+
 export function isPushHostCovered(hostId: number | undefined): boolean {
   return client.isHostCovered(hostId)
 }

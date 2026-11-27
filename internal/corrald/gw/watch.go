@@ -116,7 +116,6 @@ func (m *Manager) AddHostWatchLog(hostID int64, logPath string) {
 		return
 	}
 	if len(set) >= maxExtraWatchLogsPerHost {
-		// Evict an arbitrary entry to stay bounded.
 		for k := range set {
 			delete(set, k)
 			break
@@ -131,7 +130,7 @@ func (m *Manager) AddHostWatchLog(hostID int64, logPath string) {
 
 	if sc != nil {
 		sc.mu.Lock()
-		subscribed := sc.watchSubscribed && sc.watchClient != nil && sc.watchClient == sc.client && !sc.client.Closed()
+		subscribed := sc.watchRemoteActive && sc.watchHealthy && sc.watchClient != nil && sc.watchClient == sc.client && !sc.client.Closed()
 		sc.mu.Unlock()
 		if subscribed {
 			m.scheduleWatchReconcile(sc)
@@ -147,13 +146,13 @@ func (m *Manager) IsWatchCovered(userID, hostID int64) bool {
 		return false
 	}
 	sc.mu.Lock()
-	covered := sc.watchSubscribed && sc.watchClient == client
+	covered := sc.watchRemoteActive && sc.watchHealthy && sc.watchClient == client
 	sc.mu.Unlock()
 	return covered
 }
 
 // WatchSubscribedForHost reports whether hostID's sharedConn currently has an
-// active agent.watch subscription (used by tests).
+// active remote agent.watch subscription (including degraded poll mode; used by tests).
 func (m *Manager) WatchSubscribedForHost(hostID int64) bool {
 	sc := m.sharedConnForHost(hostID, "", "")
 	if sc == nil {
@@ -161,7 +160,117 @@ func (m *Manager) WatchSubscribedForHost(hostID int64) bool {
 	}
 	sc.mu.Lock()
 	defer sc.mu.Unlock()
-	return sc.watchSubscribed && sc.client != nil && sc.watchClient == sc.client && !sc.client.Closed()
+	return sc.watchRemoteActive && sc.client != nil && sc.watchClient == sc.client && !sc.client.Closed()
+}
+
+func (sc *sharedConn) cancelUnsubTimerLocked() {
+	if sc.watchUnsubCancel != nil {
+		close(sc.watchUnsubCancel)
+		sc.watchUnsubCancel = nil
+	}
+}
+
+func (sc *sharedConn) clearWatchStateLocked() {
+	sc.cancelUnsubTimerLocked()
+	sc.watchUnsubDue = false
+	sc.watchRemoteActive = false
+	sc.watchHealthy = false
+	sc.watchClient = nil
+	sc.watchLogsSig = ""
+}
+
+// isWatchEffectivelyCoveredLocked reports whether sc currently has a live,
+// healthy, non-degraded watch subscription (caller holds sc.mu).
+func (sc *sharedConn) isWatchEffectivelyCoveredLocked() bool {
+	return sc.client != nil &&
+		!sc.client.Closed() &&
+		sc.watchRemoteActive &&
+		sc.watchHealthy &&
+		sc.watchClient == sc.client &&
+		!sc.capDegraded["watch"] &&
+		isWatchHealthOK(sc.health)
+}
+
+func mergeUniqueHostIDs(lists ...[]int64) []int64 {
+	total := 0
+	for _, l := range lists {
+		total += len(l)
+	}
+	if total == 0 {
+		return nil
+	}
+	seen := make(map[int64]struct{}, total)
+	out := make([]int64, 0, total)
+	for _, l := range lists {
+		for _, id := range l {
+			if id <= 0 {
+				continue
+			}
+			if _, ok := seen[id]; !ok {
+				seen[id] = struct{}{}
+				out = append(out, id)
+			}
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	return out
+}
+
+// mutateWatchState is the unified exit for ALL mutations that affect watch
+// subscription validity, watch health/degradation, client attachment/teardown,
+// or host detachment on sc. It atomically applies mutate under sc.mu, tracks
+// previously covered host IDs so detachment of the last host never loses its
+// IDs, and guarantees OnCoverageChanged is emitted whenever coverage changes.
+func (m *Manager) mutateWatchState(sc *sharedConn, extraHosts []int64, mutate func()) {
+	if m == nil || sc == nil {
+		return
+	}
+	beforeConnHosts := m.connHostIDs(sc)
+
+	var (
+		wasCovered  bool
+		nowCovered  bool
+		wasDegraded bool
+		nowDegraded bool
+		prevCovered []int64
+		afterRefs   []int64
+	)
+
+	sc.mu.Lock()
+	wasCovered = sc.isWatchEffectivelyCoveredLocked()
+	wasDegraded = sc.capDegraded["watch"]
+	for hid := range sc.watchCoveredHosts {
+		prevCovered = append(prevCovered, hid)
+	}
+	if mutate != nil {
+		mutate()
+	}
+	nowCovered = sc.isWatchEffectivelyCoveredLocked()
+	nowDegraded = sc.capDegraded["watch"]
+	for hid := range sc.hostRefs {
+		afterRefs = append(afterRefs, hid)
+	}
+	if nowCovered {
+		if sc.watchCoveredHosts == nil {
+			sc.watchCoveredHosts = make(map[int64]struct{})
+		}
+		clear(sc.watchCoveredHosts)
+		for _, hid := range afterRefs {
+			sc.watchCoveredHosts[hid] = struct{}{}
+		}
+	} else {
+		clear(sc.watchCoveredHosts)
+	}
+	sc.mu.Unlock()
+
+	sort.Slice(afterRefs, func(i, j int) bool { return afterRefs[i] < afterRefs[j] })
+	affected := mergeUniqueHostIDs(beforeConnHosts, prevCovered, afterRefs, extraHosts)
+	if len(affected) == 0 {
+		return
+	}
+	if wasCovered != nowCovered || wasDegraded != nowDegraded || len(extraHosts) > 0 || (wasCovered && !slices.Equal(beforeConnHosts, afterRefs)) {
+		m.notifyCoverageChanged(affected)
+	}
 }
 
 func (m *Manager) emitAgentChanged(hostIDs []int64, ev proto.AgentChangedEventData) {
@@ -208,6 +317,9 @@ func (m *Manager) connHostIDs(sc *sharedConn) []int64 {
 	}
 	sc.mu.Lock()
 	for hid := range sc.hostRefs {
+		idSet[hid] = struct{}{}
+	}
+	for hid := range sc.watchCoveredHosts {
 		idSet[hid] = struct{}{}
 	}
 	sc.mu.Unlock()
@@ -290,8 +402,9 @@ func (m *Manager) hasEligibleWatchDemand(sc *sharedConn, curClient *Client) (boo
 }
 
 // hasAnyRunningWatchDemand checks whether any registered browser watcher wants
-// a host on sc whose stored corrald state is running for that user (used during
-// reconnectSharedConn before sc.client is swapped to the new connection).
+// a host on sc whose stored corrald state is running for that user (ignoring
+// local watch degradation/health, so poll-degraded subscriptions stay alive
+// while browsers watch and unsubscribe cleanly after the last browser leaves).
 func (m *Manager) hasAnyRunningWatchDemand(ctx context.Context, sc *sharedConn, manifest *proto.Manifest) (bool, []string) {
 	if m == nil || m.adminDisabled || !m.Available() {
 		return false, nil
@@ -339,13 +452,6 @@ func watchResultHealthy(res *proto.AgentWatchResult) bool {
 	return true
 }
 
-func (sc *sharedConn) cancelUnsubTimerLocked() {
-	if sc.watchUnsubCancel != nil {
-		close(sc.watchUnsubCancel)
-		sc.watchUnsubCancel = nil
-	}
-}
-
 func (m *Manager) scheduleWatchReconcile(sc *sharedConn) {
 	if m == nil || sc == nil {
 		return
@@ -384,6 +490,8 @@ func (m *Manager) scheduleWatchReconcile(sc *sharedConn) {
 	}()
 }
 
+// reconcileWatchOnce strictly serializes Watch and Unwatch RPCs for sc so a
+// grace-period Unwatch can never race with a newly arriving browser watcher.
 func (m *Manager) reconcileWatchOnce(sc *sharedConn) {
 	select {
 	case <-sc.stopCh:
@@ -393,32 +501,35 @@ func (m *Manager) reconcileWatchOnce(sc *sharedConn) {
 
 	sc.mu.Lock()
 	curClient := sc.client
-	subscribed := sc.watchSubscribed && sc.watchClient == curClient
+	remoteActive := sc.watchRemoteActive && sc.watchClient == curClient
+	healthy := sc.watchHealthy && remoteActive
 	prevSig := sc.watchLogsSig
+	unsubDue := sc.watchUnsubDue
+	var curManifest *proto.Manifest
+	if sc.hello != nil {
+		cp := sc.hello.Manifest
+		curManifest = &cp
+	}
 	sc.mu.Unlock()
 
 	if curClient == nil || curClient.Closed() {
-		sc.mu.Lock()
-		sc.cancelUnsubTimerLocked()
-		wasSub := sc.watchSubscribed
-		sc.watchSubscribed = false
-		sc.watchClient = nil
-		sc.watchLogsSig = ""
-		sc.mu.Unlock()
-		if wasSub {
-			m.notifyCoverageForConn(sc)
-		}
+		m.mutateWatchState(sc, nil, func() {
+			if sc.client == nil || sc.client == curClient || sc.client.Closed() {
+				sc.clearWatchStateLocked()
+			}
+		})
 		return
 	}
 
-	want, logs := m.hasEligibleWatchDemand(sc, curClient)
-	if want {
+	wantEligible, logs := m.hasEligibleWatchDemand(sc, curClient)
+	if wantEligible {
 		sc.mu.Lock()
 		sc.cancelUnsubTimerLocked()
+		sc.watchUnsubDue = false
 		sc.mu.Unlock()
 
 		sig := watchLogsSignature(logs)
-		if subscribed && sig == prevSig {
+		if healthy && sig == prevSig {
 			return
 		}
 
@@ -426,101 +537,116 @@ func (m *Manager) reconcileWatchOnce(sc *sharedConn) {
 		res, err := curClient.Watch(wctx, logs)
 		cancel()
 
-		changed := false
-		sc.mu.Lock()
-		if sc.client == curClient && !curClient.Closed() {
-			if err != nil || !watchResultHealthy(res) {
-				if !sc.capDegraded["watch"] || sc.watchSubscribed {
-					changed = true
-				}
-				sc.capDegraded["watch"] = true
-				sc.watchSubscribed = false
-				sc.watchClient = nil
-				sc.watchLogsSig = ""
-			} else {
-				if !sc.watchSubscribed || sc.watchClient != curClient {
-					changed = true
-				}
-				sc.watchSubscribed = true
-				sc.watchClient = curClient
-				sc.watchLogsSig = sig
+		m.mutateWatchState(sc, nil, func() {
+			if sc.client != curClient || curClient.Closed() {
+				return
 			}
-		}
-		sc.mu.Unlock()
-
-		if changed {
-			m.notifyCoverageForConn(sc)
-		}
+			if err != nil || res == nil || !res.Watching {
+				sc.capDegraded["watch"] = true
+				sc.clearWatchStateLocked()
+				return
+			}
+			sc.cancelUnsubTimerLocked()
+			sc.watchUnsubDue = false
+			sc.watchRemoteActive = true
+			sc.watchClient = curClient
+			sc.watchLogsSig = sig
+			if watchResultHealthy(res) {
+				sc.watchHealthy = true
+			} else {
+				// Mode="poll": remote subscription IS active (must be unwatched
+				// after last browser leaves), but host is not in healthy cover.
+				sc.watchHealthy = false
+				sc.capDegraded["watch"] = true
+			}
+		})
 		return
 	}
 
-	// No eligible demand: if currently subscribed on this client, start grace
-	// period unsubscribe timer (or leave existing timer running).
-	if subscribed {
-		m.mu.Lock()
-		closed := m.closed
-		delay := m.watchUnsubDelay
-		if !closed {
-			sc.mu.Lock()
-			if sc.client == curClient && sc.watchSubscribed && sc.watchClient == curClient && sc.watchUnsubCancel == nil {
-				cancelCh := make(chan struct{})
-				sc.watchUnsubCancel = cancelCh
-				m.wg.Add(1)
-				go func(target *Client, stop chan struct{}, wait time.Duration) {
-					defer m.wg.Done()
-					timer := time.NewTimer(wait)
-					defer timer.Stop()
-					select {
-					case <-timer.C:
-						m.finishWatchUnsubscribe(sc, target, stop)
-					case <-stop:
-					case <-sc.stopCh:
-					}
-				}(curClient, cancelCh, delay)
+	if !remoteActive {
+		return
+	}
+
+	// Remote subscription is active (healthy or poll-degraded). Check whether
+	// any browser still watches a running host on this sharedConn.
+	rctx, rcancel := context.WithTimeout(context.Background(), 2*time.Second)
+	wantRaw, _ := m.hasAnyRunningWatchDemand(rctx, sc, curManifest)
+	rcancel()
+	if wantRaw {
+		sc.mu.Lock()
+		sc.cancelUnsubTimerLocked()
+		sc.watchUnsubDue = false
+		sc.mu.Unlock()
+		return
+	}
+
+	// No browsers watching any running host on sc. If the grace delay has
+	// elapsed, send Unwatch inside this serialized reconcile loop.
+	if unsubDue {
+		sc.mu.Lock()
+		sc.watchUnsubDue = false
+		stillMine := sc.client == curClient && sc.watchClient == curClient && sc.watchRemoteActive && !curClient.Closed()
+		sc.mu.Unlock()
+		if !stillMine {
+			return
+		}
+
+		uctx, cancel := context.WithTimeout(context.Background(), watchRPCTimeout)
+		_, _ = curClient.Unwatch(uctx)
+		cancel()
+
+		m.mutateWatchState(sc, nil, func() {
+			if sc.client == curClient && sc.watchClient == curClient {
+				sc.clearWatchStateLocked()
 			}
+		})
+		// Re-check demand after Unwatch returns: if a browser arrived while
+		// Unwatch was in flight, scheduleWatchReconcile already set
+		// watchReconcileAgain = true, and checking here guarantees zero window.
+		rctx2, rcancel2 := context.WithTimeout(context.Background(), 2*time.Second)
+		wantAfter, _ := m.hasAnyRunningWatchDemand(rctx2, sc, curManifest)
+		rcancel2()
+		if wantAfter {
+			sc.mu.Lock()
+			sc.watchReconcileAgain = true
 			sc.mu.Unlock()
 		}
-		m.mu.Unlock()
+		return
 	}
-}
 
-func (m *Manager) finishWatchUnsubscribe(sc *sharedConn, target *Client, token chan struct{}) {
-	// Clear timer reference first if still ours.
-	sc.mu.Lock()
-	if sc.watchUnsubCancel != token {
+	// Start grace-period unsubscribe timer if one is not already running.
+	m.mu.Lock()
+	closed := m.closed
+	delay := m.watchUnsubDelay
+	if !closed {
+		sc.mu.Lock()
+		if sc.client == curClient && sc.watchRemoteActive && sc.watchClient == curClient && sc.watchUnsubCancel == nil {
+			cancelCh := make(chan struct{})
+			sc.watchUnsubCancel = cancelCh
+			m.wg.Add(1)
+			go func(target *Client, stop chan struct{}, wait time.Duration) {
+				defer m.wg.Done()
+				timer := time.NewTimer(wait)
+				defer timer.Stop()
+				select {
+				case <-timer.C:
+					sc.mu.Lock()
+					if sc.watchUnsubCancel == stop && sc.client == target && sc.watchClient == target && sc.watchRemoteActive {
+						sc.watchUnsubCancel = nil
+						sc.watchUnsubDue = true
+						sc.mu.Unlock()
+						m.scheduleWatchReconcile(sc)
+						return
+					}
+					sc.mu.Unlock()
+				case <-stop:
+				case <-sc.stopCh:
+				}
+			}(curClient, cancelCh, delay)
+		}
 		sc.mu.Unlock()
-		return
 	}
-	sc.watchUnsubCancel = nil
-	if sc.client != target || !sc.watchSubscribed || sc.watchClient != target || target.Closed() {
-		sc.mu.Unlock()
-		return
-	}
-	sc.mu.Unlock()
-
-	// Re-check demand before unsubscribing (a browser might have arrived right as timer fired).
-	if want, _ := m.hasEligibleWatchDemand(sc, target); want {
-		m.scheduleWatchReconcile(sc)
-		return
-	}
-
-	uctx, cancel := context.WithTimeout(context.Background(), watchRPCTimeout)
-	_, _ = target.Unwatch(uctx)
-	cancel()
-
-	changed := false
-	sc.mu.Lock()
-	if sc.client == target && sc.watchClient == target && sc.watchSubscribed {
-		sc.watchSubscribed = false
-		sc.watchClient = nil
-		sc.watchLogsSig = ""
-		changed = true
-	}
-	sc.mu.Unlock()
-
-	if changed {
-		m.notifyCoverageForConn(sc)
-	}
+	m.mu.Unlock()
 }
 
 func (m *Manager) handleAgentChangedEvent(sc *sharedConn, ev proto.Event) {

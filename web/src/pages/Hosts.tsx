@@ -9,9 +9,9 @@ import { useConnect } from '../connect'
 import { useFlip } from '../flip'
 import { useSession } from '../app'
 import { useCode } from '../terminal/CodeDialog'
-import { noteSessions, sessionAgents, waitingAgents } from '../terminal/agents'
+import { noteSessions, noteVisibleHosts, sessionAgents, waitingAgents } from '../terminal/agents'
 import { onPushAgents, watchPushHosts } from '../terminal/pushEvents'
-import { createAgentsHintCoalescer } from '../terminal/pushEventsLogic'
+import { createAgentsHintCoalescer, createSerializedRefresher, type SerializedRefresher } from '../terminal/pushEventsLogic'
 import { sessionWhich } from '../terminal/sessionName'
 import { local } from '../storage'
 import { deskRowKey, useDeskPages } from '../workbench'
@@ -31,21 +31,22 @@ export function HostsPage() {
   // (An answer that comes after the page was left, or after another account
   // signed in, is not this list's — nor the navigation's: review b006ffd.)
   const alive = useRef(true)
-  useEffect(() => {
-    alive.current = true
-    return () => void (alive.current = false)
-  }, [])
-  const refreshSessions = useCallback(() => {
+  const sessionsRefresher = useRef<SerializedRefresher | null>(null)
+  const runRefreshSessionsOnce = useCallback(() => {
     const gen = authGen()
     const ours = () => alive.current && gen === authGen()
-    api<SharedSession[]>('GET', '/api/shared')
+    const pShared = api<SharedSession[]>('GET', '/api/shared', undefined, { timeoutMs: 15000 })
       .then((l) => {
+        if (!ours()) return
         setShared(l)
         setSharedFailed(false)
       })
-      .catch(() => setSharedFailed(true))
+      .catch(() => {
+        if (!ours()) return
+        setSharedFailed(true)
+      })
     // (Told to the navigation too: its count of agents waiting is this list's.)
-    return api<SessionInfo[]>('GET', '/api/sessions')
+    const pSessions = api<SessionInfo[]>('GET', '/api/sessions', undefined, { timeoutMs: 15000 })
       .then((x) => {
         if (!ours()) return
         setSessions(x)
@@ -57,14 +58,37 @@ export function HostsPage() {
         setSessFailed(true)
         noteSessions(null)
       })
+    return Promise.allSettled([pShared, pSessions]).then(() => undefined)
   }, [])
+  useEffect(() => {
+    alive.current = true
+    const r = createSerializedRefresher(runRefreshSessionsOnce)
+    sessionsRefresher.current = r
+    return () => {
+      alive.current = false
+      r.stop()
+      if (sessionsRefresher.current === r) sessionsRefresher.current = null
+    }
+  }, [runRefreshSessionsOnce])
+  const refreshSessions = useCallback(() => {
+    if (!sessionsRefresher.current) {
+      sessionsRefresher.current = createSerializedRefresher(runRefreshSessionsOnce)
+    }
+    return sessionsRefresher.current.trigger()
+  }, [runRefreshSessionsOnce])
   const load = useCallback(() => {
-    api<Host[]>('GET', '/api/hosts')
+    const gen = authGen()
+    api<Host[]>('GET', '/api/hosts', undefined, { timeoutMs: 15000 })
       .then((h) => {
+        if (!alive.current || gen !== authGen()) return
         setHosts(h)
         setFailed(false)
+        noteVisibleHosts(h.map((x) => x.id))
       })
-      .catch(() => setFailed(true))
+      .catch(() => {
+        if (!alive.current || gen !== authGen()) return
+        setFailed(true)
+      })
     void refreshSessions()
   }, [refreshSessions])
 

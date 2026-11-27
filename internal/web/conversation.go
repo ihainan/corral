@@ -2618,6 +2618,9 @@ func (s *Server) apiConversation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	grew := st.parser != nil && st.parser.Rev() != prevRev
+	if grew {
+		s.recordConvoHintBinding(sess, pane, st)
+	}
 	s.agyMergeDBErrors(ctx, sess, st, grew)
 	if sess.Persistence == "tmux" && st.agent == "codex" && st.bind != nil && (st.status == "busy" || st.status == "") {
 		if s.codexWaits(ctx, sess, st) {

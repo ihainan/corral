@@ -511,3 +511,136 @@ func TestCorraldPushLatencyAndHotUpdateE2E(t *testing.T) {
 		}
 	}
 }
+
+// Regression A.5: herdr summary changes (NotifyAgentsChanged) must NOT push
+// agents hints when corrald is not covering the host, leaving behavior
+// identical when corrald is off.
+func TestHerdrNotifyAgentsOnlyWhenHostCovered(t *testing.T) {
+	v1Dir, _ := buildTestCorraldDist(t)
+	h := newHarness(t, func(c *config.Config) {
+		c.CorraldDir = v1Dir
+		c.GatewayID = "gw-herdr-gate.local"
+	})
+	admin := h.admin()
+	srv, _ := startCorraldSSH(t)
+	hostID, _ := createAndPinHost(t, admin, srv, "herdr-gate-box")
+	uid := int64(admin.do("GET", "/api/me", nil).json()["id"].(float64))
+
+	ws, _, err := dialEventsWS(t, h, admin, h.cfg.Origin())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ws.CloseNow()
+	rd := startPushReader(ws)
+	_ = rd.next(t, 2*time.Second) // initial cover=[]
+	sendWatchHosts(t, ws, []int64{hostID})
+	time.Sleep(40 * time.Millisecond)
+
+	// Corrald is OFF (host not in cover): NotifyAgentsChanged must NOT push anything.
+	h.srv.events.NotifyAgentsChanged(uid, hostID)
+	rd.expectNone(t, 180*time.Millisecond)
+
+	// Enable corrald and wait until hostID enters cover.
+	startCorraldInstall(t, admin, hostID)
+	waitCorraldState(t, admin, hostID, "running")
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		m := rd.next(t, time.Until(deadline))
+		if m.T == "cover" && slices.Equal(m.Hosts, []int64{hostID}) {
+			break
+		}
+	}
+
+	// Now that hostID IS in cover, NotifyAgentsChanged pushes {"t":"agents","host":hostID}.
+	h.srv.events.NotifyAgentsChanged(uid, hostID)
+	got := rd.next(t, 2*time.Second)
+	if got.T != "agents" || got.Host != hostID {
+		t.Fatalf("expected agents(%d) when covered, got %+v", hostID, got)
+	}
+}
+
+// Regression B: When an unmatched log file changes (new conversation's first
+// reply or mid-conversation /clear / /resume), bindings with no log or a quiet
+// log (>= 2s) receive a convo hint and relocAfter mark, while another actively
+// streaming conversation on the same host is NOT disturbed.
+func TestEventsUnmatchedLogWakesNoLogAndQuietBindingsNotActive(t *testing.T) {
+	h := newHarness(t)
+	h.srv.events.SetCoalesceWindow(80 * time.Millisecond)
+	h.srv.events.SetUnmatchedLogQuietThreshold(2 * time.Second)
+
+	admin := h.admin()
+	alice := h.member(admin, "alice")
+	srv := h.sshServer(t.TempDir())
+	hostID, sessID := createAndPinHost(t, alice, srv, "newlog-box")
+	aliceID := int64(alice.do("GET", "/api/me", nil).json()["id"].(float64))
+
+	// Create convoStates for three panes on the same session/host so we can
+	// verify relocAfter is only set for the no-log and quiet panes.
+	stNoLog := h.srv.convos.get(sessID + "\x00w1:p_nolog")
+	stNoLog.done()
+	stQuiet := h.srv.convos.get(sessID + "\x00w1:p_quiet")
+	stQuiet.done()
+	stActive := h.srv.convos.get(sessID + "\x00w1:p_active")
+	stActive.done()
+
+	// 1) No-log binding (brand new Claude Code conversation before first reply).
+	h.srv.events.RecordBindingWithActivity(aliceID, hostID, sessID, "w1:p_nolog", "w1:p_nolog", 50001, "", time.Time{})
+	// 2) Quiet binding (last log change 5s ago, e.g. user ran /clear or /resume).
+	h.srv.events.RecordBindingWithActivity(aliceID, hostID, sessID, "w1:p_quiet", "w1:p_quiet", 50002, "/tmp/old-quiet.jsonl", time.Now().Add(-5*time.Second))
+	// 3) Actively streaming binding (last log change right now).
+	h.srv.events.RecordBindingWithActivity(aliceID, hostID, sessID, "w1:p_active", "w1:p_active", 50003, "/tmp/streaming-now.jsonl", time.Now())
+
+	ws, _, err := dialEventsWS(t, h, alice, h.cfg.Origin())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ws.CloseNow()
+	rd := startPushReader(ws)
+	_ = rd.next(t, 2*time.Second) // initial cover
+	sendWatchHosts(t, ws, []int64{hostID})
+	time.Sleep(40 * time.Millisecond)
+
+	// Emit an unmatched log change (a brand new log path appearing on the host).
+	h.srv.events.HandleAgentChanged([]int64{hostID}, proto.AgentChangedEventData{
+		ChangedLogs: []string{"/tmp/brand-new-first-reply.jsonl"},
+	})
+
+	// Expect exactly 3 messages: convo(w1:p_nolog), convo(w1:p_quiet), and agents(hostID).
+	// w1:p_active MUST NOT receive a convo hint!
+	gotConvo := map[string]bool{}
+	gotAgents := false
+	for i := 0; i < 3; i++ {
+		m := rd.next(t, 2*time.Second)
+		switch m.T {
+		case "convo":
+			gotConvo[m.Pane] = true
+		case "agents":
+			if m.Host == hostID {
+				gotAgents = true
+			}
+		}
+	}
+	rd.expectNone(t, 160*time.Millisecond)
+
+	if !gotConvo["w1:p_nolog"] {
+		t.Fatalf("no-log binding did not receive convo hint: %+v", gotConvo)
+	}
+	if !gotConvo["w1:p_quiet"] {
+		t.Fatalf("quiet binding did not receive convo hint: %+v", gotConvo)
+	}
+	if gotConvo["w1:p_active"] {
+		t.Fatalf("actively streaming binding should NOT receive convo hint from unrelated log: %+v", gotConvo)
+	}
+	if !gotAgents {
+		t.Fatal("expected agents hint alongside unmatched log")
+	}
+	if stNoLog.relocAfter.Load() == 0 {
+		t.Fatal("expected relocAfter set on no-log convoState so next GET immediately locates new log")
+	}
+	if stQuiet.relocAfter.Load() == 0 {
+		t.Fatal("expected relocAfter set on quiet convoState so next GET immediately locates switched log")
+	}
+	if stActive.relocAfter.Load() != 0 {
+		t.Fatal("active convoState must NOT have relocAfter forced by unrelated unmatched log")
+	}
+}

@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { api, type HerdrAgent, type Host, type SessionInfo } from '../api'
-import { arePushHostsCovered, onPushAgents, onPushStateChange, watchPushHosts } from './pushEvents'
-import { agentsNextPollDelay, createAgentsHintCoalescer } from './pushEventsLogic'
+import { isPushConnected, isPushHostCovered, onPushAgents, onPushStateChange, watchPushHosts } from './pushEvents'
+import { agentsNextPollDelay, allVisibleHostsCovered, createAgentsHintCoalescer } from './pushEventsLogic'
 import { agentKey } from './sessionName'
 
 // The agents of the sessions the gateway has open, as the Agents page and
@@ -167,12 +167,23 @@ export function markRead(list: SessionInfo[], at: number) {
 // it rather than from nothing, so its list does not appear a moment later.)
 let lastList: SessionInfo[] | null = null
 
+let visibleHostIds: number[] | null = null
+const visibleHostListeners = new Set<() => void>()
+export function noteVisibleHosts(ids: number[]) {
+  const clean = [...new Set(ids.filter((id) => Number.isFinite(id) && id > 0))].sort((a, b) => a - b)
+  if (visibleHostIds && visibleHostIds.length === clean.length && visibleHostIds.every((v, i) => v === clean[i])) return
+  visibleHostIds = clean
+  visibleHostListeners.forEach((f) => f())
+}
+
 // (Another account signed in, or none: nothing of the one before stays.)
 export function forgetSessions() {
   lastList = null
+  visibleHostIds = null
   convoTitles.clear() // (the titles read: another's agents' as well)
   listFailed = false
   told()
+  visibleHostListeners.forEach((f) => f())
 }
 
 // Whoever reads the session list says so here (the agents page's poll, the
@@ -339,13 +350,21 @@ export function useWaitingCount(poll: boolean): { n: number | null; working: num
     const watchSrc = Symbol('waiting-count')
     let unwatch = () => {}
     const syncWatch = () => {
-      unwatch = watchPushHosts(watchSrc, sessionHostIds(lastList))
+      const ids = new Set<number>(visibleHostIds ?? [])
+      for (const id of sessionHostIds(lastList)) ids.add(id)
+      unwatch = watchPushHosts(watchSrc, [...ids])
     }
     const nextDelay = () =>
       agentsNextPollDelay({
         defaultEvery: VISIBLE_EVERY,
         hidden: document.hidden,
-        allCovered: arePushHostsCovered(sessionHostIds(lastList)),
+        allCovered: allVisibleHostsCovered({
+          connected: isPushConnected(),
+          visibleHostsLoaded: visibleHostIds !== null,
+          visibleHosts: visibleHostIds ?? [],
+          sessionHosts: sessionHostIds(lastList),
+          isHostCovered: isPushHostCovered,
+        }),
       })
     const schedule = (ms: number) => {
       if (stopped) return
@@ -356,6 +375,20 @@ export function useWaitingCount(poll: boolean): { n: number | null; working: num
         scheduledMs = null
         load()
       }, ms)
+    }
+    const refreshVisibleHosts = () => {
+      api<Host[]>('GET', '/api/hosts', undefined, { timeoutMs: 15000 })
+        .then((hs) => {
+          if (stopped) return
+          noteVisibleHosts(hs.map((h) => h.id))
+        })
+        .catch(() => {})
+    }
+    const onHostsOrState = () => {
+      syncWatch()
+      if (stopped || document.hidden || asking || timer === undefined) return
+      const want = nextDelay()
+      if (scheduledMs !== null && want !== scheduledMs) schedule(want)
     }
     const load = () => {
       clearTimeout(timer)
@@ -387,6 +420,7 @@ export function useWaitingCount(poll: boolean): { n: number | null; working: num
         clearTimeout(timer)
         timer = undefined
         scheduledMs = null
+        refreshVisibleHosts()
         load()
       }
     }
@@ -405,13 +439,11 @@ export function useWaitingCount(poll: boolean): { n: number | null; working: num
       },
     })
     const offAgents = onPushAgents(() => coalescer.trigger())
-    const offState = onPushStateChange(() => {
-      if (stopped || document.hidden || asking || timer === undefined) return
-      const want = nextDelay()
-      if (scheduledMs !== null && want !== scheduledMs) schedule(want)
-    })
+    const offState = onPushStateChange(onHostsOrState)
+    visibleHostListeners.add(onHostsOrState)
     document.addEventListener('visibilitychange', onVisible)
     syncWatch()
+    refreshVisibleHosts()
     load()
     return () => {
       stopped = true
@@ -419,6 +451,7 @@ export function useWaitingCount(poll: boolean): { n: number | null; working: num
       coalescer.cancel()
       offAgents()
       offState()
+      visibleHostListeners.delete(onHostsOrState)
       unwatch()
       document.removeEventListener('visibilitychange', onVisible)
     }
@@ -458,22 +491,24 @@ export function useRunningSessions(on: boolean, every = 3000): { sessions: Sessi
     let asking = false
     let again = false
     const watchSrc = Symbol('running-sessions')
-    let visibleHosts: number[] = []
     let unwatch = () => {}
     const syncWatch = () => {
-      const ids = new Set<number>(visibleHosts)
+      const ids = new Set<number>(visibleHostIds ?? [])
       for (const id of sessionHostIds(lastList)) ids.add(id)
       unwatch = watchPushHosts(watchSrc, [...ids])
     }
-    const nextDelay = () => {
-      const sHosts = sessionHostIds(lastList)
-      const checkHosts = sHosts.length > 0 ? sHosts : visibleHosts
-      return agentsNextPollDelay({
+    const nextDelay = () =>
+      agentsNextPollDelay({
         defaultEvery: every,
         hidden: document.hidden,
-        allCovered: arePushHostsCovered(checkHosts),
+        allCovered: allVisibleHostsCovered({
+          connected: isPushConnected(),
+          visibleHostsLoaded: visibleHostIds !== null,
+          visibleHosts: visibleHostIds ?? [],
+          sessionHosts: sessionHostIds(lastList),
+          isHostCovered: isPushHostCovered,
+        }),
       })
-    }
     const schedule = (ms: number) => {
       if (stopped) return
       clearTimeout(timer)
@@ -484,15 +519,23 @@ export function useRunningSessions(on: boolean, every = 3000): { sessions: Sessi
         load()
       }, ms)
     }
-    // Load visible hosts so the push channel watches all visible hosts while the
-    // agents view is open, even before a session appears on a host.
-    api<Host[]>('GET', '/api/hosts')
-      .then((hs) => {
-        if (stopped) return
-        visibleHosts = hs.map((h) => h.id)
-        syncWatch()
-      })
-      .catch(() => {})
+    const refreshVisibleHosts = () => {
+      // Load visible hosts so the push channel watches all visible hosts while
+      // the agents view is open, and polling only slows to 60s when every
+      // visible host is covered.
+      api<Host[]>('GET', '/api/hosts', undefined, { timeoutMs: 15000 })
+        .then((hs) => {
+          if (stopped) return
+          noteVisibleHosts(hs.map((h) => h.id))
+        })
+        .catch(() => {})
+    }
+    const onHostsOrState = () => {
+      syncWatch()
+      if (stopped || document.hidden || asking || timer === undefined) return
+      const want = nextDelay()
+      if (scheduledMs !== null && want !== scheduledMs) schedule(want)
+    }
     // (Behind another tab, now and then still: what waits is told in the title.)
     const load = () => {
       clearTimeout(timer)
@@ -531,6 +574,7 @@ export function useRunningSessions(on: boolean, every = 3000): { sessions: Sessi
         clearTimeout(timer)
         timer = undefined
         scheduledMs = null
+        refreshVisibleHosts()
         load()
       }
     }
@@ -560,14 +604,12 @@ export function useRunningSessions(on: boolean, every = 3000): { sessions: Sessi
       },
     })
     const offAgents = onPushAgents(() => coalescer.trigger())
-    const offState = onPushStateChange(() => {
-      if (stopped || document.hidden || asking || timer === undefined) return
-      const want = nextDelay()
-      if (scheduledMs !== null && want !== scheduledMs) schedule(want)
-    })
+    const offState = onPushStateChange(onHostsOrState)
+    visibleHostListeners.add(onHostsOrState)
     readNow.add(now)
     document.addEventListener('visibilitychange', onVisible)
     syncWatch()
+    refreshVisibleHosts()
     load()
     return () => {
       stopped = true
@@ -575,6 +617,7 @@ export function useRunningSessions(on: boolean, every = 3000): { sessions: Sessi
       coalescer.cancel()
       offAgents()
       offState()
+      visibleHostListeners.delete(onHostsOrState)
       unwatch()
       readNow.delete(now)
       document.removeEventListener('visibilitychange', onVisible)

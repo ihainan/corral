@@ -24,6 +24,7 @@ export const AGENTS_COVERED_POLL = 60000
 export const AGENTS_COALESCE_MS = 300
 
 export const PUSH_PING_EVERY = 30000
+export const PUSH_PONG_TIMEOUT = 10000
 
 export function nextReconnectDelay(attempt: number): number {
   const idx = Math.max(0, Math.min(attempt, PUSH_RECONNECT_BACKOFFS.length - 1))
@@ -95,6 +96,77 @@ export function agentsNextPollDelay(opts: {
   return opts.defaultEvery
 }
 
+// List polling slows to 60s ONLY when the push channel is connected, the
+// visible host list has been loaded, there is at least one visible/session
+// host, and EVERY single one of them is in cover.
+export function allVisibleHostsCovered(opts: {
+  connected: boolean
+  visibleHostsLoaded: boolean
+  visibleHosts: number[]
+  sessionHosts: number[]
+  isHostCovered: (hostId: number) => boolean
+}): boolean {
+  if (!opts.connected || !opts.visibleHostsLoaded) return false
+  const all = new Set<number>()
+  for (const id of opts.visibleHosts) if (Number.isFinite(id) && id > 0) all.add(id)
+  for (const id of opts.sessionHosts) if (Number.isFinite(id) && id > 0) all.add(id)
+  if (all.size === 0) return false
+  for (const id of all) {
+    if (!opts.isHostCovered(id)) return false
+  }
+  return true
+}
+
+export interface SerializedRefresher {
+  trigger: () => Promise<void>
+  inFlight: () => boolean
+  stop: () => void
+}
+
+// Runs at most one async refresh at a time. Any triggers arriving while a
+// refresh is in flight collapse into a single follow-up run once it settles.
+export function createSerializedRefresher(runOnce: () => Promise<unknown>): SerializedRefresher {
+  let stopped = false
+  let busy = false
+  let again = false
+  let current: Promise<void> | null = null
+
+  const trigger = (): Promise<void> => {
+    if (stopped) return Promise.resolve()
+    if (busy) {
+      again = true
+      return current ?? Promise.resolve()
+    }
+    busy = true
+    current = (async () => {
+      try {
+        do {
+          again = false
+          if (stopped) break
+          try {
+            await runOnce()
+          } catch {
+            // Caller updates its own error state.
+          }
+        } while (again && !stopped)
+      } finally {
+        busy = false
+        current = null
+      }
+    })()
+    return current
+  }
+
+  return {
+    trigger,
+    inFlight: () => busy,
+    stop() {
+      stopped = true
+      again = false
+    },
+  }
+}
+
 export interface SocketLike {
   readyState: number
   send(data: string): void
@@ -124,6 +196,7 @@ export interface PushEventClientOptions {
   isHidden?: () => boolean
   timers?: TimerAPI
   pingEveryMs?: number
+  pongTimeoutMs?: number
 }
 
 function sameSortedNumbers(a: number[], b: number[]): boolean {
@@ -146,6 +219,7 @@ export class PushEventClient {
   private attempt = 0
   private reconnectTimer: ReturnType<typeof setTimeout> | undefined
   private pingTimer: ReturnType<typeof setTimeout> | undefined
+  private pongTimer: ReturnType<typeof setTimeout> | undefined
   private coveredHosts = new Set<number>()
   private watchSources = new Map<symbol, number[]>()
   private watchedUnion: number[] = []
@@ -156,12 +230,14 @@ export class PushEventClient {
   private readonly isHidden: () => boolean
   private readonly timers: TimerAPI
   private readonly pingEveryMs: number
+  private readonly pongTimeoutMs: number
 
   constructor(opts: PushEventClientOptions) {
     this.createSocket = opts.createSocket
     this.isHidden = opts.isHidden ?? (() => false)
     this.timers = opts.timers ?? defaultTimers
     this.pingEveryMs = opts.pingEveryMs ?? PUSH_PING_EVERY
+    this.pongTimeoutMs = opts.pongTimeoutMs ?? PUSH_PONG_TIMEOUT
   }
 
   isConnected(): boolean {
@@ -255,6 +331,11 @@ export class PushEventClient {
     }
   }
 
+  private clearPongTimer() {
+    this.timers.clearTimeout(this.pongTimer)
+    this.pongTimer = undefined
+  }
+
   private schedulePing(g: number) {
     this.timers.clearTimeout(this.pingTimer)
     if (this.pingEveryMs <= 0) return
@@ -263,10 +344,31 @@ export class PushEventClient {
       try {
         this.ws.send(JSON.stringify({ t: 'ping' }))
       } catch {
-        // ignore
+        this.handleTransportDown(g)
+        return
+      }
+      if (this.pongTimeoutMs > 0 && this.pongTimer === undefined) {
+        this.pongTimer = this.timers.setTimeout(() => {
+          this.pongTimer = undefined
+          this.handleTransportDown(g)
+        }, this.pongTimeoutMs)
       }
       this.schedulePing(g)
     }, this.pingEveryMs)
+  }
+
+  private handleTransportDown(g: number) {
+    if (g !== this.gen) return
+    const stale = this.ws
+    this.dropSocket(false)
+    if (stale) {
+      try {
+        stale.close()
+      } catch {
+        // ignore
+      }
+    }
+    if (this.active) this.scheduleReconnect()
   }
 
   private open() {
@@ -290,6 +392,7 @@ export class PushEventClient {
     }
     ws.onmessage = (ev) => {
       if (g !== this.gen || typeof ev.data !== 'string') return
+      this.clearPongTimer()
       const msg = parsePushMessage(ev.data)
       if (!msg) return
       switch (msg.t) {
@@ -333,6 +436,7 @@ export class PushEventClient {
     this.gen++
     this.timers.clearTimeout(this.pingTimer)
     this.pingTimer = undefined
+    this.clearPongTimer()
     const ws = this.ws
     this.ws = null
     if (ws) {

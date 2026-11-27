@@ -19,6 +19,12 @@ import (
 // the same (user, session, pane) or (user, host) key.
 const DefaultEventCoalesceWindow = 150 * time.Millisecond
 
+// DefaultUnmatchedLogQuietThreshold is how long a binding's log must have been
+// quiet before an unmatched log change on the same host also triggers a convo
+// hint (handling /clear, /resume, or new Codex sessions without waking other
+// actively streaming conversations on the same host).
+const DefaultUnmatchedLogQuietThreshold = 2 * time.Second
+
 const (
 	maxWatchedHostsPerConn = 512
 	eventSubSendBuf        = 64
@@ -30,13 +36,14 @@ type convoBindKey struct {
 }
 
 type convoHintBinding struct {
-	ownerID   int64
-	hostID    int64
-	sessionID string
-	pane      string // herdr pane id, or "" for tmux
-	bindPane  string // pane reported to browser in {"t":"convo", ...}
-	pid       int
-	log       string
+	ownerID       int64
+	hostID        int64
+	sessionID     string
+	pane          string // herdr pane id, or "" for tmux
+	bindPane      string // pane reported to browser in {"t":"convo", ...}
+	pid           int
+	log           string
+	lastLogChange time.Time
 }
 
 type coalesceKey struct {
@@ -118,6 +125,7 @@ func (sub *eventSub) watchedHostList() []int64 {
 type eventHub struct {
 	s              *Server
 	coalesceWindow time.Duration
+	quietThreshold time.Duration
 
 	mu       sync.Mutex
 	closed   bool
@@ -131,6 +139,7 @@ func newEventHub(s *Server) *eventHub {
 	return &eventHub{
 		s:              s,
 		coalesceWindow: DefaultEventCoalesceWindow,
+		quietThreshold: DefaultUnmatchedLogQuietThreshold,
 		subs:           make(map[*eventSub]struct{}),
 		byUser:         make(map[int64]map[*eventSub]struct{}),
 		bindings:       make(map[convoBindKey]*convoHintBinding),
@@ -159,6 +168,15 @@ func (h *eventHub) SetCoalesceWindow(d time.Duration) {
 	}
 	h.mu.Lock()
 	h.coalesceWindow = d
+	h.mu.Unlock()
+}
+
+func (h *eventHub) SetUnmatchedLogQuietThreshold(d time.Duration) {
+	if h == nil || d <= 0 {
+		return
+	}
+	h.mu.Lock()
+	h.quietThreshold = d
 	h.mu.Unlock()
 }
 
@@ -191,6 +209,13 @@ func (h *eventHub) removeSub(sub *eventSub) {
 // (session, pane) -> (owner, host, pid, logPath) used to map corrald's
 // agent.changed hints without contending on convoState.mu.
 func (h *eventHub) RecordBinding(ownerID, hostID int64, sessionID, pane, bindPane string, pid int, logPath string) {
+	h.RecordBindingWithActivity(ownerID, hostID, sessionID, pane, bindPane, pid, logPath, time.Time{})
+}
+
+// RecordBindingWithActivity is RecordBinding with an optional last log-growth
+// timestamp (from convoState.grewAt) so quiet bindings can be distinguished
+// from actively streaming conversations when an unmatched log appears.
+func (h *eventHub) RecordBindingWithActivity(ownerID, hostID int64, sessionID, pane, bindPane string, pid int, logPath string, logActivity time.Time) {
 	if h == nil || sessionID == "" || hostID <= 0 {
 		return
 	}
@@ -202,14 +227,27 @@ func (h *eventHub) RecordBinding(ownerID, hostID int64, sessionID, pane, bindPan
 		if bindPane == "" {
 			bindPane = pane
 		}
+		var lastChange time.Time
+		if logPath != "" {
+			if prev := h.bindings[k]; prev != nil && prev.log == logPath {
+				lastChange = prev.lastLogChange
+			}
+			if !logActivity.IsZero() && logActivity.After(lastChange) {
+				lastChange = logActivity
+			}
+			if lastChange.IsZero() {
+				lastChange = time.Now()
+			}
+		}
 		h.bindings[k] = &convoHintBinding{
-			ownerID:   ownerID,
-			hostID:    hostID,
-			sessionID: sessionID,
-			pane:      pane,
-			bindPane:  bindPane,
-			pid:       pid,
-			log:       logPath,
+			ownerID:       ownerID,
+			hostID:        hostID,
+			sessionID:     sessionID,
+			pane:          pane,
+			bindPane:      bindPane,
+			pid:           pid,
+			log:           logPath,
+			lastLogChange: lastChange,
 		}
 	}
 	h.mu.Unlock()
@@ -379,10 +417,23 @@ func (h *eventHub) HandleAgentChanged(hostIDs []int64, ev proto.AgentChangedEven
 
 	// Map event items independently per (hostID, userID) to preserve strict
 	// cross-user isolation even when two users share a host account.
+	now := time.Now()
+	h.mu.Lock()
+	quietThreshold := h.quietThreshold
+	h.mu.Unlock()
+	if quietThreshold <= 0 {
+		quietThreshold = DefaultUnmatchedLogQuietThreshold
+	}
+
+	matchedKeys := make(map[convoBindKey]struct{})
+	relocKeys := make(map[convoBindKey]struct{})
+
 	for hid, users := range usersByHost {
 		for uid := range users {
 			needAgents := false
+			hasUnmatchedLog := false
 			convoTargets := make(map[coalesceKey]struct{})
+			directMatched := make(map[convoBindKey]struct{})
 
 			for _, logPath := range ev.ChangedLogs {
 				matched := false
@@ -395,11 +446,43 @@ func (h *eventHub) HandleAgentChanged(hostIDs []int64, ev proto.AgentChangedEven
 							sessionID: b.sessionID,
 							pane:      b.bindPane,
 						}] = struct{}{}
+						bk := convoBindKey{sessionID: b.sessionID, pane: b.pane}
+						directMatched[bk] = struct{}{}
+						matchedKeys[bk] = struct{}{}
 						matched = true
 					}
 				}
 				if !matched {
 					needAgents = true
+					hasUnmatchedLog = true
+				}
+			}
+
+			// When an unmatched log changes on this host (e.g. a brand-new
+			// conversation's first log write or a /clear / /resume log switch),
+			// also notify this user's bindings on the same host that either
+			// have no log yet or whose bound log has been quiet for at least
+			// quietThreshold — without disturbing other actively streaming
+			// conversations on the same host.
+			if hasUnmatchedLog {
+				for _, b := range liveBindings {
+					if b.ownerID != uid || b.hostID != hid {
+						continue
+					}
+					bk := convoBindKey{sessionID: b.sessionID, pane: b.pane}
+					if _, already := directMatched[bk]; already {
+						continue
+					}
+					if b.log == "" || b.lastLogChange.IsZero() || now.Sub(b.lastLogChange) >= quietThreshold {
+						convoTargets[coalesceKey{
+							kind:      "convo",
+							userID:    uid,
+							hostID:    hid,
+							sessionID: b.sessionID,
+							pane:      b.bindPane,
+						}] = struct{}{}
+						relocKeys[bk] = struct{}{}
+					}
 				}
 			}
 
@@ -428,6 +511,7 @@ func (h *eventHub) HandleAgentChanged(hostIDs []int64, ev proto.AgentChangedEven
 							sessionID: b.sessionID,
 							pane:      b.bindPane,
 						}] = struct{}{}
+						relocKeys[convoBindKey{sessionID: b.sessionID, pane: b.pane}] = struct{}{}
 					}
 				}
 				needAgents = true
@@ -445,12 +529,38 @@ func (h *eventHub) HandleAgentChanged(hostIDs []int64, ev proto.AgentChangedEven
 			}
 		}
 	}
+
+	if len(matchedKeys) > 0 {
+		h.mu.Lock()
+		for bk := range matchedKeys {
+			if b := h.bindings[bk]; b != nil && b.log != "" {
+				b.lastLogChange = now
+			}
+		}
+		h.mu.Unlock()
+	}
+
+	// Mark convo states whose pane likely created or switched logs so the
+	// browser's immediate push-triggered GET runs locateConvo right away
+	// instead of waiting for convoLocateTTL (10s).
+	if len(relocKeys) > 0 && h.s != nil {
+		ts := now.UnixNano()
+		for bk := range relocKeys {
+			if st := h.s.convos.peek(bk.sessionID + "\x00" + bk.pane); st != nil {
+				st.relocAfter.Store(ts)
+			}
+		}
+	}
 }
 
 // NotifyAgentsChanged emits a coalesced {"t":"agents","host":hostID} hint to
-// ownerID's browsers watching hostID (used when herdr reports status changes).
+// ownerID's browsers watching hostID when hostID is currently covered by
+// corrald push (leaving behavior completely unchanged when corrald is off).
 func (h *eventHub) NotifyAgentsChanged(ownerID, hostID int64) {
 	if h == nil || ownerID <= 0 || hostID <= 0 {
+		return
+	}
+	if h.s == nil || h.s.corrald == nil || !h.s.corrald.IsWatchCovered(ownerID, hostID) {
 		return
 	}
 	h.mu.Lock()
@@ -789,7 +899,7 @@ func (s *Server) recordConvoHintBinding(sess *term.Session, pane string, st *con
 			bindPane = st.bind.Pane
 		}
 	}
-	s.events.RecordBinding(sess.OwnerID, sess.HostID, sess.ID, keyPane, bindPane, pid, st.log)
+	s.events.RecordBindingWithActivity(sess.OwnerID, sess.HostID, sess.ID, keyPane, bindPane, pid, st.log, st.grewAt)
 }
 
 func convoReadTrigger(raw string) string {
