@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -151,9 +152,18 @@ func parseKV(out string) map[string]string {
 	return m
 }
 
-func stageBinary(t *testing.T, home, srcBin string) string {
+// stageBinary places srcBin into the spec-mandated per-host stage directory
+// ~/.local/state/corral/corrald/<mid>/stage-<opID>/corrald.
+func stageBinary(t *testing.T, home, mid, opID, srcBin string) string {
 	t.Helper()
-	stage := filepath.Join(home, "stage-"+RandomHex(4))
+	if mid == "" {
+		resolved, _, err := ResolveMachineID(nil, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		mid = resolved
+	}
+	stage := filepath.Join(home, ".local", "state", "corral", "corrald", mid, "stage-"+opID)
 	if err := os.MkdirAll(stage, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -231,9 +241,9 @@ func (c *rpcClient) readEvent(t *testing.T, timeout time.Duration) proto.Event {
 func TestIntegrationLifecycleAndResume(t *testing.T) {
 	bins := getTestBinaries(t)
 	home := t.TempDir()
-	env := []string{"CORRALD_TEST_MACHINE_ID=111122223333"}
+	const mid = "111122223333"
+	env := []string{"CORRALD_TEST_MACHINE_ID=" + mid}
 
-	// Ensure clean teardown even on test failure.
 	installedBin := filepath.Join(home, ".local", "lib", "corral", "corrald")
 	t.Cleanup(func() {
 		if _, err := os.Lstat(installedBin); err == nil {
@@ -259,12 +269,12 @@ func TestIntegrationLifecycleAndResume(t *testing.T) {
 
 	out, code = runCLI(t, bins.v1, home, env, "selftest")
 	kv = parseKV(out)
-	if code != 0 || kv["result"] != "ok" || kv["mid"] != "111122223333" {
+	if code != 0 || kv["result"] != "ok" || kv["mid"] != mid {
 		t.Fatalf("selftest unexpected (code=%d):\n%s", code, out)
 	}
 
 	// 2. install.
-	stage := stageBinary(t, home, bins.v1)
+	stage := stageBinary(t, home, mid, "op0001", bins.v1)
 	out, code = runCLI(t, filepath.Join(stage, "corrald"), home, env,
 		"install", "--stage", stage, "--op", "op0001", "--gateway", "gw.test", "--by", "alice")
 	kv = parseKV(out)
@@ -277,7 +287,7 @@ func TestIntegrationLifecycleAndResume(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(home, ".local", "lib", "corral", "README.txt")); err != nil {
 		t.Fatalf("README.txt missing: %v", err)
 	}
-	stateDir := filepath.Join(home, ".local", "state", "corral", "corrald", "111122223333")
+	stateDir := filepath.Join(home, ".local", "state", "corral", "corrald", mid)
 	if _, err := os.Stat(filepath.Join(stateDir, "install.json")); err != nil {
 		t.Fatalf("install.json missing: %v", err)
 	}
@@ -333,12 +343,10 @@ func TestIntegrationLifecycleAndResume(t *testing.T) {
 		t.Fatalf("unexpected hello result: %+v", hello)
 	}
 
-	// Verify clients.json persisted on disk.
 	if _, err := os.Stat(filepath.Join(stateDir, "clients.json")); err != nil {
 		t.Fatalf("clients.json not persisted: %v", err)
 	}
 
-	// Emit events 1..5 via test-build RPC, disconnect, emit 6..8, then reconnect & resume from 5.
 	for i := 1; i <= 5; i++ {
 		r, _ := c1.call(t, "test.emit", map[string]any{"event": "test.tick", "data": map[string]int{"n": i}})
 		if r.Error != nil {
@@ -376,13 +384,11 @@ func TestIntegrationLifecycleAndResume(t *testing.T) {
 		}
 	}
 
-	// Wrong epoch returns resync_required.
 	c3 := dialRPC(t, sock)
 	resp, _ = c3.call(t, proto.MethodDaemonResume, proto.ResumeParams{Epoch: "different-epoch", LastSeq: 5})
 	if resp.Error == nil || resp.Error.Code != proto.ErrResyncRequired {
 		t.Fatalf("wrong epoch resume: got %+v, want resync_required", resp)
 	}
-	// Forget client.
 	resp, _ = c3.call(t, proto.MethodDaemonForget, proto.ForgetParams{Gateway: "gw.test", CorralUser: "alice"})
 	if resp.Error != nil {
 		t.Fatalf("forget failed: %v", resp.Error)
@@ -415,12 +421,13 @@ func TestIntegrationLifecycleAndResume(t *testing.T) {
 func TestIntegrationIdleExit(t *testing.T) {
 	bins := getTestBinaries(t)
 	home := t.TempDir()
+	const mid = "222233334444"
 	env := []string{
-		"CORRALD_TEST_MACHINE_ID=222233334444",
+		"CORRALD_TEST_MACHINE_ID=" + mid,
 		"CORRALD_TEST_IDLE_TIMEOUT=300ms",
 	}
 
-	stage := stageBinary(t, home, bins.v1)
+	stage := stageBinary(t, home, mid, "op1", bins.v1)
 	if out, code := runCLI(t, filepath.Join(stage, "corrald"), home, env,
 		"install", "--stage", stage, "--op", "op1", "--gateway", "gw.idle", "--by", "bob"); code != 0 {
 		t.Fatalf("install failed: %s", out)
@@ -439,13 +446,12 @@ func TestIntegrationIdleExit(t *testing.T) {
 	}
 	pid, _ := strconv.Atoi(kv["pid"])
 	sock := kv["socket"]
-	metaPath := filepath.Join(home, ".local", "state", "corral", "corrald", "222233334444", "meta.json")
+	metaPath := filepath.Join(home, ".local", "state", "corral", "corrald", mid, "meta.json")
 	meta, err := ReadMetaRecord(metaPath)
 	if err != nil {
 		t.Fatalf("read meta.json: %v", err)
 	}
 
-	// Connect once and disconnect; idle timer should then exit daemon after ~300ms.
 	c := dialRPC(t, sock)
 	resp, _ := c.call(t, proto.MethodDaemonHealth, nil)
 	if resp.Error != nil {
@@ -453,8 +459,6 @@ func TestIntegrationIdleExit(t *testing.T) {
 	}
 	c.close()
 
-	// Poll process liveness without connecting to the socket (connecting via
-	// status would reset the idle timer).
 	deadline := time.Now().Add(4 * time.Second)
 	for time.Now().Before(deadline) {
 		if !ProcessMatches(pid, meta.StartTime) {
@@ -477,9 +481,10 @@ func TestIntegrationIdleExit(t *testing.T) {
 func TestIntegrationTombstoneBlocksServeAndInstall(t *testing.T) {
 	bins := getTestBinaries(t)
 	home := t.TempDir()
-	env := []string{"CORRALD_TEST_MACHINE_ID=333344445555"}
+	const mid = "333344445555"
+	env := []string{"CORRALD_TEST_MACHINE_ID=" + mid}
 
-	stateDir := filepath.Join(home, ".local", "state", "corral", "corrald", "333344445555")
+	stateDir := filepath.Join(home, ".local", "state", "corral", "corrald", mid)
 	if err := os.MkdirAll(stateDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -487,15 +492,13 @@ func TestIntegrationTombstoneBlocksServeAndInstall(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// serve refused with error=removing.
 	out, code := runCLI(t, bins.v1, home, env, "serve", "--gateway", "gw.test")
 	kv := parseKV(out)
 	if code == 0 || kv["error"] != proto.ErrRemoving {
 		t.Fatalf("serve with tombstone: code=%d out=%s", code, out)
 	}
 
-	// install refused with error=removing.
-	stage := stageBinary(t, home, bins.v1)
+	stage := stageBinary(t, home, mid, "op1", bins.v1)
 	out, code = runCLI(t, filepath.Join(stage, "corrald"), home, env,
 		"install", "--stage", stage, "--op", "op1", "--gateway", "gw.test", "--by", "alice")
 	kv = parseKV(out)
@@ -504,13 +507,56 @@ func TestIntegrationTombstoneBlocksServeAndInstall(t *testing.T) {
 	}
 }
 
+func TestIntegrationInstallRejectsArbitraryStageAndSymlinkVersionDir(t *testing.T) {
+	// Items 9 & 10:
+	// - --stage pointing to an arbitrary working directory MUST be rejected and NOT deleted.
+	// - Pre-existing symlink at version directory MUST be rejected without writing outside.
+	bins := getTestBinaries(t)
+	home := t.TempDir()
+	const mid = "343434343434"
+	env := []string{"CORRALD_TEST_MACHINE_ID=" + mid}
+
+	// Item 9: decoy arbitrary directory containing corrald + precious file.
+	arbitraryDir := t.TempDir()
+	b, _ := os.ReadFile(bins.v1)
+	_ = os.WriteFile(filepath.Join(arbitraryDir, "corrald"), b, 0o700)
+	precious := filepath.Join(arbitraryDir, "keep.txt")
+	_ = os.WriteFile(precious, []byte("precious"), 0o600)
+
+	out, code := runCLI(t, bins.v1, home, env,
+		"install", "--stage", arbitraryDir, "--op", "op9", "--gateway", "gw.test", "--by", "alice")
+	if code == 0 || parseKV(out)["error"] != "invalid_stage" {
+		t.Fatalf("arbitrary --stage should be rejected with invalid_stage: code=%d out=%s", code, out)
+	}
+	if got, err := os.ReadFile(precious); err != nil || string(got) != "precious" {
+		t.Fatalf("arbitrary --stage directory was damaged: %q (%v)", got, err)
+	}
+
+	// Item 10: symlink at version dir ~/.local/lib/corral/corrald-0.1.0-100 -> outsideDir.
+	outsideDir := t.TempDir()
+	libDir := filepath.Join(home, ".local", "lib", "corral")
+	_ = os.MkdirAll(libDir, 0o755)
+	if err := os.Symlink(outsideDir, filepath.Join(libDir, "corrald-0.1.0-100")); err != nil {
+		t.Fatal(err)
+	}
+	stage := stageBinary(t, home, mid, "op10", bins.v1)
+	out, code = runCLI(t, filepath.Join(stage, "corrald"), home, env,
+		"install", "--stage", stage, "--op", "op10", "--gateway", "gw.test", "--by", "alice")
+	if code == 0 || parseKV(out)["error"] != "ver_dir_invalid" {
+		t.Fatalf("symlinked version dir should be rejected: code=%d out=%s", code, out)
+	}
+	if _, err := os.Lstat(filepath.Join(outsideDir, "corrald")); !os.IsNotExist(err) {
+		t.Fatal("install wrote binary through symlinked version dir into outsideDir")
+	}
+}
+
 func TestIntegrationHotUpdateZeroGap(t *testing.T) {
 	bins := getTestBinaries(t)
 	home := t.TempDir()
-	env := []string{"CORRALD_TEST_MACHINE_ID=444455556666"}
+	const mid = "444455556666"
+	env := []string{"CORRALD_TEST_MACHINE_ID=" + mid}
 
-	// Install & start v1 (release=100).
-	stage1 := stageBinary(t, home, bins.v1)
+	stage1 := stageBinary(t, home, mid, "op1", bins.v1)
 	if out, code := runCLI(t, filepath.Join(stage1, "corrald"), home, env,
 		"install", "--stage", stage1, "--op", "op1", "--gateway", "gw.hot", "--by", "alice"); code != 0 {
 		t.Fatalf("install v1: %s", out)
@@ -530,7 +576,6 @@ func TestIntegrationHotUpdateZeroGap(t *testing.T) {
 	pid1, _ := strconv.Atoi(kv["pid"])
 	sock := kv["socket"]
 
-	// Connect observer client, hello, emit events 1..5.
 	obs := dialRPC(t, sock)
 	defer obs.close()
 	resp, _ := obs.call(t, proto.MethodDaemonHello, proto.HelloParams{
@@ -549,8 +594,8 @@ func TestIntegrationHotUpdateZeroGap(t *testing.T) {
 			t.Fatalf("emit %d: %v", i, r.Error)
 		}
 	}
-	// Execute an idempotent write on v1 to verify OpTable survives handoff.
-	r, _ := obs.call(t, "test.write", map[string]any{"op_id": "idem-handoff-1", "value": "v1-payload"})
+	idemOpID := proto.NewOpID(time.Now())
+	r, _ := obs.call(t, "test.write", map[string]any{"op_id": idemOpID, "value": "v1-payload"})
 	if r.Error != nil {
 		t.Fatalf("test.write on v1: %v", r.Error)
 	}
@@ -563,7 +608,7 @@ func TestIntegrationHotUpdateZeroGap(t *testing.T) {
 	}
 
 	// Stage v2 with --upgrade; symlink must STILL point to v1 before handoff!
-	stage2 := stageBinary(t, home, bins.v2)
+	stage2 := stageBinary(t, home, mid, "op2", bins.v2)
 	out, code = runCLI(t, filepath.Join(stage2, "corrald"), home, env,
 		"install", "--upgrade", "--stage", stage2, "--op", "op2", "--gateway", "gw.hot", "--by", "alice")
 	kv2 := parseKV(out)
@@ -581,8 +626,7 @@ func TestIntegrationHotUpdateZeroGap(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Continuous background client dialing fresh connections and calling
-	// daemon.health throughout handoff — ZERO ECONNREFUSED allowed!
+	// Continuous background client dialing fresh connections throughout handoff.
 	stopHammer := make(chan struct{})
 	var hammerErrs atomic.Int64
 	var hammerOK atomic.Int64
@@ -608,10 +652,8 @@ func TestIntegrationHotUpdateZeroGap(t *testing.T) {
 		}
 	}()
 
-	// Let hammer run briefly before triggering handoff.
 	time.Sleep(40 * time.Millisecond)
 
-	// Trigger daemon.handoff on v1.
 	handoffStart := time.Now()
 	resp, _ = obs.call(t, proto.MethodDaemonHandoff, proto.HandoffParams{
 		Path:    v2BinPath,
@@ -634,14 +676,12 @@ func TestIntegrationHotUpdateZeroGap(t *testing.T) {
 	t.Logf("hot-update handoff to READY: server_reported=%dms wall=%v (v1 pid=%d -> v2 pid=%d)",
 		hres.DurationMS, handoffElapsed, pid1, hres.PID)
 
-	// Existing connection must receive daemon.reconnect control event.
 	reconnEv := obs.readEvent(t, 2*time.Second)
 	if reconnEv.Event != proto.EventDaemonReconnect || reconnEv.Epoch != h1.Epoch || reconnEv.Seq != 5 {
 		t.Fatalf("unexpected reconnect event: %+v", reconnEv)
 	}
 	obs.close()
 
-	// Continue hammering v2 briefly, then stop hammer and check 0 errors.
 	time.Sleep(60 * time.Millisecond)
 	close(stopHammer)
 	hammerWG.Wait()
@@ -653,13 +693,11 @@ func TestIntegrationHotUpdateZeroGap(t *testing.T) {
 		t.Fatal("hammer made 0 successful requests")
 	}
 
-	// Verify symlink now points to v2.
 	linkAfter, err := os.Readlink(installedBin)
 	if err != nil || !strings.Contains(linkAfter, "0.2.0-200") {
 		t.Fatalf("symlink not switched to v2 after handoff: %q (%v)", linkAfter, err)
 	}
 
-	// Reconnect to v2: verify v2 metadata, same epoch, and continuous event seq!
 	c2 := dialRPC(t, sock)
 	defer c2.close()
 	resp, _ = c2.call(t, proto.MethodDaemonHello, proto.HelloParams{
@@ -675,8 +713,7 @@ func TestIntegrationHotUpdateZeroGap(t *testing.T) {
 		t.Fatalf("unexpected v2 hello: %+v (want version=0.2.0 release=200 pid=%d epoch=%s)", h2, hres.PID, h1.Epoch)
 	}
 
-	// Replaying the pre-handoff op_id on v2 must return v1's cached result (same v1 PID).
-	r2, _ := c2.call(t, "test.write", map[string]any{"op_id": "idem-handoff-1", "value": "should-not-run"})
+	r2, _ := c2.call(t, "test.write", map[string]any{"op_id": idemOpID, "value": "should-not-run"})
 	if r2.Error != nil {
 		t.Fatalf("replay op_id on v2: %v", r2.Error)
 	}
@@ -689,7 +726,6 @@ func TestIntegrationHotUpdateZeroGap(t *testing.T) {
 		t.Fatalf("op_id was re-executed on v2 instead of returning cached v1 result: %+v", w2)
 	}
 
-	// Resume from seq=3 -> must replay 4, 5 from snapshot, then emit 6, 7 on v2 cleanly.
 	resp, _ = c2.call(t, proto.MethodDaemonResume, proto.ResumeParams{Epoch: h1.Epoch, LastSeq: 3})
 	if resp.Error != nil {
 		t.Fatalf("resume on v2 failed: %v", resp.Error)
@@ -701,7 +737,6 @@ func TestIntegrationHotUpdateZeroGap(t *testing.T) {
 		}
 	}
 
-	// Emit 6 and 7 on v2 via separate conn and verify c2 receives seq=6, seq=7 continuously.
 	cEmit := dialRPC(t, sock)
 	defer cEmit.close()
 	for wantSeq := uint64(6); wantSeq <= 7; wantSeq++ {
@@ -715,7 +750,6 @@ func TestIntegrationHotUpdateZeroGap(t *testing.T) {
 		}
 	}
 
-	// Verify old v1 process exited.
 	deadline := time.Now().Add(4 * time.Second)
 	for time.Now().Before(deadline) {
 		if !ProcessMatches(pid1, h1.StartTime) {
@@ -728,12 +762,108 @@ func TestIntegrationHotUpdateZeroGap(t *testing.T) {
 	}
 }
 
-func TestIntegrationHotUpdateBadBinaryFallback(t *testing.T) {
+func TestIntegrationHandoffTimedOutWriteAndHardExit(t *testing.T) {
+	// Items 1 & 5:
+	// - An in-flight write exceeding DrainTimeout is handed off as state="unknown"
+	//   so v2 returns op_unknown instead of re-executing.
+	// - Even though the write handler ignores ctx and sleeps 10s, v1 exits hard
+	//   within PostHandoffWriteCap (400ms) instead of hanging 10s!
 	bins := getTestBinaries(t)
 	home := t.TempDir()
-	env := []string{"CORRALD_TEST_MACHINE_ID=555566667777"}
+	const mid = "454545454545"
+	env := []string{
+		"CORRALD_TEST_MACHINE_ID=" + mid,
+		"CORRALD_TEST_DRAIN_TIMEOUT=150ms",
+		"CORRALD_TEST_POST_HANDOFF_WRITE_CAP=400ms",
+		"CORRALD_TEST_POST_HANDOFF_EXIT=200ms",
+	}
 
-	stage1 := stageBinary(t, home, bins.v1)
+	stage1 := stageBinary(t, home, mid, "op1", bins.v1)
+	if out, code := runCLI(t, filepath.Join(stage1, "corrald"), home, env,
+		"install", "--stage", stage1, "--op", "op1", "--gateway", "gw.hard", "--by", "alice"); code != 0 {
+		t.Fatalf("install v1: %s", out)
+	}
+	installedBin := filepath.Join(home, ".local", "lib", "corral", "corrald")
+	t.Cleanup(func() {
+		if _, err := os.Lstat(installedBin); err == nil {
+			_, _ = runCLI(t, installedBin, home, env, "uninstall")
+		}
+	})
+
+	out, code := runCLI(t, installedBin, home, env, "serve", "--gateway", "gw.hard")
+	kv := parseKV(out)
+	if code != 0 || kv["result"] != "ok" {
+		t.Fatalf("serve v1: %s", out)
+	}
+	pid1, _ := strconv.Atoi(kv["pid"])
+	sock := kv["socket"]
+	meta1, err := ReadMetaRecord(filepath.Join(home, ".local", "state", "corral", "corrald", mid, "meta.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	stage2 := stageBinary(t, home, mid, "op2", bins.v2)
+	out, code = runCLI(t, filepath.Join(stage2, "corrald"), home, env,
+		"install", "--upgrade", "--stage", stage2, "--op", "op2", "--gateway", "gw.hard", "--by", "alice")
+	if code != 0 {
+		t.Fatalf("upgrade v2: %s", out)
+	}
+	v2Bin := parseKV(out)["binary"]
+	v2SHA, _ := FileSHA256(v2Bin)
+
+	// Start a slow 10-second mutating write on v1 that ignores ctx.
+	slowOpID := proto.NewOpID(time.Now())
+	cSlow := dialRPC(t, sock)
+	defer cSlow.close()
+	go func() {
+		id := cSlow.nextID.Add(1)
+		raw, _ := json.Marshal(map[string]any{"op_id": slowOpID, "value": "slow", "delay_ms": 10000})
+		_ = proto.WriteJSON(cSlow.conn, proto.Request{ID: id, Method: "test.write", Params: raw})
+	}()
+	// Wait briefly so slowOpID enters OpTable.Execute on v1.
+	time.Sleep(60 * time.Millisecond)
+
+	// Trigger handoff; v1 drains for 150ms, then hands off slowOpID as unknown.
+	cHandoff := dialRPC(t, sock)
+	defer cHandoff.close()
+	resp, _ := cHandoff.call(t, proto.MethodDaemonHandoff, proto.HandoffParams{
+		Path: v2Bin, SHA256: v2SHA, Release: 200,
+	})
+	if resp.Error != nil {
+		t.Fatalf("handoff with timed-out write failed: %v", resp.Error)
+	}
+	handoffDone := time.Now()
+
+	// Item 1: Retry slowOpID on v2 -> MUST return op_unknown (never re-execute).
+	c2 := dialRPC(t, sock)
+	defer c2.close()
+	r2, _ := c2.call(t, "test.write", map[string]any{"op_id": slowOpID, "value": "retry"})
+	if r2.Error == nil || r2.Error.Code != proto.ErrOpUnknown {
+		t.Fatalf("retry timed-out op_id on v2: got %+v, want op_unknown", r2)
+	}
+
+	// Item 5: Old v1 process MUST exit at the hard cap (~400ms), well before 10s!
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if !ProcessMatches(pid1, meta1.StartTime) {
+			break
+		}
+		time.Sleep(30 * time.Millisecond)
+	}
+	if ProcessMatches(pid1, meta1.StartTime) {
+		t.Fatalf("old v1 pid=%d survived past hard exit cap (%v since handoff)", pid1, time.Since(handoffDone))
+	}
+}
+
+func TestIntegrationHotUpdateBadBinaryAndCutoverFailureRollback(t *testing.T) {
+	// Tests bad binary fallback AND Items 4 & 17 (cutover failure must NOT send
+	// READY, and rollback must restore meta.json + symlink to v1).
+	bins := getTestBinaries(t)
+	home := t.TempDir()
+	const mid = "555566667777"
+	env := []string{"CORRALD_TEST_MACHINE_ID=" + mid}
+
+	stage1 := stageBinary(t, home, mid, "op1", bins.v1)
 	if out, code := runCLI(t, filepath.Join(stage1, "corrald"), home, env,
 		"install", "--stage", stage1, "--op", "op1", "--gateway", "gw.bad", "--by", "alice"); code != 0 {
 		t.Fatalf("install v1: %s", out)
@@ -771,26 +901,31 @@ func TestIntegrationHotUpdateBadBinaryFallback(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Attempt handoff to bad binary -> must return handoff_failed.
 	c := dialRPC(t, sock)
 	defer c.close()
 	resp, _ := c.call(t, proto.MethodDaemonHandoff, proto.HandoffParams{
-		Path:    badPath,
-		SHA256:  badSHA,
-		Release: 999,
+		Path: badPath, SHA256: badSHA, Release: 999,
 	})
 	if resp.Error == nil || resp.Error.Code != proto.ErrHandoffFailed {
 		t.Fatalf("expected handoff_failed for bad binary, got %+v", resp)
 	}
 
-	// failed.json must record release 999.
-	failedPath := filepath.Join(home, ".local", "state", "corral", "corrald", "555566667777", "failed.json")
+	failedPath := filepath.Join(home, ".local", "state", "corral", "corrald", mid, "failed.json")
 	frec, err := ReadFailedRecord(failedPath)
 	if err != nil || len(frec.Releases) != 1 || frec.Releases[0].Release != 999 {
 		t.Fatalf("failed.json unexpected: %+v (%v)", frec, err)
 	}
 
-	// Old v1 process must still accept new connections, be state=running, and serve mutating writes!
+	// Verify meta.json still points to v1 PID and symlink still points to v1.
+	metaAfter, err := ReadMetaRecord(filepath.Join(home, ".local", "state", "corral", "corrald", mid, "meta.json"))
+	if err != nil || metaAfter.PID != pid1 || metaAfter.Release != 100 {
+		t.Fatalf("meta.json corrupted after rollback: %+v (%v)", metaAfter, err)
+	}
+	linkAfter, _ := os.Readlink(installedBin)
+	if !strings.Contains(linkAfter, "0.1.0-100") {
+		t.Fatalf("symlink not pointing to v1 after rollback: %q", linkAfter)
+	}
+
 	c2 := dialRPC(t, sock)
 	defer c2.close()
 	resp, _ = c2.call(t, proto.MethodDaemonHealth, nil)
@@ -802,24 +937,198 @@ func TestIntegrationHotUpdateBadBinaryFallback(t *testing.T) {
 	if health.PID != pid1 || health.State != proto.StateRunning {
 		t.Fatalf("v1 state after rollback: pid=%d (want %d) state=%q (want running)", health.PID, pid1, health.State)
 	}
-	resp, _ = c2.call(t, "test.write", map[string]any{"op_id": "after-rollback", "value": "ok"})
+	resp, _ = c2.call(t, "test.write", map[string]any{"op_id": proto.NewOpID(time.Now()), "value": "ok"})
 	if resp.Error != nil {
-		t.Fatalf("mutating write after rollback failed (draining not cleared?): %v", resp.Error)
+		t.Fatalf("mutating write after rollback failed: %v", resp.Error)
+	}
+}
+
+func TestIntegrationHandoffRejectsCorruptSnapshot(t *testing.T) {
+	// Item 3 (receiver side): a replacement process receiving truncated/corrupt
+	// snapshot JSON on --state-fd MUST fail closed with snapshot_invalid and
+	// MUST NOT emit READY.
+	bins := getTestBinaries(t)
+	home := t.TempDir()
+	const mid = "313131313131"
+	stateDir := filepath.Join(home, ".local", "state", "corral", "corrald", mid)
+	if err := os.MkdirAll(stateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	stateR, stateW, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	readyR, readyW, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stateR.Close()
+	defer readyR.Close()
+
+	// Write truncated JSON and close write end.
+	_, _ = stateW.WriteString(`{"schema":2,"epoch":"abc","events":[`)
+	_ = stateW.Close()
+
+	cmd := exec.Command(bins.v2, "serve", "--gateway", "gw.corrupt", "--foreground", "--handoff", "--state-fd=3", "--ready-fd=4")
+	cmd.Env = []string{"HOME=" + home, "PATH=/usr/bin:/bin", "CORRALD_TEST_MACHINE_ID=" + mid}
+	cmd.ExtraFiles = []*os.File{stateR, readyW}
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &out
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	_ = readyW.Close()
+
+	readyOut, _ := io.ReadAll(readyR)
+	waitErr := cmd.Wait()
+	if waitErr == nil {
+		t.Fatalf("expected non-zero exit for corrupt snapshot, got 0 (ready=%q out=%q)", readyOut, out.String())
+	}
+	if strings.HasPrefix(string(readyOut), "READY") {
+		t.Fatalf("corrupt snapshot unexpectedly emitted READY: %q", readyOut)
+	}
+	if parseKV(out.String())["error"] != "snapshot_invalid" {
+		t.Fatalf("expected error=snapshot_invalid, got:\n%s", out.String())
+	}
+}
+
+func TestIntegrationHandoffRejectsSchema1Snapshot(t *testing.T) {
+	// Round-2 Item 12: Snapshot schema bumped to 2; valid JSON with schema=1
+	// MUST be rejected with snapshot_invalid and MUST NOT emit READY.
+	bins := getTestBinaries(t)
+	home := t.TempDir()
+	const mid = "121212121212"
+	stateDir := filepath.Join(home, ".local", "state", "corral", "corrald", mid)
+	if err := os.MkdirAll(stateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	stateR, stateW, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	readyR, readyW, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stateR.Close()
+	defer readyR.Close()
+
+	_, _ = stateW.WriteString(`{"schema":1,"epoch":"old","last_seq":1,"events":[],"clients":[]}`)
+	_ = stateW.Close()
+
+	cmd := exec.Command(bins.v2, "serve", "--gateway", "gw.s1", "--foreground", "--handoff", "--state-fd=3", "--ready-fd=4")
+	cmd.Env = []string{"HOME=" + home, "PATH=/usr/bin:/bin", "CORRALD_TEST_MACHINE_ID=" + mid}
+	cmd.ExtraFiles = []*os.File{stateR, readyW}
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &out
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	_ = readyW.Close()
+
+	readyOut, _ := io.ReadAll(readyR)
+	waitErr := cmd.Wait()
+	if waitErr == nil {
+		t.Fatalf("expected non-zero exit for schema=1 snapshot, got 0 (ready=%q out=%q)", readyOut, out.String())
+	}
+	if strings.HasPrefix(string(readyOut), "READY") {
+		t.Fatalf("schema=1 snapshot unexpectedly emitted READY: %q", readyOut)
+	}
+	if parseKV(out.String())["error"] != "snapshot_invalid" {
+		t.Fatalf("expected error=snapshot_invalid for schema=1, got:\n%s", out.String())
+	}
+}
+
+func TestIntegrationHandoffCutoverFailureDoesNotReportReady(t *testing.T) {
+	// Items 4 & 17 (end-to-end): when v2 fails persistent cutover (symlink /
+	// install.json / meta.json), v2 must NOT report READY, v1 must return
+	// handoff_failed, and v1 must remain serving with v1's meta.json & symlink intact.
+	bins := getTestBinaries(t)
+	home := t.TempDir()
+	const mid = "171717171717"
+	env := []string{
+		"CORRALD_TEST_MACHINE_ID=" + mid,
+		"CORRALD_TEST_FAIL_CUTOVER=1",
+	}
+
+	stage1 := stageBinary(t, home, mid, "op1", bins.v1)
+	if out, code := runCLI(t, filepath.Join(stage1, "corrald"), home, env,
+		"install", "--stage", stage1, "--op", "op1", "--gateway", "gw.cut", "--by", "alice"); code != 0 {
+		t.Fatalf("install v1: %s", out)
+	}
+	installedBin := filepath.Join(home, ".local", "lib", "corral", "corrald")
+	t.Cleanup(func() {
+		if _, err := os.Lstat(installedBin); err == nil {
+			_, _ = runCLI(t, installedBin, home, env, "uninstall")
+		}
+	})
+
+	out, code := runCLI(t, installedBin, home, env, "serve", "--gateway", "gw.cut")
+	kv := parseKV(out)
+	if code != 0 || kv["result"] != "ok" {
+		t.Fatalf("serve v1: %s", out)
+	}
+	pid1, _ := strconv.Atoi(kv["pid"])
+	sock := kv["socket"]
+
+	stage2 := stageBinary(t, home, mid, "op2", bins.v2)
+	out, code = runCLI(t, filepath.Join(stage2, "corrald"), home, env,
+		"install", "--upgrade", "--stage", stage2, "--op", "op2", "--gateway", "gw.cut", "--by", "alice")
+	if code != 0 {
+		t.Fatalf("upgrade v2: %s", out)
+	}
+	v2Bin := parseKV(out)["binary"]
+	v2SHA, _ := FileSHA256(v2Bin)
+
+	c := dialRPC(t, sock)
+	defer c.close()
+	resp, _ := c.call(t, proto.MethodDaemonHandoff, proto.HandoffParams{
+		Path: v2Bin, SHA256: v2SHA, Release: 200,
+	})
+	if resp.Error == nil || resp.Error.Code != proto.ErrHandoffFailed {
+		t.Fatalf("expected handoff_failed when cutover fails, got %+v", resp)
+	}
+
+	linkAfter, _ := os.Readlink(installedBin)
+	if !strings.Contains(linkAfter, "0.1.0-100") {
+		t.Fatalf("symlink drifted after cutover failure: %q", linkAfter)
+	}
+	metaAfter, err := ReadMetaRecord(filepath.Join(home, ".local", "state", "corral", "corrald", mid, "meta.json"))
+	if err != nil || metaAfter.PID != pid1 || metaAfter.Release != 100 {
+		t.Fatalf("meta.json drifted after cutover failure: %+v (%v)", metaAfter, err)
+	}
+	var health proto.HealthResult
+	if err := callLocalRPC(sock, proto.MethodDaemonHealth, nil, &health, 2*time.Second); err != nil || health.PID != pid1 {
+		t.Fatalf("v1 not healthy after cutover failure rollback: health=%+v err=%v", health, err)
 	}
 }
 
 func TestIntegrationNFSMultiMachineUninstallAndPreserveSiblings(t *testing.T) {
+	// Includes Item 8 verification: corrald-backups and code-server-* MUST remain untouched!
 	bins := getTestBinaries(t)
 	sharedHome := t.TempDir()
-	envA := []string{"CORRALD_TEST_MACHINE_ID=aaaaaaaaaaaa"}
-	envB := []string{"CORRALD_TEST_MACHINE_ID=bbbbbbbbbbbb"}
+	const midA = "aaaaaaaaaaaa"
+	const midB = "bbbbbbbbbbbb"
+	envA := []string{"CORRALD_TEST_MACHINE_ID=" + midA}
+	envB := []string{"CORRALD_TEST_MACHINE_ID=" + midB}
 
-	// Pre-create sibling code-server directory under ~/.local/lib/corral/.
 	siblingFile := filepath.Join(sharedHome, ".local", "lib", "corral", "code-server-4.90.0", "bin", "code-server")
 	if err := os.MkdirAll(filepath.Dir(siblingFile), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(siblingFile, []byte("keep-me"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Item 8: unrelated corrald-backups directory MUST NOT be deleted by uninstall!
+	backupFile := filepath.Join(sharedHome, ".local", "lib", "corral", "corrald-backups", "notes.txt")
+	if err := os.MkdirAll(filepath.Dir(backupFile), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(backupFile, []byte("user-backup"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -831,8 +1140,7 @@ func TestIntegrationNFSMultiMachineUninstallAndPreserveSiblings(t *testing.T) {
 		}
 	})
 
-	// Install & serve on Machine A.
-	stageA := stageBinary(t, sharedHome, bins.v1)
+	stageA := stageBinary(t, sharedHome, midA, "opA", bins.v1)
 	if out, code := runCLI(t, filepath.Join(stageA, "corrald"), sharedHome, envA,
 		"install", "--stage", stageA, "--op", "opA", "--gateway", "gw.nfs", "--by", "alice"); code != 0 {
 		t.Fatalf("install A: %s", out)
@@ -841,8 +1149,7 @@ func TestIntegrationNFSMultiMachineUninstallAndPreserveSiblings(t *testing.T) {
 		t.Fatalf("serve A: %s", out)
 	}
 
-	// Install & serve on Machine B in the same shared HOME.
-	stageB := stageBinary(t, sharedHome, bins.v1)
+	stageB := stageBinary(t, sharedHome, midB, "opB", bins.v1)
 	if out, code := runCLI(t, filepath.Join(stageB, "corrald"), sharedHome, envB,
 		"install", "--stage", stageB, "--op", "opB", "--gateway", "gw.nfs", "--by", "alice"); code != 0 {
 		t.Fatalf("install B: %s", out)
@@ -853,53 +1160,89 @@ func TestIntegrationNFSMultiMachineUninstallAndPreserveSiblings(t *testing.T) {
 	}
 	sockB := parseKV(outB)["socket"]
 
-	// Uninstall Machine A: must delete ONLY Machine A's state, preserving shared binaries & Machine B.
+	// Uninstall Machine A: only Machine A state removed; shared binaries + Machine B intact.
 	out, code := runCLI(t, installedBin, sharedHome, envA, "uninstall")
 	kv := parseKV(out)
 	if code != 0 || kv["result"] != "removed" || kv["last_machine"] != "false" {
 		t.Fatalf("uninstall A unexpected (code=%d):\n%s", code, out)
 	}
-	stateA := filepath.Join(sharedHome, ".local", "state", "corral", "corrald", "aaaaaaaaaaaa")
+	stateA := filepath.Join(sharedHome, ".local", "state", "corral", "corrald", midA)
 	if _, err := os.Lstat(stateA); !os.IsNotExist(err) {
 		t.Fatal("Machine A state dir still exists")
 	}
 	if _, err := os.Lstat(installedBin); err != nil {
 		t.Fatalf("shared symlink deleted while Machine B still installed: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(sharedHome, ".local", "lib", "corral", "README.txt")); err != nil {
-		t.Fatalf("shared README.txt deleted while Machine B still installed: %v", err)
-	}
-	// Machine B's daemon must still be healthy.
 	var healthB proto.HealthResult
 	if err := callLocalRPC(sockB, proto.MethodDaemonHealth, nil, &healthB, 2*time.Second); err != nil {
 		t.Fatalf("Machine B daemon broken after Machine A uninstall: %v", err)
 	}
 
-	// Now uninstall Machine B (the last machine): must delete shared corrald files too,
-	// while leaving code-server-4.90.0 untouched!
+	// Uninstall Machine B (last machine): shared corrald files removed, code-server & corrald-backups intact!
 	out, code = runCLI(t, installedBin, sharedHome, envB, "uninstall")
 	kv = parseKV(out)
 	if code != 0 || kv["result"] != "removed" || kv["last_machine"] != "true" {
 		t.Fatalf("uninstall B unexpected (code=%d):\n%s", code, out)
 	}
-	stateB := filepath.Join(sharedHome, ".local", "state", "corral", "corrald", "bbbbbbbbbbbb")
-	if _, err := os.Lstat(stateB); !os.IsNotExist(err) {
-		t.Fatal("Machine B state dir still exists")
-	}
 	if _, err := os.Lstat(installedBin); !os.IsNotExist(err) {
 		t.Fatal("shared symlink still exists after last machine uninstall")
 	}
-	if _, err := os.Stat(filepath.Join(sharedHome, ".local", "lib", "corral", "README.txt")); !os.IsNotExist(err) {
-		t.Fatal("shared README.txt still exists after last machine uninstall")
-	}
-	verDir := filepath.Join(sharedHome, ".local", "lib", "corral", "corrald-0.1.0-100")
-	if _, err := os.Lstat(verDir); !os.IsNotExist(err) {
+	if _, err := os.Lstat(filepath.Join(sharedHome, ".local", "lib", "corral", "corrald-0.1.0-100")); !os.IsNotExist(err) {
 		t.Fatal("shared version dir still exists after last machine uninstall")
 	}
-	// code-server sibling MUST remain completely untouched!
-	gotSibling, err := os.ReadFile(siblingFile)
-	if err != nil || string(gotSibling) != "keep-me" {
+	if gotSibling, err := os.ReadFile(siblingFile); err != nil || string(gotSibling) != "keep-me" {
 		t.Fatalf("sibling code-server file disturbed: %q (%v)", gotSibling, err)
+	}
+	if gotBackup, err := os.ReadFile(backupFile); err != nil || string(gotBackup) != "user-backup" {
+		t.Fatalf("unrelated corrald-backups file disturbed: %q (%v)", gotBackup, err)
+	}
+}
+
+func TestIntegrationUninstallAbortsWhenTombstoneWriteFails(t *testing.T) {
+	// Item 12: If removing tombstone cannot be written, uninstall MUST abort
+	// without stopping the running daemon or deleting files.
+	if os.Geteuid() == 0 {
+		t.Skip("chmod 0500 does not block root")
+	}
+	bins := getTestBinaries(t)
+	home := t.TempDir()
+	const mid = "777788889999"
+	env := []string{"CORRALD_TEST_MACHINE_ID=" + mid}
+
+	stage := stageBinary(t, home, mid, "op1", bins.v1)
+	if out, code := runCLI(t, filepath.Join(stage, "corrald"), home, env,
+		"install", "--stage", stage, "--op", "op1", "--gateway", "gw.tomb", "--by", "alice"); code != 0 {
+		t.Fatalf("install: %s", out)
+	}
+	installedBin := filepath.Join(home, ".local", "lib", "corral", "corrald")
+	stateDir := filepath.Join(home, ".local", "state", "corral", "corrald", mid)
+	t.Cleanup(func() {
+		_ = os.Chmod(stateDir, 0o700)
+		if _, err := os.Lstat(installedBin); err == nil {
+			_, _ = runCLI(t, installedBin, home, env, "uninstall")
+		}
+	})
+
+	out, code := runCLI(t, installedBin, home, env, "serve", "--gateway", "gw.tomb")
+	if code != 0 {
+		t.Fatalf("serve: %s", out)
+	}
+	sock := parseKV(out)["socket"]
+
+	// Make StateDir read-only so WriteFileAtomic(removing) fails.
+	if err := os.Chmod(stateDir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+
+	out, code = runCLI(t, installedBin, home, env, "uninstall")
+	if code == 0 || parseKV(out)["error"] != "tombstone_failed" {
+		t.Fatalf("expected tombstone_failed when StateDir is read-only, got code=%d:\n%s", code, out)
+	}
+
+	// Running daemon must STILL be alive because uninstall aborted before stop!
+	var health proto.HealthResult
+	if err := callLocalRPC(sock, proto.MethodDaemonHealth, nil, &health, 2*time.Second); err != nil {
+		t.Fatalf("daemon was stopped despite tombstone write failure: %v", err)
 	}
 }
 
@@ -909,17 +1252,17 @@ func TestIntegrationUninstallPartialResult(t *testing.T) {
 	}
 	bins := getTestBinaries(t)
 	home := t.TempDir()
-	env := []string{"CORRALD_TEST_MACHINE_ID=666677778888"}
+	const mid = "666677778888"
+	env := []string{"CORRALD_TEST_MACHINE_ID=" + mid}
 
-	stage := stageBinary(t, home, bins.v1)
+	stage := stageBinary(t, home, mid, "op1", bins.v1)
 	if out, code := runCLI(t, filepath.Join(stage, "corrald"), home, env,
 		"install", "--stage", stage, "--op", "op1", "--gateway", "gw.part", "--by", "alice"); code != 0 {
 		t.Fatalf("install: %s", out)
 	}
 	installedBin := filepath.Join(home, ".local", "lib", "corral", "corrald")
 
-	// Lock a subdirectory inside StateDir as 0500 so removing its child fails.
-	lockedDir := filepath.Join(home, ".local", "state", "corral", "corrald", "666677778888", "locked-sub")
+	lockedDir := filepath.Join(home, ".local", "state", "corral", "corrald", mid, "locked-sub")
 	if err := os.MkdirAll(lockedDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -940,6 +1283,169 @@ func TestIntegrationUninstallPartialResult(t *testing.T) {
 	}
 }
 
+func TestIntegrationOpLockSerializesTombstoneAndServe(t *testing.T) {
+	// Item 13: While op.lock is held, serve waits; once tombstone is written
+	// before releasing op.lock, serve immediately rejects with error=removing!
+	bins := getTestBinaries(t)
+	home := t.TempDir()
+	const mid = "898989898989"
+	env := []string{"CORRALD_TEST_MACHINE_ID=" + mid}
+
+	stage := stageBinary(t, home, mid, "op1", bins.v1)
+	if out, code := runCLI(t, filepath.Join(stage, "corrald"), home, env,
+		"install", "--stage", stage, "--op", "op1", "--gateway", "gw.lock", "--by", "alice"); code != 0 {
+		t.Fatalf("install: %s", out)
+	}
+	installedBin := filepath.Join(home, ".local", "lib", "corral", "corrald")
+	stateDir := filepath.Join(home, ".local", "state", "corral", "corrald", mid)
+	opLock, err := AcquireLock(filepath.Join(stateDir, "op.lock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	type cliRes struct {
+		out  string
+		code int
+	}
+	done := make(chan cliRes, 1)
+	go func() {
+		out, code := runCLI(t, installedBin, home, env, "serve", "--gateway", "gw.lock")
+		done <- cliRes{out: out, code: code}
+	}()
+
+	// Ensure serve is blocked waiting on op.lock (must not complete while held).
+	select {
+	case res := <-done:
+		_ = opLock.Release()
+		t.Fatalf("serve did not wait for op.lock: code=%d out=%s", res.code, res.out)
+	case <-time.After(150 * time.Millisecond):
+	}
+
+	// Write removing tombstone while holding op.lock, then release op.lock.
+	if err := WriteFileAtomic(filepath.Join(stateDir, "removing"), []byte("1\n"), 0o600); err != nil {
+		_ = opLock.Release()
+		t.Fatal(err)
+	}
+	_ = opLock.Release()
+
+	res := <-done
+	if res.code == 0 || parseKV(res.out)["error"] != proto.ErrRemoving {
+		t.Fatalf("serve after op.lock tombstone: code=%d out=%s, want error=removing", res.code, res.out)
+	}
+}
+
+func TestIntegrationSharedLockPreventsNFSRace(t *testing.T) {
+	// Item 14: While .corrald-shared.lock is held, Machine A's uninstall waits
+	// before checking isLastMachine; if Machine B writes its install.json before
+	// releasing the shared lock, Machine A sees Machine B and preserves shared binaries!
+	bins := getTestBinaries(t)
+	sharedHome := t.TempDir()
+	const midA = "abababababab"
+	const midB = "cdcdcdcdcdcd"
+	envA := []string{"CORRALD_TEST_MACHINE_ID=" + midA}
+
+	stageA := stageBinary(t, sharedHome, midA, "opA", bins.v1)
+	if out, code := runCLI(t, filepath.Join(stageA, "corrald"), sharedHome, envA,
+		"install", "--stage", stageA, "--op", "opA", "--gateway", "gw.nfs2", "--by", "alice"); code != 0 {
+		t.Fatalf("install A: %s", out)
+	}
+	installedBin := filepath.Join(sharedHome, ".local", "lib", "corral", "corrald")
+	sharedLockPath := filepath.Join(sharedHome, ".local", "lib", "corral", ".corrald-shared.lock")
+	sharedLock, err := AcquireLock(sharedLockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	type cliRes struct {
+		out  string
+		code int
+	}
+	done := make(chan cliRes, 1)
+	go func() {
+		out, code := runCLI(t, installedBin, sharedHome, envA, "uninstall")
+		done <- cliRes{out: out, code: code}
+	}()
+
+	// Round-2 Item 5: While uninstall waits on SharedLock, Machine A MUST NOT
+	// have deleted its StateDir or tombstone yet!
+	stateA := filepath.Join(sharedHome, ".local", "state", "corral", "corrald", midA)
+	time.Sleep(120 * time.Millisecond)
+	if _, err := os.Lstat(stateA); err != nil {
+		_ = sharedLock.Release()
+		t.Fatalf("Machine A deleted StateDir before acquiring SharedLock: %v", err)
+	}
+
+	// Simulate Machine B finishing install under SharedLock right before releasing it!
+	stateB := filepath.Join(sharedHome, ".local", "state", "corral", "corrald", midB)
+	if err := os.MkdirAll(stateB, 0o700); err != nil {
+		_ = sharedLock.Release()
+		t.Fatal(err)
+	}
+	if err := WriteInstallRecord(filepath.Join(stateB, "install.json"), &InstallRecord{
+		Version: "0.1.0", Release: 100, MachineID: midB,
+	}); err != nil {
+		_ = sharedLock.Release()
+		t.Fatal(err)
+	}
+	_ = sharedLock.Release()
+
+	res := <-done
+	kv := parseKV(res.out)
+	if res.code != 0 || kv["result"] != "removed" || kv["last_machine"] != "false" {
+		t.Fatalf("expected Machine A to see Machine B under shared lock: code=%d out=%s", res.code, res.out)
+	}
+	if _, err := os.Lstat(installedBin); err != nil {
+		t.Fatalf("shared symlink was deleted despite concurrent Machine B install: %v", err)
+	}
+	if _, err := os.Lstat(stateA); !os.IsNotExist(err) {
+		t.Fatal("Machine A StateDir was not deleted after shared check")
+	}
+}
+
+func TestIntegrationUninstallWithoutInstallJSONPreservesSharedAndReturnsPartial(t *testing.T) {
+	// Round-2 Item 13: When install.json is missing/corrupt, uninstall MUST NOT
+	// delete shared program directories, symlink, or README.txt; it removes only
+	// this machine's StateDir and reports result=partial with left= entries.
+	bins := getTestBinaries(t)
+	home := t.TempDir()
+	const mid = "131313131313"
+	env := []string{"CORRALD_TEST_MACHINE_ID=" + mid}
+
+	stage := stageBinary(t, home, mid, "op1", bins.v1)
+	if out, code := runCLI(t, filepath.Join(stage, "corrald"), home, env,
+		"install", "--stage", stage, "--op", "op1", "--gateway", "gw.noinst", "--by", "alice"); code != 0 {
+		t.Fatalf("install: %s", out)
+	}
+	installedBin := filepath.Join(home, ".local", "lib", "corral", "corrald")
+	readmePath := filepath.Join(home, ".local", "lib", "corral", "README.txt")
+	verDir := filepath.Join(home, ".local", "lib", "corral", "corrald-0.1.0-100")
+	stateDir := filepath.Join(home, ".local", "state", "corral", "corrald", mid)
+
+	// Remove install.json to simulate missing manifest.
+	if err := os.Remove(filepath.Join(stateDir, "install.json")); err != nil {
+		t.Fatal(err)
+	}
+
+	out, code := runCLI(t, installedBin, home, env, "uninstall")
+	kv := parseKV(out)
+	if code == 0 || kv["result"] != "partial" {
+		t.Fatalf("expected result=partial when install.json missing, got code=%d:\n%s", code, out)
+	}
+	// StateDir must be deleted.
+	if _, err := os.Lstat(stateDir); !os.IsNotExist(err) {
+		t.Fatal("StateDir should still be removed when install.json is missing")
+	}
+	// Shared symlink, version dir, and README.txt MUST be preserved and listed in left=!
+	for _, preserved := range []string{installedBin, readmePath, verDir} {
+		if _, err := os.Lstat(preserved); err != nil {
+			t.Fatalf("shared path %s was deleted without install.json: %v", preserved, err)
+		}
+		if !strings.Contains(out, "left="+preserved+"\t") {
+			t.Fatalf("preserved path %s not listed in left=:\n%s", preserved, out)
+		}
+	}
+}
+
 func TestIntegrationProductionBinaryHasNoTestMethods(t *testing.T) {
 	bins := getTestBinaries(t)
 	home := t.TempDir()
@@ -950,7 +1456,7 @@ func TestIntegrationProductionBinaryHasNoTestMethods(t *testing.T) {
 		}
 	})
 
-	stage := stageBinary(t, home, bins.prod)
+	stage := stageBinary(t, home, "", "op1", bins.prod)
 	if out, code := runCLI(t, filepath.Join(stage, "corrald"), home, nil,
 		"install", "--stage", stage, "--op", "op1", "--gateway", "gw.prod", "--by", "alice"); code != 0 {
 		t.Fatalf("install prod: %s", out)
@@ -969,7 +1475,6 @@ func TestIntegrationProductionBinaryHasNoTestMethods(t *testing.T) {
 		t.Fatalf("production binary must not expose test.emit, got %+v", resp)
 	}
 
-	// Measure idle RSS of the production binary.
 	resp, _ = c.call(t, proto.MethodDaemonHealth, nil)
 	if resp.Error != nil {
 		t.Fatalf("prod health: %v", resp.Error)

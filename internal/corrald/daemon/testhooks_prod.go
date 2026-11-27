@@ -15,3 +15,7 @@ func registerTestMethods(_ *Server) {}
 func shouldFailBeforeReady(_ bool) bool {
 	return false
 }
+
+func shouldFailCutover() bool {
+	return false
+}

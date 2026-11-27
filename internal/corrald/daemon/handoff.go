@@ -24,28 +24,198 @@ import (
 )
 
 // HandoffSnapshotSchema is the current handoff state snapshot format version.
-const HandoffSnapshotSchema = 1
+// Version 2 carries OpTableSnapshot ("ops") and ForceNewEpoch. Snapshots with
+// any other schema version are rejected so incompatible upgrades fail closed.
+const HandoffSnapshotSchema = 2
+
+const (
+	// MaxHandoffSnapshotBytes bounds serialized handoff snapshots sent over the
+	// state pipe so valid large event histories are trimmed cleanly rather than
+	// truncated mid-JSON at the receiver.
+	MaxHandoffSnapshotBytes = 12 << 20
+
+	// MaxHandoffReadBytes is the hard ceiling accepted by the replacement
+	// process when reading the state pipe.
+	MaxHandoffReadBytes = 16 << 20
+)
 
 // HandoffSnapshot is streamed from v1 to v2 over the inherited state pipe
 // during a zero-gap hot update (spec §6).
 type HandoffSnapshot struct {
-	Schema       int                        `json:"schema"`
-	Epoch        string                     `json:"epoch"`
-	LastSeq      uint64                     `json:"last_seq"`
-	Events       []proto.Event              `json:"events"`
-	Clients      []proto.ClientInfo         `json:"clients"`
-	CompletedOps []CompletedOp              `json:"completed_ops,omitempty"`
-	Modules      map[string]json.RawMessage `json:"modules,omitempty"`
-	SocketPath   string                     `json:"socket_path"`
-	Gateway      string                     `json:"gateway"`
-	OldPID       int                        `json:"old_pid"`
-	OldVersion   string                     `json:"old_version"`
-	OldRelease   int64                      `json:"old_release"`
+	Schema        int                        `json:"schema"`
+	Epoch         string                     `json:"epoch"`
+	LastSeq       uint64                     `json:"last_seq"`
+	ForceNewEpoch bool                       `json:"force_new_epoch,omitempty"`
+	Events        []proto.Event              `json:"events"`
+	Clients       []proto.ClientInfo         `json:"clients"`
+	Ops           OpTableSnapshot            `json:"ops"`
+	Modules       map[string]json.RawMessage `json:"modules,omitempty"`
+	SocketPath    string                     `json:"socket_path"`
+	Gateway       string                     `json:"gateway"`
+	OldPID        int                        `json:"old_pid"`
+	OldStartTime  string                     `json:"old_start_time,omitempty"`
+	OldVersion    string                     `json:"old_version"`
+	OldRelease    int64                      `json:"old_release"`
 }
 
-func (s *Server) handleHandoff(ctx context.Context, conn *Conn, raw json.RawMessage) (any, *proto.RPCError) {
-	// Actually invoked through dispatchHandoff so we can enqueue the RPC
-	// response before broadcasting daemon.reconnect and exiting.
+// BuildBoundedSnapshot marshals snap within maxBytes. If the serialized
+// snapshot exceeds maxBytes, oldest events in snap.Events are dropped first
+// (preserving LastSeq so clients whose cursor was dropped receive
+// resync_required, while keeping OpTable, Clients, and Modules intact).
+func BuildBoundedSnapshot(snap HandoffSnapshot, maxBytes int) ([]byte, error) {
+	if maxBytes <= 0 {
+		maxBytes = MaxHandoffSnapshotBytes
+	}
+	b, err := json.Marshal(snap)
+	if err != nil {
+		return nil, err
+	}
+	if len(b) <= maxBytes {
+		return b, nil
+	}
+
+	events := snap.Events
+	lo, hi := 0, len(events)
+	var best []byte
+	for lo <= hi {
+		mid := lo + (hi-lo)/2
+		candidate := snap
+		if mid == 0 {
+			candidate.Events = nil
+		} else {
+			candidate.Events = events[len(events)-mid:]
+		}
+		encoded, err := json.Marshal(candidate)
+		if err != nil {
+			return nil, err
+		}
+		if len(encoded) <= maxBytes {
+			best = encoded
+			lo = mid + 1
+		} else {
+			hi = mid - 1
+		}
+	}
+	if best == nil {
+		return nil, fmt.Errorf("handoff snapshot exceeds %d bytes even without event history", maxBytes)
+	}
+	return best, nil
+}
+
+type cutoverBackup struct {
+	hasSymlink  bool
+	symlink     string
+	hasInstall  bool
+	origVersion string
+	origRelease int64
+	origCommit  string
+}
+
+func captureCutoverBackup(layout *Layout) cutoverBackup {
+	var bk cutoverBackup
+	if target, err := os.Readlink(layout.CurrentSymlink); err == nil {
+		bk.hasSymlink = true
+		bk.symlink = target
+	}
+	if rec, err := ReadInstallRecord(layout.InstallJSON); err == nil {
+		bk.hasInstall = true
+		bk.origVersion = rec.Version
+		bk.origRelease = rec.Release
+		bk.origCommit = rec.Commit
+	}
+	return bk
+}
+
+// compareAndRestoreCutoverLocked compares persistent files against the values
+// written by the failed handoff candidate (expectedNewSymlink / expectedNewPID
+// / expectedNewRelease) and restores ONLY entries that still match those
+// candidate values. Any newer update written concurrently by another machine or
+// install is preserved untouched. Caller must hold SharedLock (if LibDir
+// exists) and OpLock (if StateDir exists).
+func compareAndRestoreCutoverLocked(
+	layout *Layout,
+	bk cutoverBackup,
+	v1Meta *MetaRecord,
+	expectedNewSymlink string,
+	expectedNewPID int,
+	expectedNewRelease int64,
+	forceMetaEpochUpdate bool,
+) error {
+	var errs []string
+	revertedGlobal := false
+
+	// 1. Symlink: compare current target against expectedNewSymlink before restoring.
+	if expectedNewSymlink != "" {
+		if curLink, err := os.Readlink(layout.CurrentSymlink); err == nil && curLink == expectedNewSymlink {
+			if bk.hasSymlink {
+				if aerr := AtomicSymlink(bk.symlink, layout.CurrentSymlink); aerr != nil {
+					errs = append(errs, fmt.Sprintf("restore symlink: %v", aerr))
+				} else {
+					revertedGlobal = true
+				}
+			} else {
+				// Symlink did not exist before cutover; remove the newly created link.
+				if rerr := os.Remove(layout.CurrentSymlink); rerr != nil && !errors.Is(rerr, os.ErrNotExist) {
+					errs = append(errs, fmt.Sprintf("remove newly created symlink: %v", rerr))
+				} else {
+					revertedGlobal = true
+				}
+			}
+		}
+	}
+
+	// 2. install.json: only revert Version/Release/Commit if current release
+	// still matches the failed candidate, preserving any concurrent Files edits.
+	if bk.hasInstall {
+		if curRec, err := ReadInstallRecord(layout.InstallJSON); err == nil && curRec.Release == expectedNewRelease {
+			curRec.Version = bk.origVersion
+			curRec.Release = bk.origRelease
+			curRec.Commit = bk.origCommit
+			if werr := WriteInstallRecord(layout.InstallJSON, curRec); werr != nil {
+				errs = append(errs, fmt.Sprintf("restore install.json: %v", werr))
+			} else {
+				revertedGlobal = true
+				if revertedGlobal {
+					readmeText := proto.RenderReadme(proto.ReadmeData{
+						Version:    curRec.Version,
+						Release:    curRec.Release,
+						Gateway:    curRec.Gateway,
+						EnabledBy:  curRec.EnabledBy,
+						EnabledAt:  curRec.EnabledAt,
+						MachineID:  layout.MachineID,
+						LibDir:     layout.LibDir,
+						StateDir:   layout.StateDir,
+						SocketPath: layout.SocketPath,
+						Files:      curRec.Files,
+					})
+					if rerr := WriteFileAtomic(layout.ReadmePath, []byte(readmeText), 0o644); rerr != nil {
+						errs = append(errs, fmt.Sprintf("restore README.txt: %v", rerr))
+					}
+				}
+			}
+		}
+	}
+
+	// 3. meta.json: restore v1's MetaRecord if meta.json currently points to the
+	// failed child, is missing, or needs an updated epoch after frozen drops.
+	if v1Meta != nil {
+		curMeta, merr := ReadMetaRecord(layout.MetaJSON)
+		needMeta := forceMetaEpochUpdate || errors.Is(merr, os.ErrNotExist) ||
+			(merr == nil && ((expectedNewPID > 0 && curMeta.PID == expectedNewPID) || curMeta.Release == expectedNewRelease))
+		if needMeta {
+			if werr := WriteMetaRecord(layout.MetaJSON, v1Meta); werr != nil {
+				errs = append(errs, fmt.Sprintf("restore meta.json: %v", werr))
+			}
+		}
+	}
+
+	if len(errs) > 0 {
+		return errors.New(strings.Join(errs, "; "))
+	}
+	return nil
+}
+
+func (s *Server) handleHandoff(_ context.Context, _ *Conn, _ json.RawMessage) (any, *proto.RPCError) {
 	return nil, &proto.RPCError{Code: proto.ErrInternal, Message: "handoff called outside request context"}
 }
 
@@ -57,8 +227,28 @@ func (s *Server) dispatchHandoff(ctx context.Context, conn *Conn, req proto.Requ
 		return
 	}
 
-	// 1. Validate binary path, ownership, mode 0700, and sha256 BEFORE entering draining.
-	resolvedPath, err := ValidateHandoffBinary(s.layout, p.Path, p.SHA256, s.expectedUID)
+	// Enforce monotonic upgrades (spec §2: never downgrade or re-handoff to same release).
+	if !proto.ShouldUpgrade(s.build.Release, p.Release) {
+		conn.enqueueResponse(req.ID, nil, &proto.RPCError{
+			Code:    proto.ErrNotNewer,
+			Message: fmt.Sprintf("candidate release %d is not newer than current release %d", p.Release, s.build.Release),
+		})
+		return
+	}
+
+	// Withdrawal-first: refuse handoff if uninstall tombstone is present.
+	if s.layout.TombstoneExists() {
+		conn.enqueueResponse(req.ID, nil, &proto.RPCError{
+			Code:    proto.ErrRemoving,
+			Message: "uninstall tombstone present",
+		})
+		return
+	}
+
+	// 1. Validate binary path, parent dir ownership/mode, file FD ownership/mode
+	// 0700, directory release match, and SHA-256 on the open FD BEFORE draining.
+	// Holding binFile open pins the validated inode until execve("/proc/self/fd/6").
+	binFile, resolvedPath, dirRelease, err := OpenValidatedHandoffBinary(s.layout, p.Path, p.SHA256, s.expectedUID)
 	if err != nil {
 		s.log.Warn("handoff binary validation failed", "path", p.Path, "err", err)
 		conn.enqueueResponse(req.ID, nil, &proto.RPCError{
@@ -67,6 +257,17 @@ func (s *Server) dispatchHandoff(ctx context.Context, conn *Conn, req proto.Requ
 		})
 		return
 	}
+	defer binFile.Close()
+
+	if dirRelease != p.Release {
+		conn.enqueueResponse(req.ID, nil, &proto.RPCError{
+			Code:    proto.ErrInvalidParams,
+			Message: fmt.Sprintf("handoff release %d does not match version directory release %d", p.Release, dirRelease),
+		})
+		return
+	}
+
+	expectedNewSymlink, _ := filepath.Rel(s.layout.LibDir, resolvedPath)
 
 	// 2. Enter draining atomically (reject concurrent handoffs).
 	s.stateMu.Lock()
@@ -83,43 +284,87 @@ func (s *Server) dispatchHandoff(ctx context.Context, conn *Conn, req proto.Requ
 	s.state = proto.StateDraining
 	s.stateMu.Unlock()
 
-	rollback := func(reason string) {
+	backup := captureCutoverBackup(s.layout)
+
+	// listenerLocked tracks whether listenerOpMu is currently held so rollback
+	// always releases it cleanly after resuming accept.
+	listenerLocked := false
+	releaseListenerLock := func() {
+		if listenerLocked {
+			listenerLocked = false
+			s.listenerOpMu.Unlock()
+		}
+	}
+
+	rollback := func(reason string, childPID int) {
+		rotated := s.bus.Unfreeze()
+		v1Meta := s.currentMetaRecord()
+
+		// Perform compare-and-restore under SharedLock + OpLock so we never
+		// clobber concurrent installs or updates from other hosts.
+		restoreErr := s.runCompareAndRestore(backup, v1Meta, expectedNewSymlink, childPID, p.Release, rotated)
+
 		s.resumeAccept()
 		s.stateMu.Lock()
 		s.handoffActive = false
 		s.state = proto.StateRunning
+		if restoreErr != nil {
+			s.rollbackDegraded = restoreErr.Error()
+		} else {
+			s.rollbackDegraded = ""
+		}
 		s.stateMu.Unlock()
+		releaseListenerLock()
+
+		fullReason := reason
+		if restoreErr != nil {
+			fullReason = fmt.Sprintf("%s (rollback restore failed: %v)", reason, restoreErr)
+		}
 		if p.Release > 0 {
-			if recErr := RecordFailedRelease(s.layout.FailedJSON, p.Release, reason); recErr != nil {
+			if recErr := RecordFailedRelease(s.layout.FailedJSON, p.Release, fullReason); recErr != nil {
 				s.log.Warn("record failed release error", "release", p.Release, "err", recErr)
 			}
 		}
-		s.log.Error("handoff failed; resumed serving on current process", "release", p.Release, "reason", reason)
+		s.log.Error("handoff failed; resumed serving on current process",
+			"release", p.Release,
+			"reason", fullReason,
+			"epoch_rotated", rotated,
+		)
 		conn.enqueueResponse(req.ID, nil, &proto.RPCError{
 			Code:    proto.ErrHandoffFailed,
-			Message: reason,
+			Message: fullReason,
 		})
 	}
 
 	// Wait up to DrainTimeout (5 s) for in-flight mutating RPCs to finish.
 	s.waitForInflightWrites(ctx, s.cfg.DrainTimeout)
 
-	// 3. Pause accept loop while keeping the listening socket FD open in the kernel backlog.
+	// Re-check tombstone after draining.
+	if s.layout.TombstoneExists() {
+		rollback("uninstall tombstone appeared during drain", 0)
+		return
+	}
+
+	// 3. Acquire listenerOpMu to exclude concurrent socket rebinding across the
+	// entire pause -> dup -> spawn -> READY/rollback sequence.
+	s.listenerOpMu.Lock()
+	listenerLocked = true
+
 	if err := s.pauseAccept(); err != nil {
-		rollback("pause accept: " + err.Error())
+		rollback("pause accept: "+err.Error(), 0)
 		return
 	}
 
 	listenFile, err := s.ln.File()
 	if err != nil {
-		rollback("dup listen fd: " + err.Error())
+		rollback("dup listen fd: "+err.Error(), 0)
 		return
 	}
 
 	stateR, stateW, err := os.Pipe()
 	if err != nil {
 		_ = listenFile.Close()
-		rollback("create state pipe: " + err.Error())
+		rollback("create state pipe: "+err.Error(), 0)
 		return
 	}
 	readyR, readyW, err := os.Pipe()
@@ -127,7 +372,7 @@ func (s *Server) dispatchHandoff(ctx context.Context, conn *Conn, req proto.Requ
 		_ = listenFile.Close()
 		_ = stateR.Close()
 		_ = stateW.Close()
-		rollback("create ready pipe: " + err.Error())
+		rollback("create ready pipe: "+err.Error(), 0)
 		return
 	}
 	devNull, err := os.OpenFile(os.DevNull, os.O_RDWR, 0)
@@ -137,31 +382,37 @@ func (s *Server) dispatchHandoff(ctx context.Context, conn *Conn, req proto.Requ
 		_ = stateW.Close()
 		_ = readyR.Close()
 		_ = readyW.Close()
-		rollback("open /dev/null: " + err.Error())
+		rollback("open /dev/null: "+err.Error(), 0)
 		return
 	}
-	logOut, err := os.OpenFile(s.layout.LogPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	logOut, err := OpenLogFileNoFollow(s.layout.LogPath)
 	if err != nil {
 		logOut = devNull
 	}
 
-	// Snapshot current daemon state right before spawning v2.
-	epoch, lastSeq, events := s.bus.Snapshot()
+	// Freeze the EventBus BEFORE snapshotting module states so any producer
+	// attempting Emit while frozen sets droppedWhileFrozen -> ForceNewEpoch.
+	s.bus.Freeze()
+	mods := s.snapshotModuleStates()
+	epoch, lastSeq, events, droppedWhileFrozen := s.bus.FrozenSnapshot()
+
 	snap := HandoffSnapshot{
-		Schema:       HandoffSnapshotSchema,
-		Epoch:        epoch,
-		LastSeq:      lastSeq,
-		Events:       events,
-		Clients:      s.clients.List(),
-		CompletedOps: s.ops.Snapshot(),
-		Modules:      s.snapshotModuleStates(),
-		SocketPath:   s.layout.SocketPath,
-		Gateway:      s.cfg.Gateway,
-		OldPID:       os.Getpid(),
-		OldVersion:   s.build.Version,
-		OldRelease:   s.build.Release,
+		Schema:        HandoffSnapshotSchema,
+		Epoch:         epoch,
+		LastSeq:       lastSeq,
+		ForceNewEpoch: droppedWhileFrozen,
+		Events:        events,
+		Clients:       s.clients.List(),
+		Ops:           s.ops.Snapshot(),
+		Modules:       mods,
+		SocketPath:    s.layout.SocketPath,
+		Gateway:       s.cfg.Gateway,
+		OldPID:        os.Getpid(),
+		OldStartTime:  s.procStart,
+		OldVersion:    s.build.Version,
+		OldRelease:    s.build.Release,
 	}
-	snapBytes, err := json.Marshal(snap)
+	snapBytes, err := BuildBoundedSnapshot(snap, MaxHandoffSnapshotBytes)
 	if err != nil {
 		_ = listenFile.Close()
 		_ = stateR.Close()
@@ -172,12 +423,12 @@ func (s *Server) dispatchHandoff(ctx context.Context, conn *Conn, req proto.Requ
 		if logOut != devNull {
 			_ = logOut.Close()
 		}
-		rollback("marshal snapshot: " + err.Error())
+		rollback("build bounded snapshot: "+err.Error(), 0)
 		return
 	}
 
-	// Prepare lock file for inheritance (if server does not hold one, e.g. in an
-	// embedded test, pass /dev/null and omit --lock-fd).
+	// Execute the pinned, validated file descriptor at FD 6 (/proc/self/fd/6)
+	// so no TOCTOU replacement can occur between validation and execve.
 	files := []*os.File{
 		devNull,    // fd 0: stdin
 		logOut,     // fd 1: stdout
@@ -185,6 +436,7 @@ func (s *Server) dispatchHandoff(ctx context.Context, conn *Conn, req proto.Requ
 		listenFile, // fd 3: listening Unix socket
 		stateR,     // fd 4: state snapshot read end
 		readyW,     // fd 5: readiness signal write end
+		binFile,    // fd 6: pinned validated executable FD
 	}
 	argv := []string{
 		resolvedPath,
@@ -195,13 +447,15 @@ func (s *Server) dispatchHandoff(ctx context.Context, conn *Conn, req proto.Requ
 		"--listen-fd=3",
 		"--state-fd=4",
 		"--ready-fd=5",
+		"--bin-fd=6",
+		"--binary-path", resolvedPath,
 	}
 	if s.lock != nil && s.lock.File() != nil {
-		files = append(files, s.lock.File()) // fd 6: flock file descriptor
-		argv = append(argv, "--lock-fd=6")
+		files = append(files, s.lock.File()) // fd 7: flock file descriptor
+		argv = append(argv, "--lock-fd=7")
 	}
 
-	proc, err := os.StartProcess(resolvedPath, argv, &os.ProcAttr{
+	proc, err := os.StartProcess("/proc/self/fd/6", argv, &os.ProcAttr{
 		Files: files,
 		Sys:   &syscall.SysProcAttr{Setsid: true},
 	})
@@ -218,7 +472,7 @@ func (s *Server) dispatchHandoff(ctx context.Context, conn *Conn, req proto.Requ
 	if err != nil {
 		_ = stateW.Close()
 		_ = readyR.Close()
-		rollback("spawn new corrald: " + err.Error())
+		rollback("spawn new corrald: "+err.Error(), 0)
 		return
 	}
 
@@ -235,19 +489,27 @@ func (s *Server) dispatchHandoff(ctx context.Context, conn *Conn, req proto.Requ
 	if readyErr != nil {
 		_ = proc.Kill()
 		_, _ = proc.Wait()
-		rollback("new process did not become ready: " + readyErr.Error())
+		rollback("new process did not become ready: "+readyErr.Error(), proc.Pid)
 		return
 	}
 
-	// 5. Handoff succeeded! Mark handed off, close our copy of listener without
-	// unlinking the socket, reply to caller, push daemon.reconnect, and exit.
+	// 5. Handoff succeeded! Mark handed off, establish hard exit deadline, close
+	// our copy of listener without unlinking the socket, release listenerOpMu,
+	// reply to caller, push daemon.reconnect, and exit within the hard cap.
 	elapsedMS := time.Since(started).Milliseconds()
 	s.stateMu.Lock()
 	s.handedOff = true
 	remainingWrites := s.inflightWrites
+	hardCap := s.cfg.PostHandoffExit
+	if remainingWrites > 0 {
+		hardCap = s.cfg.PostHandoffWriteCap
+	}
+	hardDeadline := time.Now().Add(hardCap)
+	s.hardExitDeadline = hardDeadline
 	s.stateMu.Unlock()
 
 	s.closeListenerForExit()
+	releaseListenerLock()
 
 	if newPID == 0 {
 		newPID = proc.Pid
@@ -256,7 +518,6 @@ func (s *Server) dispatchHandoff(ctx context.Context, conn *Conn, req proto.Requ
 		newRelease = p.Release
 	}
 
-	// Enqueue RPC response first, then broadcast daemon.reconnect to all clients.
 	conn.enqueueResponse(req.ID, proto.HandoffResult{
 		PID:        newPID,
 		Release:    newRelease,
@@ -281,34 +542,63 @@ func (s *Server) dispatchHandoff(ctx context.Context, conn *Conn, req proto.Requ
 		"new_release", newRelease,
 		"duration_ms", elapsedMS,
 		"remaining_writes", remainingWrites,
+		"hard_cap", hardCap,
 	)
 
-	// Allow clients to read response + reconnect frame, and give any write that
-	// exceeded the 5 s drain window up to 15 s total before exiting.
 	go func() {
 		if remainingWrites > 0 {
-			s.waitForInflightWrites(context.Background(), s.cfg.PostHandoffWriteCap)
-		}
-		// Give outbound queues a brief window to flush response + reconnect frames,
-		// bounded by PostHandoffExit (3 s).
-		flushCap := s.cfg.PostHandoffExit
-		if flushCap > 200*time.Millisecond {
-			// Wait up to 200 ms for active conns to flush, or until all conns close,
-			// capped at PostHandoffExit.
-			deadline := time.Now().Add(flushCap)
-			minWait := time.Now().Add(80 * time.Millisecond)
-			for time.Now().Before(deadline) {
-				if s.connectedCount() == 0 && time.Now().After(minWait) {
-					break
-				}
-				if time.Now().After(minWait) && s.allConnsFlushed() {
-					break
-				}
-				time.Sleep(10 * time.Millisecond)
+			if rem := time.Until(hardDeadline) - 100*time.Millisecond; rem > 0 {
+				s.waitForInflightWrites(context.Background(), rem)
 			}
+		}
+		flushLimit := time.Now().Add(s.cfg.PostHandoffExit)
+		if flushLimit.After(hardDeadline) {
+			flushLimit = hardDeadline
+		}
+		minWait := time.Now().Add(80 * time.Millisecond)
+		if minWait.After(flushLimit) {
+			minWait = flushLimit
+		}
+		for time.Now().Before(flushLimit) {
+			if time.Now().After(minWait) && (s.connectedCount() == 0 || s.allConnsFlushed()) {
+				break
+			}
+			time.Sleep(10 * time.Millisecond)
 		}
 		s.RequestShutdown()
 	}()
+}
+
+func (s *Server) runCompareAndRestore(
+	bk cutoverBackup,
+	v1Meta *MetaRecord,
+	expectedNewSymlink string,
+	childPID int,
+	expectedNewRelease int64,
+	forceMetaEpochUpdate bool,
+) error {
+	var (
+		sharedLock *FileLock
+		opLock     *FileLock
+		err        error
+	)
+	if _, statErr := os.Lstat(s.layout.LibDir); statErr == nil {
+		sharedLock, err = AcquireLockWait(s.layout.SharedLockPath, 5*time.Second)
+		if err != nil {
+			return fmt.Errorf("acquire shared lock for rollback: %w", err)
+		}
+		defer sharedLock.Release()
+	}
+	if _, statErr := os.Lstat(s.layout.StateDir); statErr == nil {
+		opLock, err = AcquireLockWait(s.layout.OpLockPath, 5*time.Second)
+		if err != nil {
+			return fmt.Errorf("acquire op lock for rollback: %w", err)
+		}
+		defer opLock.Release()
+	}
+	return compareAndRestoreCutoverLocked(
+		s.layout, bk, v1Meta, expectedNewSymlink, childPID, expectedNewRelease, forceMetaEpochUpdate,
+	)
 }
 
 func (s *Server) allConnsFlushed() bool {
@@ -381,69 +671,112 @@ func (s *Server) resumeAccept() {
 	s.acceptCond.Broadcast()
 }
 
-// ValidateHandoffBinary verifies that candidatePath resides inside
-// ~/.local/lib/corral/ (after resolving symlinks on parent directories), is a
-// regular file (not itself a symlink), is owned by expectedUID, has mode 0700,
-// and matches expectedSHA256.
-func ValidateHandoffBinary(layout *Layout, candidatePath, expectedSHA256 string, expectedUID uint32) (string, error) {
+// OpenValidatedHandoffBinary opens candidatePath without following symlinks
+// (O_NOFOLLOW), validates LibDir and version parent directory ownership and
+// permissions, verifies the strict "corrald-<Version>-<Release>/corrald"
+// layout, validates the open FD's type/owner/0700 mode, and checks SHA-256 on
+// the open FD itself. The caller owns the returned *os.File and should execute
+// it via /proc/self/fd/<N> to prevent TOCTOU swaps.
+func OpenValidatedHandoffBinary(layout *Layout, candidatePath, expectedSHA256 string, expectedUID uint32) (*os.File, string, int64, error) {
 	if candidatePath == "" || !filepath.IsAbs(candidatePath) {
-		return "", errors.New("handoff path must be absolute")
+		return nil, "", 0, errors.New("handoff path must be absolute")
 	}
 	if strings.ContainsAny(candidatePath, "\x00\n") {
-		return "", errors.New("handoff path contains invalid characters")
+		return nil, "", 0, errors.New("handoff path contains invalid characters")
 	}
 	expectedSHA256 = strings.ToLower(strings.TrimSpace(expectedSHA256))
 	if len(expectedSHA256) != 64 {
-		return "", errors.New("invalid sha256 digest length")
+		return nil, "", 0, errors.New("invalid sha256 digest length")
 	}
 	if _, err := hex.DecodeString(expectedSHA256); err != nil {
-		return "", errors.New("invalid sha256 hex digest")
+		return nil, "", 0, errors.New("invalid sha256 hex digest")
 	}
 
-	// Ensure candidate is not a symlink itself.
-	info, err := os.Lstat(candidatePath)
-	if err != nil {
-		return "", fmt.Errorf("lstat binary: %w", err)
+	if err := CheckNonWritableDir(layout.LibDir, expectedUID); err != nil {
+		return nil, "", 0, fmt.Errorf("lib dir check failed: %w", err)
 	}
-	if info.Mode()&os.ModeSymlink != 0 {
-		return "", errors.New("handoff binary must not be a symlink")
+
+	cleanCand := filepath.Clean(candidatePath)
+	parentDir := filepath.Dir(cleanCand)
+	if filepath.Dir(parentDir) != filepath.Clean(layout.LibDir) {
+		return nil, "", 0, fmt.Errorf("handoff binary %s is not directly inside a version dir under %s", cleanCand, layout.LibDir)
+	}
+	if filepath.Base(cleanCand) != "corrald" {
+		return nil, "", 0, fmt.Errorf("handoff binary basename must be corrald, got %q", filepath.Base(cleanCand))
+	}
+	_, dirRelease, ok := ParseVersionDirName(filepath.Base(parentDir))
+	if !ok {
+		return nil, "", 0, fmt.Errorf("handoff parent %q is not a valid corrald-<version>-<release> directory", filepath.Base(parentDir))
+	}
+
+	pinfo, err := os.Lstat(parentDir)
+	if err != nil {
+		return nil, "", 0, fmt.Errorf("lstat parent dir: %w", err)
+	}
+	if pinfo.Mode()&os.ModeSymlink != 0 || !pinfo.IsDir() {
+		return nil, "", 0, errors.New("handoff parent directory must be a real directory")
+	}
+	pst, ok := pinfo.Sys().(*syscall.Stat_t)
+	if !ok || pst.Uid != expectedUID {
+		return nil, "", 0, fmt.Errorf("handoff parent directory owned by uid %d, expected %d", pst.Uid, expectedUID)
+	}
+	if pinfo.Mode().Perm() != 0o700 {
+		return nil, "", 0, fmt.Errorf("handoff parent directory mode is %04o, want 0700", pinfo.Mode().Perm())
+	}
+
+	f, err := os.OpenFile(cleanCand, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return nil, "", 0, fmt.Errorf("open handoff binary: %w", err)
+	}
+	info, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		return nil, "", 0, fmt.Errorf("fstat binary: %w", err)
 	}
 	if !info.Mode().IsRegular() {
-		return "", errors.New("handoff binary must be a regular file")
+		_ = f.Close()
+		return nil, "", 0, errors.New("handoff binary must be a regular file")
 	}
 	st, ok := info.Sys().(*syscall.Stat_t)
 	if !ok {
-		return "", errors.New("stat metadata unavailable")
+		_ = f.Close()
+		return nil, "", 0, errors.New("stat metadata unavailable")
 	}
 	if st.Uid != expectedUID {
-		return "", fmt.Errorf("handoff binary owned by uid %d, expected %d", st.Uid, expectedUID)
+		_ = f.Close()
+		return nil, "", 0, fmt.Errorf("handoff binary owned by uid %d, expected %d", st.Uid, expectedUID)
 	}
 	if info.Mode().Perm() != 0o700 {
-		return "", fmt.Errorf("handoff binary mode is %04o, want 0700", info.Mode().Perm())
+		_ = f.Close()
+		return nil, "", 0, fmt.Errorf("handoff binary mode is %04o, want 0700", info.Mode().Perm())
 	}
 
-	// Resolve real paths of LibDir and candidatePath's parent to prevent traversal.
-	realLib, err := filepath.EvalSymlinks(layout.LibDir)
-	if err != nil {
-		return "", fmt.Errorf("resolve lib dir: %w", err)
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		_ = f.Close()
+		return nil, "", 0, fmt.Errorf("hash binary fd: %w", err)
 	}
-	realBin, err := filepath.EvalSymlinks(candidatePath)
-	if err != nil {
-		return "", fmt.Errorf("resolve binary path: %w", err)
-	}
-	rel, err := filepath.Rel(realLib, realBin)
-	if err != nil || rel == "." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || rel == ".." {
-		return "", fmt.Errorf("handoff binary %s is outside %s", realBin, realLib)
-	}
-
-	gotHex, err := FileSHA256(realBin)
-	if err != nil {
-		return "", fmt.Errorf("hash binary: %w", err)
-	}
+	gotHex := hex.EncodeToString(h.Sum(nil))
 	if subtle.ConstantTimeCompare([]byte(gotHex), []byte(expectedSHA256)) != 1 {
-		return "", fmt.Errorf("sha256 mismatch: got %s, want %s", gotHex, expectedSHA256)
+		_ = f.Close()
+		return nil, "", 0, fmt.Errorf("sha256 mismatch: got %s, want %s", gotHex, expectedSHA256)
 	}
-	return realBin, nil
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		_ = f.Close()
+		return nil, "", 0, fmt.Errorf("seek binary fd: %w", err)
+	}
+	return f, cleanCand, dirRelease, nil
+}
+
+// ValidateHandoffBinary validates candidatePath and closes the pinned file
+// descriptor. Callers executing the binary should use OpenValidatedHandoffBinary.
+func ValidateHandoffBinary(layout *Layout, candidatePath, expectedSHA256 string, expectedUID uint32) (string, error) {
+	f, resolved, _, err := OpenValidatedHandoffBinary(layout, candidatePath, expectedSHA256, expectedUID)
+	if err != nil {
+		return "", err
+	}
+	_ = f.Close()
+	return resolved, nil
 }
 
 // FileSHA256 computes the lowercase hex SHA-256 digest of a file.
@@ -503,11 +836,84 @@ func waitForReadyLine(r *os.File, timeout time.Duration) (pid int, release int64
 	}
 }
 
-// PruneOldVersions retains at most two corrald-* version directories under
-// ~/.local/lib/corral/ (the current running version and the newest previous
-// version) and removes older corrald-* directories. Non-corrald directories
-// (such as code-server-*) are never touched.
+// PruneOldVersions removes old managed corrald version directories only when
+// this machine is the sole machine directory under StateRoot (if any other
+// machine directory exists in a shared NFS home, no version directory is
+// deleted).
+//
+// When pruning runs, it retains:
+//   - the current running version
+//   - the single newest healthy previous version (release < currentRelease and
+//     not in failed.json)
+//   - any non-failed pending candidate with release >= currentRelease listed in
+//     install.json
+//
+// Unlisted directories (such as corrald-backups or code-server-*) are never
+// touched.
 func PruneOldVersions(layout *Layout, currentVersion string, currentRelease int64) ([]string, error) {
+	// Follow global lock order SharedLock -> OpLock (non-blocking; skip GC if
+	// an install, uninstall, or handoff cutover is in progress).
+	sharedLock, err := AcquireLock(layout.SharedLockPath)
+	if err != nil {
+		if errors.Is(err, ErrLocked) || errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	defer sharedLock.Release()
+
+	opLock, err := AcquireLock(layout.OpLockPath)
+	if err != nil {
+		if errors.Is(err, ErrLocked) || errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	defer opLock.Release()
+
+	// Conservative NFS rule: if ANY other machine directory exists under
+	// StateRoot (or StateRoot cannot be read), do not delete any version dir.
+	stateEntries, err := os.ReadDir(layout.StateRoot)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	for _, se := range stateEntries {
+		if se.IsDir() && se.Name() != layout.MachineID {
+			return nil, nil
+		}
+	}
+
+	installRec, err := ReadInstallRecord(layout.InstallJSON)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, err
+	}
+
+	managed := make(map[string]struct{})
+	for _, f := range installRec.Files {
+		clean := filepath.Clean(f)
+		if filepath.Dir(clean) == filepath.Clean(layout.LibDir) {
+			if _, _, ok := ParseVersionDirName(filepath.Base(clean)); ok {
+				managed[filepath.Base(clean)] = struct{}{}
+			}
+		}
+	}
+	if len(managed) == 0 {
+		return nil, nil
+	}
+
+	failedSet := make(map[int64]bool)
+	if frec, err := ReadFailedRecord(layout.FailedJSON); err == nil {
+		for _, fe := range frec.Releases {
+			failedSet[fe.Release] = true
+		}
+	}
+
 	entries, err := os.ReadDir(layout.LibDir)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -515,61 +921,90 @@ func PruneOldVersions(layout *Layout, currentVersion string, currentRelease int6
 		}
 		return nil, err
 	}
+
 	currentDirName := fmt.Sprintf("corrald-%s-%d", currentVersion, currentRelease)
+
 	type verEntry struct {
 		name    string
 		path    string
 		release int64
 		modTime time.Time
 	}
-	var others []verEntry
+	var healthyPrev []verEntry
+	var failedDirs []verEntry
+
 	for _, e := range entries {
-		if !e.IsDir() || !strings.HasPrefix(e.Name(), "corrald-") {
+		name := e.Name()
+		if !e.IsDir() || name == currentDirName {
 			continue
 		}
-		if e.Name() == currentDirName {
+		if _, isManaged := managed[name]; !isManaged {
+			continue
+		}
+		_, rel, ok := ParseVersionDirName(name)
+		if !ok {
 			continue
 		}
 		info, err := e.Info()
 		if err != nil {
 			continue
 		}
-		rel := parseVersionDirRelease(e.Name())
-		others = append(others, verEntry{
-			name:    e.Name(),
-			path:    filepath.Join(layout.LibDir, e.Name()),
+		ve := verEntry{
+			name:    name,
+			path:    filepath.Join(layout.LibDir, name),
 			release: rel,
 			modTime: info.ModTime(),
-		})
+		}
+		if failedSet[rel] {
+			failedDirs = append(failedDirs, ve)
+			continue
+		}
+		if rel < currentRelease {
+			healthyPrev = append(healthyPrev, ve)
+		}
+		// Non-failed dirs with rel >= currentRelease are preserved as pending
+		// upgrade candidates listed in install.json.
 	}
-	if len(others) <= 1 {
+
+	sort.Slice(healthyPrev, func(i, j int) bool {
+		if healthyPrev[i].release != healthyPrev[j].release {
+			return healthyPrev[i].release > healthyPrev[j].release
+		}
+		return healthyPrev[i].modTime.After(healthyPrev[j].modTime)
+	})
+
+	var toRemove []verEntry
+	toRemove = append(toRemove, failedDirs...)
+	if len(healthyPrev) > 1 {
+		toRemove = append(toRemove, healthyPrev[1:]...)
+	}
+	if len(toRemove) == 0 {
 		return nil, nil
 	}
-	// Sort descending by release timestamp, breaking ties by modTime descending.
-	sort.Slice(others, func(i, j int) bool {
-		if others[i].release != others[j].release {
-			return others[i].release > others[j].release
-		}
-		return others[i].modTime.After(others[j].modTime)
-	})
-	// Keep others[0] (the single previous version); delete others[1:].
+
+	removedSet := make(map[string]struct{}, len(toRemove))
 	var removed []string
-	for _, o := range others[1:] {
+	for _, o := range toRemove {
 		if err := os.RemoveAll(o.path); err == nil {
 			removed = append(removed, o.path)
+			removedSet[o.path] = struct{}{}
 		}
 	}
-	return removed, nil
-}
 
-func parseVersionDirRelease(name string) int64 {
-	idx := strings.LastIndexByte(name, '-')
-	if idx < 0 || idx+1 >= len(name) {
-		return 0
+	if len(removedSet) > 0 {
+		kept := make([]string, 0, len(installRec.Files))
+		for _, f := range installRec.Files {
+			clean := filepath.Clean(f)
+			if _, drop := removedSet[clean]; drop {
+				continue
+			}
+			if _, drop := removedSet[filepath.Dir(clean)]; drop {
+				continue
+			}
+			kept = append(kept, f)
+		}
+		installRec.Files = kept
+		_ = WriteInstallRecord(layout.InstallJSON, installRec)
 	}
-	n, err := strconv.ParseInt(name[idx+1:], 10, 64)
-	if err != nil {
-		return 0
-	}
-	return n
+	return removed, nil
 }

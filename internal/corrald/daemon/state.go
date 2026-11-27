@@ -24,15 +24,17 @@ type InstallRecord struct {
 // MetaRecord is persisted at ~/.local/state/corral/corrald/<mid>/meta.json
 // while the daemon is serving.
 type MetaRecord struct {
-	PID        int    `json:"pid"`
-	StartTime  string `json:"start_time"`
-	Version    string `json:"version"`
-	Release    int64  `json:"release"`
-	Commit     string `json:"commit,omitempty"`
-	Epoch      string `json:"epoch"`
-	StartedAt  string `json:"started_at"`
-	SocketPath string `json:"socket_path"`
-	Gateway    string `json:"gateway,omitempty"`
+	PID           int    `json:"pid"`
+	StartTime     string `json:"start_time"`
+	PrevPID       int    `json:"prev_pid,omitempty"`
+	PrevStartTime string `json:"prev_start_time,omitempty"`
+	Version       string `json:"version"`
+	Release       int64  `json:"release"`
+	Commit        string `json:"commit,omitempty"`
+	Epoch         string `json:"epoch"`
+	StartedAt     string `json:"started_at"`
+	SocketPath    string `json:"socket_path"`
+	Gateway       string `json:"gateway,omitempty"`
 }
 
 // OpRecordFile is persisted at ~/.local/state/corral/corrald/<mid>/ops/<op>.json.

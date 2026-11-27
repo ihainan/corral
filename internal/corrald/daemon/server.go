@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -56,6 +57,12 @@ type MethodOptions struct {
 	// During handoff draining, new mutating calls are immediately rejected with
 	// retryable handoff_in_progress, and in-flight calls are tracked for drain.
 	Mutating bool
+
+	// Idempotent marks mutating RPCs whose JSON params carry an "op_id" field.
+	// Admission and OpTable registration happen atomically under stateMu before
+	// the handler executes, guaranteeing that any admitted write is captured in
+	// a handoff snapshot even if it stalls before reaching handler logic.
+	Idempotent bool
 }
 
 // HandlerFunc handles an RPC request. Returning nil result and nil error sends
@@ -94,7 +101,15 @@ type ServerConfig struct {
 	Lock                *FileLock
 	Listener            *net.UnixListener
 	InitialSnapshot     *HandoffSnapshot
-	OnReady             func()
+	// PreReady runs BEFORE Accept starts and BEFORE OnReady signals READY.
+	// Returning an error aborts startup without accepting any request or
+	// signaling READY.
+	PreReady func(meta *MetaRecord) error
+	OnReady  func()
+	// OnHardExit is called immediately when the post-handoff hard exit deadline
+	// expires while handlers are still blocked. CLI binaries pass os.Exit(0)
+	// directly so exit cannot block on logging or lock cleanup.
+	OnHardExit func()
 }
 
 type registeredMethod struct {
@@ -124,12 +139,19 @@ type Server struct {
 	healthChecks   map[string]HealthCheckFunc
 	reconcilers    []ReconcilerFunc
 
-	stateMu        sync.Mutex
-	state          string // proto.StateRunning or proto.StateDraining
-	inflightWrites int
-	writeDoneCh    chan struct{}
-	handoffActive  bool
-	handedOff      bool
+	// listenerOpMu strictly serializes socket rebind and handoff listener
+	// pause/dup/spawn/rollback so they can never interleave or unpause each other.
+	listenerOpMu sync.Mutex
+
+	stateMu          sync.Mutex
+	state            string // proto.StateRunning or proto.StateDraining
+	inflightWrites   int
+	writeDoneCh      chan struct{}
+	handoffActive    bool
+	handedOff        bool
+	hardExitDeadline time.Time
+	hardExitForced   bool
+	rollbackDegraded string
 
 	acceptMu      sync.Mutex
 	acceptCond    *sync.Cond
@@ -142,6 +164,7 @@ type Server struct {
 	idleTimer   *time.Timer
 	idleStopped bool
 
+	sockMu  sync.Mutex
 	sockDev uint64
 	sockIno uint64
 	sockOK  atomic.Bool
@@ -224,6 +247,9 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 
 // Register adds an RPC method to the server's dispatch table.
 func (s *Server) Register(method string, opts MethodOptions, fn HandlerFunc) {
+	if opts.Idempotent {
+		opts.Mutating = true
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.methods[method] = registeredMethod{opts: opts, fn: fn}
@@ -268,60 +294,15 @@ func (s *Server) HandedOff() bool {
 	return s.handedOff
 }
 
-// Serve binds (or adopts) the Unix listener, writes meta.json, invokes OnReady,
-// and serves RPC connections until shutdown, idle timeout, context cancel, or
-// hot-update handoff.
-func (s *Server) Serve(parentCtx context.Context) error {
-	ctx, cancel := context.WithCancel(parentCtx)
-	s.cancelFn = cancel
-	defer cancel()
+// HardExitForced reports whether Serve returned due to hitting the post-handoff
+// hard exit cap while handlers were still running.
+func (s *Server) HardExitForced() bool {
+	s.stateMu.Lock()
+	defer s.stateMu.Unlock()
+	return s.hardExitForced
+}
 
-	// Restore handoff snapshot if starting as a replacement daemon.
-	if snap := s.cfg.InitialSnapshot; snap != nil {
-		if snap.Schema == HandoffSnapshotSchema {
-			s.bus.Restore(snap.Epoch, snap.LastSeq, snap.Events)
-			if err := s.clients.Restore(snap.Clients); err != nil {
-				s.log.Warn("restore clients failed", "err", err)
-			}
-			s.ops.Restore(snap.CompletedOps)
-			s.restoreModuleStates(snap.Modules)
-		} else {
-			s.log.Warn("unsupported handoff snapshot schema; starting fresh epoch", "schema", snap.Schema)
-		}
-	}
-
-	if s.ln == nil {
-		if err := s.layout.EnsureSocketDir(); err != nil {
-			return fmt.Errorf("prepare socket dir: %w", err)
-		}
-		_ = os.Remove(s.layout.SocketPath)
-		addr := &net.UnixAddr{Name: s.layout.SocketPath, Net: "unix"}
-		ln, err := net.ListenUnix("unix", addr)
-		if err != nil {
-			return fmt.Errorf("listen unix %s: %w", s.layout.SocketPath, err)
-		}
-		if err := os.Chmod(s.layout.SocketPath, 0o600); err != nil {
-			_ = ln.Close()
-			return fmt.Errorf("chmod socket %s: %w", s.layout.SocketPath, err)
-		}
-		s.ln = ln
-	}
-	// Never let Go auto-unlink the socket on Close(); we explicitly remove the
-	// socket only on clean shutdown/idle exit and NEVER on handoff.
-	s.ln.SetUnlinkOnClose(false)
-
-	if dev, ino, err := FileInode(s.layout.SocketPath); err == nil {
-		s.sockDev, s.sockIno = dev, ino
-	}
-
-	// Run level-triggered reconcilers before signaling READY.
-	if s.cfg.InitialSnapshot != nil {
-		if err := s.reconcileAll(ctx); err != nil {
-			s.log.Warn("handoff reconciliation returned error", "err", err)
-		}
-	}
-
-	// Write meta.json before signaling readiness.
+func (s *Server) currentMetaRecord() *MetaRecord {
 	meta := &MetaRecord{
 		PID:        os.Getpid(),
 		StartTime:  s.procStart,
@@ -333,8 +314,81 @@ func (s *Server) Serve(parentCtx context.Context) error {
 		SocketPath: s.layout.SocketPath,
 		Gateway:    s.cfg.Gateway,
 	}
-	if err := WriteMetaRecord(s.layout.MetaJSON, meta); err != nil {
-		return fmt.Errorf("write meta.json: %w", err)
+	if snap := s.cfg.InitialSnapshot; snap != nil {
+		meta.PrevPID = snap.OldPID
+		meta.PrevStartTime = snap.OldStartTime
+	}
+	return meta
+}
+
+// Serve binds (or adopts) the Unix listener, completes PreReady cutover BEFORE
+// starting Accept, invokes OnReady, and serves RPC connections until shutdown,
+// idle timeout, context cancel, or hot-update handoff.
+func (s *Server) Serve(parentCtx context.Context) error {
+	ctx, cancel := context.WithCancel(parentCtx)
+	s.cancelFn = cancel
+	defer cancel()
+
+	// Restore handoff snapshot if starting as a replacement daemon.
+	if snap := s.cfg.InitialSnapshot; snap != nil {
+		if snap.Schema != HandoffSnapshotSchema {
+			return fmt.Errorf("unsupported handoff snapshot schema %d (want %d)", snap.Schema, HandoffSnapshotSchema)
+		}
+		if snap.ForceNewEpoch {
+			// Events were attempted while v1's bus was frozen: keep our fresh
+			// random epoch so reconnecting clients receive resync_required and
+			// perform a full resync instead of silently missing events.
+			s.log.Info("handoff snapshot flagged dropped frozen events; rotating to fresh epoch", "new_epoch", s.bus.Epoch())
+		} else {
+			s.bus.Restore(snap.Epoch, snap.LastSeq, snap.Events)
+		}
+		if err := s.clients.Restore(snap.Clients); err != nil {
+			s.log.Warn("restore clients failed", "err", err)
+		}
+		s.ops.Restore(snap.Ops)
+		s.restoreModuleStates(snap.Modules)
+	}
+
+	if s.ln == nil {
+		ln, err := s.listenUnixPath(s.layout.SocketPath)
+		if err != nil {
+			return err
+		}
+		s.ln = ln
+	}
+	// Never let Go auto-unlink the socket on Close(); we explicitly remove the
+	// socket only on clean shutdown/idle exit and NEVER on handoff.
+	s.ln.SetUnlinkOnClose(false)
+
+	if dev, ino, err := FileInode(s.layout.SocketPath); err == nil {
+		s.sockMu.Lock()
+		s.sockDev, s.sockIno = dev, ino
+		s.sockMu.Unlock()
+	}
+
+	// Run level-triggered reconcilers before cutover/READY.
+	if s.cfg.InitialSnapshot != nil {
+		if err := s.reconcileAll(ctx); err != nil {
+			s.log.Warn("handoff reconciliation returned error", "err", err)
+		}
+	}
+
+	meta := s.currentMetaRecord()
+
+	// Perform persistent cutover (symlink + install.json + meta.json) BEFORE
+	// accepting any connections or executing any requests. Incoming connects
+	// queue safely in the kernel listen backlog while PreReady runs; if PreReady
+	// fails, zero requests were executed by this process and READY is never sent.
+	if s.cfg.PreReady != nil {
+		if err := s.cfg.PreReady(meta); err != nil {
+			s.closeListenerForExit()
+			return err
+		}
+	} else {
+		if err := WriteMetaRecord(s.layout.MetaJSON, meta); err != nil {
+			s.closeListenerForExit()
+			return fmt.Errorf("write meta.json: %w", err)
+		}
 	}
 
 	s.log.Info("corrald serving",
@@ -349,12 +403,11 @@ func (s *Server) Serve(parentCtx context.Context) error {
 	// Start idle timer (starts immediately; cancelled as soon as a client connects).
 	s.armIdleTimer()
 
-	// Start accept loop before notifying readiness so incoming connections are
-	// accepted immediately.
+	// Start accept loop ONLY after PreReady succeeded.
 	s.wg.Add(1)
 	go s.acceptLoop(ctx)
 
-	// Start periodic socket inode watchdog.
+	// Start periodic socket inode watchdog (auto-rebinds if unlinked).
 	s.wg.Add(1)
 	go s.socketWatchLoop(ctx)
 
@@ -371,15 +424,149 @@ func (s *Server) Serve(parentCtx context.Context) error {
 	s.stopIdleTimer()
 	s.closeListenerForExit()
 	s.closeAllConns()
-	s.wg.Wait()
 
-	if !s.HandedOff() {
-		_ = os.Remove(s.layout.SocketPath)
-		_ = os.Remove(s.layout.MetaJSON)
-		s.log.Info("corrald stopped", "pid", os.Getpid())
-	} else {
+	// Enforce a hard exit deadline after hot-update handoff so a hung write
+	// handler can never keep the retired process alive indefinitely. When the
+	// hard deadline expires, exit immediately via OnHardExit (os.Exit(0))
+	// WITHOUT writing logs or pre-closing corrald.lock (the OS releases the
+	// lock atomically when the process terminates).
+	if s.HandedOff() {
+		s.stateMu.Lock()
+		deadline := s.hardExitDeadline
+		s.stateMu.Unlock()
+		remaining := time.Until(deadline)
+		if remaining < 50*time.Millisecond {
+			remaining = 50 * time.Millisecond
+		}
+		wgDone := make(chan struct{})
+		go func() {
+			s.wg.Wait()
+			close(wgDone)
+		}()
+		timer := time.NewTimer(remaining)
+		select {
+		case <-wgDone:
+			timer.Stop()
+		case <-timer.C:
+			if s.cfg.OnHardExit != nil {
+				s.cfg.OnHardExit()
+			}
+			s.stateMu.Lock()
+			s.hardExitForced = true
+			s.stateMu.Unlock()
+			return nil
+		}
 		s.log.Info("corrald exited after handoff", "pid", os.Getpid())
+		return nil
 	}
+
+	s.wg.Wait()
+	_ = os.Remove(s.layout.SocketPath)
+	_ = os.Remove(s.layout.MetaJSON)
+	s.log.Info("corrald stopped", "pid", os.Getpid())
+	return nil
+}
+
+func (s *Server) listenUnixPath(sockPath string) (*net.UnixListener, error) {
+	if err := s.layout.EnsureSocketDir(); err != nil {
+		return nil, fmt.Errorf("prepare socket dir: %w", err)
+	}
+	_ = os.Remove(sockPath)
+	addr := &net.UnixAddr{Name: sockPath, Net: "unix"}
+	ln, err := net.ListenUnix("unix", addr)
+	if err != nil {
+		return nil, fmt.Errorf("listen unix %s: %w", sockPath, err)
+	}
+	ln.SetUnlinkOnClose(false)
+	if err := os.Chmod(sockPath, 0o600); err != nil {
+		_ = ln.Close()
+		_ = os.Remove(sockPath)
+		return nil, fmt.Errorf("chmod socket %s: %w", sockPath, err)
+	}
+	return ln, nil
+}
+
+// rebindSocket atomically rebinds corrald.sock when the socket file has been
+// removed or replaced. It holds listenerOpMu across the entire operation so it
+// is strictly mutually exclusive with handoff and can never unpause a
+// handoff-paused accept loop.
+func (s *Server) rebindSocket() error {
+	s.listenerOpMu.Lock()
+	defer s.listenerOpMu.Unlock()
+
+	s.stateMu.Lock()
+	busy := s.handoffActive || s.handedOff
+	s.stateMu.Unlock()
+	if busy {
+		return nil
+	}
+
+	// Re-check inode under listenerOpMu in case a previous rebind already fixed it.
+	s.sockMu.Lock()
+	wantDev, wantIno := s.sockDev, s.sockIno
+	s.sockMu.Unlock()
+	if wantIno != 0 {
+		if dev, ino, err := FileInode(s.layout.SocketPath); err == nil && dev == wantDev && ino == wantIno {
+			s.sockOK.Store(true)
+			return nil
+		}
+	}
+
+	if err := s.pauseAccept(); err != nil {
+		return err
+	}
+	defer s.resumeAccept()
+
+	if err := s.layout.EnsureSocketDir(); err != nil {
+		return err
+	}
+
+	// Prefer atomic bind-to-temp + rename when the temporary path fits within
+	// MaxSocketPath; otherwise bind directly at SocketPath.
+	tmpSock := filepath.Join(s.layout.SocketDir, fmt.Sprintf(".rebind-%d-%s.sock", os.Getpid(), RandomHex(3)))
+	var newLn *net.UnixListener
+	var err error
+	if len(tmpSock) <= MaxSocketPath {
+		_ = os.Remove(tmpSock)
+		newLn, err = net.ListenUnix("unix", &net.UnixAddr{Name: tmpSock, Net: "unix"})
+		if err != nil {
+			return fmt.Errorf("rebind listen %s: %w", tmpSock, err)
+		}
+		newLn.SetUnlinkOnClose(false)
+		if chmodErr := os.Chmod(tmpSock, 0o600); chmodErr != nil {
+			_ = newLn.Close()
+			_ = os.Remove(tmpSock)
+			return fmt.Errorf("rebind chmod %s: %w", tmpSock, chmodErr)
+		}
+		if renErr := os.Rename(tmpSock, s.layout.SocketPath); renErr != nil {
+			_ = newLn.Close()
+			_ = os.Remove(tmpSock)
+			return fmt.Errorf("rebind rename %s -> %s: %w", tmpSock, s.layout.SocketPath, renErr)
+		}
+	} else {
+		newLn, err = s.listenUnixPath(s.layout.SocketPath)
+		if err != nil {
+			return err
+		}
+	}
+
+	s.acceptMu.Lock()
+	oldLn := s.ln
+	s.ln = newLn
+	s.acceptMu.Unlock()
+
+	if oldLn != nil {
+		oldLn.SetUnlinkOnClose(false)
+		_ = oldLn.Close()
+	}
+
+	if dev, ino, statErr := FileInode(s.layout.SocketPath); statErr == nil {
+		s.sockMu.Lock()
+		s.sockDev, s.sockIno = dev, ino
+		s.sockMu.Unlock()
+	}
+	s.sockOK.Store(true)
+	s.log.Info("rebound missing unix socket", "socket", s.layout.SocketPath)
 	return nil
 }
 
@@ -432,7 +619,7 @@ func (s *Server) acceptLoop(ctx context.Context) {
 
 		if err != nil {
 			if paused {
-				// Expected wakeup from ln.SetDeadline(time.Now()) during handoff.
+				// Expected wakeup from ln.SetDeadline(time.Now()) during handoff or rebind.
 				continue
 			}
 			if stopped || ctx.Err() != nil || errors.Is(err, net.ErrClosed) {
@@ -474,13 +661,19 @@ func (s *Server) socketWatchLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			if s.sockIno == 0 {
+			s.sockMu.Lock()
+			wantDev, wantIno := s.sockDev, s.sockIno
+			s.sockMu.Unlock()
+			if wantIno == 0 {
 				continue
 			}
 			dev, ino, err := FileInode(s.layout.SocketPath)
-			if err != nil || dev != s.sockDev || ino != s.sockIno {
+			if err != nil || dev != wantDev || ino != wantIno {
 				s.sockOK.Store(false)
-				s.log.Warn("socket path missing or inode changed", "socket", s.layout.SocketPath, "err", err)
+				s.log.Warn("socket path missing or inode changed; attempting rebind", "socket", s.layout.SocketPath, "err", err)
+				if rebindErr := s.rebindSocket(); rebindErr != nil {
+					s.log.Error("socket rebind failed", "socket", s.layout.SocketPath, "err", rebindErr)
+				}
 			} else {
 				s.sockOK.Store(true)
 			}
@@ -664,21 +857,6 @@ func (c *Conn) Close() {
 	_ = c.raw.Close()
 }
 
-// FlushAndClose drains queued outbound frames (up to timeout) before closing.
-func (c *Conn) FlushAndClose(timeout time.Duration) {
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		c.mu.Lock()
-		empty := len(c.outCh) == 0 || c.closed
-		c.mu.Unlock()
-		if empty {
-			break
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-	c.Close()
-}
-
 func (s *Server) serveConn(ctx context.Context, c *Conn) {
 	defer s.wg.Done()
 	defer s.removeConn(c)
@@ -695,7 +873,6 @@ func (s *Server) serveConn(ctx context.Context, c *Conn) {
 					return
 				}
 			case <-c.doneCh:
-				// Best-effort drain of any frames already queued before close.
 				for {
 					select {
 					case payload := <-c.outCh:
@@ -726,10 +903,6 @@ func (s *Server) serveConn(ctx context.Context, c *Conn) {
 			})
 			continue
 		}
-		// Handle daemon.resume synchronously on the reader goroutine so
-		// subscription ordering relative to subsequent requests on this
-		// connection is deterministic. Other methods execute concurrently so
-		// slow writes or handoff do not block concurrent reads.
 		if req.Method == proto.MethodDaemonResume || req.Method == proto.MethodDaemonHello {
 			s.dispatchRequest(ctx, c, req)
 			continue
@@ -767,6 +940,66 @@ func (s *Server) dispatchRequest(ctx context.Context, c *Conn, req proto.Request
 		return
 	}
 
+	// Idempotent mutating RPCs atomically combine draining admission and
+	// OpTable.Begin(op_id) under stateMu, so no admitted write can ever escape
+	// a handoff snapshot even if it stalls before reaching handler code.
+	if reg.opts.Idempotent {
+		var hdr struct {
+			OpID string `json:"op_id"`
+		}
+		if len(req.Params) > 0 {
+			if err := json.Unmarshal(req.Params, &hdr); err != nil {
+				c.enqueueResponse(req.ID, nil, &proto.RPCError{
+					Code:    proto.ErrInvalidParams,
+					Message: err.Error(),
+				})
+				return
+			}
+		}
+		admitted, cachedRes, cachedErr := s.enterIdempotentMutating(hdr.OpID)
+		if !admitted {
+			c.enqueueResponse(req.ID, cachedRes, cachedErr)
+			return
+		}
+		defer s.leaveMutating()
+
+		var (
+			rawRes json.RawMessage
+			rpcErr *proto.RPCError
+		)
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					rpcErr = &proto.RPCError{
+						Code:    proto.ErrInternal,
+						Message: fmt.Sprintf("operation panic: %v", r),
+					}
+				}
+			}()
+			res, err := reg.fn(ctx, c, req.Params)
+			if err != nil {
+				rpcErr = err
+				return
+			}
+			if res == nil {
+				rawRes = json.RawMessage(`{}`)
+			} else if r, ok := res.(json.RawMessage); ok {
+				rawRes = r
+			} else {
+				encoded, merr := json.Marshal(res)
+				if merr != nil {
+					rpcErr = &proto.RPCError{Code: proto.ErrInternal, Message: merr.Error()}
+					return
+				}
+				rawRes = encoded
+			}
+		}()
+
+		s.ops.Finish(hdr.OpID, rawRes, rpcErr)
+		c.enqueueResponse(req.ID, rawRes, rpcErr)
+		return
+	}
+
 	if reg.opts.Mutating {
 		if !s.enterMutating() {
 			c.enqueueResponse(req.ID, nil, &proto.RPCError{
@@ -789,6 +1022,24 @@ func (s *Server) dispatchRequest(ctx context.Context, c *Conn, req proto.Request
 func asErr(v any) error {
 	e, _ := v.(error)
 	return e
+}
+
+func (s *Server) enterIdempotentMutating(opID string) (admitted bool, cachedRes json.RawMessage, cachedErr *proto.RPCError) {
+	s.stateMu.Lock()
+	defer s.stateMu.Unlock()
+	if s.state == proto.StateDraining || s.handedOff {
+		return false, nil, &proto.RPCError{
+			Code:      proto.ErrHandoffInProgress,
+			Message:   "daemon handoff in progress; retry after reconnect",
+			Retryable: true,
+		}
+	}
+	admitted, cachedRes, cachedErr = s.ops.Begin(opID)
+	if !admitted {
+		return false, cachedRes, cachedErr
+	}
+	s.inflightWrites++
+	return true, nil, nil
 }
 
 func (s *Server) enterMutating() bool {
@@ -836,6 +1087,9 @@ func (s *Server) handleHello(_ context.Context, c *Conn, raw json.RawMessage) (a
 			return nil, &proto.RPCError{Code: proto.ErrInvalidParams, Message: err.Error()}
 		}
 	}
+	if err := ValidateClientFields(p.Gateway, p.GatewayVersion, p.Client.CorralUser, p.Client.HostID); err != nil {
+		return nil, &proto.RPCError{Code: proto.ErrInvalidParams, Message: err.Error()}
+	}
 	if p.ProtoMin != 0 || p.ProtoMax != 0 {
 		if !proto.ProtocolInRange(proto.Protocol, p.ProtoMin, p.ProtoMax) {
 			return nil, &proto.RPCError{
@@ -871,11 +1125,7 @@ func (s *Server) handleHello(_ context.Context, c *Conn, raw json.RawMessage) (a
 	}, nil
 }
 
-func (s *Server) handleResume(_ context.Context, c *Conn, raw json.RawMessage) (any, *proto.RPCError) {
-	// We need the request ID to enqueue the response atomically under bus.mu;
-	// handleResume is invoked via dispatchResume below when called from RPC,
-	// or directly via params when we capture reqID in dispatchRequest.
-	// Wait: see dispatchRequest override below for atomic response+replay.
+func (s *Server) handleResume(_ context.Context, _ *Conn, _ json.RawMessage) (any, *proto.RPCError) {
 	return nil, &proto.RPCError{Code: proto.ErrInternal, Message: "resume called outside request context"}
 }
 
@@ -910,6 +1160,12 @@ func (s *Server) handleHealth(ctx context.Context, _ *Conn, _ json.RawMessage) (
 	}
 	if !s.sockOK.Load() {
 		caps["socket"] = "socket_missing"
+	}
+	s.stateMu.Lock()
+	degraded := s.rollbackDegraded
+	s.stateMu.Unlock()
+	if degraded != "" {
+		caps["state"] = "rollback_failed: " + degraded
 	}
 	s.mu.RLock()
 	checks := make(map[string]HealthCheckFunc, len(s.healthChecks))

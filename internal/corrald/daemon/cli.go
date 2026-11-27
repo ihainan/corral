@@ -10,7 +10,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"log/slog"
 	"net"
 	"os"
 	"os/signal"
@@ -22,6 +21,8 @@ import (
 
 	"github.com/ihainan/corral/internal/corrald/proto"
 )
+
+const lifecycleLockTimeout = 15 * time.Second
 
 // Main executes a corrald CLI subcommand and returns the process exit code.
 func Main(args []string, build proto.BuildInfo, stdout, stderr io.Writer) int {
@@ -118,17 +119,15 @@ func cmdSelftest(stdout io.Writer) int {
 		return 1
 	}
 
-	// Test flock on a dedicated temporary lock file so we do not disturb a live daemon.
 	probeLockPath := filepath.Join(layout.StateDir, fmt.Sprintf(".selftest-%d.lock", os.Getpid()))
 	lock, err := AcquireLock(probeLockPath)
 	if err != nil {
 		writeErr(stdout, "flock_failed", err.Error())
 		return 1
 	}
-	_ = lock.Release()
 	_ = os.Remove(probeLockPath)
+	_ = lock.Release()
 
-	// Verify socket parent directory and ability to bind a Unix domain socket.
 	if err := layout.EnsureSocketDir(); err != nil {
 		writeErr(stdout, "socket_dir_failed", err.Error())
 		return 1
@@ -154,7 +153,7 @@ func cmdSelftest(stdout io.Writer) int {
 func cmdInstall(args []string, build proto.BuildInfo, stdout io.Writer) int {
 	fs := flag.NewFlagSet("install", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
-	stageDir := fs.String("stage", "", "staging directory containing corrald binary")
+	stageDir := fs.String("stage", "", "staging directory (<state_dir>/stage-<op>) containing corrald binary")
 	opID := fs.String("op", "", "operation identifier")
 	gateway := fs.String("gateway", "", "gateway identifier")
 	by := fs.String("by", "", "enabling user")
@@ -174,14 +173,20 @@ func cmdInstall(args []string, build proto.BuildInfo, stdout io.Writer) int {
 		return 1
 	}
 
-	// Tombstone enforces withdrawal-first: refuse install/upgrade while removing exists.
-	if layout.TombstoneExists() {
-		writeErr(stdout, proto.ErrRemoving, "uninstall tombstone present")
-		return 1
+	// Strictly enforce --stage == ~/.local/state/corral/corrald/<mid>/stage-<op>.
+	expectedStage, err := layout.StageDir(*opID)
+	if err != nil {
+		writeErr(stdout, "invalid_op", err.Error())
+		return 2
+	}
+	absStage, err := filepath.Abs(*stageDir)
+	if err != nil || filepath.Clean(absStage) != filepath.Clean(expectedStage) {
+		writeErr(stdout, "invalid_stage", fmt.Sprintf("--stage must be %s", expectedStage))
+		return 2
 	}
 
-	if err := os.MkdirAll(layout.LibDir, 0o755); err != nil {
-		writeErr(stdout, "mkdir_failed", err.Error())
+	if err := layout.EnsureLibDir(); err != nil {
+		writeErr(stdout, "lib_dir_failed", err.Error())
 		return 1
 	}
 	if err := layout.EnsureStateDir(); err != nil {
@@ -189,19 +194,39 @@ func cmdInstall(args []string, build proto.BuildInfo, stdout io.Writer) int {
 		return 1
 	}
 
-	// Re-check tombstone after state dir creation.
+	// Global lock order: SharedLock -> OpLock.
+	sharedLock, err := AcquireLockWait(layout.SharedLockPath, lifecycleLockTimeout)
+	if err != nil {
+		writeErr(stdout, "lock_failed", err.Error())
+		return 1
+	}
+	defer sharedLock.Release()
+
+	opLock, err := AcquireLockWait(layout.OpLockPath, lifecycleLockTimeout)
+	if err != nil {
+		writeErr(stdout, "lock_failed", err.Error())
+		return 1
+	}
+	defer opLock.Release()
+
+	// Tombstone check inside OpLock enforces withdrawal-first without races.
 	if layout.TombstoneExists() {
 		writeErr(stdout, proto.ErrRemoving, "uninstall tombstone present")
 		return 1
 	}
 
-	srcPath := filepath.Join(*stageDir, "corrald")
-	if info, err := os.Stat(*stageDir); err == nil && info.Mode().IsRegular() {
-		srcPath = *stageDir
+	if err := EnsureSecureDir(expectedStage, layout.UID); err != nil {
+		writeErr(stdout, "invalid_stage", err.Error())
+		return 1
 	}
+	srcPath := filepath.Join(expectedStage, "corrald")
 	srcInfo, err := os.Lstat(srcPath)
-	if err != nil || !srcInfo.Mode().IsRegular() {
-		writeErr(stdout, "stage_missing", fmt.Sprintf("staged binary not found at %s", srcPath))
+	if err != nil || srcInfo.Mode()&os.ModeSymlink != 0 || !srcInfo.Mode().IsRegular() {
+		writeErr(stdout, "stage_missing", fmt.Sprintf("staged regular binary not found at %s", srcPath))
+		return 1
+	}
+	if st, ok := srcInfo.Sys().(*syscall.Stat_t); !ok || st.Uid != layout.UID {
+		writeErr(stdout, "invalid_stage", "staged binary is not owned by current user")
 		return 1
 	}
 
@@ -210,8 +235,12 @@ func cmdInstall(args []string, build proto.BuildInfo, stdout io.Writer) int {
 		writeErr(stdout, "invalid_version", err.Error())
 		return 1
 	}
-	if err := os.MkdirAll(verDir, 0o700); err != nil {
+	if err := os.Mkdir(verDir, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
 		writeErr(stdout, "mkdir_failed", err.Error())
+		return 1
+	}
+	if err := EnsureSecureDir(verDir, layout.UID); err != nil {
+		writeErr(stdout, "ver_dir_invalid", err.Error())
 		return 1
 	}
 	dstBin := filepath.Join(verDir, "corrald")
@@ -260,6 +289,7 @@ func cmdInstall(args []string, build proto.BuildInfo, stdout io.Writer) int {
 			layout.StateDir,
 			layout.InstallJSON,
 			layout.LockPath,
+			layout.OpLockPath,
 			layout.MetaJSON,
 			layout.ClientsJSON,
 			layout.LogPath,
@@ -323,8 +353,7 @@ func cmdInstall(args []string, build proto.BuildInfo, stdout io.Writer) int {
 		return 1
 	}
 
-	// Remove staging directory after installation succeeds.
-	if err := os.RemoveAll(*stageDir); err != nil {
+	if err := os.RemoveAll(expectedStage); err != nil {
 		writeErr(stdout, "stage_cleanup_failed", err.Error())
 		return 1
 	}
@@ -339,15 +368,29 @@ func cmdInstall(args []string, build proto.BuildInfo, stdout io.Writer) int {
 }
 
 func copyBinaryAtomic(src, dst string) error {
-	in, err := os.Open(src)
+	in, err := os.OpenFile(src, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
 	if err != nil {
 		return err
 	}
 	defer in.Close()
+	if info, err := in.Stat(); err != nil {
+		return err
+	} else if !info.Mode().IsRegular() {
+		return fmt.Errorf("source binary %s is not a regular file", src)
+	}
 
 	dir := filepath.Dir(dst)
+	if dinfo, err := os.Lstat(dir); err != nil {
+		return err
+	} else if dinfo.Mode()&os.ModeSymlink != 0 || !dinfo.IsDir() {
+		return fmt.Errorf("destination dir %s is not a real directory", dir)
+	}
+	if info, err := os.Lstat(dst); err == nil && info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("refusing to overwrite symlink %s", dst)
+	}
+
 	tmp := filepath.Join(dir, fmt.Sprintf(".corrald.tmp.%d.%s", os.Getpid(), RandomHex(4)))
-	out, err := os.OpenFile(tmp, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o700)
+	out, err := os.OpenFile(tmp, os.O_CREATE|os.O_EXCL|os.O_WRONLY|syscall.O_NOFOLLOW, 0o700)
 	if err != nil {
 		return err
 	}
@@ -388,9 +431,15 @@ func cmdServe(args []string, build proto.BuildInfo, stdout io.Writer) int {
 	lockFD := fs.Int("lock-fd", -1, "internal: inherited flock fd")
 	stateFD := fs.Int("state-fd", -1, "internal: inherited handoff state pipe fd")
 	readyFD := fs.Int("ready-fd", -1, "internal: readiness notification pipe fd")
+	binFD := fs.Int("bin-fd", -1, "internal: inherited validated binary fd to close")
+	binaryPath := fs.String("binary-path", "", "internal: validated binary path for handoff cutover")
 	if err := fs.Parse(args); err != nil {
 		writeErr(stdout, "invalid_args", err.Error())
 		return 2
+	}
+
+	if *binFD >= 0 {
+		_ = syscall.Close(*binFD)
 	}
 
 	layout, err := resolveDefaultLayout()
@@ -399,7 +448,6 @@ func cmdServe(args []string, build proto.BuildInfo, stdout io.Writer) int {
 		return 1
 	}
 
-	// Tombstone check: never start if uninstall is in progress.
 	if layout.TombstoneExists() {
 		writeErr(stdout, proto.ErrRemoving, "uninstall tombstone present")
 		return 1
@@ -410,18 +458,27 @@ func cmdServe(args []string, build proto.BuildInfo, stdout io.Writer) int {
 		return 1
 	}
 
-	// Self-detach when not running in foreground.
 	if !*foreground {
 		return serveDetached(layout, *gateway, stdout)
 	}
 
-	return serveForeground(layout, build, *gateway, *handoff, *listenFD, *lockFD, *stateFD, *readyFD, stdout)
+	return serveForeground(layout, build, *gateway, *handoff, *listenFD, *lockFD, *stateFD, *readyFD, *binaryPath, stdout)
 }
 
 func serveDetached(layout *Layout, gateway string, stdout io.Writer) int {
-	// Quick lock probe: if already running, report running without spawning.
+	opLock, err := AcquireLockWait(layout.OpLockPath, lifecycleLockTimeout)
+	if err != nil {
+		writeErr(stdout, "lock_failed", err.Error())
+		return 1
+	}
+	if layout.TombstoneExists() {
+		_ = opLock.Release()
+		writeErr(stdout, proto.ErrRemoving, "uninstall tombstone present")
+		return 1
+	}
 	probeLock, err := AcquireLock(layout.LockPath)
 	if errors.Is(err, ErrLocked) {
+		_ = opLock.Release()
 		pid, sock := waitForRunningMeta(layout, 2*time.Second)
 		fmt.Fprintf(stdout, "result=running\n")
 		fmt.Fprintf(stdout, "pid=%d\n", pid)
@@ -429,11 +486,12 @@ func serveDetached(layout *Layout, gateway string, stdout io.Writer) int {
 		return 0
 	}
 	if err != nil {
+		_ = opLock.Release()
 		writeErr(stdout, "lock_failed", err.Error())
 		return 1
 	}
-	// Release probe lock before child acquires it.
 	_ = probeLock.Release()
+	_ = opLock.Release()
 
 	exe, err := os.Executable()
 	if err != nil {
@@ -453,7 +511,7 @@ func serveDetached(layout *Layout, gateway string, stdout io.Writer) int {
 		writeErr(stdout, "devnull_failed", err.Error())
 		return 1
 	}
-	logFile, err := os.OpenFile(layout.LogPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	logFile, err := OpenLogFileNoFollow(layout.LogPath)
 	if err != nil {
 		_ = readyR.Close()
 		_ = readyW.Close()
@@ -481,7 +539,6 @@ func serveDetached(layout *Layout, gateway string, stdout io.Writer) int {
 		return 1
 	}
 
-	// Wait up to 5 seconds for child readiness report.
 	type readyMsg struct {
 		line string
 		err  error
@@ -545,6 +602,7 @@ func serveForeground(
 	gateway string,
 	handoff bool,
 	listenFD, lockFD, stateFD, readyFD int,
+	binaryPath string,
 	stdout io.Writer,
 ) int {
 	var readyFile *os.File
@@ -561,8 +619,6 @@ func serveForeground(
 		return 1
 	}
 
-	// Optional test-only hook to simulate a broken replacement binary that exits
-	// before sending READY.
 	if shouldFailBeforeReady(handoff) {
 		if readyFile != nil {
 			_ = readyFile.Close()
@@ -577,15 +633,37 @@ func serveForeground(
 	defer rotLog.Close()
 	logger := NewLogger(rotLog)
 
-	var lock *FileLock
+	var (
+		lock   *FileLock
+		opLock *FileLock
+	)
+	releaseOpLock := func() {
+		if opLock != nil {
+			_ = opLock.Release()
+			opLock = nil
+		}
+	}
+	defer releaseOpLock()
+
 	if handoff && lockFD >= 0 {
 		lock, err = AdoptLock(uintptr(lockFD))
 		if err != nil {
 			return reportReadyErr("adopt_lock_failed", err.Error())
 		}
+		if layout.TombstoneExists() {
+			return reportReadyErr(proto.ErrRemoving, "uninstall tombstone present")
+		}
 	} else {
+		opLock, err = AcquireLockWait(layout.OpLockPath, lifecycleLockTimeout)
+		if err != nil {
+			return reportReadyErr("lock_failed", err.Error())
+		}
+		if layout.TombstoneExists() {
+			return reportReadyErr(proto.ErrRemoving, "uninstall tombstone present")
+		}
 		lock, err = AcquireLock(layout.LockPath)
 		if errors.Is(err, ErrLocked) {
+			releaseOpLock()
 			pid, sock := waitForRunningMeta(layout, 2*time.Second)
 			if readyFile != nil {
 				_, _ = fmt.Fprintf(readyFile, "RUNNING %d %s\n", pid, sock)
@@ -600,6 +678,10 @@ func serveForeground(
 		if err != nil {
 			return reportReadyErr("lock_failed", err.Error())
 		}
+		if layout.TombstoneExists() {
+			_ = lock.Release()
+			return reportReadyErr(proto.ErrRemoving, "uninstall tombstone present")
+		}
 	}
 	defer lock.Release()
 
@@ -608,28 +690,37 @@ func serveForeground(
 		snap *HandoffSnapshot
 	)
 	if handoff {
-		if stateFD >= 0 {
-			sf := os.NewFile(uintptr(stateFD), "state-pipe")
-			rawSnap, rerr := io.ReadAll(io.LimitReader(sf, 16<<20))
-			_ = sf.Close()
-			if rerr != nil {
-				logger.Warn("failed reading handoff state pipe; continuing with fresh epoch", "err", rerr)
-			} else if len(rawSnap) > 0 {
-				var parsed HandoffSnapshot
-				if jerr := json.Unmarshal(rawSnap, &parsed); jerr != nil {
-					logger.Warn("corrupt handoff snapshot; continuing with fresh epoch", "err", jerr)
-				} else {
-					snap = &parsed
-					if snap.SocketPath != "" {
-						layout.SocketPath = snap.SocketPath
-						layout.SocketDir = filepath.Dir(snap.SocketPath)
-					}
-					if gateway == "" && snap.Gateway != "" {
-						gateway = snap.Gateway
-					}
-				}
-			}
+		if stateFD < 0 {
+			return reportReadyErr("snapshot_invalid", "missing state pipe fd")
 		}
+		sf := os.NewFile(uintptr(stateFD), "state-pipe")
+		rawSnap, rerr := io.ReadAll(io.LimitReader(sf, MaxHandoffReadBytes+1))
+		_ = sf.Close()
+		if rerr != nil {
+			return reportReadyErr("snapshot_invalid", fmt.Sprintf("read state pipe: %v", rerr))
+		}
+		if len(rawSnap) == 0 {
+			return reportReadyErr("snapshot_invalid", "empty handoff snapshot")
+		}
+		if len(rawSnap) > MaxHandoffReadBytes {
+			return reportReadyErr("snapshot_invalid", fmt.Sprintf("handoff snapshot exceeds %d bytes", MaxHandoffReadBytes))
+		}
+		var parsed HandoffSnapshot
+		if jerr := json.Unmarshal(rawSnap, &parsed); jerr != nil {
+			return reportReadyErr("snapshot_invalid", fmt.Sprintf("parse handoff snapshot: %v", jerr))
+		}
+		if parsed.Schema != HandoffSnapshotSchema {
+			return reportReadyErr("snapshot_invalid", fmt.Sprintf("unsupported snapshot schema %d (want %d)", parsed.Schema, HandoffSnapshotSchema))
+		}
+		snap = &parsed
+		if snap.SocketPath != "" {
+			layout.SocketPath = snap.SocketPath
+			layout.SocketDir = filepath.Dir(snap.SocketPath)
+		}
+		if gateway == "" && snap.Gateway != "" {
+			gateway = snap.Gateway
+		}
+
 		if listenFD >= 0 {
 			lf := os.NewFile(uintptr(listenFD), "listen-sock")
 			fl, ferr := net.FileListener(lf)
@@ -654,15 +745,23 @@ func serveForeground(
 		Lock:            lock,
 		Listener:        ln,
 		InitialSnapshot: snap,
+		// Hard exit calls os.Exit(0) immediately without writing logs or
+		// pre-closing locks so exit cannot block and the OS releases locks
+		// atomically when the process terminates.
+		OnHardExit: func() {
+			os.Exit(0)
+		},
 	}
 	applyTestServerConfig(&cfg)
 
-	cfg.OnReady = func() {
-		// On hot-update handoff, atomically switch the current symlink and update
-		// install.json + README.txt right before signaling READY (spec §6 item 4).
-		if handoff {
-			finalizeHandoffCutover(layout, build, logger)
+	if handoff {
+		cfg.PreReady = func(meta *MetaRecord) error {
+			return finalizeHandoffCutover(layout, build, binaryPath, meta)
 		}
+	}
+
+	cfg.OnReady = func() {
+		releaseOpLock()
 		if readyFile != nil {
 			if handoff {
 				procStart, _, _ := ProcStartTime(os.Getpid())
@@ -695,33 +794,88 @@ func serveForeground(
 	return 0
 }
 
-func finalizeHandoffCutover(layout *Layout, build proto.BuildInfo, log *slog.Logger) {
-	exe, err := os.Executable()
-	if err != nil {
-		log.Warn("handoff cutover: resolve executable failed", "err", err)
-		return
+// finalizeHandoffCutover acquires SharedLock -> OpLock, verifies the target
+// binary still exists on disk (no dangling symlink), and atomically updates
+// the symlink, install.json, README.txt, and meta.json BEFORE Accept starts
+// and BEFORE READY is signaled. On any failure it performs compare-and-restore
+// under the held locks and returns an error so the replacement never reports READY.
+func finalizeHandoffCutover(layout *Layout, build proto.BuildInfo, binaryPath string, meta *MetaRecord) error {
+	if shouldFailCutover() {
+		return errors.New("injected cutover failure")
 	}
-	realExe, err := filepath.EvalSymlinks(exe)
-	if err != nil {
-		realExe = exe
+
+	// Global lock order: SharedLock -> OpLock.
+	if _, err := os.Lstat(layout.LibDir); err != nil {
+		return fmt.Errorf("stat lib dir: %w", err)
 	}
-	realLib, err := filepath.EvalSymlinks(layout.LibDir)
+	sharedLock, err := AcquireLockWait(layout.SharedLockPath, lifecycleLockTimeout)
 	if err != nil {
-		realLib = layout.LibDir
+		return fmt.Errorf("acquire shared lock: %w", err)
 	}
-	rel, err := filepath.Rel(realLib, realExe)
-	if err == nil && rel != "." && !strings.HasPrefix(rel, "..") {
-		if err := AtomicSymlink(rel, layout.CurrentSymlink); err != nil {
-			log.Warn("handoff cutover: atomic symlink failed", "err", err)
+	defer sharedLock.Release()
+
+	opLock, err := AcquireLockWait(layout.OpLockPath, lifecycleLockTimeout)
+	if err != nil {
+		return fmt.Errorf("acquire op lock: %w", err)
+	}
+	defer opLock.Release()
+
+	if layout.TombstoneExists() {
+		return errors.New("uninstall tombstone present")
+	}
+
+	exe := binaryPath
+	if exe == "" {
+		exe, err = os.Executable()
+		if err != nil {
+			return fmt.Errorf("resolve executable: %w", err)
 		}
 	}
+	cleanExe := filepath.Clean(exe)
+	// Verify the switch target actually exists on disk as a regular 0700 binary
+	// (prevents writing a dangling symlink if the file was deleted after FD open).
+	exeInfo, err := os.Lstat(cleanExe)
+	if err != nil {
+		return fmt.Errorf("cutover target missing %s: %w", cleanExe, err)
+	}
+	if exeInfo.Mode()&os.ModeSymlink != 0 || !exeInfo.Mode().IsRegular() {
+		return fmt.Errorf("cutover target %s is not a regular file", cleanExe)
+	}
+	if st, ok := exeInfo.Sys().(*syscall.Stat_t); !ok || st.Uid != layout.UID {
+		return fmt.Errorf("cutover target %s ownership invalid", cleanExe)
+	}
+	if exeInfo.Mode().Perm() != 0o700 {
+		return fmt.Errorf("cutover target %s mode is %04o, want 0700", cleanExe, exeInfo.Mode().Perm())
+	}
+
+	realLib, err := filepath.EvalSymlinks(layout.LibDir)
+	if err != nil {
+		realLib = filepath.Clean(layout.LibDir)
+	}
+	realExe, err := filepath.EvalSymlinks(cleanExe)
+	if err != nil {
+		return fmt.Errorf("resolve target %s: %w", cleanExe, err)
+	}
+	rel, err := filepath.Rel(realLib, realExe)
+	if err != nil || rel == "." || strings.HasPrefix(rel, "..") {
+		return fmt.Errorf("replacement binary %s outside lib dir %s", realExe, realLib)
+	}
+
+	bk := captureCutoverBackup(layout)
+	oldMeta, _ := ReadMetaRecord(layout.MetaJSON)
+
+	if err := AtomicSymlink(rel, layout.CurrentSymlink); err != nil {
+		return fmt.Errorf("switch symlink: %w", err)
+	}
+
 	if rec, err := ReadInstallRecord(layout.InstallJSON); err == nil {
 		rec.Version = build.Version
 		rec.Release = build.Release
 		rec.Commit = build.Commit
 		rec.Files = append(rec.Files, filepath.Dir(realExe), realExe)
 		if err := WriteInstallRecord(layout.InstallJSON, rec); err != nil {
-			log.Warn("handoff cutover: update install.json failed", "err", err)
+			_ = compareAndRestoreCutoverLocked(layout, bk, oldMeta, rel, meta.PID, build.Release, false)
+			return fmt.Errorf("update install.json: %w", err)
 		}
 		readmeText := proto.RenderReadme(proto.ReadmeData{
 			Version:    rec.Version,
@@ -735,8 +889,20 @@ func finalizeHandoffCutover(layout *Layout, build proto.BuildInfo, log *slog.Log
 			SocketPath: layout.SocketPath,
 			Files:      rec.Files,
 		})
-		_ = WriteFileAtomic(layout.ReadmePath, []byte(readmeText), 0o644)
+		if err := WriteFileAtomic(layout.ReadmePath, []byte(readmeText), 0o644); err != nil {
+			_ = compareAndRestoreCutoverLocked(layout, bk, oldMeta, rel, meta.PID, build.Release, false)
+			return fmt.Errorf("update README.txt: %w", err)
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		_ = compareAndRestoreCutoverLocked(layout, bk, oldMeta, rel, meta.PID, build.Release, false)
+		return fmt.Errorf("read install.json: %w", err)
 	}
+
+	if err := WriteMetaRecord(layout.MetaJSON, meta); err != nil {
+		_ = compareAndRestoreCutoverLocked(layout, bk, oldMeta, rel, meta.PID, build.Release, false)
+		return fmt.Errorf("write meta.json: %w", err)
+	}
+	return nil
 }
 
 func waitForRunningMeta(layout *Layout, wait time.Duration) (int, string) {
@@ -769,7 +935,6 @@ func cmdStatus(stdout io.Writer) int {
 		sockPath = meta.SocketPath
 	}
 
-	// Query live daemon over Unix socket via daemon.health first.
 	var health proto.HealthResult
 	if err := callLocalRPC(sockPath, proto.MethodDaemonHealth, nil, &health, 2*time.Second); err == nil {
 		state := health.State
@@ -788,7 +953,6 @@ func cmdStatus(stdout io.Writer) int {
 		return 0
 	}
 
-	// Fallback: inspect meta.json and /proc/<pid>/stat.
 	if metaErr == nil && ProcessMatches(meta.PID, meta.StartTime) {
 		fmt.Fprintf(stdout, "result=ok\n")
 		fmt.Fprintf(stdout, "state=running\n")
@@ -839,10 +1003,10 @@ func cmdStop(stdout io.Writer) int {
 	return 0
 }
 
-// StopDaemon stops the running corrald instance for layout: first requesting
-// graceful shutdown over the Unix socket, then falling back to SIGTERM (3 s)
-// and SIGKILL only when both pid and /proc/<pid>/stat field-22 start time match
-// meta.json.
+// StopDaemon stops all running corrald processes for layout (including a
+// post-handoff draining predecessor recorded in meta.PrevPID) and verifies
+// corrald.lock is no longer held by any process before cleaning up socket/meta
+// artifacts.
 func StopDaemon(layout *Layout) (stopped bool, pid int, err error) {
 	meta, metaErr := ReadMetaRecord(layout.MetaJSON)
 	sockPath := layout.SocketPath
@@ -855,18 +1019,17 @@ func StopDaemon(layout *Layout) (stopped bool, pid int, err error) {
 		pid = meta.PID
 	}
 
-	// 1. Try graceful RPC shutdown via Unix socket.
 	var res proto.ShutdownResult
 	rpcOK := callLocalRPC(sockPath, proto.MethodDaemonShutdown, proto.ShutdownParams{Reason: "stop"}, &res, 2*time.Second) == nil
 	if rpcOK {
 		wasRunning = true
-		if waitProcessGone(layout, meta, 3*time.Second) {
-			cleanupStoppedArtifacts(layout, sockPath)
-			return true, pid, nil
+		if meta != nil {
+			_ = waitSpecificProcessGone(meta.PID, meta.StartTime, 3*time.Second)
+		} else {
+			_ = waitLockFree(layout.LockPath, 3*time.Second)
 		}
 	}
 
-	// Re-read meta.json in case a handoff occurred right before stop.
 	if freshMeta, err := ReadMetaRecord(layout.MetaJSON); err == nil {
 		meta = freshMeta
 		metaErr = nil
@@ -876,44 +1039,104 @@ func StopDaemon(layout *Layout) (stopped bool, pid int, err error) {
 		}
 	}
 
-	if metaErr != nil || !ProcessMatches(meta.PID, meta.StartTime) {
-		cleanupStoppedArtifacts(layout, sockPath)
-		return wasRunning, 0, nil
+	if metaErr == nil && ProcessMatches(meta.PID, meta.StartTime) {
+		wasRunning = true
+		if err := terminateVerifiedProcess(meta.PID, meta.StartTime); err != nil {
+			return false, meta.PID, err
+		}
 	}
 
-	// 2. Send SIGTERM only when PID and /proc/<pid>/stat start time match.
-	_ = syscall.Kill(meta.PID, syscall.SIGTERM)
-	if waitProcessGone(layout, meta, 3*time.Second) {
-		cleanupStoppedArtifacts(layout, sockPath)
-		return true, meta.PID, nil
+	if metaErr == nil && meta.PrevPID > 0 && ProcessMatches(meta.PrevPID, meta.PrevStartTime) {
+		wasRunning = true
+		if err := terminateVerifiedProcess(meta.PrevPID, meta.PrevStartTime); err != nil {
+			return false, meta.PrevPID, err
+		}
 	}
 
-	// 3. Re-verify identity before SIGKILL.
-	if !ProcessMatches(meta.PID, meta.StartTime) {
-		cleanupStoppedArtifacts(layout, sockPath)
-		return true, meta.PID, nil
+	if lockHeldErr := ensureLockReleased(layout); lockHeldErr != nil {
+		return false, pid, lockHeldErr
 	}
-	_ = syscall.Kill(meta.PID, syscall.SIGKILL)
-	if waitProcessGone(layout, meta, 2*time.Second) {
-		cleanupStoppedArtifacts(layout, sockPath)
-		return true, meta.PID, nil
-	}
-	return false, meta.PID, fmt.Errorf("process %d did not exit after SIGTERM and SIGKILL", meta.PID)
+
+	cleanupStoppedArtifacts(layout, sockPath)
+	return wasRunning, 0, nil
 }
 
-func waitProcessGone(layout *Layout, meta *MetaRecord, timeout time.Duration) bool {
+func terminateVerifiedProcess(pid int, startTime string) error {
+	_ = syscall.Kill(pid, syscall.SIGTERM)
+	if waitSpecificProcessGone(pid, startTime, 3*time.Second) {
+		return nil
+	}
+	if !ProcessMatches(pid, startTime) {
+		return nil
+	}
+	_ = syscall.Kill(pid, syscall.SIGKILL)
+	if waitSpecificProcessGone(pid, startTime, 2*time.Second) {
+		return nil
+	}
+	return fmt.Errorf("process %d did not exit after SIGTERM and SIGKILL", pid)
+}
+
+func ensureLockReleased(layout *Layout) error {
+	if _, err := os.Lstat(layout.LockPath); errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		lock, err := AcquireLock(layout.LockPath)
+		if err == nil {
+			_ = lock.Release()
+			return nil
+		}
+		if !errors.Is(err, ErrLocked) {
+			return fmt.Errorf("verify lock %s: %w", layout.LockPath, err)
+		}
+		if meta, merr := ReadMetaRecord(layout.MetaJSON); merr == nil {
+			if ProcessMatches(meta.PID, meta.StartTime) {
+				if kerr := terminateVerifiedProcess(meta.PID, meta.StartTime); kerr != nil {
+					return kerr
+				}
+				continue
+			}
+			if meta.PrevPID > 0 && ProcessMatches(meta.PrevPID, meta.PrevStartTime) {
+				if kerr := terminateVerifiedProcess(meta.PrevPID, meta.PrevStartTime); kerr != nil {
+					return kerr
+				}
+				continue
+			}
+		}
+		if time.Now().After(deadline) {
+			return errors.New("corrald.lock is still held by an active process")
+		}
+		time.Sleep(40 * time.Millisecond)
+	}
+}
+
+func waitSpecificProcessGone(pid int, startTime string, timeout time.Duration) bool {
+	if pid <= 0 || startTime == "" {
+		return true
+	}
 	deadline := time.Now().Add(timeout)
 	for {
-		if meta != nil && meta.PID > 0 && meta.StartTime != "" {
-			if !ProcessMatches(meta.PID, meta.StartTime) {
-				return true
-			}
-		} else {
-			// Without meta, check if flock is free.
-			if lock, err := AcquireLock(layout.LockPath); err == nil {
-				_ = lock.Release()
-				return true
-			}
+		if !ProcessMatches(pid, startTime) {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(40 * time.Millisecond)
+	}
+}
+
+func waitLockFree(lockPath string, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for {
+		lock, err := AcquireLock(lockPath)
+		if err == nil {
+			_ = lock.Release()
+			return true
+		}
+		if !errors.Is(err, ErrLocked) {
+			return true
 		}
 		if time.Now().After(deadline) {
 			return false
@@ -948,26 +1171,90 @@ func cmdUninstall(args []string, stdout io.Writer) int {
 		return 1
 	}
 
-	// 1. Write removing tombstone immediately if StateDir exists (or can be created).
-	if _, err := os.Stat(layout.StateDir); err == nil {
-		_ = WriteFileAtomic(layout.TombstonePath, []byte(time.Now().UTC().Format(time.RFC3339)+"\n"), 0o600)
+	var (
+		sharedLock     *FileLock
+		opLock         *FileLock
+		lifeLock       *FileLock
+		libDirExists   bool
+		stateDirExists bool
+	)
+	if _, err := os.Lstat(layout.LibDir); err == nil {
+		libDirExists = true
+	} else if !errors.Is(err, os.ErrNotExist) {
+		writeErr(stdout, "lib_dir_failed", err.Error())
+		return 1
+	}
+	if _, err := os.Lstat(layout.StateDir); err == nil {
+		stateDirExists = true
+	} else if !errors.Is(err, os.ErrNotExist) {
+		writeErr(stdout, "state_dir_failed", err.Error())
+		return 1
+	}
+
+	// Acquire locks in strict global order SharedLock -> OpLock -> corrald.lock,
+	// keeping BOTH locks and the removing tombstone active until shared binary
+	// cleanup finishes so no same-host or cross-host install/serve can race.
+	if libDirExists {
+		sharedLock, err = AcquireLockWait(layout.SharedLockPath, lifecycleLockTimeout)
+		if err != nil {
+			writeErr(stdout, "lock_failed", err.Error())
+			return 1
+		}
+		defer func() {
+			if sharedLock != nil {
+				_ = sharedLock.Release()
+			}
+		}()
+	}
+
+	if stateDirExists {
+		opLock, err = AcquireLockWait(layout.OpLockPath, lifecycleLockTimeout)
+		if err != nil {
+			writeErr(stdout, "lock_failed", err.Error())
+			return 1
+		}
+		defer func() {
+			if opLock != nil {
+				_ = opLock.Release()
+			}
+		}()
+		// 1. Write removing tombstone; abort immediately if tombstone cannot be persisted.
+		if err := WriteFileAtomic(layout.TombstonePath, []byte(time.Now().UTC().Format(time.RFC3339)+"\n"), 0o600); err != nil {
+			writeErr(stdout, "tombstone_failed", err.Error())
+			return 1
+		}
 	}
 
 	// Capture meta & install records before stopping/deleting.
 	metaBefore, _ := ReadMetaRecord(layout.MetaJSON)
-	installRec, _ := ReadInstallRecord(layout.InstallJSON)
+	installRec, installErr := ReadInstallRecord(layout.InstallJSON)
 	sockPath := layout.SocketPath
 	if metaBefore != nil && metaBefore.SocketPath != "" {
 		sockPath = metaBefore.SocketPath
 	}
 
-	// 2. Stop running daemon. If stop fails, do not delete files (spec §4 & design doc).
+	// 2. Stop running daemon (and any draining predecessor) and confirm lock is free.
 	_, pid, stopErr := StopDaemon(layout)
 	if stopErr != nil {
 		fmt.Fprintf(stdout, "error=stop_failed\n")
 		fmt.Fprintf(stdout, "pid=%d\n", pid)
 		fmt.Fprintf(stdout, "detail=%s\n", strings.ReplaceAll(stopErr.Error(), "\n", " "))
 		return 1
+	}
+
+	if stateDirExists {
+		lifeLock, err = AcquireLock(layout.LockPath)
+		if err != nil {
+			fmt.Fprintf(stdout, "error=stop_failed\n")
+			fmt.Fprintf(stdout, "pid=0\n")
+			fmt.Fprintf(stdout, "detail=%s\n", strings.ReplaceAll(err.Error(), "\n", " "))
+			return 1
+		}
+		defer func() {
+			if lifeLock != nil {
+				_ = lifeLock.Release()
+			}
+		}()
 	}
 
 	type leftover struct {
@@ -994,31 +1281,73 @@ func cmdUninstall(args []string, stdout io.Writer) int {
 		}
 	}
 
-	// 4. Determine whether this machine is the last machine in a shared HOME (NFS).
-	isLast := isLastMachineInStateRoot(layout.StateRoot, layout.MachineID)
-
-	// 5. Delete this machine's state directory.
-	if err := os.RemoveAll(layout.StateDir); err != nil {
-		addLeft(layout.StateDir, err.Error())
+	// 4. While STILL holding SharedLock, OpLock, lifeLock, and with tombstone
+	// STILL on disk, check whether this host is the last machine and delete
+	// shared binaries ONLY if install.json is available and authoritative.
+	isLast, lastCheckErr := isLastMachineInStateRoot(layout.StateRoot, layout.MachineID)
+	if lastCheckErr != nil {
+		isLast = false
+		addLeft(layout.StateRoot, fmt.Sprintf("unable to verify other machines (shared binaries preserved): %v", lastCheckErr))
 	}
 
-	// 6. Only if this is the last machine, remove shared corrald binaries,
-	// symlink, and README.txt — NEVER touching code-server or other entries.
-	var sharedTargets []string
-	if isLast {
-		sharedTargets = collectSharedCorraldTargets(layout, installRec)
-		for _, target := range sharedTargets {
-			if err := os.RemoveAll(target); err != nil {
-				addLeft(target, err.Error())
+	var (
+		sharedTargets        []string
+		removedSharedCleanly bool
+	)
+	if isLast && lastCheckErr == nil && libDirExists {
+		if installRec != nil && installErr == nil {
+			sharedTargets = collectSharedCorraldTargets(layout, installRec)
+			allOK := true
+			for _, target := range sharedTargets {
+				if err := os.RemoveAll(target); err != nil {
+					addLeft(target, err.Error())
+					allOK = false
+				}
+			}
+			removedSharedCleanly = allOK
+		} else {
+			// Item 13: Without a readable install.json manifest, NEVER delete
+			// shared program directories, symlink, or README.txt. List any
+			// preserved shared paths so uninstall reports result=partial.
+			for _, p := range listPreservedSharedPaths(layout) {
+				addLeft(p, "install.json missing or unreadable; shared file preserved")
 			}
 		}
-		// Remove StateRoot / LibDir only if completely empty.
-		_ = os.Remove(layout.StateRoot)
-		_ = os.Remove(layout.LibDir)
 	}
 
-	// 7. Post-check verification (回查): process exited, socket gone, state dir gone,
-	// and shared targets gone (when last machine).
+	// 5. Only AFTER shared binary cleanup is complete, remove this host's state
+	// directory (containing tombstone, install.json, op.lock, corrald.lock).
+	if stateDirExists {
+		if err := os.RemoveAll(layout.StateDir); err != nil {
+			addLeft(layout.StateDir, err.Error())
+		}
+	}
+	if lifeLock != nil {
+		_ = lifeLock.Release()
+		lifeLock = nil
+	}
+	if opLock != nil {
+		_ = opLock.Release()
+		opLock = nil
+	}
+
+	// 6. Unlink SharedLockPath ONLY WHILE STILL HOLDING sharedLock (paired with
+	// AcquireLock inode verification so no two processes can lock different
+	// inodes at the same path), and ONLY when this was the last machine and
+	// shared cleanup succeeded.
+	if sharedLock != nil {
+		if isLast && lastCheckErr == nil && removedSharedCleanly {
+			_ = os.Remove(layout.SharedLockPath)
+		}
+		_ = sharedLock.Release()
+		sharedLock = nil
+		if isLast && lastCheckErr == nil && removedSharedCleanly {
+			_ = os.Remove(layout.StateRoot)
+			_ = os.Remove(layout.LibDir)
+		}
+	}
+
+	// 7. Post-check verification (回查).
 	if metaBefore != nil && ProcessMatches(metaBefore.PID, metaBefore.StartTime) {
 		fmt.Fprintf(stdout, "error=stop_failed\n")
 		fmt.Fprintf(stdout, "pid=%d\n", metaBefore.PID)
@@ -1032,7 +1361,7 @@ func cmdUninstall(args []string, stdout io.Writer) int {
 	if _, err := os.Lstat(layout.StateDir); err == nil {
 		addLeft(layout.StateDir, "state directory still exists after removal")
 	}
-	if isLast {
+	if isLast && installRec != nil && installErr == nil {
 		for _, target := range sharedTargets {
 			if _, err := os.Lstat(target); err == nil {
 				addLeft(target, "path still exists after removal")
@@ -1054,29 +1383,48 @@ func cmdUninstall(args []string, stdout io.Writer) int {
 	return 0
 }
 
-func isLastMachineInStateRoot(stateRoot, currentMID string) bool {
+// isLastMachineInStateRoot reports whether no other machine directory under
+// stateRoot contains an install.json. Any read or stat error (other than
+// os.ErrNotExist) conservatively returns (false, err) so shared binaries are
+// never deleted on I/O or permission failures.
+func isLastMachineInStateRoot(stateRoot, currentMID string) (bool, error) {
 	entries, err := os.ReadDir(stateRoot)
 	if err != nil {
-		return true
+		if errors.Is(err, os.ErrNotExist) {
+			return true, nil
+		}
+		return false, err
 	}
 	for _, e := range entries {
 		if !e.IsDir() || e.Name() == currentMID {
 			continue
 		}
-		if _, err := os.Stat(filepath.Join(stateRoot, e.Name(), "install.json")); err == nil {
-			return false
+		_, err := os.Stat(filepath.Join(stateRoot, e.Name(), "install.json"))
+		if err == nil {
+			return false, nil
 		}
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		return false, err
 	}
-	return true
+	return true, nil
 }
 
+// collectSharedCorraldTargets returns ONLY the shared files under LibDir that
+// are explicitly recorded in installRec.Files and match either the symlink,
+// README.txt, or the strict "corrald-<Version>-<Release>" directory grammar.
 func collectSharedCorraldTargets(layout *Layout, installRec *InstallRecord) []string {
+	if installRec == nil {
+		return nil
+	}
 	seen := make(map[string]struct{})
 	var targets []string
 	add := func(p string) {
 		if p == "" {
 			return
 		}
+		p = filepath.Clean(p)
 		if _, ok := seen[p]; ok {
 			return
 		}
@@ -1084,32 +1432,45 @@ func collectSharedCorraldTargets(layout *Layout, installRec *InstallRecord) []st
 		targets = append(targets, p)
 	}
 
-	add(layout.CurrentSymlink)
-	add(layout.ReadmePath)
-
-	// Any corrald-* version directories (or stray .corrald.tmp.*) under LibDir.
-	if entries, err := os.ReadDir(layout.LibDir); err == nil {
-		for _, e := range entries {
-			name := e.Name()
-			if strings.HasPrefix(name, "corrald-") || strings.HasPrefix(name, ".corrald.tmp.") {
-				add(filepath.Join(layout.LibDir, name))
-			}
+	cleanLib := filepath.Clean(layout.LibDir)
+	for _, f := range installRec.Files {
+		clean := filepath.Clean(f)
+		if filepath.Dir(clean) != cleanLib {
+			continue
+		}
+		base := filepath.Base(clean)
+		if base == "corrald" || base == "README.txt" {
+			add(clean)
+			continue
+		}
+		if _, _, ok := ParseVersionDirName(base); ok {
+			add(clean)
 		}
 	}
+	return targets
+}
 
-	// Also include any corrald-* directories recorded in install.json strictly inside LibDir.
-	if installRec != nil {
-		for _, f := range installRec.Files {
-			clean := filepath.Clean(f)
-			if filepath.Dir(clean) == layout.LibDir {
-				base := filepath.Base(clean)
-				if base == "corrald" || base == "README.txt" || strings.HasPrefix(base, "corrald-") {
-					add(clean)
+// listPreservedSharedPaths enumerates shared corrald artifacts still present in
+// LibDir when install.json is missing or corrupt, so uninstall can report them
+// as left= entries under result=partial without deleting them.
+func listPreservedSharedPaths(layout *Layout) []string {
+	var preserved []string
+	if _, err := os.Lstat(layout.CurrentSymlink); err == nil {
+		preserved = append(preserved, layout.CurrentSymlink)
+	}
+	if _, err := os.Lstat(layout.ReadmePath); err == nil {
+		preserved = append(preserved, layout.ReadmePath)
+	}
+	if entries, err := os.ReadDir(layout.LibDir); err == nil {
+		for _, e := range entries {
+			if e.IsDir() {
+				if _, _, ok := ParseVersionDirName(e.Name()); ok {
+					preserved = append(preserved, filepath.Join(layout.LibDir, e.Name()))
 				}
 			}
 		}
 	}
-	return targets
+	return preserved
 }
 
 // callLocalRPC connects to sockPath, invokes method with params, and decodes
