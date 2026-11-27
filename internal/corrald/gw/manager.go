@@ -32,8 +32,10 @@ var (
 	ErrUnavailable = errors.New("corrald is not available on this gateway")
 	// ErrAdminDisabled is returned when the administrator has disabled corrald.
 	ErrAdminDisabled = errors.New("corrald is disabled by administrator")
+	// ErrManifestRequired is returned when manifest_hash is missing on install/update.
+	ErrManifestRequired = errors.New("manifest_hash is required")
 	// ErrManifestChanged is returned when the manifest_hash submitted by the user
-	// does not match the gateway's current corrald manifest.
+	// does not match the current corrald manifest.
 	ErrManifestChanged = errors.New("corrald manifest changed; review details again")
 	// ErrCannotCancel is returned when attempting to cancel an install that is not
 	// active or has already reached the start phase.
@@ -47,7 +49,7 @@ var (
 // SSHProvider supplies SSH connections and host/user metadata to Manager.
 type SSHProvider interface {
 	// AcquireSSH returns an active or freshly dialed SSH client for (ownerID, hostID),
-	// along with a release callback, the pinned host key fingerprint, and SSH username.
+	// along with a release callback, the host key fingerprint, and SSH username.
 	AcquireSSH(ctx context.Context, ownerID, hostID int64) (client *ssh.Client, release func(), fingerprint, sshUser string, err error)
 	// HostBinding returns the current SSH username and pinned host key fingerprint
 	// (empty string if not yet pinned) for (ownerID, hostID).
@@ -75,15 +77,12 @@ type ManagerConfig struct {
 	ProtoMax        int
 
 	// Test hooks (nil in production).
-	ProbeOverride    func(ctx context.Context, c *ssh.Client) (*HostProbe, error)
-	VerifySHA256Hook func(actual string) string
-	// OnEvent receives all daemon events forwarded across hosts (for T3 & tests).
-	OnEvent func(fingerprint, sshUser string, ev proto.Event)
-	// OnResync is called when daemon.resume returns resync_required.
-	OnResync func(fingerprint, sshUser string)
-	// BeforeInstallStart is an optional test hook called right before the start
-	// step of an install (useful for testing cancellation or gateway restart).
+	ProbeOverride      func(ctx context.Context, c *ssh.Client) (*HostProbe, error)
+	VerifySHA256Hook   func(actual string) string
+	OnEvent            func(fingerprint, sshUser string, ev proto.Event)
+	OnResync           func(fingerprint, sshUser string)
 	BeforeInstallStart func(hostID int64, opID string)
+	BeforeUpdateStage  func(hostID int64, opID string)
 }
 
 // API view types matching web/src/corraldLogic.ts.
@@ -170,6 +169,10 @@ type accountKey struct {
 	Username    string
 }
 
+func (k accountKey) valid() bool {
+	return k.Fingerprint != "" && k.Username != ""
+}
+
 type hostRef struct {
 	HostID     int64
 	OwnerID    int64
@@ -178,11 +181,45 @@ type hostRef struct {
 
 type runningOp struct {
 	opID      string
+	hostID    int64
+	acct      accountKey
 	kind      string
 	step      string
 	cancel    context.CancelFunc
 	cancelled bool
 	done      chan struct{}
+}
+
+// sshOwnership transfers ownership of an AcquireSSH release callback so an
+// operation's deferred cleanup will not close a freshly dialed SSH connection
+// that was adopted by a live sharedConn.
+type sshOwnership struct {
+	mu      sync.Mutex
+	release func()
+}
+
+func newSSHOwnership(rel func()) *sshOwnership {
+	if rel == nil {
+		return nil
+	}
+	return &sshOwnership{release: rel}
+}
+
+func (o *sshOwnership) take() func() {
+	if o == nil {
+		return nil
+	}
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	r := o.release
+	o.release = nil
+	return r
+}
+
+func (o *sshOwnership) releaseIfOwned() {
+	if r := o.take(); r != nil {
+		r()
+	}
 }
 
 type sharedConn struct {
@@ -193,6 +230,8 @@ type sharedConn struct {
 	sshRelease func()
 	socketPath string
 	machineID  string
+	homeDir    string
+	uid        int64
 	libDir     string
 	stateDir   string
 	hello      *proto.HelloResult
@@ -201,14 +240,20 @@ type sharedConn struct {
 	lastSeq    uint64
 	hostRefs   map[int64]*hostRef
 
-	// Hot-update tracking & 30-min crash-loop rollback state.
+	// Cached failed releases observed from host failed.json or local failures.
+	failedReleases []int64
+
+	// Unacknowledged mutating RPC op_id -> epoch sent in (T1 epoch-scoped dedup).
+	unackedWrites map[string]string
+
+	// Hot-update tracking & 30-min crash-loop rollback state (also persisted in DB).
 	updatedAt        time.Time
 	updateTargetVer  string
 	updateTargetRel  int64
 	updateCrashCount int
 	prevVersion      string
 	prevRelease      int64
-	prevRelTarget    string // relative symlink target under LibDir, e.g. corrald-0.1.0-100/corrald
+	prevRelTarget    string
 
 	// Pending scope change detected against current Dist.
 	scopeChange *ScopeChangeInfo
@@ -222,8 +267,26 @@ type sharedConn struct {
 	stopOnce         sync.Once
 }
 
+func newSharedConn(key accountKey) *sharedConn {
+	return &sharedConn{
+		key:           key,
+		uid:           -1,
+		hostRefs:      make(map[int64]*hostRef),
+		unackedWrites: make(map[string]string),
+		stopCh:        make(chan struct{}),
+	}
+}
+
 func (sc *sharedConn) stop() {
 	sc.stopOnce.Do(func() { close(sc.stopCh) })
+}
+
+func (sc *sharedConn) addFailedReleasesLocked(rels []int64) {
+	for _, r := range rels {
+		if r > 0 && !slices.Contains(sc.failedReleases, r) {
+			sc.failedReleases = append(sc.failedReleases, r)
+		}
+	}
 }
 
 // Manager coordinates all corrald connections, operations, auto-updates, health
@@ -246,12 +309,13 @@ type Manager struct {
 	distMu sync.RWMutex
 	dist   *Dist
 
-	mu       sync.Mutex
-	conns    map[accountKey]*sharedConn
-	hostConn map[int64]accountKey
-	ops      map[int64]*runningOp
-	closed   bool
-	wg       sync.WaitGroup
+	mu        sync.Mutex
+	conns     map[accountKey]*sharedConn
+	hostConn  map[int64]accountKey
+	opsByHost map[int64]*runningOp
+	opsByAcct map[accountKey]*runningOp
+	closed    bool
+	wg        sync.WaitGroup
 }
 
 // NewManager creates a corrald gateway Manager.
@@ -297,7 +361,8 @@ func NewManager(cfg ManagerConfig) *Manager {
 		protoMax:        cfg.ProtoMax,
 		conns:           make(map[accountKey]*sharedConn),
 		hostConn:        make(map[int64]accountKey),
-		ops:             make(map[int64]*runningOp),
+		opsByHost:       make(map[int64]*runningOp),
+		opsByAcct:       make(map[accountKey]*runningOp),
 	}
 }
 
@@ -335,7 +400,12 @@ func (m *Manager) Close() {
 		return
 	}
 	m.closed = true
-	for _, op := range m.ops {
+	for _, op := range m.opsByHost {
+		if op.cancel != nil {
+			op.cancel()
+		}
+	}
+	for _, op := range m.opsByAcct {
 		if op.cancel != nil {
 			op.cancel()
 		}
@@ -356,19 +426,25 @@ func (m *Manager) Close() {
 
 // ClientForCap is the unified fallback entrypoint (spec §9) used by stage 1
 // features (T3) to decide whether a host capability should use corrald or fall
-// back to the existing SSH path.
+// back to the existing SSH path. Enforces both per-capability health degradation
+// and consented manifest scope boundaries.
 func (m *Manager) ClientForCap(userID, hostID int64, capName string) (*Client, bool) {
+	client, _, ok := m.clientAndConnForCap(userID, hostID, capName)
+	return client, ok
+}
+
+func (m *Manager) clientAndConnForCap(userID, hostID int64, capName string) (*Client, *sharedConn, bool) {
 	if m == nil || m.adminDisabled || !m.Available() {
-		return nil, false
+		return nil, nil, false
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	ch, err := m.store.CorraldHostByID(ctx, hostID)
 	if err != nil {
-		return nil, false
+		return nil, nil, false
 	}
 	if EffectiveUserState(toSnapshot(ch), userID) != StateRunning {
-		return nil, false
+		return nil, nil, false
 	}
 	m.mu.Lock()
 	key, ok := m.hostConn[hostID]
@@ -378,19 +454,82 @@ func (m *Manager) ClientForCap(userID, hostID int64, capName string) (*Client, b
 	}
 	m.mu.Unlock()
 	if sc == nil {
-		return nil, false
+		return nil, nil, false
 	}
 	sc.mu.Lock()
 	defer sc.mu.Unlock()
 	if sc.client == nil || sc.client.Closed() {
-		return nil, false
+		return nil, nil, false
+	}
+	// Enforce consented manifest scope against actual running daemon manifest (Item 6).
+	if sc.hello != nil {
+		if consented, hasConsented := parseManifestJSON(ch.ManifestJSON); hasConsented {
+			if !CapAllowedByScope(consented, sc.hello.Manifest, capName) {
+				return nil, nil, false
+			}
+		}
 	}
 	if capName != "" && sc.health != nil && sc.health.Caps != nil {
 		if st, exists := sc.health.Caps[capName]; exists && st != "ok" {
-			return nil, false
+			return nil, nil, false
 		}
 	}
-	return sc.client, true
+	return sc.client, sc, true
+}
+
+// CallMutating executes a mutating RPC (e.g. pane.send / pane.answer) with T1's
+// protocol conventions:
+//   - Generates op_id via proto.NewOpID if opID is empty.
+//   - Refuses to resend an unacknowledged op_id across a changed daemon epoch
+//     (returning ErrUnknownResult -> HTTP 409 corrald_unknown_result).
+//   - Treats op_expired, op_unknown, and mid-flight disconnects as ErrUnknownResult.
+func (m *Manager) CallMutating(
+	ctx context.Context,
+	userID, hostID int64,
+	capName, method, opID string,
+	buildParams func(opID string) any,
+	dst any,
+) (string, error) {
+	if opID == "" {
+		opID = NewWriteOpID()
+	}
+	client, sc, ok := m.clientAndConnForCap(userID, hostID, capName)
+	if !ok {
+		return opID, ErrNotConnected
+	}
+
+	sc.mu.Lock()
+	curEpoch := sc.epoch
+	if curEpoch == "" && sc.hello != nil {
+		curEpoch = sc.hello.Epoch
+	}
+	if prevEpoch, seen := sc.unackedWrites[opID]; seen && prevEpoch != "" && prevEpoch != curEpoch {
+		sc.mu.Unlock()
+		return opID, fmt.Errorf("%w: daemon epoch changed (%s -> %s)", ErrUnknownResult, prevEpoch, curEpoch)
+	}
+	if len(sc.unackedWrites) >= 512 {
+		// Evict entries when table grows large to bound memory.
+		for k := range sc.unackedWrites {
+			delete(sc.unackedWrites, k)
+			if len(sc.unackedWrites) < 256 {
+				break
+			}
+		}
+	}
+	sc.unackedWrites[opID] = curEpoch
+	sc.mu.Unlock()
+
+	var params any
+	if buildParams != nil {
+		params = buildParams(opID)
+	}
+	err := client.CallMutating(ctx, method, params, dst)
+	if err == nil || !errors.Is(err, ErrUnknownResult) {
+		sc.mu.Lock()
+		delete(sc.unackedWrites, opID)
+		sc.mu.Unlock()
+	}
+	return opID, err
 }
 
 // Readme returns the bilingual documentation text (identical source to README.txt)
@@ -424,11 +563,12 @@ func (m *Manager) Status(ctx context.Context, userID, hostID int64) (*StatusResp
 	}
 
 	sshUser, fp, _ := m.ssh.HostBinding(ctx, userID, hostID)
+	sshVerified := m.store.IsSSHVerified(ctx, hostID, fp, sshUser)
 	ch, err := m.store.CorraldHost(ctx, userID, hostID)
 	if errors.Is(err, store.ErrNotFound) {
-		// Check if another Corral user on this gateway already enabled corrald on
-		// the same (fingerprint, sshUser): share the running daemon automatically.
-		if fp != "" && sshUser != "" {
+		// Only inherit/expose shared helper status if this host record has
+		// actually completed at least one SSH authentication to (fp, sshUser) (Item 8).
+		if sshVerified && fp != "" && sshUser != "" {
 			if adopted := m.tryAdoptPeer(ctx, userID, hostID, fp, sshUser); adopted != nil {
 				ch = adopted
 				err = nil
@@ -465,14 +605,10 @@ func (m *Manager) Status(ctx context.Context, userID, hostID int64) (*StatusResp
 	res.Release = ch.Release
 	res.LastOKAt = ch.LastOKAt
 	res.MachineID = ch.MachineID
-	if len(ch.Files) > 0 {
-		res.Files = append([]string(nil), ch.Files...)
-	}
-	if ch.ConsentBy != nil && *ch.ConsentBy > 0 {
-		res.Consent = &ConsentInfo{
-			By: m.ssh.UserLabel(ctx, *ch.ConsentBy),
-			At: ch.ConsentAt,
-		}
+
+	// Latest operation.
+	if op, oerr := m.store.LatestCorraldOp(ctx, hostID); oerr == nil {
+		res.Op = m.toOpView(op)
 	}
 	if ch.LastError != "" {
 		res.Error = decodeLastError(ch.LastError)
@@ -481,51 +617,89 @@ func (m *Manager) Status(ctx context.Context, userID, hostID int64) (*StatusResp
 		res.CanReplaceWithGateway = true
 	}
 
-	// Latest operation.
-	if op, oerr := m.store.LatestCorraldOp(ctx, hostID); oerr == nil {
-		res.Op = m.toOpView(op)
+	// Shared metadata (files, consent_by, users, live running metrics) is only
+	// shown once the host is verified via SSH login (or owned/in-progress by this user).
+	canSeeShared := sshVerified || (ch.ConsentBy != nil && *ch.ConsentBy == userID)
+	if !canSeeShared && res.State != StateOff && res.State != StateInstalling && res.State != StateRebind && res.State != StateRemoving && res.State != StateRemovePending {
+		res.State = StateOff
+		res.Version = ""
+		res.Release = 0
+		res.LastOKAt = 0
+		res.MachineID = ""
+		return res, nil
+	}
+
+	if canSeeShared && res.State != StateOff {
+		if len(ch.Files) > 0 {
+			res.Files = append([]string(nil), ch.Files...)
+		}
+		if ch.ConsentBy != nil && *ch.ConsentBy > 0 {
+			res.Consent = &ConsentInfo{
+				By: m.ssh.UserLabel(ctx, *ch.ConsentBy),
+				At: ch.ConsentAt,
+			}
+		}
 	}
 
 	// Live connection details (running metrics, caps, scope_change, users).
-	sc := m.sharedConnForHost(hostID, fp, sshUser)
-	if sc != nil {
-		sc.mu.Lock()
-		if sc.client != nil && !sc.client.Closed() {
-			if sc.health != nil {
-				res.Running = &RunningInfo{
-					PID:     sc.health.PID,
-					UptimeS: sc.health.UptimeS,
-					RSSKB:   sc.health.RSSKB,
-				}
-				if len(sc.health.Caps) > 0 {
-					res.Caps = make(map[string]string, len(sc.health.Caps))
-					for k, v := range sc.health.Caps {
-						res.Caps[k] = v
+	var liveHello *proto.HelloResult
+	if canSeeShared && res.State != StateOff && res.State != StateRebind {
+		sc := m.sharedConnForHost(hostID, fp, sshUser)
+		if sc != nil {
+			sc.mu.Lock()
+			if sc.client != nil && !sc.client.Closed() {
+				if sc.health != nil {
+					res.Running = &RunningInfo{
+						PID:     sc.health.PID,
+						UptimeS: sc.health.UptimeS,
+						RSSKB:   sc.health.RSSKB,
 					}
+					if len(sc.health.Caps) > 0 {
+						res.Caps = make(map[string]string, len(sc.health.Caps))
+						for k, v := range sc.health.Caps {
+							res.Caps[k] = v
+						}
+					}
+				} else if sc.hello != nil {
+					res.Running = &RunningInfo{PID: sc.hello.PID}
 				}
-			} else if sc.hello != nil {
-				res.Running = &RunningInfo{PID: sc.hello.PID}
+				if sc.scopeChange != nil {
+					cp := *sc.scopeChange
+					cp.Added = slices.Clone(sc.scopeChange.Added)
+					res.ScopeChange = &cp
+				}
 			}
-			if sc.scopeChange != nil {
-				cp := *sc.scopeChange
-				cp.Added = slices.Clone(sc.scopeChange.Added)
-				res.ScopeChange = &cp
+			var remoteClients []proto.ClientInfo
+			if sc.hello != nil {
+				cp := *sc.hello
+				liveHello = &cp
+				remoteClients = slices.Clone(sc.hello.Clients)
 			}
+			sc.mu.Unlock()
+			res.Users = m.computeUsers(ctx, userID, fp, sshUser, remoteClients)
+		} else if fp != "" && sshUser != "" {
+			res.Users = m.computeUsers(ctx, userID, fp, sshUser, nil)
 		}
-		var remoteClients []proto.ClientInfo
-		if sc.hello != nil {
-			remoteClients = slices.Clone(sc.hello.Clients)
-		}
-		sc.mu.Unlock()
-		res.Users = m.computeUsers(ctx, userID, fp, sshUser, remoteClients)
-	} else if ch.State != StateOff && fp != "" && sshUser != "" {
-		res.Users = m.computeUsers(ctx, userID, fp, sshUser, nil)
 	}
 
-	// Also compute scope_change from persisted manifest when stopped/running and dist is newer.
-	if res.ScopeChange == nil && ch.Release > 0 && ch.State != StateOff && ch.State != StateIncompatible && ch.State != StateRemoving && ch.State != StateRemovePending {
-		if consented, ok := parseManifestJSON(ch.ManifestJSON); ok {
-			dec := DecideUpdate(ch.Release, proto.Protocol, consented, dist.Release, dist.Manifest, nil, m.protoMin, m.protoMax)
+	// Compare running daemon's actual manifest against this user's consented manifest (Item 6).
+	if res.State != StateOff && res.State != StateIncompatible && res.State != StateRemoving && res.State != StateRemovePending {
+		consented, hasConsented := parseManifestJSON(ch.ManifestJSON)
+		if hasConsented && liveHello != nil {
+			if added := proto.ScopeGrew(consented, liveHello.Manifest); len(added) > 0 {
+				res.ScopeChange = &ScopeChangeInfo{
+					TargetVersion: liveHello.Version,
+					Added:         added,
+				}
+				if liveHello.Release >= dist.Release {
+					if mh, herr := proto.ManifestSHA256(liveHello.Manifest); herr == nil && mh != "" {
+						res.ManifestHash = mh
+					}
+				}
+			}
+		}
+		if res.ScopeChange == nil && ch.Release > 0 && hasConsented {
+			dec := DecideUpdate(ch.Release, proto.Protocol, consented, dist.Release, dist.Manifest, ch.FailedReleases, m.protoMin, m.protoMax)
 			if dec.Action == UpdateNeedConsent {
 				res.ScopeChange = &ScopeChangeInfo{
 					TargetVersion: dist.Version,
@@ -547,7 +721,11 @@ func (m *Manager) StartInstall(ctx context.Context, userID, hostID int64, corral
 	if m.adminDisabled {
 		return nil, ErrAdminDisabled
 	}
-	if manifestHash != "" && manifestHash != dist.ManifestHash {
+	manifestHash = strings.TrimSpace(manifestHash)
+	if manifestHash == "" {
+		return nil, ErrManifestRequired
+	}
+	if manifestHash != dist.ManifestHash {
 		return nil, ErrManifestChanged
 	}
 
@@ -566,44 +744,61 @@ func (m *Manager) StartInstall(ctx context.Context, userID, hostID int64, corral
 		return nil, fmt.Errorf("%w: %s", ErrInvalidState, tr.Reason)
 	}
 
+	sshUser, fp, _ := m.ssh.HostBinding(ctx, userID, hostID)
+	acct := accountKey{Fingerprint: fp, Username: sshUser}
+
 	opID := newHexID()
 	op := &store.CorraldOp{
-		ID:        opID,
-		HostID:    hostID,
-		Kind:      OpInstall,
-		State:     OpRunning,
-		Step:      "check",
-		CreatedBy: userID,
-	}
-	if err := m.store.CreateCorraldOp(ctx, op, false); err != nil {
-		return nil, err
-	}
-
-	ch.State = StateInstalling
-	ch.LastError = ""
-	ch.RestartCount = 0
-	if err := m.store.UpsertCorraldHost(ctx, ch); err != nil {
-		return nil, err
+		ID:         opID,
+		HostID:     hostID,
+		AccountKey: store.CorraldAccountKey(fp, sshUser),
+		Kind:       OpInstall,
+		State:      OpRunning,
+		Step:       "check",
+		CreatedBy:  userID,
 	}
 
 	opCtx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-	rop := &runningOp{opID: opID, kind: OpInstall, step: "check", cancel: cancel, done: make(chan struct{})}
-	m.mu.Lock()
-	if m.closed {
-		m.mu.Unlock()
+	rop := &runningOp{opID: opID, hostID: hostID, acct: acct, kind: OpInstall, step: "check", cancel: cancel, done: make(chan struct{})}
+	if err := m.registerRunningOp(rop); err != nil {
 		cancel()
-		return nil, errors.New("manager closed")
+		return nil, err
 	}
-	m.ops[hostID] = rop
-	m.wg.Add(1)
-	m.mu.Unlock()
+	if err := m.store.CreateCorraldOp(ctx, op, false); err != nil {
+		m.clearRunningOp(rop)
+		cancel()
+		return nil, err
+	}
+
+	// Write authorization, binding, and active_op_id immediately when install starts (Item 4, Item 11).
+	mb, _ := proto.MarshalManifest(dist.Manifest)
+	uid := userID
+	ch.State = StateInstalling
+	ch.ConsentBy = &uid
+	ch.ConsentAt = time.Now().Unix()
+	ch.BoundFingerprint = fp
+	ch.BoundUsername = sshUser
+	ch.BoundGateway = m.gatewayID
+	ch.ManifestJSON = string(mb)
+	ch.ActiveOpID = opID
+	ch.LastError = ""
+	ch.RestartCount = 0
+	if err := m.store.UpsertCorraldHost(ctx, ch); err != nil {
+		op.State = OpFailed
+		op.ErrorCode = "other"
+		_ = m.store.UpdateCorraldOp(ctx, op)
+		m.clearRunningOp(rop)
+		cancel()
+		return nil, err
+	}
 
 	view := m.toOpView(op)
+	m.wg.Add(1)
 	go func() {
 		defer m.wg.Done()
 		defer cancel()
 		defer close(rop.done)
-		defer m.clearRunningOp(hostID, rop)
+		defer m.clearRunningOp(rop)
 		m.runInstallOp(opCtx, rop, op, ch, dist, userID, hostID, corralUser)
 	}()
 
@@ -624,7 +819,7 @@ func (m *Manager) CancelInstall(ctx context.Context, userID, hostID int64) (*OpV
 	}
 
 	m.mu.Lock()
-	rop := m.ops[hostID]
+	rop := m.opsByHost[hostID]
 	if rop != nil && rop.opID == op.ID {
 		if !StepCancellable(rop.kind, rop.step) {
 			m.mu.Unlock()
@@ -646,10 +841,11 @@ func (m *Manager) CancelInstall(ctx context.Context, userID, hostID int64) (*OpV
 	} else {
 		// No in-memory goroutine (e.g. post-restart stale op); cancel directly in store.
 		op.State = OpCancelled
-		_ = m.store.UpdateCorraldOp(ctx, op)
+		_, _ = m.store.UpdateCorraldOpIfActive(ctx, op)
 		if ch, err := m.store.CorraldHostByID(ctx, hostID); err == nil && ch.State == StateInstalling {
 			ch.State = StateOff
-			_ = m.store.UpsertCorraldHost(ctx, ch)
+			ch.ActiveOpID = ""
+			_, _ = m.store.UpdateCorraldHostIfOp(ctx, ch, op.ID, true)
 		}
 	}
 	latest, err := m.store.LatestCorraldOp(ctx, hostID)
@@ -703,9 +899,9 @@ func (m *Manager) Pause(ctx context.Context, userID, hostID int64, corralUser st
 			}
 		}
 
-		// Also verify whether any other non-paused peer exists on this gateway.
+		// Also verify whether any other non-paused active peer exists on this gateway.
 		otherActive := m.hasOtherActivePeers(ctx, userID, fp, sshUser)
-		if !otherActive && remaining <= 0 {
+		if !otherActive && remaining == 0 {
 			if client != nil && !client.Closed() {
 				_, _ = client.Shutdown(ctx, "paused_no_users")
 			}
@@ -737,14 +933,16 @@ func (m *Manager) Resume(ctx context.Context, userID, hostID int64, corralUser s
 	// Best-effort reconnect/start immediately if host is reachable.
 	sshClient, release, fp, sshUser, err := m.ssh.AcquireSSH(ctx, userID, hostID)
 	if err == nil && sshClient != nil {
-		defer release()
-		m.OnHostConnected(ctx, userID, hostID, corralUser, fp, sshUser, sshClient)
+		own := newSSHOwnership(release)
+		defer own.releaseIfOwned()
+		m.onHostConnectedOwned(ctx, userID, hostID, corralUser, fp, sshUser, sshClient, own)
 	}
 	return nil
 }
 
 // StartRemove initiates withdrawal-first removal of corrald for all users on
-// this host account.
+// this host account. Any active install/update on the same host OR account is
+// cancelled and awaited before removal begins (Items 3 & 4).
 func (m *Manager) StartRemove(ctx context.Context, userID, hostID int64) (*OpView, error) {
 	if !m.Available() {
 		return nil, ErrUnavailable
@@ -761,53 +959,61 @@ func (m *Manager) StartRemove(ctx context.Context, userID, hostID int64) (*OpVie
 		return nil, ErrInvalidState
 	}
 
-	// Cancel any active in-memory install/update op first (withdrawal-first).
-	m.mu.Lock()
-	if prev := m.ops[hostID]; prev != nil && (prev.kind == OpInstall || prev.kind == OpUpdate) {
-		prev.cancelled = true
-		if prev.cancel != nil {
-			prev.cancel()
-		}
+	sshUser, fp, _ := m.ssh.HostBinding(ctx, userID, hostID)
+	if fp == "" {
+		fp = ch.BoundFingerprint
 	}
-	m.mu.Unlock()
+	if sshUser == "" {
+		sshUser = ch.BoundUsername
+	}
+	acct := accountKey{Fingerprint: fp, Username: sshUser}
+
+	// Cancel and WAIT for any active install/update op on this host or account
+	// to exit completely before creating and running the remove op (Item 4).
+	m.cancelAndWaitOps(ctx, hostID, acct, OpInstall, OpUpdate)
 
 	opID := newHexID()
 	op := &store.CorraldOp{
-		ID:        opID,
-		HostID:    hostID,
-		Kind:      OpRemove,
-		State:     OpRunning,
-		Step:      "mark",
-		CreatedBy: userID,
+		ID:         opID,
+		HostID:     hostID,
+		AccountKey: store.CorraldAccountKey(fp, sshUser),
+		Kind:       OpRemove,
+		State:      OpRunning,
+		Step:       "mark",
+		CreatedBy:  userID,
+	}
+
+	opCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	rop := &runningOp{opID: opID, hostID: hostID, acct: acct, kind: OpRemove, step: "mark", cancel: cancel, done: make(chan struct{})}
+	if err := m.registerRunningOp(rop); err != nil {
+		cancel()
+		return nil, err
 	}
 	if err := m.store.CreateCorraldOp(ctx, op, true); err != nil {
+		m.clearRunningOp(rop)
+		cancel()
 		return nil, err
 	}
 
 	ch.State = StateRemoving
+	ch.ActiveOpID = opID
 	ch.LastError = ""
 	if err := m.store.UpsertCorraldHost(ctx, ch); err != nil {
+		op.State = OpFailed
+		op.ErrorCode = "other"
+		_ = m.store.UpdateCorraldOp(ctx, op)
+		m.clearRunningOp(rop)
+		cancel()
 		return nil, err
 	}
 
-	opCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	rop := &runningOp{opID: opID, kind: OpRemove, step: "mark", cancel: cancel, done: make(chan struct{})}
-	m.mu.Lock()
-	if m.closed {
-		m.mu.Unlock()
-		cancel()
-		return nil, errors.New("manager closed")
-	}
-	m.ops[hostID] = rop
-	m.wg.Add(1)
-	m.mu.Unlock()
-
 	view := m.toOpView(op)
+	m.wg.Add(1)
 	go func() {
 		defer m.wg.Done()
 		defer cancel()
 		defer close(rop.done)
-		defer m.clearRunningOp(hostID, rop)
+		defer m.clearRunningOp(rop)
 		m.runRemoveOp(opCtx, rop, op, ch, userID, hostID)
 	}()
 
@@ -824,13 +1030,62 @@ func (m *Manager) StartUpdate(ctx context.Context, userID, hostID int64, corralU
 	if m.adminDisabled {
 		return nil, ErrAdminDisabled
 	}
-	if manifestHash != "" && manifestHash != dist.ManifestHash {
-		return nil, ErrManifestChanged
+	manifestHash = strings.TrimSpace(manifestHash)
+	if manifestHash == "" {
+		return nil, ErrManifestRequired
 	}
 	ch, err := m.store.CorraldHost(ctx, userID, hostID)
 	if err != nil {
 		return nil, ErrInvalidState
 	}
+
+	sshUser, fp, _ := m.ssh.HostBinding(ctx, userID, hostID)
+	if fp == "" {
+		fp = ch.BoundFingerprint
+	}
+	if sshUser == "" {
+		sshUser = ch.BoundUsername
+	}
+
+	// Check whether the user is consenting to an expanded manifest of an already
+	// running daemon installed by a newer gateway (Item 6).
+	if !replace {
+		if sc := m.sharedConnForHost(hostID, fp, sshUser); sc != nil {
+			sc.mu.Lock()
+			liveHello := sc.hello
+			sc.mu.Unlock()
+			if liveHello != nil && liveHello.Release >= dist.Release {
+				liveHash, _ := proto.ManifestSHA256(liveHello.Manifest)
+				if manifestHash == liveHash {
+					mb, _ := proto.MarshalManifest(liveHello.Manifest)
+					ch.ManifestJSON = string(mb)
+					if err := m.store.UpsertCorraldHost(ctx, ch); err != nil {
+						return nil, err
+					}
+					sc.mu.Lock()
+					sc.scopeChange = nil
+					sc.mu.Unlock()
+					opID := newHexID()
+					op := &store.CorraldOp{
+						ID:         opID,
+						HostID:     hostID,
+						AccountKey: store.CorraldAccountKey(fp, sshUser),
+						Kind:       OpUpdate,
+						State:      OpDone,
+						Step:       "verify",
+						CreatedBy:  userID,
+					}
+					_ = m.store.CreateCorraldOp(ctx, op, false)
+					return m.toOpView(op), nil
+				}
+			}
+		}
+	}
+
+	if manifestHash != dist.ManifestHash {
+		return nil, ErrManifestChanged
+	}
+
 	tr := Transition(toSnapshot(ch), Event{Kind: EvUpdateStart})
 	if !tr.Allowed {
 		return nil, ErrInvalidState
@@ -845,7 +1100,7 @@ func (m *Manager) StartUpdate(ctx context.Context, userID, hostID int64, corralU
 		return nil, err
 	}
 
-	return m.launchUpdateOp(ctx, userID, hostID, corralUser, ch, dist, replace)
+	return m.launchUpdateOp(ctx, userID, hostID, corralUser, fp, sshUser, ch, dist, replace)
 }
 
 // Retry resets error/restart counters and attempts to reconnect/start corrald.
@@ -865,51 +1120,67 @@ func (m *Manager) Retry(ctx context.Context, userID, hostID int64, corralUser st
 	if !tr.Allowed {
 		return nil, ErrInvalidState
 	}
-	ch.State = tr.Next.State
-	ch.RestartCount = 0
-	ch.LastError = ""
-	if err := m.store.UpsertCorraldHost(ctx, ch); err != nil {
-		return nil, err
+
+	sshUser, fp, _ := m.ssh.HostBinding(ctx, userID, hostID)
+	if fp == "" {
+		fp = ch.BoundFingerprint
 	}
+	if sshUser == "" {
+		sshUser = ch.BoundUsername
+	}
+	acct := accountKey{Fingerprint: fp, Username: sshUser}
 
 	opID := newHexID()
 	op := &store.CorraldOp{
-		ID:        opID,
-		HostID:    hostID,
-		Kind:      OpInstall,
-		State:     OpRunning,
-		Step:      "start",
-		CreatedBy: userID,
-	}
-	if err := m.store.CreateCorraldOp(ctx, op, false); err != nil {
-		return nil, err
+		ID:         opID,
+		HostID:     hostID,
+		AccountKey: store.CorraldAccountKey(fp, sshUser),
+		Kind:       OpInstall,
+		State:      OpRunning,
+		Step:       "start",
+		CreatedBy:  userID,
 	}
 
 	opCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	rop := &runningOp{opID: opID, kind: OpInstall, step: "start", cancel: cancel, done: make(chan struct{})}
-	m.mu.Lock()
-	if m.closed {
-		m.mu.Unlock()
+	rop := &runningOp{opID: opID, hostID: hostID, acct: acct, kind: OpInstall, step: "start", cancel: cancel, done: make(chan struct{})}
+	if err := m.registerRunningOp(rop); err != nil {
 		cancel()
-		return nil, errors.New("manager closed")
+		return nil, err
 	}
-	m.ops[hostID] = rop
-	m.wg.Add(1)
-	m.mu.Unlock()
+	if err := m.store.CreateCorraldOp(ctx, op, false); err != nil {
+		m.clearRunningOp(rop)
+		cancel()
+		return nil, err
+	}
+
+	ch.State = tr.Next.State
+	ch.RestartCount = 0
+	ch.LastError = ""
+	ch.ActiveOpID = opID
+	if err := m.store.UpsertCorraldHost(ctx, ch); err != nil {
+		op.State = OpFailed
+		op.ErrorCode = "other"
+		_ = m.store.UpdateCorraldOp(ctx, op)
+		m.clearRunningOp(rop)
+		cancel()
+		return nil, err
+	}
 
 	view := m.toOpView(op)
+	m.wg.Add(1)
 	go func() {
 		defer m.wg.Done()
 		defer cancel()
 		defer close(rop.done)
-		defer m.clearRunningOp(hostID, rop)
+		defer m.clearRunningOp(rop)
 
-		sshClient, release, fp, sshUser, err := m.ssh.AcquireSSH(opCtx, userID, hostID)
+		sshClient, release, gotFP, gotUser, err := m.ssh.AcquireSSH(opCtx, userID, hostID)
 		if err != nil {
 			m.finishOpFail(op, ch, &OpFailure{Code: "disconnected", Detail: err.Error(), KeepInstalled: true})
 			return
 		}
-		defer release()
+		own := newSSHOwnership(release)
+		defer own.releaseIfOwned()
 
 		probe, err := m.probeHost(opCtx, sshClient)
 		if err != nil {
@@ -922,7 +1193,7 @@ func (m *Manager) Retry(ctx context.Context, userID, hostID int64, corralUser st
 		}
 		if !probe.HasSymlink {
 			// Binary missing; run full install.
-			m.runInstallWithSSH(opCtx, rop, op, ch, dist, userID, hostID, corralUser, fp, sshUser, sshClient)
+			m.runInstallWithSSH(opCtx, rop, op, ch, dist, userID, hostID, corralUser, gotFP, gotUser, sshClient, own)
 			return
 		}
 		_, sock, fail := RunServe(opCtx, sshClient, probe.CurrentBin, m.gatewayID, probe.MachineID, probe.OS, probe.Arch)
@@ -933,23 +1204,29 @@ func (m *Manager) Retry(ctx context.Context, userID, hostID int64, corralUser st
 		if sock == "" {
 			sock = probe.SocketPath
 		}
-		if err := m.attachAndHello(opCtx, userID, hostID, corralUser, fp, sshUser, sshClient, probe, sock, ch); err != nil {
+		if err := m.attachAndHello(opCtx, userID, hostID, corralUser, gotFP, gotUser, sshClient, own, probe, sock, ch, op.ID); err != nil {
 			m.finishOpFail(op, ch, &OpFailure{Code: "start_failed", Detail: err.Error(), MachineID: probe.MachineID, KeepInstalled: true})
 			return
 		}
 		op.State = OpDone
-		_ = m.store.UpdateCorraldOp(context.Background(), op)
+		_, _ = m.store.UpdateCorraldOpIfActive(context.Background(), op)
 	}()
 
 	return view, nil
 }
 
-// OnHostConnected is called when an SSH connection is established to a host.
-// It reconciles interrupted ops / remove_pending, enforces binding, connects to
-// (or starts) corrald, checks version compatibility, and triggers auto-updates.
+// OnHostConnected is called when an SSH connection is established to a host
+// (new terminal session or restored terminal after gateway restart).
 func (m *Manager) OnHostConnected(ctx context.Context, userID, hostID int64, corralUser, fingerprint, sshUser string, sshClient *ssh.Client) {
+	m.onHostConnectedOwned(ctx, userID, hostID, corralUser, fingerprint, sshUser, sshClient, nil)
+}
+
+func (m *Manager) onHostConnectedOwned(ctx context.Context, userID, hostID int64, corralUser, fingerprint, sshUser string, sshClient *ssh.Client, own *sshOwnership) {
 	if m == nil || !m.Available() || sshClient == nil {
 		return
+	}
+	if fingerprint != "" && sshUser != "" {
+		_ = m.store.RecordSSHVerified(ctx, hostID, fingerprint, sshUser)
 	}
 	ch, err := m.store.CorraldHost(ctx, userID, hostID)
 	if errors.Is(err, store.ErrNotFound) {
@@ -964,12 +1241,30 @@ func (m *Manager) OnHostConnected(ctx context.Context, userID, hostID int64, cor
 	}
 
 	if m.adminDisabled {
-		// Admin disabled: do not start; if running, stop when no other gateway uses it.
 		return
 	}
 
-	// Check authorization binding (unless removing/remove_pending/off).
-	if ch.State != StateOff && ch.State != StateRemoving && ch.State != StateRemovePending {
+	// Check if an in-memory op is already running for this host or account.
+	acct := accountKey{Fingerprint: fingerprint, Username: sshUser}
+	if m.hasRunningOp(hostID, acct) {
+		return
+	}
+
+	// Check authorization binding BEFORE connecting, EXCEPT:
+	// - off / removing / remove_pending (never rebind a pending removal)
+	// - installing where binding may be incomplete from pre-restart (Item 11):
+	//   only rebind if a non-empty bound field disagrees with current identity.
+	if ch.State == StateInstalling {
+		conflict := (ch.BoundFingerprint != "" && ch.BoundFingerprint != fingerprint) ||
+			(ch.BoundUsername != "" && ch.BoundUsername != sshUser) ||
+			(ch.BoundGateway != "" && ch.BoundGateway != m.gatewayID)
+		if conflict {
+			ch.State = StateRebind
+			_ = m.store.UpsertCorraldHost(ctx, ch)
+			m.detachHost(hostID)
+			return
+		}
+	} else if ch.State != StateOff && ch.State != StateRemoving && ch.State != StateRemovePending {
 		if !CheckBinding(toSnapshot(ch), fingerprint, sshUser, m.gatewayID) {
 			ch.State = StateRebind
 			_ = m.store.UpsertCorraldHost(ctx, ch)
@@ -978,19 +1273,10 @@ func (m *Manager) OnHostConnected(ctx context.Context, userID, hostID int64, cor
 		}
 	}
 
-	// Check if there is an unfinished op from before a gateway restart, or remove_pending.
-	m.mu.Lock()
-	_, inMemoryOp := m.ops[hostID]
-	m.mu.Unlock()
-	if inMemoryOp {
-		return
-	}
-
 	activeOp, activeErr := m.store.ActiveCorraldOp(ctx, hostID)
 	needsReconcile := activeErr == nil || ch.State == StateRemovePending || ch.State == StateRemoving || ch.State == StateInstalling || ch.State == StateUpdating
 	if needsReconcile {
 		m.reconcileHost(ctx, userID, hostID, corralUser, fingerprint, sshUser, sshClient, ch, activeOp)
-		// Reload after reconciliation.
 		ch, err = m.store.CorraldHostByID(ctx, hostID)
 		if err != nil {
 			return
@@ -1022,6 +1308,8 @@ func (m *Manager) OnHostConnected(ctx context.Context, userID, hostID int64, cor
 		sc.mu.Lock()
 		live := sc.client != nil && !sc.client.Closed()
 		client := sc.client
+		stateDir := sc.stateDir
+		cachedFailed := slices.Clone(sc.failedReleases)
 		sc.mu.Unlock()
 		if live {
 			hello, err := client.Hello(ctx, proto.HelloParams{
@@ -1032,6 +1320,21 @@ func (m *Manager) OnHostConnected(ctx context.Context, userID, hostID int64, cor
 				Client:         proto.ClientIdentity{CorralUser: corralUser, HostID: strconv.FormatInt(hostID, 10)},
 			})
 			if err == nil {
+				// Refresh failed.json on shared-conn fast path too (Item 15).
+				var failedRec *HostFailedRecord
+				if stateDir != "" {
+					if b, rerr := sftpReadFile(ctx, sshClient, stateDir+"/failed.json", 256<<10); rerr == nil {
+						var fr HostFailedRecord
+						if json.Unmarshal(b, &fr) == nil {
+							failedRec = &fr
+							_ = m.store.RecordCorraldFailedReleases(ctx, hostID, fingerprint, sshUser, fr.ReleaseList())
+							sc.mu.Lock()
+							sc.addFailedReleasesLocked(fr.ReleaseList())
+							cachedFailed = slices.Clone(sc.failedReleases)
+							sc.mu.Unlock()
+						}
+					}
+				}
 				sc.mu.Lock()
 				sc.hello = hello
 				sc.hostRefs[hostID] = &hostRef{HostID: hostID, OwnerID: userID, CorralUser: corralUser}
@@ -1044,7 +1347,7 @@ func (m *Manager) OnHostConnected(ctx context.Context, userID, hostID int64, cor
 				ch.Release = hello.Release
 				ch.LastOKAt = time.Now().Unix()
 				_ = m.store.UpsertCorraldHost(ctx, ch)
-				m.evaluateUpdateAfterConnect(ctx, userID, hostID, corralUser, fingerprint, sshUser, nil, nil)
+				m.evaluateUpdateAfterConnect(ctx, userID, hostID, corralUser, fingerprint, sshUser, nil, mergeReleaseLists(failedRec.ReleaseList(), cachedFailed, ch.FailedReleases))
 				return
 			}
 		}
@@ -1066,6 +1369,10 @@ func (m *Manager) OnHostConnected(ctx context.Context, userID, hostID int64, cor
 	}
 
 	files := ReadHostStateFiles(ctx, sshClient, probe, "")
+	if files.Failed != nil {
+		_ = m.store.RecordCorraldFailedReleases(ctx, hostID, fingerprint, sshUser, files.Failed.ReleaseList())
+		ch.FailedReleases = mergeReleaseLists(ch.FailedReleases, files.Failed.ReleaseList())
+	}
 	sock := probe.SocketPath
 	if files.Meta != nil && files.Meta.SocketPath != "" {
 		sock = files.Meta.SocketPath
@@ -1076,7 +1383,7 @@ func (m *Manager) OnHostConnected(ctx context.Context, userID, hostID int64, cor
 	ch.MachineID = probe.MachineID
 
 	// Try connecting directly first; if not listening, start via `corrald serve`.
-	if err := m.attachAndHello(ctx, userID, hostID, corralUser, fingerprint, sshUser, sshClient, probe, sock, ch); err != nil {
+	if err := m.attachAndHello(ctx, userID, hostID, corralUser, fingerprint, sshUser, sshClient, own, probe, sock, ch, ""); err != nil {
 		var rpcErr *proto.RPCError
 		if errors.As(err, &rpcErr) && rpcErr.Code == proto.ErrProtoMismatch {
 			return // already transitioned to StateIncompatible
@@ -1095,7 +1402,7 @@ func (m *Manager) OnHostConnected(ctx context.Context, userID, hostID int64, cor
 		if startedSock != "" {
 			sock = startedSock
 		}
-		if err := m.attachAndHello(ctx, userID, hostID, corralUser, fingerprint, sshUser, sshClient, probe, sock, ch); err != nil {
+		if err := m.attachAndHello(ctx, userID, hostID, corralUser, fingerprint, sshUser, sshClient, own, probe, sock, ch, ""); err != nil {
 			if !errors.As(err, &rpcErr) || rpcErr.Code != proto.ErrProtoMismatch {
 				ch.State = StateError
 				ch.LastError = encodeLastError(&OpFailure{Code: "start_failed", Detail: err.Error(), MachineID: probe.MachineID})
@@ -1105,45 +1412,63 @@ func (m *Manager) OnHostConnected(ctx context.Context, userID, hostID int64, cor
 		}
 	}
 
+	if sc := m.getSharedConn(key); sc != nil && files.Failed != nil {
+		sc.mu.Lock()
+		sc.addFailedReleasesLocked(files.Failed.ReleaseList())
+		sc.mu.Unlock()
+	}
+
 	// After connecting cleanly, evaluate automatic update or scope-change prompt.
-	m.evaluateUpdateAfterConnect(ctx, userID, hostID, corralUser, fingerprint, sshUser, probe, files.Failed)
+	m.evaluateUpdateAfterConnect(ctx, userID, hostID, corralUser, fingerprint, sshUser, probe, mergeReleaseLists(files.Failed.ReleaseList(), ch.FailedReleases))
 }
 
 // DeleteHostCleanup handles corrald cleanup during DELETE /api/hosts/{id}.
+// Always cancels and waits for any active operation on this host (Item 5).
+// When removeCorrald is true and sshClient is reachable, probes the host even
+// if no local corrald_hosts row exists (Item 18).
 func (m *Manager) DeleteHostCleanup(ctx context.Context, userID, hostID int64, corralUser, fingerprint, sshUser string, removeCorrald bool, sshClient *ssh.Client) *DeleteCorraldOutcome {
 	ch, err := m.store.CorraldHost(ctx, userID, hostID)
-	if errors.Is(err, store.ErrNotFound) || ch == nil || ch.State == StateOff {
-		if !removeCorrald {
-			return &DeleteCorraldOutcome{State: "skipped"}
-		}
-		return &DeleteCorraldOutcome{State: "skipped"}
-	}
-	if err != nil {
+	hasLocalRow := err == nil && ch != nil
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
 		return &DeleteCorraldOutcome{State: "error", Error: err.Error()}
 	}
-
-	if fp := ch.BoundFingerprint; fp != "" && fingerprint == "" {
-		fingerprint = fp
+	if hasLocalRow {
+		if ch.BoundFingerprint != "" && fingerprint == "" {
+			fingerprint = ch.BoundFingerprint
+		}
+		if ch.BoundUsername != "" && sshUser == "" {
+			sshUser = ch.BoundUsername
+		}
 	}
-	if u := ch.BoundUsername; u != "" && sshUser == "" {
-		sshUser = u
+	acct := accountKey{Fingerprint: fingerprint, Username: sshUser}
+
+	// Cancel and wait for any active install/update on this host (and account
+	// if removing the shared daemon) BEFORE proceeding (Item 5).
+	if removeCorrald {
+		m.cancelAndWaitOps(ctx, hostID, acct, OpInstall, OpUpdate)
+		_ = m.store.CancelActiveCorraldOps(ctx, hostID, store.CorraldAccountKey(fingerprint, sshUser), "host_deleted")
+	} else {
+		m.cancelAndWaitOps(ctx, hostID, accountKey{}, OpInstall, OpUpdate)
+		_ = m.store.CancelActiveCorraldOps(ctx, hostID, "", "host_deleted")
 	}
 
 	if !removeCorrald {
 		// Unregister this user from the running daemon (best-effort) without removing files.
-		if sc := m.sharedConnForHost(hostID, fingerprint, sshUser); sc != nil {
-			sc.mu.Lock()
-			client := sc.client
-			delete(sc.hostRefs, hostID)
-			sc.mu.Unlock()
-			if client != nil && !client.Closed() {
-				fctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-				_, _ = client.Forget(fctx, proto.ForgetParams{
-					Gateway:    m.gatewayID,
-					CorralUser: corralUser,
-					HostID:     strconv.FormatInt(hostID, 10),
-				})
-				cancel()
+		if hasLocalRow && ch.State != StateOff {
+			if sc := m.sharedConnForHost(hostID, fingerprint, sshUser); sc != nil {
+				sc.mu.Lock()
+				client := sc.client
+				delete(sc.hostRefs, hostID)
+				sc.mu.Unlock()
+				if client != nil && !client.Closed() {
+					fctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+					_, _ = client.Forget(fctx, proto.ForgetParams{
+						Gateway:    m.gatewayID,
+						CorralUser: corralUser,
+						HostID:     strconv.FormatInt(hostID, 10),
+					})
+					cancel()
+				}
 			}
 		}
 		m.detachHost(hostID)
@@ -1152,12 +1477,17 @@ func (m *Manager) DeleteHostCleanup(ctx context.Context, userID, hostID int64, c
 
 	if sshClient == nil {
 		m.detachHost(hostID)
+		if !hasLocalRow || ch.State == StateOff {
+			return &DeleteCorraldOutcome{State: "skipped"}
+		}
 		return &DeleteCorraldOutcome{
 			State:        "unreachable",
 			UninstallCmd: DefaultUninstallCmd,
 		}
 	}
 
+	// Always probe the host when remove_corrald=true and reachable, even if
+	// local corrald_hosts is missing or off (Item 18).
 	probe, err := m.probeHost(ctx, sshClient)
 	if err != nil {
 		m.detachHost(hostID)
@@ -1166,6 +1496,16 @@ func (m *Manager) DeleteHostCleanup(ctx context.Context, userID, hostID int64, c
 			Error:        err.Error(),
 			UninstallCmd: DefaultUninstallCmd,
 		}
+	}
+
+	hasOnHost := probe.HasSymlink || probe.HasInstall || probe.HasTombstone || len(probe.Versions) > 0 || len(probe.Stages) > 0
+	if !hasOnHost {
+		files := ReadHostStateFiles(ctx, sshClient, probe, "")
+		hasOnHost = files.Install != nil || files.Meta != nil
+	}
+	if !hasOnHost {
+		m.detachHost(hostID)
+		return &DeleteCorraldOutcome{State: "skipped"}
 	}
 
 	// Close gateway connection to daemon before uninstalling.
@@ -1189,16 +1529,21 @@ func (m *Manager) DeleteHostCleanup(ctx context.Context, userID, hostID int64, c
 }
 
 // CleanupUserHosts handles corrald cleanup when a Corral user account is
-// deleted or permanently disabled: for every host owned by userID, unregisters
-// them from the daemon; keeps the daemon running if another user still shares
-// the same host account, otherwise removes it (best-effort when reachable).
-func (m *Manager) CleanupUserHosts(ctx context.Context, userID int64, corralUser string) {
+// deleted or permanently disabled (NOT on password reset — Item 17).
+// For each host owned by userID:
+//   - Paused local peers count as users (Item 16).
+//   - If remote user count cannot be determined, the helper daemon is preserved
+//     and the result for that host is "not_cleaned" (Item 16).
+//   - Only when no local peers (active or paused) AND confirmed zero remote
+//     clients remain is the daemon uninstalled.
+func (m *Manager) CleanupUserHosts(ctx context.Context, userID int64, corralUser string) map[int64]string {
+	outcomes := make(map[int64]string)
 	if m == nil {
-		return
+		return outcomes
 	}
 	hosts, states, err := m.store.ListUserCorraldHosts(ctx, userID)
 	if err != nil || len(hosts) == 0 {
-		return
+		return outcomes
 	}
 	for i, h := range hosts {
 		ch := states[i]
@@ -1207,10 +1552,16 @@ func (m *Manager) CleanupUserHosts(ctx context.Context, userID int64, corralUser
 		if sshUser == "" {
 			sshUser = h.Username
 		}
-		otherPeers := m.hasOtherActivePeers(ctx, userID, fp, sshUser)
 
-		// Check remote clients on shared connection as well.
-		remainingRemote := 0
+		// Cancel any active install/update owned by this user on this host.
+		m.cancelAndWaitOps(ctx, h.ID, accountKey{}, OpInstall, OpUpdate)
+
+		// Paused peers still count as users who need the helper kept (Item 16).
+		otherPeers := m.hasOtherPeersIncludingPaused(ctx, userID, fp, sshUser)
+
+		// Check remote clients via live sharedConn first.
+		remoteKnown := false
+		remainingRemote := -1
 		if sc := m.sharedConnForHost(h.ID, fp, sshUser); sc != nil {
 			sc.mu.Lock()
 			client := sc.client
@@ -1223,27 +1574,101 @@ func (m *Manager) CleanupUserHosts(ctx context.Context, userID int64, corralUser
 					CorralUser: corralUser,
 					HostID:     strconv.FormatInt(h.ID, 10),
 				}); ferr == nil && fres != nil {
+					remoteKnown = true
 					remainingRemote = fres.RemainingClients
 				}
 				cancel()
 			}
 		}
 
-		if otherPeers || remainingRemote > 0 {
-			// Keep the helper daemon running for the remaining users.
+		if otherPeers || (remoteKnown && remainingRemote > 0) {
 			m.detachHost(h.ID)
+			outcomes[h.ID] = "kept_other_users"
 			continue
 		}
 
-		// No other users: try to connect and uninstall cleanly.
-		sshClient, release, _, _, err := m.ssh.AcquireSSH(ctx, userID, h.ID)
-		if err == nil && sshClient != nil {
-			m.DeleteHostCleanup(ctx, userID, h.ID, corralUser, fp, sshUser, true, sshClient)
-			release()
-		} else {
+		// Acquire SSH to either check remote clients (if not yet known) and/or uninstall.
+		sshClient, release, gotFP, gotUser, err := m.ssh.AcquireSSH(ctx, userID, h.ID)
+		if err != nil || sshClient == nil {
 			m.detachHost(h.ID)
+			outcomes[h.ID] = "not_cleaned"
+			continue
+		}
+		if fp != "" && (gotFP != fp || (sshUser != "" && gotUser != sshUser)) {
+			release()
+			m.detachHost(h.ID)
+			outcomes[h.ID] = "not_cleaned"
+			continue
+		}
+
+		// If remote users are still unknown, query daemon or clients.json over this SSH connection.
+		if !remoteKnown {
+			probe, perr := m.probeHost(ctx, sshClient)
+			if perr == nil && probe != nil {
+				files := ReadHostStateFiles(ctx, sshClient, probe, "")
+				sock := probe.SocketPath
+				if files.Meta != nil && files.Meta.SocketPath != "" {
+					sock = files.Meta.SocketPath
+				}
+				if sock != "" {
+					if tmpClient, derr := Dial(ctx, sshClient, sock, nil); derr == nil {
+						_, herr := tmpClient.Hello(ctx, proto.HelloParams{
+							Gateway:        m.gatewayID,
+							GatewayVersion: m.gatewayVersion,
+							ProtoMin:       m.protoMin,
+							ProtoMax:       m.protoMax,
+							Client:         proto.ClientIdentity{CorralUser: corralUser, HostID: strconv.FormatInt(h.ID, 10)},
+						})
+						if herr == nil {
+							if fres, ferr := tmpClient.Forget(ctx, proto.ForgetParams{
+								Gateway:    m.gatewayID,
+								CorralUser: corralUser,
+								HostID:     strconv.FormatInt(h.ID, 10),
+							}); ferr == nil && fres != nil {
+								remoteKnown = true
+								remainingRemote = fres.RemainingClients
+							}
+						}
+						_ = tmpClient.Close()
+					}
+				}
+				// If daemon isn't running, fall back to clients.json on disk.
+				if !remoteKnown && files.ClientsLoaded {
+					otherRemote := 0
+					hostIDStr := strconv.FormatInt(h.ID, 10)
+					for _, rc := range files.Clients {
+						if rc.Gateway == m.gatewayID && rc.CorralUser == corralUser && (rc.HostID == "" || rc.HostID == hostIDStr) {
+							continue
+						}
+						otherRemote++
+					}
+					remoteKnown = true
+					remainingRemote = otherRemote
+				}
+			}
+		}
+
+		if !remoteKnown {
+			// Cannot confirm zero remote users -> preserve daemon! (Item 16)
+			release()
+			m.detachHost(h.ID)
+			outcomes[h.ID] = "not_cleaned"
+			continue
+		}
+		if remainingRemote > 0 {
+			release()
+			m.detachHost(h.ID)
+			outcomes[h.ID] = "kept_other_users"
+			continue
+		}
+
+		res := m.DeleteHostCleanup(ctx, userID, h.ID, corralUser, fp, sshUser, true, sshClient)
+		release()
+		if res != nil {
+			outcomes[h.ID] = res.State
 		}
 	}
+	return outcomes
 }
 
 // --- Internal execution flows ---
@@ -1258,18 +1683,36 @@ func (m *Manager) runInstallOp(ctx context.Context, rop *runningOp, op *store.Co
 		m.finishOpFail(op, ch, &OpFailure{Code: "disconnected", Detail: err.Error()})
 		return
 	}
-	defer release()
+	own := newSSHOwnership(release)
+	defer own.releaseIfOwned()
 
-	m.runInstallWithSSH(ctx, rop, op, ch, dist, userID, hostID, corralUser, fp, sshUser, sshClient)
+	// If binding was unknown when StartInstall began, bind it now and enforce account exclusivity.
+	acct := accountKey{Fingerprint: fp, Username: sshUser}
+	if acct.valid() && !rop.acct.valid() {
+		if err := m.attachOpAccount(rop, acct); err != nil {
+			m.finishOpFail(op, ch, &OpFailure{Code: "other", Detail: err.Error()})
+			return
+		}
+	}
+	if ch.BoundFingerprint == "" && fp != "" {
+		ch.BoundFingerprint = fp
+		ch.BoundUsername = sshUser
+		ok, _ := m.store.UpdateCorraldHostIfOp(context.Background(), ch, op.ID, false)
+		if !ok {
+			return // superseded by remove
+		}
+	}
+
+	m.runInstallWithSSH(ctx, rop, op, ch, dist, userID, hostID, corralUser, fp, sshUser, sshClient, own)
 }
 
-func (m *Manager) runInstallWithSSH(ctx context.Context, rop *runningOp, op *store.CorraldOp, ch *store.CorraldHost, dist *Dist, userID, hostID int64, corralUser, fp, sshUser string, sshClient *ssh.Client) {
+func (m *Manager) runInstallWithSSH(ctx context.Context, rop *runningOp, op *store.CorraldOp, ch *store.CorraldHost, dist *Dist, userID, hostID int64, corralUser, fp, sshUser string, sshClient *ssh.Client, own *sshOwnership) {
 	setStep := func(step string) {
 		m.mu.Lock()
 		rop.step = step
 		m.mu.Unlock()
 		op.Step = step
-		_ = m.store.UpdateCorraldOp(context.Background(), op)
+		_, _ = m.store.UpdateCorraldOpIfActive(context.Background(), op)
 	}
 	isCancelled := func() bool { return m.isOpCancelled(rop) }
 
@@ -1291,6 +1734,79 @@ func (m *Manager) runInstallWithSSH(ctx context.Context, rop *runningOp, op *sto
 	if isCancelled() {
 		m.finishOpCancelled(op, ch)
 		return
+	}
+
+	// Check existing installation before staging/installing: if the host already
+	// has a same or newer Release installed, never downgrade — attach directly
+	// and let attachAndHello perform protocol + manifest scope checks (Item 10).
+	existingFiles := ReadHostStateFiles(ctx, sshClient, probe, "")
+	if probe.HasSymlink {
+		existingRel := int64(0)
+		if existingFiles.Meta != nil && existingFiles.Meta.Release > existingRel {
+			existingRel = existingFiles.Meta.Release
+		}
+		if existingFiles.Install != nil && existingFiles.Install.Release > existingRel {
+			existingRel = existingFiles.Install.Release
+		}
+		if existingRel == 0 {
+			if vres, verr := runSSH(ctx, sshClient, VersionCommand(probe.CurrentBin), 4096, sshx.ExecOptions{}); verr == nil || vres.Ended {
+				vf := ParseKeyValues(vres.Out)
+				if r, rerr := strconv.ParseInt(strings.TrimSpace(vf["release"]), 10, 64); rerr == nil {
+					existingRel = r
+				}
+			}
+		}
+		if existingRel > 0 && existingRel >= dist.Release {
+			setStep("start")
+			sock := probe.SocketPath
+			if existingFiles.Meta != nil && existingFiles.Meta.SocketPath != "" {
+				sock = existingFiles.Meta.SocketPath
+			}
+			ch.MachineID = probe.MachineID
+			ch.SocketPath = sock
+			if existingFiles.Install != nil && len(existingFiles.Install.Files) > 0 {
+				ch.Files = existingFiles.Install.Files
+			}
+			if err := m.attachAndHello(ctx, userID, hostID, corralUser, fp, sshUser, sshClient, own, probe, sock, ch, op.ID); err != nil {
+				var rpcErr *proto.RPCError
+				if errors.As(err, &rpcErr) && rpcErr.Code == proto.ErrProtoMismatch {
+					op.State = OpFailed
+					op.ErrorCode = proto.ErrProtoMismatch
+					_, _ = m.store.UpdateCorraldOpIfActive(context.Background(), op)
+					return
+				}
+				_, startedSock, serveFail := RunServe(ctx, sshClient, probe.CurrentBin, m.gatewayID, probe.MachineID, probe.OS, probe.Arch)
+				if serveFail != nil {
+					m.finishOpFail(op, ch, serveFail)
+					return
+				}
+				if startedSock != "" {
+					sock = startedSock
+					ch.SocketPath = sock
+				}
+				if err := m.attachAndHello(ctx, userID, hostID, corralUser, fp, sshUser, sshClient, own, probe, sock, ch, op.ID); err != nil {
+					if errors.As(err, &rpcErr) && rpcErr.Code == proto.ErrProtoMismatch {
+						op.State = OpFailed
+						op.ErrorCode = proto.ErrProtoMismatch
+						_, _ = m.store.UpdateCorraldOpIfActive(context.Background(), op)
+						return
+					}
+					m.finishOpFail(op, ch, &OpFailure{
+						Code:          "start_failed",
+						Detail:        err.Error(),
+						MachineID:     probe.MachineID,
+						OS:            probe.OS,
+						Arch:          probe.Arch,
+						KeepInstalled: true,
+					})
+					return
+				}
+			}
+			op.State = OpDone
+			op.ErrorCode = ""
+			_, _ = m.store.UpdateCorraldOpIfActive(context.Background(), op)
+			return
+		}
 	}
 
 	_, sfail := StageAndInstall(ctx, sshClient, dist, probe, bin, op.ID, m.gatewayID, corralUser, false, setStep, isCancelled, m.cfg.VerifySHA256Hook)
@@ -1325,15 +1841,6 @@ func (m *Manager) runInstallWithSSH(ctx context.Context, rop *runningOp, op *sto
 		sock = probe.SocketPath
 	}
 
-	// Save binding & consent metadata before hello.
-	mb, _ := proto.MarshalManifest(dist.Manifest)
-	uid := userID
-	ch.ConsentBy = &uid
-	ch.ConsentAt = time.Now().Unix()
-	ch.BoundFingerprint = fp
-	ch.BoundUsername = sshUser
-	ch.BoundGateway = m.gatewayID
-	ch.ManifestJSON = string(mb)
 	ch.MachineID = probe.MachineID
 	ch.SocketPath = sock
 
@@ -1342,12 +1849,12 @@ func (m *Manager) runInstallWithSSH(ctx context.Context, rop *runningOp, op *sto
 		ch.Files = files.Install.Files
 	}
 
-	if err := m.attachAndHello(ctx, userID, hostID, corralUser, fp, sshUser, sshClient, probe, sock, ch); err != nil {
+	if err := m.attachAndHello(ctx, userID, hostID, corralUser, fp, sshUser, sshClient, own, probe, sock, ch, op.ID); err != nil {
 		var rpcErr *proto.RPCError
 		if errors.As(err, &rpcErr) && rpcErr.Code == proto.ErrProtoMismatch {
 			op.State = OpFailed
 			op.ErrorCode = proto.ErrProtoMismatch
-			_ = m.store.UpdateCorraldOp(context.Background(), op)
+			_, _ = m.store.UpdateCorraldOpIfActive(context.Background(), op)
 			return
 		}
 		m.finishOpFail(op, ch, &OpFailure{
@@ -1363,7 +1870,7 @@ func (m *Manager) runInstallWithSSH(ctx context.Context, rop *runningOp, op *sto
 
 	op.State = OpDone
 	op.ErrorCode = ""
-	_ = m.store.UpdateCorraldOp(context.Background(), op)
+	_, _ = m.store.UpdateCorraldOpIfActive(context.Background(), op)
 }
 
 func (m *Manager) runRemoveOp(ctx context.Context, rop *runningOp, op *store.CorraldOp, ch *store.CorraldHost, userID, hostID int64) {
@@ -1372,12 +1879,11 @@ func (m *Manager) runRemoveOp(ctx context.Context, rop *runningOp, op *store.Cor
 		rop.step = step
 		m.mu.Unlock()
 		op.Step = step
-		_ = m.store.UpdateCorraldOp(context.Background(), op)
+		_, _ = m.store.UpdateCorraldOpIfActive(context.Background(), op)
 	}
 
 	sshClient, release, fp, sshUser, err := m.ssh.AcquireSSH(ctx, userID, hostID)
 	if err != nil {
-		// Unreachable: mark remove_pending so next connect finishes removal.
 		m.markRemovePending(op, ch, err.Error())
 		return
 	}
@@ -1411,31 +1917,39 @@ func (m *Manager) runRemoveOp(ctx context.Context, rop *runningOp, op *store.Cor
 		ch.SocketPath = ""
 		ch.Files = []string{}
 		ch.PausedUsers = []int64{}
+		ch.FailedReleases = []int64{}
 		ch.LastError = ""
 		ch.RestartCount = 0
-		_ = m.store.UpsertCorraldHost(context.Background(), ch)
+		ch.UpdatedFromVer = ""
+		ch.UpdatedFromRel = 0
+		ch.UpdatedFromTarget = ""
+		ch.UpdateTargetVer = ""
+		ch.UpdateTargetRel = 0
+		ch.UpdateReadyAt = 0
+		ch.UpdateCrashCount = 0
+		_, _ = m.store.UpdateCorraldHostIfOp(context.Background(), ch, op.ID, true)
 		op.State = OpDone
 		op.ErrorCode = ""
 		op.Detail = encodeOpDetail(opDetailPayload{Result: "removed"})
-		_ = m.store.UpdateCorraldOp(context.Background(), op)
+		_, _ = m.store.UpdateCorraldOpIfActive(context.Background(), op)
 	case "partial":
 		fail := &OpFailure{Code: "partial", Left: out.Left}
 		ch.State = StateError
 		ch.LastError = encodeLastError(fail)
-		_ = m.store.UpsertCorraldHost(context.Background(), ch)
+		_, _ = m.store.UpdateCorraldHostIfOp(context.Background(), ch, op.ID, true)
 		op.State = OpFailed
 		op.ErrorCode = "partial"
 		op.Detail = encodeOpDetail(opDetailPayload{Result: "partial", Left: out.Left})
-		_ = m.store.UpdateCorraldOp(context.Background(), op)
+		_, _ = m.store.UpdateCorraldOpIfActive(context.Background(), op)
 	case "stop_failed":
 		fail := &OpFailure{Code: "stop_failed", PID: out.PID, Detail: out.Detail}
 		ch.State = StateError
 		ch.LastError = encodeLastError(fail)
-		_ = m.store.UpsertCorraldHost(context.Background(), ch)
+		_, _ = m.store.UpdateCorraldHostIfOp(context.Background(), ch, op.ID, true)
 		op.State = OpFailed
 		op.ErrorCode = "stop_failed"
 		op.Detail = encodeOpDetail(opDetailPayload{Result: "stop_failed", PID: out.PID, Message: out.Detail})
-		_ = m.store.UpdateCorraldOp(context.Background(), op)
+		_, _ = m.store.UpdateCorraldOpIfActive(context.Background(), op)
 	default:
 		m.markRemovePending(op, ch, out.Detail)
 	}
@@ -1444,45 +1958,62 @@ func (m *Manager) runRemoveOp(ctx context.Context, rop *runningOp, op *store.Cor
 func (m *Manager) markRemovePending(op *store.CorraldOp, ch *store.CorraldHost, reason string) {
 	ch.State = StateRemovePending
 	ch.LastError = ""
-	_ = m.store.UpsertCorraldHost(context.Background(), ch)
+	_, _ = m.store.UpdateCorraldHostIfOp(context.Background(), ch, op.ID, true)
 	op.State = OpUnknown
 	op.ErrorCode = ""
 	op.Detail = encodeOpDetail(opDetailPayload{Result: "pending", Message: reason})
-	_ = m.store.UpdateCorraldOp(context.Background(), op)
+	_, _ = m.store.UpdateCorraldOpIfActive(context.Background(), op)
 }
 
-func (m *Manager) launchUpdateOp(ctx context.Context, userID, hostID int64, corralUser string, ch *store.CorraldHost, dist *Dist, replace bool) (*OpView, error) {
+func (m *Manager) launchUpdateOp(ctx context.Context, userID, hostID int64, corralUser, fp, sshUser string, ch *store.CorraldHost, dist *Dist, replace bool) (*OpView, error) {
+	if fp == "" {
+		fp = ch.BoundFingerprint
+	}
+	if sshUser == "" {
+		sshUser = ch.BoundUsername
+	}
+	acct := accountKey{Fingerprint: fp, Username: sshUser}
+
 	opID := newHexID()
 	op := &store.CorraldOp{
-		ID:        opID,
-		HostID:    hostID,
-		Kind:      OpUpdate,
-		State:     OpRunning,
-		Step:      "upload",
-		CreatedBy: userID,
-	}
-	if err := m.store.CreateCorraldOp(ctx, op, false); err != nil {
-		return nil, err
+		ID:         opID,
+		HostID:     hostID,
+		AccountKey: store.CorraldAccountKey(fp, sshUser),
+		Kind:       OpUpdate,
+		State:      OpRunning,
+		Step:       "upload",
+		CreatedBy:  userID,
 	}
 
 	opCtx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-	rop := &runningOp{opID: opID, kind: OpUpdate, step: "upload", cancel: cancel, done: make(chan struct{})}
-	m.mu.Lock()
-	if m.closed {
-		m.mu.Unlock()
+	rop := &runningOp{opID: opID, hostID: hostID, acct: acct, kind: OpUpdate, step: "upload", cancel: cancel, done: make(chan struct{})}
+	if err := m.registerRunningOp(rop); err != nil {
 		cancel()
-		return nil, errors.New("manager closed")
+		return nil, err
 	}
-	m.ops[hostID] = rop
-	m.wg.Add(1)
-	m.mu.Unlock()
+	if err := m.store.CreateCorraldOp(ctx, op, false); err != nil {
+		m.clearRunningOp(rop)
+		cancel()
+		return nil, err
+	}
+
+	ch.ActiveOpID = opID
+	if err := m.store.UpsertCorraldHost(ctx, ch); err != nil {
+		op.State = OpFailed
+		op.ErrorCode = "other"
+		_ = m.store.UpdateCorraldOp(ctx, op)
+		m.clearRunningOp(rop)
+		cancel()
+		return nil, err
+	}
 
 	view := m.toOpView(op)
+	m.wg.Add(1)
 	go func() {
 		defer m.wg.Done()
 		defer cancel()
 		defer close(rop.done)
-		defer m.clearRunningOp(hostID, rop)
+		defer m.clearRunningOp(rop)
 		m.runUpdateOp(opCtx, rop, op, ch, dist, userID, hostID, corralUser, replace)
 	}()
 
@@ -1495,27 +2026,45 @@ func (m *Manager) runUpdateOp(ctx context.Context, rop *runningOp, op *store.Cor
 		rop.step = step
 		m.mu.Unlock()
 		op.Step = step
-		_ = m.store.UpdateCorraldOp(context.Background(), op)
+		_, _ = m.store.UpdateCorraldOpIfActive(context.Background(), op)
 	}
+	isCancelled := func() bool { return m.isOpCancelled(rop) }
 
 	prevVer := ch.Version
 	prevRel := ch.Release
 
 	sshClient, release, fp, sshUser, err := m.ssh.AcquireSSH(ctx, userID, hostID)
 	if err != nil {
+		if isCancelled() {
+			return
+		}
 		m.finishUpdateFailKeepPrev(op, ch, prevVer, prevRel, dist.Version, err.Error())
 		return
 	}
-	defer release()
+	own := newSSHOwnership(release)
+	defer own.releaseIfOwned()
 
 	probe, err := m.probeHost(ctx, sshClient)
 	if err != nil {
+		if isCancelled() {
+			return
+		}
 		m.finishUpdateFailKeepPrev(op, ch, prevVer, prevRel, dist.Version, err.Error())
 		return
 	}
 	bin, vfail := ValidateProbe(probe, dist)
 	if vfail != nil {
+		if isCancelled() {
+			return
+		}
 		m.finishUpdateFailKeepPrev(op, ch, prevVer, prevRel, dist.Version, vfail.Error())
+		return
+	}
+
+	if m.cfg.BeforeUpdateStage != nil {
+		m.cfg.BeforeUpdateStage(hostID, op.ID)
+	}
+	if isCancelled() {
 		return
 	}
 
@@ -1525,42 +2074,51 @@ func (m *Manager) runUpdateOp(ctx context.Context, rop *runningOp, op *store.Cor
 			m.closeSharedConn(sc, true)
 		}
 		_, _ = runSSH(ctx, sshClient, StopCommand(probe.CurrentBin), 4096, sshx.ExecOptions{})
-		_, sfail := StageAndInstall(ctx, sshClient, dist, probe, bin, op.ID, m.gatewayID, corralUser, false, setStep, nil, m.cfg.VerifySHA256Hook)
+		_, sfail := StageAndInstall(ctx, sshClient, dist, probe, bin, op.ID, m.gatewayID, corralUser, false, setStep, isCancelled, m.cfg.VerifySHA256Hook)
 		if sfail != nil {
+			if isCancelled() {
+				return
+			}
 			ch.State = StateError
 			ch.LastError = encodeLastError(sfail)
-			_ = m.store.UpsertCorraldHost(context.Background(), ch)
+			_, _ = m.store.UpdateCorraldHostIfOp(context.Background(), ch, op.ID, true)
 			op.State = OpFailed
 			op.ErrorCode = sfail.Code
-			_ = m.store.UpdateCorraldOp(context.Background(), op)
+			_, _ = m.store.UpdateCorraldOpIfActive(context.Background(), op)
 			return
 		}
 		setStep("handoff")
 		_, sock, serveFail := RunServe(ctx, sshClient, probe.CurrentBin, m.gatewayID, probe.MachineID, probe.OS, probe.Arch)
 		if serveFail != nil {
+			if isCancelled() {
+				return
+			}
 			ch.State = StateError
 			ch.LastError = encodeLastError(serveFail)
-			_ = m.store.UpsertCorraldHost(context.Background(), ch)
+			_, _ = m.store.UpdateCorraldHostIfOp(context.Background(), ch, op.ID, true)
 			op.State = OpFailed
 			op.ErrorCode = serveFail.Code
-			_ = m.store.UpdateCorraldOp(context.Background(), op)
+			_, _ = m.store.UpdateCorraldOpIfActive(context.Background(), op)
 			return
 		}
 		setStep("verify")
 		if sock == "" {
 			sock = probe.SocketPath
 		}
-		if err := m.attachAndHello(ctx, userID, hostID, corralUser, fp, sshUser, sshClient, probe, sock, ch); err != nil {
+		if err := m.attachAndHello(ctx, userID, hostID, corralUser, fp, sshUser, sshClient, own, probe, sock, ch, op.ID); err != nil {
+			if isCancelled() {
+				return
+			}
 			ch.State = StateError
 			ch.LastError = encodeLastError(&OpFailure{Code: "start_failed", Detail: err.Error()})
-			_ = m.store.UpsertCorraldHost(context.Background(), ch)
+			_, _ = m.store.UpdateCorraldHostIfOp(context.Background(), ch, op.ID, true)
 			op.State = OpFailed
 			op.ErrorCode = "start_failed"
-			_ = m.store.UpdateCorraldOp(context.Background(), op)
+			_, _ = m.store.UpdateCorraldOpIfActive(context.Background(), op)
 			return
 		}
 		op.State = OpDone
-		_ = m.store.UpdateCorraldOp(context.Background(), op)
+		_, _ = m.store.UpdateCorraldOpIfActive(context.Background(), op)
 		return
 	}
 
@@ -1570,9 +2128,16 @@ func (m *Manager) runUpdateOp(ctx context.Context, rop *runningOp, op *store.Cor
 		prevRelTarget = fmt.Sprintf("corrald-%s-%d/corrald", prevVer, prevRel)
 	}
 
-	installedBin, sfail := StageAndInstall(ctx, sshClient, dist, probe, bin, op.ID, m.gatewayID, corralUser, true, setStep, nil, m.cfg.VerifySHA256Hook)
+	installedBin, sfail := StageAndInstall(ctx, sshClient, dist, probe, bin, op.ID, m.gatewayID, corralUser, true, setStep, isCancelled, m.cfg.VerifySHA256Hook)
 	if sfail != nil {
+		if sfail.Code == "cancelled" || isCancelled() {
+			return
+		}
 		m.finishUpdateFailKeepPrev(op, ch, prevVer, prevRel, dist.Version, sfail.Error())
+		return
+	}
+
+	if isCancelled() {
 		return
 	}
 
@@ -1597,7 +2162,13 @@ func (m *Manager) runUpdateOp(ctx context.Context, rop *runningOp, op *store.Cor
 		_, _ = runSSH(ctx, sshClient, SwitchSymlinkCommand(probe.LibDir, relTarget), 4096, sshx.ExecOptions{})
 		_, sock, serveFail := RunServe(ctx, sshClient, probe.CurrentBin, m.gatewayID, probe.MachineID, probe.OS, probe.Arch)
 		if serveFail != nil {
-			_ = RecordFailedOnHost(ctx, sshClient, probe.FailedJSON, dist.Release, serveFail.Error())
+			_ = RecordFailedOnHost(ctx, sshClient, probe.Home, probe.UIDInt64(), probe.FailedJSON, dist.Release, serveFail.Error())
+			_ = m.store.RecordCorraldFailedReleases(context.Background(), hostID, fp, sshUser, []int64{dist.Release})
+			if sc != nil {
+				sc.mu.Lock()
+				sc.addFailedReleasesLocked([]int64{dist.Release})
+				sc.mu.Unlock()
+			}
 			if prevRelTarget != "" {
 				_, _ = runSSH(ctx, sshClient, SwitchSymlinkCommand(probe.LibDir, prevRelTarget), 4096, sshx.ExecOptions{})
 				_, _, _ = RunServe(ctx, sshClient, probe.CurrentBin, m.gatewayID, probe.MachineID, probe.OS, probe.Arch)
@@ -1608,12 +2179,12 @@ func (m *Manager) runUpdateOp(ctx context.Context, rop *runningOp, op *store.Cor
 		if sock == "" {
 			sock = probe.SocketPath
 		}
-		if err := m.attachAndHello(ctx, userID, hostID, corralUser, fp, sshUser, sshClient, probe, sock, ch); err != nil {
+		if err := m.attachAndHello(ctx, userID, hostID, corralUser, fp, sshUser, sshClient, own, probe, sock, ch, op.ID); err != nil {
 			m.finishUpdateFailKeepPrev(op, ch, prevVer, prevRel, dist.Version, err.Error())
 			return
 		}
 		op.State = OpDone
-		_ = m.store.UpdateCorraldOp(context.Background(), op)
+		_, _ = m.store.UpdateCorraldOpIfActive(context.Background(), op)
 		return
 	}
 
@@ -1626,21 +2197,32 @@ func (m *Manager) runUpdateOp(ctx context.Context, rop *runningOp, op *store.Cor
 	})
 	hcancel()
 	if herr != nil {
+		if isCancelled() {
+			return
+		}
 		// Handoff failed before READY: old daemon keeps serving seamlessly!
-		_ = RecordFailedOnHost(ctx, sshClient, probe.FailedJSON, dist.Release, herr.Error())
+		_ = RecordFailedOnHost(ctx, sshClient, probe.Home, probe.UIDInt64(), probe.FailedJSON, dist.Release, herr.Error())
+		_ = m.store.RecordCorraldFailedReleases(context.Background(), hostID, fp, sshUser, []int64{dist.Release})
+		sc.mu.Lock()
+		sc.addFailedReleasesLocked([]int64{dist.Release})
+		sc.mu.Unlock()
 		m.finishUpdateFailKeepPrev(op, ch, prevVer, prevRel, dist.Version, herr.Error())
 		return
 	}
 
 	// Step: verify — reconnect to the new process and confirm its Release.
 	setStep("verify")
-	if err := m.reconnectSharedConn(ctx, sc, sshClient); err != nil {
+	if err := m.reconnectSharedConn(ctx, sc, sshClient, own); err != nil {
+		if isCancelled() {
+			return
+		}
 		m.finishUpdateFailKeepPrev(op, ch, prevVer, prevRel, dist.Version, err.Error())
 		return
 	}
 
+	readyTime := time.Now()
 	sc.mu.Lock()
-	sc.updatedAt = time.Now()
+	sc.updatedAt = readyTime
 	sc.updateTargetVer = dist.Version
 	sc.updateTargetRel = dist.Release
 	sc.updateCrashCount = 0
@@ -1659,17 +2241,30 @@ func (m *Manager) runUpdateOp(ctx context.Context, rop *runningOp, op *store.Cor
 		ch.Version = dist.Version
 		ch.Release = dist.Release
 	}
-	ch.LastOKAt = time.Now().Unix()
+	ch.UpdatedFromVer = prevVer
+	ch.UpdatedFromRel = prevRel
+	ch.UpdatedFromTarget = prevRelTarget
+	ch.UpdateTargetVer = dist.Version
+	ch.UpdateTargetRel = dist.Release
+	ch.UpdateReadyAt = readyTime.Unix()
+	ch.UpdateCrashCount = 0
+	ch.LastOKAt = readyTime.Unix()
 	ch.LastError = ""
 	ch.RestartCount = 0
 	if files := ReadHostStateFiles(ctx, sshClient, probe, op.ID); files.Install != nil && len(files.Install.Files) > 0 {
 		ch.Files = files.Install.Files
 	}
-	_ = m.store.UpsertCorraldHost(context.Background(), ch)
+	if ok, _ := m.store.UpdateCorraldHostIfOp(context.Background(), ch, op.ID, true); ok {
+		// Persist post-update crash window across all peers sharing this account (Item 22).
+		_ = m.store.UpdateCorraldCrashWindowByBinding(
+			context.Background(), hostID, fp, sshUser,
+			readyTime.Unix(), dist.Version, dist.Release, prevVer, prevRel, prevRelTarget, 0,
+		)
+	}
 
 	op.State = OpDone
 	op.ErrorCode = ""
-	_ = m.store.UpdateCorraldOp(context.Background(), op)
+	_, _ = m.store.UpdateCorraldOpIfActive(context.Background(), op)
 }
 
 func (m *Manager) finishUpdateFailKeepPrev(op *store.CorraldOp, ch *store.CorraldHost, prevVer string, prevRel int64, targetVer, detail string) {
@@ -1685,25 +2280,29 @@ func (m *Manager) finishUpdateFailKeepPrev(op *store.CorraldOp, ch *store.Corral
 		ch.Release = prevRel
 	}
 	ch.LastError = encodeLastError(fail)
-	_ = m.store.UpsertCorraldHost(context.Background(), ch)
+	// Conditional update: if a withdrawal-first remove superseded this op, do NOT overwrite! (Item 4)
+	_, _ = m.store.UpdateCorraldHostIfOp(context.Background(), ch, op.ID, true)
 
 	op.State = OpFailed
 	op.ErrorCode = "update_failed"
 	op.Detail = encodeOpDetail(opDetailPayload{Message: detail})
-	_ = m.store.UpdateCorraldOp(context.Background(), op)
+	_, _ = m.store.UpdateCorraldOpIfActive(context.Background(), op)
 }
 
 // attachAndHello dials socketPath via direct-streamlocal, performs daemon.hello
 // and daemon.resume, creates/updates the sharedConn, and starts health/disconnect
-// monitoring.
+// monitoring. If own is non-nil, ownership of the SSH release callback is
+// transferred to sc so the caller will not close the live SSH connection (Item 2).
 func (m *Manager) attachAndHello(
 	ctx context.Context,
 	userID, hostID int64,
 	corralUser, fp, sshUser string,
 	sshClient *ssh.Client,
+	own *sshOwnership,
 	probe *HostProbe,
 	socketPath string,
 	ch *store.CorraldHost,
+	opID string,
 ) error {
 	key := accountKey{Fingerprint: fp, Username: sshUser}
 
@@ -1711,11 +2310,7 @@ func (m *Manager) attachAndHello(
 	m.mu.Lock()
 	sc = m.conns[key]
 	if sc == nil {
-		sc = &sharedConn{
-			key:      key,
-			hostRefs: make(map[int64]*hostRef),
-			stopCh:   make(chan struct{}),
-		}
+		sc = newSharedConn(key)
 		m.conns[key] = sc
 	}
 	m.hostConn[hostID] = key
@@ -1745,7 +2340,7 @@ func (m *Manager) attachAndHello(
 		if errors.As(err, &rpcErr) && rpcErr.Code == proto.ErrProtoMismatch {
 			ch.State = StateIncompatible
 			ch.LastError = encodeLastError(&OpFailure{Code: proto.ErrProtoMismatch, Detail: rpcErr.Message})
-			_ = m.store.UpsertCorraldHost(context.Background(), ch)
+			_, _ = m.store.UpdateCorraldHostIfOp(context.Background(), ch, opID, opID != "")
 		}
 		return err
 	}
@@ -1755,7 +2350,7 @@ func (m *Manager) attachAndHello(
 		ch.Version = hello.Version
 		ch.Release = hello.Release
 		ch.LastError = encodeLastError(&OpFailure{Code: proto.ErrProtoMismatch, Detail: fmt.Sprintf("protocol %d outside [%d,%d]", hello.Protocol, m.protoMin, m.protoMax)})
-		_ = m.store.UpsertCorraldHost(context.Background(), ch)
+		_, _ = m.store.UpdateCorraldHostIfOp(context.Background(), ch, opID, opID != "")
 		return &proto.RPCError{Code: proto.ErrProtoMismatch, Message: "daemon protocol out of gateway range"}
 	}
 
@@ -1779,13 +2374,25 @@ func (m *Manager) attachAndHello(
 
 	health, _ := client.Health(ctx)
 
+	// Transfer SSH release ownership to sc now that Dial+Hello succeeded (Item 2).
+	newRelease := own.take()
+
 	sc.mu.Lock()
 	oldClient := sc.client
+	oldSSH := sc.sshClient
+	oldRelease := sc.sshRelease
 	sc.client = client
 	sc.sshClient = sshClient
+	if sshClient != oldSSH {
+		sc.sshRelease = newRelease
+	} else if newRelease != nil && oldRelease == nil {
+		sc.sshRelease = newRelease
+	}
 	sc.socketPath = socketPath
 	if probe != nil {
 		sc.machineID = probe.MachineID
+		sc.homeDir = probe.Home
+		sc.uid = probe.UIDInt64()
 		sc.libDir = probe.LibDir
 		sc.stateDir = probe.StateDir
 	}
@@ -1795,12 +2402,26 @@ func (m *Manager) attachAndHello(
 	if hello.Seq > sc.lastSeq {
 		sc.lastSeq = hello.Seq
 	}
+	sc.addFailedReleasesLocked(ch.FailedReleases)
+	// Hydrate persisted post-update crash window after gateway restart (Item 22).
+	if sc.updatedAt.IsZero() && ch.UpdateReadyAt > 0 && ch.UpdateTargetRel > 0 && ch.UpdateTargetRel == hello.Release {
+		sc.updatedAt = time.Unix(ch.UpdateReadyAt, 0)
+		sc.updateTargetVer = ch.UpdateTargetVer
+		sc.updateTargetRel = ch.UpdateTargetRel
+		sc.updateCrashCount = ch.UpdateCrashCount
+		sc.prevVersion = ch.UpdatedFromVer
+		sc.prevRelease = ch.UpdatedFromRel
+		sc.prevRelTarget = ch.UpdatedFromTarget
+	}
 	sc.intentionalClose = false
 	sc.hostRefs[hostID] = &hostRef{HostID: hostID, OwnerID: userID, CorralUser: corralUser}
 	sc.mu.Unlock()
 
 	if oldClient != nil && oldClient != client {
 		_ = oldClient.Close()
+	}
+	if oldRelease != nil && oldSSH != sshClient {
+		oldRelease()
 	}
 
 	ch.State = StateRunning
@@ -1814,7 +2435,7 @@ func (m *Manager) attachAndHello(
 			ch.LastError = ""
 		}
 	}
-	_ = m.store.UpsertCorraldHost(context.Background(), ch)
+	_, _ = m.store.UpdateCorraldHostIfOp(context.Background(), ch, opID, opID != "")
 
 	// Start monitor loop for this client generation.
 	m.wg.Add(1)
@@ -1859,19 +2480,20 @@ func (m *Manager) handleDaemonEvent(sc *sharedConn, ev proto.Event) {
 				}()
 				rctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 				defer cancel()
-				_ = m.reconnectSharedConn(rctx, sc, nil)
+				_ = m.reconnectSharedConn(rctx, sc, nil, nil)
 			}()
 		}
 	}
 }
 
-func (m *Manager) reconnectSharedConn(ctx context.Context, sc *sharedConn, overrideSSH *ssh.Client) error {
+func (m *Manager) reconnectSharedConn(ctx context.Context, sc *sharedConn, overrideSSH *ssh.Client, overrideOwn *sshOwnership) error {
 	sc.mu.Lock()
 	sock := sc.socketPath
 	oldClient := sc.client
 	prevEpoch := sc.epoch
 	prevSeq := sc.lastSeq
 	sshClient := overrideSSH
+	own := overrideOwn
 	if sshClient == nil {
 		sshClient = sc.sshClient
 	}
@@ -1882,13 +2504,16 @@ func (m *Manager) reconnectSharedConn(ctx context.Context, sc *sharedConn, overr
 	}
 	sc.mu.Unlock()
 
+	var acquiredOwn *sshOwnership
 	if sshClient == nil && len(refs) > 0 {
-		c, rel, _, _, err := m.ssh.AcquireSSH(ctx, refs[0].OwnerID, refs[0].HostID)
+		c, rel, err := m.acquireMatchingSSH(ctx, sc.key, refs)
 		if err != nil {
 			return err
 		}
-		defer rel()
+		acquiredOwn = newSSHOwnership(rel)
+		defer acquiredOwn.releaseIfOwned()
 		sshClient = c
+		own = acquiredOwn
 	}
 	if sshClient == nil {
 		return ErrNotConnected
@@ -1964,8 +2589,19 @@ func (m *Manager) reconnectSharedConn(ctx context.Context, sc *sharedConn, overr
 
 	health, _ := newClient.Health(ctx)
 
+	// Transfer SSH ownership to sc so caller does not close the live SSH conn (Item 2).
+	newRelease := own.take()
+
 	sc.mu.Lock()
+	oldSSH := sc.sshClient
+	oldRelease := sc.sshRelease
 	sc.client = newClient
+	if sshClient != oldSSH {
+		sc.sshClient = sshClient
+		sc.sshRelease = newRelease
+	} else if newRelease != nil && oldRelease == nil {
+		sc.sshRelease = newRelease
+	}
 	sc.hello = hello
 	sc.health = health
 	sc.epoch = hello.Epoch
@@ -1976,6 +2612,9 @@ func (m *Manager) reconnectSharedConn(ctx context.Context, sc *sharedConn, overr
 
 	if oldClient != nil && oldClient != newClient {
 		_ = oldClient.Close()
+	}
+	if oldRelease != nil && oldSSH != sshClient {
+		oldRelease()
 	}
 
 	m.wg.Add(1)
@@ -2057,13 +2696,17 @@ func (m *Manager) handleUnexpectedDisconnect(sc *sharedConn) {
 	prevRelTarget := sc.prevRelTarget
 	libDir := sc.libDir
 	stateDir := sc.stateDir
+	homeDir := sc.homeDir
+	uid := sc.uid
 	sockPath := sc.socketPath
 	machineID := sc.machineID
 
-	// Check 30-minute post-update crash loop window (spec §6 item 7).
+	// Check 30-minute post-update crash loop window (spec §6 item 7, persisted via Item 22).
 	triggerRollback := false
+	newCrashCount := sc.updateCrashCount
 	if !updatedAt.IsZero() && updateTargetRel > 0 {
 		sc.updateCrashCount++
+		newCrashCount = sc.updateCrashCount
 		if ShouldRollbackOnCrash(sc.updateCrashCount, time.Since(updatedAt), m.crashWindow, m.crashThreshold) {
 			triggerRollback = true
 		}
@@ -2080,6 +2723,14 @@ func (m *Manager) handleUnexpectedDisconnect(sc *sharedConn) {
 		return
 	}
 
+	// Persist incremented crash count so gateway restarts preserve the rollback window (Item 22).
+	if !updatedAt.IsZero() && updateTargetRel > 0 {
+		_ = m.store.UpdateCorraldCrashWindowByBinding(
+			context.Background(), refs[0].HostID, sc.key.Fingerprint, sc.key.Username,
+			updatedAt.Unix(), updateTargetVer, updateTargetRel, prevVer, prevRel, prevRelTarget, newCrashCount,
+		)
+	}
+
 	// Transition all attached hosts to StateLost.
 	for _, ref := range refs {
 		if ch, err := m.store.CorraldHostByID(context.Background(), ref.HostID); err == nil {
@@ -2091,7 +2742,7 @@ func (m *Manager) handleUnexpectedDisconnect(sc *sharedConn) {
 	}
 
 	if triggerRollback {
-		if m.attemptPostUpdateRollback(sc, refs, updateTargetVer, updateTargetRel, prevVer, prevRel, prevRelTarget, libDir, stateDir, sockPath, machineID) {
+		if m.attemptPostUpdateRollback(sc, refs, updateTargetVer, updateTargetRel, prevVer, prevRel, prevRelTarget, homeDir, uid, libDir, stateDir, sockPath, machineID) {
 			return
 		}
 	}
@@ -2107,7 +2758,7 @@ func (m *Manager) handleUnexpectedDisconnect(sc *sharedConn) {
 
 		if m.tryRestartSharedConn(sc, refs) {
 			for _, ref := range refs {
-				if ch, err := m.store.CorraldHostByID(context.Background(), ref.HostID); err == nil {
+				if ch, err := m.store.CorraldHostByID(context.Background(), ref.HostID); err == nil && ch.State != StateRebind && ch.State != StateOff && ch.State != StateRemoving && ch.State != StateRemovePending {
 					ch.State = StateRunning
 					ch.RestartCount = 0
 					ch.LastOKAt = time.Now().Unix()
@@ -2139,27 +2790,42 @@ func (m *Manager) attemptPostUpdateRollback(
 	badRel int64,
 	prevVer string,
 	prevRel int64,
-	prevRelTarget, libDir, stateDir, sockPath, machineID string,
+	prevRelTarget, homeDir string,
+	uid int64,
+	libDir, stateDir, sockPath, machineID string,
 ) bool {
 	rctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	sshClient, relFn, err := m.acquireAnySSH(rctx, refs)
+	sshClient, relFn, err := m.acquireMatchingSSH(rctx, sc.key, refs)
 	if err != nil {
 		return false
 	}
-	defer relFn()
+	own := newSSHOwnership(relFn)
+	defer own.releaseIfOwned()
 
-	// Record the broken release in failed.json on the host.
+	// Record the broken release in failed.json on the host and in gateway DB/cache.
 	if stateDir != "" && badRel > 0 {
-		_ = RecordFailedOnHost(rctx, sshClient, stateDir+"/failed.json", badRel, "crash_loop_after_update")
+		_ = RecordFailedOnHost(rctx, sshClient, homeDir, uid, stateDir+"/failed.json", badRel, "crash_loop_after_update")
+	}
+	if badRel > 0 && len(refs) > 0 {
+		_ = m.store.RecordCorraldFailedReleases(context.Background(), refs[0].HostID, sc.key.Fingerprint, sc.key.Username, []int64{badRel})
+		sc.mu.Lock()
+		sc.addFailedReleasesLocked([]int64{badRel})
+		sc.mu.Unlock()
 	}
 
-	// Clear update window so we don't loop rollback.
+	// Clear update window in memory & DB so we don't loop rollback.
 	sc.mu.Lock()
 	sc.updatedAt = time.Time{}
 	sc.updateCrashCount = 0
 	sc.mu.Unlock()
+	if len(refs) > 0 {
+		_ = m.store.UpdateCorraldCrashWindowByBinding(
+			context.Background(), refs[0].HostID, sc.key.Fingerprint, sc.key.Username,
+			0, "", 0, "", 0, "", 0,
+		)
+	}
 
 	if prevRelTarget == "" || libDir == "" {
 		return false
@@ -2180,7 +2846,7 @@ func (m *Manager) attemptPostUpdateRollback(
 		sc.socketPath = startedSock
 		sc.mu.Unlock()
 	}
-	if err := m.reconnectSharedConn(rctx, sc, sshClient); err != nil {
+	if err := m.reconnectSharedConn(rctx, sc, sshClient, own); err != nil {
 		return false
 	}
 
@@ -2208,14 +2874,15 @@ func (m *Manager) tryRestartSharedConn(sc *sharedConn, refs []*hostRef) bool {
 	rctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
-	sshClient, relFn, err := m.acquireAnySSH(rctx, refs)
+	sshClient, relFn, err := m.acquireMatchingSSH(rctx, sc.key, refs)
 	if err != nil {
 		return false
 	}
-	defer relFn()
+	own := newSSHOwnership(relFn)
+	defer own.releaseIfOwned()
 
 	// Try direct reconnect first (e.g. transient SSH blip while daemon kept running).
-	if err := m.reconnectSharedConn(rctx, sc, sshClient); err == nil {
+	if err := m.reconnectSharedConn(rctx, sc, sshClient, own); err == nil {
 		return true
 	}
 
@@ -2234,6 +2901,8 @@ func (m *Manager) tryRestartSharedConn(sc *sharedConn, refs []*hostRef) bool {
 		sc.mu.Lock()
 		sc.libDir = probe.LibDir
 		sc.stateDir = probe.StateDir
+		sc.homeDir = probe.Home
+		sc.uid = probe.UIDInt64()
 		sc.machineID = probe.MachineID
 		sc.mu.Unlock()
 	}
@@ -2247,7 +2916,7 @@ func (m *Manager) tryRestartSharedConn(sc *sharedConn, refs []*hostRef) bool {
 		sc.socketPath = sock
 		sc.mu.Unlock()
 	}
-	return m.reconnectSharedConn(rctx, sc, sshClient) == nil
+	return m.reconnectSharedConn(rctx, sc, sshClient, own) == nil
 }
 
 func (m *Manager) evaluateUpdateAfterConnect(
@@ -2255,7 +2924,7 @@ func (m *Manager) evaluateUpdateAfterConnect(
 	userID, hostID int64,
 	corralUser, fp, sshUser string,
 	probe *HostProbe,
-	failed *HostFailedRecord,
+	failedReleases []int64,
 ) {
 	dist := m.Dist()
 	if dist == nil || m.adminDisabled {
@@ -2268,6 +2937,7 @@ func (m *Manager) evaluateUpdateAfterConnect(
 	sc.mu.Lock()
 	hello := sc.hello
 	alreadyUpdating := sc.updating
+	scFailed := slices.Clone(sc.failedReleases)
 	sc.mu.Unlock()
 	if hello == nil || alreadyUpdating {
 		return
@@ -2281,7 +2951,20 @@ func (m *Manager) evaluateUpdateAfterConnect(
 	if !ok {
 		consented = hello.Manifest
 	}
-	dec := DecideUpdate(hello.Release, hello.Protocol, consented, dist.Release, dist.Manifest, failed.ReleaseList(), m.protoMin, m.protoMax)
+	// If the currently running daemon ALREADY grew beyond consented scope (Item 6),
+	// surface scope_change and do NOT auto-update until the user consents.
+	if runningAdded := proto.ScopeGrew(consented, hello.Manifest); len(runningAdded) > 0 {
+		sc.mu.Lock()
+		sc.scopeChange = &ScopeChangeInfo{
+			TargetVersion: hello.Version,
+			Added:         runningAdded,
+		}
+		sc.mu.Unlock()
+		return
+	}
+
+	allFailed := mergeReleaseLists(failedReleases, scFailed, ch.FailedReleases)
+	dec := DecideUpdate(hello.Release, hello.Protocol, consented, dist.Release, dist.Manifest, allFailed, m.protoMin, m.protoMax)
 	switch dec.Action {
 	case UpdateIncompatible:
 		ch.State = StateIncompatible
@@ -2300,7 +2983,7 @@ func (m *Manager) evaluateUpdateAfterConnect(
 		sc.mu.Unlock()
 		ch.State = StateUpdating
 		_ = m.store.UpsertCorraldHost(ctx, ch)
-		_, _ = m.launchUpdateOp(ctx, userID, hostID, corralUser, ch, dist, false)
+		_, _ = m.launchUpdateOp(ctx, userID, hostID, corralUser, fp, sshUser, ch, dist, false)
 	}
 }
 
@@ -2323,6 +3006,10 @@ func (m *Manager) reconcileHost(
 		opKind = activeOp.Kind
 	}
 	files := ReadHostStateFiles(ctx, sshClient, probe, opID)
+	if files.Failed != nil {
+		_ = m.store.RecordCorraldFailedReleases(ctx, hostID, fp, sshUser, files.Failed.ReleaseList())
+		ch.FailedReleases = mergeReleaseLists(ch.FailedReleases, files.Failed.ReleaseList())
+	}
 
 	daemonRunning := false
 	if probe.HasSymlink {
@@ -2363,6 +3050,7 @@ func (m *Manager) reconcileHost(
 			ch.Version = ""
 			ch.Release = 0
 			ch.Files = []string{}
+			ch.ActiveOpID = ""
 			ch.LastError = ""
 			_ = m.store.UpsertCorraldHost(ctx, ch)
 			if activeOp != nil {
@@ -2372,6 +3060,7 @@ func (m *Manager) reconcileHost(
 			}
 		case "partial":
 			ch.State = StateError
+			ch.ActiveOpID = ""
 			ch.LastError = encodeLastError(&OpFailure{Code: "partial", Left: out.Left})
 			_ = m.store.UpsertCorraldHost(ctx, ch)
 			if activeOp != nil {
@@ -2382,6 +3071,7 @@ func (m *Manager) reconcileHost(
 			}
 		case "stop_failed":
 			ch.State = StateError
+			ch.ActiveOpID = ""
 			ch.LastError = encodeLastError(&OpFailure{Code: "stop_failed", PID: out.PID, Detail: out.Detail})
 			_ = m.store.UpsertCorraldHost(ctx, ch)
 			if activeOp != nil {
@@ -2392,6 +3082,7 @@ func (m *Manager) reconcileHost(
 			}
 		default:
 			ch.State = StateRemovePending
+			ch.ActiveOpID = ""
 			_ = m.store.UpsertCorraldHost(ctx, ch)
 		}
 
@@ -2400,6 +3091,7 @@ func (m *Manager) reconcileHost(
 		ch.Version = ""
 		ch.Release = 0
 		ch.Files = []string{}
+		ch.ActiveOpID = ""
 		_ = m.store.UpsertCorraldHost(ctx, ch)
 		if activeOp != nil && dec.OpFinalState != "" {
 			activeOp.State = dec.OpFinalState
@@ -2409,6 +3101,7 @@ func (m *Manager) reconcileHost(
 
 	case ReconcileMarkOpFailed:
 		ch.State = dec.NextState
+		ch.ActiveOpID = ""
 		if dec.OpErrorCode != "" {
 			ch.LastError = encodeLastError(&OpFailure{Code: dec.OpErrorCode})
 		}
@@ -2425,7 +3118,17 @@ func (m *Manager) reconcileHost(
 			ch.Release = files.Install.Release
 			ch.Files = files.Install.Files
 		}
+		if ch.BoundFingerprint == "" && fp != "" {
+			ch.BoundFingerprint = fp
+		}
+		if ch.BoundUsername == "" && sshUser != "" {
+			ch.BoundUsername = sshUser
+		}
+		if ch.BoundGateway == "" {
+			ch.BoundGateway = m.gatewayID
+		}
 		ch.State = dec.NextState
+		ch.ActiveOpID = ""
 		ch.MachineID = probe.MachineID
 		_ = m.store.UpsertCorraldHost(ctx, ch)
 		if activeOp != nil && dec.OpFinalState != "" {
@@ -2445,14 +3148,29 @@ func (m *Manager) probeHost(ctx context.Context, c *ssh.Client) (*HostProbe, err
 	return ProbeHost(ctx, c)
 }
 
-func (m *Manager) acquireAnySSH(ctx context.Context, refs []*hostRef) (*ssh.Client, func(), error) {
+// acquireMatchingSSH acquires an SSH connection for one of refs, strictly
+// verifying that the returned (fingerprint, sshUser) matches wantKey (Item 1).
+// Any host ref whose identity changed is marked StateRebind and detached rather
+// than being attached back into the original shared group.
+func (m *Manager) acquireMatchingSSH(ctx context.Context, wantKey accountKey, refs []*hostRef) (*ssh.Client, func(), error) {
 	var lastErr error
 	for _, ref := range refs {
-		c, rel, _, _, err := m.ssh.AcquireSSH(ctx, ref.OwnerID, ref.HostID)
-		if err == nil && c != nil {
-			return c, rel, nil
+		c, rel, fp, sshUser, err := m.ssh.AcquireSSH(ctx, ref.OwnerID, ref.HostID)
+		if err != nil || c == nil {
+			lastErr = err
+			continue
 		}
-		lastErr = err
+		if fp != wantKey.Fingerprint || sshUser != wantKey.Username {
+			// Host address/key/username changed: never attach to the old shared group!
+			if rel != nil {
+				rel()
+			}
+			_ = m.store.MarkCorraldRebind(context.Background(), ref.HostID)
+			m.detachHost(ref.HostID)
+			lastErr = ErrInvalidState
+			continue
+		}
+		return c, rel, nil
 	}
 	if lastErr == nil {
 		lastErr = ErrNotConnected
@@ -2475,21 +3193,29 @@ func (m *Manager) tryAdoptPeer(ctx context.Context, userID, hostID int64, fp, ss
 				continue
 			}
 			adopted := &store.CorraldHost{
-				HostID:           hostID,
-				State:            src.State,
-				ConsentBy:        src.ConsentBy,
-				ConsentAt:        src.ConsentAt,
-				BoundFingerprint: src.BoundFingerprint,
-				BoundUsername:    src.BoundUsername,
-				BoundGateway:     src.BoundGateway,
-				ManifestJSON:     src.ManifestJSON,
-				Version:          src.Version,
-				Release:          src.Release,
-				MachineID:        src.MachineID,
-				SocketPath:       src.SocketPath,
-				Files:            slices.Clone(src.Files),
-				PausedUsers:      []int64{},
-				LastOKAt:         src.LastOKAt,
+				HostID:            hostID,
+				State:             src.State,
+				ConsentBy:         src.ConsentBy,
+				ConsentAt:         src.ConsentAt,
+				BoundFingerprint:  src.BoundFingerprint,
+				BoundUsername:     src.BoundUsername,
+				BoundGateway:      src.BoundGateway,
+				ManifestJSON:      src.ManifestJSON,
+				Version:           src.Version,
+				Release:           src.Release,
+				MachineID:         src.MachineID,
+				SocketPath:        src.SocketPath,
+				Files:             slices.Clone(src.Files),
+				PausedUsers:       []int64{},
+				FailedReleases:    slices.Clone(src.FailedReleases),
+				UpdatedFromVer:    src.UpdatedFromVer,
+				UpdatedFromRel:    src.UpdatedFromRel,
+				UpdatedFromTarget: src.UpdatedFromTarget,
+				UpdateTargetVer:   src.UpdateTargetVer,
+				UpdateTargetRel:   src.UpdateTargetRel,
+				UpdateReadyAt:     src.UpdateReadyAt,
+				UpdateCrashCount:  src.UpdateCrashCount,
+				LastOKAt:          src.LastOKAt,
 			}
 			if err := m.store.UpsertCorraldHost(ctx, adopted); err == nil {
 				return adopted
@@ -2564,8 +3290,122 @@ func (m *Manager) hasOtherActivePeers(ctx context.Context, selfUserID int64, fp,
 	return false
 }
 
+// hasOtherPeersIncludingPaused reports whether any other Corral user on this
+// gateway has a non-off corrald record for (fp, sshUser), INCLUDING paused
+// users (Item 16).
+func (m *Manager) hasOtherPeersIncludingPaused(ctx context.Context, selfUserID int64, fp, sshUser string) bool {
+	peers, err := m.store.CorraldPeersByBinding(ctx, fp, sshUser)
+	if err != nil {
+		return true // fail-safe: preserve helper on DB error
+	}
+	for _, p := range peers {
+		if p.OwnerID == selfUserID {
+			continue
+		}
+		if p.State != StateOff && p.State != StateRemoving && p.State != StateRemovePending {
+			return true
+		}
+	}
+	return false
+}
+
+func (m *Manager) registerRunningOp(rop *runningOp) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.closed {
+		return errors.New("manager closed")
+	}
+	if _, exists := m.opsByHost[rop.hostID]; exists {
+		return store.ErrOpInProgress
+	}
+	if rop.acct.valid() {
+		if _, exists := m.opsByAcct[rop.acct]; exists {
+			return store.ErrOpInProgress
+		}
+		m.opsByAcct[rop.acct] = rop
+	}
+	m.opsByHost[rop.hostID] = rop
+	return nil
+}
+
+func (m *Manager) attachOpAccount(rop *runningOp, acct accountKey) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if prev, exists := m.opsByAcct[acct]; exists && prev != rop {
+		return store.ErrOpInProgress
+	}
+	rop.acct = acct
+	m.opsByAcct[acct] = rop
+	return nil
+}
+
+func (m *Manager) clearRunningOp(rop *runningOp) {
+	m.mu.Lock()
+	if m.opsByHost[rop.hostID] == rop {
+		delete(m.opsByHost, rop.hostID)
+	}
+	if rop.acct.valid() && m.opsByAcct[rop.acct] == rop {
+		delete(m.opsByAcct, rop.acct)
+	}
+	m.mu.Unlock()
+}
+
+func (m *Manager) hasRunningOp(hostID int64, acct accountKey) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, ok := m.opsByHost[hostID]; ok {
+		return true
+	}
+	if acct.valid() {
+		if _, ok := m.opsByAcct[acct]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+// cancelAndWaitOps cancels all in-memory running ops matching hostID or acct
+// (optionally filtered by kinds) and blocks until every cancelled op's
+// goroutine has exited (Items 4 & 5).
+func (m *Manager) cancelAndWaitOps(ctx context.Context, hostID int64, acct accountKey, kinds ...string) {
+	m.mu.Lock()
+	var toWait []*runningOp
+	add := func(rop *runningOp) {
+		if rop == nil {
+			return
+		}
+		if len(kinds) > 0 && !slices.Contains(kinds, rop.kind) {
+			return
+		}
+		for _, existing := range toWait {
+			if existing == rop {
+				return
+			}
+		}
+		rop.cancelled = true
+		if rop.cancel != nil {
+			rop.cancel()
+		}
+		toWait = append(toWait, rop)
+	}
+	add(m.opsByHost[hostID])
+	if acct.valid() {
+		add(m.opsByAcct[acct])
+	}
+	m.mu.Unlock()
+
+	for _, rop := range toWait {
+		select {
+		case <-rop.done:
+		case <-ctx.Done():
+			return
+		case <-time.After(15 * time.Second):
+		}
+	}
+}
+
 func (m *Manager) getSharedConn(key accountKey) *sharedConn {
-	if key.Fingerprint == "" || key.Username == "" {
+	if !key.valid() {
 		return nil
 	}
 	m.mu.Lock()
@@ -2619,6 +3459,7 @@ func (m *Manager) closeSharedConn(sc *sharedConn, removeFromMap bool) {
 	sc.client = nil
 	rel := sc.sshRelease
 	sc.sshRelease = nil
+	sc.sshClient = nil
 	sc.mu.Unlock()
 
 	sc.stop()
@@ -2637,14 +3478,6 @@ func (m *Manager) closeSharedConn(sc *sharedConn, removeFromMap bool) {
 	}
 }
 
-func (m *Manager) clearRunningOp(hostID int64, rop *runningOp) {
-	m.mu.Lock()
-	if m.ops[hostID] == rop {
-		delete(m.ops, hostID)
-	}
-	m.mu.Unlock()
-}
-
 func (m *Manager) isOpCancelled(rop *runningOp) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -2654,10 +3487,10 @@ func (m *Manager) isOpCancelled(rop *runningOp) bool {
 func (m *Manager) finishOpCancelled(op *store.CorraldOp, ch *store.CorraldHost) {
 	op.State = OpCancelled
 	op.ErrorCode = ""
-	_ = m.store.UpdateCorraldOp(context.Background(), op)
+	_, _ = m.store.UpdateCorraldOpIfActive(context.Background(), op)
 	ch.State = StateOff
 	ch.LastError = ""
-	_ = m.store.UpsertCorraldHost(context.Background(), ch)
+	_, _ = m.store.UpdateCorraldHostIfOp(context.Background(), ch, op.ID, true)
 }
 
 func (m *Manager) finishOpFail(op *store.CorraldOp, ch *store.CorraldHost, fail *OpFailure) {
@@ -2674,7 +3507,7 @@ func (m *Manager) finishOpFail(op *store.CorraldOp, ch *store.CorraldHost, fail 
 		ch.State = StateOff
 	}
 	ch.LastError = encodeLastError(fail)
-	_ = m.store.UpsertCorraldHost(context.Background(), ch)
+	_, _ = m.store.UpdateCorraldHostIfOp(context.Background(), ch, op.ID, true)
 
 	op.State = OpFailed
 	op.ErrorCode = fail.Code
@@ -2688,7 +3521,7 @@ func (m *Manager) finishOpFail(op *store.CorraldOp, ch *store.CorraldHost, fail 
 		PID:      fail.PID,
 		HostInfo: hostInfo,
 	})
-	_ = m.store.UpdateCorraldOp(context.Background(), op)
+	_, _ = m.store.UpdateCorraldOpIfActive(context.Background(), op)
 }
 
 func (m *Manager) toOpView(op *store.CorraldOp) *OpView {
@@ -2733,6 +3566,18 @@ func toSnapshot(ch *store.CorraldHost) StateSnapshot {
 		BoundGateway:     ch.BoundGateway,
 		PausedUsers:      ch.PausedUsers,
 	}
+}
+
+func mergeReleaseLists(lists ...[]int64) []int64 {
+	var out []int64
+	for _, l := range lists {
+		for _, r := range l {
+			if r > 0 && !slices.Contains(out, r) {
+				out = append(out, r)
+			}
+		}
+	}
+	return out
 }
 
 func parseManifestJSON(raw string) (proto.Manifest, bool) {
@@ -2789,7 +3634,7 @@ func (m *Manager) WaitOpsIdle(ctx context.Context) error {
 	for {
 		m.mu.Lock()
 		var ch chan struct{}
-		for _, op := range m.ops {
+		for _, op := range m.opsByHost {
 			ch = op.done
 			break
 		}
@@ -2850,6 +3695,22 @@ func (m *Manager) SetHealthCapsForTest(hostID int64, caps map[string]string) {
 		sc.health = &proto.HealthResult{}
 	}
 	sc.health.Caps = caps
+	sc.mu.Unlock()
+}
+
+// SetRunningManifestForTest overrides the cached hello manifest on the live
+// sharedConn for testing scope-change enforcement against running daemons.
+func (m *Manager) SetRunningManifestForTest(hostID int64, manifest proto.Manifest) {
+	sc := m.sharedConnForHost(hostID, "", "")
+	if sc == nil {
+		return
+	}
+	sc.mu.Lock()
+	if sc.hello != nil {
+		cp := *sc.hello
+		cp.Manifest = manifest
+		sc.hello = &cp
+	}
 	sc.mu.Unlock()
 }
 

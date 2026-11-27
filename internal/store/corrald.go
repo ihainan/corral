@@ -9,44 +9,64 @@ import (
 	"strings"
 )
 
-// ErrOpInProgress is returned when a host already has an unfinished corrald operation.
+// ErrOpInProgress is returned when a host or target account already has an
+// unfinished corrald operation.
 var ErrOpInProgress = errors.New("another corrald operation is already in progress")
+
+// CorraldAccountKey formats the canonical (fingerprint, username) exclusivity
+// key for corrald_ops. Returns "" when either component is missing.
+func CorraldAccountKey(fingerprint, username string) string {
+	if fingerprint == "" || username == "" {
+		return ""
+	}
+	return fingerprint + "\x00" + username
+}
 
 // CorraldHost persists the gateway's view of corrald consent, binding, and state
 // for a single Corral host record.
 type CorraldHost struct {
-	HostID           int64
-	State            string
-	ConsentBy        *int64
-	ConsentAt        int64
-	BoundFingerprint string
-	BoundUsername    string
-	BoundGateway     string
-	ManifestJSON     string
-	Version          string
-	Release          int64
-	MachineID        string
-	SocketPath       string
-	Files            []string
-	PausedUsers      []int64
-	LastOKAt         int64
-	LastError        string
-	RestartCount     int
-	UpdatedAt        int64
+	HostID            int64
+	State             string
+	ConsentBy         *int64
+	ConsentAt         int64
+	BoundFingerprint  string
+	BoundUsername     string
+	BoundGateway      string
+	ManifestJSON      string
+	Version           string
+	Release           int64
+	MachineID         string
+	SocketPath        string
+	Files             []string
+	PausedUsers       []int64
+	FailedReleases    []int64
+	ActiveOpID        string
+	UpdatedFromVer    string
+	UpdatedFromRel    int64
+	UpdatedFromTarget string
+	UpdateTargetVer   string
+	UpdateTargetRel   int64
+	UpdateReadyAt     int64
+	UpdateCrashCount  int
+	LastOKAt          int64
+	LastError         string
+	RestartCount      int
+	UpdatedAt         int64
 }
 
 // CorraldOp persists a single install/update/pause/resume/remove operation.
 type CorraldOp struct {
-	ID        string
-	HostID    int64
-	Kind      string
-	State     string
-	Step      string
-	ErrorCode string
-	Detail    string
-	CreatedBy int64
-	CreatedAt int64
-	UpdatedAt int64
+	ID         string
+	HostID     int64
+	AccountKey string
+	Kind       string
+	State      string
+	Step       string
+	ErrorCode  string
+	Detail     string
+	CreatedBy  int64
+	CreatedAt  int64
+	UpdatedAt  int64
 }
 
 // CorraldPeerHost describes another Corral host record bound to the same
@@ -61,17 +81,26 @@ type CorraldPeerHost struct {
 }
 
 const corraldHostCols = `host_id, state, consent_by, consent_at, bound_fingerprint, bound_username, bound_gateway,
-	manifest_json, version, release, machine_id, socket_path, files_json, paused_users_json, last_ok_at, last_error, restart_count, updated_at`
+	manifest_json, version, release, machine_id, socket_path, files_json, paused_users_json, failed_releases_json,
+	active_op_id, updated_from_ver, updated_from_rel, updated_from_target, update_target_ver, update_target_rel,
+	update_ready_at, update_crash_count, last_ok_at, last_error, restart_count, updated_at`
+
+const corraldHostQualifiedCols = `ch.host_id, ch.state, ch.consent_by, ch.consent_at, ch.bound_fingerprint, ch.bound_username, ch.bound_gateway,
+	ch.manifest_json, ch.version, ch.release, ch.machine_id, ch.socket_path, ch.files_json, ch.paused_users_json, ch.failed_releases_json,
+	ch.active_op_id, ch.updated_from_ver, ch.updated_from_rel, ch.updated_from_target, ch.update_target_ver, ch.update_target_rel,
+	ch.update_ready_at, ch.update_crash_count, ch.last_ok_at, ch.last_error, ch.restart_count, ch.updated_at`
 
 func scanCorraldHost(row interface{ Scan(...any) error }) (*CorraldHost, error) {
 	ch := &CorraldHost{}
 	var consentBy sql.NullInt64
-	var filesJSON, pausedJSON string
+	var filesJSON, pausedJSON, failedJSON string
 	err := row.Scan(
 		&ch.HostID, &ch.State, &consentBy, &ch.ConsentAt,
 		&ch.BoundFingerprint, &ch.BoundUsername, &ch.BoundGateway,
 		&ch.ManifestJSON, &ch.Version, &ch.Release,
-		&ch.MachineID, &ch.SocketPath, &filesJSON, &pausedJSON,
+		&ch.MachineID, &ch.SocketPath, &filesJSON, &pausedJSON, &failedJSON,
+		&ch.ActiveOpID, &ch.UpdatedFromVer, &ch.UpdatedFromRel, &ch.UpdatedFromTarget,
+		&ch.UpdateTargetVer, &ch.UpdateTargetRel, &ch.UpdateReadyAt, &ch.UpdateCrashCount,
 		&ch.LastOKAt, &ch.LastError, &ch.RestartCount, &ch.UpdatedAt,
 	)
 	if err != nil {
@@ -93,16 +122,54 @@ func scanCorraldHost(row interface{ Scan(...any) error }) (*CorraldHost, error) 
 	if ch.PausedUsers == nil {
 		ch.PausedUsers = []int64{}
 	}
+	if failedJSON != "" {
+		_ = json.Unmarshal([]byte(failedJSON), &ch.FailedReleases)
+	}
+	if ch.FailedReleases == nil {
+		ch.FailedReleases = []int64{}
+	}
 	return ch, nil
+}
+
+// RecordSSHVerified records that hostID completed a real SSH authentication to
+// (fingerprint, username). Shared corrald metadata is only exposed to users
+// whose host record has been verified for its current (fingerprint, username).
+func (s *Store) RecordSSHVerified(ctx context.Context, hostID int64, fingerprint, username string) error {
+	if hostID <= 0 || fingerprint == "" || username == "" {
+		return nil
+	}
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO corrald_ssh_verified (host_id, fingerprint, username, verified_at)
+		VALUES (?, ?, ?, ?)
+		ON CONFLICT(host_id) DO UPDATE SET
+			fingerprint = excluded.fingerprint,
+			username = excluded.username,
+			verified_at = excluded.verified_at`,
+		hostID, fingerprint, username, s.unix())
+	return err
+}
+
+// IsSSHVerified reports whether hostID has previously completed an SSH login
+// for the exact (fingerprint, username) pair.
+func (s *Store) IsSSHVerified(ctx context.Context, hostID int64, fingerprint, username string) bool {
+	if hostID <= 0 || fingerprint == "" || username == "" {
+		return false
+	}
+	var gotFP, gotUser string
+	err := s.db.QueryRowContext(ctx,
+		`SELECT fingerprint, username FROM corrald_ssh_verified WHERE host_id = ?`, hostID).
+		Scan(&gotFP, &gotUser)
+	if err != nil {
+		return false
+	}
+	return gotFP == fingerprint && gotUser == username
 }
 
 // CorraldHost returns the corrald state row for a host owned by ownerID.
 // Returns ErrNotFound if the host does not exist or has no corrald_hosts row yet.
 func (s *Store) CorraldHost(ctx context.Context, ownerID, hostID int64) (*CorraldHost, error) {
 	return scanCorraldHost(s.db.QueryRowContext(ctx,
-		`SELECT ch.host_id, ch.state, ch.consent_by, ch.consent_at, ch.bound_fingerprint, ch.bound_username, ch.bound_gateway,
-			ch.manifest_json, ch.version, ch.release, ch.machine_id, ch.socket_path, ch.files_json, ch.paused_users_json,
-			ch.last_ok_at, ch.last_error, ch.restart_count, ch.updated_at
+		`SELECT `+corraldHostQualifiedCols+`
 		 FROM corrald_hosts ch JOIN hosts h ON h.id = ch.host_id
 		 WHERE h.owner_id = ? AND ch.host_id = ?`, ownerID, hostID))
 }
@@ -113,10 +180,7 @@ func (s *Store) CorraldHostByID(ctx context.Context, hostID int64) (*CorraldHost
 		`SELECT `+corraldHostCols+` FROM corrald_hosts WHERE host_id = ?`, hostID))
 }
 
-// UpsertCorraldHost creates or updates the corrald_hosts row for ch.HostID.
-func (s *Store) UpsertCorraldHost(ctx context.Context, ch *CorraldHost) error {
-	now := s.unix()
-	ch.UpdatedAt = now
+func marshalCorraldSlices(ch *CorraldHost) (filesJSON, pausedJSON, failedJSON string, err error) {
 	files := ch.Files
 	if files == nil {
 		files = []string{}
@@ -125,11 +189,30 @@ func (s *Store) UpsertCorraldHost(ctx context.Context, ch *CorraldHost) error {
 	if paused == nil {
 		paused = []int64{}
 	}
-	filesB, err := json.Marshal(files)
-	if err != nil {
-		return err
+	failed := ch.FailedReleases
+	if failed == nil {
+		failed = []int64{}
 	}
-	pausedB, err := json.Marshal(paused)
+	fb, err := json.Marshal(files)
+	if err != nil {
+		return "", "", "", err
+	}
+	pb, err := json.Marshal(paused)
+	if err != nil {
+		return "", "", "", err
+	}
+	flb, err := json.Marshal(failed)
+	if err != nil {
+		return "", "", "", err
+	}
+	return string(fb), string(pb), string(flb), nil
+}
+
+// UpsertCorraldHost creates or updates the corrald_hosts row for ch.HostID.
+func (s *Store) UpsertCorraldHost(ctx context.Context, ch *CorraldHost) error {
+	now := s.unix()
+	ch.UpdatedAt = now
+	filesJSON, pausedJSON, failedJSON, err := marshalCorraldSlices(ch)
 	if err != nil {
 		return err
 	}
@@ -140,9 +223,10 @@ func (s *Store) UpsertCorraldHost(ctx context.Context, ch *CorraldHost) error {
 	_, err = s.db.ExecContext(ctx, `
 		INSERT INTO corrald_hosts (
 			host_id, state, consent_by, consent_at, bound_fingerprint, bound_username, bound_gateway,
-			manifest_json, version, release, machine_id, socket_path, files_json, paused_users_json,
-			last_ok_at, last_error, restart_count, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			manifest_json, version, release, machine_id, socket_path, files_json, paused_users_json, failed_releases_json,
+			active_op_id, updated_from_ver, updated_from_rel, updated_from_target, update_target_ver, update_target_rel,
+			update_ready_at, update_crash_count, last_ok_at, last_error, restart_count, updated_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(host_id) DO UPDATE SET
 			state = excluded.state,
 			consent_by = excluded.consent_by,
@@ -157,6 +241,15 @@ func (s *Store) UpsertCorraldHost(ctx context.Context, ch *CorraldHost) error {
 			socket_path = excluded.socket_path,
 			files_json = excluded.files_json,
 			paused_users_json = excluded.paused_users_json,
+			failed_releases_json = excluded.failed_releases_json,
+			active_op_id = excluded.active_op_id,
+			updated_from_ver = excluded.updated_from_ver,
+			updated_from_rel = excluded.updated_from_rel,
+			updated_from_target = excluded.updated_from_target,
+			update_target_ver = excluded.update_target_ver,
+			update_target_rel = excluded.update_target_rel,
+			update_ready_at = excluded.update_ready_at,
+			update_crash_count = excluded.update_crash_count,
 			last_ok_at = excluded.last_ok_at,
 			last_error = excluded.last_error,
 			restart_count = excluded.restart_count,
@@ -164,10 +257,83 @@ func (s *Store) UpsertCorraldHost(ctx context.Context, ch *CorraldHost) error {
 		ch.HostID, ch.State, consentBy, ch.ConsentAt,
 		ch.BoundFingerprint, ch.BoundUsername, ch.BoundGateway,
 		ch.ManifestJSON, ch.Version, ch.Release,
-		ch.MachineID, ch.SocketPath, string(filesB), string(pausedB),
+		ch.MachineID, ch.SocketPath, filesJSON, pausedJSON, failedJSON,
+		ch.ActiveOpID, ch.UpdatedFromVer, ch.UpdatedFromRel, ch.UpdatedFromTarget,
+		ch.UpdateTargetVer, ch.UpdateTargetRel, ch.UpdateReadyAt, ch.UpdateCrashCount,
 		ch.LastOKAt, ch.LastError, ch.RestartCount, now,
 	)
 	return err
+}
+
+// UpdateCorraldHostIfOp conditionally updates corrald_hosts ONLY if the row's
+// current active_op_id matches expectedOpID. This prevents a cancelled or stale
+// install/update goroutine from overwriting a withdrawal-first remove state.
+// When clearOp is true, active_op_id is cleared to ” on success.
+func (s *Store) UpdateCorraldHostIfOp(ctx context.Context, ch *CorraldHost, expectedOpID string, clearOp bool) (bool, error) {
+	if expectedOpID == "" {
+		return true, s.UpsertCorraldHost(ctx, ch)
+	}
+	now := s.unix()
+	ch.UpdatedAt = now
+	nextOpID := expectedOpID
+	if clearOp {
+		nextOpID = ""
+	}
+	filesJSON, pausedJSON, failedJSON, err := marshalCorraldSlices(ch)
+	if err != nil {
+		return false, err
+	}
+	var consentBy any
+	if ch.ConsentBy != nil {
+		consentBy = *ch.ConsentBy
+	}
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE corrald_hosts SET
+			state = ?,
+			consent_by = ?,
+			consent_at = ?,
+			bound_fingerprint = ?,
+			bound_username = ?,
+			bound_gateway = ?,
+			manifest_json = ?,
+			version = ?,
+			release = ?,
+			machine_id = ?,
+			socket_path = ?,
+			files_json = ?,
+			paused_users_json = ?,
+			failed_releases_json = ?,
+			active_op_id = ?,
+			updated_from_ver = ?,
+			updated_from_rel = ?,
+			updated_from_target = ?,
+			update_target_ver = ?,
+			update_target_rel = ?,
+			update_ready_at = ?,
+			update_crash_count = ?,
+			last_ok_at = ?,
+			last_error = ?,
+			restart_count = ?,
+			updated_at = ?
+		WHERE host_id = ? AND active_op_id = ?`,
+		ch.State, consentBy, ch.ConsentAt,
+		ch.BoundFingerprint, ch.BoundUsername, ch.BoundGateway,
+		ch.ManifestJSON, ch.Version, ch.Release,
+		ch.MachineID, ch.SocketPath, filesJSON, pausedJSON, failedJSON,
+		nextOpID, ch.UpdatedFromVer, ch.UpdatedFromRel, ch.UpdatedFromTarget,
+		ch.UpdateTargetVer, ch.UpdateTargetRel, ch.UpdateReadyAt, ch.UpdateCrashCount,
+		ch.LastOKAt, ch.LastError, ch.RestartCount, now,
+		ch.HostID, expectedOpID,
+	)
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	if n > 0 {
+		ch.ActiveOpID = nextOpID
+		return true, nil
+	}
+	return false, nil
 }
 
 // UpdateCorraldFingerprint updates bound_fingerprint on host key rotation, or marks
@@ -239,9 +405,88 @@ func (s *Store) CorraldResetByBinding(ctx context.Context, fingerprint, username
 	_, err := s.db.ExecContext(ctx, `
 		UPDATE corrald_hosts
 		SET state = 'off', version = '', release = 0, socket_path = '', files_json = '[]',
-		    paused_users_json = '[]', last_error = '', restart_count = 0, updated_at = ?
+		    paused_users_json = '[]', failed_releases_json = '[]', active_op_id = '',
+		    updated_from_ver = '', updated_from_rel = 0, updated_from_target = '',
+		    update_target_ver = '', update_target_rel = 0, update_ready_at = 0, update_crash_count = 0,
+		    last_error = '', restart_count = 0, updated_at = ?
 		WHERE bound_fingerprint = ? AND bound_username = ?`,
 		s.unix(), fingerprint, username)
+	return err
+}
+
+// RecordCorraldFailedReleases merges releases into failed_releases_json for
+// hostID and any peer host sharing (fingerprint, username).
+func (s *Store) RecordCorraldFailedReleases(ctx context.Context, hostID int64, fingerprint, username string, releases []int64) error {
+	if len(releases) == 0 {
+		return nil
+	}
+	hostIDs := []int64{}
+	if hostID > 0 {
+		hostIDs = append(hostIDs, hostID)
+	}
+	if peers, err := s.CorraldPeersByBinding(ctx, fingerprint, username); err == nil {
+		for _, p := range peers {
+			if !slices.Contains(hostIDs, p.HostID) {
+				hostIDs = append(hostIDs, p.HostID)
+			}
+		}
+	}
+	now := s.unix()
+	for _, id := range hostIDs {
+		ch, err := s.CorraldHostByID(ctx, id)
+		if err != nil {
+			continue
+		}
+		changed := false
+		for _, r := range releases {
+			if r > 0 && !slices.Contains(ch.FailedReleases, r) {
+				ch.FailedReleases = append(ch.FailedReleases, r)
+				changed = true
+			}
+		}
+		if changed {
+			b, _ := json.Marshal(ch.FailedReleases)
+			_, _ = s.db.ExecContext(ctx,
+				`UPDATE corrald_hosts SET failed_releases_json = ?, updated_at = ? WHERE host_id = ?`,
+				string(b), now, id)
+		}
+	}
+	return nil
+}
+
+// UpdateCorraldCrashWindowByBinding persists post-update crash-loop rollback
+// tracking fields for hostID and any peers sharing (fingerprint, username).
+func (s *Store) UpdateCorraldCrashWindowByBinding(
+	ctx context.Context,
+	hostID int64,
+	fingerprint, username string,
+	readyAt int64,
+	targetVer string,
+	targetRel int64,
+	fromVer string,
+	fromRel int64,
+	fromTarget string,
+	crashCount int,
+) error {
+	now := s.unix()
+	if fingerprint != "" && username != "" {
+		_, err := s.db.ExecContext(ctx, `
+			UPDATE corrald_hosts SET
+				updated_from_ver = ?, updated_from_rel = ?, updated_from_target = ?,
+				update_target_ver = ?, update_target_rel = ?, update_ready_at = ?,
+				update_crash_count = ?, updated_at = ?
+			WHERE (bound_fingerprint = ? AND bound_username = ?) OR host_id = ?`,
+			fromVer, fromRel, fromTarget, targetVer, targetRel, readyAt, crashCount, now,
+			fingerprint, username, hostID)
+		return err
+	}
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE corrald_hosts SET
+			updated_from_ver = ?, updated_from_rel = ?, updated_from_target = ?,
+			update_target_ver = ?, update_target_rel = ?, update_ready_at = ?,
+			update_crash_count = ?, updated_at = ?
+		WHERE host_id = ?`,
+		fromVer, fromRel, fromTarget, targetVer, targetRel, readyAt, crashCount, now, hostID)
 	return err
 }
 
@@ -250,10 +495,7 @@ func (s *Store) ListUserCorraldHosts(ctx context.Context, userID int64) ([]*Host
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT h.id, h.owner_id, h.name, h.address, h.port, h.username, h.auth, h.credential_id,
 		       h.persistence, h.tmux_session, h.herdr_session, h.created_at, h.updated_at, h.last_connected_at,
-		       h.conn_version, h.version, h.jump_host_id,
-		       ch.host_id, ch.state, ch.consent_by, ch.consent_at, ch.bound_fingerprint, ch.bound_username,
-		       ch.bound_gateway, ch.manifest_json, ch.version, ch.release, ch.machine_id, ch.socket_path,
-		       ch.files_json, ch.paused_users_json, ch.last_ok_at, ch.last_error, ch.restart_count, ch.updated_at
+		       h.conn_version, h.version, h.jump_host_id, `+corraldHostQualifiedCols+`
 		FROM hosts h
 		JOIN corrald_hosts ch ON ch.host_id = h.id
 		WHERE h.owner_id = ? AND ch.state != 'off'
@@ -268,7 +510,7 @@ func (s *Store) ListUserCorraldHosts(ctx context.Context, userID int64) ([]*Host
 		h := &Host{}
 		ch := &CorraldHost{}
 		var cred, jump, consentBy sql.NullInt64
-		var filesJSON, pausedJSON string
+		var filesJSON, pausedJSON, failedJSON string
 		if err := rows.Scan(
 			&h.ID, &h.OwnerID, &h.Name, &h.Address, &h.Port, &h.Username, &h.Auth, &cred,
 			&h.Persistence, &h.TmuxSession, &h.HerdrSession, &h.CreatedAt, &h.UpdatedAt, &h.LastConnectedAt,
@@ -276,7 +518,9 @@ func (s *Store) ListUserCorraldHosts(ctx context.Context, userID int64) ([]*Host
 			&ch.HostID, &ch.State, &consentBy, &ch.ConsentAt,
 			&ch.BoundFingerprint, &ch.BoundUsername, &ch.BoundGateway,
 			&ch.ManifestJSON, &ch.Version, &ch.Release,
-			&ch.MachineID, &ch.SocketPath, &filesJSON, &pausedJSON,
+			&ch.MachineID, &ch.SocketPath, &filesJSON, &pausedJSON, &failedJSON,
+			&ch.ActiveOpID, &ch.UpdatedFromVer, &ch.UpdatedFromRel, &ch.UpdatedFromTarget,
+			&ch.UpdateTargetVer, &ch.UpdateTargetRel, &ch.UpdateReadyAt, &ch.UpdateCrashCount,
 			&ch.LastOKAt, &ch.LastError, &ch.RestartCount, &ch.UpdatedAt,
 		); err != nil {
 			return nil, nil, err
@@ -299,6 +543,9 @@ func (s *Store) ListUserCorraldHosts(ctx context.Context, userID int64) ([]*Host
 		if pausedJSON != "" {
 			_ = json.Unmarshal([]byte(pausedJSON), &ch.PausedUsers)
 		}
+		if failedJSON != "" {
+			_ = json.Unmarshal([]byte(failedJSON), &ch.FailedReleases)
+		}
 		hosts = append(hosts, h)
 		states = append(states, ch)
 	}
@@ -309,7 +556,7 @@ func (s *Store) ListUserCorraldHosts(ctx context.Context, userID int64) ([]*Host
 // (used after a gateway restart to reconcile host state).
 func (s *Store) ListIncompleteCorraldOps(ctx context.Context) ([]*CorraldOp, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, host_id, kind, state, step, error_code, detail, created_by, created_at, updated_at
+		SELECT id, host_id, account_key, kind, state, step, error_code, detail, created_by, created_at, updated_at
 		FROM corrald_ops WHERE state IN ('pending', 'running') ORDER BY created_at ASC`)
 	if err != nil {
 		return nil, err
@@ -318,7 +565,7 @@ func (s *Store) ListIncompleteCorraldOps(ctx context.Context) ([]*CorraldOp, err
 	var out []*CorraldOp
 	for rows.Next() {
 		op := &CorraldOp{}
-		if err := rows.Scan(&op.ID, &op.HostID, &op.Kind, &op.State, &op.Step, &op.ErrorCode, &op.Detail, &op.CreatedBy, &op.CreatedAt, &op.UpdatedAt); err != nil {
+		if err := rows.Scan(&op.ID, &op.HostID, &op.AccountKey, &op.Kind, &op.State, &op.Step, &op.ErrorCode, &op.Detail, &op.CreatedBy, &op.CreatedAt, &op.UpdatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, op)
@@ -327,9 +574,11 @@ func (s *Store) ListIncompleteCorraldOps(ctx context.Context) ([]*CorraldOp, err
 }
 
 // CreateCorraldOp inserts a new operation. If another pending/running operation
-// already exists for op.HostID, ErrOpInProgress is returned.
+// already exists for op.HostID or op.AccountKey, ErrOpInProgress is returned.
 // When supersedeInstallUpdate is true (for withdrawal-first remove), any active
-// install or update op for the host is cancelled atomically in the same transaction.
+// install or update op for the host OR account_key is cancelled atomically in
+// the same transaction and active_op_id on matching corrald_hosts rows is set
+// to op.ID so superseded goroutines cannot overwrite removal state.
 func (s *Store) CreateCorraldOp(ctx context.Context, op *CorraldOp, supersedeInstallUpdate bool) error {
 	now := s.unix()
 	op.CreatedAt = now
@@ -341,25 +590,73 @@ func (s *Store) CreateCorraldOp(ctx context.Context, op *CorraldOp, supersedeIns
 	defer tx.Rollback()
 
 	if supersedeInstallUpdate {
-		if _, err := tx.ExecContext(ctx, `
-			UPDATE corrald_ops
-			SET state = 'cancelled', error_code = 'removing', updated_at = ?
-			WHERE host_id = ? AND state IN ('pending', 'running') AND kind IN ('install', 'update')`,
-			now, op.HostID); err != nil {
-			return err
+		if op.AccountKey != "" {
+			if _, err := tx.ExecContext(ctx, `
+				UPDATE corrald_ops
+				SET state = 'cancelled', error_code = 'removing', updated_at = ?
+				WHERE (host_id = ? OR account_key = ?) AND state IN ('pending', 'running') AND kind IN ('install', 'update')`,
+				now, op.HostID, op.AccountKey); err != nil {
+				return err
+			}
+			// Claim active_op_id on peer rows sharing this account too so stale ops cannot overwrite them.
+			fp, user, ok := strings.Cut(op.AccountKey, "\x00")
+			if ok && fp != "" && user != "" {
+				if _, err := tx.ExecContext(ctx, `
+					UPDATE corrald_hosts
+					SET active_op_id = ?, updated_at = ?
+					WHERE (bound_fingerprint = ? AND bound_username = ?) OR host_id = ?`,
+					op.ID, now, fp, user, op.HostID); err != nil {
+					return err
+				}
+			}
+		} else {
+			if _, err := tx.ExecContext(ctx, `
+				UPDATE corrald_ops
+				SET state = 'cancelled', error_code = 'removing', updated_at = ?
+				WHERE host_id = ? AND state IN ('pending', 'running') AND kind IN ('install', 'update')`,
+				now, op.HostID); err != nil {
+				return err
+			}
 		}
 	}
 
 	_, err = tx.ExecContext(ctx, `
-		INSERT INTO corrald_ops (id, host_id, kind, state, step, error_code, detail, created_by, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		op.ID, op.HostID, op.Kind, op.State, op.Step, op.ErrorCode, op.Detail, op.CreatedBy, now, now)
+		INSERT INTO corrald_ops (id, host_id, account_key, kind, state, step, error_code, detail, created_by, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		op.ID, op.HostID, op.AccountKey, op.Kind, op.State, op.Step, op.ErrorCode, op.Detail, op.CreatedBy, now, now)
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE") {
 			return ErrOpInProgress
 		}
 		return err
 	}
+	return tx.Commit()
+}
+
+// CancelActiveCorraldOps cancels active install/update operations for hostID
+// (and accountKey if non-empty) and clears active_op_id on corrald_hosts so
+// cancelled goroutines cannot write state back after host deletion.
+func (s *Store) CancelActiveCorraldOps(ctx context.Context, hostID int64, accountKey, errorCode string) error {
+	now := s.unix()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if accountKey != "" {
+		_, _ = tx.ExecContext(ctx, `
+			UPDATE corrald_ops
+			SET state = 'cancelled', error_code = ?, updated_at = ?
+			WHERE (host_id = ? OR account_key = ?) AND state IN ('pending', 'running') AND kind IN ('install', 'update')`,
+			errorCode, now, hostID, accountKey)
+	} else {
+		_, _ = tx.ExecContext(ctx, `
+			UPDATE corrald_ops
+			SET state = 'cancelled', error_code = ?, updated_at = ?
+			WHERE host_id = ? AND state IN ('pending', 'running') AND kind IN ('install', 'update')`,
+			errorCode, now, hostID)
+	}
+	_, _ = tx.ExecContext(ctx, `UPDATE corrald_hosts SET active_op_id = '', updated_at = ? WHERE host_id = ?`, now, hostID)
 	return tx.Commit()
 }
 
@@ -372,13 +669,28 @@ func (s *Store) UpdateCorraldOp(ctx context.Context, op *CorraldOp) error {
 		op.State, op.Step, op.ErrorCode, op.Detail, op.UpdatedAt, op.ID))
 }
 
+// UpdateCorraldOpIfActive updates an operation ONLY if it is still pending or
+// running, so an already-superseded operation cannot overwrite its cancelled row.
+func (s *Store) UpdateCorraldOpIfActive(ctx context.Context, op *CorraldOp) (bool, error) {
+	op.UpdatedAt = s.unix()
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE corrald_ops SET state = ?, step = ?, error_code = ?, detail = ?, updated_at = ?
+		WHERE id = ? AND state IN ('pending', 'running')`,
+		op.State, op.Step, op.ErrorCode, op.Detail, op.UpdatedAt, op.ID)
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
+}
+
 // LatestCorraldOp returns the most recent operation for hostID, or ErrNotFound.
 func (s *Store) LatestCorraldOp(ctx context.Context, hostID int64) (*CorraldOp, error) {
 	op := &CorraldOp{}
 	err := s.db.QueryRowContext(ctx, `
-		SELECT id, host_id, kind, state, step, error_code, detail, created_by, created_at, updated_at
+		SELECT id, host_id, account_key, kind, state, step, error_code, detail, created_by, created_at, updated_at
 		FROM corrald_ops WHERE host_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1`, hostID).
-		Scan(&op.ID, &op.HostID, &op.Kind, &op.State, &op.Step, &op.ErrorCode, &op.Detail, &op.CreatedBy, &op.CreatedAt, &op.UpdatedAt)
+		Scan(&op.ID, &op.HostID, &op.AccountKey, &op.Kind, &op.State, &op.Step, &op.ErrorCode, &op.Detail, &op.CreatedBy, &op.CreatedAt, &op.UpdatedAt)
 	if err != nil {
 		return nil, notFound(err)
 	}
@@ -389,9 +701,9 @@ func (s *Store) LatestCorraldOp(ctx context.Context, hostID int64) (*CorraldOp, 
 func (s *Store) ActiveCorraldOp(ctx context.Context, hostID int64) (*CorraldOp, error) {
 	op := &CorraldOp{}
 	err := s.db.QueryRowContext(ctx, `
-		SELECT id, host_id, kind, state, step, error_code, detail, created_by, created_at, updated_at
+		SELECT id, host_id, account_key, kind, state, step, error_code, detail, created_by, created_at, updated_at
 		FROM corrald_ops WHERE host_id = ? AND state IN ('pending', 'running') LIMIT 1`, hostID).
-		Scan(&op.ID, &op.HostID, &op.Kind, &op.State, &op.Step, &op.ErrorCode, &op.Detail, &op.CreatedBy, &op.CreatedAt, &op.UpdatedAt)
+		Scan(&op.ID, &op.HostID, &op.AccountKey, &op.Kind, &op.State, &op.Step, &op.ErrorCode, &op.Detail, &op.CreatedBy, &op.CreatedAt, &op.UpdatedAt)
 	if err != nil {
 		return nil, notFound(err)
 	}

@@ -474,6 +474,17 @@ func (s *Server) restoreOne(parent context.Context, t *store.OpenTab) {
 	if sess.Persistence == store.PersistHerdr {
 		go s.watchHerdr(sess, h)
 	}
+	{
+		fp := ""
+		if k, kerr := s.store.HostKey(parent, t.OwnerID, t.HostID); kerr == nil {
+			fp = k.Fingerprint
+		}
+		uname := ""
+		if u, uerr := s.store.UserByID(parent, t.OwnerID); uerr == nil {
+			uname = u.Username
+		}
+		s.notifyCorraldConnected(t.OwnerID, t.HostID, uname, h.Username, fp, sess.Client())
+	}
 	out.outcome = "restored"
 }
 

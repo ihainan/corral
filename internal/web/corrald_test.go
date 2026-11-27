@@ -126,6 +126,22 @@ func createAndPinHost(t *testing.T, c *client, srv *testutil.SSHServer, name str
 	return hostID, sessID
 }
 
+func startCorraldInstall(t *testing.T, c *client, hostID int64, extra ...map[string]any) resp {
+	t.Helper()
+	st := c.do("GET", fmt.Sprintf("/api/hosts/%d/corrald", hostID), nil)
+	mustStatus(t, st, http.StatusOK, "get manifest_hash before install")
+	mhash, _ := st.json()["manifest_hash"].(string)
+	body := map[string]any{"manifest_hash": mhash}
+	for _, m := range extra {
+		for k, v := range m {
+			body[k] = v
+		}
+	}
+	r := c.do("POST", fmt.Sprintf("/api/hosts/%d/corrald/install", hostID), body)
+	mustStatus(t, r, http.StatusAccepted, "start install")
+	return r
+}
+
 func waitCorraldState(t *testing.T, c *client, hostID int64, wantStates ...string) map[string]any {
 	t.Helper()
 	want := make(map[string]bool, len(wantStates))
@@ -320,7 +336,7 @@ func TestCorraldInstallFailures(t *testing.T) {
 			})
 			hostID, _ := createAndPinHost(t, admin, srv, "failbox")
 
-			mustStatus(t, admin.do("POST", fmt.Sprintf("/api/hosts/%d/corrald/install", hostID), map[string]any{}), http.StatusAccepted, "start install")
+			startCorraldInstall(t, admin, hostID)
 			st := waitCorraldState(t, admin, hostID, tc.wantState)
 			errObj, _ := st["error"].(map[string]any)
 			if errObj == nil || errObj["code"] != tc.wantCode {
@@ -362,7 +378,7 @@ func TestCorraldInstallCancel(t *testing.T) {
 	})
 	hostID, _ := createAndPinHost(t, admin, srv, "cancelbox")
 
-	mustStatus(t, admin.do("POST", fmt.Sprintf("/api/hosts/%d/corrald/install", hostID), map[string]any{}), http.StatusAccepted, "start install")
+	startCorraldInstall(t, admin, hostID)
 	select {
 	case <-reached:
 	case <-time.After(15 * time.Second):
@@ -402,7 +418,7 @@ func TestCorraldAutoUpdateAndNoDowngrade(t *testing.T) {
 	hostID, _ := createAndPinHost(t, admin, srv, "updbox")
 
 	// Install v1.
-	mustStatus(t, admin.do("POST", fmt.Sprintf("/api/hosts/%d/corrald/install", hostID), map[string]any{}), http.StatusAccepted, "install v1")
+	startCorraldInstall(t, admin, hostID)
 	st := waitCorraldState(t, admin, hostID, "running")
 	if st["version"] != "0.3.1" {
 		t.Fatalf("expected v1 0.3.1, got %v", st["version"])
@@ -450,7 +466,7 @@ func TestCorraldScopeChangeBlocksAutoUpdateUntilConsent(t *testing.T) {
 	srv, _ := startCorraldSSH(t)
 	hostID, _ := createAndPinHost(t, admin, srv, "scopebox")
 
-	mustStatus(t, admin.do("POST", fmt.Sprintf("/api/hosts/%d/corrald/install", hostID), map[string]any{}), http.StatusAccepted, "install v1")
+	startCorraldInstall(t, admin, hostID)
 	waitCorraldState(t, admin, hostID, "running")
 
 	// Prepare v2 Dist with expanded manifest scope.
@@ -502,7 +518,7 @@ func TestCorraldBadVersionHandoffFailureAndRollback(t *testing.T) {
 	srv, home := startCorraldSSH(t, "CORRALD_TEST_FAIL_READY=1")
 	hostID, _ := createAndPinHost(t, admin, srv, "badverbox")
 
-	mustStatus(t, admin.do("POST", fmt.Sprintf("/api/hosts/%d/corrald/install", hostID), map[string]any{}), http.StatusAccepted, "install v1")
+	startCorraldInstall(t, admin, hostID)
 	st := waitCorraldState(t, admin, hostID, "running")
 	if st["version"] != "0.3.1" {
 		t.Fatalf("expected 0.3.1, got %v", st["version"])
@@ -543,7 +559,7 @@ func TestCorraldPauseResumeRemoveAndPending(t *testing.T) {
 	srv, home := startCorraldSSH(t)
 	hostID, _ := createAndPinHost(t, admin, srv, "lifebox")
 
-	mustStatus(t, admin.do("POST", fmt.Sprintf("/api/hosts/%d/corrald/install", hostID), map[string]any{}), http.StatusAccepted, "install")
+	startCorraldInstall(t, admin, hostID)
 	waitCorraldState(t, admin, hostID, "running")
 
 	// Pause (only user -> stops daemon too).
@@ -576,7 +592,7 @@ func TestCorraldPauseResumeRemoveAndPending(t *testing.T) {
 	}
 
 	// Re-install then shut down SSH server to test remove_pending!
-	mustStatus(t, admin.do("POST", fmt.Sprintf("/api/hosts/%d/corrald/install", hostID), map[string]any{}), http.StatusAccepted, "re-install")
+	startCorraldInstall(t, admin, hostID)
 	waitCorraldState(t, admin, hostID, "running")
 	h.terms.CloseHost(uid, hostID, "drop")
 	srv.Close()
@@ -598,7 +614,7 @@ func TestCorraldRemovePartialAndStopFailed(t *testing.T) {
 	srv, _ := startCorraldSSH(t)
 	hostID, _ := createAndPinHost(t, admin, srv, "rmerrbox")
 
-	mustStatus(t, admin.do("POST", fmt.Sprintf("/api/hosts/%d/corrald/install", hostID), map[string]any{}), http.StatusAccepted, "install")
+	startCorraldInstall(t, admin, hostID)
 	waitCorraldState(t, admin, hostID, "running")
 
 	// Mock partial uninstall response from host.
@@ -649,7 +665,7 @@ func TestCorraldReconcileAfterGatewayRestart(t *testing.T) {
 	hostID, _ := createAndPinHost(t, admin, srv, "restartbox")
 
 	// Install cleanly so daemon is running on the host.
-	mustStatus(t, admin.do("POST", fmt.Sprintf("/api/hosts/%d/corrald/install", hostID), map[string]any{}), http.StatusAccepted, "install")
+	startCorraldInstall(t, admin, hostID)
 	waitCorraldState(t, admin, hostID, "running")
 
 	// Create a leftover stage dir and simulate an interrupted installing op right before restart.
@@ -696,7 +712,7 @@ func TestCorraldDeleteHostOptions(t *testing.T) {
 	// Case 1: Reachable with remove_corrald=true removes corrald before deleting host.
 	srv1, home1 := startCorraldSSH(t)
 	id1, _ := createAndPinHost(t, admin, srv1, "del1")
-	mustStatus(t, admin.do("POST", fmt.Sprintf("/api/hosts/%d/corrald/install", id1), map[string]any{}), http.StatusAccepted, "install 1")
+	startCorraldInstall(t, admin, id1)
 	waitCorraldState(t, admin, id1, "running")
 
 	dr1 := admin.do("DELETE", fmt.Sprintf("/api/hosts/%d", id1), map[string]any{
@@ -714,7 +730,7 @@ func TestCorraldDeleteHostOptions(t *testing.T) {
 	// Case 2: Reachable with remove_corrald=false leaves corrald installed.
 	srv2, home2 := startCorraldSSH(t)
 	id2, _ := createAndPinHost(t, admin, srv2, "del2")
-	mustStatus(t, admin.do("POST", fmt.Sprintf("/api/hosts/%d/corrald/install", id2), map[string]any{}), http.StatusAccepted, "install 2")
+	startCorraldInstall(t, admin, id2)
 	waitCorraldState(t, admin, id2, "running")
 
 	dr2 := admin.do("DELETE", fmt.Sprintf("/api/hosts/%d", id2), map[string]any{
@@ -728,7 +744,7 @@ func TestCorraldDeleteHostOptions(t *testing.T) {
 	// Case 3: Unreachable host still deletes record and returns unreachable + uninstall_cmd.
 	srv3, _ := startCorraldSSH(t)
 	id3, _ := createAndPinHost(t, admin, srv3, "del3")
-	mustStatus(t, admin.do("POST", fmt.Sprintf("/api/hosts/%d/corrald/install", id3), map[string]any{}), http.StatusAccepted, "install 3")
+	startCorraldInstall(t, admin, id3)
 	waitCorraldState(t, admin, id3, "running")
 	uid := int64(admin.do("GET", "/api/me", nil).json()["id"].(float64))
 	h.terms.CloseHost(uid, id3, "drop")
@@ -756,7 +772,7 @@ func TestCorraldIdentityRebindAndHostKeyRotation(t *testing.T) {
 	srv, _ := startCorraldSSH(t)
 	hostID, _ := createAndPinHost(t, admin, srv, "bindbox")
 
-	mustStatus(t, admin.do("POST", fmt.Sprintf("/api/hosts/%d/corrald/install", hostID), map[string]any{}), http.StatusAccepted, "install")
+	startCorraldInstall(t, admin, hostID)
 	waitCorraldState(t, admin, hostID, "running")
 
 	// 1. Rotate host key -> host_key_changed includes corrald_enabled=true.
@@ -791,7 +807,7 @@ func TestCorraldIdentityRebindAndHostKeyRotation(t *testing.T) {
 	}
 
 	// Re-confirm & re-enable from rebind.
-	mustStatus(t, admin.do("POST", fmt.Sprintf("/api/hosts/%d/corrald/install", hostID), map[string]any{"rebind": true}), http.StatusAccepted, "rebind install")
+	startCorraldInstall(t, admin, hostID, map[string]any{"rebind": true})
 	waitCorraldState(t, admin, hostID, "running")
 
 	// 3. Changing host login username -> enters rebind!
@@ -820,7 +836,7 @@ func TestCorraldMultiUserSharedDaemonAndAccountCleanup(t *testing.T) {
 	bobHost, _ := createAndPinHost(t, bob, srv, "shared-b")
 
 	// Alice installs corrald.
-	mustStatus(t, alice.do("POST", fmt.Sprintf("/api/hosts/%d/corrald/install", aliceHost), map[string]any{}), http.StatusAccepted, "alice install")
+	startCorraldInstall(t, alice, aliceHost)
 	stA := waitCorraldState(t, alice, aliceHost, "running")
 	pidA := int(stA["running"].(map[string]any)["pid"].(float64))
 
@@ -881,7 +897,7 @@ func TestCorraldIncompatibleAndRestartExhaustionRetry(t *testing.T) {
 	})
 	hostID, _ := createAndPinHost(t, admin, srv, "recbox")
 
-	mustStatus(t, admin.do("POST", fmt.Sprintf("/api/hosts/%d/corrald/install", hostID), map[string]any{}), http.StatusAccepted, "install")
+	startCorraldInstall(t, admin, hostID)
 	waitCorraldState(t, admin, hostID, "running")
 
 	// Break binary on host & stop daemon + drop conn -> 3 restarts fail -> enters error.
@@ -943,7 +959,7 @@ func TestCorraldPostUpdateCrashLoopRollback(t *testing.T) {
 	hostID, _ := createAndPinHost(t, admin, srv, "crashrbbox")
 
 	// Install v1, then hot-update to v2 cleanly.
-	mustStatus(t, admin.do("POST", fmt.Sprintf("/api/hosts/%d/corrald/install", hostID), map[string]any{}), http.StatusAccepted, "install v1")
+	startCorraldInstall(t, admin, hostID)
 	waitCorraldState(t, admin, hostID, "running")
 
 	distV2, _ := gw.LoadDist(v2Dir)

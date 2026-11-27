@@ -16,10 +16,12 @@ RUN go mod download
 COPY . .
 COPY --from=web /src/web/dist ./web/dist
 ARG VERSION=dev
-ARG RELEASE=0
+ARG RELEASE
 ARG COMMIT=
 ARG BUILDARCH TARGETOS TARGETARCH
-RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o /corral ./cmd/corral \
+RUN case "${RELEASE}" in ''|*[!0-9]*) echo "RELEASE build-arg must be a positive integer (e.g. git log -1 --format=%ct)" >&2; exit 1 ;; esac \
+ && [ "${RELEASE}" -gt 0 ] || { echo "RELEASE build-arg must be > 0" >&2; exit 1; } \
+ && CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o /corral ./cmd/corral \
  && mkdir -p /corrald/linux-amd64 /corrald/linux-arm64 \
  && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "-s -w -X main.version=${VERSION} -X main.release=${RELEASE} -X main.commit=${COMMIT}" -o /corrald/linux-amd64/corrald ./cmd/corrald \
  && CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags "-s -w -X main.version=${VERSION} -X main.release=${RELEASE} -X main.commit=${COMMIT}" -o /corrald/linux-arm64/corrald ./cmd/corrald \

@@ -49,16 +49,17 @@ func CheckUsername(u string) error {
 }
 
 type Service struct {
-	store       *store.Store
-	idle        time.Duration
-	maxAge      time.Duration
-	now         func() time.Time
-	limiter     *ipLimiter
-	setupMu     sync.Mutex
-	setupHash   string
-	OnUserGone  func(userID int64) // called when a user's access must end now (disable, password change)
-	touchMu     sync.Mutex
-	lastTouched map[string]time.Time
+	store          *store.Store
+	idle           time.Duration
+	maxAge         time.Duration
+	now            func() time.Time
+	limiter        *ipLimiter
+	setupMu        sync.Mutex
+	setupHash      string
+	OnUserGone     func(userID int64) // called when a user's access must end now (disable, password change)
+	OnUserDisabled func(userID int64) // called only when an account is permanently disabled or deleted (NOT password reset)
+	touchMu        sync.Mutex
+	lastTouched    map[string]time.Time
 
 	// localLogin: who may sign in with a password (config.LocalLogin*: "all", "admins", "off").
 	localLogin string
@@ -475,6 +476,15 @@ func (s *Service) EndAccess(ctx context.Context, userID int64) error {
 func (s *Service) CloseConnections(userID int64) {
 	if s.OnUserGone != nil {
 		s.OnUserGone(userID)
+	}
+}
+
+// DisableUserConnections ends a user's live connections AND runs permanent
+// account-disable/delete cleanup hooks (e.g. corrald host cleanup).
+func (s *Service) DisableUserConnections(userID int64) {
+	s.CloseConnections(userID)
+	if s.OnUserDisabled != nil {
+		s.OnUserDisabled(userID)
 	}
 }
 

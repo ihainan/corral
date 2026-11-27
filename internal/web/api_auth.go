@@ -286,28 +286,28 @@ const (
 
 // settingRules lists the known settings and checks their values.
 var settingRules = map[string]func(json.RawMessage) bool{
-	"theme":           oneOf("system", "light", "dark"),
-	"termTheme":       matches(regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,63}$`)),
-	"termThemeDark":   matches(regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,63}$`)),
-	"termThemeLight":  matches(regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,63}$`)),
-	"fontSize":        intRange(9, 28),
-	"keybar":          isBool,
-	"optionIsMeta":    isBool,
-	"webgl":           isBool,
-	"remoteClipboard": isBool,
-	"tapKeyboard":     isBool,
-	"composerEnter":   oneOf("send", "newline"),
-	"customKeys":      customKeys,
-	"keyLayout":       keyLayout,
-	"pinnedAgents":    pinnedAgents,
+	"theme":               oneOf("system", "light", "dark"),
+	"termTheme":           matches(regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,63}$`)),
+	"termThemeDark":       matches(regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,63}$`)),
+	"termThemeLight":      matches(regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,63}$`)),
+	"fontSize":            intRange(9, 28),
+	"keybar":              isBool,
+	"optionIsMeta":        isBool,
+	"webgl":               isBool,
+	"remoteClipboard":     isBool,
+	"tapKeyboard":         isBool,
+	"composerEnter":       oneOf("send", "newline"),
+	"customKeys":          customKeys,
+	"keyLayout":           keyLayout,
+	"pinnedAgents":        pinnedAgents,
 	"sidebarGroup":        oneOf("status", "project", "session"),
 	"sidebarSort":         oneOf("recent", "smart", "name"),
 	"pinFixedOrder":       isBool,
 	"sidebarNestChildren": isBool,
-	"webhook":         webhookURL,
-	"chime":           oneOf("off", "done", "all"),
-	"chimeTone":       oneOf("bell", "soft", "ping"),
-	"chimeBells":      isBool,
+	"webhook":             webhookURL,
+	"chime":               oneOf("off", "done", "all"),
+	"chimeTone":           oneOf("bell", "soft", "ping"),
+	"chimeBells":          isBool,
 	// Who has the keys with a terminal focused: it (Corral's own shortcuts let go) or Corral.
 	"keysFirst":    oneOf("terminal", "corral"),
 	"confirmLeave": isBool,
@@ -747,8 +747,8 @@ func (s *Server) apiAdminUpdateUser(w http.ResponseWriter, r *http.Request) {
 	}
 	if b.Disabled != nil {
 		if *b.Disabled {
-			// Logins were removed in the same transaction; now close what is open.
-			s.auth.CloseConnections(id)
+			// Logins were removed in the same transaction; now close what is open and run disable cleanup.
+			s.auth.DisableUserConnections(id)
 			s.audit(r, "user.disable", target.Username, nil)
 		} else {
 			s.audit(r, "user.enable", target.Username, nil)

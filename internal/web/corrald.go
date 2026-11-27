@@ -32,6 +32,9 @@ func (p *webSSHProvider) AcquireSSH(ctx context.Context, ownerID, hostID int64) 
 			if k, kerr := p.s.store.HostKey(ctx, ownerID, hostID); kerr == nil {
 				fp = k.Fingerprint
 			}
+			if fp != "" {
+				_ = p.s.store.RecordSSHVerified(ctx, hostID, fp, h.Username)
+			}
 			return rs.Client(), func() {}, fp, h.Username, nil
 		}
 	}
@@ -47,6 +50,7 @@ func (p *webSSHProvider) AcquireSSH(ctx context.Context, ownerID, hostID int64) 
 	fp := ""
 	if dialed.SeenKey != nil {
 		fp = dialed.SeenKey.Fingerprint
+		_ = p.s.store.RecordSSHVerified(ctx, hostID, fp, h.Username)
 	}
 	return dialed.Client, func() { _ = dialed.Client.Close() }, fp, h.Username, nil
 }
@@ -121,14 +125,33 @@ func (s *Server) CorraldClient(userID, hostID int64, capName string) (*gw.Client
 	return s.corrald.ClientForCap(userID, hostID, capName)
 }
 
+// notifyCorraldConnected records successful SSH verification and triggers
+// corrald's asynchronous OnHostConnected lifecycle reconciliation/attachment.
+func (s *Server) notifyCorraldConnected(ownerID, hostID int64, corralUser, sshUser, fp string, c *ssh.Client) {
+	if fp != "" && sshUser != "" {
+		_ = s.store.RecordSSHVerified(context.Background(), hostID, fp, sshUser)
+	}
+	if mgr := s.corrald; mgr != nil && mgr.Available() && c != nil {
+		go func(m *gw.Manager, uid, hid int64, uname, fpStr, sUser string, client *ssh.Client) {
+			cctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			m.OnHostConnected(cctx, uid, hid, uname, fpStr, sUser, client)
+		}(mgr, ownerID, hostID, corralUser, fp, sshUser, c)
+	}
+}
+
 func (s *Server) writeCorraldError(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
 	case errors.Is(err, gw.ErrUnavailable):
 		writeError(w, http.StatusNotFound, "corrald_unavailable", "helper daemon is not available on this gateway")
 	case errors.Is(err, gw.ErrAdminDisabled):
 		writeError(w, http.StatusForbidden, "corrald_disabled", "helper daemon is disabled by the administrator")
+	case errors.Is(err, gw.ErrManifestRequired):
+		writeError(w, http.StatusBadRequest, "bad_request", "manifest_hash is required")
 	case errors.Is(err, gw.ErrManifestChanged):
 		writeError(w, http.StatusConflict, "manifest_changed", "helper daemon manifest changed; reload and review details")
+	case errors.Is(err, gw.ErrUnknownResult):
+		writeError(w, http.StatusConflict, "corrald_unknown_result", "write operation result unknown; do not retry blindly")
 	case errors.Is(err, store.ErrOpInProgress):
 		writeError(w, http.StatusConflict, "op_in_progress", "another helper daemon operation is already in progress")
 	case errors.Is(err, gw.ErrCannotCancel):

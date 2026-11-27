@@ -26,7 +26,7 @@ const MaxSocketPath = 99
 var (
 	hex12RE = regexp.MustCompile(`^[0-9a-f]{12}$`)
 	uidRE   = regexp.MustCompile(`^[0-9]{1,10}$`)
-	opIDRE  = regexp.MustCompile(`^[0-9a-f]{8,32}$`)
+	opIDRE  = regexp.MustCompile(`^[0-9A-Za-z_-]{8,96}$`)
 )
 
 // ArchMap maps `uname -m` values to Go/distribution architecture names.
@@ -111,10 +111,23 @@ type HostProbe struct {
 	StateDir      string
 	InstallJSON   string
 	MetaJSON      string
+	ClientsJSON   string
 	FailedJSON    string
 	OpsDir        string
 	TombstonePath string
 	SocketPath    string
+}
+
+// UIDInt64 returns the parsed numeric UID or -1 if unavailable.
+func (p *HostProbe) UIDInt64() int64 {
+	if p == nil || !uidRE.MatchString(p.UID) {
+		return -1
+	}
+	n, err := strconv.ParseInt(p.UID, 10, 64)
+	if err != nil {
+		return -1
+	}
+	return n
 }
 
 // ProbeCommand inspects the target host without writing permanent files:
@@ -230,6 +243,7 @@ func ParseProbe(out []byte) (*HostProbe, error) {
 		p.StateDir = p.StateRoot + "/" + p.MachineID
 		p.InstallJSON = p.StateDir + "/install.json"
 		p.MetaJSON = p.StateDir + "/meta.json"
+		p.ClientsJSON = p.StateDir + "/clients.json"
 		p.FailedJSON = p.StateDir + "/failed.json"
 		p.OpsDir = p.StateDir + "/ops"
 		p.TombstonePath = p.StateDir + "/removing"
@@ -249,15 +263,76 @@ func ComputeSocketPath(home, uid, mid string) string {
 	return fmt.Sprintf("/tmp/corrald-%s-%s/corrald.sock", uid, hex.EncodeToString(sum[:4]))
 }
 
-// MkStageCommand creates the state directory (0700) and a private stage
-// directory (0700) for uploading corrald.
-func MkStageCommand(stateDir, stageDir string) string {
+// MkStageCommand safely creates the state directory (0700) and a private stage
+// directory (0700) step-by-step, refusing any symlink or foreign-owned component
+// along ~/.local/lib/corral and ~/.local/state/corral/corrald/<mid>/stage-<op>.
+func MkStageCommand(home, stateDir, stageDir string) string {
 	return shellScript(`umask 077
-mkdir -p "$ST" && chmod 700 "$ST" || { echo "error=mkdir"; exit 1; }
+ME=$(id -u)
+check_or_mk() {
+  p="$1"
+  mode="$2"
+  if [ -L "$p" ]; then
+    echo "error=unsafe_path"
+    echo "detail=symlink at $p"
+    exit 1
+  fi
+  if [ -e "$p" ]; then
+    if [ ! -d "$p" ]; then
+      echo "error=unsafe_path"
+      echo "detail=not a directory: $p"
+      exit 1
+    fi
+  else
+    mkdir "$p" || { echo "error=mkdir"; exit 1; }
+  fi
+  if [ -L "$p" ] || [ ! -d "$p" ]; then
+    echo "error=unsafe_path"
+    exit 1
+  fi
+  own=$(stat -c %u "$p" 2>/dev/null || echo "")
+  if [ -n "$own" ] && [ "$own" != "$ME" ]; then
+    echo "error=unsafe_path"
+    echo "detail=unexpected owner $own on $p"
+    exit 1
+  fi
+  if [ -n "$mode" ]; then
+    chmod "$mode" "$p" || { echo "error=chmod"; exit 1; }
+  fi
+}
+check_existing_dir() {
+  p="$1"
+  if [ -L "$p" ]; then
+    echo "error=unsafe_path"
+    echo "detail=symlink at $p"
+    exit 1
+  fi
+  if [ -e "$p" ]; then
+    if [ ! -d "$p" ]; then
+      echo "error=unsafe_path"
+      exit 1
+    fi
+    own=$(stat -c %u "$p" 2>/dev/null || echo "")
+    if [ -n "$own" ] && [ "$own" != "$ME" ]; then
+      echo "error=unsafe_path"
+      echo "detail=unexpected owner $own on $p"
+      exit 1
+    fi
+  fi
+}
+H="${HOME_DIR%/}"
+check_existing_dir "$H/.local"
+check_existing_dir "$H/.local/lib"
+check_existing_dir "$H/.local/lib/corral"
+check_or_mk "$H/.local" ""
+check_or_mk "$H/.local/state" ""
+check_or_mk "$H/.local/state/corral" ""
+check_or_mk "$H/.local/state/corral/corrald" ""
+check_or_mk "$ST" "700"
 if [ -e "$ST/removing" ]; then echo "error=removing"; exit 1; fi
-mkdir -p "$STAGE" && chmod 700 "$STAGE" || { echo "error=stage"; exit 1; }
+check_or_mk "$STAGE" "700"
 echo "result=ok"
-`, "ST", stateDir, "STAGE", stageDir)
+`, "HOME_DIR", home, "ST", stateDir, "STAGE", stageDir)
 }
 
 // RmStageCommand removes a staging directory.
@@ -298,6 +373,13 @@ func ServeCommand(binPath, gateway string) string {
 `, "BIN", binPath, "GW", gateway)
 }
 
+// VersionCommand runs `<bin> version` to inspect an existing installation.
+func VersionCommand(binPath string) string {
+	return shellScript(`if [ ! -x "$BIN" ]; then echo "error=not_installed"; exit 1; fi
+"$BIN" version
+`, "BIN", binPath)
+}
+
 // StatusCommand runs `<bin> status`.
 func StatusCommand(binPath string) string {
 	return shellScript(`if [ ! -x "$BIN" ]; then echo "result=ok"; echo "state=not_installed"; exit 0; fi
@@ -314,7 +396,7 @@ func StopCommand(binPath string) string {
 
 // WriteTombstoneCommand writes the removing tombstone to block concurrent starts.
 func WriteTombstoneCommand(stateDir string) string {
-	return shellScript(`if [ -d "$ST" ]; then
+	return shellScript(`if [ -d "$ST" ] && [ ! -L "$ST" ]; then
   : > "$ST/removing" || { echo "error=tombstone_failed"; exit 1; }
 fi
 echo "result=ok"
@@ -322,8 +404,10 @@ echo "result=ok"
 }
 
 // UninstallCommand runs `<bin> uninstall [--op <id>]`. If the current symlink
-// is missing (e.g. partial install or damaged symlink), it attempts to locate any
-// corrald-*/corrald binary before falling back to safe shell cleanup.
+// and all versioned binaries are missing, the fallback verifies meta.json and
+// corrald.lock, stops any running process (verifying /proc/<pid>/stat start
+// time), and refuses to delete state files (returning error=stop_failed) if
+// the process or lock cannot be stopped.
 func UninstallCommand(libDir, stateDir, sockPath, opID string) string {
 	return shellScript(`BIN="$L/corrald"
 if [ ! -x "$BIN" ]; then
@@ -339,8 +423,99 @@ if [ -x "$BIN" ]; then
   fi
   exit $?
 fi
-# Binary missing: safe fallback cleanup of state dir and corrald-* entries only.
-if [ -d "$ST" ]; then : > "$ST/removing" 2>/dev/null || true; fi
+# Binary missing: write tombstone, check meta.json + lock, stop verified process first.
+if [ -d "$ST" ] && [ ! -L "$ST" ]; then : > "$ST/removing" 2>/dev/null || true; fi
+
+proc_start() {
+  p="$1"
+  [ -r "/proc/$p/stat" ] || return 1
+  awk '{ i = index($0, ") "); if (i == 0) exit 1; rest = substr($0, i+2); n = split(rest, a, " "); if (n < 20) exit 1; if (a[1] == "Z" || a[1] == "X") exit 1; print a[20] }' "/proc/$p/stat" 2>/dev/null
+}
+
+proc_matches() {
+  p="$1"
+  st="$2"
+  case "$p" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$p" -gt 0 ] 2>/dev/null || return 1
+  kill -0 "$p" 2>/dev/null || return 1
+  cur=$(proc_start "$p") || return 1
+  if [ -n "$st" ]; then
+    [ "$cur" = "$st" ] || return 1
+  fi
+  return 0
+}
+
+stop_verified() {
+  p="$1"
+  st="$2"
+  proc_matches "$p" "$st" || return 0
+  kill -TERM "$p" 2>/dev/null || true
+  i=0
+  while [ $i -lt 30 ]; do
+    proc_matches "$p" "$st" || return 0
+    sleep 0.1
+    i=$((i + 1))
+  done
+  proc_matches "$p" "$st" || return 0
+  kill -KILL "$p" 2>/dev/null || true
+  i=0
+  while [ $i -lt 20 ]; do
+    proc_matches "$p" "$st" || return 0
+    sleep 0.1
+    i=$((i + 1))
+  done
+  proc_matches "$p" "$st" && return 1
+  return 0
+}
+
+meta_pid=0
+meta_st=
+prev_pid=0
+prev_st=
+if [ -f "$ST/meta.json" ] && [ ! -L "$ST/meta.json" ]; then
+  meta_pid=$(sed -n 's/.*"pid"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$ST/meta.json" | head -n 1)
+  meta_st=$(sed -n 's/.*"start_time"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$ST/meta.json" | head -n 1)
+  prev_pid=$(sed -n 's/.*"prev_pid"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$ST/meta.json" | head -n 1)
+  prev_st=$(sed -n 's/.*"prev_start_time"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$ST/meta.json" | head -n 1)
+fi
+
+if [ -n "$meta_pid" ] && [ "$meta_pid" -gt 0 ] 2>/dev/null; then
+  if ! stop_verified "$meta_pid" "$meta_st"; then
+    echo "error=stop_failed"
+    echo "pid=$meta_pid"
+    echo "detail=process did not exit after SIGTERM and SIGKILL"
+    exit 1
+  fi
+fi
+if [ -n "$prev_pid" ] && [ "$prev_pid" -gt 0 ] 2>/dev/null; then
+  if ! stop_verified "$prev_pid" "$prev_st"; then
+    echo "error=stop_failed"
+    echo "pid=$prev_pid"
+    echo "detail=previous process did not exit after SIGTERM and SIGKILL"
+    exit 1
+  fi
+fi
+
+# Verify corrald.lock is no longer held by any live process before deleting state dir.
+if [ -f "$ST/corrald.lock" ] && command -v flock >/dev/null 2>&1; then
+  locked=1
+  i=0
+  while [ $i -lt 10 ]; do
+    if flock -n "$ST/corrald.lock" true 2>/dev/null; then
+      locked=0
+      break
+    fi
+    sleep 0.1
+    i=$((i + 1))
+  done
+  if [ "$locked" = "1" ]; then
+    echo "error=stop_failed"
+    echo "pid=${meta_pid:-0}"
+    echo "detail=corrald.lock is still held by an active process"
+    exit 1
+  fi
+fi
+
 if [ -n "$SOCK" ]; then rm -f "$SOCK" 2>/dev/null || true; fi
 rm -rf "$ST" 2>/dev/null || true
 SR=$(dirname "$ST")

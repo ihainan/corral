@@ -2,6 +2,7 @@ package gw
 
 import (
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/ihainan/corral/internal/corrald/proto"
@@ -510,6 +511,65 @@ func DecideUpdate(
 	return UpdateDecision{Action: UpdateAuto}
 }
 
+// CapAllowedByScope reports whether capName may be served by a running daemon
+// whose actual manifest is runningManifest, given the user's previously
+// consentedManifest. When the running daemon expands global scope (schema,
+// writes, egress, or resource budget), all capabilities are blocked until the
+// user consents. When only specific reads/actions/optional items grew, newly
+// added capabilities are blocked while previously consented ones remain usable.
+func CapAllowedByScope(consented, running proto.Manifest, capName string) bool {
+	added := proto.ScopeGrew(consented, running)
+	if len(added) == 0 {
+		return true
+	}
+	for _, item := range added {
+		if strings.HasPrefix(item, "schema:") ||
+			strings.HasPrefix(item, "writes:") ||
+			strings.HasPrefix(item, "egress:") ||
+			strings.HasPrefix(item, "budget:") {
+			return false
+		}
+	}
+	capName = strings.TrimSpace(capName)
+	if capName == "" {
+		return false
+	}
+	for _, item := range added {
+		if item == capName ||
+			item == "reads:"+capName ||
+			item == "actions:"+capName ||
+			item == "optional:"+capName {
+			return false
+		}
+		switch capName {
+		case "agent.state", "agent.events", "agent.locate", "agent.watch", "convo.subscribe", "fs.watch":
+			if item == "reads:"+proto.ReadProc ||
+				strings.HasPrefix(item, "reads:agent-logs:") ||
+				strings.HasPrefix(item, "reads:env:") ||
+				strings.HasPrefix(item, "reads:pane-screen:") {
+				return false
+			}
+		case "proc.monitor":
+			if item == "reads:"+proto.ReadProc {
+				return false
+			}
+		case "terminal.hint":
+			if strings.HasPrefix(item, "reads:pane-screen:") {
+				return false
+			}
+		case "pane.send", proto.ActionPaneInput:
+			if item == "actions:"+proto.ActionPaneInput {
+				return false
+			}
+		case "pane.answer", proto.ActionAnswerCard:
+			if item == "actions:"+proto.ActionAnswerCard {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 // ShouldRollbackOnCrash reports whether repeated abnormal exits after an update
 // should trigger an automatic rollback to the previous version (spec §6 item 7:
 // 2+ abnormal exits within 30 minutes of READY).
@@ -527,34 +587,34 @@ func ShouldRollbackOnCrash(crashCount int, timeSinceUpdate, crashWindow time.Dur
 // reconnect or gateway restart (reading install.json, meta.json, ops, tombstone,
 // and leftover stage-* directories).
 type HostObservedState struct {
-	HasTombstone    bool
-	HasInstall      bool
-	DaemonRunning   bool
-	InstalledVer    string
-	InstalledRel    int64
-	OpRecordResult  string // "ok", "failed", or "" if ops/<op>.json absent
-	LeftoverStages  []string
+	HasTombstone   bool
+	HasInstall     bool
+	DaemonRunning  bool
+	InstalledVer   string
+	InstalledRel   int64
+	OpRecordResult string // "ok", "failed", or "" if ops/<op>.json absent
+	LeftoverStages []string
 }
 
 // ReconcileAction describes what the gateway must do after reading host state.
 type ReconcileAction string
 
 const (
-	ReconcileNone           ReconcileAction = "none"
-	ReconcileFinishRemove   ReconcileAction = "finish_remove"
-	ReconcileConnect        ReconcileAction = "connect"
-	ReconcileStartDaemon    ReconcileAction = "start_daemon"
-	ReconcileMarkOff        ReconcileAction = "mark_off"
-	ReconcileMarkOpFailed   ReconcileAction = "mark_op_failed"
+	ReconcileNone         ReconcileAction = "none"
+	ReconcileFinishRemove ReconcileAction = "finish_remove"
+	ReconcileConnect      ReconcileAction = "connect"
+	ReconcileStartDaemon  ReconcileAction = "start_daemon"
+	ReconcileMarkOff      ReconcileAction = "mark_off"
+	ReconcileMarkOpFailed ReconcileAction = "mark_op_failed"
 )
 
 // ReconcileDecision is the pure result of ReconcileAfterRestart.
 type ReconcileDecision struct {
-	NextState      string
-	OpFinalState   string // "", OpDone, OpFailed, OpCancelled
-	OpErrorCode    string
-	Action         ReconcileAction
-	CleanupStages  []string
+	NextState     string
+	OpFinalState  string // "", OpDone, OpFailed, OpCancelled
+	OpErrorCode   string
+	Action        ReconcileAction
+	CleanupStages []string
 }
 
 // ReconcileAfterRestart decides how to settle an interrupted operation or host

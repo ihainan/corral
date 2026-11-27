@@ -481,3 +481,47 @@ func TestStepCancellableAndCheckBinding(t *testing.T) {
 		t.Fatal("different gateway must fail binding")
 	}
 }
+
+func TestCapAllowedByScope(t *testing.T) {
+	base := proto.DefaultManifest()
+
+	// No scope growth -> all caps allowed.
+	if !CapAllowedByScope(base, base, "agent.state") || !CapAllowedByScope(base, base, "pane.send") || !CapAllowedByScope(base, base, "") {
+		t.Fatal("expected all caps allowed when scope did not grow")
+	}
+
+	// Optional capability added -> previously consented caps remain usable, new optional cap is blocked.
+	optAdded := proto.DefaultManifest()
+	optAdded.Optional = append(optAdded.Optional, "terminal.record")
+	if !CapAllowedByScope(base, optAdded, "agent.state") {
+		t.Fatal("expected previously consented agent.state to remain allowed when only optional cap grew")
+	}
+	if CapAllowedByScope(base, optAdded, "terminal.record") {
+		t.Fatal("expected newly added optional cap terminal.record to be blocked")
+	}
+	if CapAllowedByScope(base, optAdded, "") {
+		t.Fatal("expected empty capName to be blocked when scope grew")
+	}
+
+	// Action added -> pane.send blocked while read-only agent.state remains allowed.
+	reduced := proto.DefaultManifest()
+	reduced.Actions = []string{proto.ActionAnswerCard} // consented without pane-input
+	if CapAllowedByScope(reduced, base, "pane.send") {
+		t.Fatal("expected pane.send blocked when actions:pane-input is not consented")
+	}
+	if !CapAllowedByScope(reduced, base, "agent.state") {
+		t.Fatal("expected agent.state allowed when only actions:pane-input grew")
+	}
+
+	// Global budget/writes/egress/schema growth -> ALL caps blocked.
+	budgetGrew := proto.DefaultManifest()
+	budgetGrew.Budget.RSSMB = base.Budget.RSSMB + 50
+	if CapAllowedByScope(base, budgetGrew, "agent.state") {
+		t.Fatal("expected all caps blocked when budget grew")
+	}
+	egressGrew := proto.DefaultManifest()
+	egressGrew.Egress = append(egressGrew.Egress, "internet")
+	if CapAllowedByScope(base, egressGrew, "agent.state") {
+		t.Fatal("expected all caps blocked when egress grew")
+	}
+}

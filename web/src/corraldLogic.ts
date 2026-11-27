@@ -136,6 +136,11 @@ export type CorraldFailureKind =
   | 'start_failed'
   | 'disconnected'
   | 'update_failed'
+  | 'handoff_failed'
+  | 'handoff_in_progress'
+  | 'not_newer'
+  | 'proto_mismatch'
+  | 'op_unknown'
   | 'stop_failed'
   | 'partial'
   | 'removing'
@@ -310,6 +315,18 @@ export function corraldFailureKind(code: string | undefined): CorraldFailureKind
       return 'disconnected'
     case 'update_failed':
       return 'update_failed'
+    case 'handoff_failed':
+      return 'handoff_failed'
+    case 'handoff_in_progress':
+      return 'handoff_in_progress'
+    case 'not_newer':
+      return 'not_newer'
+    case 'proto_mismatch':
+      return 'proto_mismatch'
+    case 'op_expired':
+    case 'op_unknown':
+    case 'corrald_unknown_result':
+      return 'op_unknown'
     case 'stop_failed':
       return 'stop_failed'
     case 'partial':

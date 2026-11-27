@@ -20,10 +20,11 @@ import (
 var (
 	// ErrClientClosed is returned when a call is made on a closed Client.
 	ErrClientClosed = errors.New("corrald client closed")
-	// ErrUnknownResult is returned when the connection drops while a mutating
-	// RPC (e.g. pane.send / pane.answer) is in flight, so the gateway must NOT
-	// blindly retry or fall back to re-sending (consent-design "结果未确认的写操作").
-	ErrUnknownResult = errors.New("corrald write result unknown after disconnect")
+	// ErrUnknownResult is returned when the outcome of a mutating RPC cannot be
+	// confirmed (disconnect/timeout after send, op_expired, op_unknown, or epoch
+	// change across reconnect), so the gateway must return 409
+	// corrald_unknown_result and NEVER retry with the same op_id.
+	ErrUnknownResult = errors.New("corrald write result unknown")
 )
 
 // DefaultCallTimeout bounds RPC calls when ctx carries no shorter deadline.
@@ -32,11 +33,17 @@ var DefaultCallTimeout = 15 * time.Second
 // DefaultDialTimeout bounds opening the direct-streamlocal channel.
 var DefaultDialTimeout = 10 * time.Second
 
+// NewWriteOpID generates a protocol-compliant timestamped op_id for mutating
+// RPC calls (pane.send, pane.answer, etc.) using proto.NewOpID.
+func NewWriteOpID() string {
+	return proto.NewOpID(time.Now())
+}
+
 // Client speaks the corrald framed JSON-RPC + event stream protocol over a
 // single Unix domain socket connection forwarded via SSH direct-streamlocal.
 type Client struct {
 	conn   net.Conn
-	wmu    sync.Mutex
+	wsem   chan struct{}
 	nextID atomic.Uint64
 
 	mu      sync.Mutex
@@ -74,8 +81,11 @@ func Dial(ctx context.Context, sshClient *ssh.Client, socketPath string, onEvent
 
 // NewClient wraps an already-established stream (used by Dial and unit tests).
 func NewClient(conn net.Conn, onEvent func(proto.Event)) *Client {
+	wsem := make(chan struct{}, 1)
+	wsem <- struct{}{}
 	c := &Client{
 		conn:    conn,
+		wsem:    wsem,
 		pending: make(map[uint64]chan proto.Response),
 		done:    make(chan struct{}),
 		onEvent: onEvent,
@@ -196,9 +206,10 @@ func (c *Client) Call(ctx context.Context, method string, params any, dst any) e
 	return c.call(ctx, method, params, dst, false)
 }
 
-// CallMutating invokes a write RPC (e.g. pane.send / pane.answer). If the
-// connection drops after the request was written and before a reply arrives,
-// ErrUnknownResult is returned so the caller never blindly re-sends.
+// CallMutating invokes a write RPC (e.g. pane.send / pane.answer).
+// If the connection drops or times out after the write begins, or if corrald
+// responds with op_expired / op_unknown, ErrUnknownResult is returned so the
+// caller returns 409 corrald_unknown_result and never blindly retries.
 func (c *Client) CallMutating(ctx context.Context, method string, params any, dst any) error {
 	return c.call(ctx, method, params, dst, true)
 }
@@ -208,6 +219,9 @@ func (c *Client) call(ctx context.Context, method string, params any, dst any, m
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, DefaultCallTimeout)
 		defer cancel()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 
 	var rawParams json.RawMessage
@@ -240,17 +254,55 @@ func (c *Client) call(ctx context.Context, method string, params any, dst any, m
 		c.mu.Unlock()
 	}
 
-	c.wmu.Lock()
+	// Acquire write slot while respecting ctx deadline/cancellation and client close.
+	select {
+	case <-c.wsem:
+	case <-c.done:
+		cleanupPending()
+		if err := c.Err(); err != nil {
+			return err
+		}
+		return ErrClientClosed
+	case <-ctx.Done():
+		cleanupPending()
+		return ctx.Err()
+	}
+
+	if err := ctx.Err(); err != nil {
+		c.wsem <- struct{}{}
+		cleanupPending()
+		return err
+	}
+
+	// Bound the write itself: set write deadline when supported and close the
+	// underlying connection immediately if ctx expires while blocked on write
+	// (e.g. SSH channel window exhausted because remote stopped reading).
+	if dl, ok := ctx.Deadline(); ok {
+		_ = c.conn.SetWriteDeadline(dl)
+	}
+	stopWriteWatch := context.AfterFunc(ctx, func() {
+		c.fail(ctx.Err())
+		_ = c.conn.Close()
+	})
 	werr := proto.WriteJSON(c.conn, proto.Request{
 		ID:     id,
 		Method: method,
 		Params: rawParams,
 	})
-	c.wmu.Unlock()
+	stopWriteWatch()
+	_ = c.conn.SetWriteDeadline(time.Time{})
+	c.wsem <- struct{}{}
+
 	if werr != nil {
 		cleanupPending()
 		c.fail(werr)
 		_ = c.conn.Close()
+		if mutating {
+			return fmt.Errorf("%w: %v", ErrUnknownResult, werr)
+		}
+		if cerr := ctx.Err(); cerr != nil {
+			return cerr
+		}
 		return werr
 	}
 
@@ -266,6 +318,9 @@ func (c *Client) call(ctx context.Context, method string, params any, dst any, m
 			return ErrClientClosed
 		}
 		if resp.Error != nil {
+			if mutating && (resp.Error.Code == proto.ErrOpExpired || resp.Error.Code == proto.ErrOpUnknown) {
+				return fmt.Errorf("%w: %w", ErrUnknownResult, resp.Error)
+			}
 			return resp.Error
 		}
 		if dst != nil && len(resp.Result) > 0 {

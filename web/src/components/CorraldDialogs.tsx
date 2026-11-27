@@ -81,6 +81,26 @@ export function corraldFailureText(
           prev: opts?.fallbackVersion || '?',
         }),
       }
+    case 'handoff_failed':
+      return {
+        body: t('corrald.err.handoffFailed'),
+      }
+    case 'handoff_in_progress':
+      return {
+        body: t('corrald.err.handoffInProgress'),
+      }
+    case 'not_newer':
+      return {
+        body: t('corrald.err.notNewer'),
+      }
+    case 'proto_mismatch':
+      return {
+        body: t('corrald.err.protoMismatch'),
+      }
+    case 'op_unknown':
+      return {
+        body: t('corrald.err.opUnknown'),
+      }
     case 'stop_failed':
       return {
         body: opts?.pid ? t('corrald.err.stopFailedPid', { pid: opts.pid }) : t('corrald.err.stopFailed'),

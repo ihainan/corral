@@ -63,48 +63,48 @@ type Server struct {
 	routes   []Route
 	static   fs.FS
 
-	herdrSocks       herdrSockets
-	herdrSeenSync    sync.Map         // herdr server key → *sync.Mutex (serializes Chat→CLI seen focus sync)
-	paneAttaches     paneAttachSlots  // active single-pane PTY attaches per SSH client/terminal (api_pane_ws.go)
-	gitCalls         gitCalls         // the session card's git state, per folder (git_info.go)
-	codexPanes       codexPaneLooks   // what each herdr server's Codex panes run, looked at shortly (codex_panes.go)
-	codexThreadLooks sync.Map         // session id → a look begun for cmdSession (herdr_bgcmd.go)
-	convoClaimed     convoClaims      // (which Codex each conversation was found to be of)
-	ocContested      ocContests       // (folders where two OpenCodes ran at once)
-	herdrTimes       herdrServers     // when each herdr server's agents last changed (shared by its watchers)
-	replies          paneReplies      // answers to agents in herdr panes
-	rewinds          rewindStore      // pending Claude Code in-place rewinds (lost on gateway restart)
-	cxPressed        sync.Map         // convoReplyKey → time.Time: when keys or text last went to a Codex's pane (its title read before, stale)
-	agyPressedMap    sync.Map         // convoReplyKey → time.Time: when keys or text last went to an agy pane (its screen wait check before, stale)
-	agyPanes         sync.Map         // sessID+"\x00"+pane → bool: herdr panes Corral bound to agy (fallback when herdr omits hp.Agent)
-	tmuxCmds         sync.Map         // tmux session id → *cmdProber: commands its Claude Code left running (see convo_tmux_cmds.go)
-	picks            pendingConns     // connections kept while the user picks what to open
-	opening          openSlots        // opens connecting or asking a host, per user
-	files            *sftpPool        // shared SFTP channels of the file panel
-	rec              *recState        // recordings being made, and their pruning
-	notifier         *notify.Notifier // nil disables push
-	fwd              *forwarder
-	code             codeServers
-	vis              visibility
-	looks            paneLooks    // (agents shown on an agents page now: see paneWatched)
-	waitAlerts       waitAlerts   // "needs you" alerts shown, to replace when no longer true
+	herdrSocks             herdrSockets
+	herdrSeenSync          sync.Map         // herdr server key → *sync.Mutex (serializes Chat→CLI seen focus sync)
+	paneAttaches           paneAttachSlots  // active single-pane PTY attaches per SSH client/terminal (api_pane_ws.go)
+	gitCalls               gitCalls         // the session card's git state, per folder (git_info.go)
+	codexPanes             codexPaneLooks   // what each herdr server's Codex panes run, looked at shortly (codex_panes.go)
+	codexThreadLooks       sync.Map         // session id → a look begun for cmdSession (herdr_bgcmd.go)
+	convoClaimed           convoClaims      // (which Codex each conversation was found to be of)
+	ocContested            ocContests       // (folders where two OpenCodes ran at once)
+	herdrTimes             herdrServers     // when each herdr server's agents last changed (shared by its watchers)
+	replies                paneReplies      // answers to agents in herdr panes
+	rewinds                rewindStore      // pending Claude Code in-place rewinds (lost on gateway restart)
+	cxPressed              sync.Map         // convoReplyKey → time.Time: when keys or text last went to a Codex's pane (its title read before, stale)
+	agyPressedMap          sync.Map         // convoReplyKey → time.Time: when keys or text last went to an agy pane (its screen wait check before, stale)
+	agyPanes               sync.Map         // sessID+"\x00"+pane → bool: herdr panes Corral bound to agy (fallback when herdr omits hp.Agent)
+	tmuxCmds               sync.Map         // tmux session id → *cmdProber: commands its Claude Code left running (see convo_tmux_cmds.go)
+	picks                  pendingConns     // connections kept while the user picks what to open
+	opening                openSlots        // opens connecting or asking a host, per user
+	files                  *sftpPool        // shared SFTP channels of the file panel
+	rec                    *recState        // recordings being made, and their pruning
+	notifier               *notify.Notifier // nil disables push
+	fwd                    *forwarder
+	code                   codeServers
+	vis                    visibility
+	looks                  paneLooks  // (agents shown on an agents page now: see paneWatched)
+	waitAlerts             waitAlerts // "needs you" alerts shown, to replace when no longer true
 	translateFlight        translateFlightState
 	translateClient        *http.Client // test hook; nil uses translateDefaultClient
 	translateClientOnce    sync.Once
 	translateDefaultClient *http.Client
-	complete         completions  // the composer's completion listings, per session and folder
-	convos           convoStates  // the conversation view's logs being read, per session
-	subConvos        convoStates  // and the logs of subagents opened from them
-	subScans         subScanSeen  // what their logs said last (convo_subscan.go)
-	quotaRuns        quotaRuns       // when Claude Code was last asked for its quota (convo_quota.go)
-	claudePlan       claudePlanCache // cached Claude Code subscription tier from `claude auth status`
-	agyQuota         agyQuotaPoller  // background periodic & stale-while-revalidate Antigravity quota cache
-	turns            turnIndexes  // the person's turns in those logs, for the page's panel of them (convo_turns.go)
-	newAgents        newAgents    // agents being started from the conversation page
-	claudeLists      sessionLists // Claude Code's sessions of a folder, as last listed
-	histLocks        histLocks    // one reading of a session's input history at a time
-	convoScans       convoScans   // scans of a host's processes, shared by its panes for a moment
-	askHook          askHooks     // Claude Code's question hook in hosts' settings: changes under way, what was read (askhook.go)
+	complete               completions     // the composer's completion listings, per session and folder
+	convos                 convoStates     // the conversation view's logs being read, per session
+	subConvos              convoStates     // and the logs of subagents opened from them
+	subScans               subScanSeen     // what their logs said last (convo_subscan.go)
+	quotaRuns              quotaRuns       // when Claude Code was last asked for its quota (convo_quota.go)
+	claudePlan             claudePlanCache // cached Claude Code subscription tier from `claude auth status`
+	agyQuota               agyQuotaPoller  // background periodic & stale-while-revalidate Antigravity quota cache
+	turns                  turnIndexes     // the person's turns in those logs, for the page's panel of them (convo_turns.go)
+	newAgents              newAgents       // agents being started from the conversation page
+	claudeLists            sessionLists    // Claude Code's sessions of a folder, as last listed
+	histLocks              histLocks       // one reading of a session's input history at a time
+	convoScans             convoScans      // scans of a host's processes, shared by its panes for a moment
+	askHook                askHooks        // Claude Code's question hook in hosts' settings: changes under way, what was read (askhook.go)
 
 	sockMu   sync.Mutex
 	socks    map[int64]map[*liveSocket]struct{} // open WebSockets per user, closed on sign-out
@@ -179,21 +179,27 @@ func New(d Deps) *Server {
 		s.cancelRestores(userID, 0)
 		s.closeUserForwards(userID)
 		s.forgetUserCode(userID)
-		if s.corrald != nil {
-			go func(uid int64) {
+		if s.notifier != nil {
+			s.notifier.Revoke(userID)
+		}
+		s.terms.CloseUser(userID, "access revoked")
+	}
+	prevDisabled := s.auth.OnUserDisabled
+	s.auth.OnUserDisabled = func(userID int64) {
+		if prevDisabled != nil {
+			prevDisabled(userID)
+		}
+		if mgr := s.corrald; mgr != nil {
+			go func(m *gw.Manager, uid int64) {
 				cctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 				defer cancel()
 				uname := ""
 				if u, err := s.store.UserByID(cctx, uid); err == nil {
 					uname = u.Username
 				}
-				s.corrald.CleanupUserHosts(cctx, uid, uname)
-			}(userID)
+				m.CleanupUserHosts(cctx, uid, uname)
+			}(mgr, userID)
 		}
-		if s.notifier != nil {
-			s.notifier.Revoke(userID)
-		}
-		s.terms.CloseUser(userID, "access revoked")
 	}
 	s.initCorrald()
 	if s.cfg.DataDir != "" {

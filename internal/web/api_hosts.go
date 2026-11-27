@@ -1,6 +1,7 @@
 package web
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
@@ -8,6 +9,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -458,9 +460,16 @@ func (s *Server) deleteHost(w http.ResponseWriter, r *http.Request) {
 		StopVSCode    bool `json:"stop_vscode"`
 		RemoveVSCode  bool `json:"remove_vscode"`
 	}
-	hasBody := r.ContentLength != 0
+	rawBody, rerr := io.ReadAll(io.LimitReader(r.Body, 16<<10))
+	if rerr != nil {
+		writeError(w, http.StatusBadRequest, "bad_request", rerr.Error())
+		return
+	}
+	hasBody := len(bytes.TrimSpace(rawBody)) > 0
 	if hasBody {
-		if err := readJSON(r, &opts); err != nil {
+		dec := json.NewDecoder(bytes.NewReader(rawBody))
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&opts); err != nil {
 			writeError(w, http.StatusBadRequest, "bad_request", err.Error())
 			return
 		}
@@ -471,68 +480,70 @@ func (s *Server) deleteHost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// When explicit cleanup options are provided, attempt synchronous host cleanup
-	// while credentials are still present; if unreachable, proceed to delete the
-	// host record anyway and return manual cleanup instructions (spec §8).
+	// When an explicit request body is provided, strictly honor its options
+	// (if all three flags are false, perform NO remote cleanup and do NOT fall
+	// back to legacy VS Code stop — Item 20). Only an empty body uses the
+	// legacy async VS Code stop path.
 	var (
 		reachable      = true
 		corraldOutcome any
 		vscodeOutcome  map[string]any
 		stopCode       func()
 	)
-	if hasBody && (opts.RemoveCorrald || opts.StopVSCode || opts.RemoveVSCode) {
-		var (
-			sshClient *ssh.Client
-			release   = func() {}
-			fp        string
-		)
-		if k, kerr := s.store.HostKey(r.Context(), u.ID, h.ID); kerr == nil {
-			fp = k.Fingerprint
-		}
-		// Borrow a running terminal SSH connection if available, else dial once.
-		cfg := hostConfig(h)
-		for _, rs := range s.terms.Running(u.ID, h.ID) {
-			if rs.HostConfig == cfg && rs.Client() != nil {
-				sshClient = rs.Client()
-				break
-			}
-		}
-		if sshClient == nil {
-			if t, terr := s.storedTarget(r.Context(), h); terr == nil {
-				dctx, dcancel := context.WithTimeout(r.Context(), 15*time.Second)
-				if dialed, derr := sshx.Dial(dctx, s.guard, *t); derr == nil {
-					sshClient = dialed.Client
-					if dialed.SeenKey != nil && fp == "" {
-						fp = dialed.SeenKey.Fingerprint
-					}
-					release = func() { _ = dialed.Client.Close() }
+	fp := ""
+	if k, kerr := s.store.HostKey(r.Context(), u.ID, h.ID); kerr == nil {
+		fp = k.Fingerprint
+	}
+	if hasBody {
+		if opts.RemoveCorrald || opts.StopVSCode || opts.RemoveVSCode {
+			var (
+				sshClient *ssh.Client
+				release   = func() {}
+			)
+			// Borrow a running terminal SSH connection if available, else dial once.
+			cfg := hostConfig(h)
+			for _, rs := range s.terms.Running(u.ID, h.ID) {
+				if rs.HostConfig == cfg && rs.Client() != nil {
+					sshClient = rs.Client()
+					break
 				}
-				dcancel()
 			}
-		}
-		if sshClient == nil {
-			reachable = false
-		}
-		if s.corrald != nil && opts.RemoveCorrald {
-			co := s.corrald.DeleteHostCleanup(r.Context(), u.ID, h.ID, u.Username, fp, h.Username, true, sshClient)
-			corraldOutcome = co
-			if co != nil && co.State == "removed" {
-				s.audit(r, "corrald.remove", hostTarget(h), map[string]any{"via": "host.delete"})
+			if sshClient == nil {
+				if t, terr := s.storedTarget(r.Context(), h); terr == nil {
+					dctx, dcancel := context.WithTimeout(r.Context(), 15*time.Second)
+					if dialed, derr := sshx.Dial(dctx, s.guard, *t); derr == nil {
+						sshClient = dialed.Client
+						if dialed.SeenKey != nil && fp == "" {
+							fp = dialed.SeenKey.Fingerprint
+						}
+						release = func() { _ = dialed.Client.Close() }
+					}
+					dcancel()
+				}
 			}
+			if sshClient == nil {
+				reachable = false
+			}
+			if s.corrald != nil && opts.RemoveCorrald {
+				co := s.corrald.DeleteHostCleanup(r.Context(), u.ID, h.ID, u.Username, fp, h.Username, true, sshClient)
+				corraldOutcome = co
+				if co != nil && co.State == "removed" {
+					s.audit(r, "corrald.remove", hostTarget(h), map[string]any{"via": "host.delete"})
+				}
+			} else if s.corrald != nil {
+				_ = s.corrald.DeleteHostCleanup(r.Context(), u.ID, h.ID, u.Username, fp, h.Username, false, nil)
+			}
+			if opts.StopVSCode || opts.RemoveVSCode {
+				vscodeOutcome = s.deleteHostCodeCleanup(r.Context(), sshClient, opts.StopVSCode, opts.RemoveVSCode)
+			}
+			release()
 		} else if s.corrald != nil {
+			// All three options explicitly false: cancel any in-progress op and unregister without remote cleanup.
 			_ = s.corrald.DeleteHostCleanup(r.Context(), u.ID, h.ID, u.Username, fp, h.Username, false, nil)
 		}
-		if opts.StopVSCode || opts.RemoveVSCode {
-			vscodeOutcome = s.deleteHostCodeCleanup(r.Context(), sshClient, opts.StopVSCode, opts.RemoveVSCode)
-		}
-		release()
 	} else {
-		// Legacy DELETE without options: unregister corrald best-effort and stop VS Code async.
+		// Legacy DELETE without request body: unregister corrald best-effort and stop VS Code async.
 		if s.corrald != nil {
-			fp := ""
-			if k, kerr := s.store.HostKey(r.Context(), u.ID, h.ID); kerr == nil {
-				fp = k.Fingerprint
-			}
 			_ = s.corrald.DeleteHostCleanup(r.Context(), u.ID, h.ID, u.Username, fp, h.Username, false, nil)
 		}
 		stopCode = s.codeStopperFor(r.Context(), h)

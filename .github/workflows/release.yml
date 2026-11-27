@@ -92,10 +92,13 @@ jobs:
           ACTOR: ${{ github.actor }}
         run: |
           v="$(cat out/version.txt)"
+          rel="$(git log -1 --format=%ct)"
+          commit="$(git rev-parse --short=12 HEAD)"
           echo "$TOKEN" | docker login ghcr.io -u "$ACTOR" --password-stdin
           docker buildx create --use --name multiarch
           # (The Dockerfile builds every architecture on this machine: no emulation.)
-          docker buildx build --platform linux/amd64,linux/arm64 --build-arg VERSION="$v" \
+          docker buildx build --platform linux/amd64,linux/arm64 \
+            --build-arg VERSION="$v" --build-arg RELEASE="$rel" --build-arg COMMIT="$commit" \
             -t "ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/corral:$v" --push .
       - name: Publish release
         if: env.PUBLISHED != '1'

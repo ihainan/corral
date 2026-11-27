@@ -3,8 +3,6 @@ package gw
 import (
 	"bufio"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -53,10 +51,12 @@ func (f *OpFailure) Error() string {
 
 // HostStateFiles holds parsed JSON files read from ~/.local/state/corral/corrald/<mid>/.
 type HostStateFiles struct {
-	Install *HostInstallRecord
-	Meta    *HostMetaRecord
-	Failed  *HostFailedRecord
-	Op      *HostOpRecord
+	Install       *HostInstallRecord
+	Meta          *HostMetaRecord
+	Failed        *HostFailedRecord
+	Op            *HostOpRecord
+	Clients       []proto.ClientInfo
+	ClientsLoaded bool // true when clients.json was read or confirmed absent
 }
 
 // HostInstallRecord mirrors daemon.InstallRecord without importing linux-only daemon code.
@@ -74,15 +74,17 @@ type HostInstallRecord struct {
 
 // HostMetaRecord mirrors daemon.MetaRecord.
 type HostMetaRecord struct {
-	PID        int    `json:"pid"`
-	StartTime  string `json:"start_time"`
-	Version    string `json:"version"`
-	Release    int64  `json:"release"`
-	Commit     string `json:"commit,omitempty"`
-	Epoch      string `json:"epoch"`
-	StartedAt  string `json:"started_at"`
-	SocketPath string `json:"socket_path"`
-	Gateway    string `json:"gateway,omitempty"`
+	PID           int    `json:"pid"`
+	StartTime     string `json:"start_time"`
+	PrevPID       int    `json:"prev_pid,omitempty"`
+	PrevStartTime string `json:"prev_start_time,omitempty"`
+	Version       string `json:"version"`
+	Release       int64  `json:"release"`
+	Commit        string `json:"commit,omitempty"`
+	Epoch         string `json:"epoch"`
+	StartedAt     string `json:"started_at"`
+	SocketPath    string `json:"socket_path"`
+	Gateway       string `json:"gateway,omitempty"`
 }
 
 // HostOpRecord mirrors daemon.OpRecordFile.
@@ -109,6 +111,11 @@ type HostFailedEntry struct {
 // HostFailedRecord mirrors daemon.FailedRecord.
 type HostFailedRecord struct {
 	Releases []HostFailedEntry `json:"releases"`
+}
+
+// HostClientsFile mirrors daemon.clientsFile.
+type HostClientsFile struct {
+	Clients []proto.ClientInfo `json:"clients"`
 }
 
 func (f *HostFailedRecord) ReleaseList() []int64 {
@@ -162,8 +169,8 @@ func ProbeHost(ctx context.Context, c *ssh.Client) (*HostProbe, error) {
 	return p, nil
 }
 
-// ReadHostStateFiles reads install.json, meta.json, failed.json, and optionally
-// ops/<opID>.json from the host via SFTP. Missing files are left nil.
+// ReadHostStateFiles reads install.json, meta.json, failed.json, clients.json,
+// and optionally ops/<opID>.json from the host via SFTP. Missing files are left nil.
 func ReadHostStateFiles(ctx context.Context, c *ssh.Client, probe *HostProbe, opID string) HostStateFiles {
 	var out HostStateFiles
 	if probe == nil || probe.StateDir == "" {
@@ -175,34 +182,50 @@ func ReadHostStateFiles(ctx context.Context, c *ssh.Client, probe *HostProbe, op
 	}
 	defer cleanup()
 
-	readJSON := func(remotePath string, dst any) bool {
+	readJSON := func(remotePath string, dst any) (found bool, notExist bool) {
+		info, lerr := sc.Lstat(remotePath)
+		if lerr != nil {
+			return false, errors.Is(lerr, os.ErrNotExist)
+		}
+		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+			return false, false
+		}
 		f, err := sc.Open(remotePath)
 		if err != nil {
-			return false
+			return false, errors.Is(err, os.ErrNotExist)
 		}
 		defer f.Close()
 		b, err := io.ReadAll(io.LimitReader(f, 512<<10))
 		if err != nil {
-			return false
+			return false, false
 		}
-		return json.Unmarshal(b, dst) == nil
+		return json.Unmarshal(b, dst) == nil, false
 	}
 
 	var inst HostInstallRecord
-	if readJSON(probe.InstallJSON, &inst) {
+	if ok, _ := readJSON(probe.InstallJSON, &inst); ok {
 		out.Install = &inst
 	}
 	var meta HostMetaRecord
-	if readJSON(probe.MetaJSON, &meta) {
+	if ok, _ := readJSON(probe.MetaJSON, &meta); ok {
 		out.Meta = &meta
 	}
 	var failed HostFailedRecord
-	if readJSON(probe.FailedJSON, &failed) {
+	if ok, _ := readJSON(probe.FailedJSON, &failed); ok {
 		out.Failed = &failed
+	}
+	if probe.ClientsJSON != "" {
+		var cf HostClientsFile
+		if ok, notExist := readJSON(probe.ClientsJSON, &cf); ok {
+			out.Clients = cf.Clients
+			out.ClientsLoaded = true
+		} else if notExist {
+			out.ClientsLoaded = true
+		}
 	}
 	if opID != "" && opIDRE.MatchString(opID) {
 		var opRec HostOpRecord
-		if readJSON(probe.OpsDir+"/"+opID+".json", &opRec) {
+		if ok, _ := readJSON(probe.OpsDir+"/"+opID+".json", &opRec); ok {
 			out.Op = &opRec
 		}
 	}
@@ -211,7 +234,7 @@ func ReadHostStateFiles(ctx context.Context, c *ssh.Client, probe *HostProbe, op
 
 // RecordFailedOnHost appends release to ~/.local/state/corral/corrald/<mid>/failed.json
 // via SFTP so neither this gateway nor another retries a broken release.
-func RecordFailedOnHost(ctx context.Context, c *ssh.Client, failedPath string, release int64, reason string) error {
+func RecordFailedOnHost(ctx context.Context, c *ssh.Client, home string, expectedUID int64, failedPath string, release int64, reason string) error {
 	if failedPath == "" || release <= 0 {
 		return nil
 	}
@@ -241,7 +264,7 @@ func RecordFailedOnHost(ctx context.Context, c *ssh.Client, failedPath string, r
 		return err
 	}
 	b = append(b, '\n')
-	return sftpWriteFile(ctx, c, failedPath, b)
+	return sftpWriteFile(ctx, c, home, expectedUID, failedPath, b)
 }
 
 // ValidateProbe checks whether the probed host satisfies corrald requirements.
@@ -346,7 +369,7 @@ func StageAndInstall(
 		return "", cf
 	}
 
-	mkRes, mkErr := runSSH(ctx, c, MkStageCommand(probe.StateDir, stageDir), 4096, sshx.ExecOptions{})
+	mkRes, mkErr := runSSH(ctx, c, MkStageCommand(probe.Home, probe.StateDir, stageDir), 4096, sshx.ExecOptions{})
 	mkFields := ParseKeyValues(mkRes.Out)
 	if mkFields["error"] == proto.ErrRemoving {
 		return "", &OpFailure{Code: proto.ErrRemoving, MachineID: probe.MachineID, OS: probe.OS, Arch: probe.Arch}
@@ -358,10 +381,10 @@ func StageAndInstall(
 		if isCancelled != nil && isCancelled() {
 			return "", &OpFailure{Code: "cancelled"}
 		}
-		return "", &OpFailure{Code: classifyWriteErr(mkErr, mkFields["error"]), Detail: errStr(mkErr), MachineID: probe.MachineID, OS: probe.OS, Arch: probe.Arch}
+		return "", &OpFailure{Code: classifyWriteErr(mkErr, mkFields["error"]), Detail: firstNonEmpty(mkFields["detail"], mkFields["error"], errStr(mkErr)), MachineID: probe.MachineID, OS: probe.OS, Arch: probe.Arch}
 	}
 
-	if err := sftpUploadBinary(ctx, c, bin.Path, stageBin); err != nil {
+	if err := sftpUploadBinarySecure(ctx, c, bin.Path, probe.Home, probe.UIDInt64(), probe.LibDir, stageDir, stageBin); err != nil {
 		if isCancelled != nil && isCancelled() {
 			_ = cleanupStage()
 			return "", &OpFailure{Code: "cancelled"}
@@ -554,83 +577,6 @@ func RunUninstall(ctx context.Context, c *ssh.Client, probe *HostProbe, opID str
 	}
 }
 
-func sftpUploadBinary(ctx context.Context, c *ssh.Client, localPath, remotePath string) error {
-	sc, cleanup, err := openSFTP(ctx, c)
-	if err != nil {
-		return fmt.Errorf("open sftp: %w", err)
-	}
-	defer cleanup()
-
-	src, err := os.Open(localPath)
-	if err != nil {
-		return fmt.Errorf("open local binary: %w", err)
-	}
-	defer src.Close()
-
-	dst, err := sc.OpenFile(remotePath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC)
-	if err != nil {
-		return err
-	}
-	buf := make([]byte, 32<<10)
-	for {
-		if ctx.Err() != nil {
-			_ = dst.Close()
-			return ctx.Err()
-		}
-		n, rerr := src.Read(buf)
-		if n > 0 {
-			if _, werr := dst.Write(buf[:n]); werr != nil {
-				_ = dst.Close()
-				return werr
-			}
-		}
-		if rerr == io.EOF {
-			break
-		}
-		if rerr != nil {
-			_ = dst.Close()
-			return rerr
-		}
-	}
-	if err := dst.Chmod(0o700); err != nil {
-		_ = dst.Close()
-		return err
-	}
-	return dst.Close()
-}
-
-func sftpReadbackSHA256(ctx context.Context, c *ssh.Client, remotePath string) (string, error) {
-	sc, cleanup, err := openSFTP(ctx, c)
-	if err != nil {
-		return "", fmt.Errorf("open sftp: %w", err)
-	}
-	defer cleanup()
-
-	rd, err := sc.Open(remotePath)
-	if err != nil {
-		return "", err
-	}
-	defer rd.Close()
-	h := sha256.New()
-	buf := make([]byte, 32<<10)
-	for {
-		if ctx.Err() != nil {
-			return "", ctx.Err()
-		}
-		n, rerr := rd.Read(buf)
-		if n > 0 {
-			h.Write(buf[:n])
-		}
-		if rerr == io.EOF {
-			break
-		}
-		if rerr != nil {
-			return "", rerr
-		}
-	}
-	return hex.EncodeToString(h.Sum(nil)), nil
-}
-
 func classifySFTPErr(err error) string {
 	if err == nil {
 		return "other"
@@ -639,7 +585,7 @@ func classifySFTPErr(err error) string {
 	switch {
 	case strings.Contains(msg, "no space"), strings.Contains(msg, "enospc"), strings.Contains(msg, "quota"):
 		return "no_space"
-	case strings.Contains(msg, "permission denied"), strings.Contains(msg, "read-only"), strings.Contains(msg, "erofs"):
+	case strings.Contains(msg, "unsafe"), strings.Contains(msg, "symlink"), strings.Contains(msg, "permission denied"), strings.Contains(msg, "read-only"), strings.Contains(msg, "erofs"):
 		return "home_readonly"
 	case strings.Contains(msg, "eof"), strings.Contains(msg, "closed"), strings.Contains(msg, "connection"), strings.Contains(msg, "broken pipe"):
 		return "disconnected"

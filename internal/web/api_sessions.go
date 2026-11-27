@@ -26,7 +26,6 @@ import (
 	"github.com/pkg/sftp"
 	"golang.org/x/crypto/ssh"
 
-	"github.com/ihainan/corral/internal/corrald/gw"
 	"github.com/ihainan/corral/internal/herdr"
 	"github.com/ihainan/corral/internal/netguard"
 	"github.com/ihainan/corral/internal/sftplite"
@@ -337,16 +336,12 @@ func (s *Server) openSession(ctx context.Context, w http.ResponseWriter, r *http
 	if sess.Persistence == store.PersistHerdr {
 		go s.watchHerdr(sess, h)
 	}
-	if mgr := s.corrald; mgr != nil && mgr.Available() {
+	{
 		fp := ""
 		if k, kerr := s.store.HostKey(r.Context(), u.ID, h.ID); kerr == nil {
 			fp = k.Fingerprint
 		}
-		go func(m *gw.Manager, uid, hid int64, uname, fpStr, sshUser string, c *ssh.Client) {
-			cctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			defer cancel()
-			m.OnHostConnected(cctx, uid, hid, uname, fpStr, sshUser, c)
-		}(mgr, u.ID, h.ID, u.Username, fp, h.Username, sess.Client())
+		s.notifyCorraldConnected(u.ID, h.ID, u.Username, h.Username, fp, sess.Client())
 	}
 	_ = s.store.TouchHostConnected(r.Context(), u.ID, h.ID)
 	s.audit(r, "session.open", hostTarget(h), map[string]any{"session": sess.ID, "open": choice.Kind})
