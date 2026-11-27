@@ -14,16 +14,15 @@ import (
 // op_id values within a single daemon epoch.
 //
 // Deduplication scope contract (enforced jointly by corrald and the gateway):
-//   - Within the same daemon epoch (including across clean zero-gap hot updates
-//     that preserve epoch and transfer the OpTable and eviction watermark),
-//     corrald guarantees at-most-once execution per op_id: duplicates return
-//     in_progress, op_unknown (if still in flight across handoff), the cached
-//     first result, or op_expired (if older than OpDedupWindow or evicted by
-//     capacity pressure).
-//   - Across a daemon cold restart or epoch rotation, daemon.hello returns a
-//     new epoch. Whenever the gateway reconnects and observes a changed epoch,
-//     it MUST treat any previously unacknowledged mutating RPC from the old
-//     epoch as outcome-unknown and MUST NOT retry it with the same op_id.
+//   - Within the same daemon epoch, corrald guarantees at-most-once execution
+//     per op_id: duplicates return in_progress, op_unknown (if carried across a
+//     hot update while in flight), the cached first result, or op_expired (if
+//     older than OpDedupWindow or evicted by capacity pressure).
+//   - Hot updates and cold restarts both begin a fresh daemon epoch reported in
+//     daemon.hello. Whenever the gateway reconnects and observes a changed
+//     epoch, it MUST treat any previously unacknowledged mutating RPC from the
+//     old epoch as outcome-unknown and MUST NOT retry it with the same op_id.
+//     (corrald still transfers OpTable across hot updates as defense-in-depth.)
 //   - On cold start, corrald begins a fresh epoch with an empty in-memory
 //     OpTable and treats any valid non-expired op_id as a new request.
 const OpDedupWindow = 30 * time.Minute

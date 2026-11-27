@@ -32,8 +32,8 @@ const (
 	// during hot-update handoff (spec §6: 5 s).
 	DefaultReadyTimeout = 5 * time.Second
 
-	// DefaultPostHandoffExit is the grace period after READY before v1 exits
-	// when no mutating RPC is still in flight (spec §6: 3 s).
+	// DefaultPostHandoffExit is the hard cap after READY before v1 exits when
+	// no mutating RPC is still in flight (spec §6: 3 s).
 	DefaultPostHandoffExit = 3 * time.Second
 
 	// DefaultPostHandoffWriteExit is the hard cap after READY when an
@@ -47,6 +47,10 @@ const (
 	// DefaultSocketWatchInterval is the interval for verifying that corrald.sock
 	// still exists at the expected inode.
 	DefaultSocketWatchInterval = 60 * time.Second
+
+	// DefaultLifecycleLockTimeout is the maximum time a lifecycle operation
+	// waits on SharedLock / OpLock before returning "busy".
+	DefaultLifecycleLockTimeout = 60 * time.Second
 
 	connOutboundQueueSize = 2048
 )
@@ -98,6 +102,7 @@ type ServerConfig struct {
 	PostHandoffWriteCap time.Duration
 	OldVersionGCDelay   time.Duration
 	SocketWatchInterval time.Duration
+	LockTimeout         time.Duration
 	Lock                *FileLock
 	Listener            *net.UnixListener
 	InitialSnapshot     *HandoffSnapshot
@@ -106,9 +111,8 @@ type ServerConfig struct {
 	// signaling READY.
 	PreReady func(meta *MetaRecord) error
 	OnReady  func()
-	// OnHardExit is called immediately when the post-handoff hard exit deadline
-	// expires while handlers are still blocked. CLI binaries pass os.Exit(0)
-	// directly so exit cannot block on logging or lock cleanup.
+	// OnHardExit is triggered by time.AfterFunc started immediately upon
+	// receiving READY during handoff. Defaults to os.Exit(0).
 	OnHardExit func()
 }
 
@@ -149,8 +153,7 @@ type Server struct {
 	writeDoneCh      chan struct{}
 	handoffActive    bool
 	handedOff        bool
-	hardExitDeadline time.Time
-	hardExitForced   bool
+	hardExitTimer    *time.Timer
 	rollbackDegraded string
 
 	acceptMu      sync.Mutex
@@ -205,6 +208,9 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 	}
 	if cfg.SocketWatchInterval <= 0 {
 		cfg.SocketWatchInterval = DefaultSocketWatchInterval
+	}
+	if cfg.LockTimeout <= 0 {
+		cfg.LockTimeout = defaultLifecycleLockTimeout()
 	}
 	expectedUID := cfg.Layout.UID
 	if cfg.ExpectedUID != nil {
@@ -294,14 +300,6 @@ func (s *Server) HandedOff() bool {
 	return s.handedOff
 }
 
-// HardExitForced reports whether Serve returned due to hitting the post-handoff
-// hard exit cap while handlers were still running.
-func (s *Server) HardExitForced() bool {
-	s.stateMu.Lock()
-	defer s.stateMu.Unlock()
-	return s.hardExitForced
-}
-
 func (s *Server) currentMetaRecord() *MetaRecord {
 	meta := &MetaRecord{
 		PID:        os.Getpid(),
@@ -330,17 +328,12 @@ func (s *Server) Serve(parentCtx context.Context) error {
 	defer cancel()
 
 	// Restore handoff snapshot if starting as a replacement daemon.
+	// Rule 2: Hot updates ALWAYS start a fresh epoch (clients perform a full
+	// resync on reconnect); Clients, OpTable (defense-in-depth), and Modules
+	// are restored from the snapshot.
 	if snap := s.cfg.InitialSnapshot; snap != nil {
 		if snap.Schema != HandoffSnapshotSchema {
 			return fmt.Errorf("unsupported handoff snapshot schema %d (want %d)", snap.Schema, HandoffSnapshotSchema)
-		}
-		if snap.ForceNewEpoch {
-			// Events were attempted while v1's bus was frozen: keep our fresh
-			// random epoch so reconnecting clients receive resync_required and
-			// perform a full resync instead of silently missing events.
-			s.log.Info("handoff snapshot flagged dropped frozen events; rotating to fresh epoch", "new_epoch", s.bus.Epoch())
-		} else {
-			s.bus.Restore(snap.Epoch, snap.LastSeq, snap.Events)
 		}
 		if err := s.clients.Restore(snap.Clients); err != nil {
 			s.log.Warn("restore clients failed", "err", err)
@@ -356,8 +349,6 @@ func (s *Server) Serve(parentCtx context.Context) error {
 		}
 		s.ln = ln
 	}
-	// Never let Go auto-unlink the socket on Close(); we explicitly remove the
-	// socket only on clean shutdown/idle exit and NEVER on handoff.
 	s.ln.SetUnlinkOnClose(false)
 
 	if dev, ino, err := FileInode(s.layout.SocketPath); err == nil {
@@ -366,7 +357,6 @@ func (s *Server) Serve(parentCtx context.Context) error {
 		s.sockMu.Unlock()
 	}
 
-	// Run level-triggered reconcilers before cutover/READY.
 	if s.cfg.InitialSnapshot != nil {
 		if err := s.reconcileAll(ctx); err != nil {
 			s.log.Warn("handoff reconciliation returned error", "err", err)
@@ -375,10 +365,7 @@ func (s *Server) Serve(parentCtx context.Context) error {
 
 	meta := s.currentMetaRecord()
 
-	// Perform persistent cutover (symlink + install.json + meta.json) BEFORE
-	// accepting any connections or executing any requests. Incoming connects
-	// queue safely in the kernel listen backlog while PreReady runs; if PreReady
-	// fails, zero requests were executed by this process and READY is never sent.
+	// Perform persistent cutover BEFORE accepting any connections or requests.
 	if s.cfg.PreReady != nil {
 		if err := s.cfg.PreReady(meta); err != nil {
 			s.closeListenerForExit()
@@ -400,18 +387,14 @@ func (s *Server) Serve(parentCtx context.Context) error {
 		"handoff", s.cfg.InitialSnapshot != nil,
 	)
 
-	// Start idle timer (starts immediately; cancelled as soon as a client connects).
 	s.armIdleTimer()
 
-	// Start accept loop ONLY after PreReady succeeded.
 	s.wg.Add(1)
 	go s.acceptLoop(ctx)
 
-	// Start periodic socket inode watchdog (auto-rebinds if unlinked).
 	s.wg.Add(1)
 	go s.socketWatchLoop(ctx)
 
-	// Schedule old version cleanup after staying healthy for OldVersionGCDelay.
 	s.wg.Add(1)
 	go s.oldVersionGCLoop(ctx)
 
@@ -424,46 +407,23 @@ func (s *Server) Serve(parentCtx context.Context) error {
 	s.stopIdleTimer()
 	s.closeListenerForExit()
 	s.closeAllConns()
-
-	// Enforce a hard exit deadline after hot-update handoff so a hung write
-	// handler can never keep the retired process alive indefinitely. When the
-	// hard deadline expires, exit immediately via OnHardExit (os.Exit(0))
-	// WITHOUT writing logs or pre-closing corrald.lock (the OS releases the
-	// lock atomically when the process terminates).
-	if s.HandedOff() {
-		s.stateMu.Lock()
-		deadline := s.hardExitDeadline
-		s.stateMu.Unlock()
-		remaining := time.Until(deadline)
-		if remaining < 50*time.Millisecond {
-			remaining = 50 * time.Millisecond
-		}
-		wgDone := make(chan struct{})
-		go func() {
-			s.wg.Wait()
-			close(wgDone)
-		}()
-		timer := time.NewTimer(remaining)
-		select {
-		case <-wgDone:
-			timer.Stop()
-		case <-timer.C:
-			if s.cfg.OnHardExit != nil {
-				s.cfg.OnHardExit()
-			}
-			s.stateMu.Lock()
-			s.hardExitForced = true
-			s.stateMu.Unlock()
-			return nil
-		}
-		s.log.Info("corrald exited after handoff", "pid", os.Getpid())
-		return nil
-	}
-
 	s.wg.Wait()
-	_ = os.Remove(s.layout.SocketPath)
-	_ = os.Remove(s.layout.MetaJSON)
-	s.log.Info("corrald stopped", "pid", os.Getpid())
+
+	if !s.HandedOff() {
+		_ = os.Remove(s.layout.SocketPath)
+		_ = os.Remove(s.layout.MetaJSON)
+		s.log.Info("corrald stopped", "pid", os.Getpid())
+	} else {
+		// Note: hardExitTimer remains armed through this final log write so
+		// even a blocked logger cannot violate the post-READY exit deadline.
+		s.log.Info("corrald exited after handoff", "pid", os.Getpid())
+		s.stateMu.Lock()
+		if s.hardExitTimer != nil {
+			s.hardExitTimer.Stop()
+			s.hardExitTimer = nil
+		}
+		s.stateMu.Unlock()
+	}
 	return nil
 }
 
@@ -501,7 +461,6 @@ func (s *Server) rebindSocket() error {
 		return nil
 	}
 
-	// Re-check inode under listenerOpMu in case a previous rebind already fixed it.
 	s.sockMu.Lock()
 	wantDev, wantIno := s.sockDev, s.sockIno
 	s.sockMu.Unlock()
@@ -521,8 +480,6 @@ func (s *Server) rebindSocket() error {
 		return err
 	}
 
-	// Prefer atomic bind-to-temp + rename when the temporary path fits within
-	// MaxSocketPath; otherwise bind directly at SocketPath.
 	tmpSock := filepath.Join(s.layout.SocketDir, fmt.Sprintf(".rebind-%d-%s.sock", os.Getpid(), RandomHex(3)))
 	var newLn *net.UnixListener
 	var err error
@@ -619,7 +576,6 @@ func (s *Server) acceptLoop(ctx context.Context) {
 
 		if err != nil {
 			if paused {
-				// Expected wakeup from ln.SetDeadline(time.Now()) during handoff or rebind.
 				continue
 			}
 			if stopped || ctx.Err() != nil || errors.Is(err, net.ErrClosed) {
@@ -833,7 +789,6 @@ func (c *Conn) enqueueRaw(payload []byte) bool {
 	case c.outCh <- payload:
 		return true
 	default:
-		// Outbound queue saturated; close slow connection rather than blocking bus.
 		go c.Close()
 		return false
 	}
@@ -940,9 +895,6 @@ func (s *Server) dispatchRequest(ctx context.Context, c *Conn, req proto.Request
 		return
 	}
 
-	// Idempotent mutating RPCs atomically combine draining admission and
-	// OpTable.Begin(op_id) under stateMu, so no admitted write can ever escape
-	// a handoff snapshot even if it stalls before reaching handler code.
 	if reg.opts.Idempotent {
 		var hdr struct {
 			OpID string `json:"op_id"`

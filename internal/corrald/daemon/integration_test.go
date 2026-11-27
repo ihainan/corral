@@ -238,6 +238,23 @@ func (c *rpcClient) readEvent(t *testing.T, timeout time.Duration) proto.Event {
 	return env.AsEvent()
 }
 
+func assertStateDirCleanedKeepLocks(t *testing.T, stateDir string) {
+	t.Helper()
+	entries, err := os.ReadDir(stateDir)
+	if os.IsNotExist(err) {
+		return
+	}
+	if err != nil {
+		t.Fatalf("readdir %s: %v", stateDir, err)
+	}
+	for _, e := range entries {
+		name := e.Name()
+		if name != "op.lock" && name != "corrald.lock" {
+			t.Fatalf("unexpected leftover entry %q in %s after uninstall", name, stateDir)
+		}
+	}
+}
+
 func TestIntegrationLifecycleAndResume(t *testing.T) {
 	bins := getTestBinaries(t)
 	home := t.TempDir()
@@ -401,15 +418,13 @@ func TestIntegrationLifecycleAndResume(t *testing.T) {
 	c3.close()
 	c2.close()
 
-	// 7. uninstall stops daemon, deletes files, and post-check reports removed.
+	// 7. uninstall stops daemon, deletes files (leaving only lock files in StateDir), and post-check reports removed.
 	out, code = runCLI(t, installedBin, home, env, "uninstall", "--op", "op0002")
 	kv = parseKV(out)
 	if code != 0 || kv["result"] != "removed" || kv["last_machine"] != "true" {
 		t.Fatalf("uninstall unexpected (code=%d):\n%s", code, out)
 	}
-	if _, err := os.Lstat(stateDir); !os.IsNotExist(err) {
-		t.Fatalf("stateDir still exists after uninstall")
-	}
+	assertStateDirCleanedKeepLocks(t, stateDir)
 	if _, err := os.Lstat(installedBin); !os.IsNotExist(err) {
 		t.Fatalf("symlink still exists after uninstall")
 	}
@@ -709,10 +724,12 @@ func TestIntegrationHotUpdateZeroGap(t *testing.T) {
 	}
 	var h2 proto.HelloResult
 	_ = json.Unmarshal(resp.Result, &h2)
-	if h2.Version != "0.2.0" || h2.Release != 200 || h2.PID != hres.PID || h2.Epoch != h1.Epoch {
-		t.Fatalf("unexpected v2 hello: %+v (want version=0.2.0 release=200 pid=%d epoch=%s)", h2, hres.PID, h1.Epoch)
+	// Rule 2: Hot updates ALWAYS rotate to a fresh epoch on v2 so clients resync.
+	if h2.Version != "0.2.0" || h2.Release != 200 || h2.PID != hres.PID || h2.Epoch == "" || h2.Epoch == h1.Epoch {
+		t.Fatalf("unexpected v2 hello: %+v (want version=0.2.0 release=200 pid=%d new epoch != %s)", h2, hres.PID, h1.Epoch)
 	}
 
+	// OpTable is still carried across handoff as defense-in-depth.
 	r2, _ := c2.call(t, "test.write", map[string]any{"op_id": idemOpID, "value": "should-not-run"})
 	if r2.Error != nil {
 		t.Fatalf("replay op_id on v2: %v", r2.Error)
@@ -726,27 +743,27 @@ func TestIntegrationHotUpdateZeroGap(t *testing.T) {
 		t.Fatalf("op_id was re-executed on v2 instead of returning cached v1 result: %+v", w2)
 	}
 
+	// Rule 2: Resuming with v1's old epoch on v2 MUST require full resync.
 	resp, _ = c2.call(t, proto.MethodDaemonResume, proto.ResumeParams{Epoch: h1.Epoch, LastSeq: 3})
-	if resp.Error != nil {
-		t.Fatalf("resume on v2 failed: %v", resp.Error)
-	}
-	for wantSeq := uint64(4); wantSeq <= 5; wantSeq++ {
-		ev := c2.readEvent(t, 2*time.Second)
-		if ev.Seq != wantSeq {
-			t.Fatalf("replayed seq=%d, want %d", ev.Seq, wantSeq)
-		}
+	if resp.Error == nil || resp.Error.Code != proto.ErrResyncRequired {
+		t.Fatalf("resume with old epoch on v2: got %+v, want resync_required", resp)
 	}
 
+	// Subscribing under v2's new epoch receives fresh seq=1..2 events.
+	resp, _ = c2.call(t, proto.MethodDaemonResume, proto.ResumeParams{Epoch: h2.Epoch, LastSeq: 0})
+	if resp.Error != nil {
+		t.Fatalf("resume with new epoch on v2 failed: %v", resp.Error)
+	}
 	cEmit := dialRPC(t, sock)
 	defer cEmit.close()
-	for wantSeq := uint64(6); wantSeq <= 7; wantSeq++ {
+	for wantSeq := uint64(1); wantSeq <= 2; wantSeq++ {
 		r, _ := cEmit.call(t, "test.emit", map[string]any{"event": "test.tick", "data": map[string]uint64{"n": wantSeq}})
 		if r.Error != nil {
 			t.Fatalf("emit %d on v2: %v", wantSeq, r.Error)
 		}
 		ev := c2.readEvent(t, 2*time.Second)
-		if ev.Seq != wantSeq || ev.Epoch != h1.Epoch {
-			t.Fatalf("post-handoff event seq=%d epoch=%s, want seq=%d epoch=%s", ev.Seq, ev.Epoch, wantSeq, h1.Epoch)
+		if ev.Seq != wantSeq || ev.Epoch != h2.Epoch {
+			t.Fatalf("post-handoff event seq=%d epoch=%s, want seq=%d epoch=%s", ev.Seq, ev.Epoch, wantSeq, h2.Epoch)
 		}
 	}
 
@@ -903,11 +920,32 @@ func TestIntegrationHotUpdateBadBinaryAndCutoverFailureRollback(t *testing.T) {
 
 	c := dialRPC(t, sock)
 	defer c.close()
+	helloResp, _ := c.call(t, proto.MethodDaemonHello, proto.HelloParams{
+		Gateway: "gw.bad", GatewayVersion: "1.0", ProtoMin: 1, ProtoMax: 1,
+		Client: proto.ClientIdentity{CorralUser: "alice", HostID: "h1"},
+	})
+	if helloResp.Error != nil {
+		t.Fatalf("hello before failed handoff: %v", helloResp.Error)
+	}
+	var hBefore proto.HelloResult
+	_ = json.Unmarshal(helloResp.Result, &hBefore)
+
+	// Open a second passive client connection to verify Rule 2 closes ALL existing clients on rollback.
+	passive := dialRPC(t, sock)
+	defer passive.close()
+
 	resp, _ := c.call(t, proto.MethodDaemonHandoff, proto.HandoffParams{
 		Path: badPath, SHA256: badSHA, Release: 999,
 	})
 	if resp.Error == nil || resp.Error.Code != proto.ErrHandoffFailed {
 		t.Fatalf("expected handoff_failed for bad binary, got %+v", resp)
+	}
+
+	// Rule 2: Rollback must close existing client connections to force reconnect & resync.
+	_ = passive.conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	var dummy proto.Envelope
+	if err := proto.ReadJSON(passive.conn, &dummy); err == nil {
+		t.Fatalf("expected passive client connection to be closed after rollback, got %+v", dummy)
 	}
 
 	failedPath := filepath.Join(home, ".local", "state", "corral", "corrald", mid, "failed.json")
@@ -928,6 +966,19 @@ func TestIntegrationHotUpdateBadBinaryAndCutoverFailureRollback(t *testing.T) {
 
 	c2 := dialRPC(t, sock)
 	defer c2.close()
+	// Rule 2: Reconnecting after rollback MUST observe a rotated epoch!
+	resp, _ = c2.call(t, proto.MethodDaemonHello, proto.HelloParams{
+		Gateway: "gw.bad", GatewayVersion: "1.0", ProtoMin: 1, ProtoMax: 1,
+		Client: proto.ClientIdentity{CorralUser: "alice", HostID: "h1"},
+	})
+	if resp.Error != nil {
+		t.Fatalf("hello after rollback: %v", resp.Error)
+	}
+	var hAfter proto.HelloResult
+	_ = json.Unmarshal(resp.Result, &hAfter)
+	if hAfter.Epoch == "" || hAfter.Epoch == hBefore.Epoch {
+		t.Fatalf("expected rollback to rotate epoch: before=%q after=%q", hBefore.Epoch, hAfter.Epoch)
+	}
 	resp, _ = c2.call(t, proto.MethodDaemonHealth, nil)
 	if resp.Error != nil {
 		t.Fatalf("v1 health after failed handoff: %v", resp.Error)
@@ -1167,9 +1218,7 @@ func TestIntegrationNFSMultiMachineUninstallAndPreserveSiblings(t *testing.T) {
 		t.Fatalf("uninstall A unexpected (code=%d):\n%s", code, out)
 	}
 	stateA := filepath.Join(sharedHome, ".local", "state", "corral", "corrald", midA)
-	if _, err := os.Lstat(stateA); !os.IsNotExist(err) {
-		t.Fatal("Machine A state dir still exists")
-	}
+	assertStateDirCleanedKeepLocks(t, stateA)
 	if _, err := os.Lstat(installedBin); err != nil {
 		t.Fatalf("shared symlink deleted while Machine B still installed: %v", err)
 	}
@@ -1229,18 +1278,34 @@ func TestIntegrationUninstallAbortsWhenTombstoneWriteFails(t *testing.T) {
 	}
 	sock := parseKV(out)["socket"]
 
-	// Make StateDir read-only so WriteFileAtomic(removing) fails.
+	// Make StateDir read-only so step 1 (removing install.json) fails cleanly
+	// without stopping the running daemon!
 	if err := os.Chmod(stateDir, 0o500); err != nil {
 		t.Fatal(err)
 	}
 
 	out, code = runCLI(t, installedBin, home, env, "uninstall")
-	if code == 0 || parseKV(out)["error"] != "tombstone_failed" {
-		t.Fatalf("expected tombstone_failed when StateDir is read-only, got code=%d:\n%s", code, out)
+	if code == 0 || parseKV(out)["error"] != "remove_install_json_failed" {
+		t.Fatalf("expected remove_install_json_failed when StateDir is read-only, got code=%d:\n%s", code, out)
 	}
 
 	// Running daemon must STILL be alive because uninstall aborted before stop!
 	var health proto.HealthResult
+	if err := callLocalRPC(sock, proto.MethodDaemonHealth, nil, &health, 2*time.Second); err != nil {
+		t.Fatalf("daemon was stopped despite install.json remove failure: %v", err)
+	}
+
+	// Also verify tombstone_failed specifically (e.g. a non-empty directory at removing).
+	_ = os.Chmod(stateDir, 0o700)
+	tombDir := filepath.Join(stateDir, "removing")
+	if err := os.MkdirAll(filepath.Join(tombDir, "blocker"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(tombDir) })
+	out, code = runCLI(t, installedBin, home, env, "uninstall")
+	if code == 0 || parseKV(out)["error"] != "tombstone_failed" {
+		t.Fatalf("expected tombstone_failed when removing cannot be replaced, got code=%d:\n%s", code, out)
+	}
 	if err := callLocalRPC(sock, proto.MethodDaemonHealth, nil, &health, 2*time.Second); err != nil {
 		t.Fatalf("daemon was stopped despite tombstone write failure: %v", err)
 	}
@@ -1397,15 +1462,13 @@ func TestIntegrationSharedLockPreventsNFSRace(t *testing.T) {
 	if _, err := os.Lstat(installedBin); err != nil {
 		t.Fatalf("shared symlink was deleted despite concurrent Machine B install: %v", err)
 	}
-	if _, err := os.Lstat(stateA); !os.IsNotExist(err) {
-		t.Fatal("Machine A StateDir was not deleted after shared check")
-	}
+	assertStateDirCleanedKeepLocks(t, stateA)
 }
 
 func TestIntegrationUninstallWithoutInstallJSONPreservesSharedAndReturnsPartial(t *testing.T) {
-	// Round-2 Item 13: When install.json is missing/corrupt, uninstall MUST NOT
-	// delete shared program directories, symlink, or README.txt; it removes only
-	// this machine's StateDir and reports result=partial with left= entries.
+	// Round-2 Item 13 / Rule 6: When install.json is missing/corrupt, uninstall
+	// MUST NOT delete shared program directories, symlink, or README.txt; it
+	// cleans this machine's non-lock state and reports result=partial with left=.
 	bins := getTestBinaries(t)
 	home := t.TempDir()
 	const mid = "131313131313"
@@ -1431,10 +1494,7 @@ func TestIntegrationUninstallWithoutInstallJSONPreservesSharedAndReturnsPartial(
 	if code == 0 || kv["result"] != "partial" {
 		t.Fatalf("expected result=partial when install.json missing, got code=%d:\n%s", code, out)
 	}
-	// StateDir must be deleted.
-	if _, err := os.Lstat(stateDir); !os.IsNotExist(err) {
-		t.Fatal("StateDir should still be removed when install.json is missing")
-	}
+	assertStateDirCleanedKeepLocks(t, stateDir)
 	// Shared symlink, version dir, and README.txt MUST be preserved and listed in left=!
 	for _, preserved := range []string{installedBin, readmePath, verDir} {
 		if _, err := os.Lstat(preserved); err != nil {
@@ -1482,4 +1542,461 @@ func TestIntegrationProductionBinaryHasNoTestMethods(t *testing.T) {
 	var health proto.HealthResult
 	_ = json.Unmarshal(resp.Result, &health)
 	t.Logf("production corrald idle RSS: %d KiB (%.2f MiB)", health.RSSKB, float64(health.RSSKB)/1024.0)
+}
+
+func TestIntegrationConcurrentHandoffAndUninstall(t *testing.T) {
+	// Rule 1: Concurrent daemon.handoff and corrald uninstall are strictly
+	// serialized by SharedLock -> OpLock. Regardless of which runs first, final
+	// state must be completely consistent: uninstall finishes removed, no live
+	// daemon remains, and no dangling symlink is left behind.
+	bins := getTestBinaries(t)
+	home := t.TempDir()
+	const mid = "c0c0c0c0c0c0"
+	env := []string{"CORRALD_TEST_MACHINE_ID=" + mid}
+
+	stage1 := stageBinary(t, home, mid, "op1", bins.v1)
+	if out, code := runCLI(t, filepath.Join(stage1, "corrald"), home, env,
+		"install", "--stage", stage1, "--op", "op1", "--gateway", "gw.race", "--by", "alice"); code != 0 {
+		t.Fatalf("install v1: %s", out)
+	}
+	installedBin := filepath.Join(home, ".local", "lib", "corral", "corrald")
+	stateDir := filepath.Join(home, ".local", "state", "corral", "corrald", mid)
+	t.Cleanup(func() {
+		if _, err := os.Lstat(installedBin); err == nil {
+			_, _ = runCLI(t, installedBin, home, env, "uninstall")
+		}
+	})
+
+	out, code := runCLI(t, installedBin, home, env, "serve", "--gateway", "gw.race")
+	if code != 0 {
+		t.Fatalf("serve v1: %s", out)
+	}
+	sock := parseKV(out)["socket"]
+
+	stage2 := stageBinary(t, home, mid, "op2", bins.v2)
+	out, code = runCLI(t, filepath.Join(stage2, "corrald"), home, env,
+		"install", "--upgrade", "--stage", stage2, "--op", "op2", "--gateway", "gw.race", "--by", "alice")
+	if code != 0 {
+		t.Fatalf("upgrade v2: %s", out)
+	}
+	v2Bin := parseKV(out)["binary"]
+	v2SHA, _ := FileSHA256(v2Bin)
+
+	// Launch handoff and uninstall concurrently!
+	var wg sync.WaitGroup
+	var uninstOut string
+	var uninstCode int
+	var handoffErr error
+
+	start := make(chan struct{})
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		<-start
+		var hres proto.HandoffResult
+		handoffErr = callLocalRPC(sock, proto.MethodDaemonHandoff, proto.HandoffParams{
+			Path: v2Bin, SHA256: v2SHA, Release: 200,
+		}, &hres, 10*time.Second)
+	}()
+	go func() {
+		defer wg.Done()
+		<-start
+		uninstOut, uninstCode = runCLI(t, bins.v1, home, env, "uninstall")
+	}()
+	close(start)
+	wg.Wait()
+
+	t.Logf("concurrent handoffErr=%v uninstallCode=%d out=%q", handoffErr, uninstCode, uninstOut)
+	kv := parseKV(uninstOut)
+	if uninstCode != 0 || kv["result"] != "removed" {
+		t.Fatalf("uninstall did not finish cleanly after concurrent handoff: code=%d out=%s", uninstCode, uninstOut)
+	}
+	// No symlink (especially no dangling symlink) may remain.
+	if _, err := os.Lstat(installedBin); !os.IsNotExist(err) {
+		t.Fatalf("symlink remained after concurrent handoff+uninstall: err=%v", err)
+	}
+	// No version dirs may remain.
+	for _, d := range []string{"corrald-0.1.0-100", "corrald-0.2.0-200"} {
+		if _, err := os.Lstat(filepath.Join(home, ".local", "lib", "corral", d)); !os.IsNotExist(err) {
+			t.Fatalf("version dir %s remained after concurrent handoff+uninstall", d)
+		}
+	}
+	// StateDir must contain only lock files.
+	assertStateDirCleanedKeepLocks(t, stateDir)
+	// No daemon may be listening on sock.
+	var health proto.HealthResult
+	if err := callLocalRPC(sock, proto.MethodDaemonHealth, nil, &health, 300*time.Millisecond); err == nil {
+		t.Fatalf("daemon still responding after uninstall: %+v", health)
+	}
+}
+
+func TestIntegrationLockTimeoutReturnsBusy(t *testing.T) {
+	// Rule 1: Holding .corrald-shared.lock past LockTimeout causes install,
+	// uninstall, and daemon.handoff to return error=busy.
+	bins := getTestBinaries(t)
+	home := t.TempDir()
+	const mid = "b0b0b0b0b0b0"
+	env := []string{
+		"CORRALD_TEST_MACHINE_ID=" + mid,
+		"CORRALD_TEST_LOCK_TIMEOUT=150ms",
+	}
+
+	stage1 := stageBinary(t, home, mid, "op1", bins.v1)
+	if out, code := runCLI(t, filepath.Join(stage1, "corrald"), home, env,
+		"install", "--stage", stage1, "--op", "op1", "--gateway", "gw.busy", "--by", "alice"); code != 0 {
+		t.Fatalf("install v1: %s", out)
+	}
+	installedBin := filepath.Join(home, ".local", "lib", "corral", "corrald")
+	t.Cleanup(func() {
+		if _, err := os.Lstat(installedBin); err == nil {
+			_, _ = runCLI(t, installedBin, home, []string{"CORRALD_TEST_MACHINE_ID=" + mid}, "uninstall")
+		}
+	})
+
+	out, code := runCLI(t, installedBin, home, env, "serve", "--gateway", "gw.busy")
+	if code != 0 {
+		t.Fatalf("serve v1: %s", out)
+	}
+	sock := parseKV(out)["socket"]
+
+	stage2 := stageBinary(t, home, mid, "op2", bins.v2)
+	out, code = runCLI(t, filepath.Join(stage2, "corrald"), home, env,
+		"install", "--upgrade", "--stage", stage2, "--op", "op2", "--gateway", "gw.busy", "--by", "alice")
+	if code != 0 {
+		t.Fatalf("upgrade v2: %s", out)
+	}
+	v2Bin := parseKV(out)["binary"]
+	v2SHA, _ := FileSHA256(v2Bin)
+
+	// Hold SharedLock to simulate another host/operation holding lifecycle lock.
+	sharedLock, err := AcquireLock(filepath.Join(home, ".local", "lib", "corral", ".corrald-shared.lock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sharedLock.Release()
+
+	// 1. install -> busy.
+	stage3 := stageBinary(t, home, mid, "op3", bins.v2)
+	out, code = runCLI(t, filepath.Join(stage3, "corrald"), home, env,
+		"install", "--upgrade", "--stage", stage3, "--op", "op3", "--gateway", "gw.busy", "--by", "alice")
+	if code == 0 || parseKV(out)["error"] != proto.ErrBusy {
+		t.Fatalf("install while SharedLock held: code=%d out=%s, want error=busy", code, out)
+	}
+
+	// 2. uninstall -> busy.
+	out, code = runCLI(t, installedBin, home, env, "uninstall")
+	if code == 0 || parseKV(out)["error"] != proto.ErrBusy {
+		t.Fatalf("uninstall while SharedLock held: code=%d out=%s, want error=busy", code, out)
+	}
+
+	// 3. daemon.handoff -> retryable RPC error busy.
+	c := dialRPC(t, sock)
+	defer c.close()
+	resp, _ := c.call(t, proto.MethodDaemonHandoff, proto.HandoffParams{
+		Path: v2Bin, SHA256: v2SHA, Release: 200,
+	})
+	if resp.Error == nil || resp.Error.Code != proto.ErrBusy || !resp.Error.Retryable {
+		t.Fatalf("handoff while SharedLock held: got %+v, want retryable busy", resp)
+	}
+}
+
+func TestIntegrationHardExitEvenWhenLogBlocksAfterReady(t *testing.T) {
+	// Rule 3: Even if the logger blocks forever immediately after READY (on the
+	// "handoff completed" log write), the time.AfterFunc armed BEFORE any I/O on
+	// READY still exits v1 cleanly within PostHandoffExit!
+	bins := getTestBinaries(t)
+	home := t.TempDir()
+	const mid = "e3e3e3e3e3e3"
+	envV1 := []string{
+		"CORRALD_TEST_MACHINE_ID=" + mid,
+		"CORRALD_TEST_POST_HANDOFF_EXIT=300ms",
+		"CORRALD_TEST_BLOCK_LOG_ON_HANDOFF=1",
+	}
+	envClean := []string{"CORRALD_TEST_MACHINE_ID=" + mid}
+
+	stage1 := stageBinary(t, home, mid, "op1", bins.v1)
+	if out, code := runCLI(t, filepath.Join(stage1, "corrald"), home, envClean,
+		"install", "--stage", stage1, "--op", "op1", "--gateway", "gw.logblk", "--by", "alice"); code != 0 {
+		t.Fatalf("install v1: %s", out)
+	}
+	installedBin := filepath.Join(home, ".local", "lib", "corral", "corrald")
+	t.Cleanup(func() {
+		if _, err := os.Lstat(installedBin); err == nil {
+			_, _ = runCLI(t, installedBin, home, envClean, "uninstall")
+		}
+	})
+
+	out, code := runCLI(t, installedBin, home, envV1, "serve", "--gateway", "gw.logblk")
+	if code != 0 {
+		t.Fatalf("serve v1: %s", out)
+	}
+	kv := parseKV(out)
+	pid1, _ := strconv.Atoi(kv["pid"])
+	sock := kv["socket"]
+	meta1, err := ReadMetaRecord(filepath.Join(home, ".local", "state", "corral", "corrald", mid, "meta.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	stage2 := stageBinary(t, home, mid, "op2", bins.v2)
+	out, code = runCLI(t, filepath.Join(stage2, "corrald"), home, envClean,
+		"install", "--upgrade", "--stage", stage2, "--op", "op2", "--gateway", "gw.logblk", "--by", "alice")
+	if code != 0 {
+		t.Fatalf("upgrade v2: %s", out)
+	}
+	v2Bin := parseKV(out)["binary"]
+	v2SHA, _ := FileSHA256(v2Bin)
+
+	c := dialRPC(t, sock)
+	defer c.close()
+	resp, _ := c.call(t, proto.MethodDaemonHandoff, proto.HandoffParams{
+		Path: v2Bin, SHA256: v2SHA, Release: 200,
+	})
+	if resp.Error != nil {
+		t.Fatalf("handoff failed: %v", resp.Error)
+	}
+
+	// v1's goroutine is now blocked forever inside s.log.Info("handoff completed..."),
+	// yet the hard-exit AfterFunc armed on READY must still terminate v1 within ~300ms!
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if !ProcessMatches(pid1, meta1.StartTime) {
+			break
+		}
+		time.Sleep(30 * time.Millisecond)
+	}
+	if ProcessMatches(pid1, meta1.StartTime) {
+		t.Fatalf("v1 pid=%d hung because log write blocked after READY!", pid1)
+	}
+
+	// Verify v2 is healthy and serving!
+	var health proto.HealthResult
+	if err := callLocalRPC(sock, proto.MethodDaemonHealth, nil, &health, 2*time.Second); err != nil || health.Release != 200 {
+		t.Fatalf("v2 unhealthy after v1 hard exit: health=%+v err=%v", health, err)
+	}
+}
+
+func TestIntegrationServeRejectedAfterUninstallDeletesInstallJSONAndFreshStateCheck(t *testing.T) {
+	// Rule 4:
+	// 1. A serve process waiting on op.lock while uninstall deletes install.json
+	//    (even after tombstone is removed) MUST be rejected with error=not_installed.
+	// 2. An uninstall waiting on SharedLock when StateDir did NOT exist yet MUST
+	//    re-read StateDir AFTER acquiring SharedLock, seeing a concurrent install
+	//    that created StateDir + install.json while uninstall was waiting!
+	bins := getTestBinaries(t)
+	home := t.TempDir()
+	const mid = "f4f4f4f4f4f4"
+	env := []string{"CORRALD_TEST_MACHINE_ID=" + mid}
+
+	stage := stageBinary(t, home, mid, "op1", bins.v1)
+	if out, code := runCLI(t, filepath.Join(stage, "corrald"), home, env,
+		"install", "--stage", stage, "--op", "op1", "--gateway", "gw.r4", "--by", "alice"); code != 0 {
+		t.Fatalf("install: %s", out)
+	}
+	installedBin := filepath.Join(home, ".local", "lib", "corral", "corrald")
+	stateDir := filepath.Join(home, ".local", "state", "corral", "corrald", mid)
+	opLock, err := AcquireLock(filepath.Join(stateDir, "op.lock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	type cliRes struct {
+		out  string
+		code int
+	}
+	serveDone := make(chan cliRes, 1)
+	go func() {
+		out, code := runCLI(t, installedBin, home, env, "serve", "--gateway", "gw.r4")
+		serveDone <- cliRes{out: out, code: code}
+	}()
+
+	select {
+	case res := <-serveDone:
+		_ = opLock.Release()
+		t.Fatalf("serve did not wait on op.lock: code=%d out=%s", res.code, res.out)
+	case <-time.After(120 * time.Millisecond):
+	}
+
+	// Delete install.json (no tombstone left!) then release op.lock.
+	if err := os.Remove(filepath.Join(stateDir, "install.json")); err != nil {
+		_ = opLock.Release()
+		t.Fatal(err)
+	}
+	_ = opLock.Release()
+
+	res := <-serveDone
+	if res.code == 0 || parseKV(res.out)["error"] != "not_installed" {
+		t.Fatalf("serve after install.json removed: code=%d out=%s, want error=not_installed", res.code, res.out)
+	}
+
+	// Part 2: Uninstall waits on SharedLock BEFORE StateDir exists; while it
+	// waits, install creates StateDir + install.json -> uninstall MUST re-check
+	// StateDir AFTER SharedLock and clean it up completely!
+	home2 := t.TempDir()
+	const mid2 = "f5f5f5f5f5f5"
+	env2 := []string{"CORRALD_TEST_MACHINE_ID=" + mid2}
+	libDir2 := filepath.Join(home2, ".local", "lib", "corral")
+	if err := os.MkdirAll(libDir2, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sharedLock2, err := AcquireLock(filepath.Join(libDir2, ".corrald-shared.lock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	uninstDone := make(chan cliRes, 1)
+	go func() {
+		out, code := runCLI(t, bins.v1, home2, env2, "uninstall")
+		uninstDone <- cliRes{out: out, code: code}
+	}()
+
+	// Wait until uninstall is definitely blocked on SharedLock (StateDir does not exist yet!).
+	time.Sleep(120 * time.Millisecond)
+	stateDir2 := filepath.Join(home2, ".local", "state", "corral", "corrald", mid2)
+	if err := os.MkdirAll(stateDir2, 0o700); err != nil {
+		_ = sharedLock2.Release()
+		t.Fatal(err)
+	}
+	verDir2 := filepath.Join(libDir2, "corrald-0.1.0-100")
+	_ = os.MkdirAll(verDir2, 0o700)
+	if err := WriteInstallRecord(filepath.Join(stateDir2, "install.json"), &InstallRecord{
+		Version: "0.1.0", Release: 100, MachineID: mid2, Files: []string{verDir2},
+	}); err != nil {
+		_ = sharedLock2.Release()
+		t.Fatal(err)
+	}
+	_ = sharedLock2.Release()
+
+	ures := <-uninstDone
+	if ures.code != 0 || parseKV(ures.out)["result"] != "removed" {
+		t.Fatalf("uninstall after concurrent install during SharedLock wait: code=%d out=%s", ures.code, ures.out)
+	}
+	// Both the newly created StateDir entries AND verDir2 must be cleaned up!
+	assertStateDirCleanedKeepLocks(t, stateDir2)
+	if _, err := os.Lstat(verDir2); !os.IsNotExist(err) {
+		t.Fatal("verDir2 not removed after re-checking StateDir under SharedLock")
+	}
+}
+
+func TestIntegrationRollbackFailureReportsRollbackFailedAndDegradesHealth(t *testing.T) {
+	// Rule 5: When cutover fails AND restoring backup encounters a write error
+	// (read-only StateDir), daemon.handoff MUST return error=rollback_failed and
+	// daemon.health MUST report caps["state"] = "rollback_failed: ...".
+	if os.Geteuid() == 0 {
+		t.Skip("chmod 0500 does not block root")
+	}
+	bins := getTestBinaries(t)
+	home := t.TempDir()
+	const mid = "e5e5e5e5e5e5"
+	env := []string{"CORRALD_TEST_MACHINE_ID=" + mid}
+
+	stage1 := stageBinary(t, home, mid, "op1", bins.v1)
+	if out, code := runCLI(t, filepath.Join(stage1, "corrald"), home, env,
+		"install", "--stage", stage1, "--op", "op1", "--gateway", "gw.rbf", "--by", "alice"); code != 0 {
+		t.Fatalf("install v1: %s", out)
+	}
+	installedBin := filepath.Join(home, ".local", "lib", "corral", "corrald")
+	libDir := filepath.Join(home, ".local", "lib", "corral")
+	t.Cleanup(func() {
+		_ = os.Chmod(libDir, 0o755)
+		if _, err := os.Lstat(installedBin); err == nil {
+			_, _ = runCLI(t, installedBin, home, env, "uninstall")
+		}
+	})
+
+	out, code := runCLI(t, installedBin, home, env, "serve", "--gateway", "gw.rbf")
+	if code != 0 {
+		t.Fatalf("serve v1: %s", out)
+	}
+	sock := parseKV(out)["socket"]
+
+	stage2 := stageBinary(t, home, mid, "op2", bins.v2)
+	out, code = runCLI(t, filepath.Join(stage2, "corrald"), home, env,
+		"install", "--upgrade", "--stage", stage2, "--op", "op2", "--gateway", "gw.rbf", "--by", "alice")
+	if code != 0 {
+		t.Fatalf("upgrade v2: %s", out)
+	}
+	v2Bin := parseKV(out)["binary"]
+	v2SHA, _ := FileSHA256(v2Bin)
+
+	// Make LibDir 0500: existing .corrald-shared.lock can still be opened and
+	// readlink/README read succeed, v2 fails AtomicSymlink in LibDir, and v1's
+	// unconditional restoreCutoverBackup fails writing symlink/README in LibDir!
+	if err := os.Chmod(libDir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+
+	c := dialRPC(t, sock)
+	defer c.close()
+	resp, _ := c.call(t, proto.MethodDaemonHandoff, proto.HandoffParams{
+		Path: v2Bin, SHA256: v2SHA, Release: 200,
+	})
+	if resp.Error == nil || resp.Error.Code != proto.ErrRollbackFailed {
+		t.Fatalf("expected rollback_failed, got %+v", resp)
+	}
+
+	var health proto.HealthResult
+	if err := callLocalRPC(sock, proto.MethodDaemonHealth, nil, &health, 2*time.Second); err != nil {
+		t.Fatalf("health after rollback_failed: %v", err)
+	}
+	if !strings.HasPrefix(health.Caps["state"], "rollback_failed:") {
+		t.Fatalf("expected daemon.health caps[state] rollback_failed, got %+v", health.Caps)
+	}
+}
+
+func TestIntegrationUninstallMissingInstallJSONNonLastMachineReturnsPartial(t *testing.T) {
+	// Rule 6: Even when another machine is still installed (last_machine=false),
+	// missing/corrupt install.json on Machine A MUST still return result=partial
+	// with left= listing preserved shared paths, without disturbing Machine B.
+	bins := getTestBinaries(t)
+	sharedHome := t.TempDir()
+	const midA = "6a6a6a6a6a6a"
+	const midB = "6b6b6b6b6b6b"
+	envA := []string{"CORRALD_TEST_MACHINE_ID=" + midA}
+	envB := []string{"CORRALD_TEST_MACHINE_ID=" + midB}
+	installedBin := filepath.Join(sharedHome, ".local", "lib", "corral", "corrald")
+	t.Cleanup(func() {
+		if _, err := os.Lstat(installedBin); err == nil {
+			_, _ = runCLI(t, installedBin, sharedHome, envA, "uninstall")
+			_, _ = runCLI(t, installedBin, sharedHome, envB, "uninstall")
+		}
+	})
+
+	stageA := stageBinary(t, sharedHome, midA, "opA", bins.v1)
+	if out, code := runCLI(t, filepath.Join(stageA, "corrald"), sharedHome, envA,
+		"install", "--stage", stageA, "--op", "opA", "--gateway", "gw.r6", "--by", "alice"); code != 0 {
+		t.Fatalf("install A: %s", out)
+	}
+	stageB := stageBinary(t, sharedHome, midB, "opB", bins.v1)
+	if out, code := runCLI(t, filepath.Join(stageB, "corrald"), sharedHome, envB,
+		"install", "--stage", stageB, "--op", "opB", "--gateway", "gw.r6", "--by", "alice"); code != 0 {
+		t.Fatalf("install B: %s", out)
+	}
+	outB, code := runCLI(t, installedBin, sharedHome, envB, "serve", "--gateway", "gw.r6")
+	if code != 0 {
+		t.Fatalf("serve B: %s", outB)
+	}
+	sockB := parseKV(outB)["socket"]
+
+	// Corrupt/delete Machine A's install.json while Machine B is still installed!
+	stateA := filepath.Join(sharedHome, ".local", "state", "corral", "corrald", midA)
+	if err := os.Remove(filepath.Join(stateA, "install.json")); err != nil {
+		t.Fatal(err)
+	}
+
+	out, code := runCLI(t, installedBin, sharedHome, envA, "uninstall")
+	kv := parseKV(out)
+	if code == 0 || kv["result"] != "partial" || kv["last_machine"] != "false" {
+		t.Fatalf("expected result=partial last_machine=false, got code=%d:\n%s", code, out)
+	}
+	if !strings.Contains(out, "left="+installedBin+"\t") {
+		t.Fatalf("expected left= listing preserved shared symlink:\n%s", out)
+	}
+	assertStateDirCleanedKeepLocks(t, stateA)
+
+	// Machine B and shared binary must remain untouched and healthy.
+	var healthB proto.HealthResult
+	if err := callLocalRPC(sockB, proto.MethodDaemonHealth, nil, &healthB, 2*time.Second); err != nil {
+		t.Fatalf("Machine B broken after Machine A partial uninstall: %v", err)
+	}
 }

@@ -419,7 +419,7 @@ func TestOpTableIdempotencyInFlightHandoffAndExpiry(t *testing.T) {
 	}
 }
 
-func TestEventBusRingBufferAndFreeze(t *testing.T) {
+func TestEventBusRingBufferAndRotateEpoch(t *testing.T) {
 	bus := NewEventBus(5)
 	epoch := bus.Epoch()
 
@@ -448,63 +448,24 @@ func TestEventBusRingBufferAndFreeze(t *testing.T) {
 		t.Fatalf("resume wrong epoch: got %v, want resync_required", rpcErr)
 	}
 
-	// Item 2: FreezeAndSnapshot prevents further Emit under same epoch until Unfreeze.
-	snapEpoch, snapSeq, snapEvents := bus.FreezeAndSnapshot()
-	if snapEpoch != epoch || snapSeq != 8 || len(snapEvents) != 5 {
-		t.Fatalf("FreezeAndSnapshot: epoch=%q seq=%d len=%d", snapEpoch, snapSeq, len(snapEvents))
+	// Rule 2: RotateEpoch switches to a fresh epoch, resets seq to 0, clears the
+	// ring buffer, and forces clients holding the old epoch to resync.
+	newEpoch := bus.RotateEpoch()
+	if newEpoch == "" || newEpoch == epoch || bus.Epoch() != newEpoch || bus.CurrentSeq() != 0 {
+		t.Fatalf("RotateEpoch: got epoch=%q (old %q) seq=%d", newEpoch, epoch, bus.CurrentSeq())
 	}
-	if bus.CurrentSeq() != 8 {
-		t.Fatalf("seq advanced while frozen: got %d, want 8", bus.CurrentSeq())
-	}
-
-	// Unfreeze (rollback path) without frozen drops keeps epoch and allows emitting.
-	if rotated := bus.Unfreeze(); rotated {
-		t.Fatal("Unfreeze should not rotate epoch when no emit was dropped while frozen")
-	}
-	ev9, err := bus.Emit("test.ev", map[string]int{"i": 9})
-	if err != nil || ev9.Seq != 9 || ev9.Epoch != epoch {
-		t.Fatalf("Emit after clean Unfreeze: %+v, %v", ev9, err)
-	}
-
-	// Item 3: Freeze, attempt Emit (dropped), then Unfreeze -> MUST rotate epoch!
-	bus.Freeze()
-	if _, err := bus.Emit("test.ev", map[string]int{"i": 10}); !errors.Is(err, ErrBusFrozen) {
-		t.Fatalf("Emit while frozen: got %v, want ErrBusFrozen", err)
-	}
-	_, _, _, dropped := bus.FrozenSnapshot()
-	if !dropped {
-		t.Fatal("FrozenSnapshot did not report dropped=true after frozen Emit")
-	}
-	if rotated := bus.Unfreeze(); !rotated {
-		t.Fatal("Unfreeze must rotate epoch after frozen Emit was dropped")
-	}
-	if bus.Epoch() == epoch || bus.CurrentSeq() != 0 {
-		t.Fatalf("expected rotated epoch and seq=0, got epoch=%q (old %q) seq=%d", bus.Epoch(), epoch, bus.CurrentSeq())
-	}
-	if _, _, rpcErr := bus.Resume(epoch, 9, nil, nil); rpcErr == nil || rpcErr.Code != proto.ErrResyncRequired {
+	if _, _, rpcErr := bus.Resume(epoch, 8, nil, nil); rpcErr == nil || rpcErr.Code != proto.ErrResyncRequired {
 		t.Fatalf("resume with pre-rotation epoch: got %v, want resync_required", rpcErr)
+	}
+	ev1, err := bus.Emit("test.ev", map[string]int{"i": 1})
+	if err != nil || ev1.Seq != 1 || ev1.Epoch != newEpoch {
+		t.Fatalf("Emit after RotateEpoch: %+v, %v", ev1, err)
 	}
 }
 
-func TestBuildBoundedSnapshotTrimsOldestEvents(t *testing.T) {
-	// Item 3: 17 events of ~1 MiB each must be cleanly trimmed to fit within
-	// MaxHandoffSnapshotBytes (12 MiB) while preserving newest events, LastSeq,
-	// Clients, and OpTable entries.
-	bigData, _ := json.Marshal(map[string]string{"pad": strings.Repeat("A", 1<<20)})
-	events := make([]proto.Event, 17)
-	for i := range events {
-		events[i] = proto.Event{
-			Event: "test.big",
-			Epoch: "ep1",
-			Seq:   uint64(i + 1),
-			Data:  bigData,
-		}
-	}
+func TestBuildBoundedSnapshotEnforcesLimit(t *testing.T) {
 	snap := HandoffSnapshot{
 		Schema:  HandoffSnapshotSchema,
-		Epoch:   "ep1",
-		LastSeq: 17,
-		Events:  events,
 		Clients: []proto.ClientInfo{{Gateway: "gw", CorralUser: "alice", LastSeen: "2026-11-27T00:00:00Z"}},
 		Ops: OpTableSnapshot{
 			Entries: []OpSnapshotEntry{{OpID: proto.NewOpID(time.Now()), State: OpStateDone, CompletedAt: time.Now().UTC()}},
@@ -515,27 +476,17 @@ func TestBuildBoundedSnapshotTrimsOldestEvents(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuildBoundedSnapshot: %v", err)
 	}
-	if len(b) > MaxHandoffSnapshotBytes {
-		t.Fatalf("snapshot bytes %d exceeded cap %d", len(b), MaxHandoffSnapshotBytes)
-	}
 	var parsed HandoffSnapshot
 	if err := json.Unmarshal(b, &parsed); err != nil {
-		t.Fatalf("trimmed snapshot invalid JSON: %v", err)
+		t.Fatalf("snapshot invalid JSON: %v", err)
 	}
-	if parsed.LastSeq != 17 || len(parsed.Clients) != 1 || len(parsed.Ops.Entries) != 1 {
-		t.Fatalf("trimmed snapshot lost metadata: lastSeq=%d clients=%d ops=%d", parsed.LastSeq, len(parsed.Clients), len(parsed.Ops.Entries))
-	}
-	if len(parsed.Events) == 0 || len(parsed.Events) >= 17 {
-		t.Fatalf("expected trimmed event subset, got %d events", len(parsed.Events))
-	}
-	// Newest event must be retained at the end.
-	if parsed.Events[len(parsed.Events)-1].Seq != 17 {
-		t.Fatalf("last retained event seq=%d, want 17", parsed.Events[len(parsed.Events)-1].Seq)
+	if parsed.Schema != HandoffSnapshotSchema || len(parsed.Clients) != 1 || len(parsed.Ops.Entries) != 1 {
+		t.Fatalf("snapshot lost metadata: %+v", parsed)
 	}
 
-	// Impossible cap (smaller than base metadata) must return error rather than truncating.
+	// Oversized snapshot must fail closed instead of truncating.
 	if _, err := BuildBoundedSnapshot(snap, 32); err == nil {
-		t.Fatal("expected error when snapshot base exceeds maxBytes")
+		t.Fatal("expected error when snapshot exceeds maxBytes")
 	}
 }
 
@@ -1075,10 +1026,15 @@ func TestHandoffRejectsNonNewerRelease(t *testing.T) {
 	}
 }
 
-func TestFinalizeHandoffCutoverFailClosedAndRestoresState(t *testing.T) {
-	// Items 4 & 17: If persistent cutover fails midway (e.g. unwritable
-	// StateDir preventing meta.json write), finalizeHandoffCutover must restore
-	// the previous symlink and install.json and return an error.
+func TestFinalizeHandoffCutoverFailClosedAndUnconditionalRestore(t *testing.T) {
+	// Rules 1 & 5:
+	// 1. Capture backup before cutover. If finalizeHandoffCutover fails midway
+	//    (unwritable StateDir), v1 calls restoreCutoverBackup which returns an
+	//    error if any restore step fails (StateDir unwritable), and succeeds once
+	//    StateDir is writable, unconditionally restoring symlink/install/README/meta.
+	// 2. When symlink did not exist previously, restoreCutoverBackup deletes the
+	//    newly created symlink.
+	// 3. Any read error during captureCutoverBackup fails closed.
 	if os.Geteuid() == 0 {
 		t.Skip("chmod 0500 does not block root")
 	}
@@ -1116,13 +1072,20 @@ func TestFinalizeHandoffCutoverFailClosedAndRestoresState(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := WriteMetaRecord(layout.MetaJSON, &MetaRecord{
-		PID: 111, StartTime: "10", Version: "0.1.0", Release: 100,
-	}); err != nil {
+	if err := WriteFileAtomic(layout.ReadmePath, []byte("v1-readme"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	v1Meta := &MetaRecord{PID: 111, StartTime: "10", Version: "0.1.0", Release: 100}
+	if err := WriteMetaRecord(layout.MetaJSON, v1Meta); err != nil {
 		t.Fatal(err)
 	}
 
-	// Make StateDir read-only so updating install.json / meta.json fails AFTER symlink switched.
+	bk, err := captureCutoverBackup(layout)
+	if err != nil {
+		t.Fatalf("captureCutoverBackup: %v", err)
+	}
+
+	// Make StateDir read-only so finalizeHandoffCutover fails AFTER switching symlink.
 	if err := os.Chmod(layout.StateDir, 0o500); err != nil {
 		t.Fatal(err)
 	}
@@ -1135,10 +1098,39 @@ func TestFinalizeHandoffCutoverFailClosedAndRestoresState(t *testing.T) {
 		t.Fatal("expected finalizeHandoffCutover to fail when StateDir is read-only")
 	}
 
-	// Symlink MUST be rolled back to v1!
+	// Rule 5: restoreCutoverBackup while StateDir is still 0500 MUST return an
+	// error (because install.json / meta.json cannot be written), NOT nil!
+	if rerr := restoreCutoverBackup(layout, bk, v1Meta); rerr == nil {
+		t.Fatal("expected restoreCutoverBackup to fail when StateDir is read-only")
+	}
+
+	// Restore StateDir permissions; unconditional restore succeeds and reverts everything.
+	_ = os.Chmod(layout.StateDir, 0o700)
+	if rerr := restoreCutoverBackup(layout, bk, v1Meta); rerr != nil {
+		t.Fatalf("restoreCutoverBackup with writable StateDir: %v", rerr)
+	}
 	gotLink, rerr := os.Readlink(layout.CurrentSymlink)
 	if rerr != nil || gotLink != origTarget {
-		t.Fatalf("symlink not restored after failed cutover: got %q (%v), want %q", gotLink, rerr, origTarget)
+		t.Fatalf("symlink not restored: got %q (%v), want %q", gotLink, rerr, origTarget)
+	}
+	gotReadme, _ := os.ReadFile(layout.ReadmePath)
+	if string(gotReadme) != "v1-readme" {
+		t.Fatalf("README not restored: got %q", gotReadme)
+	}
+
+	// When symlink did not exist previously, restoreCutoverBackup deletes the new link.
+	_ = AtomicSymlink("corrald-0.2.0-200/corrald", layout.CurrentSymlink)
+	if rerr := restoreCutoverBackup(layout, cutoverBackup{hasSymlink: false}, nil); rerr != nil {
+		t.Fatalf("restoreCutoverBackup no-link: %v", rerr)
+	}
+	if _, serr := os.Lstat(layout.CurrentSymlink); !os.IsNotExist(serr) {
+		t.Fatal("newly created symlink was not deleted when hasSymlink=false")
+	}
+
+	// Rule 5: Read error during captureCutoverBackup fails closed.
+	_ = os.WriteFile(layout.CurrentSymlink, []byte("not-a-symlink"), 0o600)
+	if _, cerr := captureCutoverBackup(layout); cerr == nil {
+		t.Fatal("expected captureCutoverBackup to fail when CurrentSymlink is not a symlink")
 	}
 }
 
@@ -1295,9 +1287,9 @@ func TestAtomicIdempotentAdmissionBeforeHandlerRuns(t *testing.T) {
 	}
 }
 
-func TestForceNewEpochInHandoffSnapshot(t *testing.T) {
-	// Round-2 Item 3: When ForceNewEpoch is true in HandoffSnapshot, v2 MUST
-	// rotate to a fresh epoch while still restoring OpTable and Clients.
+func TestHandoffSnapshotAlwaysStartsFreshEpochAndRestoresOps(t *testing.T) {
+	// Rule 2: Replacement server adopting a HandoffSnapshot ALWAYS starts with
+	// a fresh random epoch and seq=0, while still restoring OpTable and Clients.
 	home := t.TempDir()
 	layout, err := ResolveLayout(PathOptions{Home: home, MachineID: "333300003333"})
 	if err != nil {
@@ -1316,11 +1308,8 @@ func TestForceNewEpochInHandoffSnapshot(t *testing.T) {
 		Layout: layout,
 		Build:  proto.BuildInfo{Version: "0.2.0", Release: 200},
 		InitialSnapshot: &HandoffSnapshot{
-			Schema:        HandoffSnapshotSchema,
-			Epoch:         "old-epoch-1111",
-			LastSeq:       42,
-			ForceNewEpoch: true,
-			Clients:       []proto.ClientInfo{{Gateway: "gw", CorralUser: "alice", LastSeen: "2026-11-27T00:00:00Z"}},
+			Schema:  HandoffSnapshotSchema,
+			Clients: []proto.ClientInfo{{Gateway: "gw", CorralUser: "alice", LastSeen: "2026-11-27T00:00:00Z"}},
 			Ops: OpTableSnapshot{
 				Entries: []OpSnapshotEntry{{OpID: opID, State: OpStateUnknown, CompletedAt: time.Now().UTC()}},
 			},
@@ -1337,13 +1326,9 @@ func TestForceNewEpochInHandoffSnapshot(t *testing.T) {
 	<-ready
 	defer func() { cancel(); <-done }()
 
-	if srv.Bus().Epoch() == "old-epoch-1111" {
-		t.Fatal("v2 did not rotate epoch when ForceNewEpoch=true")
+	if srv.Bus().Epoch() == "" || srv.Bus().CurrentSeq() != 0 {
+		t.Fatalf("expected fresh epoch and seq=0, got epoch=%q seq=%d", srv.Bus().Epoch(), srv.Bus().CurrentSeq())
 	}
-	if srv.Bus().CurrentSeq() != 0 {
-		t.Fatalf("expected seq=0 on new epoch, got %d", srv.Bus().CurrentSeq())
-	}
-	// OpTable must still have been restored!
 	if _, rpcErr := srv.Ops().Execute(opID, func() (json.RawMessage, *proto.RPCError) {
 		t.Fatal("restored unknown op_id must not re-execute")
 		return nil, nil
@@ -1524,62 +1509,18 @@ func TestFinalizeHandoffCutoverFailsWhenTargetMissing(t *testing.T) {
 	}
 }
 
-func TestCompareAndRestorePreservesExternalUpdateDeletesNewLinkAndReportsHealth(t *testing.T) {
-	// Round-2 Items 8 & 9:
-	// 1. Compare-and-restore must NOT overwrite a newer symlink written by another host
-	//    and must preserve concurrent additions to install.json.Files.
-	// 2. When symlink did not exist previously, compare-and-restore must DELETE the
-	//    newly created link if it still points to the failed candidate.
-	// 3. When restore fails, error is returned (and Server surfaces it via daemon.health).
+func TestHealthReportsRollbackFailedState(t *testing.T) {
+	// Rule 5: When rollbackDegraded is set, daemon.health reports rollback_failed.
 	home := t.TempDir()
 	layout, err := ResolveLayout(PathOptions{Home: home, MachineID: "888800008888"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	_ = layout.EnsureLibDir()
 	_ = layout.EnsureStateDir()
 	if layout.SocketUsesTmpDir {
 		t.Cleanup(func() { _ = os.RemoveAll(layout.SocketDir) })
 	}
 
-	// Case 1: Machine B concurrently upgraded symlink to 0.3.0-300 while A rolled back 0.2.0-200.
-	bk := cutoverBackup{
-		hasSymlink:  true,
-		symlink:     "corrald-0.1.0-100/corrald",
-		hasInstall:  true,
-		origVersion: "0.1.0",
-		origRelease: 100,
-	}
-	_ = AtomicSymlink("corrald-0.3.0-300/corrald", layout.CurrentSymlink)
-	_ = WriteInstallRecord(layout.InstallJSON, &InstallRecord{
-		Version: "0.2.0",
-		Release: 200,
-		Files:   []string{"/a", "/concurrently-added"},
-	})
-	if err := compareAndRestoreCutoverLocked(layout, bk, &MetaRecord{PID: 10, Release: 100}, "corrald-0.2.0-200/corrald", 20, 200, false); err != nil {
-		t.Fatalf("compareAndRestore Case 1: %v", err)
-	}
-	// Symlink MUST still be 0.3.0-300 (NOT clobbered back to 0.1.0-100)!
-	if link, _ := os.Readlink(layout.CurrentSymlink); link != "corrald-0.3.0-300/corrald" {
-		t.Fatalf("external newer symlink was overwritten: got %q", link)
-	}
-	// install.json reverted Release to 100 while preserving "/concurrently-added" in Files!
-	rec, _ := ReadInstallRecord(layout.InstallJSON)
-	if rec.Release != 100 || !strings.Contains(strings.Join(rec.Files, ","), "/concurrently-added") {
-		t.Fatalf("install.json rollback lost concurrent Files or failed revert: %+v", rec)
-	}
-
-	// Case 2: Symlink did NOT exist before (hasSymlink=false), candidate created it -> MUST be deleted!
-	bkNoLink := cutoverBackup{hasSymlink: false}
-	_ = AtomicSymlink("corrald-0.2.0-200/corrald", layout.CurrentSymlink)
-	if err := compareAndRestoreCutoverLocked(layout, bkNoLink, nil, "corrald-0.2.0-200/corrald", 20, 200, false); err != nil {
-		t.Fatalf("compareAndRestore Case 2: %v", err)
-	}
-	if _, err := os.Lstat(layout.CurrentSymlink); !os.IsNotExist(err) {
-		t.Fatal("newly created symlink was not removed when hasSymlink=false")
-	}
-
-	// Case 3: Health reports rollback_failed when rollbackDegraded is set.
 	ready := make(chan struct{})
 	srv, err := NewServer(ServerConfig{
 		Layout:  layout,
@@ -1609,10 +1550,9 @@ func TestCompareAndRestorePreservesExternalUpdateDeletesNewLinkAndReportsHealth(
 	}
 }
 
-func TestHardExitInvokesCallbackWithoutReleasingLock(t *testing.T) {
-	// Round-2 Item 10: On hard exit deadline, OnHardExit (os.Exit(0)) must be
-	// invoked WITHOUT pre-releasing s.lock (the OS releases the lock atomically
-	// when the process exits).
+func TestHardExitTimerFiresWithoutReleasingLock(t *testing.T) {
+	// Rule 3: The AfterFunc hard-exit timer armed on READY fires OnHardExit
+	// without pre-releasing s.lock even when shutdown is blocked on a stuck write.
 	home := t.TempDir()
 	layout, err := ResolveLayout(PathOptions{Home: home, MachineID: "999900009999"})
 	if err != nil {
@@ -1630,9 +1570,8 @@ func TestHardExitInvokesCallbackWithoutReleasingLock(t *testing.T) {
 	defer lock.Release()
 
 	var lockStillHeld atomic.Bool
-	var hardExitCalled atomic.Bool
+	hardExitDone := make(chan struct{})
 	blockWrite := make(chan struct{})
-	defer close(blockWrite)
 	entered := make(chan struct{})
 	ready := make(chan struct{})
 
@@ -1641,12 +1580,6 @@ func TestHardExitInvokesCallbackWithoutReleasingLock(t *testing.T) {
 		Build:   proto.BuildInfo{Version: "0.1.0", Release: 100},
 		Lock:    lock,
 		OnReady: func() { close(ready) },
-		OnHardExit: func() {
-			hardExitCalled.Store(true)
-			if _, err := AcquireLock(layout.LockPath); errors.Is(err, ErrLocked) {
-				lockStillHeld.Store(true)
-			}
-		},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1670,26 +1603,36 @@ func TestHardExitInvokesCallbackWithoutReleasingLock(t *testing.T) {
 	}()
 	<-entered
 
-	// Simulate post-handoff hard exit deadline expiring while test.stuck is blocked.
+	// Arm hardExitTimer (identical to dispatchHandoff immediately on READY).
 	srv.stateMu.Lock()
 	srv.handedOff = true
-	srv.hardExitDeadline = time.Now().Add(60 * time.Millisecond)
+	srv.hardExitTimer = time.AfterFunc(60*time.Millisecond, func() {
+		if _, err := AcquireLock(layout.LockPath); errors.Is(err, ErrLocked) {
+			lockStillHeld.Store(true)
+		}
+		close(hardExitDone)
+	})
 	srv.stateMu.Unlock()
 	cancel()
 
+	select {
+	case <-hardExitDone:
+	case <-time.After(2 * time.Second):
+		close(blockWrite)
+		t.Fatal("hardExitTimer did not fire within cap")
+	}
+	if !lockStillHeld.Load() {
+		close(blockWrite)
+		t.Fatal("s.lock was released BEFORE hardExitTimer fired")
+	}
+	// Unblock stuck handler so Serve finishes cleanly in the test process.
+	close(blockWrite)
 	select {
 	case err := <-done:
 		if err != nil {
 			t.Fatalf("Serve returned error: %v", err)
 		}
 	case <-time.After(2 * time.Second):
-		t.Fatal("Serve did not return at hard exit deadline")
-	}
-
-	if !hardExitCalled.Load() {
-		t.Fatal("OnHardExit callback was not invoked")
-	}
-	if !lockStillHeld.Load() {
-		t.Fatal("s.lock was released BEFORE OnHardExit (os.Exit) was invoked")
+		t.Fatal("Serve did not exit after unblocking test.stuck")
 	}
 }

@@ -36,6 +36,8 @@ const (
 	ErrResyncRequired    = "resync_required"
 	ErrHandoffInProgress = "handoff_in_progress"
 	ErrHandoffFailed     = "handoff_failed"
+	ErrRollbackFailed    = "rollback_failed"
+	ErrBusy              = "busy"
 	ErrNotNewer          = "not_newer"
 	ErrInProgress        = "in_progress"
 	ErrOpExpired         = "op_expired"
