@@ -613,8 +613,8 @@ func TestPostHandoffVerifyReconnectHigherReleaseSetsDistAsRollbackTarget(t *test
 	if after.UpdateTargetVer != "0.3.3" || after.UpdateTargetRel != 3000 {
 		t.Fatalf("expected crash window target 0.3.3/3000, got %s/%d", after.UpdateTargetVer, after.UpdateTargetRel)
 	}
-	if after.UpdatedFromVer != "0.3.2" || after.UpdatedFromRel != 2000 || after.UpdatedFromTarget != "corrald-0.3.2-2000/corrald" {
-		t.Fatalf("expected rollback target to be dist R2 (0.3.2/2000), NOT pre-op R1; got from=%s/%d target=%q",
+	if after.UpdatedFromVer != "" || after.UpdatedFromRel != 0 || after.UpdatedFromTarget != "" {
+		t.Fatalf("expected no pre-stored rollback target at update completion (computed dynamically at rollback time); got from=%s/%d target=%q",
 			after.UpdatedFromVer, after.UpdatedFromRel, after.UpdatedFromTarget)
 	}
 
@@ -625,7 +625,7 @@ func TestPostHandoffVerifyReconnectHigherReleaseSetsDistAsRollbackTarget(t *test
 	sc.mu.Lock()
 	gotPrevVer, gotPrevRel, gotPrevTarget := sc.prevVersion, sc.prevRelease, sc.prevRelTarget
 	sc.mu.Unlock()
-	if gotPrevVer != "0.3.2" || gotPrevRel != 2000 || gotPrevTarget != "corrald-0.3.2-2000/corrald" {
-		t.Fatalf("sharedConn prev = (%s/%d, %q), want (0.3.2/2000, corrald-0.3.2-2000/corrald)", gotPrevVer, gotPrevRel, gotPrevTarget)
+	if gotPrevVer != "" || gotPrevRel != 0 || gotPrevTarget != "" {
+		t.Fatalf("sharedConn prev = (%s/%d, %q), want empty (rollback computed dynamically)", gotPrevVer, gotPrevRel, gotPrevTarget)
 	}
 }

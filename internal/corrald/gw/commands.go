@@ -581,19 +581,21 @@ type StartSelectOptions struct {
 	// (e.g. post-update rollback or explicit replace). Failed releases are
 	// still strictly excluded.
 	Rollback bool
-	// PreferredTarget (e.g. "corrald-0.3.1-1000/corrald") is preferred during
-	// Rollback when it exists in probe.Versions and is not in failedReleases.
+	// BelowRelease, when > 0 in Rollback mode, restricts selection to installed
+	// non-failed releases strictly lower than BelowRelease (computing the
+	// rollback target dynamically from host state rather than pre-storing one).
+	BelowRelease int64
+	// PreferredTarget (e.g. "corrald-0.3.1-1000/corrald") is used only for
+	// explicit replace mode where a specific version directory is requested.
 	PreferredTarget string
 }
 
-// parseVersionDirInfo extracts (version, release, relTarget) from a
-// "corrald-<ver>-<rel>" directory name or relative symlink target
-// "corrald-<ver>-<rel>/corrald".
+// parseVersionDirInfo extracts (version, release, relTarget) from a bare
+// "corrald-<ver>-<rel>" directory name (no path separators or traversal).
 func parseVersionDirInfo(name string) (ver string, rel int64, relTarget string, ok bool) {
 	name = strings.TrimSpace(name)
-	name = strings.TrimSuffix(name, "/corrald")
-	if idx := strings.LastIndexByte(name, '/'); idx >= 0 {
-		name = name[idx+1:]
+	if name == "" || strings.ContainsAny(name, "/\\\x00") || name == "." || name == ".." {
+		return "", 0, "", false
 	}
 	if !strings.HasPrefix(name, "corrald-") {
 		return "", 0, "", false
@@ -611,6 +613,31 @@ func parseVersionDirInfo(name string) (ver string, rel int64, relTarget string, 
 	return ver, rel, name + "/corrald", true
 }
 
+// parseSymlinkTargetInLibDir validates that a shared symlink target points
+// strictly to a versioned binary `<dir>/corrald` directly inside libDir
+// (rejecting relative traversal like "../outside/..." or absolute paths outside
+// libDir).
+func parseSymlinkTargetInLibDir(libDir, target string) (ver string, rel int64, relTarget string, ok bool) {
+	target = strings.TrimSpace(target)
+	if target == "" || strings.ContainsAny(target, "\x00\\") {
+		return "", 0, "", false
+	}
+	if strings.HasPrefix(target, "/") {
+		cleanLib := strings.TrimRight(strings.TrimSpace(libDir), "/")
+		if cleanLib == "" || !strings.HasPrefix(target, cleanLib+"/") {
+			return "", 0, "", false
+		}
+		target = strings.TrimPrefix(target, cleanLib+"/")
+	}
+	// Strip optional leading "./" once.
+	target = strings.TrimPrefix(target, "./")
+	if !strings.HasSuffix(target, "/corrald") {
+		return "", 0, "", false
+	}
+	dir := strings.TrimSuffix(target, "/corrald")
+	return parseVersionDirInfo(dir)
+}
+
 // SelectStartBinary is the single authoritative selector for deciding which
 // corrald binary to start on a host (first start, auto-restart, retry,
 // cold-start update, and rollback).
@@ -620,14 +647,17 @@ func parseVersionDirInfo(name string) (ver string, rel int64, relTarget string, 
 //     `<libDir>/corrald-<ver>-<rel>/corrald`, NEVER the mutable shared symlink
 //     path (`probe.CurrentBin`), preventing an NFS peer from mutating the
 //     symlink target between selection and execution.
-//  2. Never selects any release present in failedReleases.
-//  3. In normal mode (!opts.Rollback), never selects a version lower than the
-//     current shared symlink target unless the symlink target itself is in
-//     failedReleases (e.g. NFS post-rollback where the symlink is never lowered).
-//  4. In rollback mode (opts.Rollback), selects opts.PreferredTarget if present
-//     on the host and not in failedReleases, otherwise the highest non-failed
-//     installed version directory.
-//  5. Returns ok=false if no eligible non-failed versioned binary exists.
+//  2. Only selects candidates whose version directory actually exists in
+//     `probe.Versions` inside `probe.LibDir`. A symlink target outside `LibDir`
+//     or pointing to a missing version directory is treated as non-existent
+//     (never selected and never blacklisted).
+//  3. Never selects any release present in failedReleases.
+//  4. In normal mode (!opts.Rollback), never selects a version lower than a
+//     valid, existing, non-failed shared symlink target.
+//  5. In rollback mode (opts.Rollback), selects opts.PreferredTarget if present
+//     in `probe.Versions` and not failed, otherwise the highest installed
+//     non-failed release (strictly `< opts.BelowRelease` when `BelowRelease > 0`).
+//  6. Returns ok=false if no eligible non-failed versioned binary exists.
 func SelectStartBinary(probe *HostProbe, failedReleases []int64, opts StartSelectOptions) (StartCandidate, bool) {
 	if probe == nil || probe.LibDir == "" {
 		return StartCandidate{}, false
@@ -653,11 +683,14 @@ func SelectStartBinary(probe *HostProbe, failedReleases []int64, opts StartSelec
 		})
 	}
 
-	highestNonFailed := func(minRel int64) (StartCandidate, bool) {
+	highestNonFailed := func(minRel, belowRel int64) (StartCandidate, bool) {
 		var best StartCandidate
 		found := false
 		for _, c := range installed {
 			if failed[c.Release] || c.Release < minRel {
+				continue
+			}
+			if belowRel > 0 && c.Release >= belowRel {
 				continue
 			}
 			if !found || c.Release > best.Release {
@@ -668,11 +701,9 @@ func SelectStartBinary(probe *HostProbe, failedReleases []int64, opts StartSelec
 		return best, found
 	}
 
-	curVer, curRel, curRelTarget, hasCur := parseVersionDirInfo(probe.CurrentTarget)
-
 	if opts.Rollback {
 		if opts.PreferredTarget != "" {
-			if _, prefRel, prefRelTarget, ok := parseVersionDirInfo(opts.PreferredTarget); ok && !failed[prefRel] {
+			if _, prefRel, prefRelTarget, ok := parseSymlinkTargetInLibDir(probe.LibDir, opts.PreferredTarget); ok && !failed[prefRel] && (opts.BelowRelease <= 0 || prefRel < opts.BelowRelease) {
 				for _, c := range installed {
 					if c.RelTarget == prefRelTarget {
 						return c, true
@@ -680,11 +711,13 @@ func SelectStartBinary(probe *HostProbe, failedReleases []int64, opts StartSelec
 				}
 			}
 		}
-		return highestNonFailed(1)
+		return highestNonFailed(1, opts.BelowRelease)
 	}
 
-	// Normal mode: resolve the shared symlink target to its concrete versioned
-	// binary path when it is not blacklisted (NEVER return probe.CurrentBin).
+	// Normal mode: resolve the shared symlink target strictly within LibDir and
+	// verify that the target version directory actually exists in probe.Versions.
+	// Targets outside LibDir or missing from LibDir are treated as non-existent.
+	_, curRel, curRelTarget, hasCur := parseSymlinkTargetInLibDir(probe.LibDir, probe.CurrentTarget)
 	if probe.HasSymlink && hasCur {
 		if !failed[curRel] {
 			for _, c := range installed {
@@ -692,23 +725,20 @@ func SelectStartBinary(probe *HostProbe, failedReleases []int64, opts StartSelec
 					return c, true
 				}
 			}
-			return StartCandidate{
-				Path:      probe.LibDir + "/" + curRelTarget,
-				Version:   curVer,
-				Release:   curRel,
-				RelTarget: curRelTarget,
-			}, true
+			// Target version directory does not exist in LibDir: fall through
+			// to select from remaining healthy installed versions.
+		} else {
+			// Shared symlink points to a blacklisted release: prefer any non-failed
+			// version >= curRel first, then fall back to the highest non-failed
+			// installed version (NFS post-rollback case).
+			if best, ok := highestNonFailed(curRel, 0); ok {
+				return best, true
+			}
+			return highestNonFailed(1, 0)
 		}
-		// Shared symlink points to a blacklisted release: prefer any non-failed
-		// version >= curRel first, then fall back to the highest non-failed
-		// installed version (NFS post-rollback case).
-		if best, ok := highestNonFailed(curRel); ok {
-			return best, true
-		}
-		return highestNonFailed(1)
 	}
 
-	return highestNonFailed(1)
+	return highestNonFailed(1, 0)
 }
 
 // FriendlyOSName maps uname -s output to user-facing OS names for failure text.

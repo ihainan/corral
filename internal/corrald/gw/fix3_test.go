@@ -845,8 +845,8 @@ func TestConcurrentHandoffHigherReleaseRecordsActualCrashWindow(t *testing.T) {
 	if after.UpdateTargetRel != 3000 || after.UpdateTargetVer != "0.3.3" {
 		t.Fatalf("crash window target = %s/%d, want actual running 0.3.3/3000 (NOT dist 0.3.2/2000)", after.UpdateTargetVer, after.UpdateTargetRel)
 	}
-	if after.UpdatedFromRel != 2000 || after.UpdatedFromVer != "0.3.2" || after.UpdatedFromTarget != "corrald-0.3.2-2000/corrald" {
-		t.Fatalf("expected rollback target to be dist R2 (0.3.2/2000) when accepting higher R3, got from=%s/%d target=%q",
+	if after.UpdatedFromRel != 0 || after.UpdatedFromVer != "" || after.UpdatedFromTarget != "" {
+		t.Fatalf("expected no pre-stored rollback target at update completion (computed dynamically at rollback time), got from=%s/%d target=%q",
 			after.UpdatedFromVer, after.UpdatedFromRel, after.UpdatedFromTarget)
 	}
 
@@ -859,8 +859,8 @@ func TestConcurrentHandoffHigherReleaseRecordsActualCrashWindow(t *testing.T) {
 	gotMemPrevRel := sc.prevRelease
 	gotMemPrevTarget := sc.prevRelTarget
 	sc.mu.Unlock()
-	if gotMemTargetRel != 3000 || gotMemPrevRel != 2000 || gotMemPrevTarget != "corrald-0.3.2-2000/corrald" {
-		t.Fatalf("sharedConn crash window = target:%d prev:%d prevTarget:%q, want target:3000 prev:2000 prevTarget:\"corrald-0.3.2-2000/corrald\"",
+	if gotMemTargetRel != 3000 || gotMemPrevRel != 0 || gotMemPrevTarget != "" {
+		t.Fatalf("sharedConn crash window = target:%d prev:%d prevTarget:%q, want target:3000 prev:0 prevTarget:\"\"",
 			gotMemTargetRel, gotMemPrevRel, gotMemPrevTarget)
 	}
 }

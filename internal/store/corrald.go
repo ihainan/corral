@@ -378,6 +378,19 @@ func (s *Store) ClaimCorraldHostOp(ctx context.Context, hostID int64, opID, next
 // (only if still pending/running) within a single SQLite transaction.
 // Prevents a crash between the two writes from leaving a permanent active_op_id.
 func (s *Store) FinalizeCorraldOpWithHost(ctx context.Context, op *CorraldOp, ch *CorraldHost) (bool, error) {
+	return s.finalizeCorraldOpWithHost(ctx, op, ch, false)
+}
+
+// FinalizeCorraldOpErrorWithHost is like FinalizeCorraldOpWithHost, except it
+// matches active_op_id IN (”, op.ID) (while still excluding off/removing/
+// remove_pending) so error/rollback finalization still succeeds if an earlier
+// step (such as attachAndHello encountering proto_mismatch) already cleared
+// active_op_id.
+func (s *Store) FinalizeCorraldOpErrorWithHost(ctx context.Context, op *CorraldOp, ch *CorraldHost) (bool, error) {
+	return s.finalizeCorraldOpWithHost(ctx, op, ch, true)
+}
+
+func (s *Store) finalizeCorraldOpWithHost(ctx context.Context, op *CorraldOp, ch *CorraldHost, allowEmptyOp bool) (bool, error) {
 	now := s.unix()
 	ch.UpdatedAt = now
 	op.UpdatedAt = now
@@ -395,6 +408,10 @@ func (s *Store) FinalizeCorraldOpWithHost(ctx context.Context, op *CorraldOp, ch
 	}
 	defer tx.Rollback()
 
+	where := `WHERE host_id = ? AND active_op_id = ?`
+	if allowEmptyOp {
+		where = `WHERE host_id = ? AND active_op_id IN ('', ?) AND state NOT IN ('off', 'removing', 'remove_pending')`
+	}
 	res, err := tx.ExecContext(ctx, `
 		UPDATE corrald_hosts SET
 			state = ?,
@@ -423,7 +440,7 @@ func (s *Store) FinalizeCorraldOpWithHost(ctx context.Context, op *CorraldOp, ch
 			last_error = ?,
 			restart_count = ?,
 			updated_at = ?
-		WHERE host_id = ? AND active_op_id = ?`,
+		`+where,
 		ch.State, consentBy, ch.ConsentAt,
 		ch.BoundFingerprint, ch.BoundUsername, ch.BoundGateway,
 		ch.ManifestJSON, ch.Version, ch.Release,
@@ -701,13 +718,15 @@ func (s *Store) ClaimCorraldHostForRetry(ctx context.Context, hostID int64, opID
 
 // MarkCorraldRebindIfMismatch atomically transitions hostID to 'rebind' ONLY
 // when:
-//  1. The row's current binding STILL equals the caller's read/expected binding
-//     (expectedBoundFP, expectedBoundUser, expectedBoundGW) — so if the host
-//     was already rebound to a newer identity B while a stale callback carried
-//     observed identity A, the row is untouched.
-//  2. That binding disagrees with the observed identity (observedFP,
+//  1. The observed identity (observedFP, observedUser) STILL matches the host's
+//     current pinned identity in hosts + host_keys (so any stale callback
+//     carrying an outdated observed identity A is ignored regardless of whether
+//     it read corrald_hosts before or after a newer binding B was written).
+//  2. The row's current binding STILL equals the caller's read/expected binding
+//     (expectedBoundFP, expectedBoundUser, expectedBoundGW).
+//  3. That binding disagrees with the observed identity (observedFP,
 //     observedUser, observedGateway).
-//  3. The current state is eligible: always excludes 'off', 'removing',
+//  4. The current state is eligible: always excludes 'off', 'removing',
 //     'remove_pending', 'rebind'. When includeInstalling is false, also
 //     excludes 'installing'; when true, 'installing' rows are only transitioned
 //     if a non-empty bound column disagrees with the observed identity.
@@ -731,6 +750,13 @@ func (s *Store) MarkCorraldRebindIfMismatch(
 			SET state = 'rebind', updated_at = ?
 			WHERE host_id = ?
 			  AND bound_fingerprint = ? AND bound_username = ? AND bound_gateway = ?
+			  AND EXISTS (
+			    SELECT 1 FROM hosts h
+			    LEFT JOIN host_keys k ON k.host_id = h.id
+			    WHERE h.id = corrald_hosts.host_id
+			      AND h.username = ?
+			      AND COALESCE(k.fingerprint, '') = ?
+			  )
 			  AND (
 			    (state = 'installing' AND (
 			      (bound_fingerprint != '' AND bound_fingerprint != ?)
@@ -745,6 +771,7 @@ func (s *Store) MarkCorraldRebindIfMismatch(
 			  )`,
 			now, hostID,
 			expectedBoundFP, expectedBoundUser, expectedBoundGW,
+			observedUser, observedFP,
 			observedFP, observedUser, observedGateway,
 			observedFP, observedUser, observedGateway,
 		)
@@ -754,6 +781,13 @@ func (s *Store) MarkCorraldRebindIfMismatch(
 			SET state = 'rebind', updated_at = ?
 			WHERE host_id = ?
 			  AND bound_fingerprint = ? AND bound_username = ? AND bound_gateway = ?
+			  AND EXISTS (
+			    SELECT 1 FROM hosts h
+			    LEFT JOIN host_keys k ON k.host_id = h.id
+			    WHERE h.id = corrald_hosts.host_id
+			      AND h.username = ?
+			      AND COALESCE(k.fingerprint, '') = ?
+			  )
 			  AND state NOT IN ('off', 'removing', 'remove_pending', 'rebind', 'installing')
 			  AND (
 			    bound_fingerprint = '' OR bound_username = '' OR bound_gateway = ''
@@ -761,6 +795,7 @@ func (s *Store) MarkCorraldRebindIfMismatch(
 			  )`,
 			now, hostID,
 			expectedBoundFP, expectedBoundUser, expectedBoundGW,
+			observedUser, observedFP,
 			observedFP, observedUser, observedGateway,
 		)
 	}

@@ -299,7 +299,7 @@ func Transition(cur StateSnapshot, ev Event) TransitionResult {
 		return TransitionResult{Next: next, Allowed: true}
 
 	case EvRetry:
-		if cur.State != StateError && cur.State != StateLost {
+		if cur.State != StateError && cur.State != StateLost && cur.State != StateIncompatible {
 			return TransitionResult{Next: cur, Allowed: false, Reason: "invalid_state"}
 		}
 		next.RestartCount = 0

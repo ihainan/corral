@@ -880,12 +880,13 @@ func TestCorraldReview_PostUpdateCrashWindowPersistsAcrossRestart(t *testing.T) 
 		t.Fatalf("expected 0.3.2, got %v", st["version"])
 	}
 
-	// Verify update window metadata was persisted in corrald_hosts!
+	// Verify update window metadata (actual target + window start) was persisted in corrald_hosts;
+	// rollback target is computed dynamically at rollback time by SelectStartBinary.
 	chRow, err := h.store.CorraldHostByID(context.Background(), hostID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if chRow.UpdateReadyAt == 0 || chRow.UpdateTargetRel != 2000 || chRow.UpdatedFromRel != 1000 || chRow.UpdatedFromVer != "0.3.1" {
+	if chRow.UpdateReadyAt == 0 || chRow.UpdateTargetRel != 2000 || chRow.UpdateTargetVer != "0.3.2" {
 		t.Fatalf("Item #22 regression: update window not persisted in DB: %+v", chRow)
 	}
 

@@ -2385,11 +2385,6 @@ func (m *Manager) runUpdateOp(ctx context.Context, rop *runningOp, op *store.Cor
 	// C-2: Never manipulate the shared symlink directly from the gateway;
 	// cold-start upgrade uses `corrald install` (no --upgrade, which holds
 	// SharedLock and enforces no-downgrade) + `corrald serve`.
-	prevRelTarget := probe.CurrentTarget
-	if prevRelTarget == "" && prevVer != "" && prevRel > 0 {
-		prevRelTarget = fmt.Sprintf("corrald-%s-%d/corrald", prevVer, prevRel)
-	}
-
 	sc := m.sharedConnForHost(hostID, fp, sshUser)
 	var client *Client
 	if sc != nil {
@@ -2426,14 +2421,27 @@ func (m *Manager) runUpdateOp(ctx context.Context, rop *runningOp, op *store.Cor
 		if attemptedVer == "" {
 			attemptedVer = dist.Version
 		}
-		tryColdRollback := func(primaryErr string) {
+		tryColdRollback := func(primaryErr string, failedRel int64, stopRunning bool) {
 			_, rbCand, _, rberr := m.resolveStartBinary(ctx, sshClient, probe, hostID, fp, sshUser, ch, sc, StartSelectOptions{
-				Rollback:        true,
-				PreferredTarget: prevRelTarget,
+				Rollback:     true,
+				BelowRelease: failedRel,
 			})
 			if rberr != nil || rbCand.Path == "" {
 				m.finishUpdateFailError(op, ch, attemptedVer, probe.MachineID, fmt.Sprintf("%s; rollback unavailable: %v", primaryErr, rberr))
 				return
+			}
+			// Fix5 #3: When a running incompatible daemon is still holding the
+			// socket/lock (e.g. hello returned proto_mismatch), stop it first
+			// (verified via meta.json PID + start_time in `corrald stop`) before
+			// launching the rollback binary.
+			if stopRunning {
+				stopRes, stopErr := runSSH(ctx, sshClient, StopCommand(rbCand.Path), 4096, sshx.ExecOptions{})
+				sf := ParseKeyValues(stopRes.Out)
+				if sf["error"] == "stop_failed" || (stopErr != nil && sf["result"] != "ok") {
+					detail := firstNonEmpty(sf["detail"], sf["error"], errStr(stopErr))
+					m.finishUpdateFailError(op, ch, attemptedVer, probe.MachineID, fmt.Sprintf("%s; stop incompatible daemon failed: %s", primaryErr, detail))
+					return
+				}
 			}
 			_, rbSock, rbFail := RunServeWithRetry(ctx, sshClient, rbCand.Path, m.gatewayID, probe.MachineID, probe.OS, probe.Arch, m.busyRetry)
 			if rbFail != nil {
@@ -2477,7 +2485,7 @@ func (m *Manager) runUpdateOp(ctx context.Context, rop *runningOp, op *store.Cor
 					}
 				}
 			}
-			tryColdRollback(serveFail.Error())
+			tryColdRollback(serveFail.Error(), cand.Release, false)
 			return
 		}
 		setStep("verify")
@@ -2485,32 +2493,33 @@ func (m *Manager) runUpdateOp(ctx context.Context, rop *runningOp, op *store.Cor
 			sock = probe.SocketPath
 		}
 		if err := m.attachAndHello(ctx, userID, hostID, corralUser, fp, sshUser, sshClient, own, probe, sock, ch, op.ID); err != nil {
-			tryColdRollback(err.Error())
+			tryColdRollback(err.Error(), cand.Release, true)
 			return
 		}
-		// Arm crash-loop rollback window via the unified helper using ONLY the
-		// actual running hello version/release.
+		// Arm crash-loop rollback window using ONLY the actual running hello
+		// version/release and window start time (rollback target is computed
+		// dynamically at rollback time by SelectStartBinary).
 		if curSC := m.sharedConnForHost(hostID, fp, sshUser); curSC != nil {
 			curSC.mu.Lock()
 			newHello := curSC.hello
 			curSC.mu.Unlock()
 			if newHello != nil {
 				readyTime := time.Now()
-				win := computePostUpdateCrashWindow(readyTime.Unix(), newHello.Version, newHello.Release, dist.Version, dist.Release, prevVer, prevRel, prevRelTarget)
+				win := computePostUpdateCrashWindow(readyTime.Unix(), newHello.Version, newHello.Release, prevRel)
 				if win.ReadyAt > 0 {
 					curSC.mu.Lock()
 					curSC.updatedAt = readyTime
 					curSC.updateTargetVer = win.TargetVer
 					curSC.updateTargetRel = win.TargetRel
 					curSC.updateCrashCount = 0
-					curSC.prevVersion = win.FromVer
-					curSC.prevRelease = win.FromRel
-					curSC.prevRelTarget = win.FromTarget
+					curSC.prevVersion = ""
+					curSC.prevRelease = 0
+					curSC.prevRelTarget = ""
 					curSC.scopeChange = nil
 					curSC.mu.Unlock()
 					_ = m.store.UpdateCorraldCrashWindowByBinding(
 						context.Background(), hostID, fp, sshUser,
-						win.ReadyAt, win.TargetVer, win.TargetRel, win.FromVer, win.FromRel, win.FromTarget, 0,
+						win.ReadyAt, win.TargetVer, win.TargetRel, "", 0, "", 0,
 					)
 				}
 			}
@@ -2667,11 +2676,11 @@ func (m *Manager) runUpdateOp(ctx context.Context, rop *runningOp, op *store.Cor
 		actualRel = newHello.Release
 	}
 
-	// Unified crash-loop rollback window (Item 5): applies identically whether
-	// a higher release was noticed during retry reconnect OR post-handoff verify
-	// reconnect. When actualRel > dist.Release, rollback target is our dist (R2),
-	// NOT the older pre-op R1.
-	win := computePostUpdateCrashWindow(readyTime.Unix(), actualVer, actualRel, dist.Version, dist.Release, prevVer, prevRel, prevRelTarget)
+	// Unified crash-loop rollback window (Fix5 #4): record ONLY the actual
+	// running version/release and window start time; rollback target is computed
+	// dynamically at rollback time by SelectStartBinary (highest installed,
+	// non-failed release strictly below actualRel).
+	win := computePostUpdateCrashWindow(readyTime.Unix(), actualVer, actualRel, prevRel)
 
 	sc.mu.Lock()
 	if win.ReadyAt > 0 {
@@ -2682,9 +2691,9 @@ func (m *Manager) runUpdateOp(ctx context.Context, rop *runningOp, op *store.Cor
 	sc.updateTargetVer = win.TargetVer
 	sc.updateTargetRel = win.TargetRel
 	sc.updateCrashCount = 0
-	sc.prevVersion = win.FromVer
-	sc.prevRelease = win.FromRel
-	sc.prevRelTarget = win.FromTarget
+	sc.prevVersion = ""
+	sc.prevRelease = 0
+	sc.prevRelTarget = ""
 	sc.mu.Unlock()
 
 	ch.State = StateRunning
@@ -2692,9 +2701,9 @@ func (m *Manager) runUpdateOp(ctx context.Context, rop *runningOp, op *store.Cor
 		ch.Version = actualVer
 		ch.Release = actualRel
 	}
-	ch.UpdatedFromVer = win.FromVer
-	ch.UpdatedFromRel = win.FromRel
-	ch.UpdatedFromTarget = win.FromTarget
+	ch.UpdatedFromVer = ""
+	ch.UpdatedFromRel = 0
+	ch.UpdatedFromTarget = ""
 	ch.UpdateTargetVer = win.TargetVer
 	ch.UpdateTargetRel = win.TargetRel
 	ch.UpdateReadyAt = win.ReadyAt
@@ -2711,7 +2720,7 @@ func (m *Manager) runUpdateOp(ctx context.Context, rop *runningOp, op *store.Cor
 		// Persist post-update crash window across all peers sharing this account (Item 22).
 		_ = m.store.UpdateCorraldCrashWindowByBinding(
 			context.Background(), hostID, fp, sshUser,
-			win.ReadyAt, win.TargetVer, win.TargetRel, win.FromVer, win.FromRel, win.FromTarget, 0,
+			win.ReadyAt, win.TargetVer, win.TargetRel, "", 0, "", 0,
 		)
 	}
 }
@@ -2732,8 +2741,9 @@ func (m *Manager) finishUpdateFailKeepPrev(op *store.CorraldOp, ch *store.Corral
 	op.State = OpFailed
 	op.ErrorCode = "update_failed"
 	op.Detail = encodeOpDetail(opDetailPayload{Message: detail})
-	// Atomic transactional finalization: clears active_op_id and marks op failed together.
-	_, _ = m.store.FinalizeCorraldOpWithHost(context.Background(), op, ch)
+	// Uses active_op_id IN ('', op.ID) so recovery after attachAndHello cleared
+	// active_op_id (e.g. proto_mismatch) still writes the final state atomically.
+	_, _ = m.store.FinalizeCorraldOpErrorWithHost(context.Background(), op, ch)
 }
 
 func (m *Manager) finishUpdateFailError(op *store.CorraldOp, ch *store.CorraldHost, targetVer, machineID, detail string) {
@@ -2748,7 +2758,9 @@ func (m *Manager) finishUpdateFailError(op *store.CorraldOp, ch *store.CorraldHo
 	op.State = OpFailed
 	op.ErrorCode = "update_failed"
 	op.Detail = encodeOpDetail(opDetailPayload{Message: detail})
-	_, _ = m.store.FinalizeCorraldOpWithHost(context.Background(), op, ch)
+	// Fix5 #3: match active_op_id IN ('', op.ID) so error finalization still
+	// succeeds even if an earlier step (e.g. proto_mismatch) cleared active_op_id.
+	_, _ = m.store.FinalizeCorraldOpErrorWithHost(context.Background(), op, ch)
 }
 
 // attachAndHello dials socketPath via direct-streamlocal, performs daemon.hello
@@ -3334,12 +3346,12 @@ func (m *Manager) attemptPostUpdateRollback(
 		)
 	}
 
-	// Select rollback binary through the single unified SelectStartBinary path
-	// (reads fresh host probe + failed.json + gateway failed list; never picks a
-	// failed release and never lowers the shared symlink).
+	// Fix5 #4: Dynamically compute rollback binary at rollback time via
+	// SelectStartBinary: highest installed, non-failed release strictly below
+	// the crashed actual release (badRel). Never lowers the shared symlink.
 	freshProbe, rbCand, _, selErr := m.resolveStartBinary(rctx, sshClient, nil, firstHostID, sc.key.Fingerprint, sc.key.Username, nil, sc, StartSelectOptions{
-		Rollback:        true,
-		PreferredTarget: prevRelTarget,
+		Rollback:     true,
+		BelowRelease: badRel,
 	})
 	if selErr != nil || rbCand.Path == "" {
 		return false
@@ -3353,13 +3365,7 @@ func (m *Manager) attemptPostUpdateRollback(
 		}
 	}
 
-	stopBin := rbCand.Path
-	if freshProbe != nil && freshProbe.CurrentBin != "" {
-		stopBin = freshProbe.CurrentBin
-	} else if libDir != "" {
-		stopBin = libDir + "/corrald"
-	}
-	_, _ = runSSH(rctx, sshClient, StopCommand(stopBin), 4096, sshx.ExecOptions{})
+	_, _ = runSSH(rctx, sshClient, StopCommand(rbCand.Path), 4096, sshx.ExecOptions{})
 	_, startedSock, sfail := RunServeWithRetry(rctx, sshClient, rbCand.Path, m.gatewayID, machineID, "Linux", "", m.busyRetry)
 	if sfail != nil {
 		return false
@@ -3679,49 +3685,25 @@ func (m *Manager) reconcileHost(
 // --- Helpers ---
 
 type postUpdateCrashWindow struct {
-	ReadyAt    int64
-	TargetVer  string
-	TargetRel  int64
-	FromVer    string
-	FromRel    int64
-	FromTarget string
+	ReadyAt   int64
+	TargetVer string
+	TargetRel int64
 }
 
-// computePostUpdateCrashWindow is the single unified computation for the
-// post-update crash-loop rollback window across cold-start updates, normal
-// handoff verification, and concurrent handoff retry/reconnect paths.
-//
-// Target is ALWAYS the actual running daemon's (actualVer, actualRel).
-// Rollback target is ALWAYS the previous known-good release immediately before
-// actualRel: when actualRel > distRel (another gateway / NFS peer upgraded the
-// host beyond this gateway's dist, e.g. R3 > R2), our already-installed dist
-// (R2) is recorded as the rollback target rather than the older pre-op R1.
-func computePostUpdateCrashWindow(
-	readyAt int64,
-	actualVer string, actualRel int64,
-	distVer string, distRel int64,
-	prevVer string, prevRel int64, prevRelTarget string,
-) postUpdateCrashWindow {
+// computePostUpdateCrashWindow records ONLY the actual running daemon's
+// version/release and window start timestamp when an upgrade succeeded
+// (actualRel > prevRel). The rollback target is NOT pre-stored here — it is
+// computed dynamically at rollback time by SelectStartBinary (highest
+// installed, non-failed release strictly below TargetRel).
+func computePostUpdateCrashWindow(readyAt int64, actualVer string, actualRel, prevRel int64) postUpdateCrashWindow {
 	if actualRel <= 0 || actualRel <= prevRel {
 		return postUpdateCrashWindow{}
 	}
-	win := postUpdateCrashWindow{
+	return postUpdateCrashWindow{
 		ReadyAt:   readyAt,
 		TargetVer: actualVer,
 		TargetRel: actualRel,
 	}
-	if distRel > 0 && actualRel > distRel {
-		win.FromVer = distVer
-		win.FromRel = distRel
-		if distVer != "" {
-			win.FromTarget = fmt.Sprintf("corrald-%s-%d/corrald", distVer, distRel)
-		}
-	} else {
-		win.FromVer = prevVer
-		win.FromRel = prevRel
-		win.FromTarget = prevRelTarget
-	}
-	return win
 }
 
 // markRebindIfMismatch is the single gateway entrypoint for marking a host as
