@@ -1593,7 +1593,7 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
   }, [codeHost, refreshCode])
   const sid = cur.s.id
   const herdr = cur.s.persistence === 'herdr'
-  const convo = useConversation(sid, active, cur.pane)
+  const convo = useConversation(sid, active, cur.pane, cur.s.host_id)
   // A title given with /rename, shown at once — the log says it when Claude
   // Code writes it, a while on (11-14) — until the log says the same, or a
   // while at most.

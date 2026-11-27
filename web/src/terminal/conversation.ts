@@ -1,6 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api, ApiError, authGen } from '../api'
 import type { RowCmds } from './agentOrder'
+import { knownSession } from './agents'
+import { isPushHostCovered, onPushConvo, onPushStateChange, watchPushHosts } from './pushEvents'
+import { CONVO_POLL_COVERED, convoNextPollDelay, matchesConvoHint, type ConvoRequestSource } from './pushEventsLogic'
 
 // The conversation view's data: the agent's own log of the session in the
 // focused (herdr) or active (tmux) pane, as the gateway reads it
@@ -434,14 +437,16 @@ const sameMeta = (a?: ConvoMeta, b?: ConvoMeta) =>
   a === b || (!!a && !!b && a.model === b.model && a.mode === b.mode && a.effort === b.effort && a.branch === b.branch && a.forked === b.forked && a.history_partial === b.history_partial && a.context === b.context && a.window === b.window && a.window_by === b.window_by && JSON.stringify(a.cost) === JSON.stringify(b.cost) && JSON.stringify(a.quota) === JSON.stringify(b.quota) && JSON.stringify(a.answer) === JSON.stringify(b.answer) && a.turn_out === b.turn_out)
 
 const POLL = 2000
-const ACTIVE = 1000 // (after an answer that brought something: more is likely coming)
 const RETRY = 5000
 const MAX = 6000 // (entries kept, as the gateway keeps at most)
 
-export function useConversation(sessionId: string, enabled: boolean, pane: string | undefined): Convo {
+export function useConversation(sessionId: string, enabled: boolean, pane: string | undefined, hostId?: number): Convo {
   const [convo, setConvo] = useState<Convo>(() => initial())
   const paneRef = useRef(pane)
   paneRef.current = pane
+  const effectiveHostId = hostId ?? knownSession(sessionId)?.host_id
+  const hostIdRef = useRef<number | undefined>(effectiveHostId)
+  hostIdRef.current = effectiveHostId
   const poke = useRef<() => void>(() => {})
   const lastOk = useRef(0) // (ms) the last answer, whatever it brought
   // The part before asked for (by the reading of its gen), until an answer to that came.
@@ -450,14 +455,25 @@ export function useConversation(sessionId: string, enabled: boolean, pane: strin
   const pokeNow = useRef<() => void>(() => {})
 
   useEffect(() => {
+    if (!enabled || !effectiveHostId) return
+    const src = Symbol('convo')
+    return watchPushHosts(src, [effectiveHostId])
+  }, [enabled, effectiveHostId])
+
+  useEffect(() => {
     if (!enabled) return
     let stopped = false
     let timer: ReturnType<typeof setTimeout> | undefined
+    let scheduledMs: number | null = null
     let ctl: AbortController | null = null
     let gen = 0
     let rev = 0
     let byseq = new Map<number, ConvoEntry>()
     let again = false // (asked for while one was on its way: once it is answered)
+    let againSrc: ConvoRequestSource = 'other'
+    let lastActive = false
+    let lastMore = false
+    let lastError = false
     // The agent read as looked at (look): told it is no longer when another
     // is in front, the page is hidden or the view goes, so that it is
     // alerted about again at once. Each time it is shown is named (a reading
@@ -471,8 +487,21 @@ export function useConversation(sessionId: string, enabled: boolean, pane: strin
       if (l)
         void fetch(`/api/sessions/${sessionId}/conversation/unlook`, { method: 'POST', credentials: 'same-origin', keepalive: true, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(l) }).catch(() => {})
     }
-    const run = async () => {
+    const schedule = (ms: number, src: ConvoRequestSource) => {
+      if (stopped) return
+      clearTimeout(timer)
+      scheduledMs = ms
+      timer = setTimeout(() => {
+        timer = undefined
+        scheduledMs = null
+        void run(src)
+      }, ms)
+    }
+    const currentHostId = () => hostIdRef.current ?? knownSession(sessionId)?.host_id
+    const run = async (src: ConvoRequestSource = 'other') => {
+      clearTimeout(timer)
       timer = undefined
+      scheduledMs = null
       if (stopped) return
       if (document.hidden) return // (visibilitychange starts it again)
       const mine = new AbortController()
@@ -481,6 +510,7 @@ export function useConversation(sessionId: string, enabled: boolean, pane: strin
       const key = keyOf(sessionId, pane)
       const q = new URLSearchParams({ gen: String(gen), rev: String(rev) })
       if (pane) q.set('pane', pane)
+      if (src === 'push' || src === 'poll') q.set('src', src)
       // (Read only while shown — the agents page in front, its chat on
       // screen, the page not hidden: the agent is looked at, and the gateway
       // does not alert about it meanwhile.)
@@ -489,19 +519,27 @@ export function useConversation(sessionId: string, enabled: boolean, pane: strin
       if (pane) looked = { pane, look }
       const asksOlder = wantOlder.current !== null && wantOlder.current === gen
       if (asksOlder) q.set('older', '1')
-      let next = POLL
+      let next = isPushHostCovered(currentHostId()) ? CONVO_POLL_COVERED : POLL
       try {
         const a = await api<Answer>('GET', `/api/sessions/${sessionId}/conversation?${q}`, undefined, { signal: mine.signal, timeoutMs: 25000 })
         if (stopped || mine.signal.aborted) return
         // (An answer for the pane that was in front: ask again for this one.)
         const now = Date.now()
         lastOk.current = now
-        if (pane !== paneRef.current) next = 0
-        else if (!a.available) {
+        lastError = false
+        const covered = isPushHostCovered(currentHostId())
+        if (pane !== paneRef.current) {
+          lastActive = false
+          lastMore = false
+          next = 0
+        } else if (!a.available) {
           wantOlder.current = null // (nothing to read before: what was asked of is gone)
           gen = a.gen
           rev = 0
           byseq = new Map()
+          lastActive = false
+          lastMore = false
+          next = covered ? CONVO_POLL_COVERED : POLL
           setConvo((c) =>
             // (A new conversation's agent says what it does too: a dialog of its own open, say.)
             c.of === key && c.status === 'none' && c.reason === a.reason && c.gen === a.gen && sameBind(c.bind, a.bind) && !c.failing && c.defaultChanged === a.default_changed && c.agentStatus === a.agent_status && c.waitingFor === a.waiting_for
@@ -545,24 +583,52 @@ export function useConversation(sessionId: string, enabled: boolean, pane: strin
             return { ...initial(key), status: 'ready', entries: entries ?? c.entries, older, olderCut, loadingOlder, gen: a.gen, bind: a.bind, agentStatus: a.agent_status, waitingFor: a.waiting_for, bgCmds, bgAgents, quietAt, title: a.title || undefined, tasks, meta, queued, running, failing: false, okAt: now, changedAt: entries ? now : c.changedAt, of: key, defaultChanged: a.default_changed }
           })
           remember(key, gen, rev, byseq, a)
-          if (a.entries.length > 0 && !fresh) next = ACTIVE
-          if (a.more) next = 300
+          lastActive = a.entries.length > 0 && !fresh
+          lastMore = !!a.more
+          next = convoNextPollDelay({ covered, active: lastActive, more: lastMore })
           if (wantOlder.current !== null) next = 0 // (asked for meanwhile)
         }
       } catch (e) {
         if (stopped || mine.signal.aborted || (e instanceof ApiError && e.code === 'aborted')) return
+        lastError = true
         next = RETRY
         setConvo((c) => (c.failing ? c : { ...c, status: c.entries.length ? c.status : 'error', failing: true, okAt: lastOk.current }))
       } finally {
         if (ctl === mine) ctl = null
       }
-      if (again) (again = false), (next = 0)
-      if (!stopped) timer = setTimeout(run, next)
+      if (again) {
+        const nextSrc = againSrc
+        again = false
+        againSrc = 'other'
+        schedule(0, nextSrc)
+        return
+      }
+      if (!stopped) schedule(next, next === 0 ? 'other' : 'poll')
     }
     const onVisible = () => {
       if (document.hidden) unlook()
-      else if (!timer && !ctl) void run()
+      else if (!timer && !ctl) void run('other')
     }
+    const offConvoHint = onPushConvo((hintSession, hintPane) => {
+      if (stopped || document.hidden) return
+      if (!matchesConvoHint(sessionId, paneRef.current, hintSession, hintPane)) return
+      if (ctl) {
+        again = true
+        againSrc = 'push'
+        return
+      }
+      clearTimeout(timer)
+      timer = undefined
+      scheduledMs = null
+      void run('push')
+    })
+    const offPushState = onPushStateChange(() => {
+      if (stopped || document.hidden || ctl || timer === undefined || lastError) return
+      const want = convoNextPollDelay({ covered: isPushHostCovered(currentHostId()), active: lastActive, more: lastMore })
+      if (scheduledMs !== null && want !== scheduledMs) {
+        schedule(want, 'poll')
+      }
+    })
     // What shows first of the pane in front: what was last read of it, if
     // anything (its entries as read up to where reading goes on from), else
     // "reading". Nothing of another pane shows meanwhile.
@@ -594,34 +660,43 @@ export function useConversation(sessionId: string, enabled: boolean, pane: strin
       if (ctl || stopped) return
       clearTimeout(timer)
       timer = undefined
-      void run()
+      scheduledMs = null
+      void run('other')
     }
     // Read now: at once, or as soon as what is on its way is answered.
     pokeNow.current = () => {
       if (stopped) return
-      if (ctl) return void (again = true)
+      if (ctl) {
+        again = true
+        if (againSrc !== 'push') againSrc = 'other'
+        return
+      }
       clearTimeout(timer)
       timer = undefined
-      void run()
+      scheduledMs = null
+      void run('other')
     }
     // Another pane in front: what is on its way is for the old one.
     poke.current = () => {
       unlook()
       clearTimeout(timer)
       timer = undefined
+      scheduledMs = null
       ctl?.abort()
       ctl = null
       begin()
-      void run()
+      void run('other')
     }
     document.addEventListener('visibilitychange', onVisible)
     begin()
-    void run()
+    void run('other')
     return () => {
       stopped = true
       clearTimeout(timer)
       ctl?.abort()
       unlook()
+      offConvoHint()
+      offPushState()
       document.removeEventListener('visibilitychange', onVisible)
       poke.current = () => {}
       pokeOlder.current = () => {}

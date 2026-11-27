@@ -2488,8 +2488,14 @@ func (s *Server) apiConversation(w http.ResponseWriter, r *http.Request) {
 	}
 	perfStart := time.Now()
 	perfOutcome := "ok"
-	defer func() { s.perfObserve("convo.read", perfStart, perfOutcome, sess.HostID, "") }()
 	q := r.URL.Query()
+	perfTrigger := convoReadTrigger(q.Get("src"))
+	defer func() {
+		s.perfObserve("convo.read", perfStart, perfOutcome, sess.HostID, perfTrigger)
+		if s.perf != nil {
+			s.perf.Count("convo.read.trigger", perfTrigger, sess.HostID)
+		}
+	}()
 	pane := q.Get("pane")
 	if pane != "" && !herdrPane.MatchString(pane) {
 		perfOutcome = "bad_request"
@@ -2566,6 +2572,7 @@ func (s *Server) apiConversation(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	s.recordConvoHintBinding(sess, pane, st)
 	ans := convoAnswer{Gen: st.gen, Bind: st.bind, Entries: []convo.Entry{}, DefaultChanged: defaultChangedOf(sess.ID)}
 	if st.reason != "" {
 		perfOutcome = st.reason
@@ -2809,7 +2816,11 @@ func (s *Server) relocateLater(sess *term.Session, key string, st *convoState, p
 		defer cancel()
 		// (Failed: what was found stands, and the next check is made before answering.)
 		// (A weak binding is checked by the scan: what the screen shows.)
-		st.relocFailed.Store(s.locateConvoBy(ctx, sess, st, pane, st.weak) != nil)
+		err := s.locateConvoBy(ctx, sess, st, pane, st.weak)
+		st.relocFailed.Store(err != nil)
+		if err == nil {
+			s.recordConvoHintBinding(sess, pane, st)
+		}
 	}()
 }
 

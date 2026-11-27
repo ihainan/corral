@@ -481,3 +481,22 @@ func (c *Client) PaneSend(ctx context.Context, params proto.PaneSendParams) (*pr
 	}
 	return &res, nil
 }
+
+// Watch subscribes this connection to hint-only agent.changed events on corrald
+// (and optionally registers extra validated log paths to watch).
+func (c *Client) Watch(ctx context.Context, logs []string) (*proto.AgentWatchResult, error) {
+	var res proto.AgentWatchResult
+	if err := c.Call(ctx, proto.MethodAgentWatch, proto.AgentWatchParams{Logs: logs}, &res); err != nil {
+		return nil, err
+	}
+	return &res, nil
+}
+
+// Unwatch cancels this connection's agent.watch subscription on corrald.
+func (c *Client) Unwatch(ctx context.Context) (*proto.AgentWatchResult, error) {
+	var res proto.AgentWatchResult
+	if err := c.Call(ctx, proto.MethodAgentUnwatch, nil, &res); err != nil {
+		return nil, err
+	}
+	return &res, nil
+}

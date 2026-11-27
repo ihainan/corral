@@ -57,6 +57,7 @@ func TestRouteTableIsExplicit(t *testing.T) {
 		"POST /api/hosts/{id}/code":            false,
 		"POST /api/hosts/{id}/code/stop":       false,
 		"GET /api/corrald/readme":              false,
+		"GET /api/events/ws":                   false,
 		"GET /api/hosts/{id}/corrald":          false,
 		"POST /api/hosts/{id}/corrald/install": false,
 		"POST /api/hosts/{id}/corrald/cancel":  false,

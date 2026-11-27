@@ -1,5 +1,7 @@
 import { useEffect, useState } from 'react'
-import { api, type HerdrAgent, type SessionInfo } from '../api'
+import { api, type HerdrAgent, type Host, type SessionInfo } from '../api'
+import { arePushHostsCovered, onPushAgents, onPushStateChange, watchPushHosts } from './pushEvents'
+import { agentsNextPollDelay, createAgentsHintCoalescer } from './pushEventsLogic'
 import { agentKey } from './sessionName'
 
 // The agents of the sessions the gateway has open, as the Agents page and
@@ -305,8 +307,16 @@ export function sessionAgents(s: SessionInfo): { waiting: number; working: numbe
 // How many agents wait for the user, for the navigation: null until known;
 // stale when the last read failed (the number shown is what was so then).
 // poll: read the list here too (pages where nothing else does) — every
-// VISIBLE_EVERY while in sight, HIDDEN_EVERY behind another tab.
+// VISIBLE_EVERY while in sight, HIDDEN_EVERY behind another tab (or 60s when
+// all visible session hosts are covered by corrald push).
 const VISIBLE_EVERY = 15000
+const sessionHostIds = (list: SessionInfo[] | null): number[] => {
+  if (!list || !list.length) return []
+  const ids = new Set<number>()
+  for (const s of list) if (s.host_id > 0) ids.add(s.host_id)
+  return [...ids]
+}
+
 export function useWaitingCount(poll: boolean): { n: number | null; working: number | null; stale: boolean } {
   const read = () => ({ n: lastList ? waitingAgents(lastList) : null, working: lastList ? workingAgents(lastList) : null, stale: listFailed })
   const [v, setV] = useState(read)
@@ -323,31 +333,93 @@ export function useWaitingCount(poll: boolean): { n: number | null; working: num
     if (!poll) return
     let stopped = false
     let asking = false
+    let again = false
     let timer: ReturnType<typeof setTimeout> | undefined
+    let scheduledMs: number | null = null
+    const watchSrc = Symbol('waiting-count')
+    let unwatch = () => {}
+    const syncWatch = () => {
+      unwatch = watchPushHosts(watchSrc, sessionHostIds(lastList))
+    }
+    const nextDelay = () =>
+      agentsNextPollDelay({
+        defaultEvery: VISIBLE_EVERY,
+        hidden: document.hidden,
+        allCovered: arePushHostsCovered(sessionHostIds(lastList)),
+      })
+    const schedule = (ms: number) => {
+      if (stopped) return
+      clearTimeout(timer)
+      scheduledMs = ms
+      timer = setTimeout(() => {
+        timer = undefined
+        scheduledMs = null
+        load()
+      }, ms)
+    }
     const load = () => {
+      clearTimeout(timer)
       timer = undefined
+      scheduledMs = null
       if (asking) return
       asking = true
       let at = 0
       api<SessionInfo[]>('GET', '/api/sessions', undefined, { timeoutMs: 15000, onResponse: (r) => (at = readAt(r)) })
-        .then((l) => !stopped && noteSessions(l, at))
+        .then((l) => {
+          if (stopped) return
+          noteSessions(l, at)
+          syncWatch()
+        })
         .catch(() => !stopped && noteSessions(null))
         .finally(() => {
           asking = false
-          if (!stopped && !timer) timer = setTimeout(load, document.hidden ? HIDDEN_EVERY : VISIBLE_EVERY)
+          if (stopped) return
+          if (again) {
+            again = false
+            load()
+            return
+          }
+          if (!timer) schedule(nextDelay())
         })
     }
     const onVisible = () => {
       if (!document.hidden && !asking) {
         clearTimeout(timer)
+        timer = undefined
+        scheduledMs = null
         load()
       }
     }
+    const coalescer = createAgentsHintCoalescer({
+      isHidden: () => document.hidden,
+      onFlush: () => {
+        if (stopped || document.hidden) return
+        if (asking) {
+          again = true
+          return
+        }
+        clearTimeout(timer)
+        timer = undefined
+        scheduledMs = null
+        load()
+      },
+    })
+    const offAgents = onPushAgents(() => coalescer.trigger())
+    const offState = onPushStateChange(() => {
+      if (stopped || document.hidden || asking || timer === undefined) return
+      const want = nextDelay()
+      if (scheduledMs !== null && want !== scheduledMs) schedule(want)
+    })
     document.addEventListener('visibilitychange', onVisible)
+    syncWatch()
     load()
     return () => {
       stopped = true
       clearTimeout(timer)
+      coalescer.cancel()
+      offAgents()
+      offState()
+      unwatch()
       document.removeEventListener('visibilitychange', onVisible)
     }
   }, [poll])
@@ -382,10 +454,50 @@ export function useRunningSessions(on: boolean, every = 3000): { sessions: Sessi
     if (!on) return
     let stopped = false
     let timer: ReturnType<typeof setTimeout> | undefined
+    let scheduledMs: number | null = null
     let asking = false
+    let again = false
+    const watchSrc = Symbol('running-sessions')
+    let visibleHosts: number[] = []
+    let unwatch = () => {}
+    const syncWatch = () => {
+      const ids = new Set<number>(visibleHosts)
+      for (const id of sessionHostIds(lastList)) ids.add(id)
+      unwatch = watchPushHosts(watchSrc, [...ids])
+    }
+    const nextDelay = () => {
+      const sHosts = sessionHostIds(lastList)
+      const checkHosts = sHosts.length > 0 ? sHosts : visibleHosts
+      return agentsNextPollDelay({
+        defaultEvery: every,
+        hidden: document.hidden,
+        allCovered: arePushHostsCovered(checkHosts),
+      })
+    }
+    const schedule = (ms: number) => {
+      if (stopped) return
+      clearTimeout(timer)
+      scheduledMs = ms
+      timer = setTimeout(() => {
+        timer = undefined
+        scheduledMs = null
+        load()
+      }, ms)
+    }
+    // Load visible hosts so the push channel watches all visible hosts while the
+    // agents view is open, even before a session appears on a host.
+    api<Host[]>('GET', '/api/hosts')
+      .then((hs) => {
+        if (stopped) return
+        visibleHosts = hs.map((h) => h.id)
+        syncWatch()
+      })
+      .catch(() => {})
     // (Behind another tab, now and then still: what waits is told in the title.)
     const load = () => {
+      clearTimeout(timer)
       timer = undefined
+      scheduledMs = null
       if (asking) return
       asking = true
       // (One that never comes back, as after a network change, is given up: the next goes.)
@@ -396,6 +508,7 @@ export function useRunningSessions(on: boolean, every = 3000): { sessions: Sessi
           noteSessions(l, at)
           setSessions(lastList)
           setFailed(false)
+          syncWatch()
         })
         .catch(() => {
           if (stopped) return
@@ -404,27 +517,65 @@ export function useRunningSessions(on: boolean, every = 3000): { sessions: Sessi
         })
         .finally(() => {
           asking = false
-          if (!stopped && !timer) timer = setTimeout(load, document.hidden ? HIDDEN_EVERY : every)
+          if (stopped) return
+          if (again) {
+            again = false
+            load()
+            return
+          }
+          if (!timer) schedule(nextDelay())
         })
     }
     const onVisible = () => {
       if (!document.hidden && !asking) {
         clearTimeout(timer)
+        timer = undefined
+        scheduledMs = null
         load()
       }
     }
     // (A change just asked for: read again at once, to see it said.)
     const now = () => {
-      if (asking) return
+      if (asking) {
+        again = true
+        return
+      }
       clearTimeout(timer)
+      timer = undefined
+      scheduledMs = null
       load()
     }
+    const coalescer = createAgentsHintCoalescer({
+      isHidden: () => document.hidden,
+      onFlush: () => {
+        if (stopped || document.hidden) return
+        if (asking) {
+          again = true
+          return
+        }
+        clearTimeout(timer)
+        timer = undefined
+        scheduledMs = null
+        load()
+      },
+    })
+    const offAgents = onPushAgents(() => coalescer.trigger())
+    const offState = onPushStateChange(() => {
+      if (stopped || document.hidden || asking || timer === undefined) return
+      const want = nextDelay()
+      if (scheduledMs !== null && want !== scheduledMs) schedule(want)
+    })
     readNow.add(now)
     document.addEventListener('visibilitychange', onVisible)
+    syncWatch()
     load()
     return () => {
       stopped = true
       clearTimeout(timer)
+      coalescer.cancel()
+      offAgents()
+      offState()
+      unwatch()
       readNow.delete(now)
       document.removeEventListener('visibilitychange', onVisible)
     }

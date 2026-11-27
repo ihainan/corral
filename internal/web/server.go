@@ -117,6 +117,7 @@ type Server struct {
 	restores restorer // sessions open before the restart, being opened again (restore.go)
 	perf     *perf.Tracker
 	corrald  *gw.Manager
+	events   *eventHub
 }
 
 type liveSocket struct {
@@ -146,6 +147,7 @@ func New(d Deps) *Server {
 		pending: map[int64]map[*liveSocket]struct{}{}, herdrSocks: herdrSockets{path: map[string]string{}},
 		notifier: d.Notifier, vis: visibility{seen: map[string]map[*liveSocket]bool{}}, fwd: newForwarder(), files: newSFTPPool(), code: codeServers{jobs: map[[2]int64]*codeJob{}}, perf: perf.New(perf.Options{})}
 	s.restores.ctx, s.restores.stop = context.WithCancel(context.Background())
+	s.events = newEventHub(s)
 	s.auth.SetLocalLogin(s.cfg.LocalLogin)
 	if s.cfg.OIDC != nil {
 		s.oidc = auth.NewOIDC(s.cfg.OIDC, s.auth, d.OIDCClient)
@@ -162,6 +164,7 @@ func New(d Deps) *Server {
 	prevEnd := s.terms.OnEnd
 	s.terms.OnEnd = func(sess *term.Session, state string, d time.Duration) {
 		sshx.SetBusyObserver(sess.Client(), nil)
+		s.events.ForgetSession(sess.ID)
 		s.tabEnded(sess)
 		if prevEnd != nil {
 			prevEnd(sess, state, d)
@@ -278,6 +281,7 @@ func (s *Server) registerRoutes() {
 	s.handle("DELETE /api/sessions/{id}", SignedIn, s.apiCloseSession)
 	s.handle("GET /api/sessions/{id}/ws", SignedIn, s.apiSessionSocket)
 	s.handle("GET /api/sessions/{id}/pane-ws", SignedIn, s.apiPaneSocket)
+	s.handle("GET /api/events/ws", SignedIn, s.apiEventsSocket)
 	s.handle("PUT /api/sessions/{id}/preview", SignedIn, s.apiPutPreview)
 	s.handle("GET /api/sessions/{id}/preview", SignedIn, s.apiGetPreview)
 	s.handle("POST /api/sessions/{id}/upload", SignedIn, s.apiUpload)

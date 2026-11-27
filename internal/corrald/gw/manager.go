@@ -68,16 +68,21 @@ type ManagerConfig struct {
 	SSH            SSHProvider
 
 	// Tunables (optional; defaults apply when zero).
-	HealthInterval      time.Duration
-	RestartBackoffs     []time.Duration
-	CrashWindow         time.Duration
-	CrashThreshold      int
-	ProtoMin            int
-	ProtoMax            int
-	BusyRetryInterval   time.Duration
-	BusyMaxRetries      int
-	CapFailureThreshold int
-	HandoffTimeout      time.Duration
+	HealthInterval        time.Duration
+	RestartBackoffs       []time.Duration
+	CrashWindow           time.Duration
+	CrashThreshold        int
+	ProtoMin              int
+	ProtoMax              int
+	BusyRetryInterval     time.Duration
+	BusyMaxRetries        int
+	CapFailureThreshold   int
+	HandoffTimeout        time.Duration
+	WatchUnsubscribeDelay time.Duration
+
+	// Callbacks (optional; can also be set via SetWatchCallbacks).
+	OnAgentChanged    func(hostIDs []int64, ev proto.AgentChangedEventData)
+	OnCoverageChanged func(hostIDs []int64)
 
 	// Test hooks (nil in production).
 	ProbeOverride      func(ctx context.Context, c *ssh.Client) (*HostProbe, error)
@@ -267,6 +272,14 @@ type sharedConn struct {
 	capFailures map[string]int
 	capDegraded map[string]bool
 
+	// agent.watch subscription state for this shared connection.
+	watchSubscribed     bool
+	watchClient         *Client
+	watchLogsSig        string
+	watchUnsubCancel    chan struct{}
+	watchReconciling    bool
+	watchReconcileAgain bool
+
 	// Lifecycle coordination.
 	intentionalClose bool
 	reconnecting     bool
@@ -319,17 +332,24 @@ type Manager struct {
 	busyRetry           BusyRetryPolicy
 	capFailureThreshold int
 	handoffTimeout      time.Duration
+	watchUnsubDelay     time.Duration
 
 	distMu sync.RWMutex
 	dist   *Dist
 
-	mu        sync.Mutex
-	conns     map[accountKey]*sharedConn
-	hostConn  map[int64]accountKey
-	opsByHost map[int64]*runningOp
-	opsByAcct map[accountKey]*runningOp
-	closed    bool
-	wg        sync.WaitGroup
+	watchCbMu         sync.RWMutex
+	onAgentChanged    func(hostIDs []int64, ev proto.AgentChangedEventData)
+	onCoverageChanged func(hostIDs []int64)
+
+	mu            sync.Mutex
+	conns         map[accountKey]*sharedConn
+	hostConn      map[int64]accountKey
+	watchers      map[any]*watchRegistration
+	hostExtraLogs map[int64]map[string]struct{}
+	opsByHost     map[int64]*runningOp
+	opsByAcct     map[accountKey]*runningOp
+	closed        bool
+	wg            sync.WaitGroup
 }
 
 // NewManager creates a corrald gateway Manager.
@@ -373,6 +393,10 @@ func NewManager(cfg ManagerConfig) *Manager {
 	if handoffTO <= 0 {
 		handoffTO = DefaultHandoffTimeout
 	}
+	watchUnsubDelay := cfg.WatchUnsubscribeDelay
+	if watchUnsubDelay <= 0 {
+		watchUnsubDelay = DefaultWatchUnsubscribeDelay
+	}
 	mgr := &Manager{
 		cfg:                 cfg,
 		store:               cfg.Store,
@@ -391,8 +415,13 @@ func NewManager(cfg ManagerConfig) *Manager {
 		busyRetry:           busyPolicy,
 		capFailureThreshold: capThreshold,
 		handoffTimeout:      handoffTO,
+		watchUnsubDelay:     watchUnsubDelay,
+		onAgentChanged:      cfg.OnAgentChanged,
+		onCoverageChanged:   cfg.OnCoverageChanged,
 		conns:               make(map[accountKey]*sharedConn),
 		hostConn:            make(map[int64]accountKey),
+		watchers:            make(map[any]*watchRegistration),
+		hostExtraLogs:       make(map[int64]map[string]struct{}),
 		opsByHost:           make(map[int64]*runningOp),
 		opsByAcct:           make(map[accountKey]*runningOp),
 	}
@@ -570,6 +599,7 @@ func (m *Manager) ReportCapFailure(hostID int64, client *Client, capName string,
 		sc.mu.Unlock()
 		return
 	}
+	wasDegraded := sc.capDegraded[capName]
 	if immediate {
 		sc.capDegraded[capName] = true
 	} else {
@@ -578,7 +608,11 @@ func (m *Manager) ReportCapFailure(hostID int64, client *Client, capName string,
 			sc.capDegraded[capName] = true
 		}
 	}
+	nowDegraded := sc.capDegraded[capName]
 	sc.mu.Unlock()
+	if capName == "watch" && !wasDegraded && nowDegraded {
+		m.notifyCoverageForConn(sc)
+	}
 }
 
 // CallMutating executes a mutating RPC (e.g. pane.send / pane.answer) with T1's
@@ -1038,8 +1072,11 @@ func (m *Manager) Pause(ctx context.Context, userID, hostID int64, corralUser st
 			}
 			m.closeSharedConn(sc, true)
 			_, _ = m.store.SetCorraldStateIfIdle(ctx, hostID, StateStopped, StateRunning, StatePaused, StateLost)
+		} else {
+			m.scheduleWatchReconcile(sc)
 		}
 	}
+	m.notifyCoverageChanged([]int64{hostID})
 	return nil
 }
 
@@ -1570,6 +1607,8 @@ func (m *Manager) onHostConnectedOwned(ctx context.Context, userID, hostID int64
 					ctx, hostID, fingerprint, sshUser, m.gatewayID,
 					hello.Version, hello.Release, "", "", nil, time.Now().Unix(), false, nil,
 				)
+				m.scheduleWatchReconcile(sc)
+				m.notifyCoverageChanged([]int64{hostID})
 				m.evaluateUpdateAfterConnect(ctx, userID, hostID, corralUser, fingerprint, sshUser, nil, mergeReleaseLists(failedRec.ReleaseList(), cachedFailed, ch.FailedReleases))
 				return
 			}
@@ -2737,6 +2776,10 @@ func (m *Manager) runUpdateOp(ctx context.Context, rop *runningOp, op *store.Cor
 			win.ReadyAt, win.TargetVer, win.TargetRel, "", 0, "", 0,
 		)
 	}
+	if sc != nil {
+		m.scheduleWatchReconcile(sc)
+		m.notifyCoverageForConn(sc)
+	}
 }
 
 func (m *Manager) finishUpdateFailKeepPrev(op *store.CorraldOp, ch *store.CorraldHost, prevVer string, prevRel int64, targetVer, detail string) {
@@ -2962,6 +3005,9 @@ func (m *Manager) attachAndHello(
 		m.monitorConn(sc, client)
 	}()
 
+	m.scheduleWatchReconcile(sc)
+	m.notifyCoverageForConn(sc)
+
 	return nil
 }
 
@@ -3003,7 +3049,7 @@ func (m *Manager) handleDaemonEvent(sc *sharedConn, ev proto.Event) {
 			}()
 		}
 	case proto.EventAgentChanged:
-		// Stage T3a accepts agent.changed events cleanly without driving push yet.
+		m.handleAgentChangedEvent(sc, ev)
 	}
 }
 
@@ -3110,12 +3156,37 @@ func (m *Manager) reconnectSharedConn(ctx context.Context, sc *sharedConn, overr
 
 	health, _ := newClient.Health(ctx)
 
+	// Re-subscribe agent.watch immediately on the new client before swapping
+	// sc.client when any browser is actively watching this account (zero-gap
+	// handoff / reconnect).
+	var newWatchSub bool
+	var newWatchSig string
+	var newWatchDegraded bool
+	if isWatchHealthOK(health) {
+		var mf *proto.Manifest
+		if hello != nil {
+			mf = &hello.Manifest
+		}
+		if wantWatch, extraLogs := m.hasAnyRunningWatchDemand(ctx, sc, mf); wantWatch {
+			wctx, wcancel := context.WithTimeout(ctx, watchRPCTimeout)
+			wres, werr := newClient.Watch(wctx, extraLogs)
+			wcancel()
+			if werr != nil || !watchResultHealthy(wres) {
+				newWatchDegraded = true
+			} else {
+				newWatchSub = true
+				newWatchSig = watchLogsSignature(extraLogs)
+			}
+		}
+	}
+
 	// Transfer SSH ownership to sc so caller does not close the live SSH conn (Item 2).
 	newRelease := own.take()
 
 	sc.mu.Lock()
 	oldSSH := sc.sshClient
 	oldRelease := sc.sshRelease
+	sc.cancelUnsubTimerLocked()
 	sc.client = newClient
 	if sshClient != oldSSH {
 		sc.sshClient = sshClient
@@ -3133,6 +3204,18 @@ func (m *Manager) reconnectSharedConn(ctx context.Context, sc *sharedConn, overr
 	}
 	clear(sc.capFailures)
 	clear(sc.capDegraded)
+	if newWatchDegraded {
+		sc.capDegraded["watch"] = true
+	}
+	if newWatchSub {
+		sc.watchSubscribed = true
+		sc.watchClient = newClient
+		sc.watchLogsSig = newWatchSig
+	} else {
+		sc.watchSubscribed = false
+		sc.watchClient = nil
+		sc.watchLogsSig = ""
+	}
 	sc.mu.Unlock()
 
 	if oldClient != nil && oldClient != newClient {
@@ -3147,6 +3230,8 @@ func (m *Manager) reconnectSharedConn(ctx context.Context, sc *sharedConn, overr
 		defer m.wg.Done()
 		m.monitorConn(sc, newClient)
 	}()
+	m.scheduleWatchReconcile(sc)
+	m.notifyCoverageForConn(sc)
 	return nil
 }
 
@@ -3163,10 +3248,17 @@ func (m *Manager) monitorConn(sc *sharedConn, client *Client) {
 			sc.mu.Lock()
 			isCurrent := sc.client == client
 			intentional := sc.intentionalClose || sc.updating || sc.reconnecting
+			if isCurrent && sc.watchClient == client {
+				sc.cancelUnsubTimerLocked()
+				sc.watchSubscribed = false
+				sc.watchClient = nil
+				sc.watchLogsSig = ""
+			}
 			sc.mu.Unlock()
 			if !isCurrent || intentional {
 				return
 			}
+			m.notifyCoverageForConn(sc)
 			m.handleUnexpectedDisconnect(sc)
 			return
 		case <-ticker.C:
@@ -3185,7 +3277,9 @@ func (m *Manager) monitorConn(sc *sharedConn, client *Client) {
 			}
 			now := time.Now().Unix()
 			sc.mu.Lock()
+			prevWatchOK := isWatchHealthOK(sc.health)
 			sc.health = health
+			nowWatchOK := isWatchHealthOK(health)
 			refs := make([]int64, 0, len(sc.hostRefs))
 			for id := range sc.hostRefs {
 				refs = append(refs, id)
@@ -3193,6 +3287,12 @@ func (m *Manager) monitorConn(sc *sharedConn, client *Client) {
 			sc.mu.Unlock()
 			for _, hostID := range refs {
 				_ = m.store.TouchCorraldLastOK(context.Background(), hostID, now)
+			}
+			if prevWatchOK != nowWatchOK {
+				m.notifyCoverageForConn(sc)
+				if nowWatchOK {
+					m.scheduleWatchReconcile(sc)
+				}
 			}
 		}
 	}
@@ -3257,6 +3357,7 @@ func (m *Manager) handleUnexpectedDisconnect(sc *sharedConn) {
 	for _, ref := range refs {
 		_, _ = m.store.SetCorraldStateIfIdle(context.Background(), ref.HostID, StateLost, StateRunning)
 	}
+	m.notifyCoverageForConn(sc)
 
 	if triggerRollback {
 		if m.attemptPostUpdateRollback(sc, refs, updateTargetVer, updateTargetRel, prevVer, prevRel, prevRelTarget, homeDir, uid, libDir, stateDir, sockPath, machineID) {
@@ -3289,6 +3390,8 @@ func (m *Manager) handleUnexpectedDisconnect(sc *sharedConn) {
 					restartVer, restartRel, "", "", nil, now, false, nil,
 				)
 			}
+			m.scheduleWatchReconcile(sc)
+			m.notifyCoverageForConn(sc)
 			return
 		}
 		for _, ref := range refs {
@@ -4126,6 +4229,7 @@ func (m *Manager) detachHost(hostID int64) {
 	m.mu.Lock()
 	key, ok := m.hostConn[hostID]
 	delete(m.hostConn, hostID)
+	delete(m.hostExtraLogs, hostID)
 	var sc *sharedConn
 	if ok {
 		sc = m.conns[key]
@@ -4138,6 +4242,9 @@ func (m *Manager) detachHost(hostID int64) {
 		sc.mu.Unlock()
 		if empty {
 			m.closeSharedConn(sc, true)
+		} else {
+			m.scheduleWatchReconcile(sc)
+			m.notifyCoverageChanged([]int64{hostID})
 		}
 	}
 }
@@ -4147,6 +4254,7 @@ func (m *Manager) detachHostFromKey(hostID int64, wantKey accountKey) {
 	if curKey, ok := m.hostConn[hostID]; ok && curKey == wantKey {
 		delete(m.hostConn, hostID)
 	}
+	delete(m.hostExtraLogs, hostID)
 	sc := m.conns[wantKey]
 	m.mu.Unlock()
 	if sc != nil {
@@ -4156,13 +4264,21 @@ func (m *Manager) detachHostFromKey(hostID int64, wantKey accountKey) {
 		sc.mu.Unlock()
 		if empty {
 			m.closeSharedConn(sc, true)
+		} else {
+			m.scheduleWatchReconcile(sc)
+			m.notifyCoverageChanged([]int64{hostID})
 		}
 	}
 }
 
 func (m *Manager) closeSharedConn(sc *sharedConn, removeFromMap bool) {
+	affected := m.connHostIDs(sc)
 	sc.mu.Lock()
 	sc.intentionalClose = true
+	sc.cancelUnsubTimerLocked()
+	sc.watchSubscribed = false
+	sc.watchClient = nil
+	sc.watchLogsSig = ""
 	client := sc.client
 	sc.client = nil
 	rel := sc.sshRelease
@@ -4183,6 +4299,9 @@ func (m *Manager) closeSharedConn(sc *sharedConn, removeFromMap bool) {
 			delete(m.conns, sc.key)
 		}
 		m.mu.Unlock()
+	}
+	if len(affected) > 0 {
+		m.notifyCoverageChanged(affected)
 	}
 }
 
@@ -4402,7 +4521,12 @@ func (m *Manager) SetHealthCapsForTest(hostID int64, caps map[string]string) {
 		sc.health = &proto.HealthResult{}
 	}
 	sc.health.Caps = caps
+	nowWatchOK := isWatchHealthOK(sc.health)
 	sc.mu.Unlock()
+	m.notifyCoverageForConn(sc)
+	if nowWatchOK {
+		m.scheduleWatchReconcile(sc)
+	}
 }
 
 // SetRunningManifestForTest overrides the cached hello manifest on the live

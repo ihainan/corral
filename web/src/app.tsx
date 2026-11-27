@@ -1,6 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from 'react'
 import { forgetConversations } from './terminal/conversation'
 import { appBadge, forgetSessions, useWaitingCount } from './terminal/agents'
+import { setPushEventsActive } from './terminal/pushEvents'
 import { forgetColours } from './terminal/Code'
 import { forgetCorraldCache } from './corraldApi'
 import { Bot, ChevronLeft, Film, KeyRound, LogOut, ScrollText, Server, Settings, SquareTerminal, Users } from 'lucide-react'
@@ -130,6 +131,18 @@ export function App() {
     if (wasMe.current !== undefined && wasMe.current !== me?.id) appBadge(0)
     wasMe.current = me?.id
   }, [me?.id])
+
+  // Per-tab /api/events/ws hint push channel: active only while signed in.
+  useEffect(() => {
+    const on = !!(me && !me.must_change_password)
+    if (!on) {
+      setPushEventsActive(false)
+      return
+    }
+    setPushEventsActive(false)
+    setPushEventsActive(true)
+    return () => setPushEventsActive(false)
+  }, [me?.id, me?.must_change_password])
 
   // What the start-up answer says about the user (such as whether there are
   // recordings to see) is learnt again after signing in.

@@ -5,6 +5,7 @@ package web
 // workspaces and agents to the browser alongside the terminal stream.
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -932,6 +933,7 @@ func (s *Server) watchHerdr(sess *term.Session, h *store.Host) {
 		keys     map[string]string
 		keysRead bool
 	)
+	var lastPublished []byte
 	send := func(sum herdrSummary) { // (with mu held: none goes out of order)
 		sum.Keys, sum.KeysUnknown = keys, !keysRead
 		last = &sum
@@ -944,6 +946,10 @@ func (s *Server) watchHerdr(sess *term.Session, h *store.Host) {
 		lineage.decorate(&told)
 		if b, err := json.Marshal(told); err == nil {
 			sess.PublishMeta(b)
+			if !bytes.Equal(b, lastPublished) {
+				lastPublished = append(lastPublished[:0], b...)
+				s.events.NotifyAgentsChanged(sess.OwnerID, sess.HostID)
+			}
 		}
 	}
 	publish := func(sum herdrSummary) {

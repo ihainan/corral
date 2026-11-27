@@ -108,6 +108,14 @@ func (s *Server) initCorrald() {
 		Log:            s.log,
 		SSH:            &webSSHProvider{s: s},
 	})
+	s.wireCorraldEvents()
+}
+
+func (s *Server) wireCorraldEvents() {
+	if s.corrald == nil || s.events == nil {
+		return
+	}
+	s.corrald.SetWatchCallbacks(s.events.HandleAgentChanged, s.events.HandleCoverageChanged)
 }
 
 // CorraldManager exposes the gateway manager (for T3 integration and tests).

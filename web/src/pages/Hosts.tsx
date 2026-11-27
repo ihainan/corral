@@ -10,6 +10,8 @@ import { useFlip } from '../flip'
 import { useSession } from '../app'
 import { useCode } from '../terminal/CodeDialog'
 import { noteSessions, sessionAgents, waitingAgents } from '../terminal/agents'
+import { onPushAgents, watchPushHosts } from '../terminal/pushEvents'
+import { createAgentsHintCoalescer } from '../terminal/pushEventsLogic'
 import { sessionWhich } from '../terminal/sessionName'
 import { local } from '../storage'
 import { deskRowKey, useDeskPages } from '../workbench'
@@ -71,11 +73,24 @@ export function HostsPage() {
     const onVisible = () => document.visibilityState === 'visible' && load()
     document.addEventListener('visibilitychange', onVisible)
     const timer = setInterval(() => document.visibilityState === 'visible' && refreshSessions(), 10000)
+    const coalescer = createAgentsHintCoalescer({
+      isHidden: () => document.hidden,
+      onFlush: () => void refreshSessions(),
+    })
+    const offAgents = onPushAgents(() => coalescer.trigger())
     return () => {
       document.removeEventListener('visibilitychange', onVisible)
       clearInterval(timer)
+      offAgents()
+      coalescer.cancel()
     }
   }, [load, refreshSessions])
+
+  useEffect(() => {
+    if (!hosts?.length) return
+    const src = Symbol('hosts-page')
+    return watchPushHosts(src, hosts.map((h) => h.id))
+  }, [hosts])
 
   const { connect, busyHost, dialogs } = useConnect((s) => navigate('/t/' + s.id))
   const { boot } = useSession()
