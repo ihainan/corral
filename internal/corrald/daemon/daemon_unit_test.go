@@ -1656,26 +1656,62 @@ func TestShouldUpdateSharedSymlinkAndHandoffFailsClosedOnStatError(t *testing.T)
 		t.Cleanup(func() { _ = os.RemoveAll(layout.SocketDir) })
 	}
 
-	ok, err := shouldUpdateSharedSymlink(layout, 100)
+	ok, _, _, err := shouldUpdateSharedSymlink(layout, 100)
 	if err != nil || !ok {
 		t.Fatalf("missing symlink: got (%v, %v), want (true, nil)", ok, err)
 	}
+
+	// Round-5 #1: Dangling symlink pointing to release 300 (target missing)
+	// MUST be treated as absent/invalid so it gets replaced!
 	if err := AtomicSymlink("corrald-0.3.0-300/corrald", layout.CurrentSymlink); err != nil {
 		t.Fatal(err)
 	}
-	if ok, err := shouldUpdateSharedSymlink(layout, 200); err != nil || ok {
-		t.Fatalf("300 -> 200 downgrade: got (%v, %v), want (false, nil)", ok, err)
+	if ok, _, _, err := shouldUpdateSharedSymlink(layout, 200); err != nil || !ok {
+		t.Fatalf("dangling 300 -> 200: got (%v, %v), want (true, nil)", ok, err)
 	}
-	if ok, err := shouldUpdateSharedSymlink(layout, 300); err != nil || ok {
-		t.Fatalf("300 -> 300 equal: got (%v, %v), want (false, nil)", ok, err)
+
+	// Target binary with wrong permissions (0755 instead of 0700) is invalid!
+	v3Dir, _ := layout.VersionDir("0.3.0", 300)
+	if err := os.MkdirAll(v3Dir, 0o700); err != nil {
+		t.Fatal(err)
 	}
-	if ok, err := shouldUpdateSharedSymlink(layout, 400); err != nil || !ok {
-		t.Fatalf("300 -> 400 upgrade: got (%v, %v), want (true, nil)", ok, err)
+	v3Bin := filepath.Join(v3Dir, "corrald")
+	if err := os.WriteFile(v3Bin, []byte("v3"), 0o755); err != nil {
+		t.Fatal(err)
 	}
+	if ok, _, _, err := shouldUpdateSharedSymlink(layout, 200); err != nil || !ok {
+		t.Fatalf("0755 target 300 -> 200: got (%v, %v), want (true, nil)", ok, err)
+	}
+
+	// Target is a symlink instead of regular file -> invalid!
+	_ = os.Remove(v3Bin)
+	decoy := filepath.Join(v3Dir, "real")
+	_ = os.WriteFile(decoy, []byte("v3"), 0o700)
+	_ = os.Symlink(decoy, v3Bin)
+	if ok, _, _, err := shouldUpdateSharedSymlink(layout, 200); err != nil || !ok {
+		t.Fatalf("symlink target 300 -> 200: got (%v, %v), want (true, nil)", ok, err)
+	}
+	_ = os.Remove(v3Bin)
+	_ = os.Remove(decoy)
+
+	// Valid regular 0700 target owned by layout.UID inside 0700 dir -> preserved for <= 300!
+	if err := os.WriteFile(v3Bin, []byte("v3"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if ok, ver, rel, err := shouldUpdateSharedSymlink(layout, 200); err != nil || ok || ver != "0.3.0" || rel != 300 {
+		t.Fatalf("valid 300 -> 200: got (%v, %q, %d, %v), want (false, 0.3.0, 300, nil)", ok, ver, rel, err)
+	}
+	if ok, ver, rel, err := shouldUpdateSharedSymlink(layout, 300); err != nil || ok || ver != "0.3.0" || rel != 300 {
+		t.Fatalf("valid 300 -> 300: got (%v, %q, %d, %v), want (false, 0.3.0, 300, nil)", ok, ver, rel, err)
+	}
+	if ok, _, _, err := shouldUpdateSharedSymlink(layout, 400); err != nil || !ok {
+		t.Fatalf("valid 300 -> 400: got (%v, %v), want (true, nil)", ok, err)
+	}
+
 	// Regular file at symlink path -> Readlink error must fail closed.
 	_ = os.Remove(layout.CurrentSymlink)
 	_ = os.WriteFile(layout.CurrentSymlink, []byte("not-a-link"), 0o600)
-	if _, err := shouldUpdateSharedSymlink(layout, 400); err == nil {
+	if _, _, _, err := shouldUpdateSharedSymlink(layout, 400); err == nil {
 		t.Fatal("expected error when CurrentSymlink is not a symlink")
 	}
 

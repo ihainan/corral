@@ -2346,3 +2346,190 @@ func TestIntegrationRollbackClosesClientsEvenWhenLogBlocks(t *testing.T) {
 		t.Fatalf("expected rotated epoch after rollback with blocked logger: before=%q after=%q", hBefore.Epoch, hAfter.Epoch)
 	}
 }
+
+func TestIntegrationDanglingOrInvalidNewerSymlinkIsReplaced(t *testing.T) {
+	// Round-5 #1: If the shared symlink points to a higher release (300) whose
+	// target binary is missing (dangling) or fails mode/file checks (0755),
+	// both install and handoff MUST treat the symlink as absent and switch it
+	// to the current valid version (200) with matching README.txt!
+	bins := getTestBinaries(t)
+	home := t.TempDir()
+	const mid = "515151515151"
+	env := []string{"CORRALD_TEST_MACHINE_ID=" + mid}
+
+	libDir := filepath.Join(home, ".local", "lib", "corral")
+	installedBin := filepath.Join(libDir, "corrald")
+	readmePath := filepath.Join(libDir, "README.txt")
+	t.Cleanup(func() {
+		if _, err := os.Lstat(installedBin); err == nil {
+			_, _ = runCLI(t, installedBin, home, env, "uninstall")
+		}
+	})
+
+	// Part 1 (install): Pre-seed a dangling symlink pointing to missing release 300.
+	if err := os.MkdirAll(libDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := AtomicSymlink("corrald-0.3.0-300/corrald", installedBin); err != nil {
+		t.Fatal(err)
+	}
+	stage1 := stageBinary(t, home, mid, "op1", bins.v1)
+	if out, code := runCLI(t, filepath.Join(stage1, "corrald"), home, env,
+		"install", "--stage", stage1, "--op", "op1", "--gateway", "gw.dang", "--by", "alice"); code != 0 {
+		t.Fatalf("install v1 over dangling 300 symlink: %s", out)
+	}
+	link1, err := os.Readlink(installedBin)
+	if err != nil || !strings.Contains(link1, "0.1.0-100") {
+		t.Fatalf("install did not replace dangling 300 symlink: got %q (%v)", link1, err)
+	}
+	readme1, err := os.ReadFile(readmePath)
+	if err != nil || !strings.Contains(string(readme1), "0.1.0") {
+		t.Fatalf("README not updated after replacing dangling symlink: %v", err)
+	}
+
+	// Part 2 (handoff): Start v1, then point shared symlink to a release 300
+	// binary with invalid 0755 permissions. Handoff 100 -> 200 MUST replace it!
+	out, code := runCLI(t, installedBin, home, env, "serve", "--gateway", "gw.dang")
+	if code != 0 {
+		t.Fatalf("serve v1: %s", out)
+	}
+	sock := parseKV(out)["socket"]
+
+	stage2 := stageBinary(t, home, mid, "op2", bins.v2)
+	out, code = runCLI(t, filepath.Join(stage2, "corrald"), home, env,
+		"install", "--upgrade", "--stage", stage2, "--op", "op2", "--gateway", "gw.dang", "--by", "alice")
+	if code != 0 {
+		t.Fatalf("upgrade v2: %s", out)
+	}
+	v2Bin := parseKV(out)["binary"]
+	v2SHA, _ := FileSHA256(v2Bin)
+
+	bad300Dir := filepath.Join(libDir, "corrald-0.3.0-300")
+	if err := os.MkdirAll(bad300Dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(bad300Dir, "corrald"), []byte("bad-mode"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := AtomicSymlink("corrald-0.3.0-300/corrald", installedBin); err != nil {
+		t.Fatal(err)
+	}
+
+	var hres proto.HandoffResult
+	if err := callLocalRPC(sock, proto.MethodDaemonHandoff, proto.HandoffParams{
+		Path: v2Bin, SHA256: v2SHA, Release: 200,
+	}, &hres, 8*time.Second); err != nil {
+		t.Fatalf("handoff over invalid-mode 300 symlink failed: %v", err)
+	}
+	link2, err := os.Readlink(installedBin)
+	if err != nil || !strings.Contains(link2, "0.2.0-200") {
+		t.Fatalf("handoff did not replace invalid 0755 target symlink: got %q (%v)", link2, err)
+	}
+	readme2, err := os.ReadFile(readmePath)
+	if err != nil || !strings.Contains(string(readme2), "0.2.0") || !strings.Contains(string(readme2), "release 200") {
+		t.Fatalf("README not updated to 0.2.0 (release 200): %v\n%s", err, readme2)
+	}
+}
+
+func TestIntegrationInstallRetryAndHandoffRepairMissingOrStaleReadme(t *testing.T) {
+	// Round-5 #2:
+	// 1. First install of 0.1.0-100 switches symlink, then fails writing README
+	//    (readme_failed). Retrying the SAME release 100 after fixing the fault
+	//    MUST still write README.txt even though the symlink already points to 100.
+	// 2. On NFS, Machine B is at valid 300, but README.txt is stale (describes 100).
+	//    When Machine A handoffs 100 -> 200, symlink stays at 300 AND README.txt
+	//    is repaired to describe 300 (the link's active version)!
+	bins := getTestBinaries(t)
+	home := t.TempDir()
+	const midA = "52525252525a"
+	const midB = "52525252525b"
+	envA := []string{"CORRALD_TEST_MACHINE_ID=" + midA}
+	envB := []string{"CORRALD_TEST_MACHINE_ID=" + midB}
+
+	libDir := filepath.Join(home, ".local", "lib", "corral")
+	installedBin := filepath.Join(libDir, "corrald")
+	readmePath := filepath.Join(libDir, "README.txt")
+	t.Cleanup(func() {
+		_ = os.RemoveAll(readmePath)
+		if _, err := os.Lstat(installedBin); err == nil {
+			_, _ = runCLI(t, installedBin, home, envA, "uninstall")
+			_, _ = runCLI(t, installedBin, home, envB, "uninstall")
+		}
+	})
+
+	// Part 1: Block README.txt with a non-empty directory so first install fails with readme_failed.
+	if err := os.MkdirAll(filepath.Join(readmePath, "blocker"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	stageA1 := stageBinary(t, home, midA, "opA1", bins.v1)
+	out, code := runCLI(t, filepath.Join(stageA1, "corrald"), home, envA,
+		"install", "--stage", stageA1, "--op", "opA1", "--gateway", "gw.rm", "--by", "alice")
+	if code == 0 || parseKV(out)["error"] != "readme_failed" {
+		t.Fatalf("expected readme_failed on blocked README.txt, got code=%d:\n%s", code, out)
+	}
+	// Symlink was already switched to 100 before README failed.
+	if link, err := os.Readlink(installedBin); err != nil || !strings.Contains(link, "0.1.0-100") {
+		t.Fatalf("expected symlink at 0.1.0-100 before retry, got %q (%v)", link, err)
+	}
+
+	// Clear the fault and retry installing the SAME release 100!
+	if err := os.RemoveAll(readmePath); err != nil {
+		t.Fatal(err)
+	}
+	stageA1Retry := stageBinary(t, home, midA, "opA1r", bins.v1)
+	if out, code := runCLI(t, filepath.Join(stageA1Retry, "corrald"), home, envA,
+		"install", "--stage", stageA1Retry, "--op", "opA1r", "--gateway", "gw.rm", "--by", "alice"); code != 0 {
+		t.Fatalf("retry install v1 failed: %s", out)
+	}
+	rm1, err := os.ReadFile(readmePath)
+	if err != nil || !strings.Contains(string(rm1), "0.1.0") || !strings.Contains(string(rm1), "release 100") {
+		t.Fatalf("retry install of same release skipped README repair: %v\n%s", err, rm1)
+	}
+
+	// Part 2: Start A on 100, install B on 300, overwrite README.txt with stale 100 text,
+	// then handoff A from 100 -> 200 -> symlink stays 300 AND README is repaired to 300!
+	outA, code := runCLI(t, installedBin, home, envA, "serve", "--gateway", "gw.rm")
+	if code != 0 {
+		t.Fatalf("serve A: %s", outA)
+	}
+	sockA := parseKV(outA)["socket"]
+
+	stageB3 := stageBinary(t, home, midB, "opB3", bins.v3)
+	if out, code := runCLI(t, filepath.Join(stageB3, "corrald"), home, envB,
+		"install", "--stage", stageB3, "--op", "opB3", "--gateway", "gw.rm", "--by", "bob"); code != 0 {
+		t.Fatalf("install B v3: %s", out)
+	}
+
+	// Corrupt README.txt back to stale release 100 content.
+	if err := os.WriteFile(readmePath, rm1, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	stageA2 := stageBinary(t, home, midA, "opA2", bins.v2)
+	out, code = runCLI(t, filepath.Join(stageA2, "corrald"), home, envA,
+		"install", "--upgrade", "--stage", stageA2, "--op", "opA2", "--gateway", "gw.rm", "--by", "alice")
+	if code != 0 {
+		t.Fatalf("upgrade A v2: %s", out)
+	}
+	v2Bin := parseKV(out)["binary"]
+	v2SHA, _ := FileSHA256(v2Bin)
+
+	// Re-corrupt README.txt right before handoff as well, so we specifically verify handoff repairs it!
+	if err := os.WriteFile(readmePath, rm1, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var hres proto.HandoffResult
+	if err := callLocalRPC(sockA, proto.MethodDaemonHandoff, proto.HandoffParams{
+		Path: v2Bin, SHA256: v2SHA, Release: 200,
+	}, &hres, 8*time.Second); err != nil {
+		t.Fatalf("handoff A 100->200: %v", err)
+	}
+	if link, err := os.Readlink(installedBin); err != nil || !strings.Contains(link, "0.3.0-300") {
+		t.Fatalf("expected shared symlink to remain at 0.3.0-300, got %q (%v)", link, err)
+	}
+	rmAfter, err := os.ReadFile(readmePath)
+	if err != nil || !strings.Contains(string(rmAfter), "0.3.0") || !strings.Contains(string(rmAfter), "release 300") {
+		t.Fatalf("handoff did not repair stale README to match linked release 300: %v\n%s", err, rmAfter)
+	}
+}
