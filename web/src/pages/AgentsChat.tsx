@@ -3873,7 +3873,7 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
       ask={
         !readOnly && waits && replyTo ? (
           // (One a pane, and a process in it: nothing of another's carries over. Not tied to a terminal: no size to wait for.)
-          <InlineReply key={replyTo.key} target={replyTo} resizedAt={0} active={kActive} held={() => false} call={asked} pending={pendingCall} onAnswered={(yes) => {
+          <InlineReply key={replyTo.key} target={replyTo} resizedAt={0} active={kActive} held={() => false} call={asked} pending={pendingCall} agentVersion={convo.meta?.version} onAnswered={(yes) => {
             setAnswered(yes)
             // (Answered: not waiting in the list and the title either, at once — not at its next read. 11-14.)
             const pane = cur.pane

@@ -9,18 +9,9 @@ import { BellRing } from 'lucide-react'
 import { api, ApiError, errorText } from '../api'
 import { t, type I18nKey } from '../i18n'
 import { Dialog, useToast } from '../components/ui'
+import { ASK_HOOK_NO_NEED_VERSION, askHookRowState, asksFromScreen, hintOf, type AskHookInfo } from './askHookLogic'
 
-export interface AskHookInfo {
-  state?: 'on' | 'on-own' | 'off' | 'blocked'
-  why?: string
-  cannot?: 'link' | 'hard_link' | 'not_file' | 'invalid' | 'no_sum'
-  file: string
-  seen: string
-  snippet: string
-  declined: boolean
-  // The bell hook's (the same file): Claude Code rings the terminal's bell when it stops.
-  bell?: { state?: 'on' | 'off' | 'blocked'; why?: string; snippet: string }
-}
+export { ASK_HOOK_NO_NEED_VERSION, askHookRowState, asksFromScreen, hintOf, type AskHookInfo }
 
 // Which of the two hooks of the file: the question hook, or the bell.
 type HookName = 'ask' | 'bell'
@@ -74,30 +65,6 @@ function useAskHook(hostId: number, fresh = false) {
     for (const hear of told.get(hostId) ?? []) hear(i)
   }
   return { info, failed, set }
-}
-
-// hintOf: what the card says of the hook, from what the host's file says:
-// nothing (on — the question was asked before it — or not read), that hooks
-// are turned off there, that the file is one Corral leaves alone, the offer,
-// or (declined) only a quiet way back to it.
-export function hintOf(info: AskHookInfo | null): 'none' | 'blocked' | 'cannot' | 'offer' | 'declined' {
-  if (!info || info.state === 'on' || info.state === 'on-own') return 'none'
-  if (info.state === 'blocked') return 'blocked'
-  if (info.cannot) return 'cannot'
-  if (!info.state) return 'none'
-  return info.declined ? 'declined' : 'offer'
-}
-
-// asksFromScreen: a question of Claude Code's drawn from its screen, its log
-// not having it — where the card may offer the hook: drawn as one (a question
-// or a review page read off the screen), or the screen itself shown, with
-// Claude Code's question frame's own last line on it.
-export function asksFromScreen(o: { agent?: string; logAsks: boolean; screen?: string; drawn: boolean }): boolean {
-  if (o.agent !== 'claude' || o.logAsks || o.screen === undefined) return false
-  // (The frame's own last line, as the last line: words in a command a
-  // permission prompt shows do not make it one — review535-7.)
-  const last = o.screen.split('\n').filter((l) => l.trim()).pop() ?? ''
-  return o.drawn || /^\s*Enter to select\b.*\bEsc to cancel\s*$/.test(last)
 }
 
 const cannotText = (c: NonNullable<AskHookInfo['cannot']>) => t(('askHook.cannot.' + c) as I18nKey)
@@ -262,20 +229,20 @@ export function AskHookRow({ hostId, hostName }: { hostId: number; hostName: str
   else if (info.state === 'blocked') state = t('askHook.state.blocked', { why: info.why ?? '' })
   else if (info.state) state = t(('askHook.state.' + info.state) as I18nKey)
   else state = t('askHook.state.unknown')
-  const canChange = !!info && !info.cannot && (info.state === 'on' || info.state === 'off')
+  const row = askHookRowState(info)
   return (
     <section className="ask-hook-row" aria-labelledby="ask-hook-title">
       <h3 id="ask-hook-title">{t('askHook.row')}</h3>
-      <p className="hint">{t('askHook.rowHint', { file: info?.file ?? '~/.claude/settings.json' })}</p>
+      <p className="hint">{t(row.hintKey, { file: info?.file ?? '~/.claude/settings.json', min: ASK_HOOK_NO_NEED_VERSION })}</p>
       <p className="ask-hook-state" role="status">
         {state}
         {info?.cannot && <> · {cannotText(info.cannot)}</>}
       </p>
-      {info?.cannot && <Snippet info={info} />}
-      {canChange && (
+      {row.showSnippet && info && <Snippet info={info} />}
+      {(row.canTurnOn || row.canTurnOff) && info && (
         <div>
-          <button type="button" className="btn" onClick={() => setConfirming(info.state === 'off')}>
-            {t(info.state === 'off' ? 'askHook.turnOn' : 'askHook.turnOff')}
+          <button type="button" className="btn" onClick={() => setConfirming(row.canTurnOn)}>
+            {t(row.canTurnOn ? 'askHook.turnOn' : 'askHook.turnOff')}
           </button>
         </div>
       )}

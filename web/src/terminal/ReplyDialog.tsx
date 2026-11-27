@@ -609,7 +609,7 @@ function useFreshAsk(id: string): boolean {
   return at.id === id && at.fresh
 }
 
-export function InlineReply({ target, onLoaded, resizedAt, active = true, held, call, pending, onAnswered, waitSince }: { target: ReplyTarget; onLoaded?: () => void; resizedAt?: number; active?: boolean; held?: () => boolean; call?: ConvoTool; pending?: ConvoTool; onAnswered?: (yes: boolean) => void; waitSince?: number }) {
+export function InlineReply({ target, onLoaded, resizedAt, active = true, held, call, pending, onAnswered, waitSince, agentVersion }: { target: ReplyTarget; onLoaded?: () => void; resizedAt?: number; active?: boolean; held?: () => boolean; call?: ConvoTool; pending?: ConvoTool; onAnswered?: (yes: boolean) => void; waitSince?: number; agentVersion?: string }) {
   const toast = useToast()
   const showTerminal = useContext(ShowTerminal)
   const [sent, setSent] = useState<string | null>(null) // (the screen answered)
@@ -709,7 +709,7 @@ export function InlineReply({ target, onLoaded, resizedAt, active = true, held, 
   // (Claude Code's question drawn from its screen, its log not having it: on
   // the host, the hook that has it written at once may be offered — askHook.tsx.)
   const hookHint =
-    target.host && asksFromScreen({ agent: target.agent, logAsks, screen: screen?.text, drawn: !!fromScreen || !!reviewId }) ? <AskHookHint hostId={target.host.id} hostName={target.host.name} /> : null
+    target.host && asksFromScreen({ agent: target.agent, logAsks, screen: screen?.text, drawn: !!fromScreen || !!reviewId, version: agentVersion }) ? <AskHookHint hostId={target.host.id} hostName={target.host.name} /> : null
   const structured =
     !!screen &&
     (askAt >= 0 ||

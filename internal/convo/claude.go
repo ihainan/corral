@@ -597,6 +597,9 @@ func (c *Claude) Prepend(other Parser) {
 	if c.meta.Effort == "" {
 		c.meta.Effort = o.meta.Effort
 	}
+	if c.meta.Version == "" {
+		c.meta.Version = o.meta.Version
+	}
 	if !c.branchSaid {
 		c.meta.Branch, c.branchSaid = o.meta.Branch, o.branchSaid
 	}
@@ -755,6 +758,7 @@ type claudeRow struct {
 	Operation        string          `json:"operation"` // (queue-operation rows)
 	Content          json.RawMessage `json:"content"`   // (system rows)
 	GitBranch        *string         `json:"gitBranch"` // (present and empty: not on a branch)
+	Version          string          `json:"version"`
 	PermissionMode   string          `json:"permissionMode"`
 	Effort           string          `json:"effort"` // (assistant rows: how hard it was asked to think)
 	// (api-request rows: what a request to the model asked for.)
@@ -876,6 +880,9 @@ func (c *Claude) line(b []byte) {
 			br = ""
 		}
 		c.meta.Branch, c.branchSaid = clip(br, maxMeta), true
+	}
+	if v := strings.TrimSpace(r.Version); v != "" {
+		c.meta.Version = clip(v, maxMeta)
 	}
 	switch r.Type {
 	case "user", "assistant", "attachment", "system":
