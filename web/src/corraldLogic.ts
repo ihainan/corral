@@ -125,16 +125,7 @@ export const DEFAULT_INSTALL_STEPS = ['check', 'upload', 'verify', 'install', 's
 export const DEFAULT_REMOVE_STEPS = ['mark', 'stop', 'remove', 'verify'] as const
 export const DEFAULT_UPDATE_STEPS = ['upload', 'install', 'handoff', 'verify'] as const
 
-const NON_CANCELLABLE_STEPS = new Set([
-  'start',
-  'starting',
-  'serve',
-  'connect',
-  'connecting',
-  'verify_running',
-  'ready',
-  'done',
-])
+const NON_CANCELLABLE_STEPS = new Set(['start', 'done'])
 
 export type CorraldFailureKind =
   | 'unsupported_os'
@@ -249,7 +240,7 @@ export type DeleteHostOutcome =
   | { outcome: 'stop_failed'; pid: number; cmd: string }
   | { outcome: 'remove_pending'; cmd: string }
 
-// Returns true for 409 {code:"corrald_unknown_result"} (or {error:"corrald_unknown_result"}).
+// Returns true for 409 {error:"corrald_unknown_result"} (mapped to ApiError.code).
 export function isCorraldUnknownResult(e: unknown): boolean {
   if (!e || typeof e !== 'object') return false
   const err = e as { status?: unknown; code?: unknown }
@@ -302,45 +293,26 @@ export function opProgress(op: CorraldOp | null | undefined, fallbackKind: Corra
 }
 
 export function corraldFailureKind(code: string | undefined): CorraldFailureKind {
-  const c = (code ?? '').trim().toLowerCase()
-  switch (c) {
+  switch ((code ?? '').trim().toLowerCase()) {
     case 'unsupported_os':
-    case 'macos':
-    case 'os_unsupported':
       return 'unsupported_os'
     case 'unsupported_arch':
-    case 'arch_unsupported':
       return 'unsupported_arch'
     case 'home_readonly':
-    case 'noexec':
-    case 'home_noexec':
-    case 'readonly_home':
-    case 'permission_denied':
       return 'home_readonly'
     case 'no_space':
-    case 'disk_full':
-    case 'quota_exceeded':
-    case 'enospc':
       return 'no_space'
     case 'checksum_mismatch':
-    case 'verify_failed':
-    case 'digest_mismatch':
       return 'checksum_mismatch'
     case 'start_failed':
-    case 'serve_failed':
       return 'start_failed'
     case 'disconnected':
-    case 'connection_lost':
-    case 'gateway_restarted':
-    case 'no_connection':
       return 'disconnected'
     case 'update_failed':
-    case 'handoff_failed':
       return 'update_failed'
     case 'stop_failed':
       return 'stop_failed'
     case 'partial':
-    case 'remove_partial':
       return 'partial'
     case 'removing':
       return 'removing'

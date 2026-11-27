@@ -26,6 +26,7 @@ import (
 	"github.com/pkg/sftp"
 	"golang.org/x/crypto/ssh"
 
+	"github.com/ihainan/corral/internal/corrald/gw"
 	"github.com/ihainan/corral/internal/herdr"
 	"github.com/ihainan/corral/internal/netguard"
 	"github.com/ihainan/corral/internal/sftplite"
@@ -120,6 +121,9 @@ type openBody struct {
 	// After a host key change: the fingerprint the user saw and accepted.
 	// The connection only goes ahead if the host presents exactly this key.
 	AcceptFingerprint string `json:"accept_fingerprint"`
+	// KeepCorrald controls whether an existing corrald authorization carries
+	// over to the newly accepted host key (nil or true = keep; false = rebind).
+	KeepCorrald *bool `json:"keep_corrald"`
 	// What to open; absent, the host is asked what it has and the answer
 	// lists it to choose from (with Pending, the connection kept for that).
 	Open    *openChoice `json:"open"`
@@ -333,6 +337,17 @@ func (s *Server) openSession(ctx context.Context, w http.ResponseWriter, r *http
 	if sess.Persistence == store.PersistHerdr {
 		go s.watchHerdr(sess, h)
 	}
+	if mgr := s.corrald; mgr != nil && mgr.Available() {
+		fp := ""
+		if k, kerr := s.store.HostKey(r.Context(), u.ID, h.ID); kerr == nil {
+			fp = k.Fingerprint
+		}
+		go func(m *gw.Manager, uid, hid int64, uname, fpStr, sshUser string, c *ssh.Client) {
+			cctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			m.OnHostConnected(cctx, uid, hid, uname, fpStr, sshUser, c)
+		}(mgr, u.ID, h.ID, u.Username, fp, h.Username, sess.Client())
+	}
 	_ = s.store.TouchHostConnected(r.Context(), u.ID, h.ID)
 	s.audit(r, "session.open", hostTarget(h), map[string]any{"session": sess.ID, "open": choice.Kind})
 	writeJSON(w, http.StatusCreated, sess.Info())
@@ -410,8 +425,11 @@ func (s *Server) dialForOpen(ctx context.Context, w http.ResponseWriter, r *http
 			writeJumpError(w, err)
 		case errors.As(err, &hk):
 			s.audit(r, "hostkey.mismatch", hostTarget(h), map[string]any{"expected": hk.Expected, "got": hk.Got})
-			writeErrorExtra(w, http.StatusConflict, "host_key_changed", "the host key has changed",
-				map[string]any{"expected": hk.Expected, "got": hk.Got})
+			extra := map[string]any{"expected": hk.Expected, "got": hk.Got}
+			if s.hasActiveCorraldAuth(ctx, u.ID, h.ID) {
+				extra["corrald_enabled"] = true
+			}
+			writeErrorExtra(w, http.StatusConflict, "host_key_changed", "the host key has changed", extra)
 		case errors.Is(err, netguard.ErrForbidden):
 			s.audit(r, "session.forbidden", hostTarget(h), nil)
 			writeError(w, http.StatusForbidden, "target_forbidden", "this address is not allowed (CORRAL_ALLOWED_NETWORKS, CORRAL_DENIED_NETWORKS)")
@@ -429,6 +447,12 @@ func (s *Server) dialForOpen(ctx context.Context, w http.ResponseWriter, r *http
 	}
 	if accepted {
 		s.audit(r, "hostkey.accept", hostTarget(h), map[string]any{"fingerprint": dialed.SeenKey.Fingerprint})
+		// Carry over corrald authorization on confirmed key rotation unless the user opted out.
+		keepCorrald := b.KeepCorrald == nil || *b.KeepCorrald
+		_ = s.store.UpdateCorraldFingerprint(ctx, h.ID, dialed.SeenKey.Fingerprint, keepCorrald)
+		if s.corrald != nil {
+			s.corrald.DetachHost(h.ID)
+		}
 		// Another machine key: nothing connected under the old one is reused.
 		_ = s.store.BumpConnVersion(ctx, u.ID, h.ID)
 		s.closeHostForwards(u.ID, h.ID)

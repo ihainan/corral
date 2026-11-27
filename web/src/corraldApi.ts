@@ -1,6 +1,5 @@
 // REST client for the host helper daemon (corrald), matching spec section 8.
-import { api, ApiError, authGen, unauthorized } from './api'
-import { t } from './i18n'
+import { api, ApiError } from './api'
 import type {
   CorraldOp,
   CorraldStatus,
@@ -41,12 +40,6 @@ export interface CorraldReadme {
   format: 'markdown' | 'text'
 }
 
-function unwrapOp(res: CorraldOp | { op: CorraldOp } | null | undefined): CorraldOp | null {
-  if (!res) return null
-  if ('op' in res && res.op) return res.op
-  return res as CorraldOp
-}
-
 // Returns null when the gateway does not expose corrald (404).
 export async function getHostCorrald(hostId: number, signal?: AbortSignal): Promise<CorraldStatus | null> {
   try {
@@ -60,14 +53,12 @@ export async function getHostCorrald(hostId: number, signal?: AbortSignal): Prom
 export async function installHostCorrald(
   hostId: number,
   body: { manifest_hash?: string; rebind?: boolean } = {},
-): Promise<CorraldOp | null> {
-  const res = await api<CorraldOp | { op: CorraldOp }>('POST', `/api/hosts/${hostId}/corrald/install`, body)
-  return unwrapOp(res)
+): Promise<CorraldOp> {
+  return api<CorraldOp>('POST', `/api/hosts/${hostId}/corrald/install`, body)
 }
 
-export async function cancelHostCorrald(hostId: number): Promise<CorraldOp | null> {
-  const res = await api<CorraldOp | { op: CorraldOp } | null>('POST', `/api/hosts/${hostId}/corrald/cancel`)
-  return unwrapOp(res)
+export async function cancelHostCorrald(hostId: number): Promise<CorraldOp> {
+  return api<CorraldOp>('POST', `/api/hosts/${hostId}/corrald/cancel`)
 }
 
 export async function pauseHostCorrald(hostId: number): Promise<void> {
@@ -78,22 +69,19 @@ export async function resumeHostCorrald(hostId: number): Promise<void> {
   await api('POST', `/api/hosts/${hostId}/corrald/resume`)
 }
 
-export async function removeHostCorrald(hostId: number): Promise<CorraldOp | null> {
-  const res = await api<CorraldOp | { op: CorraldOp }>('POST', `/api/hosts/${hostId}/corrald/remove`)
-  return unwrapOp(res)
+export async function removeHostCorrald(hostId: number): Promise<CorraldOp> {
+  return api<CorraldOp>('POST', `/api/hosts/${hostId}/corrald/remove`)
 }
 
 export async function updateHostCorrald(
   hostId: number,
   body: { manifest_hash?: string; replace?: boolean } = {},
-): Promise<CorraldOp | null> {
-  const res = await api<CorraldOp | { op: CorraldOp }>('POST', `/api/hosts/${hostId}/corrald/update`, body)
-  return unwrapOp(res)
+): Promise<CorraldOp> {
+  return api<CorraldOp>('POST', `/api/hosts/${hostId}/corrald/update`, body)
 }
 
-export async function retryHostCorrald(hostId: number): Promise<CorraldOp | null> {
-  const res = await api<CorraldOp | { op: CorraldOp }>('POST', `/api/hosts/${hostId}/corrald/retry`)
-  return unwrapOp(res)
+export async function retryHostCorrald(hostId: number): Promise<CorraldOp> {
+  return api<CorraldOp>('POST', `/api/hosts/${hostId}/corrald/retry`)
 }
 
 export async function deleteHostWithOptions(
@@ -103,54 +91,8 @@ export async function deleteHostWithOptions(
   return api<DeleteHostResult | null>('DELETE', `/api/hosts/${hostId}`, opts)
 }
 
-// Fetches GET /api/corrald/readme. Accepts either plain text/Markdown
-// (matching README.txt directly) or JSON ({content|text|markdown, title?, manifest_hash?}).
 export async function getCorraldReadme(signal?: AbortSignal): Promise<CorraldReadme> {
-  const sentAt = authGen()
-  let res: Response
-  let raw: string
-  try {
-    res = await fetch('/api/corrald/readme', { credentials: 'same-origin', signal })
-    raw = await res.text()
-  } catch {
-    if (signal?.aborted) throw new ApiError(0, 'aborted', '')
-    throw new ApiError(0, 'network', t('error.network'))
-  }
-  const ct = (res.headers.get('content-type') ?? '').toLowerCase()
-  let parsed: Record<string, unknown> | null = null
-  if (ct.includes('application/json') || raw.trimStart().startsWith('{')) {
-    try {
-      const v = JSON.parse(raw)
-      if (v && typeof v === 'object') parsed = v as Record<string, unknown>
-    } catch {
-      /* treat as plain text */
-    }
-  }
-  if (!res.ok) {
-    if (res.status === 401) unauthorized(sentAt)
-    const code = String(parsed?.error ?? parsed?.code ?? 'internal')
-    const msg = String(parsed?.message ?? '')
-    throw new ApiError(res.status, code, msg, parsed?.extra as Record<string, unknown> | undefined)
-  }
-  if (parsed) {
-    const content = String(parsed.content ?? parsed.markdown ?? parsed.text ?? '')
-    const isMd = ct.includes('markdown') || typeof parsed.markdown === 'string' || looksLikeMarkdown(content)
-    return {
-      content,
-      title: typeof parsed.title === 'string' ? parsed.title : undefined,
-      manifest_hash: typeof parsed.manifest_hash === 'string' ? parsed.manifest_hash : undefined,
-      format: isMd ? 'markdown' : 'text',
-    }
-  }
-  const isMd = ct.includes('markdown') || looksLikeMarkdown(raw)
-  return {
-    content: raw,
-    format: isMd ? 'markdown' : 'text',
-  }
-}
-
-function looksLikeMarkdown(s: string): boolean {
-  return /(^|\n)#{1,6}\s+/.test(s) || /(^|\n)[-*]\s+/.test(s) || /```/.test(s)
+  return api<CorraldReadme>('GET', '/api/corrald/readme', undefined, { signal })
 }
 
 // Lightweight shared pub/sub cache per host so HostEdit and the workbench

@@ -245,10 +245,8 @@ function baseStatus(overrides = {}) {
 // 4. Operation outcomes & failure mapping.
 {
   assert.equal(corraldFailureKind('unsupported_os'), 'unsupported_os')
-  assert.equal(corraldFailureKind('macos'), 'unsupported_os')
   assert.equal(corraldFailureKind('unsupported_arch'), 'unsupported_arch')
   assert.equal(corraldFailureKind('home_readonly'), 'home_readonly')
-  assert.equal(corraldFailureKind('noexec'), 'home_readonly')
   assert.equal(corraldFailureKind('no_space'), 'no_space')
   assert.equal(corraldFailureKind('checksum_mismatch'), 'checksum_mismatch')
   assert.equal(corraldFailureKind('start_failed'), 'start_failed')
@@ -256,6 +254,8 @@ function baseStatus(overrides = {}) {
   assert.equal(corraldFailureKind('update_failed'), 'update_failed')
   assert.equal(corraldFailureKind('stop_failed'), 'stop_failed')
   assert.equal(corraldFailureKind('partial'), 'partial')
+  assert.equal(corraldFailureKind('removing'), 'removing')
+  assert.equal(corraldFailureKind('unknown_code'), 'other')
 
   // Partial remove in section model
   const stPartial = baseStatus({

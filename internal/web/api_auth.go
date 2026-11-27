@@ -860,7 +860,7 @@ func signInAs(name string) map[string]any {
 // action ("login" of "login.failed"). Anything else is "other".
 var auditKinds = map[string][]string{
 	"account":  {"login", "logout", "password", "totp", "user", "admin", "invite", "setup", "push"},
-	"hosts":    {"host", "hostkey", "credential"},
+	"hosts":    {"host", "hostkey", "credential", "corrald"},
 	"sessions": {"session", "recording", "file", "forward", "code"},
 	"agents":   {"convo", "agents", "herdr"},
 }

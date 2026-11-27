@@ -14,8 +14,8 @@ export function estimateSize() {
 
 // choice: what is being opened (none yet: the host is asked what it has).
 type Pending =
-  | { kind: 'password'; host: Host; accept?: string; choice?: OpenChoice }
-  | { kind: 'hostkey'; host: Host; expected: string; got: string; password?: string; choice?: OpenChoice }
+  | { kind: 'password'; host: Host; accept?: string; keepCorrald?: boolean; choice?: OpenChoice }
+  | { kind: 'hostkey'; host: Host; expected: string; got: string; corraldEnabled?: boolean; password?: string; choice?: OpenChoice }
   | { kind: 'choose'; host: Host; found: HostChoices }
   | null
 
@@ -31,6 +31,7 @@ export function useConnect(onOpen: (s: SessionInfo) => void): {
   const toast = useToast()
   const [busyHost, setBusyHost] = useState<number | null>(null)
   const [pending, setPending] = useState<Pending>(null)
+  const [keepCorrald, setKeepCorrald] = useState(true)
   // Each attempt gets a number; cancelling bumps it so a late success is undone
   // instead of navigating the user somewhere they backed out of.
   const attempt = useRef(0)
@@ -47,7 +48,14 @@ export function useConnect(onOpen: (s: SessionInfo) => void): {
     setBusyHost(null)
   }
 
-  const open = async (h: Host, password?: string, accept?: string, choice?: OpenChoice, token?: string): Promise<'done' | 'retry-password'> => {
+  const open = async (
+    h: Host,
+    password?: string,
+    accept?: string,
+    choice?: OpenChoice,
+    token?: string,
+    keepCorraldOpt?: boolean,
+  ): Promise<'done' | 'retry-password'> => {
     if (inflight.current) return 'done' // a second tap while connecting does nothing
     inflight.current = true
     const mine = ++attempt.current
@@ -56,7 +64,13 @@ export function useConnect(onOpen: (s: SessionInfo) => void): {
       // reused: an already running tmux/herdr session was returned, which
       // other devices may be using.
       const s = await api<(SessionInfo & { reused?: boolean }) | HostChoices>('POST', '/api/sessions', {
-        host_id: h.id, ...estimateSize(), password, accept_fingerprint: accept, open: choice ?? null, pending: token,
+        host_id: h.id,
+        ...estimateSize(),
+        password,
+        accept_fingerprint: accept,
+        ...(keepCorraldOpt !== undefined ? { keep_corrald: keepCorraldOpt } : {}),
+        open: choice ?? null,
+        pending: token,
       })
       if ('choose' in s) {
         // The host was asked what it has: the user picks (the connection is
@@ -81,11 +95,20 @@ export function useConnect(onOpen: (s: SessionInfo) => void): {
       if (mine !== attempt.current) return 'done'
       if (e instanceof ApiError) {
         if (e.code === 'password_required') {
-          setPending({ kind: 'password', host: h, accept, choice })
+          setPending({ kind: 'password', host: h, accept, keepCorrald: keepCorraldOpt, choice })
           return 'done'
         }
         if (e.code === 'host_key_changed') {
-          setPending({ kind: 'hostkey', host: h, expected: String(e.extra.expected), got: String(e.extra.got), password, choice })
+          setKeepCorrald(true)
+          setPending({
+            kind: 'hostkey',
+            host: h,
+            expected: String(e.extra.expected),
+            got: String(e.extra.got),
+            corraldEnabled: Boolean(e.extra.corrald_enabled),
+            password,
+            choice,
+          })
           return 'done'
         }
         if (e.code === 'auth_failed' && h.auth === 'ask') {
@@ -109,7 +132,13 @@ export function useConnect(onOpen: (s: SessionInfo) => void): {
   let dialogs: ReactNode = null
   if (pending?.kind === 'password') {
     const p = pending
-    dialogs = <PasswordDialog host={p.host} onClose={cancel} onSubmit={(pw) => open(p.host, pw, p.accept, p.choice)} />
+    dialogs = (
+      <PasswordDialog
+        host={p.host}
+        onClose={cancel}
+        onSubmit={(pw) => open(p.host, pw, p.accept, p.choice, undefined, p.keepCorrald)}
+      />
+    )
   } else if (pending?.kind === 'hostkey') {
     const p = pending
     dialogs = (
@@ -123,6 +152,22 @@ export function useConnect(onOpen: (s: SessionInfo) => void): {
           <dt>{t('hostkey.got')}</dt>
           <dd className="mono">{p.got}</dd>
         </dl>
+        {p.corraldEnabled && (
+          <div className="alert-checks">
+            <label>
+              <input
+                type="checkbox"
+                checked={keepCorrald}
+                disabled={busyHost === p.host.id}
+                onChange={(e) => setKeepCorrald(e.target.checked)}
+              />
+              <span>
+                {t('hostkey.keepCorrald')}
+                <small>{t('hostkey.keepCorraldHint')}</small>
+              </span>
+            </label>
+          </div>
+        )}
         <div className="dialog-actions">
           <button className="btn" onClick={cancel}>{t('common.cancel')}</button>
           <button
@@ -131,8 +176,12 @@ export function useConnect(onOpen: (s: SessionInfo) => void): {
             onClick={() => {
               // Retry with the exact fingerprint shown above: the gateway re-pins
               // only if the host presents that very key.
-              if (p.host.auth === 'ask' && !p.password) setPending({ kind: 'password', host: p.host, accept: p.got, choice: p.choice })
-              else void open(p.host, p.password, p.got, p.choice)
+              const keepOpt = p.corraldEnabled ? keepCorrald : undefined
+              if (p.host.auth === 'ask' && !p.password) {
+                setPending({ kind: 'password', host: p.host, accept: p.got, keepCorrald: keepOpt, choice: p.choice })
+              } else {
+                void open(p.host, p.password, p.got, p.choice, undefined, keepOpt)
+              }
             }}
           >
             {t('hostkey.trust')}

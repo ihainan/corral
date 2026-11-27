@@ -21,6 +21,7 @@ import (
 
 	"github.com/ihainan/corral/internal/auth"
 	"github.com/ihainan/corral/internal/config"
+	"github.com/ihainan/corral/internal/corrald/gw"
 	"github.com/ihainan/corral/internal/netguard"
 	"github.com/ihainan/corral/internal/notify"
 	"github.com/ihainan/corral/internal/perf"
@@ -115,6 +116,7 @@ type Server struct {
 
 	restores restorer // sessions open before the restart, being opened again (restore.go)
 	perf     *perf.Tracker
+	corrald  *gw.Manager
 }
 
 type liveSocket struct {
@@ -177,11 +179,23 @@ func New(d Deps) *Server {
 		s.cancelRestores(userID, 0)
 		s.closeUserForwards(userID)
 		s.forgetUserCode(userID)
+		if s.corrald != nil {
+			go func(uid int64) {
+				cctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+				defer cancel()
+				uname := ""
+				if u, err := s.store.UserByID(cctx, uid); err == nil {
+					uname = u.Username
+				}
+				s.corrald.CleanupUserHosts(cctx, uid, uname)
+			}(userID)
+		}
 		if s.notifier != nil {
 			s.notifier.Revoke(userID)
 		}
 		s.terms.CloseUser(userID, "access revoked")
 	}
+	s.initCorrald()
 	if s.cfg.DataDir != "" {
 		if err := s.startRecordings(); err != nil {
 			s.log.Error("cannot prepare session recordings; sessions are not recorded", "err", err)
@@ -337,6 +351,16 @@ func (s *Server) registerRoutes() {
 	s.handle("GET /api/hosts/{id}/code", SignedIn, s.apiCodeStatus)
 	s.handle("POST /api/hosts/{id}/code", SignedIn, s.apiCodeStart)
 	s.handle("POST /api/hosts/{id}/code/stop", SignedIn, s.apiCodeStop)
+
+	s.handle("GET /api/corrald/readme", SignedIn, s.apiCorraldReadme)
+	s.handle("GET /api/hosts/{id}/corrald", SignedIn, s.apiGetHostCorrald)
+	s.handle("POST /api/hosts/{id}/corrald/install", SignedIn, s.apiInstallHostCorrald)
+	s.handle("POST /api/hosts/{id}/corrald/cancel", SignedIn, s.apiCancelHostCorrald)
+	s.handle("POST /api/hosts/{id}/corrald/pause", SignedIn, s.apiPauseHostCorrald)
+	s.handle("POST /api/hosts/{id}/corrald/resume", SignedIn, s.apiResumeHostCorrald)
+	s.handle("POST /api/hosts/{id}/corrald/remove", SignedIn, s.apiRemoveHostCorrald)
+	s.handle("POST /api/hosts/{id}/corrald/update", SignedIn, s.apiUpdateHostCorrald)
+	s.handle("POST /api/hosts/{id}/corrald/retry", SignedIn, s.apiRetryHostCorrald)
 
 	s.handle("GET /api/push", SignedIn, s.apiPushInfo)
 	s.handle("POST /api/push/subscriptions", SignedIn, s.apiPushSubscribe)

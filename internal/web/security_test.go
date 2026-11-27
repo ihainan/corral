@@ -52,7 +52,20 @@ func TestRouteTableIsExplicit(t *testing.T) {
 		}
 	}
 	// Host-scoped routes added later are signed-in (and owner-checked by ownedHost).
-	signedIn := map[string]bool{"GET /api/hosts/{id}/code": false, "POST /api/hosts/{id}/code": false, "POST /api/hosts/{id}/code/stop": false}
+	signedIn := map[string]bool{
+		"GET /api/hosts/{id}/code":             false,
+		"POST /api/hosts/{id}/code":            false,
+		"POST /api/hosts/{id}/code/stop":       false,
+		"GET /api/corrald/readme":              false,
+		"GET /api/hosts/{id}/corrald":          false,
+		"POST /api/hosts/{id}/corrald/install": false,
+		"POST /api/hosts/{id}/corrald/cancel":  false,
+		"POST /api/hosts/{id}/corrald/pause":   false,
+		"POST /api/hosts/{id}/corrald/resume":  false,
+		"POST /api/hosts/{id}/corrald/remove":  false,
+		"POST /api/hosts/{id}/corrald/update":  false,
+		"POST /api/hosts/{id}/corrald/retry":   false,
+	}
 	for _, r := range h.srv.Routes() {
 		if _, ok := signedIn[r.Method+" "+r.Pattern]; ok {
 			signedIn[r.Method+" "+r.Pattern] = r.Access == SignedIn
@@ -100,6 +113,14 @@ func TestCrossUserAccessIsNotFound(t *testing.T) {
 		{"DELETE", hostPath, nil},
 		{"GET", hostPath + "/hostkey", nil},
 		{"DELETE", hostPath + "/hostkey", nil},
+		{"GET", hostPath + "/corrald", nil},
+		{"POST", hostPath + "/corrald/install", nil},
+		{"POST", hostPath + "/corrald/cancel", nil},
+		{"POST", hostPath + "/corrald/pause", nil},
+		{"POST", hostPath + "/corrald/resume", nil},
+		{"POST", hostPath + "/corrald/remove", nil},
+		{"POST", hostPath + "/corrald/update", nil},
+		{"POST", hostPath + "/corrald/retry", nil},
 		{"PUT", fmt.Sprintf("/api/credentials/%d", keyID), map[string]any{"name": "mine"}},
 		{"DELETE", fmt.Sprintf("/api/credentials/%d", keyID), nil},
 		{"POST", "/api/sessions", map[string]any{"host_id": hostID}},
@@ -445,6 +466,8 @@ func TestRemoteExecCallSitesAreReviewed(t *testing.T) {
 		"term/session.go: s.rec.Output(buf[:n])": true, // the session recorder, not a process
 		"corrald/daemon/cli.go: proc, err := os.StartProcess(exe, argv, &os.ProcAttr{":            true, // corrald serve detaching: re-executes its own binary (os.Executable) with fixed serve arguments; runs on the user's host, never anything from a request
 		"corrald/daemon/handoff.go: proc, err := os.StartProcess(resolvedPath, argv, &os.ProcAttr{": true, // hot update: executes the new corrald only after the path is checked to be under ~/.local/lib/corral/, owned by the user, mode 0700 and matching the sha256 the gateway sent
+		"corrald/gw/dist.go: return cmd.Output()":                                                  true, // gateway startup: executes bundled local corrald binary with fixed subcommand ("version" or "manifest") to read metadata
+		"corrald/gw/exec.go: res, err := sshx.Exec(ctx, c, cmd, limit, opt)":                       true, // corrald gateway installer/lifecycle: single exec helper running only fixed scripts from corrald/gw/commands.go with sshx.QuoteShell arguments
 	}
 	re := regexp.MustCompile(`\.(Start|Run|Output|CombinedOutput|Exec|StartProcess)\(|SendRequest\("exec"`)
 	root, _ := filepath.Abs("..")

@@ -16,6 +16,7 @@ import (
 
 	"golang.org/x/crypto/ssh"
 
+	"github.com/ihainan/corral/internal/sshx"
 	"github.com/ihainan/corral/internal/store"
 )
 
@@ -346,9 +347,10 @@ func (s *Server) updateHost(w http.ResponseWriter, r *http.Request, b *hostBody)
 		return
 	}
 	endpointChanged := h.Address != b.Address || h.Port != b.Port || !sameID(h.JumpHostID, b.JumpHostID)
+	usernameChanged := h.Username != b.Username
 	// Anything that changes what a connection to the host is: connections
 	// made before are then neither reused nor borrowed nor kept in the pool.
-	connChanged := endpointChanged || h.Username != b.Username || h.Auth != b.Auth ||
+	connChanged := endpointChanged || usernameChanged || h.Auth != b.Auth ||
 		(b.Auth == store.AuthKey && !sameID(h.CredentialID, b.CredentialID)) || (b.Auth == store.AuthPassword && b.Password != "")
 	oldCred := h.CredentialID
 	oldAuth := h.Auth
@@ -416,6 +418,12 @@ func (s *Server) updateHost(w http.ResponseWriter, r *http.Request, b *hostBody)
 	if endpointChanged {
 		_ = s.store.ForgetHostKey(bg, u.ID, h.ID) // a different machine is verified afresh
 	}
+	if endpointChanged || usernameChanged {
+		_ = s.store.MarkCorraldRebind(bg, h.ID)
+		if s.corrald != nil {
+			s.corrald.DetachHost(h.ID)
+		}
+	}
 	if connChanged {
 		// Nothing open through the old settings carries on, here or on the
 		// hosts reached through this one.
@@ -445,14 +453,91 @@ func (s *Server) deleteHost(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	var opts struct {
+		RemoveCorrald bool `json:"remove_corrald"`
+		StopVSCode    bool `json:"stop_vscode"`
+		RemoveVSCode  bool `json:"remove_vscode"`
+	}
+	hasBody := r.ContentLength != 0
+	if hasBody {
+		if err := readJSON(r, &opts); err != nil {
+			writeError(w, http.StatusBadRequest, "bad_request", err.Error())
+			return
+		}
+	}
 	// Hosts reached through it keep it.
 	if names, err := s.store.HostsThrough(r.Context(), u.ID, h.ID); err == nil && len(names) > 0 {
 		writeErrorExtra(w, http.StatusConflict, "jump_in_use", "other hosts are reached through this host", map[string]any{"hosts": names})
 		return
 	}
-	// VS Code left running on the host is stopped (best effort, after the
-	// delete, with what is needed to reach the host read now).
-	stopCode := s.codeStopperFor(r.Context(), h)
+
+	// When explicit cleanup options are provided, attempt synchronous host cleanup
+	// while credentials are still present; if unreachable, proceed to delete the
+	// host record anyway and return manual cleanup instructions (spec §8).
+	var (
+		reachable      = true
+		corraldOutcome any
+		vscodeOutcome  map[string]any
+		stopCode       func()
+	)
+	if hasBody && (opts.RemoveCorrald || opts.StopVSCode || opts.RemoveVSCode) {
+		var (
+			sshClient *ssh.Client
+			release   = func() {}
+			fp        string
+		)
+		if k, kerr := s.store.HostKey(r.Context(), u.ID, h.ID); kerr == nil {
+			fp = k.Fingerprint
+		}
+		// Borrow a running terminal SSH connection if available, else dial once.
+		cfg := hostConfig(h)
+		for _, rs := range s.terms.Running(u.ID, h.ID) {
+			if rs.HostConfig == cfg && rs.Client() != nil {
+				sshClient = rs.Client()
+				break
+			}
+		}
+		if sshClient == nil {
+			if t, terr := s.storedTarget(r.Context(), h); terr == nil {
+				dctx, dcancel := context.WithTimeout(r.Context(), 15*time.Second)
+				if dialed, derr := sshx.Dial(dctx, s.guard, *t); derr == nil {
+					sshClient = dialed.Client
+					if dialed.SeenKey != nil && fp == "" {
+						fp = dialed.SeenKey.Fingerprint
+					}
+					release = func() { _ = dialed.Client.Close() }
+				}
+				dcancel()
+			}
+		}
+		if sshClient == nil {
+			reachable = false
+		}
+		if s.corrald != nil && opts.RemoveCorrald {
+			co := s.corrald.DeleteHostCleanup(r.Context(), u.ID, h.ID, u.Username, fp, h.Username, true, sshClient)
+			corraldOutcome = co
+			if co != nil && co.State == "removed" {
+				s.audit(r, "corrald.remove", hostTarget(h), map[string]any{"via": "host.delete"})
+			}
+		} else if s.corrald != nil {
+			_ = s.corrald.DeleteHostCleanup(r.Context(), u.ID, h.ID, u.Username, fp, h.Username, false, nil)
+		}
+		if opts.StopVSCode || opts.RemoveVSCode {
+			vscodeOutcome = s.deleteHostCodeCleanup(r.Context(), sshClient, opts.StopVSCode, opts.RemoveVSCode)
+		}
+		release()
+	} else {
+		// Legacy DELETE without options: unregister corrald best-effort and stop VS Code async.
+		if s.corrald != nil {
+			fp := ""
+			if k, kerr := s.store.HostKey(r.Context(), u.ID, h.ID); kerr == nil {
+				fp = k.Fingerprint
+			}
+			_ = s.corrald.DeleteHostCleanup(r.Context(), u.ID, h.ID, u.Username, fp, h.Username, false, nil)
+		}
+		stopCode = s.codeStopperFor(r.Context(), h)
+	}
+
 	if err := s.store.DeleteHost(r.Context(), u.ID, h.ID); errors.Is(err, store.ErrInUse) {
 		names, _ := s.store.HostsThrough(r.Context(), u.ID, h.ID)
 		writeErrorExtra(w, http.StatusConflict, "jump_in_use", "other hosts are reached through this host", map[string]any{"hosts": names})
@@ -475,7 +560,14 @@ func (s *Server) deleteHost(w http.ResponseWriter, r *http.Request) {
 	if stopCode != nil {
 		stopCode()
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	resp := map[string]any{"ok": true, "deleted": true, "reachable": reachable}
+	if corraldOutcome != nil {
+		resp["corrald"] = corraldOutcome
+	}
+	if vscodeOutcome != nil {
+		resp["vscode"] = vscodeOutcome
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (s *Server) apiGetHostKey(w http.ResponseWriter, r *http.Request) {

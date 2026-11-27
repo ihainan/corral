@@ -496,6 +496,23 @@ func ForceStopCommand(socket, op string) string {
 	return script(layout+lock+claim+procs+instance+stopBody, "S", socket, "I", "", "T", op, "FORCE", "1")
 }
 
+// RemoveCommand stops any running code-server and removes code-server binaries,
+// user data, extensions, and state files, leaving other Corral directories (such
+// as corrald) untouched.
+func RemoveCommand(socket, op string) string {
+	return script(layout+lock+claim+procs+instance+`if [ -f "$P" ]; then
+  if [ -n "$pid" ]; then
+    if alive || legacy; then
+      halt || { echo error=kill; exit 1; }
+    fi
+  fi
+fi
+rm -rf "$L"/code-server-* "$DATA" "$ST/code-server.pid" "$ST/code-server.log" "$ST"/install-* "$S" 2>/dev/null
+rmdir "$L" 2>/dev/null || true
+echo result=ok
+`, "S", socket, "I", "", "T", op, "FORCE", "1")
+}
+
 // InstanceCommand names the instance that runs (instance=<id>, or
 // instance=pid:<n> for an old one), if any.
 func InstanceCommand() string {

@@ -1,0 +1,708 @@
+package gw
+
+import (
+	"bufio"
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"path"
+	"strconv"
+	"strings"
+	"time"
+
+	"golang.org/x/crypto/ssh"
+
+	"github.com/ihainan/corral/internal/corrald/proto"
+	"github.com/ihainan/corral/internal/sshx"
+)
+
+// ErrOpCancelled is returned internally when an install op was cancelled
+// before starting the daemon.
+var ErrOpCancelled = errors.New("operation cancelled")
+
+// OpFailure carries structured failure details matching consent-design.md
+// "失败处理" and web/src/corraldLogic.ts CorraldError.
+type OpFailure struct {
+	Code            string     `json:"code"`
+	Message         string     `json:"message,omitempty"`
+	Detail          string     `json:"detail,omitempty"`
+	TargetVersion   string     `json:"target_version,omitempty"`
+	FallbackVersion string     `json:"fallback_version,omitempty"`
+	MachineID       string     `json:"machine_id,omitempty"`
+	OS              string     `json:"os,omitempty"`
+	Arch            string     `json:"arch,omitempty"`
+	Left            []LeftItem `json:"left,omitempty"`
+	PID             int        `json:"pid,omitempty"`
+	KeepInstalled   bool       `json:"-"`
+}
+
+func (f *OpFailure) Error() string {
+	if f == nil {
+		return ""
+	}
+	if f.Detail != "" {
+		return f.Code + ": " + f.Detail
+	}
+	return f.Code
+}
+
+// HostStateFiles holds parsed JSON files read from ~/.local/state/corral/corrald/<mid>/.
+type HostStateFiles struct {
+	Install *HostInstallRecord
+	Meta    *HostMetaRecord
+	Failed  *HostFailedRecord
+	Op      *HostOpRecord
+}
+
+// HostInstallRecord mirrors daemon.InstallRecord without importing linux-only daemon code.
+type HostInstallRecord struct {
+	Version         string   `json:"version"`
+	Release         int64    `json:"release"`
+	Commit          string   `json:"commit,omitempty"`
+	Gateway         string   `json:"gateway"`
+	EnabledBy       string   `json:"enabled_by"`
+	EnabledAt       string   `json:"enabled_at"`
+	MachineID       string   `json:"machine_id"`
+	MachineIDSource string   `json:"machine_id_source"`
+	Files           []string `json:"files"`
+}
+
+// HostMetaRecord mirrors daemon.MetaRecord.
+type HostMetaRecord struct {
+	PID        int    `json:"pid"`
+	StartTime  string `json:"start_time"`
+	Version    string `json:"version"`
+	Release    int64  `json:"release"`
+	Commit     string `json:"commit,omitempty"`
+	Epoch      string `json:"epoch"`
+	StartedAt  string `json:"started_at"`
+	SocketPath string `json:"socket_path"`
+	Gateway    string `json:"gateway,omitempty"`
+}
+
+// HostOpRecord mirrors daemon.OpRecordFile.
+type HostOpRecord struct {
+	ID      string `json:"id"`
+	Kind    string `json:"kind"`
+	Version string `json:"version,omitempty"`
+	Release int64  `json:"release,omitempty"`
+	Gateway string `json:"gateway,omitempty"`
+	By      string `json:"by,omitempty"`
+	At      string `json:"at"`
+	Result  string `json:"result"`
+	Error   string `json:"error,omitempty"`
+	Detail  string `json:"detail,omitempty"`
+}
+
+// HostFailedEntry mirrors daemon.FailedEntry.
+type HostFailedEntry struct {
+	Release int64  `json:"release"`
+	Reason  string `json:"reason"`
+	At      string `json:"at"`
+}
+
+// HostFailedRecord mirrors daemon.FailedRecord.
+type HostFailedRecord struct {
+	Releases []HostFailedEntry `json:"releases"`
+}
+
+func (f *HostFailedRecord) ReleaseList() []int64 {
+	if f == nil || len(f.Releases) == 0 {
+		return nil
+	}
+	out := make([]int64, 0, len(f.Releases))
+	for _, r := range f.Releases {
+		out = append(out, r.Release)
+	}
+	return out
+}
+
+// UninstallOutcome holds the structured outcome of running corrald uninstall.
+type UninstallOutcome struct {
+	Result      string     // "removed", "partial", "stop_failed", "pending"
+	Left        []LeftItem // populated on "partial"
+	PID         int        // populated on "stop_failed"
+	Detail      string
+	LastMachine bool
+}
+
+// ProbeHost runs ProbeCommand (and ProbeStateCommand once mid is resolved)
+// over sshClient.
+func ProbeHost(ctx context.Context, c *ssh.Client) (*HostProbe, error) {
+	res, err := runSSH(ctx, c, ProbeCommand(), sshx.MaxOutput, sshx.ExecOptions{})
+	if err != nil && !res.Ended {
+		return nil, err
+	}
+	p, perr := ParseProbe(res.Out)
+	if perr != nil {
+		if err != nil {
+			return nil, err
+		}
+		return nil, perr
+	}
+	if p.StateDir != "" {
+		sres, serr := runSSH(ctx, c, ProbeStateCommand(p.StateDir), sshx.MaxOutput, sshx.ExecOptions{})
+		if serr == nil || sres.Ended {
+			sf := ParseKeyValues(sres.Out)
+			p.HasTombstone = sf["tombstone"] == "1"
+			p.HasInstall = sf["has_install"] == "1"
+			sc := bufio.NewScanner(strings.NewReader(string(sres.Out)))
+			for sc.Scan() {
+				if v, ok := strings.CutPrefix(sc.Text(), "stage_dir="); ok && v != "" {
+					p.Stages = append(p.Stages, p.StateDir+"/"+v)
+				}
+			}
+		}
+	}
+	return p, nil
+}
+
+// ReadHostStateFiles reads install.json, meta.json, failed.json, and optionally
+// ops/<opID>.json from the host via SFTP. Missing files are left nil.
+func ReadHostStateFiles(ctx context.Context, c *ssh.Client, probe *HostProbe, opID string) HostStateFiles {
+	var out HostStateFiles
+	if probe == nil || probe.StateDir == "" {
+		return out
+	}
+	sc, cleanup, err := openSFTP(ctx, c)
+	if err != nil {
+		return out
+	}
+	defer cleanup()
+
+	readJSON := func(remotePath string, dst any) bool {
+		f, err := sc.Open(remotePath)
+		if err != nil {
+			return false
+		}
+		defer f.Close()
+		b, err := io.ReadAll(io.LimitReader(f, 512<<10))
+		if err != nil {
+			return false
+		}
+		return json.Unmarshal(b, dst) == nil
+	}
+
+	var inst HostInstallRecord
+	if readJSON(probe.InstallJSON, &inst) {
+		out.Install = &inst
+	}
+	var meta HostMetaRecord
+	if readJSON(probe.MetaJSON, &meta) {
+		out.Meta = &meta
+	}
+	var failed HostFailedRecord
+	if readJSON(probe.FailedJSON, &failed) {
+		out.Failed = &failed
+	}
+	if opID != "" && opIDRE.MatchString(opID) {
+		var opRec HostOpRecord
+		if readJSON(probe.OpsDir+"/"+opID+".json", &opRec) {
+			out.Op = &opRec
+		}
+	}
+	return out
+}
+
+// RecordFailedOnHost appends release to ~/.local/state/corral/corrald/<mid>/failed.json
+// via SFTP so neither this gateway nor another retries a broken release.
+func RecordFailedOnHost(ctx context.Context, c *ssh.Client, failedPath string, release int64, reason string) error {
+	if failedPath == "" || release <= 0 {
+		return nil
+	}
+	rec := &HostFailedRecord{}
+	if b, err := sftpReadFile(ctx, c, failedPath, 256<<10); err == nil {
+		_ = json.Unmarshal(b, rec)
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	found := false
+	for i := range rec.Releases {
+		if rec.Releases[i].Release == release {
+			rec.Releases[i].Reason = reason
+			rec.Releases[i].At = now
+			found = true
+			break
+		}
+	}
+	if !found {
+		rec.Releases = append(rec.Releases, HostFailedEntry{
+			Release: release,
+			Reason:  reason,
+			At:      now,
+		})
+	}
+	b, err := json.MarshalIndent(rec, "", "  ")
+	if err != nil {
+		return err
+	}
+	b = append(b, '\n')
+	return sftpWriteFile(ctx, c, failedPath, b)
+}
+
+// ValidateProbe checks whether the probed host satisfies corrald requirements.
+func ValidateProbe(probe *HostProbe, dist *Dist) (*ArchBinary, *OpFailure) {
+	if probe == nil {
+		return nil, &OpFailure{Code: "disconnected", Detail: "host probe unavailable"}
+	}
+	if !strings.EqualFold(probe.OS, "Linux") {
+		return nil, &OpFailure{
+			Code: "unsupported_os",
+			OS:   FriendlyOSName(probe.OS),
+			Arch: probe.Machine,
+		}
+	}
+	if probe.Arch == "" {
+		return nil, &OpFailure{
+			Code: "unsupported_arch",
+			OS:   probe.OS,
+			Arch: probe.Machine,
+		}
+	}
+	bin, ok := dist.Binary(probe.Arch)
+	if !ok {
+		return nil, &OpFailure{
+			Code: "unsupported_arch",
+			OS:   probe.OS,
+			Arch: probe.Machine,
+		}
+	}
+	if probe.HasTombstone {
+		return nil, &OpFailure{
+			Code:      proto.ErrRemoving,
+			MachineID: probe.MachineID,
+			OS:        probe.OS,
+			Arch:      probe.Arch,
+		}
+	}
+	if !probe.HomeWritable || probe.Home == "" || probe.StateDir == "" {
+		return nil, &OpFailure{
+			Code:      "home_readonly",
+			MachineID: probe.MachineID,
+			OS:        probe.OS,
+			Arch:      probe.Arch,
+		}
+	}
+	if probe.FreeKB >= 0 && probe.FreeKB < MinFreeKB {
+		return nil, &OpFailure{
+			Code:      "no_space",
+			Detail:    fmt.Sprintf("free %d KB, need %d KB", probe.FreeKB, MinFreeKB),
+			MachineID: probe.MachineID,
+			OS:        probe.OS,
+			Arch:      probe.Arch,
+		}
+	}
+	return bin, nil
+}
+
+// StageAndInstall uploads, verifies, selftests, and installs corrald on the host.
+// On upgrade=true it passes --upgrade so the symlink is not switched until handoff.
+func StageAndInstall(
+	ctx context.Context,
+	c *ssh.Client,
+	dist *Dist,
+	probe *HostProbe,
+	bin *ArchBinary,
+	opID, gatewayID, byUser string,
+	upgrade bool,
+	onStep func(step string),
+	isCancelled func() bool,
+	verifyHook func(actual string) string,
+) (installedBin string, fail *OpFailure) {
+	stageDir := probe.StateDir + "/stage-" + opID
+	stageBin := stageDir + "/corrald"
+
+	cleanupStage := func() []LeftItem {
+		cctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		r, err := runSSH(cctx, c, RmStageCommand(stageDir), 4096, sshx.ExecOptions{})
+		if err != nil || ParseKeyValues(r.Out)["result"] != "ok" {
+			reason := "cleanup failed"
+			if err != nil {
+				reason = err.Error()
+			}
+			return []LeftItem{{Path: stageDir, Reason: reason}}
+		}
+		return nil
+	}
+
+	checkCancel := func() *OpFailure {
+		if isCancelled != nil && isCancelled() {
+			_ = cleanupStage()
+			return &OpFailure{Code: "cancelled"}
+		}
+		return nil
+	}
+
+	// Step: upload
+	if onStep != nil {
+		onStep("upload")
+	}
+	if cf := checkCancel(); cf != nil {
+		return "", cf
+	}
+
+	mkRes, mkErr := runSSH(ctx, c, MkStageCommand(probe.StateDir, stageDir), 4096, sshx.ExecOptions{})
+	mkFields := ParseKeyValues(mkRes.Out)
+	if mkFields["error"] == proto.ErrRemoving {
+		return "", &OpFailure{Code: proto.ErrRemoving, MachineID: probe.MachineID, OS: probe.OS, Arch: probe.Arch}
+	}
+	if mkErr != nil || mkFields["result"] != "ok" {
+		if !mkRes.Ended && ctx.Err() == nil {
+			return "", &OpFailure{Code: "disconnected", Detail: errStr(mkErr), MachineID: probe.MachineID, OS: probe.OS, Arch: probe.Arch}
+		}
+		if isCancelled != nil && isCancelled() {
+			return "", &OpFailure{Code: "cancelled"}
+		}
+		return "", &OpFailure{Code: classifyWriteErr(mkErr, mkFields["error"]), Detail: errStr(mkErr), MachineID: probe.MachineID, OS: probe.OS, Arch: probe.Arch}
+	}
+
+	if err := sftpUploadBinary(ctx, c, bin.Path, stageBin); err != nil {
+		if isCancelled != nil && isCancelled() {
+			_ = cleanupStage()
+			return "", &OpFailure{Code: "cancelled"}
+		}
+		left := cleanupStage()
+		return "", &OpFailure{
+			Code:      classifySFTPErr(err),
+			Detail:    err.Error(),
+			MachineID: probe.MachineID,
+			OS:        probe.OS,
+			Arch:      probe.Arch,
+			Left:      left,
+		}
+	}
+
+	if cf := checkCancel(); cf != nil {
+		return "", cf
+	}
+
+	// Step: verify (SFTP readback SHA-256 + selftest)
+	if onStep != nil {
+		onStep("verify")
+	}
+	gotSHA, rerr := sftpReadbackSHA256(ctx, c, stageBin)
+	if rerr != nil {
+		if isCancelled != nil && isCancelled() {
+			_ = cleanupStage()
+			return "", &OpFailure{Code: "cancelled"}
+		}
+		left := cleanupStage()
+		return "", &OpFailure{
+			Code:      classifySFTPErr(rerr),
+			Detail:    rerr.Error(),
+			MachineID: probe.MachineID,
+			OS:        probe.OS,
+			Arch:      probe.Arch,
+			Left:      left,
+		}
+	}
+	if verifyHook != nil {
+		gotSHA = verifyHook(gotSHA)
+	}
+	if !strings.EqualFold(gotSHA, bin.SHA256) {
+		left := cleanupStage()
+		return "", &OpFailure{
+			Code:      "checksum_mismatch",
+			Detail:    fmt.Sprintf("got %s, want %s", gotSHA, bin.SHA256),
+			MachineID: probe.MachineID,
+			OS:        probe.OS,
+			Arch:      probe.Arch,
+			Left:      left,
+		}
+	}
+
+	if cf := checkCancel(); cf != nil {
+		return "", cf
+	}
+
+	stRes, stErr := runSSH(ctx, c, SelftestCommand(stageBin), 16<<10, sshx.ExecOptions{})
+	stFields := ParseKeyValues(stRes.Out)
+	if stErr != nil || stFields["result"] != "ok" {
+		if isCancelled != nil && isCancelled() {
+			_ = cleanupStage()
+			return "", &OpFailure{Code: "cancelled"}
+		}
+		left := cleanupStage()
+		if !stRes.Ended {
+			return "", &OpFailure{Code: "disconnected", Detail: errStr(stErr), MachineID: probe.MachineID, OS: probe.OS, Arch: probe.Arch, Left: left}
+		}
+		code := classifySelftestErr(stFields["error"], stFields["detail"], stErr)
+		return "", &OpFailure{
+			Code:      code,
+			Detail:    firstNonEmpty(stFields["detail"], stFields["error"], errStr(stErr)),
+			MachineID: probe.MachineID,
+			OS:        probe.OS,
+			Arch:      probe.Arch,
+			Left:      left,
+		}
+	}
+	// Update probe socket path from selftest authoritative output if reported.
+	if sock := stFields["socket"]; sock != "" {
+		probe.SocketPath = sock
+	}
+
+	if cf := checkCancel(); cf != nil {
+		return "", cf
+	}
+
+	// Step: install
+	if onStep != nil {
+		onStep("install")
+	}
+	inRes, inErr := runSSH(ctx, c, InstallCommand(stageBin, stageDir, opID, gatewayID, byUser, upgrade), 16<<10, sshx.ExecOptions{})
+	inFields := ParseKeyValues(inRes.Out)
+	if inFields["error"] == proto.ErrRemoving {
+		_ = cleanupStage()
+		return "", &OpFailure{Code: proto.ErrRemoving, MachineID: probe.MachineID, OS: probe.OS, Arch: probe.Arch}
+	}
+	if inErr != nil || inFields["result"] != "ok" {
+		if isCancelled != nil && isCancelled() {
+			_ = cleanupStage()
+			return "", &OpFailure{Code: "cancelled"}
+		}
+		left := cleanupStage()
+		if !inRes.Ended {
+			return "", &OpFailure{Code: "disconnected", Detail: errStr(inErr), MachineID: probe.MachineID, OS: probe.OS, Arch: probe.Arch, Left: left}
+		}
+		code := classifyInstallErr(inFields["error"], inFields["detail"])
+		return "", &OpFailure{
+			Code:      code,
+			Detail:    firstNonEmpty(inFields["detail"], inFields["error"], errStr(inErr)),
+			MachineID: probe.MachineID,
+			OS:        probe.OS,
+			Arch:      probe.Arch,
+			Left:      left,
+		}
+	}
+
+	installedBin = inFields["binary"]
+	if installedBin == "" {
+		installedBin = path.Join(probe.LibDir, fmt.Sprintf("corrald-%s-%d", dist.Version, dist.Release), "corrald")
+	}
+	return installedBin, nil
+}
+
+// RunServe starts corrald detached via `corrald serve --gateway <gw>` and
+// returns its PID and Unix socket path.
+func RunServe(ctx context.Context, c *ssh.Client, binPath, gatewayID, machineID, osName, arch string) (pid int, socketPath string, fail *OpFailure) {
+	res, err := runSSH(ctx, c, ServeCommand(binPath, gatewayID), 16<<10, sshx.ExecOptions{})
+	f := ParseKeyValues(res.Out)
+	if f["error"] == proto.ErrRemoving {
+		return 0, "", &OpFailure{Code: proto.ErrRemoving, MachineID: machineID, OS: osName, Arch: arch}
+	}
+	if err != nil && !res.Ended {
+		return 0, "", &OpFailure{Code: "disconnected", Detail: err.Error(), MachineID: machineID, OS: osName, Arch: arch, KeepInstalled: true}
+	}
+	if f["result"] == "ok" || f["result"] == "running" {
+		pid, _ = strconv.Atoi(f["pid"])
+		return pid, f["socket"], nil
+	}
+	return 0, "", &OpFailure{
+		Code:          "start_failed",
+		Detail:        firstNonEmpty(f["detail"], f["error"], errStr(err)),
+		MachineID:     machineID,
+		OS:            osName,
+		Arch:          arch,
+		KeepInstalled: true,
+	}
+}
+
+// RunUninstall writes the removing tombstone and executes corrald uninstall.
+func RunUninstall(ctx context.Context, c *ssh.Client, probe *HostProbe, opID string, onStep func(step string)) UninstallOutcome {
+	if onStep != nil {
+		onStep("mark")
+	}
+	if probe.StateDir != "" {
+		mres, merr := runSSH(ctx, c, WriteTombstoneCommand(probe.StateDir), 4096, sshx.ExecOptions{})
+		if merr != nil && !mres.Ended {
+			return UninstallOutcome{Result: "pending", Detail: merr.Error()}
+		}
+	}
+	if onStep != nil {
+		onStep("stop")
+	}
+	// uninstall performs stop + remove + post-check verification atomically on the host.
+	if onStep != nil {
+		onStep("remove")
+	}
+	res, err := runSSH(ctx, c, UninstallCommand(probe.LibDir, probe.StateDir, probe.SocketPath, opID), 64<<10, sshx.ExecOptions{})
+	if err != nil && !res.Ended {
+		return UninstallOutcome{Result: "pending", Detail: err.Error()}
+	}
+	if onStep != nil {
+		onStep("verify")
+	}
+	f := ParseKeyValues(res.Out)
+	switch {
+	case f["result"] == "removed":
+		return UninstallOutcome{Result: "removed", LastMachine: f["last_machine"] == "true"}
+	case f["error"] == "stop_failed":
+		pid, _ := strconv.Atoi(f["pid"])
+		return UninstallOutcome{Result: "stop_failed", PID: pid, Detail: f["detail"]}
+	case f["result"] == "partial":
+		return UninstallOutcome{Result: "partial", Left: ParseLeftLines(res.Out), LastMachine: f["last_machine"] == "true"}
+	default:
+		if err != nil {
+			return UninstallOutcome{Result: "pending", Detail: err.Error()}
+		}
+		return UninstallOutcome{Result: "removed"}
+	}
+}
+
+func sftpUploadBinary(ctx context.Context, c *ssh.Client, localPath, remotePath string) error {
+	sc, cleanup, err := openSFTP(ctx, c)
+	if err != nil {
+		return fmt.Errorf("open sftp: %w", err)
+	}
+	defer cleanup()
+
+	src, err := os.Open(localPath)
+	if err != nil {
+		return fmt.Errorf("open local binary: %w", err)
+	}
+	defer src.Close()
+
+	dst, err := sc.OpenFile(remotePath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC)
+	if err != nil {
+		return err
+	}
+	buf := make([]byte, 32<<10)
+	for {
+		if ctx.Err() != nil {
+			_ = dst.Close()
+			return ctx.Err()
+		}
+		n, rerr := src.Read(buf)
+		if n > 0 {
+			if _, werr := dst.Write(buf[:n]); werr != nil {
+				_ = dst.Close()
+				return werr
+			}
+		}
+		if rerr == io.EOF {
+			break
+		}
+		if rerr != nil {
+			_ = dst.Close()
+			return rerr
+		}
+	}
+	if err := dst.Chmod(0o700); err != nil {
+		_ = dst.Close()
+		return err
+	}
+	return dst.Close()
+}
+
+func sftpReadbackSHA256(ctx context.Context, c *ssh.Client, remotePath string) (string, error) {
+	sc, cleanup, err := openSFTP(ctx, c)
+	if err != nil {
+		return "", fmt.Errorf("open sftp: %w", err)
+	}
+	defer cleanup()
+
+	rd, err := sc.Open(remotePath)
+	if err != nil {
+		return "", err
+	}
+	defer rd.Close()
+	h := sha256.New()
+	buf := make([]byte, 32<<10)
+	for {
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
+		n, rerr := rd.Read(buf)
+		if n > 0 {
+			h.Write(buf[:n])
+		}
+		if rerr == io.EOF {
+			break
+		}
+		if rerr != nil {
+			return "", rerr
+		}
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+func classifySFTPErr(err error) string {
+	if err == nil {
+		return "other"
+	}
+	msg := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(msg, "no space"), strings.Contains(msg, "enospc"), strings.Contains(msg, "quota"):
+		return "no_space"
+	case strings.Contains(msg, "permission denied"), strings.Contains(msg, "read-only"), strings.Contains(msg, "erofs"):
+		return "home_readonly"
+	case strings.Contains(msg, "eof"), strings.Contains(msg, "closed"), strings.Contains(msg, "connection"), strings.Contains(msg, "broken pipe"):
+		return "disconnected"
+	default:
+		return "disconnected"
+	}
+}
+
+func classifyWriteErr(err error, code string) string {
+	msg := strings.ToLower(errStr(err) + " " + code)
+	if strings.Contains(msg, "no space") || strings.Contains(msg, "enospc") || strings.Contains(msg, "quota") {
+		return "no_space"
+	}
+	return "home_readonly"
+}
+
+func classifySelftestErr(code, detail string, err error) string {
+	msg := strings.ToLower(code + " " + detail + " " + errStr(err))
+	switch {
+	case code == "noexec", code == "chmod_failed",
+		strings.Contains(msg, "permission denied"),
+		strings.Contains(msg, "read-only"),
+		strings.Contains(msg, "noexec"),
+		strings.Contains(msg, "exit status 126"),
+		strings.Contains(msg, "status 126"):
+		return "home_readonly"
+	case strings.Contains(msg, "no space"), strings.Contains(msg, "enospc"), strings.Contains(msg, "quota"):
+		return "no_space"
+	case code == "unsupported_os":
+		return "unsupported_os"
+	case code == "unsupported_arch":
+		return "unsupported_arch"
+	default:
+		return "start_failed"
+	}
+}
+
+func classifyInstallErr(code, detail string) string {
+	msg := strings.ToLower(code + " " + detail)
+	switch {
+	case code == proto.ErrRemoving:
+		return proto.ErrRemoving
+	case strings.Contains(msg, "no space"), strings.Contains(msg, "enospc"), strings.Contains(msg, "quota"):
+		return "no_space"
+	case strings.Contains(msg, "permission denied"), strings.Contains(msg, "read-only"), code == "mkdir_failed", code == "state_dir_failed":
+		return "home_readonly"
+	default:
+		return "start_failed"
+	}
+}
+
+func errStr(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
+}
+
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if strings.TrimSpace(v) != "" {
+			return strings.TrimSpace(v)
+		}
+	}
+	return ""
+}

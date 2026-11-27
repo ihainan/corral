@@ -12,6 +12,7 @@ import (
 	"net/netip"
 	"net/url"
 	"os"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strconv"
@@ -79,6 +80,14 @@ type Config struct {
 	Recording         bool
 	RecordingDays     int
 	RecordingMaxBytes int64
+
+	// Host helper daemon (corrald): directory holding linux-amd64/corrald and
+	// linux-arm64/corrald (default: corrald/ beside the executable), stable
+	// gateway identifier for authorization binding (default: PublicURL hostname),
+	// and optional administrator kill-switch.
+	CorraldDir           string
+	GatewayID            string
+	CorraldAdminDisabled bool
 }
 
 const (
@@ -398,6 +407,9 @@ func Load() (*Config, error) {
 	if err := c.loadRecording(); err != nil {
 		return nil, err
 	}
+	if err := c.loadCorrald(); err != nil {
+		return nil, err
+	}
 	if v := env("CORRAL_UPLOAD_MAX_MB", ""); v != "" {
 		n, err := strconv.Atoi(v)
 		if err != nil || n < 1 {
@@ -618,6 +630,30 @@ func (c *Config) loadRecording() error {
 			return fmt.Errorf("CORRAL_RECORDING_MAX_MB: invalid %q", v)
 		}
 		c.RecordingMaxBytes = int64(n) << 20
+	}
+	return nil
+}
+
+func (c *Config) loadCorrald() error {
+	c.CorraldDir = env("CORRAL_CORRALD_DIR", "")
+	if c.CorraldDir == "" {
+		if exe, err := os.Executable(); err == nil {
+			c.CorraldDir = filepath.Join(filepath.Dir(exe), "corrald")
+		} else {
+			c.CorraldDir = "corrald"
+		}
+	}
+	c.GatewayID = strings.TrimSpace(env("CORRAL_GATEWAY_ID", ""))
+	if c.GatewayID == "" && c.PublicURL != nil {
+		c.GatewayID = c.PublicURL.Hostname()
+	}
+	switch v := strings.ToLower(strings.TrimSpace(env("CORRAL_CORRALD_DISABLED", "off"))); v {
+	case "", "off", "false", "0":
+		c.CorraldAdminDisabled = false
+	case "on", "true", "1":
+		c.CorraldAdminDisabled = true
+	default:
+		return fmt.Errorf("CORRAL_CORRALD_DISABLED must be on or off, got %q", v)
 	}
 	return nil
 }
