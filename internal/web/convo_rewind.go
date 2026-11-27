@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/ihainan/corral/internal/convo"
+	"github.com/ihainan/corral/internal/corrald/proto"
 	"github.com/ihainan/corral/internal/herdr"
 	"github.com/ihainan/corral/internal/sshx"
 	"github.com/ihainan/corral/internal/term"
@@ -1417,7 +1418,14 @@ func (s *Server) apiConversationRewind(w http.ResponseWriter, r *http.Request) {
 	var front *convoProc
 	if sess.Persistence == "herdr" {
 		if plan := planHerdrFastLocate(livePI, b.Pane, herdr.Pane{}, false); plan.mode == herdrFastPIDs {
-			if locOut, lerr := claudeRewindExec(ctx, sess, &running, convoLocatePidsCommand(plan.shellPID, plan.pids), convoLocateMax, 2*time.Second); lerr == nil {
+			var locOut []byte
+			var lerr error
+			if cout, ok := s.tryCorraldLocate(ctx, sess, proto.AgentLocateParams{Mode: "herdr", ShellPID: plan.shellPID, PIDs: plan.pids}); ok {
+				locOut = cout
+			} else {
+				locOut, lerr = claudeRewindExec(ctx, sess, &running, convoLocatePidsCommand(plan.shellPID, plan.pids), convoLocateMax, 2*time.Second)
+			}
+			if lerr == nil {
 				located := parseConvoLocate(string(locOut))
 				if p, ok := fastLocateAccept(located, b.Pane, socket, liveHerdrSID); ok && !located.noProc && p != nil && p.pid == b.PID && p.start == b.Start && p.sid == b.Session {
 					front = p
@@ -1427,7 +1435,13 @@ func (s *Server) apiConversationRewind(w http.ResponseWriter, r *http.Request) {
 	}
 	if front == nil {
 		tLoc := time.Now()
-		locOut, lerr := claudeRewindExec(ctx, sess, &running, convoLocateCommand(sess.Persistence, sess.TmuxSession, tmuxTarget), convoLocateMax, 2*time.Second)
+		var locOut []byte
+		var lerr error
+		if cout, ok := s.tryCorraldLocate(ctx, sess, proto.AgentLocateParams{Mode: sess.Persistence, TmuxName: sess.TmuxSession, TmuxPane: tmuxTarget}); ok {
+			locOut = cout
+		} else {
+			locOut, lerr = claudeRewindExec(ctx, sess, &running, convoLocateCommand(sess.Persistence, sess.TmuxSession, tmuxTarget), convoLocateMax, 2*time.Second)
+		}
 		if lerr != nil {
 			s.perfLocate("locate.full", tLoc, lerr, 0, sess.HostID)
 			fail(asRewindErr(lerr))

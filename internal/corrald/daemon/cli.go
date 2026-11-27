@@ -254,7 +254,11 @@ func cmdInstall(args []string, build proto.BuildInfo, stdout io.Writer) int {
 	nowStr := time.Now().UTC().Format(time.RFC3339)
 
 	var installRec *InstallRecord
-	updateShared := false
+	var (
+		readmeVer   string
+		readmeRel   int64
+		forceReadme bool
+	)
 	if *upgrade {
 		installRec, _ = ReadInstallRecord(layout.InstallJSON)
 		if installRec == nil {
@@ -274,17 +278,23 @@ func cmdInstall(args []string, build proto.BuildInfo, stdout io.Writer) int {
 			writeErr(stdout, "install_json_failed", err.Error())
 			return 1
 		}
-		if _, err := os.Lstat(layout.ReadmePath); errors.Is(err, os.ErrNotExist) {
-			updateShared = true
-		}
-	} else {
-		var serr error
-		updateShared, serr = shouldUpdateSharedSymlink(layout, build.Release)
+		curVer, curRel, valid, serr := inspectSharedSymlink(layout)
 		if serr != nil {
 			writeErr(stdout, "symlink_failed", serr.Error())
 			return 1
 		}
-		if updateShared {
+		if valid {
+			readmeVer, readmeRel = curVer, curRel
+		} else {
+			readmeVer, readmeRel = installRec.Version, installRec.Release
+		}
+	} else {
+		updateLink, curVer, curRel, serr := shouldUpdateSharedSymlink(layout, build.Release)
+		if serr != nil {
+			writeErr(stdout, "symlink_failed", serr.Error())
+			return 1
+		}
+		if updateLink {
 			relTarget, err := filepath.Rel(layout.LibDir, dstBin)
 			if err != nil {
 				writeErr(stdout, "symlink_failed", err.Error())
@@ -294,6 +304,10 @@ func cmdInstall(args []string, build proto.BuildInfo, stdout io.Writer) int {
 				writeErr(stdout, "symlink_failed", err.Error())
 				return 1
 			}
+			readmeVer, readmeRel = build.Version, build.Release
+			forceReadme = true
+		} else {
+			readmeVer, readmeRel = curVer, curRel
 		}
 		files := []string{
 			verDir,
@@ -327,23 +341,9 @@ func cmdInstall(args []string, build proto.BuildInfo, stdout io.Writer) int {
 		}
 	}
 
-	if updateShared {
-		readmeText := proto.RenderReadme(proto.ReadmeData{
-			Version:    installRec.Version,
-			Release:    installRec.Release,
-			Gateway:    installRec.Gateway,
-			EnabledBy:  installRec.EnabledBy,
-			EnabledAt:  installRec.EnabledAt,
-			MachineID:  layout.MachineID,
-			LibDir:     layout.LibDir,
-			StateDir:   layout.StateDir,
-			SocketPath: layout.SocketPath,
-			Files:      installRec.Files,
-		})
-		if err := WriteFileAtomic(layout.ReadmePath, []byte(readmeText), 0o644); err != nil {
-			writeErr(stdout, "readme_failed", err.Error())
-			return 1
-		}
+	if err := ensureSharedReadme(layout, installRec, readmeVer, readmeRel, forceReadme); err != nil {
+		writeErr(stdout, "readme_failed", err.Error())
+		return 1
 	}
 
 	opPath, err := layout.OpPath(*opID)
@@ -456,6 +456,7 @@ func cmdServe(args []string, build proto.BuildInfo, stdout io.Writer) int {
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	gateway := fs.String("gateway", "", "gateway address shown in process list")
+	tmuxPath := fs.String("tmux", "", "optional absolute path to tmux binary")
 	foreground := fs.Bool("foreground", false, "run in foreground without detaching")
 	handoff := fs.Bool("handoff", false, "internal: adopt inherited fds during hot update")
 	listenFD := fs.Int("listen-fd", -1, "internal: inherited Unix listener fd")
@@ -481,6 +482,16 @@ func cmdServe(args []string, build proto.BuildInfo, stdout io.Writer) int {
 		return 1
 	}
 
+	validatedTmux := ""
+	if *tmuxPath != "" {
+		var terr error
+		validatedTmux, terr = ValidateTmuxBinary(*tmuxPath, layout.UID)
+		if terr != nil {
+			writeErr(stdout, "invalid_tmux", terr.Error())
+			return 2
+		}
+	}
+
 	if layout.TombstoneExists() {
 		writeErr(stdout, proto.ErrRemoving, "uninstall tombstone present")
 		return 1
@@ -499,13 +510,13 @@ func cmdServe(args []string, build proto.BuildInfo, stdout io.Writer) int {
 	}
 
 	if !*foreground {
-		return serveDetached(layout, *gateway, stdout)
+		return serveDetached(layout, *gateway, validatedTmux, stdout)
 	}
 
-	return serveForeground(layout, build, *gateway, *handoff, *listenFD, *lockFD, *sharedLockFD, *opLockFD, *stateFD, *readyFD, *binaryPath, stdout)
+	return serveForeground(layout, build, *gateway, validatedTmux, *handoff, *listenFD, *lockFD, *sharedLockFD, *opLockFD, *stateFD, *readyFD, *binaryPath, stdout)
 }
 
-func serveDetached(layout *Layout, gateway string, stdout io.Writer) int {
+func serveDetached(layout *Layout, gateway, tmuxPath string, stdout io.Writer) int {
 	opLock, err := AcquireLockWait(layout.OpLockPath, defaultLifecycleLockTimeout())
 	if err != nil {
 		return writeLockErr(stdout, err)
@@ -562,6 +573,9 @@ func serveDetached(layout *Layout, gateway string, stdout io.Writer) int {
 	argv := []string{exe, "serve"}
 	if gateway != "" {
 		argv = append(argv, "--gateway", gateway)
+	}
+	if tmuxPath != "" {
+		argv = append(argv, "--tmux", tmuxPath)
 	}
 	argv = append(argv, "--foreground", "--ready-fd=3")
 
@@ -639,6 +653,7 @@ func serveForeground(
 	layout *Layout,
 	build proto.BuildInfo,
 	gateway string,
+	tmuxPath string,
 	handoff bool,
 	listenFD, lockFD, sharedLockFD, opLockFD, stateFD, readyFD int,
 	binaryPath string,
@@ -794,6 +809,11 @@ func serveForeground(
 		if gateway == "" && snap.Gateway != "" {
 			gateway = snap.Gateway
 		}
+		if tmuxPath == "" && snap.TmuxPath != "" {
+			if validTmux, terr := ValidateTmuxBinary(snap.TmuxPath, layout.UID); terr == nil {
+				tmuxPath = validTmux
+			}
+		}
 
 		if listenFD >= 0 {
 			lf := os.NewFile(uintptr(listenFD), "listen-sock")
@@ -815,6 +835,7 @@ func serveForeground(
 		Layout:          layout,
 		Build:           build,
 		Gateway:         gateway,
+		TmuxPath:        tmuxPath,
 		Logger:          logger,
 		Lock:            lock,
 		Listener:        ln,
@@ -852,6 +873,7 @@ func serveForeground(
 		}
 		return reportReadyErr("server_init_failed", err.Error())
 	}
+	attachRegisteredModules(srv)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
@@ -865,31 +887,142 @@ func serveForeground(
 	return 0
 }
 
-// shouldUpdateSharedSymlink reports whether the shared CurrentSymlink and
-// README.txt should be updated to newRelease. It returns true only when
-// CurrentSymlink does not exist or currently points to a version with a
-// strictly lower Release. Any read error other than os.ErrNotExist fails closed.
-func shouldUpdateSharedSymlink(layout *Layout, newRelease int64) (bool, error) {
+// inspectSharedSymlink validates layout.CurrentSymlink and checks that its
+// target binary exists inside a valid corrald-<version>-<release> directory
+// under layout.LibDir and passes the same checks as installation (non-symlink
+// regular file, owned by layout.UID, mode 0700 inside a 0700 directory owned
+// by layout.UID). Returns valid=false when the symlink is absent or its target
+// is missing/invalid; returns an error on unexpected filesystem read errors.
+func inspectSharedSymlink(layout *Layout) (curVersion string, curRelease int64, valid bool, err error) {
 	target, err := os.Readlink(layout.CurrentSymlink)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return true, nil
+			return "", 0, false, nil
 		}
-		return false, fmt.Errorf("readlink %s: %w", layout.CurrentSymlink, err)
+		return "", 0, false, fmt.Errorf("readlink %s: %w", layout.CurrentSymlink, err)
 	}
-	parentDir := filepath.Base(filepath.Dir(filepath.Clean(target)))
-	if _, curRelease, ok := ParseVersionDirName(parentDir); ok {
-		return proto.ShouldUpgrade(curRelease, newRelease), nil
+	targetPath := target
+	if !filepath.IsAbs(targetPath) {
+		targetPath = filepath.Join(layout.LibDir, targetPath)
 	}
-	return true, nil
+	targetPath = filepath.Clean(targetPath)
+	parentDir := filepath.Dir(targetPath)
+	if filepath.Dir(parentDir) != filepath.Clean(layout.LibDir) || filepath.Base(targetPath) != "corrald" {
+		return "", 0, false, nil
+	}
+	ver, rel, ok := ParseVersionDirName(filepath.Base(parentDir))
+	if !ok {
+		return "", 0, false, nil
+	}
+
+	pinfo, err := os.Lstat(parentDir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return "", 0, false, nil
+		}
+		return "", 0, false, fmt.Errorf("lstat symlink target dir %s: %w", parentDir, err)
+	}
+	if pinfo.Mode()&os.ModeSymlink != 0 || !pinfo.IsDir() {
+		return "", 0, false, nil
+	}
+	if pst, ok := pinfo.Sys().(*syscall.Stat_t); !ok || pst.Uid != layout.UID || pinfo.Mode().Perm() != 0o700 {
+		return "", 0, false, nil
+	}
+
+	tinfo, err := os.Lstat(targetPath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return "", 0, false, nil
+		}
+		return "", 0, false, fmt.Errorf("lstat symlink target %s: %w", targetPath, err)
+	}
+	if tinfo.Mode()&os.ModeSymlink != 0 || !tinfo.Mode().IsRegular() {
+		return "", 0, false, nil
+	}
+	if tst, ok := tinfo.Sys().(*syscall.Stat_t); !ok || tst.Uid != layout.UID || tinfo.Mode().Perm() != 0o700 {
+		return "", 0, false, nil
+	}
+	return ver, rel, true, nil
+}
+
+// shouldUpdateSharedSymlink reports whether layout.CurrentSymlink should be
+// switched to newRelease. It returns true when the symlink does not exist, its
+// target binary fails validation, or its valid target has a strictly lower
+// Release. When returning false, curVersion/curRelease identify the valid
+// target currently pointed to by CurrentSymlink.
+func shouldUpdateSharedSymlink(layout *Layout, newRelease int64) (update bool, curVersion string, curRelease int64, err error) {
+	curVersion, curRelease, valid, err := inspectSharedSymlink(layout)
+	if err != nil {
+		return false, "", 0, err
+	}
+	if !valid {
+		return true, "", 0, nil
+	}
+	return proto.ShouldUpgrade(curRelease, newRelease), curVersion, curRelease, nil
+}
+
+// readmeMatchesVersion reports whether readmePath exists as a regular
+// non-symlink file describing the given (version, release).
+func readmeMatchesVersion(readmePath, version string, release int64) (bool, error) {
+	info, err := os.Lstat(readmePath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return false, nil
+		}
+		return false, fmt.Errorf("lstat %s: %w", readmePath, err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return false, nil
+	}
+	b, err := os.ReadFile(readmePath)
+	if err != nil {
+		return false, fmt.Errorf("read %s: %w", readmePath, err)
+	}
+	ver := strings.TrimSpace(version)
+	if ver == "" {
+		ver = "dev"
+	}
+	zhLine := fmt.Sprintf("  版本：%s（release %d）\n", ver, release)
+	enLine := fmt.Sprintf("  Version:    %s (release %d)\n", ver, release)
+	text := string(b)
+	return strings.Contains(text, zhLine) && strings.Contains(text, enLine), nil
+}
+
+// ensureSharedReadme ensures layout.ReadmePath exists and describes
+// (version, release). Must be called while holding SharedLock.
+func ensureSharedReadme(layout *Layout, rec *InstallRecord, version string, release int64, force bool) error {
+	if !force {
+		matches, err := readmeMatchesVersion(layout.ReadmePath, version, release)
+		if err != nil {
+			return err
+		}
+		if matches {
+			return nil
+		}
+	}
+	data := proto.ReadmeData{
+		Version:    version,
+		Release:    release,
+		MachineID:  layout.MachineID,
+		LibDir:     layout.LibDir,
+		StateDir:   layout.StateDir,
+		SocketPath: layout.SocketPath,
+	}
+	if rec != nil {
+		data.Gateway = rec.Gateway
+		data.EnabledBy = rec.EnabledBy
+		data.EnabledAt = rec.EnabledAt
+		data.Files = rec.Files
+	}
+	readmeText := proto.RenderReadme(data)
+	return WriteFileAtomic(layout.ReadmePath, []byte(readmeText), 0o644)
 }
 
 // finalizeHandoffCutover executes inside the inherited SharedLock -> OpLock
 // critical section. It verifies the target binary exists on disk and updates
-// symlink/README (only if current shared link release is lower or absent),
-// local install.json, and meta.json BEFORE Accept starts and BEFORE READY is
-// signaled. If any step fails, it returns an error without signaling READY and
-// v1 unconditionally restores its backup.
+// symlink (only if current shared link is absent, invalid, or lower release),
+// ensures README.txt matches the active shared link version, and updates local
+// install.json and meta.json BEFORE Accept starts and BEFORE READY is signaled.
 func finalizeHandoffCutover(layout *Layout, build proto.BuildInfo, binaryPath string, meta *MetaRecord) error {
 	waitCutoverTestGate()
 
@@ -937,17 +1070,21 @@ func finalizeHandoffCutover(layout *Layout, build proto.BuildInfo, binaryPath st
 		return fmt.Errorf("replacement binary %s outside lib dir %s", realExe, realLib)
 	}
 
-	updateShared, err := shouldUpdateSharedSymlink(layout, build.Release)
+	updateLink, curVer, curRel, err := shouldUpdateSharedSymlink(layout, build.Release)
 	if err != nil {
 		return fmt.Errorf("check shared symlink: %w", err)
 	}
-	if updateShared {
+	readmeVer, readmeRel := curVer, curRel
+	if updateLink {
 		if err := AtomicSymlink(rel, layout.CurrentSymlink); err != nil {
 			return fmt.Errorf("switch symlink: %w", err)
 		}
+		readmeVer, readmeRel = build.Version, build.Release
 	}
 
-	if rec, err := ReadInstallRecord(layout.InstallJSON); err == nil {
+	var rec *InstallRecord
+	if loaded, err := ReadInstallRecord(layout.InstallJSON); err == nil {
+		rec = loaded
 		rec.Version = build.Version
 		rec.Release = build.Release
 		rec.Commit = build.Commit
@@ -955,25 +1092,12 @@ func finalizeHandoffCutover(layout *Layout, build proto.BuildInfo, binaryPath st
 		if err := WriteInstallRecord(layout.InstallJSON, rec); err != nil {
 			return fmt.Errorf("update install.json: %w", err)
 		}
-		if updateShared {
-			readmeText := proto.RenderReadme(proto.ReadmeData{
-				Version:    rec.Version,
-				Release:    rec.Release,
-				Gateway:    rec.Gateway,
-				EnabledBy:  rec.EnabledBy,
-				EnabledAt:  rec.EnabledAt,
-				MachineID:  layout.MachineID,
-				LibDir:     layout.LibDir,
-				StateDir:   layout.StateDir,
-				SocketPath: layout.SocketPath,
-				Files:      rec.Files,
-			})
-			if err := WriteFileAtomic(layout.ReadmePath, []byte(readmeText), 0o644); err != nil {
-				return fmt.Errorf("update README.txt: %w", err)
-			}
-		}
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("read install.json: %w", err)
+	}
+
+	if err := ensureSharedReadme(layout, rec, readmeVer, readmeRel, updateLink); err != nil {
+		return fmt.Errorf("update README.txt: %w", err)
 	}
 
 	if err := WriteMetaRecord(layout.MetaJSON, meta); err != nil {

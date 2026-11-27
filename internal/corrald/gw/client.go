@@ -172,10 +172,10 @@ func (c *Client) readLoop() {
 		if env.IsEvent() {
 			ev := env.AsEvent()
 			c.metaMu.Lock()
-			if ev.Epoch != "" {
+			if ev.Epoch != "" && ev.Epoch != c.epoch {
 				c.epoch = ev.Epoch
-			}
-			if ev.Seq > c.lastSeq {
+				c.lastSeq = ev.Seq
+			} else if ev.Seq > c.lastSeq {
 				c.lastSeq = ev.Seq
 			}
 			c.metaMu.Unlock()
@@ -352,11 +352,16 @@ func (c *Client) Hello(ctx context.Context, params proto.HelloParams) (*proto.He
 	}
 	c.metaMu.Lock()
 	c.hello = &res
-	if res.Epoch != "" {
+	if res.Epoch != "" && res.Epoch != c.epoch {
 		c.epoch = res.Epoch
-	}
-	if res.Seq > c.lastSeq {
 		c.lastSeq = res.Seq
+	} else {
+		if res.Epoch != "" {
+			c.epoch = res.Epoch
+		}
+		if res.Seq > c.lastSeq {
+			c.lastSeq = res.Seq
+		}
 	}
 	c.metaMu.Unlock()
 	return &res, nil
@@ -416,4 +421,34 @@ func (c *Client) Forget(ctx context.Context, params proto.ForgetParams) (*proto.
 		return nil, err
 	}
 	return &res, nil
+}
+
+// Locate invokes agent.locate on corrald and returns the raw NUL-delimited
+// output matching convoLocateWith for parsing with parseConvoLocate.
+func (c *Client) Locate(ctx context.Context, params proto.AgentLocateParams) ([]byte, error) {
+	var res proto.AgentLocateResult
+	if err := c.Call(ctx, proto.MethodAgentLocate, params, &res); err != nil {
+		return nil, err
+	}
+	return res.Out, nil
+}
+
+// Tails invokes convo.tails on corrald and returns the raw NUL-delimited tail
+// output matching convoTailsCommand for parsing with splitTails.
+func (c *Client) Tails(ctx context.Context, logs []string) ([]byte, error) {
+	var res proto.ConvoTailsResult
+	if err := c.Call(ctx, proto.MethodConvoTails, proto.ConvoTailsParams{Logs: logs}, &res); err != nil {
+		return nil, err
+	}
+	return res.Out, nil
+}
+
+// MessageTails invokes convo.message_tails on corrald and returns the raw
+// NUL-delimited filtered tail output matching convoMessageTailsCommand.
+func (c *Client) MessageTails(ctx context.Context, logs []string) ([]byte, error) {
+	var res proto.ConvoTailsResult
+	if err := c.Call(ctx, proto.MethodConvoMessageTails, proto.ConvoTailsParams{Logs: logs}, &res); err != nil {
+		return nil, err
+	}
+	return res.Out, nil
 }

@@ -466,7 +466,9 @@ func TestRemoteExecCallSitesAreReviewed(t *testing.T) {
 		"term/session.go: s.rec.Output(buf[:n])":                                                           true, // the session recorder, not a process
 		"corrald/daemon/cli.go: proc, err := os.StartProcess(exe, argv, &os.ProcAttr{":                     true, // corrald serve detaching: re-executes its own binary (os.Executable) with fixed serve arguments; runs on the user's host, never anything from a request
 		"corrald/daemon/handoff.go: proc, err := os.StartProcess(\"/proc/self/fd/6\", argv, &os.ProcAttr{": true, // hot update: executes the pinned open FD (fd 6) of the new corrald only after LibDir/parent dir ownership & 0700 checks, O_NOFOLLOW open, fstat owner/0700 checks, release match, and SHA-256 verification on that open FD
+		"corrald/agent/tmux_exec.go: if err := cmd.Run(); err != nil {":                                    true, // single allowlisted host tmux executor: runs tmux directly (never sh) from fixed paths with args passed individually and strictly validated against read-only display-message subcommand
 		"corrald/gw/dist.go: return cmd.Output()":                                                          true, // gateway startup: executes bundled local corrald binary with fixed subcommand ("version" or "manifest") to read metadata
+		"web/corrald_agent.go: return sshx.Output(ctx, sess.Client(), convoTailsCommand(logs), maxBytes)":  true, // fixed read-only tail script fallback when corrald convo.tails is unavailable; quoted paths of discovered agent logs
 		"corrald/gw/exec.go: res, err := sshx.Exec(ctx, c, cmd, limit, opt)":                               true, // corrald gateway installer/lifecycle: single exec helper running only fixed scripts from corrald/gw/commands.go with sshx.QuoteShell arguments
 	}
 	re := regexp.MustCompile(`\.(Start|Run|Output|CombinedOutput|Exec|StartProcess)\(|SendRequest\("exec"`)

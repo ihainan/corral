@@ -21,6 +21,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/ihainan/corral/internal/corrald/proto"
 	"github.com/ihainan/corral/internal/herdr"
 	"github.com/ihainan/corral/internal/sshx"
 	"github.com/ihainan/corral/internal/store"
@@ -869,7 +870,15 @@ func (s *Server) watchHerdr(sess *term.Session, h *store.Host) {
 			}
 			lctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 			tLoc := time.Now()
-			out, err := sshx.Output(lctx, sess.Client(), convoLocateTimesCommand(sess.Persistence, sess.TmuxSession)+"; "+hostNowCommand, convoLocateMax)
+			var locOut []byte
+			var locErr error
+			if cout, ok := s.tryCorraldLocate(lctx, sess, proto.AgentLocateParams{Mode: sess.Persistence, TmuxName: sess.TmuxSession, Times: true}); ok {
+				locOut = cout
+			} else {
+				out, err := sshx.Output(lctx, sess.Client(), convoLocateTimesCommand(sess.Persistence, sess.TmuxSession)+"; "+hostNowCommand, convoLocateMax)
+				locOut, locErr = out, err
+			}
+			out, err := locOut, locErr
 			got := time.Now().UnixMilli()
 			cancel()
 			var at map[string]int64

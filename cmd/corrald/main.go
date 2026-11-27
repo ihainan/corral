@@ -4,6 +4,7 @@ package main
 import (
 	"os"
 
+	"github.com/ihainan/corral/internal/corrald/agent"
 	"github.com/ihainan/corral/internal/corrald/daemon"
 	"github.com/ihainan/corral/internal/corrald/proto"
 )
@@ -23,6 +24,8 @@ func main() {
 	proto.ReleaseStr = release
 	proto.Release = rel
 	proto.Commit = commit
+
+	daemon.RegisterModule(agent.Attach)
 
 	os.Exit(daemon.Main(os.Args[1:], proto.BuildInfo{
 		Version: version,

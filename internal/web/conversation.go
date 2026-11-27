@@ -33,6 +33,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/ihainan/corral/internal/convo"
+	"github.com/ihainan/corral/internal/corrald/proto"
 	"github.com/ihainan/corral/internal/sftplite"
 	"github.com/ihainan/corral/internal/sshx"
 	"github.com/ihainan/corral/internal/term"
@@ -1300,12 +1301,18 @@ func (s *Server) screenSays(ctx context.Context, sess *term.Session, pane string
 	if screen == "" {
 		return "", "", 0, true
 	}
-	tails, err := sshx.Output(ctx, sess.Client(), convoMessageTailsCommand(logs), maxScreenLogs*(72<<10))
-	if err != nil {
-		return "", "", 0, false
+	var rawTails []byte
+	if ctails, ok := s.tryCorraldMessageTails(ctx, sess, logs); ok {
+		rawTails = ctails
+	} else {
+		tails, err := sshx.Output(ctx, sess.Client(), convoMessageTailsCommand(logs), maxScreenLogs*(72<<10))
+		if err != nil {
+			return "", "", 0, false
+		}
+		rawTails = tails
 	}
 	// (One not read: what is any one's own cannot be told without it.)
-	ends := splitTails(string(tails), logs)
+	ends := splitTails(string(rawTails), logs)
 	if len(ends) != len(logs) {
 		return "", "", 0, false
 	}
@@ -1909,7 +1916,7 @@ func (s *Server) refreshCodexClaims(sess *term.Session) {
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		defer cancel()
 		tScan := time.Now()
-		out, _, _, shared, err := s.convoScans.run(ctx, sess, convoLocateCommand(sess.Persistence, sess.TmuxSession, ""), time.Time{})
+		out, _, _, shared, err := s.runConvoScan(ctx, sess, proto.AgentLocateParams{Mode: sess.Persistence, TmuxName: sess.TmuxSession}, convoLocateCommand(sess.Persistence, sess.TmuxSession, ""), time.Time{})
 		if err != nil {
 			s.perfLocate(locateOp("locate.full", shared), tScan, err, 0, sess.HostID)
 			return
@@ -2097,26 +2104,26 @@ type convoState struct {
 	// began (a Codex whose log its daemon keeps), and by what the pane's
 	// screen showed of it: screenSID, of the process screenPID/screenStart,
 	// as it was at screenAt.
-	guessed     bool
-	screenAt    time.Time
-	screenPID   int64
-	screenStart int64
-	screenSID   string
-	screenLog   string
-	screenFrom  string // (the conversation it was taken for when the screen was asked)
-	screenNo    bool   // (what its screen showed when last asked is another's: nothing is shown)
-	screenWeak  bool   // (it showed one, too little of it to take it by)
-	pane        string // (herdr) the pane it was located for
-	reason      string // why there is nothing to read, when there is not
-	sid, log    string
-	gen         int64      // changes when another log is read: what was shown does not apply
-	bind        *convoBind // the process the log is of, while there is one
+	guessed       bool
+	screenAt      time.Time
+	screenPID     int64
+	screenStart   int64
+	screenSID     string
+	screenLog     string
+	screenFrom    string // (the conversation it was taken for when the screen was asked)
+	screenNo      bool   // (what its screen showed when last asked is another's: nothing is shown)
+	screenWeak    bool   // (it showed one, too little of it to take it by)
+	pane          string // (herdr) the pane it was located for
+	reason        string // why there is nothing to read, when there is not
+	sid, log      string
+	gen           int64      // changes when another log is read: what was shown does not apply
+	bind          *convoBind // the process the log is of, while there is one
 	parser        convo.Parser
 	lineage       *lineageExtractor // raw JSONL herdr child-creation extractor (reset on adopt/truncation)
 	lineageAgent  string
 	lineageSocket string
 	early         earlyTitle // (see lookEarlierTitle)
-	agent       string     // whose log: "claude", "codex" or "opencode"
+	agent         string     // whose log: "claude", "codex" or "opencode"
 	// (A Codex in tmux: whether its title said it waits, for whom, when.)
 	cxTitleAt     time.Time
 	cxTitleFor    string
@@ -2133,12 +2140,12 @@ type convoState struct {
 	// (An Antigravity CLI conversation: last read of step_type=17 ERROR_MESSAGE rows from conversations/<sid>.db.)
 	agyDBAt     time.Time
 	agyDBMinIdx int
-	offset        int64 // read up to here
-	size          int64 // the log's size when last looked at
-	mtime         time.Time
-	grewAt        time.Time // when the log last grew, as this gateway saw it (at first, its own time of writing)
-	older         bool      // the log has more before what was read
-	from          int64     // where in the log the first line read begins (-1 until a first line is whole)
+	offset      int64 // read up to here
+	size        int64 // the log's size when last looked at
+	mtime       time.Time
+	grewAt      time.Time // when the log last grew, as this gateway saw it (at first, its own time of writing)
+	older       bool      // the log has more before what was read
+	from        int64     // where in the log the first line read begins (-1 until a first line is whole)
 	// olderLog: the log what came before is read from, where it is not log
 	// (a Codex conversation rewound: the log before, from where the one
 	// after goes on: convo_codex_chain.go); olderBase: that log's base (to
@@ -2156,21 +2163,21 @@ type convoState struct {
 	// named: bound by its conversation's name, its pane's title showing it
 	// (tmux, codexTmuxNamed): vouching for a press only with its title read
 	// anew then — it may have gone to another since (/new, /resume).
-	named      bool
-	more       bool   // the last read stopped before the end
-	status     string // (tmux) the process's own word: "busy", "idle", or "" when not known
-	skipping   bool   // in a line too long to keep, until its end
-	long       []byte // a line longer than a read, so far, its images' data left out (nil when not in one)
-	strip      b64Strip
-	ocCursor   int64 // (OpenCode) rows written since this are read next (unix ms)
-	ocCursorK  int   // (OpenCode) and, stopped within its millisecond, the last row read in it
-	ocCursorID string
-	noReaderAt time.Time // (OpenCode, Devin) when reading found no python3
-	dvTip        int64  // (Devin) the node its line was at when last read: what is after it is read next
-	sub          bool   // a subagent's own log (see apiConversationSubagent)
-	sidechain    bool   // true for Claude Code's subagents/agent-*.jsonl (sidechain rows); false for standalone CLI sessions
-	rewindTarget string // active pending rewind target message ID overlaid for this state's gen
-	runningSig   string // last Running() id signature observed (nudges cmdProber on change)
+	named        bool
+	more         bool   // the last read stopped before the end
+	status       string // (tmux) the process's own word: "busy", "idle", or "" when not known
+	skipping     bool   // in a line too long to keep, until its end
+	long         []byte // a line longer than a read, so far, its images' data left out (nil when not in one)
+	strip        b64Strip
+	ocCursor     int64 // (OpenCode) rows written since this are read next (unix ms)
+	ocCursorK    int   // (OpenCode) and, stopped within its millisecond, the last row read in it
+	ocCursorID   string
+	noReaderAt   time.Time // (OpenCode, Devin) when reading found no python3
+	dvTip        int64     // (Devin) the node its line was at when last read: what is after it is read next
+	sub          bool      // a subagent's own log (see apiConversationSubagent)
+	sidechain    bool      // true for Claude Code's subagents/agent-*.jsonl (sidechain rows); false for standalone CLI sessions
+	rewindTarget string    // active pending rewind target message ID overlaid for this state's gen
+	runningSig   string    // last Running() id signature observed (nudges cmdProber on change)
 }
 
 // newParser: a parser for the log read, a subagent's own as such (its
@@ -2716,6 +2723,10 @@ const convoScanShared = 5 * time.Second
 // way, else a new one (not bound to the asking request: others may be
 // waiting on it).
 func (c *convoScans) run(ctx context.Context, sess *term.Session, cmd string, after time.Time) ([]byte, time.Time, time.Time, bool, error) {
+	return c.runWith(ctx, sess, cmd, after, nil)
+}
+
+func (c *convoScans) runWith(ctx context.Context, sess *term.Session, cmd string, after time.Time, tryAlt func(context.Context) ([]byte, bool)) ([]byte, time.Time, time.Time, bool, error) {
 	key := sess.ID + "\x00" + cmd
 	c.mu.Lock()
 	if c.m == nil {
@@ -2752,7 +2763,15 @@ func (c *convoScans) run(ctx context.Context, sess *term.Session, cmd string, af
 		go func() {
 			sctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 20*time.Second)
 			defer cancel()
-			e.out, e.err = sshx.Output(sctx, sess.Client(), cmd, convoLocateMax)
+			if tryAlt != nil {
+				if out, ok := tryAlt(sctx); ok {
+					e.out, e.err = out, nil
+				} else {
+					e.out, e.err = sshx.Output(sctx, sess.Client(), cmd, convoLocateMax)
+				}
+			} else {
+				e.out, e.err = sshx.Output(sctx, sess.Client(), cmd, convoLocateMax)
+			}
 			e.at = time.Now()
 			close(e.done)
 		}()
@@ -2859,7 +2878,7 @@ func (s *Server) locateScan(ctx context.Context, sess *term.Session, st *convoSt
 			// On any execution error (e.g. ErrBusy while a cached full scan is
 			// available) or rejected result, fall through to the original path.
 			tPid := time.Now()
-			if fout, fat, flooked, fshared, ferr := s.convoScans.run(ctx, sess, convoLocatePidsCommand(plan.shellPID, plan.pids), after); ferr == nil {
+			if fout, fat, flooked, fshared, ferr := s.runConvoScan(ctx, sess, proto.AgentLocateParams{Mode: "herdr", ShellPID: plan.shellPID, PIDs: plan.pids}, convoLocatePidsCommand(plan.shellPID, plan.pids), after); ferr == nil {
 				fl := parseConvoLocate(string(fout))
 				outcome := "pids_miss"
 				if _, ok := fastLocateAccept(fl, pane, socket, s.herdrSocks.sid(sess.ID, pane)); ok {
@@ -2886,21 +2905,24 @@ func (s *Server) locateScan(ctx context.Context, sess *term.Session, st *convoSt
 		}
 	} else {
 		var shared bool
+		fullParams := proto.AgentLocateParams{Mode: sess.Persistence, TmuxName: sess.TmuxSession}
+		params := fullParams
 		cmd := convoLocateCommand(sess.Persistence, sess.TmuxSession, "")
 		base := "locate.full"
 		if ocOnly {
+			params.Only = "opencode"
 			cmd = convoLocateOpenCodeCommand(sess.Persistence, sess.TmuxSession)
 			base = "locate.fast"
 		}
 		tScan := time.Now()
-		out, at, looked, shared, err = s.convoScans.run(ctx, sess, cmd, after)
+		out, at, looked, shared, err = s.runConvoScan(ctx, sess, params, cmd, after)
 		// (If OpenCode-only failed, fall back to full scan, which may reuse a
 		// cached full scan.)
 		if err != nil && ocOnly && ctx.Err() == nil {
 			s.perfLocate(locateOp(base, shared), tScan, err, 0, sess.HostID)
 			ocOnly, base = false, "locate.full"
 			tScan = time.Now()
-			out, at, looked, shared, err = s.convoScans.run(ctx, sess, convoLocateCommand(sess.Persistence, sess.TmuxSession, ""), after)
+			out, at, looked, shared, err = s.runConvoScan(ctx, sess, fullParams, convoLocateCommand(sess.Persistence, sess.TmuxSession, ""), after)
 		}
 		// (The script ends with exit 0: an error is a scan cut short, by its size
 		// or a failure, which may leave out the agent started last. What was
@@ -2913,7 +2935,7 @@ func (s *Server) locateScan(ctx context.Context, sess *term.Session, st *convoSt
 		if ocOnly && !l.noProc && !ocPaneOwn(l.procs, pane, socket) {
 			ocOnly = false
 			tFull := time.Now()
-			if out, at, looked, shared, err = s.convoScans.run(ctx, sess, convoLocateCommand(sess.Persistence, sess.TmuxSession, ""), after); err != nil {
+			if out, at, looked, shared, err = s.runConvoScan(ctx, sess, fullParams, convoLocateCommand(sess.Persistence, sess.TmuxSession, ""), after); err != nil {
 				s.perfLocate(locateOp("locate.full", shared), tFull, err, 0, sess.HostID)
 				return err
 			}
@@ -4962,12 +4984,15 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 		wantSID := s.herdrSocks.sid(sess.ID, b.Pane)
 		var l convoLocated
 		for attempt := 0; attempt < 2; attempt++ {
+			params := proto.AgentLocateParams{Mode: sess.Persistence, TmuxName: sess.TmuxSession, TmuxPane: tmuxTarget}
 			cmd := convoLocateCommand(sess.Persistence, sess.TmuxSession, tmuxTarget)
 			fastTry := attempt == 0 && plan.mode != herdrFastFull
 			if fastTry {
 				if plan.mode == herdrFastPIDs {
+					params = proto.AgentLocateParams{Mode: "herdr", ShellPID: plan.shellPID, PIDs: plan.pids}
 					cmd = convoLocatePidsCommand(plan.shellPID, plan.pids)
 				} else {
+					params = proto.AgentLocateParams{Mode: sess.Persistence, TmuxName: sess.TmuxSession, Only: "opencode"}
 					cmd = convoLocateOpenCodeCommand(sess.Persistence, sess.TmuxSession)
 				}
 			}
@@ -4976,32 +5001,39 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 				op = "locate.fast"
 			}
 			tLoc := time.Now()
-			lr, err := sshx.Exec(ctx, sess.Client(), cmd, convoLocateMax, sshx.ExecOptions{Interactive: pressInteractive(what), AwaitSlot: pressSlotWait(what)})
-			out := lr.Out
-			if err != nil {
-				s.perfLocate(op, tLoc, err, 0, sess.HostID)
-			}
-			if errors.Is(err, sshx.ErrBusy) {
-				reason = "ssh_channels_busy"
-				writeSSHChannelsBusy(w)
-				return
-			}
-			if err != nil && fastTry {
-				if signedOut() {
+			var out []byte
+			var err error
+			if cout, ok := s.tryCorraldLocate(ctx, sess, params); ok {
+				out = cout
+			} else {
+				lr, err := sshx.Exec(ctx, sess.Client(), cmd, convoLocateMax, sshx.ExecOptions{Interactive: pressInteractive(what), AwaitSlot: pressSlotWait(what)})
+				out, _ = lr.Out, err
+				if err != nil {
+					s.perfLocate(op, tLoc, err, 0, sess.HostID)
+				}
+				if errors.Is(err, sshx.ErrBusy) {
+					reason = "ssh_channels_busy"
+					writeSSHChannelsBusy(w)
 					return
 				}
-				continue
-			}
-			// (A scan cut short, by its size or a failure, may leave out the agent
-			// started last: what it found does not decide where keys go.)
-			if err != nil {
-				if signedOut() {
+				if err != nil && fastTry {
+					if signedOut() {
+						return
+					}
+					continue
+				}
+				// (A scan cut short, by its size or a failure, may leave out the agent
+				// started last: what it found does not decide where keys go.)
+				if err != nil {
+					if signedOut() {
+						return
+					}
+					reason = "host_error"
+					writeError(w, http.StatusBadGateway, "host_error", "the host did not answer")
 					return
 				}
-				reason = "host_error"
-				writeError(w, http.StatusBadGateway, "host_error", "the host did not answer")
-				return
 			}
+			_ = err
 			l = parseConvoLocate(string(out))
 			s.perfLocate(op, tLoc, nil, len(l.procs), sess.HostID)
 			if fastTry {

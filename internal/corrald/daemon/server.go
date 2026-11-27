@@ -93,6 +93,7 @@ type ServerConfig struct {
 	Layout              *Layout
 	Build               proto.BuildInfo
 	Gateway             string
+	TmuxPath            string
 	ExpectedUID         *uint32
 	Logger              *slog.Logger
 	IdleTimeout         time.Duration
@@ -121,6 +122,31 @@ type registeredMethod struct {
 	fn   HandlerFunc
 }
 
+var (
+	modulesMu sync.Mutex
+	modules   []func(*Server)
+)
+
+// RegisterModule registers a host module attachment callback invoked for each
+// daemon Server started via CLI serve.
+func RegisterModule(fn func(*Server)) {
+	if fn == nil {
+		return
+	}
+	modulesMu.Lock()
+	defer modulesMu.Unlock()
+	modules = append(modules, fn)
+}
+
+func attachRegisteredModules(s *Server) {
+	modulesMu.Lock()
+	list := append(([]func(*Server))(nil), modules...)
+	modulesMu.Unlock()
+	for _, fn := range list {
+		fn(s)
+	}
+}
+
 var errAlreadyReplied = errors.New("response already enqueued")
 
 // Server is the corrald Unix domain socket RPC and event server.
@@ -142,6 +168,7 @@ type Server struct {
 	stateProviders map[string]StateProvider
 	healthChecks   map[string]HealthCheckFunc
 	reconcilers    []ReconcilerFunc
+	closers        []func()
 
 	// listenerOpMu strictly serializes socket rebind and handoff listener
 	// pause/dup/spawn/rollback so they can never interleave or unpause each other.
@@ -282,6 +309,22 @@ func (s *Server) RegisterReconciler(fn ReconcilerFunc) {
 	s.reconcilers = append(s.reconcilers, fn)
 }
 
+// RegisterCloser attaches a cleanup callback invoked when Serve shuts down.
+func (s *Server) RegisterCloser(fn func()) {
+	if fn == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.closers = append(s.closers, fn)
+}
+
+// Layout returns the server's resolved host path layout.
+func (s *Server) Layout() *Layout { return s.layout }
+
+// TmuxPath returns the validated optional tmux binary path passed via --tmux.
+func (s *Server) TmuxPath() string { return s.cfg.TmuxPath }
+
 // Bus returns the server's EventBus for emitting events.
 func (s *Server) Bus() *EventBus { return s.bus }
 
@@ -310,6 +353,7 @@ func (s *Server) currentMetaRecord() *MetaRecord {
 		StartedAt:  s.startedAt.Format(time.RFC3339),
 		SocketPath: s.layout.SocketPath,
 		Gateway:    s.cfg.Gateway,
+		TmuxPath:   s.cfg.TmuxPath,
 	}
 	if snap := s.cfg.InitialSnapshot; snap != nil {
 		meta.PrevPID = snap.OldPID
@@ -403,6 +447,7 @@ func (s *Server) Serve(parentCtx context.Context) error {
 
 	<-ctx.Done()
 
+	s.runClosers()
 	s.stopIdleTimer()
 	s.closeListenerForExit()
 	s.closeAllConns()
@@ -797,6 +842,11 @@ func (c *Conn) enqueueRaw(payload []byte) bool {
 func (c *Conn) enqueueResponse(id uint64, result any, rpcErr *proto.RPCError) bool {
 	b := marshalResponseBytes(id, result, rpcErr)
 	return c.enqueueRaw(b)
+}
+
+// Done returns a channel that is closed when the connection terminates.
+func (c *Conn) Done() <-chan struct{} {
+	return c.doneCh
 }
 
 // Close terminates the connection and stops its writer goroutine.
@@ -1208,6 +1258,15 @@ func (s *Server) restoreModuleStates(mods map[string]json.RawMessage) {
 				s.log.Warn("module restore failed", "module", name, "err", err)
 			}
 		}
+	}
+}
+
+func (s *Server) runClosers() {
+	s.mu.RLock()
+	fns := append(([]func())(nil), s.closers...)
+	s.mu.RUnlock()
+	for _, fn := range fns {
+		fn()
 	}
 }
 

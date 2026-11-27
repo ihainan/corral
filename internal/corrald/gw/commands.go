@@ -366,9 +366,24 @@ func InstallCommand(binPath, stageDir, opID, gateway, by string, upgrade bool) s
 `, "BIN", binPath, "STAGE", stageDir, "OP", opID, "GW", gateway, "BY", by)
 }
 
-// ServeCommand starts corrald detached via `<bin> serve --gateway <gw>`.
+// ServeCommand starts corrald detached via `<bin> serve --gateway <gw>`,
+// passing `--tmux <path>` when `command -v tmux` resolves a binary on the host.
+// If corrald rejects the discovered tmux path with error=invalid_tmux (e.g.
+// untrusted directory), ServeCommand retries without --tmux so the daemon still
+// starts cleanly and tmux queries fall back to SSH.
 func ServeCommand(binPath, gateway string) string {
 	return shellScript(`if [ ! -x "$BIN" ]; then echo "error=not_installed"; exit 1; fi
+TMUX_BIN=$(command -v tmux 2>/dev/null || true)
+if [ -n "$TMUX_BIN" ]; then
+  OUT=$("$BIN" serve --gateway "$GW" --tmux "$TMUX_BIN")
+  RC=$?
+  if [ $RC -ne 0 ] && printf '%s\n' "$OUT" | grep -q '^error=invalid_tmux$'; then
+    "$BIN" serve --gateway "$GW"
+    exit $?
+  fi
+  printf '%s\n' "$OUT"
+  exit $RC
+fi
 "$BIN" serve --gateway "$GW"
 `, "BIN", binPath, "GW", gateway)
 }

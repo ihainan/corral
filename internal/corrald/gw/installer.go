@@ -322,6 +322,46 @@ func ValidateProbe(probe *HostProbe, dist *Dist) (*ArchBinary, *OpFailure) {
 	return bin, nil
 }
 
+// BusyRetryPolicy configures automatic retries when a host-side corrald
+// lifecycle command returns `busy` (lock contention with another gateway or
+// concurrent lifecycle operation).
+type BusyRetryPolicy struct {
+	Interval   time.Duration
+	MaxRetries int
+}
+
+// DefaultBusyRetryPolicy retries up to 12 times at 5-second intervals.
+var DefaultBusyRetryPolicy = BusyRetryPolicy{
+	Interval:   5 * time.Second,
+	MaxRetries: 12,
+}
+
+func (p BusyRetryPolicy) effective() (time.Duration, int) {
+	iv := p.Interval
+	if iv <= 0 {
+		iv = DefaultBusyRetryPolicy.Interval
+	}
+	maxR := p.MaxRetries
+	if maxR < 0 {
+		maxR = 0
+	}
+	return iv, maxR
+}
+
+func waitBusyRetry(ctx context.Context, d time.Duration, isCancelled func() bool) bool {
+	if isCancelled != nil && isCancelled() {
+		return false
+	}
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return isCancelled == nil || !isCancelled()
+	case <-ctx.Done():
+		return false
+	}
+}
+
 // StageAndInstall uploads, verifies, selftests, and installs corrald on the host.
 // On upgrade=true it passes --upgrade so the symlink is not switched until handoff.
 func StageAndInstall(
@@ -332,6 +372,23 @@ func StageAndInstall(
 	bin *ArchBinary,
 	opID, gatewayID, byUser string,
 	upgrade bool,
+	onStep func(step string),
+	isCancelled func() bool,
+	verifyHook func(actual string) string,
+) (installedBin string, fail *OpFailure) {
+	return StageAndInstallWithRetry(ctx, c, dist, probe, bin, opID, gatewayID, byUser, upgrade, DefaultBusyRetryPolicy, onStep, isCancelled, verifyHook)
+}
+
+// StageAndInstallWithRetry is StageAndInstall with a configurable busy retry policy.
+func StageAndInstallWithRetry(
+	ctx context.Context,
+	c *ssh.Client,
+	dist *Dist,
+	probe *HostProbe,
+	bin *ArchBinary,
+	opID, gatewayID, byUser string,
+	upgrade bool,
+	busyRetry BusyRetryPolicy,
 	onStep func(step string),
 	isCancelled func() bool,
 	verifyHook func(actual string) string,
@@ -473,12 +530,26 @@ func StageAndInstall(
 		return "", cf
 	}
 
-	// Step: install
+	// Step: install (auto-retry on `busy` while preserving stage directory)
 	if onStep != nil {
 		onStep("install")
 	}
-	inRes, inErr := runSSH(ctx, c, InstallCommand(stageBin, stageDir, opID, gatewayID, byUser, upgrade), 16<<10, sshx.ExecOptions{})
-	inFields := ParseKeyValues(inRes.Out)
+	iv, maxRetries := busyRetry.effective()
+	var inRes sshx.ExecResult
+	var inErr error
+	var inFields map[string]string
+	for attempt := 0; ; attempt++ {
+		inRes, inErr = runSSH(ctx, c, InstallCommand(stageBin, stageDir, opID, gatewayID, byUser, upgrade), 16<<10, sshx.ExecOptions{})
+		inFields = ParseKeyValues(inRes.Out)
+		if inFields["error"] == proto.ErrBusy && attempt < maxRetries {
+			if waitBusyRetry(ctx, iv, isCancelled) {
+				continue
+			}
+			_ = cleanupStage()
+			return "", &OpFailure{Code: "cancelled"}
+		}
+		break
+	}
 	if inFields["error"] == proto.ErrRemoving {
 		_ = cleanupStage()
 		return "", &OpFailure{Code: proto.ErrRemoving, MachineID: probe.MachineID, OS: probe.OS, Arch: probe.Arch}
@@ -513,10 +584,31 @@ func StageAndInstall(
 // RunServe starts corrald detached via `corrald serve --gateway <gw>` and
 // returns its PID and Unix socket path.
 func RunServe(ctx context.Context, c *ssh.Client, binPath, gatewayID, machineID, osName, arch string) (pid int, socketPath string, fail *OpFailure) {
-	res, err := runSSH(ctx, c, ServeCommand(binPath, gatewayID), 16<<10, sshx.ExecOptions{})
-	f := ParseKeyValues(res.Out)
+	return RunServeWithRetry(ctx, c, binPath, gatewayID, machineID, osName, arch, DefaultBusyRetryPolicy)
+}
+
+// RunServeWithRetry starts corrald detached and automatically retries on `busy`.
+func RunServeWithRetry(ctx context.Context, c *ssh.Client, binPath, gatewayID, machineID, osName, arch string, busyRetry BusyRetryPolicy) (pid int, socketPath string, fail *OpFailure) {
+	iv, maxRetries := busyRetry.effective()
+	var res sshx.ExecResult
+	var err error
+	var f map[string]string
+	for attempt := 0; ; attempt++ {
+		res, err = runSSH(ctx, c, ServeCommand(binPath, gatewayID), 16<<10, sshx.ExecOptions{})
+		f = ParseKeyValues(res.Out)
+		if f["error"] == proto.ErrBusy && attempt < maxRetries {
+			if waitBusyRetry(ctx, iv, nil) {
+				continue
+			}
+			return 0, "", &OpFailure{Code: proto.ErrBusy, Detail: firstNonEmpty(f["detail"], "busy"), MachineID: machineID, OS: osName, Arch: arch, KeepInstalled: true}
+		}
+		break
+	}
 	if f["error"] == proto.ErrRemoving {
 		return 0, "", &OpFailure{Code: proto.ErrRemoving, MachineID: machineID, OS: osName, Arch: arch}
+	}
+	if f["error"] == proto.ErrBusy {
+		return 0, "", &OpFailure{Code: proto.ErrBusy, Detail: firstNonEmpty(f["detail"], "busy"), MachineID: machineID, OS: osName, Arch: arch, KeepInstalled: true}
 	}
 	if err != nil && !res.Ended {
 		return 0, "", &OpFailure{Code: "disconnected", Detail: err.Error(), MachineID: machineID, OS: osName, Arch: arch, KeepInstalled: true}
@@ -537,6 +629,12 @@ func RunServe(ctx context.Context, c *ssh.Client, binPath, gatewayID, machineID,
 
 // RunUninstall writes the removing tombstone and executes corrald uninstall.
 func RunUninstall(ctx context.Context, c *ssh.Client, probe *HostProbe, opID string, onStep func(step string)) UninstallOutcome {
+	return RunUninstallWithRetry(ctx, c, probe, opID, DefaultBusyRetryPolicy, onStep)
+}
+
+// RunUninstallWithRetry writes the removing tombstone and executes corrald
+// uninstall, automatically retrying on `busy`.
+func RunUninstallWithRetry(ctx context.Context, c *ssh.Client, probe *HostProbe, opID string, busyRetry BusyRetryPolicy, onStep func(step string)) UninstallOutcome {
 	if onStep != nil {
 		onStep("mark")
 	}
@@ -553,20 +651,35 @@ func RunUninstall(ctx context.Context, c *ssh.Client, probe *HostProbe, opID str
 	if onStep != nil {
 		onStep("remove")
 	}
-	res, err := runSSH(ctx, c, UninstallCommand(probe.LibDir, probe.StateDir, probe.SocketPath, opID), 64<<10, sshx.ExecOptions{})
-	if err != nil && !res.Ended {
-		return UninstallOutcome{Result: "pending", Detail: err.Error()}
+	iv, maxRetries := busyRetry.effective()
+	var res sshx.ExecResult
+	var err error
+	var f map[string]string
+	for attempt := 0; ; attempt++ {
+		res, err = runSSH(ctx, c, UninstallCommand(probe.LibDir, probe.StateDir, probe.SocketPath, opID), 64<<10, sshx.ExecOptions{})
+		if err != nil && !res.Ended {
+			return UninstallOutcome{Result: "pending", Detail: err.Error()}
+		}
+		f = ParseKeyValues(res.Out)
+		if f["error"] == proto.ErrBusy && attempt < maxRetries {
+			if waitBusyRetry(ctx, iv, nil) {
+				continue
+			}
+			return UninstallOutcome{Result: "pending", Detail: firstNonEmpty(f["detail"], "busy")}
+		}
+		break
 	}
 	if onStep != nil {
 		onStep("verify")
 	}
-	f := ParseKeyValues(res.Out)
 	switch {
 	case f["result"] == "removed":
 		return UninstallOutcome{Result: "removed", LastMachine: f["last_machine"] == "true"}
 	case f["error"] == "stop_failed":
 		pid, _ := strconv.Atoi(f["pid"])
 		return UninstallOutcome{Result: "stop_failed", PID: pid, Detail: f["detail"]}
+	case f["error"] == proto.ErrBusy:
+		return UninstallOutcome{Result: "pending", Detail: firstNonEmpty(f["detail"], "busy")}
 	case f["result"] == "partial":
 		return UninstallOutcome{Result: "partial", Left: ParseLeftLines(res.Out), LastMachine: f["last_machine"] == "true"}
 	default:
@@ -628,6 +741,8 @@ func classifyInstallErr(code, detail string) string {
 	switch {
 	case code == proto.ErrRemoving:
 		return proto.ErrRemoving
+	case code == proto.ErrBusy:
+		return proto.ErrBusy
 	case strings.Contains(msg, "no space"), strings.Contains(msg, "enospc"), strings.Contains(msg, "quota"):
 		return "no_space"
 	case strings.Contains(msg, "permission denied"), strings.Contains(msg, "read-only"), code == "mkdir_failed", code == "state_dir_failed":

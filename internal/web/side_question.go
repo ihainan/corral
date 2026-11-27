@@ -13,6 +13,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/ihainan/corral/internal/corrald/proto"
 	"github.com/ihainan/corral/internal/sshx"
 )
 
@@ -332,9 +333,11 @@ func (s *Server) apiConversationSide(w http.ResponseWriter, r *http.Request) {
 	}
 	var front *convoProc
 	for attempt := 0; attempt < 2; attempt++ {
+		params := proto.AgentLocateParams{Mode: sess.Persistence, TmuxName: sess.TmuxSession, TmuxPane: tmuxTarget}
 		cmd := convoLocateCommand(sess.Persistence, sess.TmuxSession, tmuxTarget)
 		fastTry := attempt == 0 && fastPlan.mode == herdrFastPIDs
 		if fastTry {
+			params = proto.AgentLocateParams{Mode: "herdr", ShellPID: fastPlan.shellPID, PIDs: fastPlan.pids}
 			cmd = convoLocatePidsCommand(fastPlan.shellPID, fastPlan.pids)
 		}
 		op := "locate.full"
@@ -343,30 +346,37 @@ func (s *Server) apiConversationSide(w http.ResponseWriter, r *http.Request) {
 		}
 		lctx, lcancel := context.WithTimeout(ctx, 15*time.Second)
 		tLoc := time.Now()
-		lr, err := sshx.Exec(lctx, sess.Client(), cmd, convoLocateMax, sshx.ExecOptions{Interactive: true, AwaitSlot: 2 * time.Second})
-		lcancel()
-		if err != nil {
-			s.perfLocate(op, tLoc, err, 0, sess.HostID)
+		var out []byte
+		if cout, ok := s.tryCorraldLocate(lctx, sess, params); ok {
+			lcancel()
+			out = cout
+		} else {
+			lr, err := sshx.Exec(lctx, sess.Client(), cmd, convoLocateMax, sshx.ExecOptions{Interactive: true, AwaitSlot: 2 * time.Second})
+			lcancel()
+			if err != nil {
+				s.perfLocate(op, tLoc, err, 0, sess.HostID)
+			}
+			if errors.Is(err, sshx.ErrBusy) {
+				reason = "ssh_channels_busy"
+				writeSSHChannelsBusy(w)
+				return
+			}
+			if err != nil && fastTry {
+				continue
+			}
+			switch {
+			case errors.Is(err, sshx.ErrBusy):
+				reason = "ssh_channels_busy"
+				writeSSHChannelsBusy(w)
+				return
+			case err != nil:
+				reason = "host_error"
+				writeError(w, http.StatusBadGateway, "host_error", "the host did not answer")
+				return
+			}
+			out = lr.Out
 		}
-		if errors.Is(err, sshx.ErrBusy) {
-			reason = "ssh_channels_busy"
-			writeSSHChannelsBusy(w)
-			return
-		}
-		if err != nil && fastTry {
-			continue
-		}
-		switch {
-		case errors.Is(err, sshx.ErrBusy):
-			reason = "ssh_channels_busy"
-			writeSSHChannelsBusy(w)
-			return
-		case err != nil:
-			reason = "host_error"
-			writeError(w, http.StatusBadGateway, "host_error", "the host did not answer")
-			return
-		}
-		l := parseConvoLocate(string(lr.Out))
+		l := parseConvoLocate(string(out))
 		s.perfLocate(op, tLoc, nil, len(l.procs), sess.HostID)
 		if fastTry {
 			if p, ok := fastLocateAccept(l, b.Pane, socket, wantSID); ok && !l.noProc && p != nil && p.agent == "claude" && p.pid == b.PID && p.start == b.Start && p.sid == b.Session {

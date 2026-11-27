@@ -542,11 +542,17 @@ func CapAllowedByScope(consented, running proto.Manifest, capName string) bool {
 			return false
 		}
 		switch capName {
-		case "agent.state", "agent.events", "agent.locate", "agent.watch", "convo.subscribe", "fs.watch":
+		case "locate", "watch", "agent.state", "agent.events", "agent.locate", "agent.watch", "convo.subscribe", "fs.watch":
 			if item == "reads:"+proto.ReadProc ||
 				strings.HasPrefix(item, "reads:agent-logs:") ||
 				strings.HasPrefix(item, "reads:env:") ||
 				strings.HasPrefix(item, "reads:pane-screen:") {
+				return false
+			}
+		case "tails", "convo.tails", "convo.message_tails":
+			if item == "reads:"+proto.ReadProc ||
+				strings.HasPrefix(item, "reads:agent-logs:") ||
+				strings.HasPrefix(item, "reads:env:") {
 				return false
 			}
 		case "proc.monitor":
