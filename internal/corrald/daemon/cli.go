@@ -25,6 +25,7 @@ import (
 
 // Main executes a corrald CLI subcommand and returns the process exit code.
 func Main(args []string, build proto.BuildInfo, stdout, stderr io.Writer) int {
+	SetProcessName("corrald")
 	if stdout == nil {
 		stdout = os.Stdout
 	}

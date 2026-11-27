@@ -696,6 +696,12 @@ func TestIntegrationHotUpdateZeroGap(t *testing.T) {
 	if hres.PID == 0 || hres.PID == pid1 || hres.Release != 200 {
 		t.Fatalf("unexpected handoff result: %+v (old pid=%d)", hres, pid1)
 	}
+	for _, pid := range []int{pid1, hres.PID} {
+		comm, err := os.ReadFile(fmt.Sprintf("/proc/%d/comm", pid))
+		if err != nil || strings.TrimSpace(string(comm)) != "corrald" {
+			t.Fatalf("pid %d is named %q (err %v), want corrald: hosts must see the helper by name", pid, comm, err)
+		}
+	}
 	t.Logf("hot-update handoff to READY: server_reported=%dms wall=%v (v1 pid=%d -> v2 pid=%d)",
 		hres.DurationMS, handoffElapsed, pid1, hres.PID)
 
