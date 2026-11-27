@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -311,7 +312,7 @@ func TestAutoRestartUsesSelectStartBinarySkipsBlacklisted(t *testing.T) {
 	})
 
 	probe := &HostProbe{
-		OS: "Linux", Machine: "x86_64", Arch: "amd64", UID: "1000",
+		OS: "Linux", Machine: "x86_64", Arch: "amd64", UID: strconv.Itoa(os.Getuid()),
 		Home: home, HomeWritable: true, FreeKB: 100000, MachineID: "0123456789ab",
 		HasSymlink:    true,
 		CurrentTarget: "corrald-0.3.2-2000/corrald",
@@ -603,7 +604,7 @@ func TestNFSColdStartFailureBlacklistsActualStartedReleaseNotDist(t *testing.T) 
 				versions = []string{"corrald-0.3.1-1000", "corrald-0.3.2-2000", "corrald-0.3.3-3000"}
 			}
 			return &HostProbe{
-				OS: "Linux", Machine: "x86_64", Arch: "amd64", UID: "1000",
+				OS: "Linux", Machine: "x86_64", Arch: "amd64", UID: strconv.Itoa(os.Getuid()),
 				Home: home, HomeWritable: true, FreeKB: 100000, MachineID: "0123456789ab",
 				HasSymlink:    true,
 				CurrentTarget: "corrald-0.3.3-3000/corrald", // Shared symlink stays at R3!
@@ -788,7 +789,7 @@ func TestConcurrentHandoffHigherReleaseRecordsActualCrashWindow(t *testing.T) {
 	_ = os.MkdirAll(stateDir, 0o700)
 	_ = os.MkdirAll(filepath.Join(home, ".local", "lib", "corral"), 0o755)
 	probe := &HostProbe{
-		OS: "Linux", Machine: "x86_64", Arch: "amd64", UID: "1000",
+		OS: "Linux", Machine: "x86_64", Arch: "amd64", UID: strconv.Itoa(os.Getuid()),
 		Home: home, HomeWritable: true, FreeKB: 100000, MachineID: "0123456789ab",
 		HasSymlink:    true,
 		CurrentTarget: "corrald-0.3.1-1000/corrald",
