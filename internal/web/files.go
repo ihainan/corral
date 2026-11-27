@@ -120,7 +120,7 @@ func (p *sftpPool) get(ctx context.Context, sess *term.Session) (*sharedSFTP, er
 }
 
 func (p *sftpPool) open(sess *term.Session, c *sharedSFTP) {
-	client, closeFn, err := openSFTPLite(sess.Client())
+	client, closeFn, err := openSFTPLite(context.Background(), sess.Client())
 	p.mu.Lock()
 	if err != nil {
 		c.err = fmt.Errorf("%w: %w", errSFTPUnavailable, err)
@@ -274,7 +274,9 @@ func writeFileError(w http.ResponseWriter, err error) {
 	var status *sftp.StatusError
 	var lstatus *sftplite.StatusError
 	switch {
-	case errors.Is(err, errFilesBusy), errors.Is(err, sshx.ErrBusy):
+	case errors.Is(err, sshx.ErrBusy):
+		writeError(w, http.StatusTooManyRequests, "ssh_channels_busy", "too many active SSH channels on this connection; close a panel or try again shortly")
+	case errors.Is(err, errFilesBusy):
 		writeError(w, http.StatusTooManyRequests, "busy", "too many file operations at once")
 	case errors.Is(err, errFileTimeout):
 		writeError(w, http.StatusGatewayTimeout, "sftp_timeout", "the host did not answer in time")
@@ -556,7 +558,7 @@ func (s *Server) apiFilesDelete(w http.ResponseWriter, r *http.Request) {
 	if folder {
 		ctx, cancel := context.WithTimeout(r.Context(), fileDeleteTimeout)
 		defer cancel()
-		_, err := sshx.Output(ctx, sess.Client(), removeTreeCommand(target), 64<<10)
+		_, err := sshx.Exec(ctx, sess.Client(), removeTreeCommand(target), 64<<10, sshx.ExecOptions{Interactive: true, AwaitSlot: 2 * time.Second})
 		var exit *sshx.ExitError
 		switch {
 		case errors.As(err, &exit) && exit.Status == 4:
@@ -566,7 +568,7 @@ func (s *Server) apiFilesDelete(w http.ResponseWriter, r *http.Request) {
 			writeFileError(w, fs.ErrNotExist)
 			return
 		case errors.Is(err, sshx.ErrBusy):
-			writeError(w, http.StatusTooManyRequests, "busy", "the host is still answering earlier requests")
+			writeError(w, http.StatusTooManyRequests, "ssh_channels_busy", "too many active SSH channels on this connection; close a panel or try again shortly")
 			return
 		case errors.As(err, &exit):
 			s.audit(r, "file.delete", sess.HostName, map[string]any{"session": sess.ID, "path": target, "folder": true, "complete": false})
@@ -619,9 +621,9 @@ func (s *Server) apiFilesCwd(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
-	cwd, err := s.paneCwd(ctx, sess, pane)
+	cwd, err := s.paneCwdInteractive(ctx, sess, pane, true)
 	if errors.Is(err, sshx.ErrBusy) {
-		writeError(w, http.StatusTooManyRequests, "busy", "the host is still answering earlier requests")
+		writeError(w, http.StatusTooManyRequests, "ssh_channels_busy", "too many active SSH channels on this connection; close a panel or try again shortly")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"path": cwd})
@@ -637,6 +639,10 @@ func (s *Server) sessionCwd(ctx context.Context, sess *term.Session) (string, er
 // paneCwd is sessionCwd of one herdr pane (pane: its id; "" the focused one,
 // as for a tmux session, whose active pane it always is).
 func (s *Server) paneCwd(ctx context.Context, sess *term.Session, pane string) (string, error) {
+	return s.paneCwdInteractive(ctx, sess, pane, false)
+}
+
+func (s *Server) paneCwdInteractive(ctx context.Context, sess *term.Session, pane string, interactive bool) (string, error) {
 	cwd := ""
 	switch sess.Persistence {
 	case "tmux":
@@ -646,7 +652,12 @@ func (s *Server) paneCwd(ctx context.Context, sess *term.Session, pane string) (
 		if tmuxPaneID.MatchString(pane) {
 			cmd = tmuxPaneCwdCommand(sess.TmuxSession, pane)
 		}
-		out, err := sshx.Output(ctx, sess.Client(), cmd, 8192)
+		var await time.Duration
+		if interactive {
+			await = 2 * time.Second
+		}
+		res, err := sshx.Exec(ctx, sess.Client(), cmd, 8192, sshx.ExecOptions{Interactive: interactive, AwaitSlot: await})
+		out := res.Out
 		if errors.Is(err, sshx.ErrBusy) {
 			return "", err
 		}
@@ -814,7 +825,7 @@ func (p *progressReader) Read(b []byte) (int, error) {
 // openTransferSFTP opens a channel for one transfer; it closes when the
 // transfer ends, which also unblocks anything waiting on the host.
 func (s *Server) openTransferSFTP(t *transfer, sess *term.Session) (*sftp.Client, error) {
-	client, closeSFTP, err := openSFTP(sess.Client())
+	client, closeSFTP, err := openSFTP(t.ctx, sess.Client())
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", errSFTPUnavailable, err)
 	}
@@ -1245,11 +1256,11 @@ func (s *Server) pathPrefix(ctx context.Context, sess *term.Session) string {
 			}
 		}
 	case "tmux":
-		out, err := sshx.Output(ctx, sess.Client(), tmuxForegroundCommand(sess.TmuxSession), 4096)
+		res, err := sshx.Exec(ctx, sess.Client(), tmuxForegroundCommand(sess.TmuxSession), 4096, sshx.ExecOptions{Interactive: true})
 		if err != nil {
 			return ""
 		}
-		title, args, _ := strings.Cut(string(out), "\n")
+		title, args, _ := strings.Cut(string(res.Out), "\n")
 		if geminiTitle.MatchString(strings.TrimSpace(title)) && geminiCommandLine(args) {
 			return "@"
 		}

@@ -130,7 +130,7 @@ func (s *Server) sentEnter(w http.ResponseWriter, ctx context.Context, sess *ter
 	if agent == "agy" {
 		scrCmd = agyScreenCommand(sess.Persistence, pane, socket)
 	}
-	res, err := sshx.Exec(ctx, sess.Client(), scrCmd, 256<<10, sshx.ExecOptions{Release: held.Done})
+	res, err := sshx.Exec(ctx, sess.Client(), scrCmd, 256<<10, sshx.ExecOptions{Release: held.Done, Interactive: true})
 	if err != nil {
 		*outcome, *reason = "unknown", "no_screen"
 		writeError(w, http.StatusBadGateway, "no_screen", "the pane's screen could not be read")
@@ -159,7 +159,7 @@ func (s *Server) sentEnter(w http.ResponseWriter, ctx context.Context, sess *ter
 		freeGate = "amode" // (agy's input box present: Enter goes there, never into a prompt)
 	}
 	_, err = sshx.Exec(ctx, sess.Client(), convoGatedCommand(freeGate, sess.Persistence, sess.TmuxSession, pane, socket, pid, start, sid, 0, enter, sendLines), sendOut,
-		sshx.ExecOptions{Stdin: strings.NewReader(""), Release: held.Done})
+		sshx.ExecOptions{Stdin: strings.NewReader(""), Release: held.Done, Interactive: true})
 	var exitErr *sshx.ExitError
 	switch {
 	case err == nil:

@@ -275,7 +275,8 @@ func (s *Server) newAgent(ctx context.Context, w http.ResponseWriter, sess *term
 				home = path.Dir(s)
 			}
 		}
-		out, err := sshx.Output(ctx, sess.Client(), agentTmuxCmd(name, dir, kind, home, how), 8<<10)
+		res, err := sshx.Exec(ctx, sess.Client(), agentTmuxCmd(name, dir, kind, home, how), 8<<10, sshx.ExecOptions{Interactive: true, AwaitSlot: 2 * time.Second})
+		out := res.Out
 		if err != nil || !strings.HasSuffix(strings.TrimSpace(string(out)), "started") {
 			keep = false
 			why := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(string(out)), "exited"))
@@ -514,7 +515,8 @@ echo started`
 // where what became of it is not known.
 func (s *Server) startAgent(ctx context.Context, sess *term.Session, socket, pane, name, kind string, how agentStart) (failed bool, why string) {
 	cmd := agentStartCmd(socket, pane, name, kind, how)
-	out, err := sshx.Output(ctx, sess.Client(), cmd, 64<<10)
+	execRes, err := sshx.Exec(ctx, sess.Client(), cmd, 64<<10, sshx.ExecOptions{Interactive: true, AwaitSlot: 2 * time.Second})
+	out := execRes.Out
 	var res struct {
 		Error *struct {
 			Code    string `json:"code"`

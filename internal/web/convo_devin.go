@@ -374,7 +374,8 @@ func (s *Server) readOlderDevin(sess *term.Session, st *convoState) error {
 func (s *Server) dvRead(sess *term.Session, st *convoState, mode string, args ...string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), convoReadLimit)
 	defer cancel()
-	out, err := sshx.Output(ctx, sess.Client(), dvQueryCommand(st.log, mode, append([]string{st.sid}, args...)...), dvReadMax)
+	res, err := sshx.Exec(ctx, sess.Client(), dvQueryCommand(st.log, mode, append([]string{st.sid}, args...)...), dvReadMax, sshx.ExecOptions{Interactive: mode == "older"})
+	out := res.Out
 	if err != nil {
 		return err
 	}

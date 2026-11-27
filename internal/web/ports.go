@@ -27,7 +27,8 @@ type ListeningPort struct {
 func listeningPorts(ctx context.Context, c *ssh.Client) ([]ListeningPort, error) {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	out, err := sshx.Output(ctx, c, listenCommand, sshx.MaxOutput)
+	res, err := sshx.Exec(ctx, c, listenCommand, sshx.MaxOutput, sshx.ExecOptions{Interactive: true, AwaitSlot: 2 * time.Second})
+	out := res.Out
 	switch {
 	case ctx.Err() != nil:
 		return nil, errors.New("listing ports timed out")

@@ -245,15 +245,15 @@ func (s *Server) ocFetchModels(ctx context.Context, sess *term.Session) ([]ocMod
 	}
 	mctx, mcancel := context.WithTimeout(ctx, 10*time.Second)
 	defer mcancel()
-	mOut, err := sshx.Output(mctx, sess.Client(), ocAPICommand("GET", "/api/model", ""), 2<<20)
+	mRes, err := sshx.Exec(mctx, sess.Client(), ocAPICommand("GET", "/api/model", ""), 2<<20, sshx.ExecOptions{Interactive: true, AwaitSlot: 2 * time.Second})
 	if err != nil {
 		return nil, nil, err
 	}
-	models := parseOpenCodeModels(mOut)
-	pOut, perr := sshx.Output(mctx, sess.Client(), ocAPICommand("GET", "/api/provider", ""), 256<<10)
+	models := parseOpenCodeModels(mRes.Out)
+	pRes, perr := sshx.Exec(mctx, sess.Client(), ocAPICommand("GET", "/api/provider", ""), 256<<10, sshx.ExecOptions{Interactive: true, AwaitSlot: 2 * time.Second})
 	var provs map[string]bool
 	if perr == nil {
-		provs = parseOpenCodeProviders(pOut)
+		provs = parseOpenCodeProviders(pRes.Out)
 	}
 	if len(models) > 0 {
 		ocModelCache.mu.Lock()
@@ -266,11 +266,11 @@ func (s *Server) ocFetchModels(ctx context.Context, sess *term.Session) ([]ocMod
 func (s *Server) ocReadSessionRef(ctx context.Context, sess *term.Session, sid string) (ocSessionRef, error) {
 	sctx, scancel := context.WithTimeout(ctx, 6*time.Second)
 	defer scancel()
-	out, err := sshx.Output(sctx, sess.Client(), ocAPICommand("GET", "/api/session/"+sid, ""), 256<<10)
+	sRes, err := sshx.Exec(sctx, sess.Client(), ocAPICommand("GET", "/api/session/"+sid, ""), 256<<10, sshx.ExecOptions{Interactive: true, AwaitSlot: 2 * time.Second})
 	if err != nil {
 		return ocSessionRef{}, err
 	}
-	ref, _ := parseOpenCodeSession(out)
+	ref, _ := parseOpenCodeSession(sRes.Out)
 	return ref, nil
 }
 
@@ -284,7 +284,7 @@ func (s *Server) convoOpenCodeMode(w http.ResponseWriter, ctx context.Context, s
 	body, _ := json.Marshal(map[string]string{"agent": target})
 	rctx, rcancel := context.WithTimeout(ctx, 8*time.Second)
 	defer rcancel()
-	if _, err := sshx.Output(rctx, sess.Client(), ocAPICommand("POST", "/api/session/"+sid+"/agent", string(body)), 64<<10); err != nil {
+	if _, err := sshx.Exec(rctx, sess.Client(), ocAPICommand("POST", "/api/session/"+sid+"/agent", string(body)), 64<<10, sshx.ExecOptions{Interactive: true, AwaitSlot: 2 * time.Second}); err != nil {
 		*reason = "host_error"
 		writeError(w, http.StatusBadGateway, "host_error", "failed to switch OpenCode mode")
 		return
@@ -337,7 +337,7 @@ func (s *Server) convoOpenCodeModel(w http.ResponseWriter, ctx context.Context, 
 	body, _ := json.Marshal(map[string]any{"model": mRef})
 	rctx, rcancel := context.WithTimeout(ctx, 8*time.Second)
 	defer rcancel()
-	if _, err := sshx.Output(rctx, sess.Client(), ocAPICommand("POST", "/api/session/"+sid+"/model", string(body)), 64<<10); err != nil {
+	if _, err := sshx.Exec(rctx, sess.Client(), ocAPICommand("POST", "/api/session/"+sid+"/model", string(body)), 64<<10, sshx.ExecOptions{Interactive: true, AwaitSlot: 2 * time.Second}); err != nil {
 		*reason = "host_error"
 		writeError(w, http.StatusBadGateway, "host_error", "failed to switch OpenCode model")
 		return
@@ -376,7 +376,7 @@ func (s *Server) convoOpenCodeEffort(w http.ResponseWriter, ctx context.Context,
 	body, _ := json.Marshal(map[string]any{"model": mRef})
 	rctx, rcancel := context.WithTimeout(ctx, 8*time.Second)
 	defer rcancel()
-	if _, err := sshx.Output(rctx, sess.Client(), ocAPICommand("POST", "/api/session/"+sid+"/model", string(body)), 64<<10); err != nil {
+	if _, err := sshx.Exec(rctx, sess.Client(), ocAPICommand("POST", "/api/session/"+sid+"/model", string(body)), 64<<10, sshx.ExecOptions{Interactive: true, AwaitSlot: 2 * time.Second}); err != nil {
 		*reason = "host_error"
 		writeError(w, http.StatusBadGateway, "host_error", "failed to switch OpenCode thinking variant")
 		return

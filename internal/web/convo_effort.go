@@ -249,7 +249,7 @@ func (s *Server) convoEffort(w http.ResponseWriter, ctx context.Context, sess *t
 		}
 		running.Add(1)
 		res, err := sshx.Exec(ctx, sess.Client(), convoGatedCommand(gate, sess.Persistence, sess.TmuxSession, pane, socket, pid, start, sid, len(text), press, read), 64<<10,
-			sshx.ExecOptions{Stdin: strings.NewReader(text), Release: running.Done})
+			sshx.ExecOptions{Stdin: strings.NewReader(text), Release: running.Done, Interactive: true})
 		if err == nil && (len(press) > 0 || text != "") {
 			typed = true
 		}

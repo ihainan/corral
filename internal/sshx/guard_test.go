@@ -95,8 +95,10 @@ func TestStuckSideOperationsAreCappedNotCutOff(t *testing.T) {
 	if _, err := Output(ctx, c, "ss", 1<<20); !errors.Is(err, ErrBusy) {
 		t.Fatalf("third side operation with two stuck: %v", err)
 	}
-	if _, err := DialVia(ctx, c, "unix", "/run/x.sock", DialOptions{Aux: true}); !errors.Is(err, ErrBusy) {
-		t.Fatalf("socket dial with two stuck: %v", err)
+	// Forwarded channels (direct-streamlocal) do not consume MaxSessions and
+	// are not blocked by stuck session-class execs.
+	if _, err := DialVia(ctx, c, "unix", "/run/x.sock", DialOptions{Aux: true}); errors.Is(err, ErrBusy) {
+		t.Fatalf("forwarded socket dial was blocked by session exec quota: %v", err)
 	}
 	if isClosed(c, 300*time.Millisecond) {
 		t.Fatal("a stuck side operation closed the connection")
@@ -436,8 +438,8 @@ func TestWatchAndAuxQuotasAreIndependent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("watch2 while Aux full: %v", err)
 	}
-	if auxInUse(c) != 2 || watchInUse(c) != 2 {
-		t.Fatalf("inUse aux=%d watch=%d, want 2, 2", auxInUse(c), watchInUse(c))
+	if fwdAuxInUse(c) != 2 || watchInUse(c) != 2 {
+		t.Fatalf("inUse aux=%d watch=%d, want 2, 2", fwdAuxInUse(c), watchInUse(c))
 	}
 	if _, err := DialVia(ctx, c, "unix", "/run/watch3.sock", DialOptions{Watch: true}); !errors.Is(err, ErrBusy) {
 		t.Fatalf("3rd watch with Watch full: got %v, want ErrBusy", err)
@@ -446,7 +448,7 @@ func TestWatchAndAuxQuotasAreIndependent(t *testing.T) {
 	// Release Aux channels while Watch stays full: Watch remains capped at 2, Aux is unaffected.
 	aux1.Close()
 	aux2.Close()
-	eventually(t, "aux slots not released", func() bool { return auxInUse(c) == 0 })
+	eventually(t, "aux slots not released", func() bool { return fwdAuxInUse(c) == 0 })
 
 	if _, err := DialVia(ctx, c, "unix", "/run/watch3.sock", DialOptions{Watch: true}); !errors.Is(err, ErrBusy) {
 		t.Fatalf("3rd watch still full: got %v, want ErrBusy", err)
@@ -463,7 +465,7 @@ func TestWatchAndAuxQuotasAreIndependent(t *testing.T) {
 	aux4.Close()
 	w1.Close()
 	w2.Close()
-	eventually(t, "quotas not returned to zero", func() bool { return auxInUse(c) == 0 && watchInUse(c) == 0 })
+	eventually(t, "quotas not returned to zero", func() bool { return fwdAuxInUse(c) == 0 && watchInUse(c) == 0 })
 
 	// Aux and Watch are mutually exclusive; Release is still called once.
 	var released atomic.Int32
@@ -474,8 +476,8 @@ func TestWatchAndAuxQuotasAreIndependent(t *testing.T) {
 	}); err == nil {
 		t.Fatal("DialOptions{Aux: true, Watch: true} succeeded")
 	}
-	if released.Load() != 1 || auxInUse(c) != 0 || watchInUse(c) != 0 {
-		t.Fatalf("after invalid options: released=%d aux=%d watch=%d", released.Load(), auxInUse(c), watchInUse(c))
+	if released.Load() != 1 || fwdAuxInUse(c) != 0 || watchInUse(c) != 0 {
+		t.Fatalf("after invalid options: released=%d aux=%d watch=%d", released.Load(), fwdAuxInUse(c), watchInUse(c))
 	}
 }
 
@@ -501,8 +503,8 @@ func TestWatchChannelHoldsQuotaUntilRealEnd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if watchInUse(c) != 1 || auxInUse(c) != 0 {
-		t.Fatalf("inUse watch=%d aux=%d, want 1, 0", watchInUse(c), auxInUse(c))
+	if watchInUse(c) != 1 || fwdAuxInUse(c) != 0 {
+		t.Fatalf("inUse watch=%d aux=%d, want 1, 0", watchInUse(c), fwdAuxInUse(c))
 	}
 	if _, err := io.Copy(io.Discard, conn); err != nil {
 		t.Fatal(err)
@@ -541,7 +543,7 @@ func TestWatchAndAuxConcurrentAcquireRelease(t *testing.T) {
 
 	for range 8 {
 		wg.Add(2)
-		go runPool(takeAux, auxInUse, MaxAuxPerConn)
+		go runPool(takeFwdAux, fwdAuxInUse, MaxAuxPerConn)
 		go runPool(takeWatch, watchInUse, MaxWatchPerConn)
 	}
 	wg.Wait()
@@ -549,7 +551,7 @@ func TestWatchAndAuxConcurrentAcquireRelease(t *testing.T) {
 	if errCount.Load() != 0 {
 		t.Fatalf("quota invariant violated %d times", errCount.Load())
 	}
-	if auxInUse(c) != 0 || watchInUse(c) != 0 {
-		t.Fatalf("slots leaked: aux=%d watch=%d", auxInUse(c), watchInUse(c))
+	if fwdAuxInUse(c) != 0 || watchInUse(c) != 0 {
+		t.Fatalf("slots leaked: aux=%d watch=%d", fwdAuxInUse(c), watchInUse(c))
 	}
 }

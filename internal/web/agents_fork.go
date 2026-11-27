@@ -45,7 +45,8 @@ func (s *Server) forkSource(ctx context.Context, sess *term.Session, kind, id st
 	if kind != "claude" && kind != "codex" {
 		return "", "", errForkNotFound
 	}
-	out, err := sshx.Output(ctx, sess.Client(), forkFindCommand(kind, id), 8<<10)
+	res, err := sshx.Exec(ctx, sess.Client(), forkFindCommand(kind, id), 8<<10, sshx.ExecOptions{Interactive: true, AwaitSlot: 2 * time.Second})
+	out := res.Out
 	if err != nil {
 		return "", "", err
 	}
@@ -100,7 +101,8 @@ func (s *Server) forkCopy(ctx context.Context, sess *term.Session, src, from, at
 	if (at != "" && !sessionUUID.MatchString(at)) || !sessionUUID.MatchString(from) {
 		return "", errForkAt
 	}
-	out, err := sshx.Output(ctx, sess.Client(), forkCutCommand(src, at), 256)
+	cutRes, err := sshx.Exec(ctx, sess.Client(), forkCutCommand(src, at), 256, sshx.ExecOptions{Interactive: true, AwaitSlot: 2 * time.Second})
+	out := cutRes.Out
 	if err != nil {
 		return "", errForkAt
 	}
@@ -124,7 +126,8 @@ func (s *Server) forkCopy(ctx context.Context, sess *term.Session, src, from, at
 	// remove what is not the gateway's — review588-1. A session of a new
 	// id, that much of a log: harmless, if one too many in Claude Code's
 	// list of sessions.)
-	out, err = sshx.Output(ctx, sess.Client(), forkCopyCommand(src, dst, off, from, id), 64)
+	copyRes, err := sshx.Exec(ctx, sess.Client(), forkCopyCommand(src, dst, off, from, id), 64, sshx.ExecOptions{Interactive: true, AwaitSlot: 2 * time.Second})
+	out = copyRes.Out
 	if err != nil || strings.TrimSpace(string(out)) != "ok" {
 		return "", errors.New("the conversation could not be copied")
 	}
@@ -207,7 +210,7 @@ func (s *Server) dropForkCopy(sess *term.Session, src, id string) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	_, _ = sshx.Output(ctx, sess.Client(), forkDropCommand(src[:strings.LastIndexByte(src, '/')+1]+id+".jsonl"), 64)
+	_, _ = sshx.Exec(ctx, sess.Client(), forkDropCommand(src[:strings.LastIndexByte(src, '/')+1]+id+".jsonl"), 64, sshx.ExecOptions{Interactive: true})
 }
 
 // forkDropCommand removes a copy forkCopyCommand made.

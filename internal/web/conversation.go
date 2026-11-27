@@ -3082,9 +3082,13 @@ func convoProcStatus(c *sftplite.Client, st *convoState) string {
 // new conversation): its file read on the host, in $HOME as locating read
 // it (the SFTP session may start elsewhere). "" when it cannot tell.
 func (s *Server) convoFreshStatus(ctx context.Context, sess *term.Session, b *convoBind) string {
+	return s.convoFreshStatusInteractive(ctx, sess, b, false)
+}
+
+func (s *Server) convoFreshStatusInteractive(ctx context.Context, sess *term.Session, b *convoBind, interactive bool) string {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	res, err := sshx.Exec(ctx, sess.Client(), freshStatusCommand(b.PID), 64<<10, sshx.ExecOptions{})
+	res, err := sshx.Exec(ctx, sess.Client(), freshStatusCommand(b.PID), 64<<10, sshx.ExecOptions{Interactive: interactive})
 	if err != nil {
 		return ""
 	}
@@ -4394,7 +4398,7 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 		if sess.Persistence == "tmux" {
 			tmuxTarget = b.Pane
 		}
-		lr, err := sshx.Exec(ctx, sess.Client(), convoLocateCommand(sess.Persistence, sess.TmuxSession, tmuxTarget), convoLocateMax, sshx.ExecOptions{AwaitSlot: pressSlotWait(what)})
+		lr, err := sshx.Exec(ctx, sess.Client(), convoLocateCommand(sess.Persistence, sess.TmuxSession, tmuxTarget), convoLocateMax, sshx.ExecOptions{Interactive: pressInteractive(what), AwaitSlot: pressSlotWait(what)})
 		out := lr.Out
 		if errors.Is(err, sshx.ErrBusy) {
 			reason = "busy"
@@ -4449,7 +4453,7 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 		// another since it was read; one that cannot be told is not typed to).
 		if front != nil && front.agent == "opencode" {
 			var why string
-			if front.sid, why = s.ocSessionOf(ctx, sess, front, b.Pane, l); why != "" {
+			if front.sid, why = s.ocSessionOfInteractive(ctx, sess, front, b.Pane, l, pressInteractive(what)); why != "" {
 				front.sid = ""
 			}
 		}
@@ -4698,7 +4702,7 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 			writeError(w, status, code, msg)
 		}
 		sctx, scancel := context.WithTimeout(ctx, 10*time.Second)
-		res, err := sshx.Exec(sctx, sess.Client(), agyColorScreenCommand(sess.Persistence, b.Pane, socket), 512<<10, sshx.ExecOptions{})
+		res, err := sshx.Exec(sctx, sess.Client(), agyColorScreenCommand(sess.Persistence, b.Pane, socket), 512<<10, sshx.ExecOptions{Interactive: true})
 		scancel()
 		if err != nil {
 			refuse(http.StatusBadGateway, "no_screen", "the pane's screen could not be read")
@@ -4727,7 +4731,7 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 		// message of both, 11-15 review. Where its screen cannot be read or
 		// told, as before: the host's gate still keeps it out of an approval.)
 		sctx, scancel := context.WithTimeout(ctx, 10*time.Second)
-		res, err := sshx.Exec(sctx, sess.Client(), convoColorScreenCommand(sess.Persistence, b.Pane, socket), 512<<10, sshx.ExecOptions{AwaitSlot: pressSlotWait(what)})
+		res, err := sshx.Exec(sctx, sess.Client(), convoColorScreenCommand(sess.Persistence, b.Pane, socket), 512<<10, sshx.ExecOptions{Interactive: true, AwaitSlot: pressSlotWait(what)})
 		scancel()
 		if err == nil {
 			if codexHasDraft(strings.ReplaceAll(string(res.Out), "\r", "")) {
@@ -4750,7 +4754,7 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 			writeError(w, status, code, msg)
 		}
 		sctx, scancel := context.WithTimeout(ctx, 10*time.Second)
-		res, err := sshx.Exec(sctx, sess.Client(), convoScreenCommand(sess.Persistence, b.Pane, socket), 512<<10, sshx.ExecOptions{})
+		res, err := sshx.Exec(sctx, sess.Client(), convoScreenCommand(sess.Persistence, b.Pane, socket), 512<<10, sshx.ExecOptions{Interactive: true})
 		scancel()
 		if err != nil {
 			refuse(http.StatusBadGateway, "no_screen", "the pane's screen could not be read")
@@ -4783,7 +4787,7 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 			writeError(w, status, code, msg)
 		}
 		sctx, scancel := context.WithTimeout(ctx, 10*time.Second)
-		res, err := sshx.Exec(sctx, sess.Client(), convoScreenCommand(sess.Persistence, b.Pane, socket), 512<<10, sshx.ExecOptions{})
+		res, err := sshx.Exec(sctx, sess.Client(), convoScreenCommand(sess.Persistence, b.Pane, socket), 512<<10, sshx.ExecOptions{Interactive: true})
 		scancel()
 		if err != nil {
 			refuse(http.StatusBadGateway, "no_screen", "the pane's screen could not be read")
@@ -4837,7 +4841,7 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 		look := func() (string, bool) {
 			sctx, scancel := context.WithTimeout(ctx, 10*time.Second)
 			defer scancel()
-			res, err := sshx.Exec(sctx, sess.Client(), convoColorScreenCommand(sess.Persistence, b.Pane, socket), 512<<10, sshx.ExecOptions{})
+			res, err := sshx.Exec(sctx, sess.Client(), convoColorScreenCommand(sess.Persistence, b.Pane, socket), 512<<10, sshx.ExecOptions{Interactive: true})
 			return string(res.Out), err == nil
 		}
 		scr, ok := look()
@@ -4907,7 +4911,7 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 		in = "" // (Enter only: nothing pasted)
 	}
 	res, err := sshx.Exec(ctx, sess.Client(), cmd, sendOut,
-		sshx.ExecOptions{Stdin: strings.NewReader(in), Release: done, AwaitSlot: pressSlotWait(what)})
+		sshx.ExecOptions{Stdin: strings.NewReader(in), Release: done, Interactive: true, AwaitSlot: pressSlotWait(what)})
 	var exitErr *sshx.ExitError
 	switch {
 	case err == nil:
@@ -4991,7 +4995,7 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 		if front.agent == "agy" {
 			pcmd = agyColorScreenCommand(sess.Persistence, b.Pane, socket)
 		}
-		if r2, err := sshx.Exec(sctx, sess.Client(), pcmd, 512<<10, sshx.ExecOptions{}); err == nil {
+		if r2, err := sshx.Exec(sctx, sess.Client(), pcmd, 512<<10, sshx.ExecOptions{Interactive: true}); err == nil {
 			text, _, _ := screenOf(r2.Out)
 			out["text"], out["digest"], out["look"] = text, panelDigest(r2.Out), lookDigest(r2.Out)
 		}
@@ -5646,13 +5650,20 @@ func (s *Server) convoRelocNow(sess *term.Session, pane string) {
 	}
 }
 
+// pressInteractive reports whether a convoPress action was directly triggered
+// by a user click/action (eligible for InteractiveReserve) versus an automated
+// background look (suggest, panel_screen, sent_missing).
+func pressInteractive(what string) bool {
+	return what != "suggest" && what != "panel_screen" && what != "sent_missing"
+}
+
 // pressSlotWait: how long what a person pressed waits for one of the SSH
 // connection's side operations to end where all are taken — the gateway's
 // own looks (a command scan, a screen read: more of them at a turn's end,
 // when a next message is likeliest, 11-15) — rather than be refused at
 // once. Its own looks (a suggestion, a screen) do not wait: they come again.
 func pressSlotWait(what string) time.Duration {
-	if what == "suggest" || what == "screen" || what == "panel_screen" {
+	if what == "suggest" || what == "screen" || what == "panel_screen" || what == "sent_missing" {
 		return 0
 	}
 	return 2 * time.Second
@@ -5668,7 +5679,7 @@ func (s *Server) codexStillFresh(ctx context.Context, sess *term.Session, socket
 	case sess.Persistence != "herdr" || socket == "":
 		return false
 	}
-	panes, err := s.codexPanes.run(ctx, sess, socket, pane)
+	panes, err := s.codexPanes.runInteractive(ctx, sess, socket, pane, true)
 	if err != nil {
 		return false
 	}

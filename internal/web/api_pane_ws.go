@@ -2,6 +2,7 @@ package web
 
 import (
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"io"
@@ -19,10 +20,46 @@ import (
 )
 
 const (
-	maxPaneAttachesPerClient = 4
-	paneSetupTimeout         = 10 * time.Second
-	paneOutWindow            = 4 << 20 // 4 MiB max unacked output bytes to xterm
+	paneOutWindow = 4 << 20 // 4 MiB max unacked output bytes to xterm
 )
+
+var (
+	paneSetupTimeout = 10 * time.Second
+	// paneSlotWait bounds how long an interactive single-pane live terminal queues
+	// for a slot in the per-connection SSH session ledger before reporting busy.
+	paneSlotWait = 2 * time.Second
+)
+
+// RFC 4254 Section 6.2.
+type panePTYRequestMsg struct {
+	Term     string
+	Columns  uint32
+	Rows     uint32
+	Width    uint32
+	Height   uint32
+	Modelist string
+}
+
+// RFC 4254 Section 6.7.
+type paneWindowChangeMsg struct {
+	Columns uint32
+	Rows    uint32
+	Width   uint32
+	Height  uint32
+}
+
+func encodeTerminalModes(modes ssh.TerminalModes) string {
+	var tm []byte
+	for k, v := range modes {
+		kv := struct {
+			Key byte
+			Val uint32
+		}{k, v}
+		tm = append(tm, ssh.Marshal(&kv)...)
+	}
+	tm = append(tm, 0) // RFC 4254 TTY_OP_END
+	return string(tm)
+}
 
 // herdrTermID validates a herdr terminal_id before passing it to `herdr terminal attach`.
 var herdrTermID = regexp.MustCompile(`^[A-Za-z0-9_.:-]{1,100}$`)
@@ -33,48 +70,60 @@ type paneAttachKey struct {
 	termID string
 }
 
+var errPaneDuplicate = errors.New("pane already has an active direct terminal")
+
 // paneAttachSlots enforces two invariants:
 //  1. At most one live direct attach per (ssh.Client, terminal_id) so an inline
 //     panel and the dock terminal never fight over --takeover.
-//  2. At most maxPaneAttachesPerClient concurrent pane-attach SSH channels per
-//     shared SSH client, released only when the remote channel actually ends.
+//  2. Per-client and total SSH session channel caps are enforced through the
+//     unified sshx session ledger (sshx.SessionPane, up to sshx.MaxPanePerConn
+//     and sshx.MaxSessionChannels), released only when the remote channel
+//     actually ends.
 type paneAttachSlots struct {
-	mu       sync.Mutex
-	active   map[paneAttachKey]struct{}
-	byClient map[*ssh.Client]int
+	mu     sync.Mutex
+	active map[paneAttachKey]struct{}
 }
 
-func (p *paneAttachSlots) acquire(client *ssh.Client, termID string) (release func(), ok bool) {
+func (p *paneAttachSlots) claimKey(client *ssh.Client, termID string) (release func(), ok bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.active == nil {
 		p.active = map[paneAttachKey]struct{}{}
-		p.byClient = map[*ssh.Client]int{}
 	}
 	k := paneAttachKey{client: client, termID: termID}
 	if _, dup := p.active[k]; dup {
 		return nil, false
 	}
-	if p.byClient[client] >= maxPaneAttachesPerClient {
-		return nil, false
-	}
 	p.active[k] = struct{}{}
-	p.byClient[client]++
 	var once sync.Once
 	return func() {
 		once.Do(func() {
 			p.mu.Lock()
 			defer p.mu.Unlock()
-			if _, exists := p.active[k]; exists {
-				delete(p.active, k)
-				if p.byClient[client] <= 1 {
-					delete(p.byClient, client)
-				} else {
-					p.byClient[client]--
-				}
-			}
+			delete(p.active, k)
 		})
 	}, true
+}
+
+// acquire claims both the unique (client, termID) key and a SessionPane slot
+// from the unified sshx session ledger, waiting up to await for a channel slot.
+func (p *paneAttachSlots) acquire(ctx context.Context, client *ssh.Client, termID string, await time.Duration) (release func(), err error) {
+	relKey, ok := p.claimKey(client, termID)
+	if !ok {
+		return nil, errPaneDuplicate
+	}
+	relChan, err := sshx.AcquireSession(ctx, client, sshx.SessionPane, true, await)
+	if err != nil {
+		relKey()
+		return nil, err
+	}
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			relChan()
+			relKey()
+		})
+	}, nil
 }
 
 // herdrTerminalAttachCommand attaches directly to a single herdr pane's live
@@ -207,18 +256,20 @@ func (s *Server) apiPaneSocket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Atomically claim the slot for (client, terminal_id) before upgrading so
-	// two panels on the same pane never ping-pong --takeover.
-	releaseSlot, ok := s.paneAttaches.acquire(client, hp.TerminalID)
+	// Atomically claim the unique key for (client, terminal_id) before
+	// upgrading so two panels on the same pane never ping-pong --takeover.
+	releaseKey, ok := s.paneAttaches.claimKey(client, hp.TerminalID)
 	if !ok {
 		writeError(w, http.StatusConflict, "attach_unavailable", "pane already has an active direct terminal")
 		return
 	}
-	// Accept the WebSocket BEFORE running any remote SSH command (--takeover)
-	// so plain HTTP GET / cross-site navigation can never cause side effects.
+	// Accept the WebSocket BEFORE queueing for a session channel or running
+	// any remote SSH command (--takeover) so plain HTTP GET / cross-site
+	// navigation can never cause side effects, and so channel-busy errors can
+	// be delivered to the browser as a structured message.
 	c, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true, CompressionMode: websocket.CompressionDisabled})
 	if err != nil {
-		releaseSlot()
+		releaseKey()
 		return
 	}
 	c.SetReadLimit(1 << 20)
@@ -241,104 +292,169 @@ func (s *Server) apiPaneSocket(w http.ResponseWriter, r *http.Request) {
 		return c.Write(wctx, websocket.MessageBinary, p)
 	}
 
-	// Open the SSH session and start `herdr terminal attach` with a bounded
-	// setup timeout so a dead host or early disconnect cannot hang forever.
+	// Reserve a SessionPane slot from the unified SSH session ledger,
+	// briefly queueing so transient background/panel churn does not reject
+	// an interactive open unnecessarily.
+	releaseChan, serr := sshx.AcquireSession(ctx, client, sshx.SessionPane, true, paneSlotWait)
+	if serr != nil {
+		releaseKey()
+		if errors.Is(serr, sshx.ErrBusy) {
+			_ = writeText(map[string]any{"t": "error", "code": "ssh_channels_busy"})
+			c.Close(statusTooManyViewers, "ssh_channels_busy")
+		}
+		return
+	}
+	var releaseOnce sync.Once
+	releaseSlot := func() {
+		releaseOnce.Do(func() {
+			releaseChan()
+			releaseKey()
+		})
+	}
+
+	// Open the SSH session channel directly (rather than ssh.Session) so we
+	// observe the channel's incoming request stream (reqs). reqs closes ONLY
+	// once the remote peer replies SSH_MSG_CHANNEL_CLOSE or the underlying
+	// *ssh.Client transport ends, ensuring every success, failure, and timeout
+	// path holds its ledger slot until the remote channel has really ended.
 	type setupRes struct {
-		sshSess *ssh.Session
-		stdin   io.WriteCloser
-		stdout  io.Reader
-		stderr  io.Reader
+		ch      ssh.Channel
+		reqDone <-chan int
 		err     error
 	}
 	setupDone := make(chan setupRes, 1)
 	setupCtx, setupCancel := context.WithTimeout(ctx, paneSetupTimeout)
 	defer setupCancel()
 
+	// abandonChannel tears down an already-opened channel in the background and
+	// releases the ledger slot + pane key ONLY once reqs closes. If a host never
+	// replies SSH_MSG_CHANNEL_CLOSE, the slot intentionally stays occupied so
+	// repeated reconnects cannot exceed MaxSessionChannels or MaxPanePerConn;
+	// when the owning term.Session ends (user close, detach timeout, connection
+	// loss, or gateway shutdown), term.Session.end calls s.client.Close(), which
+	// tears down the SSH transport, closes reqs, and reclaims the slot.
+	abandonChannel := func(ch ssh.Channel, reqDone <-chan int, sendHUP bool) {
+		go func() {
+			if sendHUP {
+				_ = ch.CloseWrite()
+				_, _ = ch.SendRequest("signal", false, ssh.Marshal(&struct{ Signal string }{string(ssh.SIGHUP)}))
+			}
+			_ = ch.Close()
+			var drainWG sync.WaitGroup
+			drainWG.Add(2)
+			go func() { defer drainWG.Done(); _, _ = io.Copy(io.Discard, ch) }()
+			go func() { defer drainWG.Done(); _, _ = io.Copy(io.Discard, ch.Stderr()) }()
+			<-reqDone
+			drainWG.Wait()
+			releaseSlot()
+		}()
+	}
+
 	go func() {
 		defer close(setupDone)
-		sshSess, serr := client.NewSession()
+		ch, reqs, serr := client.OpenChannel("session", nil)
 		if serr != nil {
+			// Channel open failed or was rejected by the peer; no remote channel
+			// exists, so releasing the slot immediately is safe.
+			releaseSlot()
 			setupDone <- setupRes{err: serr}
 			return
 		}
-		stopEarly := context.AfterFunc(setupCtx, func() { _ = sshSess.Close() })
+		reqDone := make(chan int, 1)
+		go func() {
+			exitCode := -1
+			for req := range reqs {
+				switch req.Type {
+				case "exit-status":
+					if len(req.Payload) >= 4 {
+						exitCode = int(binary.BigEndian.Uint32(req.Payload))
+					}
+				case "exit-signal":
+					if exitCode < 0 {
+						exitCode = 1
+					}
+				}
+				if req.WantReply {
+					_ = req.Reply(false, nil)
+				}
+			}
+			reqDone <- exitCode
+			close(reqDone)
+		}()
+
+		stopEarly := context.AfterFunc(setupCtx, func() { _ = ch.Close() })
 		defer stopEarly()
+
 		modes := ssh.TerminalModes{
 			ssh.ECHO:          1,
 			ssh.TTY_OP_ISPEED: 14400,
 			ssh.TTY_OP_OSPEED: 14400,
 		}
-		if serr = sshSess.RequestPty("xterm-256color", rows, cols, modes); serr != nil {
-			_ = sshSess.Close()
-			setupDone <- setupRes{err: serr}
-			return
+		ptyReq := panePTYRequestMsg{
+			Term:     "xterm-256color",
+			Columns:  uint32(cols),
+			Rows:     uint32(rows),
+			Width:    uint32(cols * 8),
+			Height:   uint32(rows * 8),
+			Modelist: encodeTerminalModes(modes),
 		}
-		stdin, serr := sshSess.StdinPipe()
+		ptyOK, serr := ch.SendRequest("pty-req", true, ssh.Marshal(&ptyReq))
+		if serr == nil && !ptyOK {
+			serr = errors.New("ssh: pty-req failed")
+		}
 		if serr != nil {
-			_ = sshSess.Close()
+			abandonChannel(ch, reqDone, false)
 			setupDone <- setupRes{err: serr}
 			return
 		}
-		stdout, serr := sshSess.StdoutPipe()
+		execOK, serr := ch.SendRequest("exec", true, ssh.Marshal(&struct{ Command string }{herdrTerminalAttachCommand(socket, hp.TerminalID)}))
+		if serr == nil && !execOK {
+			serr = errors.New("ssh: exec failed")
+		}
 		if serr != nil {
-			_ = sshSess.Close()
+			abandonChannel(ch, reqDone, false)
 			setupDone <- setupRes{err: serr}
-			return
-		}
-		stderr, serr := sshSess.StderrPipe()
-		if serr != nil {
-			_ = sshSess.Close()
-			setupDone <- setupRes{err: serr}
-			return
-		}
-		err = sshSess.Start(herdrTerminalAttachCommand(socket, hp.TerminalID))
-		if err != nil {
-			_ = sshSess.Close()
-			setupDone <- setupRes{err: err}
 			return
 		}
 		if !stopEarly() {
-			// Setup context already fired while Start was completing.
-			_ = stdin.Close()
-			_ = sshSess.Signal(ssh.SIGHUP)
-			_ = sshSess.Close()
-			_ = sshSess.Wait()
+			// Setup context already fired while exec was completing.
+			abandonChannel(ch, reqDone, true)
 			setupDone <- setupRes{err: setupCtx.Err()}
 			return
 		}
-		setupDone <- setupRes{sshSess: sshSess, stdin: stdin, stdout: stdout, stderr: stderr}
+		setupDone <- setupRes{ch: ch, reqDone: reqDone}
 	}()
 
 	var res setupRes
 	select {
 	case res = <-setupDone:
 	case <-setupCtx.Done():
-		// Drain late setup result and release the slot only once remote cleanup completes.
+		// Drain late setup result; if setup succeeded right as timeout fired,
+		// tear down the channel and release the slot only once reqs closes.
+		// (If setup failed, the setup goroutine already called releaseSlot or
+		// abandonChannel.)
 		go func() {
-			if late := <-setupDone; late.sshSess != nil {
-				_ = late.stdin.Close()
-				_ = late.sshSess.Signal(ssh.SIGHUP)
-				_ = late.sshSess.Close()
-				_ = late.sshSess.Wait()
+			if late := <-setupDone; late.ch != nil {
+				abandonChannel(late.ch, late.reqDone, true)
 			}
-			releaseSlot()
 		}()
 		_ = writeText(map[string]any{"t": "exit", "code": 1, "bytes": 0})
 		return
 	}
 	if res.err != nil {
-		releaseSlot()
+		// Setup goroutine already released the slot (if OpenChannel failed) or
+		// handed it to abandonChannel to release once reqs closes.
 		_ = writeText(map[string]any{"t": "exit", "code": 1, "bytes": 0})
 		return
 	}
 
-	sshSess, stdin, stdout, stderr := res.sshSess, res.stdin, res.stdout, res.stderr
+	ch, reqDone := res.ch, res.reqDone
 	var closeOnce sync.Once
 	closeSSH := func() {
 		closeOnce.Do(func() {
-			_ = stdin.Close()
-			_ = sshSess.Signal(ssh.SIGHUP)
-			_ = sshSess.Close()
+			_ = ch.CloseWrite()
+			_, _ = ch.SendRequest("signal", false, ssh.Marshal(&struct{ Signal string }{string(ssh.SIGHUP)}))
+			_ = ch.Close()
 		})
 	}
 
@@ -352,11 +468,13 @@ func (s *Server) apiPaneSocket(w http.ResponseWriter, r *http.Request) {
 			n, rerr := rd.Read(buf)
 			if n > 0 {
 				if !flow.waitRoom(ctx, int64(n)) {
+					_, _ = io.Copy(io.Discard, rd)
 					return
 				}
 				sentBytes.Add(int64(n))
 				if werr := writeBin(buf[:n]); werr != nil {
 					cancel()
+					_, _ = io.Copy(io.Discard, rd)
 					return
 				}
 			}
@@ -366,8 +484,8 @@ func (s *Server) apiPaneSocket(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	outWG.Add(2)
-	go pump(stdout)
-	go pump(stderr)
+	go pump(ch)
+	go pump(ch.Stderr())
 
 	// Periodic login recheck matching serveTerminal.
 	go func() {
@@ -386,20 +504,16 @@ func (s *Server) apiPaneSocket(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
-	// Wait for remote attach exit; release the per-client slot ONLY after the
-	// remote session and both output pumps have actually exited.
+	// Wait for remote channel close; release the per-client slot ONLY after
+	// reqs has closed (peer replied CHANNEL_CLOSE or transport ended) and both
+	// output pumps have exited.
 	go func() {
 		defer releaseSlot()
-		werr := sshSess.Wait()
+		exitCode := <-reqDone
 		outWG.Wait()
-		code := 0
-		if werr != nil {
-			var ee *ssh.ExitError
-			if errors.As(werr, &ee) {
-				code = ee.ExitStatus()
-			} else {
-				code = 1
-			}
+		code := exitCode
+		if code < 0 {
+			code = 1
 		}
 		_ = writeText(map[string]any{"t": "exit", "code": code, "bytes": sentBytes.Load()})
 		cancel()
@@ -420,7 +534,7 @@ func (s *Server) apiPaneSocket(w http.ResponseWriter, r *http.Request) {
 		}
 		if typ == websocket.MessageBinary {
 			if len(data) > 0 {
-				if _, werr := stdin.Write(data); werr != nil {
+				if _, werr := ch.Write(data); werr != nil {
 					cancel()
 					return
 				}
@@ -440,7 +554,13 @@ func (s *Server) apiPaneSocket(w http.ResponseWriter, r *http.Request) {
 		case "resize":
 			nc := clampPaneDim(strconv.Itoa(msg.Cols), cols, 20, 400)
 			nr := clampPaneDim(strconv.Itoa(msg.Rows), rows, 6, 200)
-			_ = sshSess.WindowChange(nr, nc)
+			wreq := paneWindowChangeMsg{
+				Columns: uint32(nc),
+				Rows:    uint32(nr),
+				Width:   uint32(nc * 8),
+				Height:  uint32(nr * 8),
+			}
+			_, _ = ch.SendRequest("window-change", false, ssh.Marshal(&wreq))
 		case "ack":
 			flow.ack(msg.N)
 		case "ping":

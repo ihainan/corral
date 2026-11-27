@@ -679,7 +679,8 @@ func (s *Server) readCodexModelsCache(ctx context.Context, sess *term.Session, p
 	cctx, cancel := context.WithTimeout(ctx, 6*time.Second)
 	defer cancel()
 	before := time.Now()
-	out, err := sshx.Output(cctx, sess.Client(), codexModelsCacheCommand(pid), codexModelsCacheMax)
+	res, err := sshx.Exec(cctx, sess.Client(), codexModelsCacheCommand(pid), codexModelsCacheMax, sshx.ExecOptions{Interactive: true, AwaitSlot: 2 * time.Second})
+	out := res.Out
 	if err != nil || len(out) > 4<<20 {
 		return nil, time.Time{}, false
 	}

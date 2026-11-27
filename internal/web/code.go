@@ -604,6 +604,7 @@ func (s *Server) runCode(ctx context.Context, key [2]int64, j *codeJob, h *store
 func (s *Server) codeRun(ctx context.Context, c *ssh.Client, cmd string, limit time.Duration, opt sshx.ExecOptions) (map[string]string, bool, error) {
 	ctx, cancel := context.WithTimeout(ctx, limit)
 	defer cancel()
+	opt.Interactive = true
 	r, err := sshx.Exec(ctx, c, cmd, sshx.MaxOutput, opt)
 	fields := codeserver.Fields(r.Out)
 	switch {

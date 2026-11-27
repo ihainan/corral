@@ -2,6 +2,7 @@ package web
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"mime/multipart"
@@ -15,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ihainan/corral/internal/sshx"
 	"github.com/ihainan/corral/internal/testutil"
 )
 
@@ -345,26 +347,82 @@ func TestFilesCwdAsksTmuxForTheActivePane(t *testing.T) {
 }
 
 func TestFilesRefusedWhileChannelsHaveNotEnded(t *testing.T) {
+	oldWait := sftpSlotWait
+	sftpSlotWait = 120 * time.Millisecond
+	t.Cleanup(func() { sftpSlotWait = oldWait })
+
 	e := newFileEnv(t)
 	sess, err := e.h.terms.Get(e.h.userID(e.c), e.sess)
 	if err != nil {
 		t.Fatal(err)
 	}
 	var held []func()
-	for i := 0; i < maxSFTPPerConn; i++ {
+	for i := 0; i < sshx.MaxSFTPPerConn; i++ {
 		rel, ok := takeSFTPChan(sess.Client())
 		if !ok {
 			t.Fatal("quota full too early")
 		}
 		held = append(held, rel)
 	}
-	if r := e.c.do("GET", e.url("", nil), nil); r.Status != http.StatusTooManyRequests {
+	if r := e.c.do("GET", e.url("", nil), nil); r.Status != http.StatusTooManyRequests || r.code() != "ssh_channels_busy" {
 		t.Fatalf("listing with no channel left: %d %s", r.Status, r.Body)
 	}
 	for _, rel := range held {
 		rel()
 	}
 	mustStatus(t, e.c.do("GET", e.url("", nil), nil), 200, "listing once channels ended")
+}
+
+// Even with zero SFTP channels open, filling the unified SSH session ledger
+// via other classes (Terminal + Pane + Aux = 9/9) blocks SFTP with
+// ssh_channels_busy after queueing, and releasing one slot during the queue
+// window lets the file listing succeed.
+func TestFilesRespectsUnifiedSessionLedgerAndQueues(t *testing.T) {
+	oldWait := sftpSlotWait
+	sftpSlotWait = 250 * time.Millisecond
+	t.Cleanup(func() { sftpSlotWait = oldWait })
+
+	e := newFileEnv(t)
+	sess, err := e.h.terms.Get(e.h.userID(e.c), e.sess)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := sess.Client()
+
+	// Terminal already holds 1/9; fill 4 Pane + 4 interactive Aux = 9/9.
+	var held []func()
+	t.Cleanup(func() {
+		for _, rel := range held {
+			rel()
+		}
+	})
+	for range sshx.MaxPanePerConn {
+		rel, err := sshx.AcquireSession(context.Background(), c, sshx.SessionPane, true, 0)
+		if err != nil {
+			t.Fatalf("fill pane: %v", err)
+		}
+		held = append(held, rel)
+	}
+	for range sshx.MaxAuxPerConn {
+		rel, err := sshx.AcquireSession(context.Background(), c, sshx.SessionAux, true, 0)
+		if err != nil {
+			t.Fatalf("fill aux: %v", err)
+		}
+		held = append(held, rel)
+	}
+
+	// Still full across the queue window -> 429 ssh_channels_busy.
+	r := e.c.do("GET", e.url("", nil), nil)
+	if r.Status != http.StatusTooManyRequests || r.code() != "ssh_channels_busy" {
+		t.Fatalf("expected 429 ssh_channels_busy when unified ledger full, got %d %s", r.Status, r.Body)
+	}
+
+	// Release one slot midway through the queue window -> listing wakes and succeeds.
+	go func() {
+		time.Sleep(60 * time.Millisecond)
+		held[0]()
+	}()
+	mustStatus(t, e.c.do("GET", e.url("", nil), nil), 200, "listing after slot freed during queue")
 }
 
 // The host-side check before rm -rf, run by a real sh.
@@ -559,5 +617,59 @@ esac
 		if r.json()["path"] != want {
 			t.Errorf("%q: %v, want %q", q, r.json()["path"], want)
 		}
+	}
+}
+
+// Deleting a folder is a direct user-clicked action, so it must be able to draw
+// from InteractiveReserve even when background Aux calls are refused (e.g. 7/9
+// slots already held: 1 Terminal + 4 Pane + 2 SFTP).
+func TestFilesDeleteFolderUsesInteractiveReserve(t *testing.T) {
+	e := newFileEnv(t)
+	dir := filepath.Join(e.root, "dropme")
+	if err := os.MkdirAll(filepath.Join(dir, "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "sub", "f.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Open the file panel's shared SFTP channel first so it is already counted
+	// (1 Terminal + 1 shared SFTP = 2/9).
+	mustStatus(t, e.c.do("GET", e.url("", nil), nil), 200, "warm shared sftp")
+
+	sess, err := e.h.terms.Get(e.h.userID(e.c), e.sess)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Hold 4 Pane + 1 more SFTP -> 1 Terminal + 4 Pane + 2 SFTP = 7/9 used,
+	// leaving only the 2 InteractiveReserve slots free.
+	var held []func()
+	t.Cleanup(func() {
+		for _, r := range held {
+			r()
+		}
+	})
+	for range sshx.MaxPanePerConn {
+		rel, err := sshx.AcquireSession(context.Background(), sess.Client(), sshx.SessionPane, true, 0)
+		if err != nil {
+			t.Fatalf("fill pane: %v", err)
+		}
+		held = append(held, rel)
+	}
+	relSFTP, err := sshx.AcquireSession(context.Background(), sess.Client(), sshx.SessionSFTP, true, 0)
+	if err != nil {
+		t.Fatalf("fill sftp: %v", err)
+	}
+	held = append(held, relSFTP)
+
+	// Sanity check: a background Aux call must be refused at 7/9 (7+1+2 > 9).
+	if _, err := sshx.AcquireSession(context.Background(), sess.Client(), sshx.SessionAux, false, 0); !errors.Is(err, sshx.ErrBusy) {
+		t.Fatalf("background Aux at 7/9: got %v, want ErrBusy", err)
+	}
+
+	// Deleting a folder MUST succeed into InteractiveReserve.
+	mustStatus(t, e.c.do("POST", e.url("delete", nil), map[string]any{"path": dir}), 200, "delete folder into interactive reserve")
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatalf("folder still exists after delete: %v", err)
 	}
 }

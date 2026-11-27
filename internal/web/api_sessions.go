@@ -947,34 +947,19 @@ var uploadExt = map[string]string{
 
 var errTooLarge = errors.New("file too large")
 
-// maxSFTPPerConn bounds the SFTP channels of one SSH connection that have
-// not really ended (see sshx/guard.go): the file panel's shared channel,
-// transfers, and channels given up on a host that has not let go of them.
-var maxSFTPPerConn = 4
+// sftpSlotWait bounds how long an interactive SFTP open (file panel or file
+// transfer) queues for a slot in the per-connection SSH session ledger before
+// failing with sshx.ErrBusy.
+var sftpSlotWait = 2 * time.Second
 
-var sftpChans = struct {
-	sync.Mutex
-	m map[*ssh.Client]int
-}{m: map[*ssh.Client]int{}}
-
-// takeSFTPChan reserves one SFTP channel on c; release is safe to call twice.
+// takeSFTPChan reserves one SFTP channel on c from the unified SSH session
+// ledger without waiting; release is safe to call twice.
 func takeSFTPChan(c *ssh.Client) (release func(), ok bool) {
-	sftpChans.Lock()
-	defer sftpChans.Unlock()
-	if sftpChans.m[c] >= maxSFTPPerConn {
+	rel, err := sshx.AcquireSession(context.Background(), c, sshx.SessionSFTP, true, 0)
+	if err != nil {
 		return nil, false
 	}
-	sftpChans.m[c]++
-	var once sync.Once
-	return func() {
-		once.Do(func() {
-			sftpChans.Lock()
-			defer sftpChans.Unlock()
-			if sftpChans.m[c]--; sftpChans.m[c] <= 0 {
-				delete(sftpChans.m, c)
-			}
-		})
-	}, true
+	return rel, true
 }
 
 // openSFTP starts the sftp subsystem on its own channel with hard bounds that
@@ -984,11 +969,12 @@ func takeSFTPChan(c *ssh.Client) (release func(), ok bool) {
 //   - the sftp client talks through local pipes, so closing them unblocks it
 //     immediately even if the host never answers;
 //   - stderr is read continuously so it cannot fill the channel window;
-//   - the channel counts against maxSFTPPerConn until it has really ended
-//     (its request stream closes), not merely until we gave up on it, so a
-//     host that never lets go cannot make us pile up channels.
-func openSFTP(c *ssh.Client) (*sftp.Client, func(), error) {
-	return openSFTPWith(c, func(r io.Reader, w io.WriteCloser, closeAll func()) (*sftp.Client, func(), error) {
+//   - the channel counts against the unified per-connection SSH session ledger
+//     (sshx.SessionSFTP, up to sshx.MaxSFTPPerConn and sshx.MaxSessionChannels)
+//     until it has really ended (its request stream closes), not merely until
+//     we gave up on it, so a host that never lets go cannot pile up channels.
+func openSFTP(ctx context.Context, c *ssh.Client) (*sftp.Client, func(), error) {
+	return openSFTPWith(ctx, c, sftpSlotWait, func(r io.Reader, w io.WriteCloser, closeAll func()) (*sftp.Client, func(), error) {
 		client, err := sftp.NewClientPipe(r, w)
 		if err != nil {
 			return nil, nil, err
@@ -998,8 +984,8 @@ func openSFTP(c *ssh.Client) (*sftp.Client, func(), error) {
 }
 
 // openSFTPLite is openSFTP for the file panel's quick operations.
-func openSFTPLite(c *ssh.Client) (*sftplite.Client, func(), error) {
-	return openSFTPWith(c, func(r io.Reader, w io.WriteCloser, closeAll func()) (*sftplite.Client, func(), error) {
+func openSFTPLite(ctx context.Context, c *ssh.Client) (*sftplite.Client, func(), error) {
+	return openSFTPWith(ctx, c, sftpSlotWait, func(r io.Reader, w io.WriteCloser, closeAll func()) (*sftplite.Client, func(), error) {
 		client, err := sftplite.New(r, w, closeAll)
 		if err != nil {
 			return nil, nil, err
@@ -1010,11 +996,11 @@ func openSFTPLite(c *ssh.Client) (*sftplite.Client, func(), error) {
 
 // openSFTPWith does the work of openSFTP; mk starts the client on the local
 // pipes (r: from the host, w: to it), closeAll ends them and the channel.
-func openSFTPWith[T any](c *ssh.Client, mk func(r io.Reader, w io.WriteCloser, closeAll func()) (T, func(), error)) (T, func(), error) {
+func openSFTPWith[T any](ctx context.Context, c *ssh.Client, await time.Duration, mk func(r io.Reader, w io.WriteCloser, closeAll func()) (T, func(), error)) (T, func(), error) {
 	var zero T
-	releaseChan, ok := takeSFTPChan(c)
-	if !ok {
-		return zero, nil, sshx.ErrBusy
+	releaseChan, err := sshx.AcquireSession(ctx, c, sshx.SessionSFTP, true, await)
+	if err != nil {
+		return zero, nil, err
 	}
 	type result struct {
 		client T
@@ -1166,7 +1152,7 @@ func (s *Server) apiUpload(w http.ResponseWriter, r *http.Request) {
 
 	client, err := s.openTransferSFTP(t, sess)
 	if errors.Is(err, sshx.ErrBusy) {
-		writeError(w, http.StatusTooManyRequests, "busy", "earlier file transfers have not ended yet")
+		writeError(w, http.StatusTooManyRequests, "ssh_channels_busy", "too many active SSH channels on this connection; close a panel or try again shortly")
 		return
 	}
 	if err != nil {

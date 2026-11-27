@@ -260,6 +260,12 @@ func (m *Manager) Start(ctx context.Context, res *Reservation, owner, hostID int
 	defer m.ops.Done()
 	cols, rows := clamp(opt.Cols, 20, 1000, 80), clamp(opt.Rows, 5, 500, 24)
 
+	releaseTerm, err := sshx.AcquireSession(ctx, client, sshx.SessionTerminal, true, 0)
+	if err != nil {
+		client.Close()
+		return nil, err
+	}
+
 	type setup struct {
 		sess *ssh.Session
 		s    *Session
@@ -269,10 +275,20 @@ func (m *Manager) Start(ctx context.Context, res *Reservation, owner, hostID int
 	go func() {
 		sess, err := client.NewSession()
 		if err != nil {
+			releaseTerm()
 			done <- setup{err: err}
 			return
 		}
-		fail := func(err error) { sess.Close(); done <- setup{err: err} }
+		fail := func(err error) {
+			sess.Close()
+			// Start closes client on every failure path; release the ledger
+			// slot once the SSH transport has actually ended.
+			go func() {
+				_ = client.Wait()
+				releaseTerm()
+			}()
+			done <- setup{err: err}
+		}
 		modes := ssh.TerminalModes{ssh.ECHO: 1, ssh.TTY_OP_ISPEED: 115200, ssh.TTY_OP_OSPEED: 115200}
 		_ = sess.Setenv("COLORTERM", "truecolor") // servers often refuse custom env; that is fine
 		if err := sess.RequestPty("xterm-256color", rows, cols, modes); err != nil {
@@ -348,6 +364,12 @@ func (m *Manager) Start(ctx context.Context, res *Reservation, owner, hostID int
 
 	// abandon drops a session set up after we gave up on it, recording included.
 	abandon := func(st setup) {
+		if st.sess != nil {
+			go func() {
+				_ = st.sess.Wait()
+				releaseTerm()
+			}()
+		}
 		if st.s != nil && st.s.rec != nil {
 			st.s.rec.Close()
 		}
@@ -398,9 +420,17 @@ func (m *Manager) Start(ctx context.Context, res *Reservation, owner, hostID int
 	switch {
 	case closing:
 		s.end(StateClosed, 0, ReasonShutdown)
+		go func() {
+			_ = st.sess.Wait()
+			releaseTerm()
+		}()
 		return nil, ErrClosing
 	case gaveUp != nil:
 		s.end(StateClosed, 0, "given up")
+		go func() {
+			_ = st.sess.Wait()
+			releaseTerm()
+		}()
 		return nil, gaveUp
 	}
 
@@ -411,6 +441,7 @@ func (m *Manager) Start(ctx context.Context, res *Reservation, owner, hostID int
 	exited := make(chan struct{})
 	go func() {
 		err := st.sess.Wait()
+		releaseTerm()
 		var exit *ssh.ExitError
 		switch {
 		case err == nil:

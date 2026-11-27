@@ -10,6 +10,7 @@ import (
 
 	"golang.org/x/crypto/ssh"
 
+	"github.com/ihainan/corral/internal/sshx"
 	"github.com/ihainan/corral/internal/testutil"
 )
 
@@ -212,5 +213,47 @@ func TestStartIdleSince(t *testing.T) {
 	defer s.Close("test")
 	if got := s.Snapshot().IdleSince; !got.Equal(at) {
 		t.Errorf("idle since %v, want %v", got, at)
+	}
+}
+
+// The main terminal session claims 1 SessionTerminal slot in the unified sshx
+// ledger for the lifetime of the remote channel and releases it once ended
+// (including on setup/register failure).
+func TestStartAccountsTerminalInSessionLedger(t *testing.T) {
+	m, _, dial := startEnv(t)
+
+	// 1. Normal start + close releases the ledger slot.
+	c1 := dial()
+	res1, _ := m.Reserve(1)
+	s, err := m.Start(context.Background(), res1, 1, 9, "h", c1, StartOptions{Persistence: "none"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := sshx.SessionClassInUse(c1, sshx.SessionTerminal); got != 1 {
+		t.Fatalf("terminal ledger count while running = %d, want 1", got)
+	}
+	if got := sshx.SessionInUse(c1); got != 1 {
+		t.Fatalf("total ledger count while running = %d, want 1", got)
+	}
+	s.Close("test")
+	for deadline := time.Now().Add(3 * time.Second); sshx.SessionInUse(c1) != 0; time.Sleep(10 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatalf("terminal ledger slot not released after Close: %d", sshx.SessionInUse(c1))
+		}
+	}
+
+	// 2. Register failure also releases the ledger slot once the channel closes.
+	c2 := dial()
+	res2, _ := m.Reserve(1)
+	if _, err := m.Start(context.Background(), res2, 1, 9, "h", c2, StartOptions{
+		Persistence: "none",
+		Register:    func(context.Context, *Session) error { return errors.New("boom") },
+	}); err == nil {
+		t.Fatal("expected register error")
+	}
+	for deadline := time.Now().Add(3 * time.Second); sshx.SessionInUse(c2) != 0; time.Sleep(10 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatalf("terminal ledger slot leaked after Register failure: %d", sshx.SessionInUse(c2))
+		}
 	}
 }

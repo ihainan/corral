@@ -182,7 +182,8 @@ func (s *Server) apiConversationImage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	pics, err := images.of(r.Context(), imageKey{sess.ID, log, uuid}, func(ctx context.Context) (*imagePics, error) {
-		out, err := sshx.Output(ctx, sess.Client(), imageRowCommand(log, uuid), imageLineMax)
+		res, err := sshx.Exec(ctx, sess.Client(), imageRowCommand(log, uuid), imageLineMax, sshx.ExecOptions{Interactive: true, AwaitSlot: 2 * time.Second})
+		out := res.Out
 		if err != nil {
 			var exit *sshx.ExitError
 			if errors.As(err, &exit) && exit.Status == 1 {

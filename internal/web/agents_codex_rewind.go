@@ -164,7 +164,7 @@ func (s *Server) herdrRewindPaneOf(ctx context.Context, sess *term.Session, sock
 	var c codexPane
 	ok := false
 	for i := 0; i < 20 && ctx.Err() == nil; i++ {
-		if panes, err := s.codexPanes.run(ctx, sess, socket, pane); err == nil {
+		if panes, err := s.codexPanes.runInteractive(ctx, sess, socket, pane, true); err == nil {
 			if c, ok = panes[pane]; ok && !c.Several && c.PID > 0 && c.Start > 0 {
 				break
 			}
@@ -186,8 +186,8 @@ rest=${stat##*) }
 [ "$(printf '%s' "$rest" | cut -d' ' -f20)" = "$start" ] || exit 3
 [ "$(head -c 16 "/proc/$pid/comm" 2>/dev/null)" = codex ] || exit 3
 tr '\0' '\001' <"/proc/$pid/cmdline" 2>/dev/null | awk -v want=fork '` + codexArgsAwk + `'`
-	out, err := sshx.Output(ctx, sess.Client(), "sh -c "+sshx.QuoteShell(cmd), 128)
-	return err == nil && src != "" && strings.EqualFold(strings.TrimSpace(string(out)), src)
+	res, err := sshx.Exec(ctx, sess.Client(), "sh -c "+sshx.QuoteShell(cmd), 128, sshx.ExecOptions{Interactive: true, AwaitSlot: 2 * time.Second})
+	return err == nil && src != "" && strings.EqualFold(strings.TrimSpace(string(res.Out)), src)
 }
 
 // sendSh: a command that presses (send-keys) or types (send-text) arg in
@@ -212,7 +212,7 @@ echo ok`
 // operation's slot rather than refused at once where the connection is busy
 // (the page reading the while).
 func rewindExec(ctx context.Context, sess *term.Session, cmd string, limit int) ([]byte, error) {
-	res, err := sshx.Exec(ctx, sess.Client(), cmd, limit, sshx.ExecOptions{AwaitSlot: 5 * time.Second})
+	res, err := sshx.Exec(ctx, sess.Client(), cmd, limit, sshx.ExecOptions{Interactive: true, AwaitSlot: 5 * time.Second})
 	return res.Out, err
 }
 
@@ -220,7 +220,8 @@ func rewindExec(ctx context.Context, sess *term.Session, cmd string, limit int) 
 // screen read before it is not sent; refused (ErrBusy, nothing ran), the
 // screen is read again first (pressOn) — review fork8-2.
 func rewindSend(ctx context.Context, sess *term.Session, cmd string, limit int) ([]byte, error) {
-	return sshx.Output(ctx, sess.Client(), cmd, limit)
+	res, err := sshx.Exec(ctx, sess.Client(), cmd, limit, sshx.ExecOptions{Interactive: true})
+	return res.Out, err
 }
 
 // pressOn: key pressed (text typed, where typed) on a screen seen to be as

@@ -430,7 +430,7 @@ func (s *Server) cardPress(w http.ResponseWriter, ctx context.Context, sess *ter
 		*outcome, *reason = "refused", code
 		writeError(w, http.StatusConflict, code, why)
 	}
-	res, err := sshx.Exec(ctx, sess.Client(), convoColorScreenCommand(sess.Persistence, pane, socket), 512<<10, sshx.ExecOptions{Release: held.Done})
+	res, err := sshx.Exec(ctx, sess.Client(), convoColorScreenCommand(sess.Persistence, pane, socket), 512<<10, sshx.ExecOptions{Release: held.Done, Interactive: true})
 	if err != nil {
 		*outcome, *reason = "unknown", "no_screen"
 		writeError(w, http.StatusBadGateway, "no_screen", "the pane's screen could not be read")
@@ -484,7 +484,7 @@ func (s *Server) cardPress(w http.ResponseWriter, ctx context.Context, sess *ter
 	}
 	held.Add(1)
 	_, err = sshx.Exec(ctx, sess.Client(), convoGatedCommand("card:"+c.digest, sess.Persistence, sess.TmuxSession, pane, socket, pid, start, sid, 0, replyPress(sess.Persistence, []string{key}), 0), sendOut,
-		sshx.ExecOptions{Stdin: strings.NewReader(""), Release: held.Done})
+		sshx.ExecOptions{Stdin: strings.NewReader(""), Release: held.Done, Interactive: true})
 	var exitErr *sshx.ExitError
 	switch {
 	case err == nil:

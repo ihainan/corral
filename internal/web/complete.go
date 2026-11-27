@@ -151,7 +151,7 @@ func (s *Server) apiComplete(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 	defer cancel()
 	// (pane: the agents page's agent, a herdr pane maybe not in front.)
-	cwd, err := s.paneCwd(ctx, sess, r.URL.Query().Get("pane"))
+	cwd, err := s.paneCwdInteractive(ctx, sess, r.URL.Query().Get("pane"), true)
 	if errors.Is(err, sshx.ErrBusy) {
 		writeError(w, http.StatusTooManyRequests, "busy", "the host is still answering earlier requests")
 		return
@@ -161,7 +161,8 @@ func (s *Server) apiComplete(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, l)
 		return
 	}
-	out, err := sshx.Output(ctx, sess.Client(), completeCommand(cwd), completeOutMax)
+	res, err := sshx.Exec(ctx, sess.Client(), completeCommand(cwd), completeOutMax, sshx.ExecOptions{Interactive: true})
+	out := res.Out
 	switch {
 	case errors.Is(err, sshx.ErrBusy):
 		writeError(w, http.StatusTooManyRequests, "busy", "the host is still answering earlier requests")

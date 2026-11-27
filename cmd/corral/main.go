@@ -21,6 +21,7 @@ import (
 	"github.com/ihainan/corral/internal/config"
 	"github.com/ihainan/corral/internal/netguard"
 	"github.com/ihainan/corral/internal/notify"
+	"github.com/ihainan/corral/internal/sshx"
 	"github.com/ihainan/corral/internal/store"
 	"github.com/ihainan/corral/internal/term"
 	"github.com/ihainan/corral/internal/vault"
@@ -61,6 +62,9 @@ func run(log *slog.Logger) error {
 	cfg, err := config.Load()
 	if err != nil {
 		return err
+	}
+	if cfg.SSHMaxSessions > 0 {
+		sshx.MaxSessionChannels = cfg.SSHMaxSessions
 	}
 	if err := os.MkdirAll(cfg.DataDir, 0o700); err != nil {
 		return err

@@ -896,7 +896,7 @@ func (s *Server) convoModel(w http.ResponseWriter, ctx context.Context, sess *te
 				}
 			}
 			running.Add(1)
-			_, err = sshx.Exec(rctx, sess.Client(), settingsWriteCommand(now, fixed), 4096, sshx.ExecOptions{Stdin: bytes.NewReader(fixed), Release: running.Done})
+			_, err = sshx.Exec(rctx, sess.Client(), settingsWriteCommand(now, fixed), 4096, sshx.ExecOptions{Stdin: bytes.NewReader(fixed), Release: running.Done, Interactive: true})
 			var exitErr *sshx.ExitError
 			if errors.As(err, &exitErr) && exitErr.Status == 9 {
 				continue
@@ -953,7 +953,7 @@ func (s *Server) convoModel(w http.ResponseWriter, ctx context.Context, sess *te
 		}
 		running.Add(1)
 		res, err := sshx.Exec(ctx, sess.Client(), convoGatedCommand(gate, sess.Persistence, sess.TmuxSession, pane, socket, pid, start, sid, len(text), press, read), 64<<10,
-			sshx.ExecOptions{Stdin: strings.NewReader(text), Release: running.Done})
+			sshx.ExecOptions{Stdin: strings.NewReader(text), Release: running.Done, Interactive: true})
 		if err == nil && (len(press) > 0 || text != "") {
 			typed = true
 		}
@@ -981,7 +981,7 @@ func (s *Server) convoModel(w http.ResponseWriter, ctx context.Context, sess *te
 			}
 		}
 		running.Add(1)
-		res, err := sshx.Exec(ctx, sess.Client(), convoScreenCommand(sess.Persistence, pane, socket), 512<<10, sshx.ExecOptions{Release: running.Done})
+		res, err := sshx.Exec(ctx, sess.Client(), convoScreenCommand(sess.Persistence, pane, socket), 512<<10, sshx.ExecOptions{Release: running.Done, Interactive: true})
 		if err != nil {
 			return "", "", err
 		}
@@ -995,7 +995,7 @@ func (s *Server) convoModel(w http.ResponseWriter, ctx context.Context, sess *te
 			lctx, lcancel := context.WithTimeout(context.WithoutCancel(ctx), 8*time.Second)
 			defer lcancel()
 			running.Add(1)
-			res, err := sshx.Exec(lctx, sess.Client(), convoScreenCommand(sess.Persistence, pane, socket), 512<<10, sshx.ExecOptions{Release: running.Done})
+			res, err := sshx.Exec(lctx, sess.Client(), convoScreenCommand(sess.Persistence, pane, socket), 512<<10, sshx.ExecOptions{Release: running.Done, Interactive: true})
 			if err != nil {
 				return "", "", err
 			}
@@ -1369,7 +1369,8 @@ const maxSettings = 1 << 20
 
 // readSettings: Claude Code's settings as they are (none: there are none).
 func readSettings(ctx context.Context, sess *term.Session) (doc []byte, none bool, err error) {
-	out, err := sshx.Output(ctx, sess.Client(), settingsReadCommand, maxSettings+16)
+	res, err := sshx.Exec(ctx, sess.Client(), settingsReadCommand, maxSettings+16, sshx.ExecOptions{Interactive: true})
+	out := res.Out
 	var exitErr *sshx.ExitError
 	switch {
 	case errors.As(err, &exitErr) && exitErr.Status == 3:
@@ -1501,7 +1502,8 @@ func jsonSame(a, b json.RawMessage) bool {
 // readCodexConfig reads ~/.codex/config.toml (none: there is none), as
 // readSettings reads Claude Code's settings.
 func readCodexConfig(ctx context.Context, sess *term.Session) (doc []byte, none bool, err error) {
-	out, err := sshx.Output(ctx, sess.Client(), codexConfigReadCommand, maxSettings+16)
+	res, err := sshx.Exec(ctx, sess.Client(), codexConfigReadCommand, maxSettings+16, sshx.ExecOptions{Interactive: true})
+	out := res.Out
 	var exitErr *sshx.ExitError
 	switch {
 	case errors.As(err, &exitErr) && exitErr.Status == 3:

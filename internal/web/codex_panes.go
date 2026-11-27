@@ -539,6 +539,10 @@ func (c *codexPaneLooks) since(ctx context.Context, sess *term.Session, socket s
 // run: one look (target: a pane whose title is read now, "" none), the
 // endpoints the gateway keeps named to it and kept from it.
 func (c *codexPaneLooks) run(ctx context.Context, sess *term.Session, socket, target string) (map[string]codexPane, error) {
+	return c.runInteractive(ctx, sess, socket, target, false)
+}
+
+func (c *codexPaneLooks) runInteractive(ctx context.Context, sess *term.Session, socket, target string, interactive bool) (map[string]codexPane, error) {
 	c.mu.Lock()
 	kept := c.via[sess.ID]
 	known := make([]string, 0, len(kept))
@@ -546,7 +550,8 @@ func (c *codexPaneLooks) run(ctx context.Context, sess *term.Session, socket, ta
 		known = append(known, k)
 	}
 	c.mu.Unlock()
-	out, err := sshx.Output(ctx, sess.Client(), codexPanesCommand(socket, known, target), codexPanesMax)
+	res, err := sshx.Exec(ctx, sess.Client(), codexPanesCommand(socket, known, target), codexPanesMax, sshx.ExecOptions{Interactive: interactive})
+	out := res.Out
 	if err != nil {
 		return nil, err
 	}
@@ -731,7 +736,7 @@ func (s *Server) codexFront(ctx context.Context, sess *term.Session, socket, pan
 	if !ok || !isCodexAgent(hp.Agent) || socket == "" || !herdrPaneID.MatchString(pane) {
 		return nil
 	}
-	panes, err := s.codexPanes.run(ctx, sess, socket, pane)
+	panes, err := s.codexPanes.runInteractive(ctx, sess, socket, pane, true)
 	if err != nil {
 		return nil
 	}

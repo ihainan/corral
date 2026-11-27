@@ -30,7 +30,8 @@ func (s *Server) apiCodexSessions(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
-	out, err := sshx.Output(ctx, sess.Client(), codexSessionsCommand(dir), 256<<10)
+	res, err := sshx.Exec(ctx, sess.Client(), codexSessionsCommand(dir), 256<<10, sshx.ExecOptions{Interactive: true, AwaitSlot: 2 * time.Second})
+	out := res.Out
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "host_error", "the host's list could not be read")
 		return

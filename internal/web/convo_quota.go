@@ -582,7 +582,7 @@ func (s *Server) fetchAgyQuota(ctx context.Context, sess *term.Session) (quotaIn
 	if sess == nil || sess.State() != term.StateRunning {
 		return quotaInfo{}, errors.New("session not running")
 	}
-	res, err := sshx.Exec(ctx, sess.Client(), agyQuotaCommand(), quotaReadMax, sshx.ExecOptions{AwaitSlot: 12 * time.Second})
+	res, err := sshx.Exec(ctx, sess.Client(), agyQuotaCommand(), quotaReadMax, sshx.ExecOptions{})
 	if err != nil {
 		return quotaInfo{}, err
 	}

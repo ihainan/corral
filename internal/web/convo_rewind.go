@@ -1027,7 +1027,7 @@ func (c *inFlightCounter) Wait(ctx context.Context) error {
 
 func claudeRewindExecResult(ctx context.Context, sess *term.Session, inflight *inFlightCounter, cmd string, limit int, await time.Duration) (sshx.ExecResult, error) {
 	inflight.Add()
-	res, err := sshx.Exec(ctx, sess.Client(), cmd, limit, sshx.ExecOptions{AwaitSlot: await, Release: inflight.Done})
+	res, err := sshx.Exec(ctx, sess.Client(), cmd, limit, sshx.ExecOptions{Interactive: true, AwaitSlot: await, Release: inflight.Done})
 	return res, err
 }
 
@@ -1422,7 +1422,7 @@ func (s *Server) apiConversationRewind(w http.ResponseWriter, r *http.Request) {
 		fail(rwErr(http.StatusConflict, "agent_busy", "the agent is busy"))
 		return
 	}
-	if status := s.convoFreshStatus(ctx, sess, &convoBind{PID: front.pid, Start: front.start, Session: front.sid}); status != "" && status != "idle" {
+	if status := s.convoFreshStatusInteractive(ctx, sess, &convoBind{PID: front.pid, Start: front.start, Session: front.sid}, true); status != "" && status != "idle" {
 		fail(rwErr(http.StatusConflict, "agent_busy", "the agent is busy or waiting for input"))
 		return
 	}

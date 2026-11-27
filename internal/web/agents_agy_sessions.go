@@ -26,7 +26,8 @@ func (s *Server) apiAgySessions(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
-	out, err := sshx.Output(ctx, sess.Client(), agySessionsCommand(dir), 256<<10)
+	res, err := sshx.Exec(ctx, sess.Client(), agySessionsCommand(dir), 256<<10, sshx.ExecOptions{Interactive: true, AwaitSlot: 2 * time.Second})
+	out := res.Out
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "host_error", "the host's list could not be read")
 		return

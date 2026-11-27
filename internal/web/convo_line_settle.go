@@ -354,7 +354,7 @@ func settleSSH(ctx context.Context, sess *term.Session, running *sync.WaitGroup)
 		},
 		write: func(was, now []byte) (bool, error) {
 			running.Add(1)
-			_, err := sshx.Exec(ctx, sess.Client(), settingsWriteCommand(was, now), 4096, sshx.ExecOptions{Stdin: bytes.NewReader(now), Release: running.Done})
+			_, err := sshx.Exec(ctx, sess.Client(), settingsWriteCommand(was, now), 4096, sshx.ExecOptions{Stdin: bytes.NewReader(now), Release: running.Done, Interactive: true})
 			var e *sshx.ExitError
 			if errors.As(err, &e) && e.Status == 9 {
 				return true, nil
@@ -372,7 +372,7 @@ stat -c %Y "$f" 2>/dev/null || stat -f %m "$f"`
 // lineExec runs one of the line's fixed commands on the host.
 func lineExec(ctx context.Context, sess *term.Session, running *sync.WaitGroup, cmd string, stdin io.Reader, limit int) ([]byte, error) {
 	running.Add(1)
-	res, err := sshx.Exec(ctx, sess.Client(), cmd, limit, sshx.ExecOptions{Stdin: stdin, Release: running.Done})
+	res, err := sshx.Exec(ctx, sess.Client(), cmd, limit, sshx.ExecOptions{Stdin: stdin, Release: running.Done, Interactive: true})
 	return res.Out, err
 }
 
@@ -541,7 +541,8 @@ func settingsAccount(ctx context.Context, sess *term.Session) (string, error) {
 	if v, ok := settingsAccounts.Load(sess.ID); ok {
 		return v.(string), nil
 	}
-	out, err := sshx.Output(ctx, sess.Client(), settingsIdentCommand, 8192)
+	res, err := sshx.Exec(ctx, sess.Client(), settingsIdentCommand, 8192, sshx.ExecOptions{Interactive: true})
+	out := res.Out
 	if err != nil {
 		return "", err
 	}

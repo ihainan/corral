@@ -10,6 +10,7 @@ import { isCoarse } from '../components/ui'
 import { modalShown } from '../shown'
 import { darkTheme } from './themes'
 import type { PanelLive } from './PanelWindow'
+import { classifyPaneWsMessage } from './paneWsMsg'
 import { paneFocusAction, shouldResizePty, type TermDims } from './termViewKeep'
 
 const FONT_STACK = "'JetBrains Mono', 'SFMono-Regular', Menlo, Consolas, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', monospace"
@@ -68,7 +69,7 @@ export function PaneTerminal({
   const wsRef = useRef<WebSocket | null>(null)
   const termRef = useRef<Terminal | null>(null)
   const fitRef = useRef<FitAddon | null>(null)
-  const [status, setStatus] = useState<'connecting' | 'open' | 'closed'>('connecting')
+  const [status, setStatus] = useState<'connecting' | 'open' | 'closed' | 'channels_busy'>('connecting')
   const [taking, setTaking] = useState(false)
   const [connSeq, setConnSeq] = useState(0)
 
@@ -270,6 +271,7 @@ export function PaneTerminal({
     let opened = false
     let receivedBytes = 0
     let fellBack = false
+    let terminalError = false
     let ackPending = 0
     let pongTimer: ReturnType<typeof setTimeout> | undefined
     setStatus('connecting')
@@ -350,30 +352,32 @@ export function PaneTerminal({
         return
       }
       if (typeof ev.data === 'string') {
-        try {
-          const msg = JSON.parse(ev.data) as { t?: string; code?: number; bytes?: number }
-          if (msg.t === 'exit') {
-            if ((msg.code ?? 0) !== 0 && Math.max(receivedBytes, msg.bytes ?? 0) < 256) {
-              triggerFallback()
-              return
-            }
-            setStatus('closed')
-            onSettledRef.current()
-          }
-        } catch {
-          /* ignore */
+        const evKind = classifyPaneWsMessage(ev.data, receivedBytes)
+        if (evKind.kind === 'channels_busy') {
+          terminalError = true
+          setStatus('channels_busy')
+          return
+        }
+        if (evKind.kind === 'fallback') {
+          triggerFallback()
+          return
+        }
+        if (evKind.kind === 'closed') {
+          setStatus('closed')
+          onSettledRef.current()
         }
       }
     }
 
     ws.onerror = () => {
       if (!alive) return
-      if (!opened) triggerFallback()
+      if (!opened && !terminalError) triggerFallback()
     }
 
     ws.onclose = () => {
       if (!alive) return
       clearPong()
+      if (terminalError) return
       if (!opened) {
         triggerFallback()
         return
@@ -457,8 +461,8 @@ export function PaneTerminal({
         />
         {live?.main && status !== 'open' && (
           <div className="convo-pty-bar is-overlay" role="status">
-            <span>{t(status === 'connecting' ? 'panel.ptyConnecting' : 'panel.ptyClosed')}</span>
-            {status === 'closed' && (
+            <span>{t(status === 'connecting' ? 'panel.ptyConnecting' : status === 'channels_busy' ? 'panel.ptyChannelsBusy' : 'panel.ptyClosed')}</span>
+            {(status === 'closed' || status === 'channels_busy') && (
               <button
                 type="button"
                 className="link-btn"
@@ -475,8 +479,8 @@ export function PaneTerminal({
       </div>
       {!live?.main && status !== 'open' && (
         <div className="convo-pty-bar" role="status">
-          <span>{t(status === 'connecting' ? 'panel.ptyConnecting' : 'panel.ptyClosed')}</span>
-          {status === 'closed' && (
+          <span>{t(status === 'connecting' ? 'panel.ptyConnecting' : status === 'channels_busy' ? 'panel.ptyChannelsBusy' : 'panel.ptyClosed')}</span>
+          {(status === 'closed' || status === 'channels_busy') && (
             <button
               type="button"
               className="link-btn"

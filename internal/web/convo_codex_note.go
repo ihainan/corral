@@ -133,7 +133,7 @@ func (s *Server) codexPlanAsked(ctx context.Context, sess *term.Session, pane, s
 	}
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	res, err := sshx.Exec(ctx, sess.Client(), convoScreenCommand(sess.Persistence, pane, socket), 512<<10, sshx.ExecOptions{})
+	res, err := sshx.Exec(ctx, sess.Client(), convoScreenCommand(sess.Persistence, pane, socket), 512<<10, sshx.ExecOptions{Interactive: true})
 	if err != nil {
 		return false
 	}

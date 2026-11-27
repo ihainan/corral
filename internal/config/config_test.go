@@ -55,6 +55,44 @@ func TestForwardDomainRequiresHTTPS(t *testing.T) {
 	}
 }
 
+func TestSSHMaxSessionsConfig(t *testing.T) {
+	t.Setenv("CORRAL_MASTER_KEY", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+	t.Setenv("CORRAL_PUBLIC_URL", "https://ssh.example.com")
+
+	c, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.SSHMaxSessions != 9 {
+		t.Fatalf("default SSHMaxSessions = %d, want 9", c.SSHMaxSessions)
+	}
+
+	t.Setenv("CORRAL_SSH_MAX_SESSIONS", "4")
+	c, err = Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.SSHMaxSessions != 4 {
+		t.Fatalf("min SSHMaxSessions = %d, want 4", c.SSHMaxSessions)
+	}
+
+	t.Setenv("CORRAL_SSH_MAX_SESSIONS", "20")
+	c, err = Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.SSHMaxSessions != 20 {
+		t.Fatalf("custom SSHMaxSessions = %d, want 20", c.SSHMaxSessions)
+	}
+
+	for _, bad := range []string{"0", "-1", "1", "2", "3", "1001", "abc"} {
+		t.Setenv("CORRAL_SSH_MAX_SESSIONS", bad)
+		if _, err := Load(); err == nil {
+			t.Errorf("CORRAL_SSH_MAX_SESSIONS=%q was accepted", bad)
+		}
+	}
+}
+
 func TestCodeServerConfig(t *testing.T) {
 	t.Setenv("CORRAL_MASTER_KEY", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
 	t.Setenv("CORRAL_PUBLIC_URL", "https://ssh.example.com")

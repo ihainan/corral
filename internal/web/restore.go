@@ -359,6 +359,9 @@ func (s *Server) restoreOne(parent context.Context, t *store.OpenTab) {
 	case ctx.Err() != nil:
 		keep(gone())
 		return
+	case errors.Is(err, sshx.ErrBusy):
+		keep("cancelled:busy")
+		return
 	case err != nil:
 		drop("failed:probe")
 		return
@@ -439,6 +442,8 @@ func (s *Server) restoreOne(parent context.Context, t *store.OpenTab) {
 			keep(gone())
 		case errors.Is(err, errRestoreDB):
 			keep("cancelled:db")
+		case errors.Is(err, sshx.ErrBusy):
+			keep("cancelled:busy")
 		default:
 			drop("failed:start")
 		}

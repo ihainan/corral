@@ -49,7 +49,11 @@ type Config struct {
 	LoginIdleTimeout   time.Duration
 	LoginAbsoluteLimit time.Duration
 	MaxSessionsPerUser int
-	UploadMaxBytes     int64
+	// SSHMaxSessions caps total unfinished SSH "session" channels per
+	// *ssh.Client (default 9, leaving 1 headroom below sshd's default 10).
+	// Configurable via CORRAL_SSH_MAX_SESSIONS.
+	SSHMaxSessions int
+	UploadMaxBytes int64
 
 	// Forwarded ports and editors are served from "<label>.<ForwardDomain>".
 	// Empty disables both features.
@@ -297,6 +301,7 @@ func Load() (*Config, error) {
 		DefaultLanguage:    env("CORRAL_DEFAULT_LANGUAGE", ""), // "": each browser's own language
 		ForwardDomain:      strings.TrimPrefix(strings.ToLower(env("CORRAL_FORWARD_DOMAIN", "")), "."),
 		MaxSessionsPerUser: 20,
+		SSHMaxSessions:     9,
 		UploadMaxBytes:     100 << 20,
 	}
 
@@ -379,6 +384,13 @@ func Load() (*Config, error) {
 			return nil, fmt.Errorf("CORRAL_MAX_SESSIONS_PER_USER: invalid %q", v)
 		}
 		c.MaxSessionsPerUser = n
+	}
+	if v := env("CORRAL_SSH_MAX_SESSIONS", ""); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 4 || n > 1000 {
+			return nil, fmt.Errorf("CORRAL_SSH_MAX_SESSIONS: invalid %q (expected 4..1000)", v)
+		}
+		c.SSHMaxSessions = n
 	}
 	if err := c.loadCodeServer(); err != nil {
 		return nil, err

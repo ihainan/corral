@@ -520,7 +520,12 @@ func (s *Server) fetchAgyModels(ctx context.Context, sess *term.Session, fresh b
 		}()
 		mctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		defer cancel()
-		out, err := sshx.Output(mctx, sess.Client(), agyModelsCommand, 128<<10)
+		var await time.Duration
+		if !fresh {
+			await = 2 * time.Second
+		}
+		res, err := sshx.Exec(mctx, sess.Client(), agyModelsCommand, 128<<10, sshx.ExecOptions{Interactive: !fresh, AwaitSlot: await})
+		out := res.Out
 		if err != nil {
 			call.err = err
 			return
@@ -589,7 +594,8 @@ func (s *Server) keptAgyModels(w http.ResponseWriter, ctx context.Context, sess 
 }
 
 func readAgySettings(ctx context.Context, sess *term.Session) (doc []byte, none bool, err error) {
-	out, err := sshx.Output(ctx, sess.Client(), agySettingsReadCommand, maxSettings+16)
+	res, err := sshx.Exec(ctx, sess.Client(), agySettingsReadCommand, maxSettings+16, sshx.ExecOptions{Interactive: true, AwaitSlot: 2 * time.Second})
+	out := res.Out
 	var exitErr *sshx.ExitError
 	switch {
 	case errors.As(err, &exitErr) && exitErr.Status == 3:
@@ -625,7 +631,8 @@ func (s *Server) convoAgyModels(w http.ResponseWriter, ctx context.Context, sess
 		defer wg.Done()
 		sctx, scancel := context.WithTimeout(ctx, 8*time.Second)
 		defer scancel()
-		scr, serr := sshx.Output(sctx, sess.Client(), agyScreenCommand(sess.Persistence, pane, socket), 512<<10)
+		scrRes, serr := sshx.Exec(sctx, sess.Client(), agyScreenCommand(sess.Persistence, pane, socket), 512<<10, sshx.ExecOptions{Interactive: true, AwaitSlot: 2 * time.Second})
+		scr := scrRes.Out
 		if serr == nil {
 			liveModel, liveEffort = agyStatusModelEffort(string(scr))
 		}
@@ -667,7 +674,8 @@ func (s *Server) convoAgyModel(w http.ResponseWriter, ctx context.Context, sess 
 	}
 	// Read live colored screen once to verify idle + empty input AND learn current effort.
 	sctx, scancel := context.WithTimeout(ctx, 10*time.Second)
-	rawAnsi, err := sshx.Output(sctx, sess.Client(), agyColorScreenCommand(sess.Persistence, pane, socket), 512<<10)
+	rawRes, err := sshx.Exec(sctx, sess.Client(), agyColorScreenCommand(sess.Persistence, pane, socket), 512<<10, sshx.ExecOptions{Interactive: true, AwaitSlot: 2 * time.Second})
+	rawAnsi := rawRes.Out
 	scancel()
 	if err != nil {
 		*reason = "cannot_verify"
@@ -734,7 +742,8 @@ func (s *Server) convoAgyEffort(w http.ResponseWriter, ctx context.Context, sess
 	defer func() { doneLock(); release() }()
 
 	sctx, scancel := context.WithTimeout(ctx, 10*time.Second)
-	rawAnsi, err := sshx.Output(sctx, sess.Client(), agyColorScreenCommand(sess.Persistence, pane, socket), 512<<10)
+	rawRes, err := sshx.Exec(sctx, sess.Client(), agyColorScreenCommand(sess.Persistence, pane, socket), 512<<10, sshx.ExecOptions{Interactive: true, AwaitSlot: 2 * time.Second})
+	rawAnsi := rawRes.Out
 	scancel()
 	if err != nil {
 		*reason = "cannot_verify"
@@ -822,7 +831,7 @@ func (s *Server) runAgySlashSwitch(
 			if err != nil {
 				return true, err
 			}
-			_, werr := sshx.Exec(ctx2, sess.Client(), agySettingsWriteCommand(now, fixed), 4096, sshx.ExecOptions{Stdin: bytes.NewReader(fixed)})
+			_, werr := sshx.Exec(ctx2, sess.Client(), agySettingsWriteCommand(now, fixed), 4096, sshx.ExecOptions{Stdin: bytes.NewReader(fixed), Interactive: true})
 			var exitErr *sshx.ExitError
 			if errors.As(werr, &exitErr) && exitErr.Status == 9 {
 				continue
@@ -837,7 +846,7 @@ func (s *Server) runAgySlashSwitch(
 
 	// Send the slash command through the standard afree:<digest> gate.
 	cmd := convoGatedCommand("afree:"+digest, sess.Persistence, sess.TmuxSession, pane, socket, pid, start, sid, len(slashCmd), nil, 0)
-	_, err = sshx.Exec(ctx, sess.Client(), cmd, sendOut, sshx.ExecOptions{Stdin: strings.NewReader(slashCmd), AwaitSlot: pressSlotWait("model")})
+	_, err = sshx.Exec(ctx, sess.Client(), cmd, sendOut, sshx.ExecOptions{Stdin: strings.NewReader(slashCmd), Interactive: true, AwaitSlot: pressSlotWait("model")})
 	var exitErr *sshx.ExitError
 	switch {
 	case err == nil:
@@ -871,7 +880,8 @@ poll:
 		case <-time.After(200 * time.Millisecond):
 		}
 		pctx, pcancel := context.WithTimeout(ctx, 5*time.Second)
-		scr, serr := sshx.Output(pctx, sess.Client(), agyScreenCommand(sess.Persistence, pane, socket), 512<<10)
+		scrRes, serr := sshx.Exec(pctx, sess.Client(), agyScreenCommand(sess.Persistence, pane, socket), 512<<10, sshx.ExecOptions{Interactive: true})
+		scr := scrRes.Out
 		pcancel()
 		if serr != nil {
 			continue

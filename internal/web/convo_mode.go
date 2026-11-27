@@ -116,7 +116,7 @@ func (s *Server) convoModeTo(w http.ResponseWriter, ctx context.Context, sess *t
 	if agent == "agy" {
 		scrCmd = agyScreenCommand(sess.Persistence, pane, socket)
 	}
-	res, err := sshx.Exec(ctx, sess.Client(), scrCmd, 256<<10, sshx.ExecOptions{Release: ended.Done})
+	res, err := sshx.Exec(ctx, sess.Client(), scrCmd, 256<<10, sshx.ExecOptions{Release: ended.Done, Interactive: true})
 	if err != nil {
 		*reason = "no_screen"
 		writeError(w, http.StatusBadGateway, "no_screen", "the pane's screen could not be read")
@@ -138,7 +138,7 @@ func (s *Server) convoModeTo(w http.ResponseWriter, ctx context.Context, sess *t
 		ended.Add(1)
 		// (Not while it waits: Shift+Tab is a question's then. Exit 9.)
 		res, err := sshx.Exec(ctx, sess.Client(), convoGatedCommand(gate, sess.Persistence, sess.TmuxSession, pane, socket, pid, start, sid, 0, press, convoModeLines), 16<<10,
-			sshx.ExecOptions{Stdin: strings.NewReader(""), Release: ended.Done})
+			sshx.ExecOptions{Stdin: strings.NewReader(""), Release: ended.Done, Interactive: true})
 		var exitErr *sshx.ExitError
 		switch {
 		case err == nil:
@@ -182,8 +182,8 @@ func (s *Server) convoModeTo(w http.ResponseWriter, ctx context.Context, sess *t
 		// missing, or pressing again, back where it began.)
 		for j := 0; (agent == "codex" || agent == "agy") && now == from && j < 6; j++ {
 			time.Sleep(400 * time.Millisecond)
-			if out, err := sshx.Output(ctx, sess.Client(), scrCmd, 256<<10); err == nil {
-				now = modeOnScreenOf(agent, string(out))
+			if r, err := sshx.Exec(ctx, sess.Client(), scrCmd, 256<<10, sshx.ExecOptions{Interactive: true}); err == nil {
+				now = modeOnScreenOf(agent, string(r.Out))
 			}
 		}
 		switch now {

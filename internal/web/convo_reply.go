@@ -42,7 +42,7 @@ func (s *Server) apiConversationReply(w http.ResponseWriter, r *http.Request) {
 func (s *Server) convoScreen(w http.ResponseWriter, ctx context.Context, sess *term.Session, pane, socket string, outcome, reason *string, release func()) {
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
-	res, err := sshx.Exec(ctx, sess.Client(), convoScreenJoinedCommand(sess.Persistence, pane, socket), 512<<10+unwrapMax+64, sshx.ExecOptions{Release: release})
+	res, err := sshx.Exec(ctx, sess.Client(), convoScreenJoinedCommand(sess.Persistence, pane, socket), 512<<10+unwrapMax+64, sshx.ExecOptions{Release: release, Interactive: true})
 	var shown []byte
 	var joined string
 	if err == nil {

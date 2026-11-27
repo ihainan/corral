@@ -10,19 +10,25 @@ package sshx
 // therefore held until that real end, by exactly one owner, and released
 // exactly once.
 //
-// Side operations next to a terminal (herdr, port listing) share the
+// Side operations next to a terminal (herdr, port listing, scans) share the
 // terminal's connection, so a host that leaves them hanging must not cost
-// the terminal: they are never cut off by closing the connection. Instead
-// at most MaxAuxPerConn may be unfinished per connection; more are refused
-// (ErrBusy) until some end. Status watching (herdr event subscription and
-// snapshot refresh) has its own separate quota of MaxWatchPerConn per
-// connection so background Aux traffic cannot starve it. Only a connection
-// dedicated to such traffic (the port-forwarding pool) is closed when a
-// channel will not end.
+// the terminal: they are never cut off by closing the connection. Only a
+// connection dedicated to such traffic (the port-forwarding pool) is closed
+// when a channel will not end.
 //
-// Worst-case channels per SSH connection: 1 terminal + MaxAuxPerConn (4) +
-// MaxWatchPerConn (2) = 7, which must stay below sshd's default MaxSessions
-// of 10.
+// OpenSSH's MaxSessions (default 10) caps only "session" channels (the main
+// PTY terminal, auxiliary exec commands, SFTP subsystems, and direct
+// single-pane attaches). All such channels on one *ssh.Client draw from the
+// unified session ledger in session_quota.go, capped at MaxSessionChannels
+// (default 9, leaving 1 headroom below 10) with per-class caps and reserves
+// for the main terminal and user-triggered interactive operations.
+//
+// Forwarded channels ("direct-tcpip" and "direct-streamlocal@openssh.com",
+// including port forwards and herdr socket RPC/watch streams) do NOT consume
+// MaxSessions and are not counted in the session ledger. They still carry
+// per-connection caps (MaxAuxPerConn for herdr RPC, MaxWatchPerConn for
+// herdr status watching) so a hung host cannot accumulate unfinished
+// forwarded channels without bound.
 
 import (
 	"context"
@@ -80,21 +86,27 @@ func (p *slotPool) inUse(c *ssh.Client) int {
 }
 
 var (
-	auxSlots   = slotPool{ops: map[*ssh.Client]int{}}
-	watchSlots = slotPool{ops: map[*ssh.Client]int{}}
+	fwdAuxSlots = slotPool{ops: map[*ssh.Client]int{}}
+	watchSlots  = slotPool{ops: map[*ssh.Client]int{}}
 )
 
-// takeAux reserves one side operation on c; release is safe to call twice.
-func takeAux(c *ssh.Client) (release func(), ok bool) {
-	return auxSlots.take(c, MaxAuxPerConn)
+// takeFwdAux reserves one forwarded side-channel slot (e.g. herdr Unix socket
+// RPC) on c; does not count against the SSH session ledger.
+func takeFwdAux(c *ssh.Client) (release func(), ok bool) {
+	return fwdAuxSlots.take(c, MaxAuxPerConn)
 }
 
-// auxInUse is for tests.
+// fwdAuxInUse is for tests.
+func fwdAuxInUse(c *ssh.Client) int {
+	return fwdAuxSlots.inUse(c)
+}
+
+// auxInUse reports unfinished SessionAux exec channels on c (for tests).
 func auxInUse(c *ssh.Client) int {
-	return auxSlots.inUse(c)
+	return SessionClassInUse(c, SessionAux)
 }
 
-// takeWatch reserves one status-watching channel on c; release is safe to call twice.
+// takeWatch reserves one status-watching forwarded channel on c; release is safe to call twice.
 func takeWatch(c *ssh.Client) (release func(), ok bool) {
 	return watchSlots.take(c, MaxWatchPerConn)
 }
@@ -163,7 +175,7 @@ func openGuarded(ctx context.Context, c *ssh.Client, network, addr string, opt D
 	var take func(*ssh.Client) (func(), bool)
 	switch {
 	case opt.Aux:
-		take = takeAux
+		take = takeFwdAux
 	case opt.Watch:
 		take = takeWatch
 	}

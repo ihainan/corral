@@ -238,11 +238,11 @@ func (s *Server) askHookClient(h *store.Host) *ssh.Client {
 }
 
 func readAskHookFile(ctx context.Context, c *ssh.Client) (*askHookFileRead, error) {
-	out, err := sshx.Output(ctx, c, askHookRead, 4<<20)
+	res, err := sshx.Exec(ctx, c, askHookRead, 4<<20, sshx.ExecOptions{Interactive: true, AwaitSlot: 2 * time.Second})
 	if err != nil {
 		return nil, err
 	}
-	return parseAskHookRead(out)
+	return parseAskHookRead(res.Out)
 }
 
 // parseAskHookRead: askHookRead's output.
@@ -481,7 +481,7 @@ func (s *Server) apiSetAskHook(w http.ResponseWriter, r *http.Request) {
 	held = true
 	// (Let go of once the command has ended here: what was read meanwhile is
 	// let go of again then, the file perhaps changed only at its end.)
-	res, err := sshx.Exec(ctx, c, cmd, 4096, sshx.ExecOptions{Stdin: bytes.NewReader(next), Release: func() { s.askHook.forget(key); release() }})
+	res, err := sshx.Exec(ctx, c, cmd, 4096, sshx.ExecOptions{Stdin: bytes.NewReader(next), Interactive: true, AwaitSlot: 2 * time.Second, Release: func() { s.askHook.forget(key); release() }})
 	s.askHook.forget(key)
 	var ee *sshx.ExitError
 	switch {

@@ -322,7 +322,7 @@ func (s *Server) apiConversationSide(w http.ResponseWriter, r *http.Request) {
 		tmuxTarget = b.Pane
 	}
 	lctx, lcancel := context.WithTimeout(ctx, 15*time.Second)
-	lr, err := sshx.Exec(lctx, sess.Client(), convoLocateCommand(sess.Persistence, sess.TmuxSession, tmuxTarget), convoLocateMax, sshx.ExecOptions{AwaitSlot: 2 * time.Second})
+	lr, err := sshx.Exec(lctx, sess.Client(), convoLocateCommand(sess.Persistence, sess.TmuxSession, tmuxTarget), convoLocateMax, sshx.ExecOptions{Interactive: true, AwaitSlot: 2 * time.Second})
 	lcancel()
 	switch {
 	case errors.Is(err, sshx.ErrBusy):
@@ -347,7 +347,7 @@ func (s *Server) apiConversationSide(w http.ResponseWriter, r *http.Request) {
 	ctx, cancelRun := context.WithTimeout(ctx, sideRequestLimit)
 	defer cancelRun()
 	nonce := gitNonce()
-	res, err := sshx.Exec(ctx, sess.Client(), sideQuestionCommand(b.PID, b.Start, b.Session, b.Model, nonce), sideAnswerCap+256, sshx.ExecOptions{Stdin: strings.NewReader(q), AwaitSlot: 2 * time.Second})
+	res, err := sshx.Exec(ctx, sess.Client(), sideQuestionCommand(b.PID, b.Start, b.Session, b.Model, nonce), sideAnswerCap+256, sshx.ExecOptions{Stdin: strings.NewReader(q), Interactive: true, AwaitSlot: 2 * time.Second})
 	if !res.Ended && !errors.Is(err, sshx.ErrBusy) {
 		held = false
 		id := sess.ID

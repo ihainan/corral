@@ -465,6 +465,10 @@ func (s *Server) ocPaneTitle(sess *term.Session, pane, cwd string, l convoLocate
 // neither herdr nor a unique pane title disambiguates them).
 // l is what locating found of the host's processes.
 func (s *Server) ocSessionOf(ctx context.Context, sess *term.Session, p *convoProc, pane string, l convoLocated) (sid, why string) {
+	return s.ocSessionOfInteractive(ctx, sess, p, pane, l, false)
+}
+
+func (s *Server) ocSessionOfInteractive(ctx context.Context, sess *term.Session, p *convoProc, pane string, l convoLocated, interactive bool) (sid, why string) {
 	// (OpenCode 2's: herdr is told by its background service, as the pane
 	// that began it — another's session, maybe: not taken.)
 	if sess.Persistence == "herdr" && !p.ocService {
@@ -495,7 +499,8 @@ func (s *Server) ocSessionOf(ctx context.Context, sess *term.Session, p *convoPr
 	// both when two OpenCode 2 panes share a directory and when a single pane
 	// resumed an older session whose time_updated predates p.started.
 	if title, ok := s.ocPaneTitle(sess, pane, p.cwd, l); ok {
-		out, err := sshx.Output(ctx, sess.Client(), ocQueryCommand(p.log, "find_title", p.cwd, title), 4096)
+		res, err := sshx.Exec(ctx, sess.Client(), ocQueryCommand(p.log, "find_title", p.cwd, title), 4096, sshx.ExecOptions{Interactive: interactive})
+		out := res.Out
 		if err == nil {
 			var r struct {
 				K  string `json:"k"`
@@ -523,7 +528,8 @@ func (s *Server) ocSessionOf(ctx context.Context, sess *term.Session, p *convoPr
 	// is read off the host.)
 	ended, justEnded, seen := s.ocContested.note(key, false)
 	since = max(since, ended)
-	out, err := sshx.Output(ctx, sess.Client(), ocQueryCommand(p.log, "find", p.cwd, strconv.FormatInt(since, 10)), 4096)
+	res, err := sshx.Exec(ctx, sess.Client(), ocQueryCommand(p.log, "find", p.cwd, strconv.FormatInt(since, 10)), 4096, sshx.ExecOptions{Interactive: interactive})
+	out := res.Out
 	if err != nil {
 		return convoNoSession, ""
 	}
@@ -636,7 +642,8 @@ var (
 func (s *Server) ocRead(sess *term.Session, st *convoState, mode string, args ...string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), convoReadLimit)
 	defer cancel()
-	out, err := sshx.Output(ctx, sess.Client(), ocQueryCommand(st.log, mode, append([]string{st.sid}, args...)...), ocReadMax)
+	res, err := sshx.Exec(ctx, sess.Client(), ocQueryCommand(st.log, mode, append([]string{st.sid}, args...)...), ocReadMax, sshx.ExecOptions{Interactive: mode == "older"})
+	out := res.Out
 	if err != nil {
 		return err
 	}

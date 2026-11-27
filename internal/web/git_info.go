@@ -447,14 +447,19 @@ func (s *Server) gitAnswer(w http.ResponseWriter, r *http.Request, pr bool) {
 		key += "\x00" + root + "\x00" + branch
 	}
 	v, err := s.gitCalls.do(ctx, key, ttl, func(ctx context.Context) ([]byte, error) {
-		cwd, err := s.paneCwd(ctx, sess, pane)
+		cwd, err := s.paneCwdInteractive(ctx, sess, pane, pr)
 		if err != nil {
 			return nil, err
 		}
 		if cwd == "" {
 			return nil, errGitNoDir // (herdr or tmux could not say, or said nothing: asked again next time)
 		}
-		out, err := sshx.Output(ctx, sess.Client(), gitCommand(pr, cwd, root, branch), gitOutMax)
+		var await time.Duration
+		if pr {
+			await = 2 * time.Second
+		}
+		res, err := sshx.Exec(ctx, sess.Client(), gitCommand(pr, cwd, root, branch), gitOutMax, sshx.ExecOptions{Interactive: pr, AwaitSlot: await})
+		out := res.Out
 		if err != nil {
 			return nil, err // (cut short, too long, failed: nothing kept)
 		}

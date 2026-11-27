@@ -10,6 +10,7 @@ import (
 
 	"golang.org/x/crypto/ssh"
 
+	"github.com/ihainan/corral/internal/sshx"
 	"github.com/ihainan/corral/internal/store"
 )
 
@@ -352,5 +353,68 @@ func TestOpenCancelledByStop(t *testing.T) {
 	}
 	if len(h.tabs()) != 0 {
 		t.Errorf("kept %+v", h.tabs())
+	}
+}
+
+// When the startup probe encounters sshx.ErrBusy (transient session channel
+// pressure), restore must keep the persisted tab record (cancelled:busy) rather
+// than deleting it as failed:probe; and at the minimum valid config cap (4),
+// restore succeeds on an empty connection.
+func TestRestoreBusyKeepsRecordAndMinCapRestores(t *testing.T) {
+	oldCap := sshx.MaxSessionChannels
+	t.Cleanup(func() { sshx.MaxSessionChannels = oldCap })
+
+	h := newHarness(t)
+	admin := h.admin()
+	_, id := pickerHost(t, h, admin, true, "password")
+	mustStatus(t, admin.do("POST", "/api/sessions", map[string]any{
+		"host_id": id,
+		"open":    map[string]any{"kind": "tmux", "name": "work"},
+	}), 201, "tmux work")
+	h.restart()
+
+	// Force muxRunning's background probe to hit sshx.ErrBusy (cap < 1+1+2).
+	sshx.MaxSessionChannels = 3
+	h.restoreNow(h.kept())
+	if got := h.restored()["work"]; got != "cancelled:busy" {
+		t.Fatalf("outcome on ErrBusy probe = %q, want cancelled:busy", got)
+	}
+	all := h.tabs()
+	if len(all) != 1 || all[0].Name != "work" {
+		t.Fatalf("persisted tab record was deleted on ErrBusy: %+v", all)
+	}
+	ownerID := all[0].OwnerID
+	if running := h.terms.List(ownerID); len(running) != 0 {
+		t.Fatalf("expected 0 running sessions after ErrBusy, got %+v", running)
+	}
+
+	// At the minimum valid CORRAL_SSH_MAX_SESSIONS (4), the kept record restores cleanly.
+	sshx.MaxSessionChannels = sshx.MinMaxSessionChannels
+	h.restoreNow(h.kept())
+	running := h.terms.List(ownerID)
+	if len(running) != 1 || running[0].MuxSession != "work" {
+		t.Fatalf("expected work restored at min cap (%d), running=%+v", sshx.MinMaxSessionChannels, running)
+	}
+	// Check the newest session.restore audit entry (ListAudit returns newest first).
+	entries, err := h.store.ListAudit(context.Background(), storeAuditQuery())
+	if err != nil {
+		t.Fatal(err)
+	}
+	newestOutcome := ""
+	for _, a := range entries {
+		if a.Action == "session.restore" {
+			var d struct{ Name, Outcome string }
+			_ = json.Unmarshal(a.Detail, &d)
+			if d.Name == "work" {
+				newestOutcome = d.Outcome
+				break
+			}
+		}
+	}
+	if newestOutcome != "restored" {
+		t.Fatalf("newest restore outcome at min cap (%d) = %q, want restored", sshx.MinMaxSessionChannels, newestOutcome)
+	}
+	if after := h.tabs(); len(after) != 1 || after[0].SessionID != running[0].ID {
+		t.Fatalf("records after restore at min cap: %+v (running %s)", after, running[0].ID)
 	}
 }

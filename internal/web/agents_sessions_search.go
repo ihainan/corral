@@ -50,7 +50,8 @@ func (s *Server) apiAgentSessions(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 12*time.Second)
 	defer cancel()
-	out, err := sshx.Output(ctx, sess.Client(), agentSessionsSearchCommand(q, kind, dir), 512<<10)
+	res, err := sshx.Exec(ctx, sess.Client(), agentSessionsSearchCommand(q, kind, dir), 512<<10, sshx.ExecOptions{Interactive: true, AwaitSlot: 2 * time.Second})
+	out := res.Out
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "host_error", "the host's session list could not be read")
 		return

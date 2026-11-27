@@ -28,6 +28,7 @@ import (
 	"path"
 	"strconv"
 	"strings"
+	"time"
 	"unicode"
 	"unicode/utf8"
 
@@ -518,7 +519,7 @@ func (s *Server) apiGitChanges(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	key := "changes\x00" + sess.ID + "\x00" + pane + "\x00" + against + "\x00" + file + "\x00" + from
 	v, err := s.gitCalls.do(ctx, key, gitInfoTTL, func(ctx context.Context) ([]byte, error) {
-		cwd, err := s.paneCwd(ctx, sess, pane)
+		cwd, err := s.paneCwdInteractive(ctx, sess, pane, true)
 		if err != nil {
 			return nil, err
 		}
@@ -526,7 +527,8 @@ func (s *Server) apiGitChanges(w http.ResponseWriter, r *http.Request) {
 			return nil, errGitNoDir
 		}
 		nonce := gitNonce()
-		out, err := sshx.Output(ctx, sess.Client(), gitChangesCommand(cwd, against, file, from, nonce), gitChangesOut)
+		res, err := sshx.Exec(ctx, sess.Client(), gitChangesCommand(cwd, against, file, from, nonce), gitChangesOut, sshx.ExecOptions{Interactive: true, AwaitSlot: 2 * time.Second})
+		out := res.Out
 		if err != nil {
 			return nil, err
 		}
