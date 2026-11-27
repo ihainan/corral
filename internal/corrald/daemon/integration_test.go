@@ -6,6 +6,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -16,6 +17,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -25,6 +27,7 @@ import (
 type builtBinaries struct {
 	v1   string
 	v2   string
+	v3   string
 	bad  string
 	prod string
 }
@@ -72,6 +75,11 @@ func getTestBinaries(t *testing.T) builtBinaries {
 		}
 		built.v2 = filepath.Join(dir, "corrald-v2")
 		if err := buildOne(built.v2, "0.2.0", "200", "bbbb2222", true); err != nil {
+			buildErr = err
+			return
+		}
+		built.v3 = filepath.Join(dir, "corrald-v3")
+		if err := buildOne(built.v3, "0.3.0", "300", "dddd4444", true); err != nil {
 			buildErr = err
 			return
 		}
@@ -949,8 +957,16 @@ func TestIntegrationHotUpdateBadBinaryAndCutoverFailureRollback(t *testing.T) {
 	}
 
 	failedPath := filepath.Join(home, ".local", "state", "corral", "corrald", mid, "failed.json")
-	frec, err := ReadFailedRecord(failedPath)
-	if err != nil || len(frec.Releases) != 1 || frec.Releases[0].Release != 999 {
+	var frec *FailedRecord
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		frec, err = ReadFailedRecord(failedPath)
+		if err == nil && len(frec.Releases) == 1 && frec.Releases[0].Release == 999 {
+			break
+		}
+		time.Sleep(15 * time.Millisecond)
+	}
+	if err != nil || frec == nil || len(frec.Releases) != 1 || frec.Releases[0].Release != 999 {
 		t.Fatalf("failed.json unexpected: %+v (%v)", frec, err)
 	}
 
@@ -1998,5 +2014,335 @@ func TestIntegrationUninstallMissingInstallJSONNonLastMachineReturnsPartial(t *t
 	var healthB proto.HealthResult
 	if err := callLocalRPC(sockB, proto.MethodDaemonHealth, nil, &healthB, 2*time.Second); err != nil {
 		t.Fatalf("Machine B broken after Machine A partial uninstall: %v", err)
+	}
+}
+
+func TestIntegrationNFSMultiMachineHandoffDoesNotDowngradeSharedSymlink(t *testing.T) {
+	// Round-4 #1: On an NFS shared HOME, Machine B is already on release 300.
+	// Machine A (running 100) hot-updates to 200. Machine A must now run 200
+	// with local install.json/meta.json updated to 200, while the shared
+	// symlink and shared README.txt MUST remain on release 300!
+	bins := getTestBinaries(t)
+	sharedHome := t.TempDir()
+	const midA = "aa100200300a"
+	const midB = "bb100200300b"
+	envA := []string{"CORRALD_TEST_MACHINE_ID=" + midA}
+	envB := []string{"CORRALD_TEST_MACHINE_ID=" + midB}
+
+	installedBin := filepath.Join(sharedHome, ".local", "lib", "corral", "corrald")
+	readmePath := filepath.Join(sharedHome, ".local", "lib", "corral", "README.txt")
+	t.Cleanup(func() {
+		if _, err := os.Lstat(installedBin); err == nil {
+			_, _ = runCLI(t, installedBin, sharedHome, envA, "uninstall")
+			_, _ = runCLI(t, installedBin, sharedHome, envB, "uninstall")
+		}
+	})
+
+	// 1. Machine A installs v1 (100) and starts serving.
+	stageA1 := stageBinary(t, sharedHome, midA, "opA1", bins.v1)
+	if out, code := runCLI(t, filepath.Join(stageA1, "corrald"), sharedHome, envA,
+		"install", "--stage", stageA1, "--op", "opA1", "--gateway", "gw.nfs300", "--by", "alice"); code != 0 {
+		t.Fatalf("install A v1: %s", out)
+	}
+	outA, code := runCLI(t, installedBin, sharedHome, envA, "serve", "--gateway", "gw.nfs300")
+	if code != 0 {
+		t.Fatalf("serve A v1: %s", outA)
+	}
+	sockA := parseKV(outA)["socket"]
+
+	// 2. Machine B installs v3 (300) -> shared symlink & README advance to 300.
+	stageB3 := stageBinary(t, sharedHome, midB, "opB3", bins.v3)
+	if out, code := runCLI(t, filepath.Join(stageB3, "corrald"), sharedHome, envB,
+		"install", "--stage", stageB3, "--op", "opB3", "--gateway", "gw.nfs300", "--by", "bob"); code != 0 {
+		t.Fatalf("install B v3: %s", out)
+	}
+	linkBefore, err := os.Readlink(installedBin)
+	if err != nil || !strings.Contains(linkBefore, "0.3.0-300") {
+		t.Fatalf("expected shared symlink at 0.3.0-300 after Machine B install, got %q (%v)", linkBefore, err)
+	}
+
+	// 3. Machine A stages v2 (200) and handoffs 100 -> 200.
+	stageA2 := stageBinary(t, sharedHome, midA, "opA2", bins.v2)
+	out, code := runCLI(t, filepath.Join(stageA2, "corrald"), sharedHome, envA,
+		"install", "--upgrade", "--stage", stageA2, "--op", "opA2", "--gateway", "gw.nfs300", "--by", "alice")
+	if code != 0 {
+		t.Fatalf("upgrade A v2: %s", out)
+	}
+	v2Bin := parseKV(out)["binary"]
+	v2SHA, _ := FileSHA256(v2Bin)
+
+	var hres proto.HandoffResult
+	if err := callLocalRPC(sockA, proto.MethodDaemonHandoff, proto.HandoffParams{
+		Path: v2Bin, SHA256: v2SHA, Release: 200,
+	}, &hres, 8*time.Second); err != nil {
+		t.Fatalf("Machine A handoff 100->200 failed: %v", err)
+	}
+	if hres.Release != 200 {
+		t.Fatalf("Machine A handoff release=%d, want 200", hres.Release)
+	}
+
+	// Machine A is now serving 200 and its local meta.json + install.json record 200.
+	var healthA proto.HealthResult
+	if err := callLocalRPC(sockA, proto.MethodDaemonHealth, nil, &healthA, 2*time.Second); err != nil || healthA.Release != 200 || healthA.Version != "0.2.0" {
+		t.Fatalf("Machine A health after handoff: %+v (%v)", healthA, err)
+	}
+	stateA := filepath.Join(sharedHome, ".local", "state", "corral", "corrald", midA)
+	instA, err := ReadInstallRecord(filepath.Join(stateA, "install.json"))
+	if err != nil || instA.Release != 200 {
+		t.Fatalf("Machine A install.json: %+v (%v)", instA, err)
+	}
+	metaA, err := ReadMetaRecord(filepath.Join(stateA, "meta.json"))
+	if err != nil || metaA.Release != 200 {
+		t.Fatalf("Machine A meta.json: %+v (%v)", metaA, err)
+	}
+
+	// Shared symlink and shared README MUST still point to release 300!
+	linkAfter, err := os.Readlink(installedBin)
+	if err != nil || !strings.Contains(linkAfter, "0.3.0-300") {
+		t.Fatalf("shared symlink was downgraded by Machine A handoff: got %q (%v), want 0.3.0-300", linkAfter, err)
+	}
+	readmeBytes, err := os.ReadFile(readmePath)
+	if err != nil || !strings.Contains(string(readmeBytes), "0.3.0") {
+		t.Fatalf("shared README was downgraded by Machine A handoff: %v\n%s", err, readmeBytes)
+	}
+
+	// Machine B starting from shared symlink runs release 300.
+	outB, code := runCLI(t, installedBin, sharedHome, envB, "serve", "--gateway", "gw.nfs300")
+	if code != 0 {
+		t.Fatalf("serve B: %s", outB)
+	}
+	sockB := parseKV(outB)["socket"]
+	var healthB proto.HealthResult
+	if err := callLocalRPC(sockB, proto.MethodDaemonHealth, nil, &healthB, 2*time.Second); err != nil || healthB.Release != 300 {
+		t.Fatalf("Machine B started from shared symlink: health=%+v err=%v, want release=300", healthB, err)
+	}
+}
+
+func TestIntegrationHandoffLocksSurviveParentSIGKILLBeforeReady(t *testing.T) {
+	// Round-4 #2: SharedLock and OpLock FDs are passed to the handoff child.
+	// If parent v1 is SIGKILL'd BEFORE v2 signals READY, both flocks MUST stay
+	// exclusively held by the kernel until v2 finishes cutover and enters OnReady,
+	// after which both locks are cleanly released.
+	bins := getTestBinaries(t)
+	home := t.TempDir()
+	const mid = "f2f2f2f2f2f2"
+	markerFile := filepath.Join(t.TempDir(), "cutover.entered")
+	gateFile := filepath.Join(t.TempDir(), "cutover.release")
+	envClean := []string{"CORRALD_TEST_MACHINE_ID=" + mid}
+	envGate := []string{
+		"CORRALD_TEST_MACHINE_ID=" + mid,
+		"CORRALD_TEST_CUTOVER_MARKER=" + markerFile,
+		"CORRALD_TEST_CUTOVER_GATE=" + gateFile,
+	}
+
+	stage1 := stageBinary(t, home, mid, "op1", bins.v1)
+	if out, code := runCLI(t, filepath.Join(stage1, "corrald"), home, envClean,
+		"install", "--stage", stage1, "--op", "op1", "--gateway", "gw.kill", "--by", "alice"); code != 0 {
+		t.Fatalf("install v1: %s", out)
+	}
+	installedBin := filepath.Join(home, ".local", "lib", "corral", "corrald")
+	sharedLockPath := filepath.Join(home, ".local", "lib", "corral", ".corrald-shared.lock")
+	opLockPath := filepath.Join(home, ".local", "state", "corral", "corrald", mid, "op.lock")
+	t.Cleanup(func() {
+		_ = os.WriteFile(gateFile, []byte("go"), 0o600)
+		if _, err := os.Lstat(installedBin); err == nil {
+			_, _ = runCLI(t, installedBin, home, envClean, "uninstall")
+		}
+	})
+
+	out, code := runCLI(t, installedBin, home, envGate, "serve", "--gateway", "gw.kill")
+	if code != 0 {
+		t.Fatalf("serve v1: %s", out)
+	}
+	kv := parseKV(out)
+	pid1, _ := strconv.Atoi(kv["pid"])
+	sock := kv["socket"]
+	meta1, err := ReadMetaRecord(filepath.Join(home, ".local", "state", "corral", "corrald", mid, "meta.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	stage2 := stageBinary(t, home, mid, "op2", bins.v2)
+	out, code = runCLI(t, filepath.Join(stage2, "corrald"), home, envClean,
+		"install", "--upgrade", "--stage", stage2, "--op", "op2", "--gateway", "gw.kill", "--by", "alice")
+	if code != 0 {
+		t.Fatalf("upgrade v2: %s", out)
+	}
+	v2Bin := parseKV(out)["binary"]
+	v2SHA, _ := FileSHA256(v2Bin)
+
+	// Start handoff asynchronously; child v2 will pause inside finalizeHandoffCutover.
+	go func() {
+		var hres proto.HandoffResult
+		_ = callLocalRPC(sock, proto.MethodDaemonHandoff, proto.HandoffParams{
+			Path: v2Bin, SHA256: v2SHA, Release: 200,
+		}, &hres, 10*time.Second)
+	}()
+
+	// Wait until child v2 reaches finalizeHandoffCutover (BEFORE READY).
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(markerFile); err == nil {
+			break
+		}
+		time.Sleep(15 * time.Millisecond)
+	}
+	if _, err := os.Stat(markerFile); err != nil {
+		t.Fatalf("child v2 did not enter finalizeHandoffCutover: %v", err)
+	}
+
+	// SIGKILL parent v1 BEFORE READY and wait until parent is completely dead!
+	if err := syscall.Kill(pid1, syscall.SIGKILL); err != nil {
+		t.Fatalf("SIGKILL parent pid %d: %v", pid1, err)
+	}
+	deadline = time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if !ProcessMatches(pid1, meta1.StartTime) {
+			break
+		}
+		time.Sleep(15 * time.Millisecond)
+	}
+	if ProcessMatches(pid1, meta1.StartTime) {
+		t.Fatalf("parent v1 pid=%d still alive after SIGKILL", pid1)
+	}
+
+	// Parent is dead, child v2 is still in cutover: BOTH SharedLock and OpLock MUST STILL BE HELD!
+	if lk, err := AcquireLock(sharedLockPath); !errors.Is(err, ErrLocked) {
+		if lk != nil {
+			_ = lk.Release()
+		}
+		t.Fatalf("SharedLock was NOT held after parent SIGKILL during child cutover: err=%v", err)
+	}
+	if lk, err := AcquireLock(opLockPath); !errors.Is(err, ErrLocked) {
+		if lk != nil {
+			_ = lk.Release()
+		}
+		t.Fatalf("OpLock was NOT held after parent SIGKILL during child cutover: err=%v", err)
+	}
+
+	// Release cutover gate so child v2 finishes cutover, enters OnReady, and releases locks.
+	if err := os.WriteFile(gateFile, []byte("go"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Wait for v2 to serve release 200.
+	deadline = time.Now().Add(5 * time.Second)
+	var health proto.HealthResult
+	var lastErr error
+	for time.Now().Before(deadline) {
+		if err := callLocalRPC(sock, proto.MethodDaemonHealth, nil, &health, 500*time.Millisecond); err == nil && health.Release == 200 {
+			lastErr = nil
+			break
+		} else {
+			lastErr = err
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	if lastErr != nil || health.Release != 200 {
+		t.Fatalf("child v2 did not finish cutover after gate release: health=%+v err=%v", health, lastErr)
+	}
+
+	// Both lifecycle locks MUST now be released by v2 (no leaked lock FDs).
+	slk, err := AcquireLockWait(sharedLockPath, 2*time.Second)
+	if err != nil {
+		t.Fatalf("SharedLock still held after v2 completed cutover: %v", err)
+	}
+	_ = slk.Release()
+	olk, err := AcquireLockWait(opLockPath, 2*time.Second)
+	if err != nil {
+		t.Fatalf("OpLock still held after v2 completed cutover: %v", err)
+	}
+	_ = olk.Release()
+}
+
+func TestIntegrationRollbackClosesClientsEvenWhenLogBlocks(t *testing.T) {
+	// Round-4 #5: On rollback, existing client connections MUST be closed BEFORE
+	// writing failed.json and logging. Even if logging blocks forever, passive
+	// clients disconnect immediately, caller receives handoff_failed and is
+	// closed, and newly connecting clients observe the rotated epoch.
+	bins := getTestBinaries(t)
+	home := t.TempDir()
+	const mid = "b5b5b5b5b5b5"
+	logGate := filepath.Join(t.TempDir(), "log.unblock")
+	envClean := []string{"CORRALD_TEST_MACHINE_ID=" + mid}
+	envBlock := []string{
+		"CORRALD_TEST_MACHINE_ID=" + mid,
+		"CORRALD_TEST_BLOCK_LOG_ON_ROLLBACK=1",
+		"CORRALD_TEST_BLOCK_LOG_GATE=" + logGate,
+	}
+
+	stage1 := stageBinary(t, home, mid, "op1", bins.v1)
+	if out, code := runCLI(t, filepath.Join(stage1, "corrald"), home, envClean,
+		"install", "--stage", stage1, "--op", "op1", "--gateway", "gw.rbblk", "--by", "alice"); code != 0 {
+		t.Fatalf("install v1: %s", out)
+	}
+	installedBin := filepath.Join(home, ".local", "lib", "corral", "corrald")
+	t.Cleanup(func() {
+		_ = os.WriteFile(logGate, []byte("go"), 0o600)
+		if _, err := os.Lstat(installedBin); err == nil {
+			_, _ = runCLI(t, installedBin, home, envClean, "uninstall")
+		}
+	})
+
+	out, code := runCLI(t, installedBin, home, envBlock, "serve", "--gateway", "gw.rbblk")
+	if code != 0 {
+		t.Fatalf("serve v1: %s", out)
+	}
+	sock := parseKV(out)["socket"]
+
+	badDir := filepath.Join(home, ".local", "lib", "corral", "corrald-0.9.9-999")
+	_ = os.MkdirAll(badDir, 0o700)
+	badPath := filepath.Join(badDir, "corrald")
+	b, _ := os.ReadFile(bins.bad)
+	_ = os.WriteFile(badPath, b, 0o700)
+	badSHA, _ := FileSHA256(badPath)
+
+	caller := dialRPC(t, sock)
+	defer caller.close()
+	hResp, _ := caller.call(t, proto.MethodDaemonHello, proto.HelloParams{
+		Gateway: "gw.rbblk", GatewayVersion: "1.0", ProtoMin: 1, ProtoMax: 1,
+		Client: proto.ClientIdentity{CorralUser: "alice", HostID: "h1"},
+	})
+	var hBefore proto.HelloResult
+	_ = json.Unmarshal(hResp.Result, &hBefore)
+
+	passive := dialRPC(t, sock)
+	defer passive.close()
+
+	// Trigger failed handoff while s.log.Error("handoff failed...") blocks forever!
+	resp, _ := caller.call(t, proto.MethodDaemonHandoff, proto.HandoffParams{
+		Path: badPath, SHA256: badSHA, Release: 999,
+	})
+	if resp.Error == nil || resp.Error.Code != proto.ErrHandoffFailed {
+		t.Fatalf("expected handoff_failed even with blocked rollback log, got %+v", resp)
+	}
+
+	// Both passive client and caller MUST be disconnected BEFORE logGate is released!
+	_ = passive.conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	var dummy proto.Envelope
+	if err := proto.ReadJSON(passive.conn, &dummy); err == nil {
+		t.Fatalf("passive client stayed connected when rollback logger blocked: %+v", dummy)
+	}
+	_ = caller.conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if err := proto.ReadJSON(caller.conn, &dummy); err == nil {
+		t.Fatalf("caller stayed connected when rollback logger blocked: %+v", dummy)
+	}
+
+	// Now release the blocked rollback logger so daemon.hello can log and respond.
+	if err := os.WriteFile(logGate, []byte("go"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Reconnecting client sees rotated epoch.
+	fresh := dialRPC(t, sock)
+	defer fresh.close()
+	hResp2, _ := fresh.call(t, proto.MethodDaemonHello, proto.HelloParams{
+		Gateway: "gw.rbblk", GatewayVersion: "1.0", ProtoMin: 1, ProtoMax: 1,
+		Client: proto.ClientIdentity{CorralUser: "alice", HostID: "h1"},
+	})
+	var hAfter proto.HelloResult
+	_ = json.Unmarshal(hResp2.Result, &hAfter)
+	if hAfter.Epoch == "" || hAfter.Epoch == hBefore.Epoch {
+		t.Fatalf("expected rotated epoch after rollback with blocked logger: before=%q after=%q", hBefore.Epoch, hAfter.Epoch)
 	}
 }

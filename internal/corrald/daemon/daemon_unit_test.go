@@ -1603,10 +1603,11 @@ func TestHardExitTimerFiresWithoutReleasingLock(t *testing.T) {
 	}()
 	<-entered
 
-	// Arm hardExitTimer (identical to dispatchHandoff immediately on READY).
+	// Arm hard-exit timer (identical to dispatchHandoff immediately on READY).
+	// Round-4 #4: timer is never stored or cancelled by Serve.
 	srv.stateMu.Lock()
 	srv.handedOff = true
-	srv.hardExitTimer = time.AfterFunc(60*time.Millisecond, func() {
+	time.AfterFunc(60*time.Millisecond, func() {
 		if _, err := AcquireLock(layout.LockPath); errors.Is(err, ErrLocked) {
 			lockStillHeld.Store(true)
 		}
@@ -1619,11 +1620,11 @@ func TestHardExitTimerFiresWithoutReleasingLock(t *testing.T) {
 	case <-hardExitDone:
 	case <-time.After(2 * time.Second):
 		close(blockWrite)
-		t.Fatal("hardExitTimer did not fire within cap")
+		t.Fatal("hard-exit timer did not fire within cap")
 	}
 	if !lockStillHeld.Load() {
 		close(blockWrite)
-		t.Fatal("s.lock was released BEFORE hardExitTimer fired")
+		t.Fatal("s.lock was released BEFORE hard-exit timer fired")
 	}
 	// Unblock stuck handler so Serve finishes cleanly in the test process.
 	close(blockWrite)
@@ -1634,5 +1635,97 @@ func TestHardExitTimerFiresWithoutReleasingLock(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("Serve did not exit after unblocking test.stuck")
+	}
+}
+
+func TestShouldUpdateSharedSymlinkAndHandoffFailsClosedOnStatError(t *testing.T) {
+	// Round-4 #1: shouldUpdateSharedSymlink updates only when link is absent or
+	// points to a strictly lower release; any non-ErrNotExist error fails closed.
+	home := t.TempDir()
+	layout, err := ResolveLayout(PathOptions{Home: home, MachineID: "1234abcd5678"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := layout.EnsureLibDir(); err != nil {
+		t.Fatal(err)
+	}
+	if err := layout.EnsureStateDir(); err != nil {
+		t.Fatal(err)
+	}
+	if layout.SocketUsesTmpDir {
+		t.Cleanup(func() { _ = os.RemoveAll(layout.SocketDir) })
+	}
+
+	ok, err := shouldUpdateSharedSymlink(layout, 100)
+	if err != nil || !ok {
+		t.Fatalf("missing symlink: got (%v, %v), want (true, nil)", ok, err)
+	}
+	if err := AtomicSymlink("corrald-0.3.0-300/corrald", layout.CurrentSymlink); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := shouldUpdateSharedSymlink(layout, 200); err != nil || ok {
+		t.Fatalf("300 -> 200 downgrade: got (%v, %v), want (false, nil)", ok, err)
+	}
+	if ok, err := shouldUpdateSharedSymlink(layout, 300); err != nil || ok {
+		t.Fatalf("300 -> 300 equal: got (%v, %v), want (false, nil)", ok, err)
+	}
+	if ok, err := shouldUpdateSharedSymlink(layout, 400); err != nil || !ok {
+		t.Fatalf("300 -> 400 upgrade: got (%v, %v), want (true, nil)", ok, err)
+	}
+	// Regular file at symlink path -> Readlink error must fail closed.
+	_ = os.Remove(layout.CurrentSymlink)
+	_ = os.WriteFile(layout.CurrentSymlink, []byte("not-a-link"), 0o600)
+	if _, err := shouldUpdateSharedSymlink(layout, 400); err == nil {
+		t.Fatal("expected error when CurrentSymlink is not a symlink")
+	}
+
+	// Round-4 #3: If LibDir cannot be stat'd (missing or EACCES), daemon.handoff
+	// MUST fail closed with handoff_failed instead of bypassing SharedLock!
+	_ = os.RemoveAll(layout.LibDir)
+	ready := make(chan struct{})
+	srv, err := NewServer(ServerConfig{
+		Layout:  layout,
+		Build:   proto.BuildInfo{Version: "0.1.0", Release: 100},
+		OnReady: func() { close(ready) },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- srv.Serve(ctx) }()
+	<-ready
+	defer func() { cancel(); <-done }()
+
+	c := dialRPC(t, layout.SocketPath)
+	defer c.close()
+	resp, _ := c.call(t, proto.MethodDaemonHandoff, proto.HandoffParams{
+		Path:    filepath.Join(layout.LibDir, "corrald-0.2.0-200", "corrald"),
+		SHA256:  strings.Repeat("a", 64),
+		Release: 200,
+	})
+	if resp.Error == nil || resp.Error.Code != proto.ErrHandoffFailed {
+		t.Fatalf("handoff with missing LibDir: got %+v, want handoff_failed", resp)
+	}
+
+	// Also verify EACCES on parent of LibDir fails closed (not bypassed).
+	if os.Geteuid() != 0 {
+		if err := layout.EnsureLibDir(); err != nil {
+			t.Fatal(err)
+		}
+		libParent := filepath.Dir(layout.LibDir)
+		if err := os.Chmod(libParent, 0o000); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(libParent, 0o755) })
+		resp, _ = c.call(t, proto.MethodDaemonHandoff, proto.HandoffParams{
+			Path:    filepath.Join(layout.LibDir, "corrald-0.2.0-200", "corrald"),
+			SHA256:  strings.Repeat("a", 64),
+			Release: 200,
+		})
+		if resp.Error == nil || resp.Error.Code != proto.ErrHandoffFailed {
+			t.Fatalf("handoff with unreadable LibDir parent (EACCES): got %+v, want handoff_failed", resp)
+		}
 	}
 }

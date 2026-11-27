@@ -254,6 +254,7 @@ func cmdInstall(args []string, build proto.BuildInfo, stdout io.Writer) int {
 	nowStr := time.Now().UTC().Format(time.RFC3339)
 
 	var installRec *InstallRecord
+	updateShared := false
 	if *upgrade {
 		installRec, _ = ReadInstallRecord(layout.InstallJSON)
 		if installRec == nil {
@@ -273,15 +274,26 @@ func cmdInstall(args []string, build proto.BuildInfo, stdout io.Writer) int {
 			writeErr(stdout, "install_json_failed", err.Error())
 			return 1
 		}
+		if _, err := os.Lstat(layout.ReadmePath); errors.Is(err, os.ErrNotExist) {
+			updateShared = true
+		}
 	} else {
-		relTarget, err := filepath.Rel(layout.LibDir, dstBin)
-		if err != nil {
-			writeErr(stdout, "symlink_failed", err.Error())
+		var serr error
+		updateShared, serr = shouldUpdateSharedSymlink(layout, build.Release)
+		if serr != nil {
+			writeErr(stdout, "symlink_failed", serr.Error())
 			return 1
 		}
-		if err := AtomicSymlink(relTarget, layout.CurrentSymlink); err != nil {
-			writeErr(stdout, "symlink_failed", err.Error())
-			return 1
+		if updateShared {
+			relTarget, err := filepath.Rel(layout.LibDir, dstBin)
+			if err != nil {
+				writeErr(stdout, "symlink_failed", err.Error())
+				return 1
+			}
+			if err := AtomicSymlink(relTarget, layout.CurrentSymlink); err != nil {
+				writeErr(stdout, "symlink_failed", err.Error())
+				return 1
+			}
 		}
 		files := []string{
 			verDir,
@@ -315,21 +327,23 @@ func cmdInstall(args []string, build proto.BuildInfo, stdout io.Writer) int {
 		}
 	}
 
-	readmeText := proto.RenderReadme(proto.ReadmeData{
-		Version:    installRec.Version,
-		Release:    installRec.Release,
-		Gateway:    installRec.Gateway,
-		EnabledBy:  installRec.EnabledBy,
-		EnabledAt:  installRec.EnabledAt,
-		MachineID:  layout.MachineID,
-		LibDir:     layout.LibDir,
-		StateDir:   layout.StateDir,
-		SocketPath: layout.SocketPath,
-		Files:      installRec.Files,
-	})
-	if err := WriteFileAtomic(layout.ReadmePath, []byte(readmeText), 0o644); err != nil {
-		writeErr(stdout, "readme_failed", err.Error())
-		return 1
+	if updateShared {
+		readmeText := proto.RenderReadme(proto.ReadmeData{
+			Version:    installRec.Version,
+			Release:    installRec.Release,
+			Gateway:    installRec.Gateway,
+			EnabledBy:  installRec.EnabledBy,
+			EnabledAt:  installRec.EnabledAt,
+			MachineID:  layout.MachineID,
+			LibDir:     layout.LibDir,
+			StateDir:   layout.StateDir,
+			SocketPath: layout.SocketPath,
+			Files:      installRec.Files,
+		})
+		if err := WriteFileAtomic(layout.ReadmePath, []byte(readmeText), 0o644); err != nil {
+			writeErr(stdout, "readme_failed", err.Error())
+			return 1
+		}
 	}
 
 	opPath, err := layout.OpPath(*opID)
@@ -446,6 +460,8 @@ func cmdServe(args []string, build proto.BuildInfo, stdout io.Writer) int {
 	handoff := fs.Bool("handoff", false, "internal: adopt inherited fds during hot update")
 	listenFD := fs.Int("listen-fd", -1, "internal: inherited Unix listener fd")
 	lockFD := fs.Int("lock-fd", -1, "internal: inherited flock fd")
+	sharedLockFD := fs.Int("shared-lock-fd", -1, "internal: inherited shared lifecycle flock fd")
+	opLockFD := fs.Int("op-lock-fd", -1, "internal: inherited host op.lock flock fd")
 	stateFD := fs.Int("state-fd", -1, "internal: inherited handoff state pipe fd")
 	readyFD := fs.Int("ready-fd", -1, "internal: readiness notification pipe fd")
 	binFD := fs.Int("bin-fd", -1, "internal: inherited validated binary fd to close")
@@ -486,7 +502,7 @@ func cmdServe(args []string, build proto.BuildInfo, stdout io.Writer) int {
 		return serveDetached(layout, *gateway, stdout)
 	}
 
-	return serveForeground(layout, build, *gateway, *handoff, *listenFD, *lockFD, *stateFD, *readyFD, *binaryPath, stdout)
+	return serveForeground(layout, build, *gateway, *handoff, *listenFD, *lockFD, *sharedLockFD, *opLockFD, *stateFD, *readyFD, *binaryPath, stdout)
 }
 
 func serveDetached(layout *Layout, gateway string, stdout io.Writer) int {
@@ -624,14 +640,31 @@ func serveForeground(
 	build proto.BuildInfo,
 	gateway string,
 	handoff bool,
-	listenFD, lockFD, stateFD, readyFD int,
+	listenFD, lockFD, sharedLockFD, opLockFD, stateFD, readyFD int,
 	binaryPath string,
 	stdout io.Writer,
 ) int {
-	var readyFile *os.File
+	var (
+		readyFile  *os.File
+		lock       *FileLock
+		sharedLock *FileLock
+		opLock     *FileLock
+	)
 	if readyFD >= 0 {
 		readyFile = os.NewFile(uintptr(readyFD), "ready-pipe")
 	}
+	releaseLifecycleLocks := func() {
+		if opLock != nil {
+			_ = opLock.Release()
+			opLock = nil
+		}
+		if sharedLock != nil {
+			_ = sharedLock.Release()
+			sharedLock = nil
+		}
+	}
+	defer releaseLifecycleLocks()
+
 	reportReadyErr := func(code, detail string) int {
 		if readyFile != nil {
 			_, _ = fmt.Fprintf(readyFile, "ERROR %s %s\n", code, strings.ReplaceAll(detail, "\n", " "))
@@ -640,6 +673,26 @@ func serveForeground(
 		}
 		writeErr(stdout, code, detail)
 		return 1
+	}
+
+	// Adopt inherited lifecycle lock FDs immediately so they remain held even
+	// if parent v1 is SIGKILL'd before READY, and are closed cleanly on any
+	// error return or once OnReady completes cutover.
+	if handoff {
+		if sharedLockFD >= 0 {
+			var err error
+			sharedLock, err = AdoptLock(uintptr(sharedLockFD))
+			if err != nil {
+				return reportReadyErr("adopt_lock_failed", err.Error())
+			}
+		}
+		if opLockFD >= 0 {
+			var err error
+			opLock, err = AdoptLock(uintptr(opLockFD))
+			if err != nil {
+				return reportReadyErr("adopt_lock_failed", err.Error())
+			}
+		}
 	}
 
 	if shouldFailBeforeReady(handoff) {
@@ -656,22 +709,7 @@ func serveForeground(
 	defer rotLog.Close()
 	logger := NewLogger(rotLog)
 
-	var (
-		lock   *FileLock
-		opLock *FileLock
-	)
-	releaseOpLock := func() {
-		if opLock != nil {
-			_ = opLock.Release()
-			opLock = nil
-		}
-	}
-	defer releaseOpLock()
-
 	if handoff {
-		// Parent v1 already holds SharedLock -> OpLock across the entire
-		// handoff transaction; child never re-acquires OpLock and adopts the
-		// inherited corrald.lock FD when present.
 		if layout.TombstoneExists() {
 			return reportReadyErr(proto.ErrRemoving, "uninstall tombstone present")
 		}
@@ -694,7 +732,7 @@ func serveForeground(
 		}
 		lock, err = AcquireLock(layout.LockPath)
 		if errors.Is(err, ErrLocked) {
-			releaseOpLock()
+			releaseLifecycleLocks()
 			pid, sock := waitForRunningMeta(layout, 2*time.Second)
 			if readyFile != nil {
 				_, _ = fmt.Fprintf(readyFile, "RUNNING %d %s\n", pid, sock)
@@ -745,6 +783,9 @@ func serveForeground(
 		if parsed.Schema != HandoffSnapshotSchema {
 			return reportReadyErr("snapshot_invalid", fmt.Sprintf("unsupported snapshot schema %d (want %d)", parsed.Schema, HandoffSnapshotSchema))
 		}
+		if sharedLock == nil || opLock == nil {
+			return reportReadyErr("missing_lifecycle_locks", "handoff requires inherited shared-lock-fd and op-lock-fd")
+		}
 		snap = &parsed
 		if snap.SocketPath != "" {
 			layout.SocketPath = snap.SocketPath
@@ -791,7 +832,7 @@ func serveForeground(
 	}
 
 	cfg.OnReady = func() {
-		releaseOpLock()
+		releaseLifecycleLocks()
 		if readyFile != nil {
 			if handoff {
 				procStart, _, _ := ProcStartTime(os.Getpid())
@@ -824,12 +865,34 @@ func serveForeground(
 	return 0
 }
 
-// finalizeHandoffCutover executes inside the parent v1's already-held
-// SharedLock -> OpLock critical section. It verifies the target binary exists
-// on disk and updates symlink, install.json, README.txt, and meta.json BEFORE
-// Accept starts and BEFORE READY is signaled. If any step fails, it returns an
-// error without signaling READY and v1 unconditionally restores its backup.
+// shouldUpdateSharedSymlink reports whether the shared CurrentSymlink and
+// README.txt should be updated to newRelease. It returns true only when
+// CurrentSymlink does not exist or currently points to a version with a
+// strictly lower Release. Any read error other than os.ErrNotExist fails closed.
+func shouldUpdateSharedSymlink(layout *Layout, newRelease int64) (bool, error) {
+	target, err := os.Readlink(layout.CurrentSymlink)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return true, nil
+		}
+		return false, fmt.Errorf("readlink %s: %w", layout.CurrentSymlink, err)
+	}
+	parentDir := filepath.Base(filepath.Dir(filepath.Clean(target)))
+	if _, curRelease, ok := ParseVersionDirName(parentDir); ok {
+		return proto.ShouldUpgrade(curRelease, newRelease), nil
+	}
+	return true, nil
+}
+
+// finalizeHandoffCutover executes inside the inherited SharedLock -> OpLock
+// critical section. It verifies the target binary exists on disk and updates
+// symlink/README (only if current shared link release is lower or absent),
+// local install.json, and meta.json BEFORE Accept starts and BEFORE READY is
+// signaled. If any step fails, it returns an error without signaling READY and
+// v1 unconditionally restores its backup.
 func finalizeHandoffCutover(layout *Layout, build proto.BuildInfo, binaryPath string, meta *MetaRecord) error {
+	waitCutoverTestGate()
+
 	if shouldFailCutover() {
 		return errors.New("injected cutover failure")
 	}
@@ -874,8 +937,14 @@ func finalizeHandoffCutover(layout *Layout, build proto.BuildInfo, binaryPath st
 		return fmt.Errorf("replacement binary %s outside lib dir %s", realExe, realLib)
 	}
 
-	if err := AtomicSymlink(rel, layout.CurrentSymlink); err != nil {
-		return fmt.Errorf("switch symlink: %w", err)
+	updateShared, err := shouldUpdateSharedSymlink(layout, build.Release)
+	if err != nil {
+		return fmt.Errorf("check shared symlink: %w", err)
+	}
+	if updateShared {
+		if err := AtomicSymlink(rel, layout.CurrentSymlink); err != nil {
+			return fmt.Errorf("switch symlink: %w", err)
+		}
 	}
 
 	if rec, err := ReadInstallRecord(layout.InstallJSON); err == nil {
@@ -886,20 +955,22 @@ func finalizeHandoffCutover(layout *Layout, build proto.BuildInfo, binaryPath st
 		if err := WriteInstallRecord(layout.InstallJSON, rec); err != nil {
 			return fmt.Errorf("update install.json: %w", err)
 		}
-		readmeText := proto.RenderReadme(proto.ReadmeData{
-			Version:    rec.Version,
-			Release:    rec.Release,
-			Gateway:    rec.Gateway,
-			EnabledBy:  rec.EnabledBy,
-			EnabledAt:  rec.EnabledAt,
-			MachineID:  layout.MachineID,
-			LibDir:     layout.LibDir,
-			StateDir:   layout.StateDir,
-			SocketPath: layout.SocketPath,
-			Files:      rec.Files,
-		})
-		if err := WriteFileAtomic(layout.ReadmePath, []byte(readmeText), 0o644); err != nil {
-			return fmt.Errorf("update README.txt: %w", err)
+		if updateShared {
+			readmeText := proto.RenderReadme(proto.ReadmeData{
+				Version:    rec.Version,
+				Release:    rec.Release,
+				Gateway:    rec.Gateway,
+				EnabledBy:  rec.EnabledBy,
+				EnabledAt:  rec.EnabledAt,
+				MachineID:  layout.MachineID,
+				LibDir:     layout.LibDir,
+				StateDir:   layout.StateDir,
+				SocketPath: layout.SocketPath,
+				Files:      rec.Files,
+			})
+			if err := WriteFileAtomic(layout.ReadmePath, []byte(readmeText), 0o644); err != nil {
+				return fmt.Errorf("update README.txt: %w", err)
+			}
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("read install.json: %w", err)

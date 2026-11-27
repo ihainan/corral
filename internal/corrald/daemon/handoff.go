@@ -180,31 +180,32 @@ func (s *Server) dispatchHandoff(ctx context.Context, conn *Conn, req proto.Requ
 		return
 	}
 
-	// Rule 1: Serialize handoff with install, uninstall, GC, and other hosts
-	// using SharedLock -> OpLock held across the entire handoff transaction
-	// (backup -> drain -> v2 cutover -> READY or unconditional rollback).
-	var (
-		sharedLock *FileLock
-		opLock     *FileLock
-		err        error
-	)
-	if _, statErr := os.Lstat(s.layout.LibDir); statErr == nil {
-		sharedLock, err = AcquireLockWait(s.layout.SharedLockPath, s.cfg.LockTimeout)
-		if err != nil {
-			code := proto.ErrInternal
-			retryable := false
-			if errors.Is(err, ErrLocked) {
-				code = proto.ErrBusy
-				retryable = true
-			}
-			conn.enqueueResponse(req.ID, nil, &proto.RPCError{
-				Code:      code,
-				Message:   err.Error(),
-				Retryable: retryable,
-			})
-			return
-		}
+	// Rule 1 & Round-4 #3: Serialize handoff with install, uninstall, GC, and
+	// other hosts using SharedLock -> OpLock held across the entire handoff
+	// transaction. Any stat or lock error fails closed; locking is never skipped.
+	if _, statErr := os.Lstat(s.layout.LibDir); statErr != nil {
+		conn.enqueueResponse(req.ID, nil, &proto.RPCError{
+			Code:    proto.ErrHandoffFailed,
+			Message: fmt.Sprintf("stat lib dir %s: %v", s.layout.LibDir, statErr),
+		})
+		return
 	}
+	sharedLock, err := AcquireLockWait(s.layout.SharedLockPath, s.cfg.LockTimeout)
+	if err != nil {
+		code := proto.ErrHandoffFailed
+		retryable := false
+		if errors.Is(err, ErrLocked) {
+			code = proto.ErrBusy
+			retryable = true
+		}
+		conn.enqueueResponse(req.ID, nil, &proto.RPCError{
+			Code:      code,
+			Message:   err.Error(),
+			Retryable: retryable,
+		})
+		return
+	}
+	var opLock *FileLock
 	releaseLifecycleLocks := func() {
 		if opLock != nil {
 			_ = opLock.Release()
@@ -217,22 +218,27 @@ func (s *Server) dispatchHandoff(ctx context.Context, conn *Conn, req proto.Requ
 	}
 	defer releaseLifecycleLocks()
 
-	if _, statErr := os.Lstat(s.layout.StateDir); statErr == nil {
-		opLock, err = AcquireLockWait(s.layout.OpLockPath, s.cfg.LockTimeout)
-		if err != nil {
-			code := proto.ErrInternal
-			retryable := false
-			if errors.Is(err, ErrLocked) {
-				code = proto.ErrBusy
-				retryable = true
-			}
-			conn.enqueueResponse(req.ID, nil, &proto.RPCError{
-				Code:      code,
-				Message:   err.Error(),
-				Retryable: retryable,
-			})
-			return
+	if _, statErr := os.Lstat(s.layout.StateDir); statErr != nil {
+		conn.enqueueResponse(req.ID, nil, &proto.RPCError{
+			Code:    proto.ErrHandoffFailed,
+			Message: fmt.Sprintf("stat state dir %s: %v", s.layout.StateDir, statErr),
+		})
+		return
+	}
+	opLock, err = AcquireLockWait(s.layout.OpLockPath, s.cfg.LockTimeout)
+	if err != nil {
+		code := proto.ErrHandoffFailed
+		retryable := false
+		if errors.Is(err, ErrLocked) {
+			code = proto.ErrBusy
+			retryable = true
 		}
+		conn.enqueueResponse(req.ID, nil, &proto.RPCError{
+			Code:      code,
+			Message:   err.Error(),
+			Retryable: retryable,
+		})
+		return
 	}
 
 	if s.layout.TombstoneExists() {
@@ -323,24 +329,26 @@ func (s *Server) dispatchHandoff(ctx context.Context, conn *Conn, req proto.Requ
 			errCode = proto.ErrRollbackFailed
 			fullReason = fmt.Sprintf("%s (rollback_failed: %v)", reason, restoreErr)
 		}
+
+		// Rule 2 & Round-4 #5: Enqueue error reply and disconnect all existing
+		// clients BEFORE writing failed.json or logging so blocked disk/log I/O
+		// can never keep stale clients attached after epoch rotation.
+		conn.enqueueResponse(req.ID, nil, &proto.RPCError{
+			Code:    errCode,
+			Message: fullReason,
+		})
+		s.closeAllConnsExcept(conn)
+		go func(c *Conn) {
+			time.Sleep(30 * time.Millisecond)
+			c.Close()
+		}(conn)
+
 		if p.Release > 0 {
 			if recErr := RecordFailedRelease(s.layout.FailedJSON, p.Release, fullReason); recErr != nil {
 				s.log.Warn("record failed release error", "release", p.Release, "err", recErr)
 			}
 		}
-		s.log.Error("handoff failed; rotated epoch and closing clients", "release", p.Release, "reason", fullReason)
-		conn.enqueueResponse(req.ID, nil, &proto.RPCError{
-			Code:    errCode,
-			Message: fullReason,
-		})
-
-		// Rule 2: Close all existing client connections after allowing the
-		// error reply frame to flush, forcing clients to reconnect, hello,
-		// observe the rotated epoch, and perform a full resync.
-		go func() {
-			time.Sleep(30 * time.Millisecond)
-			s.closeAllConns()
-		}()
+		s.log.Error("handoff failed; rotated epoch and closed clients", "release", p.Release, "reason", fullReason)
 	}
 
 	// Wait up to DrainTimeout (5 s) for in-flight mutating RPCs to finish.
@@ -440,8 +448,21 @@ func (s *Server) dispatchHandoff(ctx context.Context, conn *Conn, req proto.Requ
 		"--binary-path", resolvedPath,
 	}
 	if s.lock != nil && s.lock.File() != nil {
-		files = append(files, s.lock.File()) // fd 7: flock file descriptor
-		argv = append(argv, "--lock-fd=7")
+		lockFD := len(files)
+		files = append(files, s.lock.File())
+		argv = append(argv, fmt.Sprintf("--lock-fd=%d", lockFD))
+	}
+	// Round-4 #2: Pass SharedLock and OpLock FDs to child so the kernel flock
+	// remains held across cutover even if parent v1 is SIGKILL'd before READY.
+	if sharedLock != nil && sharedLock.File() != nil {
+		sharedFD := len(files)
+		files = append(files, sharedLock.File())
+		argv = append(argv, fmt.Sprintf("--shared-lock-fd=%d", sharedFD))
+	}
+	if opLock != nil && opLock.File() != nil {
+		opFD := len(files)
+		files = append(files, opLock.File())
+		argv = append(argv, fmt.Sprintf("--op-lock-fd=%d", opFD))
 	}
 
 	proc, err := os.StartProcess("/proc/self/fd/6", argv, &os.ProcAttr{
@@ -478,9 +499,10 @@ func (s *Server) dispatchHandoff(ctx context.Context, conn *Conn, req proto.Requ
 		return
 	}
 
-	// Rule 3: The instant READY arrives — BEFORE any logging, lock release,
-	// or other I/O — arm the hard-exit timer so nothing downstream can delay
-	// exit past the 3s / 15s hard cap.
+	// Rule 3 & Round-4 #4: The instant READY arrives — BEFORE any logging, lock
+	// release, or other I/O — arm the hard-exit timer. It is never cancelled so
+	// even post-Serve cleanup (e.g. closing an NFS log file) remains bounded by
+	// the 3s / 15s hard cap until the process exits.
 	s.stateMu.Lock()
 	s.handedOff = true
 	remainingWrites := s.inflightWrites
@@ -492,7 +514,7 @@ func (s *Server) dispatchHandoff(ctx context.Context, conn *Conn, req proto.Requ
 	if hardExitFn == nil {
 		hardExitFn = func() { os.Exit(0) }
 	}
-	s.hardExitTimer = time.AfterFunc(hardCap, hardExitFn)
+	time.AfterFunc(hardCap, hardExitFn)
 	s.stateMu.Unlock()
 
 	s.closeListenerForExit()

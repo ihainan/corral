@@ -25,3 +25,5 @@ func shouldFailBeforeReady(_ bool) bool {
 func shouldFailCutover() bool {
 	return false
 }
+
+func waitCutoverTestGate() {}

@@ -153,7 +153,6 @@ type Server struct {
 	writeDoneCh      chan struct{}
 	handoffActive    bool
 	handedOff        bool
-	hardExitTimer    *time.Timer
 	rollbackDegraded string
 
 	acceptMu      sync.Mutex
@@ -414,15 +413,10 @@ func (s *Server) Serve(parentCtx context.Context) error {
 		_ = os.Remove(s.layout.MetaJSON)
 		s.log.Info("corrald stopped", "pid", os.Getpid())
 	} else {
-		// Note: hardExitTimer remains armed through this final log write so
-		// even a blocked logger cannot violate the post-READY exit deadline.
+		// Round-4 #4: Never cancel the post-READY hard-exit timer; it stays
+		// armed through log writes and caller defers (e.g. rotLog.Close) until
+		// the process actually terminates.
 		s.log.Info("corrald exited after handoff", "pid", os.Getpid())
-		s.stateMu.Lock()
-		if s.hardExitTimer != nil {
-			s.hardExitTimer.Stop()
-			s.hardExitTimer = nil
-		}
-		s.stateMu.Unlock()
 	}
 	return nil
 }
@@ -722,10 +716,16 @@ func (s *Server) connectedCount() int {
 }
 
 func (s *Server) closeAllConns() {
+	s.closeAllConnsExcept(nil)
+}
+
+func (s *Server) closeAllConnsExcept(except *Conn) {
 	s.connMu.Lock()
 	list := make([]*Conn, 0, len(s.conns))
 	for c := range s.conns {
-		list = append(list, c)
+		if c != except {
+			list = append(list, c)
+		}
 	}
 	s.connMu.Unlock()
 	for _, c := range list {

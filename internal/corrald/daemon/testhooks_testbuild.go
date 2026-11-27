@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"io"
 	"os"
+	"strconv"
 	"time"
 
 	"github.com/ihainan/corral/internal/corrald/proto"
@@ -34,12 +35,23 @@ func defaultLifecycleLockTimeout() time.Duration {
 }
 
 type blockingLogWriter struct {
-	inner io.Writer
+	inner    io.Writer
+	substr   string
+	gateFile string
 }
 
 func (b *blockingLogWriter) Write(p []byte) (int, error) {
-	if len(p) > 0 && containsSubstr(string(p), "handoff completed") {
-		select {} // intentionally block forever to test Rule 3 hard-exit timer
+	if len(p) > 0 && containsSubstr(string(p), b.substr) {
+		if b.gateFile == "" {
+			select {} // intentionally block forever to test Rule 3 hard-exit timer
+		}
+		deadline := time.Now().Add(10 * time.Second)
+		for time.Now().Before(deadline) {
+			if _, err := os.Stat(b.gateFile); err == nil {
+				break
+			}
+			time.Sleep(15 * time.Millisecond)
+		}
 	}
 	return b.inner.Write(p)
 }
@@ -90,7 +102,14 @@ func applyTestServerConfig(cfg *ServerConfig) {
 		}
 	}
 	if os.Getenv("CORRALD_TEST_BLOCK_LOG_ON_HANDOFF") == "1" {
-		cfg.Logger = NewLogger(&blockingLogWriter{inner: io.Discard})
+		cfg.Logger = NewLogger(&blockingLogWriter{inner: io.Discard, substr: "handoff completed"})
+	}
+	if os.Getenv("CORRALD_TEST_BLOCK_LOG_ON_ROLLBACK") == "1" {
+		cfg.Logger = NewLogger(&blockingLogWriter{
+			inner:    io.Discard,
+			substr:   "handoff failed",
+			gateFile: os.Getenv("CORRALD_TEST_BLOCK_LOG_GATE"),
+		})
 	}
 }
 
@@ -100,6 +119,21 @@ func shouldFailBeforeReady(handoff bool) bool {
 
 func shouldFailCutover() bool {
 	return os.Getenv("CORRALD_TEST_FAIL_CUTOVER") == "1"
+}
+
+func waitCutoverTestGate() {
+	if marker := os.Getenv("CORRALD_TEST_CUTOVER_MARKER"); marker != "" {
+		_ = os.WriteFile(marker, []byte(strconv.Itoa(os.Getpid())), 0o600)
+	}
+	if gate := os.Getenv("CORRALD_TEST_CUTOVER_GATE"); gate != "" {
+		deadline := time.Now().Add(10 * time.Second)
+		for time.Now().Before(deadline) {
+			if _, err := os.Stat(gate); err == nil {
+				return
+			}
+			time.Sleep(15 * time.Millisecond)
+		}
+	}
 }
 
 func registerTestMethods(s *Server) {
