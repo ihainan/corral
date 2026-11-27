@@ -158,8 +158,10 @@ func (s *Server) sentEnter(w http.ResponseWriter, ctx context.Context, sess *ter
 	} else if agent == "agy" {
 		freeGate = "amode" // (agy's input box present: Enter goes there, never into a prompt)
 	}
+	t0 := time.Now()
 	_, err = sshx.Exec(ctx, sess.Client(), convoGatedCommand(freeGate, sess.Persistence, sess.TmuxSession, pane, socket, pid, start, sid, 0, enter, sendLines), sendOut,
 		sshx.ExecOptions{Stdin: strings.NewReader(""), Release: held.Done})
+	s.perfGated("sent_enter", t0, err, sess.HostID)
 	var exitErr *sshx.ExitError
 	switch {
 	case err == nil:

@@ -952,8 +952,10 @@ func (s *Server) convoModel(w http.ResponseWriter, ctx context.Context, sess *te
 			gate = "cscreen:" + at // (Codex's: pressed only on the screen it was decided on)
 		}
 		running.Add(1)
+		t0 := time.Now()
 		res, err := sshx.Exec(ctx, sess.Client(), convoGatedCommand(gate, sess.Persistence, sess.TmuxSession, pane, socket, pid, start, sid, len(text), press, read), 64<<10,
 			sshx.ExecOptions{Stdin: strings.NewReader(text), Release: running.Done})
+		s.perfGated("model", t0, err, sess.HostID)
 		if err == nil && (len(press) > 0 || text != "") {
 			typed = true
 		}

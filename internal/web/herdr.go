@@ -864,6 +864,7 @@ func (s *Server) watchHerdr(sess *term.Session, h *store.Host) {
 				continue
 			}
 			lctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+			tLoc := time.Now()
 			out, err := sshx.Output(lctx, sess.Client(), convoLocateTimesCommand(sess.Persistence, sess.TmuxSession)+"; "+hostNowCommand, convoLocateMax)
 			got := time.Now().UnixMilli()
 			cancel()
@@ -871,6 +872,7 @@ func (s *Server) watchHerdr(sess *term.Session, h *store.Host) {
 			if err == nil {
 				at = map[string]int64{}
 				found := parseConvoLocate(string(out))
+				s.perfLocate("locate.times", tLoc, nil, len(found.procs), sess.HostID)
 				began := time.UnixMilli(got)
 				for _, p := range found.procs {
 					// (Of this herdr server: another on the host names
@@ -893,6 +895,8 @@ func (s *Server) watchHerdr(sess *term.Session, h *store.Host) {
 					resumedWrote(at, panes, found.cands)
 				}
 				pcancel()
+			} else {
+				s.perfLocate("locate.times", tLoc, err, 0, sess.HostID)
 			}
 			if due {
 				times.found(at, time.Now())
@@ -1067,6 +1071,15 @@ func (s *Server) watchHerdr(sess *term.Session, h *store.Host) {
 			sum.LostAt = at.UnixMilli()
 		}
 		publish(sum)
+	}
+	w.OnDisconnect = func(step string, busy bool) {
+		if busy {
+			step += "_busy"
+		}
+		s.perf.Count("herdr.watch_disconnect", step, sess.HostID)
+	}
+	w.OnReconnect = func(downFor time.Duration, _ int) {
+		s.perf.Observe("herdr.watch_reconnect", downFor, "ok", sess.HostID, "")
 	}
 	w.Run(ctx)
 	s.herdrSocks.set(sess.ID, "") // (before the alerts' end: their count is without it)

@@ -55,6 +55,13 @@ type Watcher struct {
 	// OnLost, if set, is called when the connection to herdr fails: what was
 	// reported last may no longer be so until the next snapshot.
 	OnLost func()
+	// OnDisconnect, if set, is called when a healthy watcher enters a lost
+	// state (first failure of a streak), with the failing step and whether
+	// sshx.ErrBusy caused it.
+	OnDisconnect func(step string, busy bool)
+	// OnReconnect, if set, is called when a lost watcher recovers, with the
+	// outage duration and consecutive failure count.
+	OnReconnect func(downFor time.Duration, failures int)
 	// OnEvent, if set, is called for each decoded herdr event envelope
 	// (e.g. "pane_moved") before the watcher refreshes its snapshot.
 	OnEvent func(event string, data json.RawMessage)
@@ -158,11 +165,12 @@ func (w *Watcher) Run(ctx context.Context) {
 			return
 		}
 		downFor := time.Since(firstFailAt).Round(time.Millisecond)
+		fc := failCount
 		w.logger().Info("herdr watch recovered",
 			"session", w.SessionID,
 			"server", w.ServerName,
 			"socket", w.socketPath,
-			"failures", failCount,
+			"failures", fc,
 			"down_for", downFor,
 		)
 		failCount = 0
@@ -170,6 +178,9 @@ func (w *Watcher) Run(ctx context.Context) {
 		w.mu.Lock()
 		w.lostAt = time.Time{}
 		w.mu.Unlock()
+		if w.OnReconnect != nil {
+			w.OnReconnect(downFor, fc)
+		}
 	}
 	for ctx.Err() == nil {
 		began := time.Now()
@@ -184,24 +195,28 @@ func (w *Watcher) Run(ctx context.Context) {
 		if err != nil {
 			now := time.Now()
 			failCount++
+			step := "unknown"
+			var we *watchError
+			if errors.As(err, &we) {
+				step = we.step
+			}
+			busy := errors.Is(err, sshx.ErrBusy)
 			if failCount == 1 {
 				firstFailAt = now
 				w.mu.Lock()
 				w.lostAt = now
 				w.mu.Unlock()
+				if w.OnDisconnect != nil {
+					w.OnDisconnect(step, busy)
+				}
 			}
 			if shouldLogFailure(failCount) {
-				step := "unknown"
-				var we *watchError
-				if errors.As(err, &we) {
-					step = we.step
-				}
 				w.logger().Warn("herdr watch lost",
 					"session", w.SessionID,
 					"server", w.ServerName,
 					"socket", w.socketPath,
 					"step", step,
-					"busy", errors.Is(err, sshx.ErrBusy),
+					"busy", busy,
 					"failures", failCount,
 					"down_for", now.Sub(firstFailAt).Round(time.Millisecond),
 					"err", err,

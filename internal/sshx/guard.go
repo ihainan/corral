@@ -82,7 +82,40 @@ func (p *slotPool) inUse(c *ssh.Client) int {
 var (
 	auxSlots   = slotPool{ops: map[*ssh.Client]int{}}
 	watchSlots = slotPool{ops: map[*ssh.Client]int{}}
+
+	busyObservers = struct {
+		mu sync.Mutex
+		m  map[*ssh.Client]func(kind string)
+	}{m: map[*ssh.Client]func(kind string){}}
 )
+
+// SetBusyObserver registers a per-client callback invoked whenever acquiring
+// a channel slot on c fails with ErrBusy. Passing nil clears the observer.
+func SetBusyObserver(c *ssh.Client, fn func(kind string)) {
+	if c == nil {
+		return
+	}
+	busyObservers.mu.Lock()
+	defer busyObservers.mu.Unlock()
+	if fn == nil {
+		delete(busyObservers.m, c)
+	} else {
+		busyObservers.m[c] = fn
+	}
+}
+
+// NotifyBusy invokes the ErrBusy observer registered for c, if any.
+func NotifyBusy(c *ssh.Client, kind string) {
+	if c == nil {
+		return
+	}
+	busyObservers.mu.Lock()
+	fn := busyObservers.m[c]
+	busyObservers.mu.Unlock()
+	if fn != nil {
+		fn(kind)
+	}
+}
 
 // takeAux reserves one side operation on c; release is safe to call twice.
 func takeAux(c *ssh.Client) (release func(), ok bool) {
@@ -161,11 +194,14 @@ func openGuarded(ctx context.Context, c *ssh.Client, network, addr string, opt D
 		return nil, errors.New("sshx: DialOptions.Aux and Watch are mutually exclusive")
 	}
 	var take func(*ssh.Client) (func(), bool)
+	var busyKind string
 	switch {
 	case opt.Aux:
 		take = takeAux
+		busyKind = "dial_aux"
 	case opt.Watch:
 		take = takeWatch
+		busyKind = "dial_watch"
 	}
 	if take != nil {
 		slot, ok := take(c)
@@ -175,6 +211,7 @@ func openGuarded(ctx context.Context, c *ssh.Client, network, addr string, opt D
 		}
 		if !ok {
 			release()
+			NotifyBusy(c, busyKind)
 			return nil, ErrBusy
 		}
 		caller := release

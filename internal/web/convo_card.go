@@ -483,8 +483,10 @@ func (s *Server) cardPress(w http.ResponseWriter, ctx context.Context, sess *ter
 		cardPressed.Unlock()
 	}
 	held.Add(1)
+	t0 := time.Now()
 	_, err = sshx.Exec(ctx, sess.Client(), convoGatedCommand("card:"+c.digest, sess.Persistence, sess.TmuxSession, pane, socket, pid, start, sid, 0, replyPress(sess.Persistence, []string{key}), 0), sendOut,
 		sshx.ExecOptions{Stdin: strings.NewReader(""), Release: held.Done})
+	s.perfGated("card", t0, err, sess.HostID)
 	var exitErr *sshx.ExitError
 	switch {
 	case err == nil:

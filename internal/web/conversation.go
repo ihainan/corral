@@ -2072,9 +2072,13 @@ func (s *Server) apiConversation(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	perfStart := time.Now()
+	perfOutcome := "ok"
+	defer func() { s.perfObserve("convo.read", perfStart, perfOutcome, sess.HostID, "") }()
 	q := r.URL.Query()
 	pane := q.Get("pane")
 	if pane != "" && !herdrPane.MatchString(pane) {
+		perfOutcome = "bad_request"
 		writeError(w, http.StatusBadRequest, "bad_request", "bad pane")
 		return
 	}
@@ -2088,6 +2092,7 @@ func (s *Server) apiConversation(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	if sess.Persistence != "herdr" && sess.Persistence != "tmux" {
+		perfOutcome = convoUnsupported
 		writeJSON(w, http.StatusOK, convoAnswer{Reason: convoUnsupported, Entries: []convo.Entry{}})
 		return
 	}
@@ -2138,8 +2143,10 @@ func (s *Server) apiConversation(w http.ResponseWriter, r *http.Request) {
 		}
 		if err != nil {
 			if errors.Is(err, sshx.ErrBusy) {
+				perfOutcome = "busy"
 				writeError(w, http.StatusTooManyRequests, "busy", "the host is still answering earlier requests")
 			} else {
+				perfOutcome = "host_error"
 				writeError(w, http.StatusBadGateway, "host_error", "the host did not answer")
 			}
 			return
@@ -2147,6 +2154,7 @@ func (s *Server) apiConversation(w http.ResponseWriter, r *http.Request) {
 	}
 	ans := convoAnswer{Gen: st.gen, Bind: st.bind, Entries: []convo.Entry{}, DefaultChanged: defaultChangedOf(sess.ID)}
 	if st.reason != "" {
+		perfOutcome = st.reason
 		ans.Reason = st.reason
 		// (A Claude Code with no log yet, a new conversation: what its file
 		// says it does still, a dialog of its own open above all — a
@@ -2178,10 +2186,12 @@ func (s *Server) apiConversation(w http.ResponseWriter, r *http.Request) {
 		err = s.readOlder(sess, st)
 	}
 	if err != nil {
+		perfOutcome = convoReadErrOutcome(err)
 		writeFileError(w, err)
 		return
 	}
 	if st.reason != "" { // (found reading: OpenCode's, with no python3)
+		perfOutcome = st.reason
 		ans.Reason = st.reason
 		writeJSON(w, http.StatusOK, ans)
 		return
@@ -2287,7 +2297,7 @@ const convoScanShared = 5 * time.Second
 // and when it began: one made within convoScanShared, or the one under
 // way, else a new one (not bound to the asking request: others may be
 // waiting on it).
-func (c *convoScans) run(ctx context.Context, sess *term.Session, cmd string, after time.Time) ([]byte, time.Time, time.Time, error) {
+func (c *convoScans) run(ctx context.Context, sess *term.Session, cmd string, after time.Time) ([]byte, time.Time, time.Time, bool, error) {
 	key := sess.ID + "\x00" + cmd
 	c.mu.Lock()
 	if c.m == nil {
@@ -2315,6 +2325,7 @@ func (c *convoScans) run(ctx context.Context, sess *term.Session, cmd string, af
 			ok = false // (begun before what it must tell of: made again)
 		}
 	}
+	shared := ok
 	if !ok {
 		// (Made beside: the one who asked first, gone, does not wait on it
 		// either; it is there for the next.)
@@ -2331,9 +2342,9 @@ func (c *convoScans) run(ctx context.Context, sess *term.Session, cmd string, af
 	c.mu.Unlock()
 	select {
 	case <-e.done:
-		return e.out, e.at, e.began, e.err
+		return e.out, e.at, e.began, shared, e.err
 	case <-ctx.Done():
-		return nil, time.Time{}, time.Time{}, ctx.Err()
+		return nil, time.Time{}, time.Time{}, shared, ctx.Err()
 	}
 }
 
@@ -2396,7 +2407,9 @@ func (s *Server) locateScan(ctx context.Context, sess *term.Session, st *convoSt
 	// (A herdr pane's Codex, told by the host in a short look: no scan. Not
 	// where a press found another process since: that is told by a scan
 	// begun after it.)
+	tFast := time.Now()
 	if fast && sess.Persistence == "herdr" && pane != "" && st.scanAfter.IsZero() && s.locateCodexFast(ctx, sess, st, pane) {
+		s.perfObserve("locate.fast", tFast, "codex_fast", sess.HostID, "")
 		return nil
 	}
 	var after time.Time
@@ -2419,19 +2432,51 @@ func (s *Server) locateScan(ctx context.Context, sess *term.Session, st *convoSt
 	if ocOnly {
 		cmd = convoLocateOpenCodeCommand(sess.Persistence, sess.TmuxSession)
 	}
-	out, at, looked, err := s.convoScans.run(ctx, sess, cmd, after)
+	tScan := time.Now()
+	out, at, looked, shared, err := s.convoScans.run(ctx, sess, cmd, after)
 	// (The script ends with exit 0: an error is a scan cut short, by its size
 	// or a failure, which may leave out the agent started last. What was
 	// found before stays, rather than a part of it.)
 	if err != nil {
+		op := "locate.full"
+		if ocOnly {
+			op = "locate.fast"
+		}
+		if shared {
+			op = "locate.shared"
+		}
+		s.perfLocate(op, tScan, err, 0, sess.HostID)
 		return err
 	}
 	l := parseConvoLocate(string(out))
 	if ocOnly && !l.noProc && !ocPaneOwn(l.procs, pane, socket) {
-		if out, at, looked, err = s.convoScans.run(ctx, sess, convoLocateCommand(sess.Persistence, sess.TmuxSession, ""), after); err != nil {
+		tFull := time.Now()
+		if out, at, looked, shared, err = s.convoScans.run(ctx, sess, convoLocateCommand(sess.Persistence, sess.TmuxSession, ""), after); err != nil {
+			op := "locate.full"
+			if shared {
+				op = "locate.shared"
+			}
+			s.perfLocate(op, tFull, err, 0, sess.HostID)
 			return err
 		}
 		l = parseConvoLocate(string(out))
+		op := "locate.full"
+		if shared {
+			op = "locate.shared"
+		}
+		s.perfLocate(op, tFull, nil, len(l.procs), sess.HostID)
+	} else if ocOnly {
+		op := "locate.fast"
+		if shared {
+			op = "locate.shared"
+		}
+		s.perfLocateOutcome(op, tScan, "opencode_fast", len(l.procs), true, sess.HostID)
+	} else {
+		op := "locate.full"
+		if shared {
+			op = "locate.shared"
+		}
+		s.perfLocate(op, tScan, nil, len(l.procs), sess.HostID)
 	}
 	// (The Codexes the daemons' conversations are of, seen running, whatever
 	// the pane runs.)
@@ -4219,8 +4264,11 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 	}
 	// Every attempt is audited, with what it was for and what became of it
 	// ("typed", "refused" or "unknown"; why, when nothing was pressed).
+	perfStart := time.Now()
+	modelsFastKept := false
 	outcome, reason := "refused", ""
 	defer func() {
+		s.perfRecordPress(what, perfStart, outcome, reason, modelsFastKept, sess.HostID)
 		// (Another process found in the pane, by whichever check — this
 		// one's, or a mode's, model's or effort's own on the host: the
 		// conversation looked for again before its next answer. Made before
@@ -4297,6 +4345,7 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 	if what == "models" && (s.keptModelsOf(w, ctx, sess, b.Pane, b.PID, b.Start, b.Session, &outcome, &reason) ||
 		s.keptAgyModels(w, ctx, sess, b.Pane, b.PID, b.Start, b.Session, &outcome, &reason) ||
 		s.keptCodexModels(w, ctx, sess, b.Pane, b.PID, b.Start, b.Session, &outcome, &reason)) {
+		modelsFastKept = true
 		return
 	}
 	var answer *paneReply
@@ -4387,16 +4436,22 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 	// it for sure: the scan, as before.)
 	var front *convoProc
 	if (what == "send" || what == "interrupt") && sess.Persistence == "herdr" {
+		tFast := time.Now()
 		front = s.codexFront(ctx, sess, socket, b.Pane)
+		if front != nil {
+			s.perfObserve("locate.fast", tFast, "codex_front", sess.HostID, "")
+		}
 	}
 	if front == nil {
 		tmuxTarget := "" // (the pane's own terminal, for whether a process is the pane's)
 		if sess.Persistence == "tmux" {
 			tmuxTarget = b.Pane
 		}
+		tLoc := time.Now()
 		lr, err := sshx.Exec(ctx, sess.Client(), convoLocateCommand(sess.Persistence, sess.TmuxSession, tmuxTarget), convoLocateMax, sshx.ExecOptions{AwaitSlot: pressSlotWait(what)})
 		out := lr.Out
 		if errors.Is(err, sshx.ErrBusy) {
+			s.perfLocate("locate.full", tLoc, err, 0, sess.HostID)
 			reason = "busy"
 			writeError(w, http.StatusTooManyRequests, "busy", "the host is still answering earlier requests")
 			return
@@ -4404,6 +4459,7 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 		// (A scan cut short, by its size or a failure, may leave out the agent
 		// started last: what it found does not decide where keys go.)
 		if err != nil {
+			s.perfLocate("locate.full", tLoc, err, 0, sess.HostID)
 			if signedOut() {
 				return
 			}
@@ -4415,6 +4471,7 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 		// as reading chooses it): a Claude Code started inside it since, or a
 		// restart, is not the one the press was asked for.
 		l := parseConvoLocate(string(out))
+		s.perfLocate("locate.full", tLoc, nil, len(l.procs), sess.HostID)
 		tty := l.paneTTY // (tmux: the pane's terminal, active or not)
 		front = pickConvoProc(l.procs, sess.Persistence, b.Pane, socket, l.tmuxPID, tty, s.herdrSocks.sid(sess.ID, b.Pane))
 		// A Codex whose log its daemon keeps: the session this gateway gave
@@ -4906,8 +4963,10 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 	if inBox {
 		in = "" // (Enter only: nothing pasted)
 	}
+	tGated := time.Now()
 	res, err := sshx.Exec(ctx, sess.Client(), cmd, sendOut,
 		sshx.ExecOptions{Stdin: strings.NewReader(in), Release: done, AwaitSlot: pressSlotWait(what)})
+	s.perfGated(what, tGated, err, sess.HostID)
 	var exitErr *sshx.ExitError
 	switch {
 	case err == nil:
