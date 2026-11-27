@@ -3072,6 +3072,7 @@ html.kb-open .convo-runs-pop.is-sheet { padding-bottom: 16px; }
 .agent-icon-dot.is-failed { background: var(--term-danger-text); }
 /* Subagents: a line of 32, a step smaller, hung from the parent's icon by a hairline. */
 .convo-list-groups.is-flat .convo-list-children { margin: 0; gap: 0; }
+.convo-list-groups.is-flat .convo-list-children.is-nested-cli { margin-left: 16px; }
 .convo-list-groups.is-flat .convo-list-item.is-child::before { content: ''; position: absolute; left: 17px; top: 0; bottom: 0; width: 1px; background: var(--term-line-strong); }
 .convo-list-groups.is-flat .convo-list-item.is-child:last-child::before { bottom: auto; height: 16px; }
 .convo-list-groups.is-flat .convo-list-item.is-child::after { content: ''; position: absolute; left: 17px; top: 16px; width: 10px; height: 1px; background: var(--term-line-strong); }

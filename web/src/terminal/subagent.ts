@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from '../api'
 import type { ConvoEntry, ConvoRunning } from './conversation'
+import { shouldContinueSubPoll, subagentRequestUrl } from './sideState'
 
 // A subagent's own conversation (its log beside its session's), read as the
 // conversation is: a part at a time, what changed since. Read when shown;
@@ -35,7 +36,7 @@ const EVERY = 3000
 const GROWING = 30000 // (unknown whether it goes on: read on while it grew this lately)
 const BATCH = 20 // (reads in a row while there is more; then the next round)
 
-export function useSubConvo(sessionId: string, pane: string, agent: string, live: boolean, active: boolean, nested: boolean, cli?: string): SubConvo {
+export function useSubConvo(sessionId: string, pane: string, agent: string, live: boolean, active: boolean, nested: boolean, cli?: string, cliParent?: string): SubConvo {
   const [shown, setShown] = useState({ entries: [] as ConvoEntry[], running: [] as ConvoRunning[], older: false, olderCut: false, loading: true, failed: false, grewAt: 0 })
   // (ctl: the read under way, if any; one called off is none.)
   const at = useRef({ gen: 0, rev: 0, byseq: new Map<number, ConvoEntry>(), again: false, grewAt: 0, ctl: null as AbortController | null })
@@ -44,7 +45,7 @@ export function useSubConvo(sessionId: string, pane: string, agent: string, live
   const activeNow = useRef(active)
   activeNow.current = active
   const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
-  const goesOn = () => liveNow.current || (nested && Date.now() - at.current.grewAt < GROWING)
+  const goesOn = () => shouldContinueSubPoll(liveNow.current, nested, at.current.grewAt, Date.now(), GROWING)
   const run = useCallback(
     async (older: boolean) => {
       const a = at.current
@@ -61,9 +62,8 @@ export function useSubConvo(sessionId: string, pane: string, agent: string, live
       let more = false
       try {
         for (let n = 0; n < BATCH; n++) {
-          const q = new URLSearchParams({ pane, agent, gen: String(a.gen), rev: String(a.rev), older: older && n === 0 ? '1' : '0' })
-          if (cli) q.set('cli', cli)
-          const r = await api<Answer>('GET', `/api/sessions/${sessionId}/conversation/subagent?` + q.toString(), undefined, { signal: ctl.signal })
+          const url = subagentRequestUrl(sessionId, pane, agent, a.gen, a.rev, older && n === 0, cli, cliParent)
+          const r = await api<Answer>('GET', url, undefined, { signal: ctl.signal })
           if (ctl.signal.aborted) return
           if (r.reset || r.gen !== a.gen) a.byseq = new Map()
           if (r.entries.length) a.grewAt = Date.now()
@@ -87,7 +87,7 @@ export function useSubConvo(sessionId: string, pane: string, agent: string, live
         }
       }
     },
-    [sessionId, pane, agent, cli],
+    [sessionId, pane, agent, cli, cliParent],
   )
   useEffect(() => {
     const a = at.current

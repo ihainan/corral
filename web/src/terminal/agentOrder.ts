@@ -138,6 +138,27 @@ export function splitRowTasks(tasks?: RowTask[]): { cliAgents: RowTask[]; bgTask
 // hasBgCli reports whether a row has recognized background CLI subagents running.
 export const hasBgCli = (r: Pick<ConvoListRow, 'tasks'>): boolean => !!r.tasks?.some((x) => x.kind === 'agent' && !!x.agent)
 
+type QueryMatcher = (query: string, ...fields: (string | undefined)[]) => boolean
+
+// rowMatchesQuery matches a sidebar row against a search query, checking both
+// the row's own fields and any recognized background CLI sub-rows hung under it.
+export function rowMatchesQuery(r: ConvoListRow, query: string, match: QueryMatcher): boolean {
+  if (!query.trim()) return true
+  if (match(query, r.title, r.where, r.program, r.projectKey, r.sessionGroup)) return true
+  return splitRowTasks(r.tasks).cliAgents.some((x) => match(query, x.name, x.cmd, x.agent))
+}
+
+// visibleCliAgents returns the background CLI sub-rows to render under row r:
+// hidden when collapsed, all when not searching or when the parent matched
+// directly, and only the matching CLI sub-rows when search matched via CLI fields.
+export function visibleCliAgents(r: ConvoListRow, query: string, collapsed: boolean, match: QueryMatcher): RowTask[] {
+  if (collapsed) return []
+  const { cliAgents } = splitRowTasks(r.tasks)
+  if (!query.trim() || !cliAgents.length) return cliAgents
+  if (match(query, r.title, r.where, r.program, r.projectKey, r.sessionGroup)) return cliAgents
+  return cliAgents.filter((x) => match(query, x.name, x.cmd, x.agent))
+}
+
 export interface AgentGroup {
   id: string
   label?: string

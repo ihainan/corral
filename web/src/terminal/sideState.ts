@@ -1,5 +1,5 @@
 import type { AgentStatus } from './agents'
-import type { RowTask } from './agentOrder'
+import type { BgAgentLike, RowCmds, RowTask } from './agentOrder'
 
 // Shared reconciliation rules between herdr's periodic summary and the live
 // conversation stream so the sidebar and conversation view agree on status,
@@ -257,6 +257,95 @@ export function conversationRunningItems(
     })
   }
   return [...agents, ...cmds]
+}
+
+// filterHostCmds removes any host-scanned background command already promoted
+// to a CLI subagent in runningItems (by exact task ID or synthetic command text
+// match), decrementing cmds.n accordingly so header status counts and SessionCard
+// never double-count or show a promoted CLI task as a plain command.
+export function filterHostCmds(cmds: RowCmds | undefined, runningItems: RunningTaskLike[]): RowCmds | undefined {
+  if (!cmds) return undefined
+  const cliRunning = runningItems.filter((r) => r.kind === 'agent' && !!r.agent)
+  if (!cliRunning.length) return cmds
+  const ownedTasks = new Set<string>()
+  for (const r of cliRunning) {
+    if (r.task) ownedTasks.add(r.task)
+  }
+  const kept: RowCmds['list'] = []
+  let removed = 0
+  for (const c of cmds.list) {
+    const byTask = !!c.task && ownedTasks.has(c.task)
+    const bySynth =
+      !byTask &&
+      !!c.task &&
+      isSyntheticHostCmd(c.task) &&
+      cliRunning.some((r) => sameCmdText(c.title || c.desc, r.cmd || r.what) || sameCmdText(c.desc || c.title, r.what))
+    if (byTask || bySynth) {
+      removed++
+      continue
+    }
+    kept.push(c)
+  }
+  if (removed === 0) return cmds
+  const n = Math.max(0, cmds.n - removed)
+  return n > 0 || kept.length > 0 ? { n: Math.max(n, kept.length), list: kept } : undefined
+}
+
+// Cached tmux background state (both plain commands and promoted CLI subagents)
+// so switching away from a tmux agent preserves its sidebar CLI sub-rows and
+// Working-group placement until the cache expires or a fresh read clears it.
+export interface TmuxBgCacheEntry {
+  cmds?: RowCmds
+  agents?: BgAgentLike[]
+  at: number
+}
+
+export function keepTmuxBg(
+  cache: Map<string, TmuxBgCacheEntry>,
+  key: string,
+  cmds: RowCmds | undefined,
+  agents: BgAgentLike[] | undefined,
+  at: number,
+): void {
+  const hasAgents = !!(agents && agents.length)
+  if (cmds || hasAgents) cache.set(key, { cmds, agents: hasAgents ? agents : undefined, at })
+  else cache.delete(key)
+}
+
+export function readTmuxBg(
+  cache: Map<string, TmuxBgCacheEntry>,
+  key: string,
+  now: number,
+  freshMs: number,
+): { cmds?: RowCmds; agents?: BgAgentLike[] } {
+  const v = cache.get(key)
+  if (!v || now - v.at >= freshMs) return {}
+  return { cmds: v.cmds, agents: v.agents }
+}
+
+// subagentRequestUrl builds the read-only subagent conversation URL, carrying
+// optional cli ('agy' | 'claude' | 'codex') and cli_parent (for native subagents
+// spawned inside a background CLI session).
+export function subagentRequestUrl(
+  sessionId: string,
+  pane: string,
+  agent: string,
+  gen: number,
+  rev: number,
+  older: boolean,
+  cli?: string,
+  cliParent?: string,
+): string {
+  const q = new URLSearchParams({ pane, agent, gen: String(gen), rev: String(rev), older: older ? '1' : '0' })
+  if (cli) q.set('cli', cli)
+  if (cli && cliParent) q.set('cli_parent', cliParent)
+  return `/api/sessions/${sessionId}/conversation/subagent?` + q.toString()
+}
+
+// shouldContinueSubPoll reports whether useSubConvo should schedule another poll:
+// depth-1 subagents poll only while live; nested subagents poll while their log grew recently.
+export function shouldContinueSubPoll(live: boolean, nested: boolean, grewAt: number, now: number, growingMs = 30000): boolean {
+  return live || (nested && now - grewAt < growingMs)
 }
 
 // convoLastUserMs returns the unix-ms timestamp of the latest non-mid, non-gone

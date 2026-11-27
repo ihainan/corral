@@ -8,8 +8,8 @@ import { api } from '../api'
 import { setPrefs, usePrefs } from '../prefs'
 import { openSettingsModal } from '../pages/Settings'
 import { dropPickInTab, OPEN_PICKER } from '../pages/agentTabs'
-import { asHeld, buildAgentGroups, dayStart, FOLDED, foldAt, hasBgCli, isLiveBlocked, listOrder, pinned, splitRowTasks, type ConvoListRow, type OrderOpts, type RowCmds, type RowTask } from './agentOrder'
-import { conversationRunningItems, stampAgeMs } from './sideState'
+import { asHeld, buildAgentGroups, dayStart, FOLDED, foldAt, hasBgCli, isLiveBlocked, listOrder, pinned, rowMatchesQuery, splitRowTasks, visibleCliAgents, type ConvoListRow, type OrderOpts, type RowCmds, type RowTask } from './agentOrder'
+import { conversationRunningItems, filterHostCmds, stampAgeMs } from './sideState'
 import { copyText, Dialog, DialogHead, isCoarse, Menu, MenuLayer, swallowNextClick, useToast, type MenuItem } from '../components/ui'
 import { saveFile } from '../saveFile'
 import { StatusItem, useWorkbench } from '../workbench'
@@ -805,7 +805,13 @@ export function ConversationView({
   // What it left running in the background, as its processes on the host
   // say (its turn over; not said while it asks something): the bar counts
   // them, the card lists them, and each opens as one of the log's would.
-  const hostCmds = agent?.cmds && agent.status !== 'blocked' ? agent.cmds : undefined
+  // Any task already promoted to a CLI subagent in runningItems is excluded
+  // from hostCmds so neither header counts nor SessionCard double-lists it.
+  const runningItems = useMemo(() => conversationRunningItems(convo.running, agent?.tasks), [convo.running, agent?.tasks])
+  const hostCmds = useMemo(
+    () => (agent?.cmds && agent.status !== 'blocked' ? filterHostCmds(agent.cmds, runningItems) : undefined),
+    [agent?.cmds, agent?.status, runningItems],
+  )
   const hostCmd = (id: string): ConvoRunning | undefined => {
     const c = hostCmds?.list.find((x) => x.task === id)
     return c && { id, kind: 'cmd', what: c.desc || c.title || '', cmd: c.title, out: c.out, ts: c.since ? new Date(c.since).toISOString() : undefined }
@@ -848,7 +854,6 @@ export function ConversationView({
   // (where they can be looked into) and commands — one after another from a
   // panel, whichever it is (11-14). By the log's ids only.
   const subsOk = !convo.bind?.agent || convo.bind.agent === 'claude' || convo.bind.agent === 'codex' || convo.bind.agent === 'agy'
-  const runningItems = useMemo(() => conversationRunningItems(convo.running, agent?.tasks), [convo.running, agent?.tasks])
   const work = runningItems.filter((r) => (r.kind === 'agent' && isSubId(r.id) && (subsOk || !!r.agent)) || r.kind === 'cmd')
   const workNav = (id: string): WorkNav | undefined => {
     const i = work.findIndex((r) => r.id === id)
@@ -2630,7 +2635,7 @@ export function ConversationView({
         <ForkAtOf.Provider value={undefined}>
         <RewindAtOf.Provider value={undefined}>
         <SubPanel
-          key={(subs[subs.length - 1].cli ?? '') + ':' + subs[subs.length - 1].agent}
+          key={(subs[subs.length - 1].cli ?? '') + ':' + (subs[subs.length - 1].cliParent ?? '') + ':' + subs[subs.length - 1].agent}
           of={convo.of}
           sub={subs[subs.length - 1]}
           depth={subs.length}
@@ -4921,7 +4926,7 @@ export function AgentList({ rows, menus, onPicked, placed, query: given, onQuery
   // (Placed: in their order then, ties too; new ones after.)
   const first = placed ? [...placed.keys()] : []
   const place = (r: ConvoListRow) => (first.includes(r.key) ? first.indexOf(r.key) : first.length)
-  const found = query.trim() ? rows.filter((r) => matchQuery(query, r.title, r.where, r.program, r.projectKey, r.sessionGroup)) : rows
+  const found = query.trim() ? rows.filter((r) => rowMatchesQuery(r, query, matchQuery)) : rows
   const foundKeys = new Set(found.map((r) => r.key))
   // Global approval protection: blocked agents filtered out by search remain 1 click away.
   const hiddenBlocked = query.trim() ? rows.filter((r) => isLiveBlocked(r) && !foundKeys.has(r.key)) : []
@@ -5347,7 +5352,8 @@ export function AgentList({ rows, menus, onPicked, placed, query: given, onQuery
             )}
             </div>
           )
-          const nestedCli = isChild && cliAgents.length > 0 ? <div className="convo-list-children is-nested-cli">{cliAgents.map((x) => renderCliChild(r, x))}</div> : null
+          const nestedCliList = isChild ? visibleCliAgents(r, query, false, matchQuery) : []
+          const nestedCli = nestedCliList.length > 0 ? <div className="convo-list-children is-nested-cli">{nestedCliList.map((x) => renderCliChild(r, x))}</div> : null
           return otherTasks.length > 0 || nestedCli ? (
             <Fragment key={r.key}>
               {item}
@@ -5441,7 +5447,7 @@ export function AgentList({ rows, menus, onPicked, placed, query: given, onQuery
             const totalKids = kidsInList.length + cliAgents.length
             const isParentCollapsed = !query.trim() && parentFolded.includes(r.key)
             const visibleKids = isParentCollapsed ? kidsInList.filter((k) => k.current || isLiveBlocked(k)) : kidsInList
-            const visibleCli = isParentCollapsed ? [] : cliAgents
+            const visibleCli = visibleCliAgents(r, query, isParentCollapsed, matchQuery)
             const subDot = isParentCollapsed
               ? allKids.some(isLiveBlocked)
                 ? 'blocked'
@@ -6490,8 +6496,10 @@ export const recapText = (s: string) => s.replace(/\s*\((?:disable|turn off)[^()
 
 // A subagent sent off, whose own conversation can be shown: by its id.
 // When cli is set ('agy' | 'claude' | 'codex'), it is a recognized agent CLI
-// running inside a background command (read-only view, parsed in its own format).
-type Sub = { agent: string; title?: string; cli?: string; since?: number }
+// running inside a background command (read-only view, parsed in its own format);
+// cliParent identifies that CLI's root session when drilling into a native
+// subagent spawned inside the background CLI.
+type Sub = { agent: string; title?: string; cli?: string; cliParent?: string; since?: number }
 const OpenSub = createContext<((s: Sub) => void) | undefined>(undefined)
 // The turn under way, as Claude Code's spinner line says it beside its seconds — "(9s · ↓ 1.2k tokens · thinking
 // with high effort)": the tokens written so far and how hard it thinks, for the line of the step under way (doc UI 30).
@@ -6606,10 +6614,16 @@ const isSubId = (id: string) => /^[a-z0-9]{6,40}$/.test(id) || /^[0-9a-f]{8}-[0-
 function SubPanel({ of, sub, depth, live, nav, onOpen, onBack, onClose, active, copy }: { of: string; sub: Sub; depth: number; live: (agent: string) => boolean; nav?: WorkNav; onOpen: (s: Sub) => void; onBack: () => void; onClose: () => void; active: boolean; copy: (s: string) => void }) {
   const [sessionId, pane = ''] = of.split(' ')
   const isCli = !!sub.cli
+  // Nested native subagents spawned inside a background CLI carry its cli and
+  // root session ID so the backend resolves them against the CLI's own log.
+  const openChild = useCallback(
+    (s: Sub) => onOpen(isCli ? { ...s, cli: sub.cli, cliParent: sub.cliParent ?? sub.agent } : s),
+    [isCli, sub.cli, sub.cliParent, sub.agent, onOpen],
+  )
   // (Of one sent off by the session's agent, as its running list says; of
   // one sent off by a subagent, while its log keeps growing.)
   const told = depth === 1 && live(sub.agent)
-  const c = useSubConvo(sessionId, pane, sub.agent, told, active, depth > 1, sub.cli)
+  const c = useSubConvo(sessionId, pane, sub.agent, told, active, depth > 1, sub.cli, sub.cliParent)
   const going = depth === 1 ? told : c.growing
   const panel = useRef<HTMLElement>(null)
   const [opened, setOpened] = useState<Record<string, boolean>>({})
@@ -6726,7 +6740,7 @@ function SubPanel({ of, sub, depth, live, nav, onOpen, onBack, onClose, active, 
         )}
         {c.failed && <LoadErrorLine onRetry={c.read} />}
         {!c.failed && !c.loading && list.length === 0 && <p className="convo-older">{t('sub.empty')}</p>}
-        <OpenSub.Provider value={onOpen}>
+        <OpenSub.Provider value={openChild}>
           <WordsAsWritten.Provider value={true}>
           {list.map((it) => (
             <ListItem key={itemKey(it)} it={it} copy={copy} open={it.kind === 'work' ? !!opened[it.key] : false} onToggle={toggle} onShow={noShow} />
@@ -6743,7 +6757,7 @@ function SubPanel({ of, sub, depth, live, nav, onOpen, onBack, onClose, active, 
       </div>
       {going && c.running.length > 0 && (
         <div className="convo-sub-foot">
-          <RunningWork items={c.running} openSub={onOpen} />
+          <RunningWork items={c.running} openSub={openChild} />
         </div>
       )}
     </aside>

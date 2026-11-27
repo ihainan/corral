@@ -5033,7 +5033,7 @@ func (s *Server) apiConversationSubagent(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	q := r.URL.Query()
-	pane, agent, cli := q.Get("pane"), q.Get("agent"), q.Get("cli")
+	pane, agent, cli, cliParent := q.Get("pane"), q.Get("agent"), q.Get("cli"), q.Get("cli_parent")
 	if (pane != "" && !herdrPane.MatchString(pane)) || (!convo.SubagentID(agent) && !convo.CodexAgentID(agent)) {
 		writeError(w, http.StatusBadRequest, "bad_request", "bad pane or subagent")
 		return
@@ -5043,14 +5043,23 @@ func (s *Server) apiConversationSubagent(w http.ResponseWriter, r *http.Request)
 	older := q.Get("older") == "1"
 	w.Header().Set("Cache-Control", "no-store")
 	// A recognized agent CLI running inside a background command (agy, claude,
-	// codex): its log path comes strictly from the host process scan (cmdProber),
-	// never from client input, and is read in read-only mode with its own CLI parser.
+	// codex), or a native subagent spawned inside that CLI (when cli_parent is
+	// provided): the CLI's own log path comes strictly from the host process
+	// scan (cmdProber), never from client input, and is read in read-only mode.
 	if cli != "" {
-		if (cli != "agy" && cli != "claude" && cli != "codex") || !convoUUID.MatchString(agent) {
+		if cli != "agy" && cli != "claude" && cli != "codex" {
 			writeError(w, http.StatusBadRequest, "bad_request", "bad cli subagent")
 			return
 		}
-		sid := strings.ToLower(agent)
+		lookupSID := agent
+		if cliParent != "" {
+			lookupSID = cliParent
+		}
+		if !convoUUID.MatchString(lookupSID) {
+			writeError(w, http.StatusBadRequest, "bad_request", "bad cli subagent")
+			return
+		}
+		sid := strings.ToLower(lookupSID)
 		stKey := sess.ID + "\x00cli\x00" + cli + "\x00" + sid
 		var file string
 		var p *cmdProber
@@ -5088,6 +5097,11 @@ func (s *Server) apiConversationSubagent(w http.ResponseWriter, r *http.Request)
 			writeFileError(w, err)
 			return
 		}
+		if cliParent != "" {
+			// Nested native subagent spawned inside this background CLI session.
+			s.serveSubagentFromRoot(w, r, sess, stKey, cli, file, sid, agent, gen, rev, older)
+			return
+		}
 		s.subagentAnswer(w, r, sess, stKey, cli, file, sid, gen, rev, older, false)
 		return
 	}
@@ -5108,6 +5122,13 @@ func (s *Server) apiConversationSubagent(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusConflict, "not_located", "the conversation is not read yet")
 		return
 	}
+	s.serveSubagentFromRoot(w, r, sess, key, agentKind, root, mainSID, agent, gen, rev, older)
+}
+
+// serveSubagentFromRoot resolves and serves a native subagent's log relative to
+// its verified parent session log root (used for both normal pane sessions and
+// nested subagents spawned inside a background CLI session).
+func (s *Server) serveSubagentFromRoot(w http.ResponseWriter, r *http.Request, sess *term.Session, key, agentKind, root, mainSID, agent string, gen int64, rev int, older bool) {
 	// An Antigravity CLI subagent: <base>/brain/<sub-uuid>/.system_generated/logs/transcript_full.jsonl.
 	if agentKind == "agy" {
 		if !sessionUUID.MatchString(agent) {

@@ -45,10 +45,12 @@ const (
 )
 
 const (
-	maxCmdsShown = 8                // listed per agent (all are counted; the card lists each, 11-15)
-	cmdScanMax   = 512 << 10        // (with the subagents out and the background ids of those at work: review of 11-25)
-	cliLogKeep   = 30 * time.Minute // keep verified CLI log paths briefly so an open panel stays readable after exit
-	cliLogsMax   = 512
+	maxCmdsShown    = 8                // listed per agent (all are counted; the card lists each, 11-15)
+	cmdScanMax      = 512 << 10        // (with the subagents out and the background ids of those at work: review of 11-25)
+	cliScanBudget   = 64 << 10         // total byte budget for cli\t lines per scan so cmdScanMax is never blown
+	cliScanMaxLines = 64               // max cli\t lines emitted per scan
+	cliLogKeep      = 30 * time.Minute // keep verified CLI log paths briefly so an open panel stays readable after exit
+	cliLogsMax      = 512
 )
 
 // bgCLI is a known agent CLI process ("agy", "claude", "codex") discovered
@@ -586,6 +588,13 @@ agy_bg_fds() {
 `
 
 func cmdScanCommand(watched ...string) string {
+	return cmdScanCommandWithBudget(cliScanBudget, watched...)
+}
+
+func cmdScanCommandWithBudget(budget int, watched ...string) string {
+	if budget < 0 {
+		budget = 0
+	}
 	script := `btime=$(sed -n 's/^btime \([0-9]*\)$/\1/p' /proc/stat 2>/dev/null); hz=$(getconf CLK_TCK 2>/dev/null)
 printf 'clock\t%s\t%s\n' "$btime" "$hz"
 ` + codexFdsSh + agyFdsSh + agyBgFdsSh + `
@@ -652,16 +661,22 @@ claude_bg_fds() {
   fi
   if [ -z "$cclog" ] || [ ! -f "$cclog" ]; then ccsid= cclog=; fi
 }
+_bt_budget=` + strconv.Itoa(budget) + `
+_bt_emitted=0
+_bt_tab=$(printf '\t')
+_bt_nl=$(printf '\nx'); _bt_nl=${_bt_nl%x}
 scan_cmd_tree() {
+  [ "$_bt_budget" -gt 0 ] && [ "$_bt_emitted" -lt ` + strconv.Itoa(cliScanMaxLines) + ` ] || return 0
   _bt_root=$1
   _bt_q=" $_bt_root "
   _bt_vis=" "
   _bt_cnt=0
   _bt_depth=0
-  while [ -n "$_bt_q" ] && [ "$_bt_cnt" -lt 64 ] && [ "$_bt_depth" -lt 16 ]; do
+  while [ -n "$_bt_q" ] && [ "$_bt_cnt" -lt 64 ] && [ "$_bt_depth" -lt 16 ] && [ "$_bt_budget" -gt 0 ] && [ "$_bt_emitted" -lt ` + strconv.Itoa(cliScanMaxLines) + ` ]; do
     _bt_depth=$((_bt_depth + 1))
     _bt_next=
     for _bt_p in $_bt_q; do
+      [ "$_bt_budget" -gt 0 ] && [ "$_bt_emitted" -lt ` + strconv.Itoa(cliScanMaxLines) + ` ] || break
       case $_bt_vis in *" $_bt_p "*) continue;; esac
       _bt_vis="$_bt_vis$_bt_p "
       _bt_cnt=$((_bt_cnt + 1))
@@ -671,7 +686,7 @@ scan_cmd_tree() {
       _bt_exe=$(readlink "/proc/$_bt_p/exe" 2>/dev/null | tr -d '\r\n\t')
       _bt_eclean=${_bt_exe% (deleted)}
       _bt_eb=${_bt_eclean##*/}
-      _bt_argv=$(tr '\0\n\t' '\001  ' <"/proc/$_bt_p/cmdline" 2>/dev/null | head -c 1024)
+      _bt_argv=$(tr '\0\n\t' '\001  ' <"/proc/$_bt_p/cmdline" 2>/dev/null | head -c 512)
       _bt_kind=
       case $_bt_eb in
       agy) _bt_kind=agy;;
@@ -702,8 +717,20 @@ scan_cmd_tree() {
         codex) codex_bg_fds "/proc/$_bt_p"; _bt_sid=$cxid _bt_log=$cxlog;;
         claude) claude_bg_fds "$_bt_p"; _bt_sid=$ccsid _bt_log=$cclog;;
         esac
-        printf 'cli\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$_bt_root" "$_bt_p" "$_bt_comm" "$_bt_eclean" "$_bt_sid" "$(printf '%s' "$_bt_log" | tr '\t\n' '  ')" "$_bt_argv"
-        [ -n "$_bt_log" ] && _bt_found=1
+        # Never rewrite tabs/newlines in log paths (would alias onto a different file); drop them instead.
+        case $_bt_log in *"$_bt_tab"*|*"$_bt_nl"*) _bt_sid= _bt_log=;; esac
+        if [ -n "$_bt_sid" ] && [ -n "$_bt_log" ]; then
+          _bt_line=$(printf 'cli\t%s\t%s\t%s\t%s\t%s\t%s\t%s' "$_bt_root" "$_bt_p" "$_bt_comm" "$_bt_eclean" "$_bt_sid" "$_bt_log" "$_bt_argv")
+          _bt_len=$((${#_bt_line} + 1))
+          if [ "$_bt_len" -le "$_bt_budget" ]; then
+            printf '%s\n' "$_bt_line"
+            _bt_budget=$((_bt_budget - _bt_len))
+            _bt_emitted=$((_bt_emitted + 1))
+          else
+            _bt_budget=0
+          fi
+          _bt_found=1
+        fi
       fi
       [ "$_bt_found" = 1 ] && continue
       _bt_ch=$(cat /proc/"$_bt_p"/task/*/children 2>/dev/null || pgrep -P "$_bt_p" 2>/dev/null)
@@ -1128,6 +1155,20 @@ func identifyBgCLI(comm, exe, argvRaw string) string {
 		default:
 			return ""
 		}
+	case "sh", "dash", "bash", "zsh":
+		// A #!/bin/sh wrapper executable named agy/claude/codex sets comm to the
+		// script's basename and argv to [sh, /path/to/<name>, ...]. Never match `-c`.
+		script, nextIdx := shellScriptArg(argv)
+		if script == "" {
+			return ""
+		}
+		sb := path.Base(script)
+		if (sb == "agy" || sb == "claude" || sb == "codex") && comm == sb {
+			kind = sb
+			argStart = nextIdx
+		} else {
+			return ""
+		}
 	default:
 		if strings.Contains(exe, "/claude/versions/") {
 			kind = "claude"
@@ -1154,9 +1195,43 @@ func identifyBgCLI(comm, exe, argvRaw string) string {
 	return kind
 }
 
+// shellScriptArg returns the script path executed directly by a POSIX shell
+// (e.g. `#!/bin/sh` wrapper `/usr/local/bin/agy`) and the index of the first
+// argument passed to that script. Returns ("", 0) for `-c` command strings or
+// when no script file is executed.
+func shellScriptArg(argv []string) (string, int) {
+	if len(argv) < 2 {
+		return "", 0
+	}
+	for i := 1; i < len(argv); i++ {
+		a := argv[i]
+		if a == "--" {
+			if i+1 < len(argv) {
+				return argv[i+1], i + 2
+			}
+			return "", 0
+		}
+		if a == "-c" || a == "-s" {
+			return "", 0
+		}
+		if strings.HasPrefix(a, "-") && !strings.HasPrefix(a, "--") {
+			if strings.ContainsAny(a[1:], "cs") {
+				return "", 0
+			}
+			continue
+		}
+		if strings.HasPrefix(a, "--") {
+			continue
+		}
+		return a, i + 1
+	}
+	return "", 0
+}
+
 // nodeScriptArg returns the script path executed by node/bun/deno and the
 // index of the first argument passed to that script. Returns ("", 0) for
-// inline eval (-e/-p) or when no script path is present.
+// inline eval (-e/-p, including attached forms like --eval=code and -ecode)
+// or when no script path is present.
 func nodeScriptArg(argv []string) (string, int) {
 	if len(argv) < 2 {
 		return "", 0
@@ -1174,9 +1249,13 @@ func nodeScriptArg(argv []string) (string, int) {
 			}
 			return "", 0
 		}
-		switch a {
-		case "-e", "--eval", "-p", "--print", "-c", "--check":
+		if a == "-e" || a == "--eval" || strings.HasPrefix(a, "--eval=") ||
+			a == "-p" || a == "--print" || strings.HasPrefix(a, "--print=") ||
+			a == "-c" || a == "--check" ||
+			(len(a) > 2 && a[0] == '-' && a[1] != '-' && (a[1] == 'e' || a[1] == 'p')) {
 			return "", 0
+		}
+		switch a {
 		case "-r", "--require", "--import", "--loader", "--experimental-loader",
 			"-C", "--conditions", "--env-file", "--max-old-space-size",
 			"--inspect", "--inspect-brk", "--title", "--redirect-warnings",
@@ -1286,7 +1365,7 @@ func bgCLIArgsEligible(kind string, args []string) bool {
 // session UUID sid.
 func bgCLILogValid(agent, log, sid string) bool {
 	sid = strings.ToLower(strings.TrimSpace(sid))
-	if !convoUUID.MatchString(sid) || sid == convoNoSession {
+	if !convoUUID.MatchString(sid) || sid == convoNoSession || strings.ContainsAny(log, "\t\r\n") {
 		return false
 	}
 	l, ok := cleanRemotePath(log)
@@ -1338,22 +1417,37 @@ func splitBgCmds(cmds []bgCmd) (plain []bgCmd, cliAgents []bgAgent) {
 	return plain, cliAgents
 }
 
+func isSyntheticBgTask(task string) bool {
+	return strings.HasPrefix(task, "codex-") || strings.HasPrefix(task, "agy-") || strings.HasPrefix(task, "monitor-")
+}
+
 // upgradeRunningWithCLIs upgrades any log-tracked background command in running
-// whose task ID matches a host-discovered background CLI subagent into a
-// kind="agent" entry carrying the CLI kind and session ID.
+// whose task ID (or, for Codex/agy/Monitor synthetic host tasks, whose command
+// text) matches a host-discovered background CLI subagent into a kind="agent"
+// entry carrying the CLI kind and session ID.
 func upgradeRunningWithCLIs(running []convo.Running, cliAgents []bgAgent) []convo.Running {
 	if len(running) == 0 || len(cliAgents) == 0 {
 		return running
 	}
 	byTask := map[string][]bgAgent{}
+	var synthOrder []string
+	synthByTask := map[string][]bgAgent{}
 	for _, a := range cliAgents {
-		if a.Agent != "" && a.Task != "" {
-			byTask[a.Task] = append(byTask[a.Task], a)
+		if a.Agent == "" || a.Task == "" {
+			continue
+		}
+		byTask[a.Task] = append(byTask[a.Task], a)
+		if isSyntheticBgTask(a.Task) {
+			if _, ok := synthByTask[a.Task]; !ok {
+				synthOrder = append(synthOrder, a.Task)
+			}
+			synthByTask[a.Task] = append(synthByTask[a.Task], a)
 		}
 	}
 	if len(byTask) == 0 {
 		return running
 	}
+	usedSynth := map[string]bool{}
 	out := make([]convo.Running, 0, len(running))
 	for _, r := range running {
 		if r.Kind != "cmd" {
@@ -1361,6 +1455,23 @@ func upgradeRunningWithCLIs(running []convo.Running, cliAgents []bgAgent) []conv
 			continue
 		}
 		matched := byTask[r.ID]
+		if len(matched) == 0 && len(synthOrder) > 0 {
+			for _, task := range synthOrder {
+				if usedSynth[task] {
+					continue
+				}
+				grp := synthByTask[task]
+				cmdText := grp[0].Cmd
+				if cmdText == "" {
+					cmdText = grp[0].What
+				}
+				if codexSameCmd(r.Cmd, cmdText) || codexSameCmd(r.What, cmdText) {
+					matched = grp
+					usedSynth[task] = true
+					break
+				}
+			}
+		}
 		if len(matched) == 0 {
 			out = append(out, r)
 			continue

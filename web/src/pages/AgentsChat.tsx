@@ -36,7 +36,7 @@ import { attach, ATTACH_LABEL, AttachStrip, PICTURE_PATH, takeOut, type Going } 
 import { answerable, asking, callOut, useConversation, type ConvoEntry } from '../terminal/conversation'
 import { ackBg, answeredHerdr, convoTitles, expectSession, paneWaits, waitingTitle, isAgy, isCodex, isDevin, isOpenCode, listAgents, paneName, paneTitle, readSessionsNow, readsLog, useRunningSessions, type AgentRow, type AgentStatus } from '../terminal/agents'
 import { normalizeProjectPath, reorderPinned, rowTasks, type RowCmds, type RowTask } from '../terminal/agentOrder'
-import { convoLastUserMs, mergeRowTasks, reconcileAgentStatus } from '../terminal/sideState'
+import { convoLastUserMs, keepTmuxBg, mergeRowTasks, readTmuxBg, reconcileAgentStatus, type TmuxBgCacheEntry } from '../terminal/sideState'
 import { conversationReadable, prefetchConversation } from '../terminal/conversation'
 import { holdTermMode, tmuxKey } from '../terminal/chatSend'
 import { camesAfter, containedInMessage, isCommand, pairSent, sameMessage, squeezed, type Submission } from '../terminal/sentSeen'
@@ -1448,7 +1448,7 @@ const lookedAt = new Set<number>()
 // list once gone back to, the side list once another is shown.
 // (TMUX_CMDS_FRESH: how long that holds: the gateway looks once a minute.)
 const TMUX_CMDS_FRESH = 2 * 60 * 1000
-const tmuxCmds = new Map<string, { cmds: RowCmds; at: number }>()
+const tmuxCmds = new Map<string, TmuxBgCacheEntry>()
 // The host's home folder, by session (asked once: the files list of no
 // path answers with it), to make "~/…" whole. (Kept once had: the same
 // account's home does not move.)
@@ -1498,11 +1498,7 @@ function atHome(sid: string, p: string): Promise<string> {
   return h.then(join)
 }
 
-const tmuxCmdsOf = (e: Entry): RowCmds | undefined => {
-  if (e.row || e.pane) return undefined
-  const v = tmuxCmds.get(e.key)
-  return v && Date.now() - v.at < TMUX_CMDS_FRESH ? v.cmds : undefined
-}
+const tmuxBgOf = (e: Entry) => (e.row || e.pane ? {} : readTmuxBg(tmuxCmds, e.key, Date.now(), TMUX_CMDS_FRESH))
 
 // The conversation of one agent, and what is sent to it. Keyed by the
 // agent: nothing of another's (its draft, what was sent, a stop) carries over.
@@ -1692,6 +1688,7 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
   // goes (reads that change nothing change no state). review483–486)
   const tmuxKeyNow = !herdr && !cur.pane ? cur.key : ''
   const tmuxCmdsNow = agent?.cmds
+  const tmuxAgentsNow = !herdr && convo.agentStatus !== 'waiting' ? convo.bgAgents : undefined
   const lookedSince = useRef(0)
   useEffect(() => {
     if (active) lookedSince.current = Date.now()
@@ -1703,12 +1700,11 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
     const keep = () => {
       const at = readAt()
       if (at < lookedSince.current) return // (none read since it was brought back)
-      if (tmuxCmdsNow) tmuxCmds.set(key, { cmds: tmuxCmdsNow, at })
-      else tmuxCmds.delete(key)
+      keepTmuxBg(tmuxCmds, key, tmuxCmdsNow, tmuxAgentsNow, at)
     }
     keep()
     return keep
-  }, [tmuxKeyNow, tmuxCmdsNow, convo.status, convo.okAt, convo.failing, active, readAt])
+  }, [tmuxKeyNow, tmuxCmdsNow, tmuxAgentsNow, convo.status, convo.okAt, convo.failing, active, readAt])
   // (Seen only once its conversation is in front and read afresh since it was
   // gone to — what was kept from before shows at once, and is no proof the
   // person sees what it did since; not while it fails to load — review B02.)
@@ -1886,9 +1882,9 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
       }
       const title = (current && agent?.title) || keptTitle(titles, e) || `${e.s.host_name} · ${sessionWhich(e.s, all)}`
       const tmuxStatus = current && agent ? agent.status : 'unknown'
-      const tmuxCmds = current ? agent?.cmds : tmuxCmdsOf(e)
-      const tmuxTasks = current ? mergeRowTasks(rowTasks(convo.bgAgents, tmuxCmds), liveConvoRunning, { blocked: tmuxStatus === 'blocked' }) : rowTasks(undefined, tmuxCmds)
-      return { key: e.key, title, where: whereOf(e, hosts), program: current ? agent?.program : undefined, status: tmuxStatus, liveStatus: tmuxStatus, cmds: tmuxCmds, tasks: tmuxTasks, since: current && tmuxStatus === 'working' ? convoWorkingSince : undefined, current, inSplit: !isSecondary && !!splitKey && e.key === splitKey, pinned: pinAt(e.key), sessionGroup: sessionGroupOf(e, all), onPick: (how) => onPick(e, how), menu: () => rowMenu.current(e) }
+      const tmuxBg = current ? { cmds: agent?.cmds, agents: convo.bgAgents } : tmuxBgOf(e)
+      const tmuxTasks = current ? mergeRowTasks(rowTasks(tmuxBg.agents, tmuxBg.cmds), liveConvoRunning, { blocked: tmuxStatus === 'blocked' }) : rowTasks(tmuxBg.agents, tmuxBg.cmds)
+      return { key: e.key, title, where: whereOf(e, hosts), program: current ? agent?.program : undefined, status: tmuxStatus, liveStatus: tmuxStatus, cmds: tmuxBg.cmds, tasks: tmuxTasks, since: current && tmuxStatus === 'working' ? convoWorkingSince : undefined, current, inSplit: !isSecondary && !!splitKey && e.key === splitKey, pinned: pinAt(e.key), sessionGroup: sessionGroupOf(e, all), onPick: (how) => onPick(e, how), menu: () => rowMenu.current(e) }
     })
     return placedAs ? out.map((r) => (r.current ? { ...r, placeAs: placedAs } : r)) : out
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -4155,7 +4151,8 @@ function PhoneList({ entries, all, titles, query, onQuery, onPick }: { entries: 
         return { key: e.key, ...labelOf(e, said, hosts, !!named, sameWsParent), now: r.lost || r.bg || r.status !== 'blocked' ? undefined : glanceOf(e.s.id, e.pane, r.status, r.a.since) || undefined, program: r.a.agent, status: r.status, liveStatus: r.status, lost: r.lost, lastStatus: r.lost && r.last && r.last !== 'unknown' ? r.last : undefined, lostAt: r.lost ? r.lostAt : undefined, bg: r.lost ? undefined : r.bg, failed: failedOf(r, r.status), model: r.lost ? undefined : r.a.model, glance: r.lost || r.bg ? undefined : () => glanceOf(e.s.id, e.pane, r.status, r.a.since), cmds: cmdsOf(r), tasks: tasksOf(r), since: r.lost ? r.a.since : r.bg ? r.a.bg_since : r.a.since, current: false, pinned: pinAt(e.key), projectKey: normalizeProjectPath(r.a.cwd), sessionGroup: sessionGroupOf(e, all), parentKey, lineageSource: r.lost ? undefined : r.a.lineage_source, onPick: () => onPick(e) }
       }
       const title = keptTitle(titles, e) || `${e.s.host_name} · ${sessionWhich(e.s, all)}`
-      return { key: e.key, title, where: whereOf(e, hosts), status: 'unknown', cmds: tmuxCmdsOf(e), tasks: rowTasks(undefined, tmuxCmdsOf(e)), current: false, pinned: pinAt(e.key), sessionGroup: sessionGroupOf(e, all), onPick: () => onPick(e) }
+      const tmuxBg = tmuxBgOf(e)
+      return { key: e.key, title, where: whereOf(e, hosts), status: 'unknown', cmds: tmuxBg.cmds, tasks: rowTasks(tmuxBg.agents, tmuxBg.cmds), current: false, pinned: pinAt(e.key), sessionGroup: sessionGroupOf(e, all), onPick: () => onPick(e) }
     })
   }, [entries, titles, all, pins, onPick])
   const shown = mine ? rows.filter((r) => r.status === 'blocked' || r.status === 'done') : rows

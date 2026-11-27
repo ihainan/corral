@@ -2,10 +2,14 @@ package web
 
 import (
 	"errors"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -124,6 +128,62 @@ func TestIdentifyBgCLI(t *testing.T) {
 			comm: "node",
 			exe:  "/usr/bin/node",
 			argv: argv("node", "-e", "console.log('claude')"),
+			want: "",
+		},
+		{
+			name: "node --eval=code with claude path arg is NOT an agent",
+			comm: "node",
+			exe:  "/usr/bin/node",
+			argv: argv("node", "--eval=console.log(1)", "/usr/local/bin/claude"),
+			want: "",
+		},
+		{
+			name: "node -ecode with claude path arg is NOT an agent",
+			comm: "node",
+			exe:  "/usr/bin/node",
+			argv: argv("node", "-econsole.log(1)", "/usr/local/bin/claude"),
+			want: "",
+		},
+		{
+			name: "node --print=1 with claude path arg is NOT an agent",
+			comm: "node",
+			exe:  "/usr/bin/node",
+			argv: argv("node", "--print=1", "/usr/local/bin/claude"),
+			want: "",
+		},
+		{
+			name: "node -p1 / -pe with claude path arg is NOT an agent",
+			comm: "node",
+			exe:  "/usr/bin/node",
+			argv: argv("node", "-pe", "1", "/usr/local/bin/claude"),
+			want: "",
+		},
+		{
+			name: "node -r preload then claude cli.js IS claude",
+			comm: "node",
+			exe:  "/usr/bin/node",
+			argv: argv("node", "-r", "/tmp/preload.js", "/usr/lib/node_modules/@anthropic-ai/claude-code/cli.js", "-p", "hi"),
+			want: "claude",
+		},
+		{
+			name: "shell wrapper script named agy IS agy",
+			comm: "agy",
+			exe:  "/bin/dash",
+			argv: argv("/bin/sh", "/tmp/bin/agy", "-p", "WP1"),
+			want: "agy",
+		},
+		{
+			name: "sh -c running agy is NOT itself an agent",
+			comm: "sh",
+			exe:  "/bin/dash",
+			argv: argv("/bin/sh", "-c", "agy -p WP1"),
+			want: "",
+		},
+		{
+			name: "sh script not named agy/claude/codex is NOT an agent",
+			comm: "helper.sh",
+			exe:  "/bin/dash",
+			argv: argv("/bin/sh", "/tmp/helper.sh", "claude"),
 			want: "",
 		},
 		{
@@ -463,4 +523,316 @@ func TestConvoStateParserForStandaloneClaudeBgCLI(t *testing.T) {
 	if entries := pSub.Since(0); len(entries) != 1 {
 		t.Fatalf("native claude subagent parser dropped sidechain row: got %d entries", len(entries))
 	}
+}
+
+// Backend review #3: Codex and agy parents emit synthetic task IDs (codex-<pid>,
+// agy-<pid>) while their log parsers emit tool-call / background-task IDs.
+// upgradeRunningWithCLIs must match them by command text and upgrade them.
+func TestUpgradeRunningWithCLIsSyntheticParent(t *testing.T) {
+	const (
+		agySID    = "11111111-2222-4333-8444-555555555501"
+		claudeSID = "22222222-3333-4444-8555-666666666602"
+		codexSID  = "33333333-4444-4555-8666-777777777703"
+	)
+	cliAgents := []bgAgent{
+		{ID: agySID, Agent: "agy", Task: "codex-8597", Cmd: "agy -p 'WP1' --model gemini-4-neon-high", What: "agy -p 'WP1' --model gemini-4-neon-high", Since: 1700000010000},
+		{ID: codexSID, Agent: "codex", Task: "codex-8597", Cmd: "agy -p 'WP1' --model gemini-4-neon-high", What: "agy -p 'WP1' --model gemini-4-neon-high", Since: 1700000010000},
+		{ID: claudeSID, Agent: "claude", Task: "agy-9001", Cmd: "claude -p 'audit auth'", What: "claude -p 'audit auth'", Since: 1700000020000},
+	}
+	running := []convo.Running{
+		{ID: "call_codex_1", Kind: "cmd", What: "agy -p 'WP1' --model gemini-4-neon-high", Cmd: "agy -p 'WP1' --model gemini-4-neon-high"},
+		{ID: "agy-task-9", Kind: "cmd", What: "Audit auth module", Cmd: "claude -p 'audit auth'"},
+		{ID: "call_plain_2", Kind: "cmd", What: "go test ./...", Cmd: "go test ./..."},
+	}
+	got := upgradeRunningWithCLIs(running, cliAgents)
+	if len(got) != 4 {
+		t.Fatalf("upgraded len = %d, want 4: %+v", len(got), got)
+	}
+	if got[0].Kind != "agent" || got[0].Agent != "agy" || got[0].ID != agySID || got[0].Task != "call_codex_1" {
+		t.Errorf("got[0] = %+v", got[0])
+	}
+	if got[1].Kind != "agent" || got[1].Agent != "codex" || got[1].ID != codexSID || got[1].Task != "call_codex_1" {
+		t.Errorf("got[1] = %+v", got[1])
+	}
+	if got[2].Kind != "agent" || got[2].Agent != "claude" || got[2].ID != claudeSID || got[2].Task != "agy-task-9" || got[2].What != "Audit auth module" {
+		t.Errorf("got[2] = %+v", got[2])
+	}
+	if got[3].Kind != "cmd" || got[3].ID != "call_plain_2" {
+		t.Errorf("got[3] = %+v", got[3])
+	}
+}
+
+// End-to-end real script test on Linux /proc:
+// 1. Spawns a fake `claude` parent whose background task runs a fake `agy`
+//    executable script holding conversations/<uuid>.db open with a matching
+//    brain/<uuid>/.system_generated/logs/transcript_full.jsonl, runs the real
+//    `sh -c cmdScanCommand(...)`, and verifies parseCmdScan discovers the agy
+//    CLI subagent (deleting `scan_cmd_tree` fails this test).
+// 2. Verifies CLI byte budget cap (cmdScanCommandWithBudget) drops CLI lines
+//    when exceeded without emitting `more` or losing plain `cmd` lines.
+// 3. Verifies a log path containing a literal tab is never rewritten to spaces
+//    to alias onto another directory.
+func TestCmdScanRealFakeAgyProcess(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("reads /proc")
+	}
+	sh, err := exec.LookPath("sh")
+	if err != nil {
+		t.Skip("no sh")
+	}
+
+	const (
+		realSess = "99999999-1111-4222-8333-444444444444"
+		agySID   = "44444444-5555-4666-8777-888888888881"
+	)
+	home := t.TempDir()
+	binDir := filepath.Join(home, "bin")
+	tasksDir := filepath.Join(home, "tmp", "claude-1000", "-home-u-proj", realSess, "tasks")
+	agyBase := filepath.Join(home, ".gemini", "antigravity-cli")
+	agyConv := filepath.Join(agyBase, "conversations")
+	agyLogDir := filepath.Join(agyBase, "brain", agySID, ".system_generated", "logs")
+	for _, d := range []string{binDir, tasksDir, agyConv, agyLogDir} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	dbFile := filepath.Join(agyConv, agySID+".db")
+	logFile := filepath.Join(agyLogDir, "transcript_full.jsonl")
+	if err := os.WriteFile(dbFile, []byte("sqlite"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(logFile, []byte(`{"step_index":1,"type":"USER_INPUT","content":"hello"}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Fake `claude` parent and fake `agy` executable script that keeps dbFile open on fd 3.
+	fakeClaude := filepath.Join(binDir, "claude")
+	if err := os.Symlink(sh, fakeClaude); err != nil {
+		t.Fatal(err)
+	}
+	fakeAgy := filepath.Join(binDir, "agy")
+	agyScript := "#!/bin/sh\necho \"$$\" > \"$2\"\nexec 3<\"$1\"\nsleep 30 &\n_sp=$!\ntrap 'kill $_sp 2>/dev/null; exit 0' TERM INT\nwait $_sp\n"
+	if err := os.WriteFile(fakeAgy, []byte(agyScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	killPidFile := func(pidFile string) {
+		if b, err := os.ReadFile(pidFile); err == nil {
+			if pid, err := strconv.Atoi(strings.TrimSpace(string(b))); err == nil && pid > 1 {
+				_ = syscall.Kill(pid, syscall.SIGTERM)
+			}
+		}
+	}
+
+	outFile := filepath.Join(tasksDir, "breal0001.output")
+	pidFile1 := filepath.Join(home, "agy1.pid")
+	// Spawn fake claude -> child sh writing to tasks/breal0001.output -> fake agy opening dbFile.
+	proc := exec.Command(fakeClaude, "-c", `sh -c '"$1" "$2" "$3" -p WP1' bgwrap "$1" "$2" "$3" > "$4" & wait`, "claude", fakeAgy, dbFile, pidFile1, outFile)
+	if err := proc.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		killPidFile(pidFile1)
+		_ = proc.Process.Kill()
+		_ = proc.Wait()
+	})
+
+	// Wait until the grandchild `agy` has opened dbFile and cmdScanCommand sees it.
+	var foundCmd bgCmd
+	var lastOut string
+	for i := 0; i < 40; i++ {
+		time.Sleep(50 * time.Millisecond)
+		cmd := exec.Command("sh", "-c", cmdScanCommand("s:"+realSess))
+		cmd.Env = append(os.Environ(), "HOME="+home)
+		out, err := cmd.Output()
+		if err != nil {
+			t.Fatal(err)
+		}
+		lastOut = string(out)
+		got, whole := parseCmdScan(lastOut)
+		if !whole {
+			t.Fatalf("scan not whole:\n%s", lastOut)
+		}
+		for _, c := range got[realSess] {
+			if c.Task == "breal0001" && len(c.clis) > 0 {
+				foundCmd = c
+				break
+			}
+		}
+		if len(foundCmd.clis) > 0 {
+			break
+		}
+	}
+	if len(foundCmd.clis) != 1 || foundCmd.clis[0].Agent != "agy" || foundCmd.clis[0].Session != agySID || foundCmd.clis[0].Log != logFile {
+		t.Fatalf("real cmdScanCommand did not recognize fake agy: found=%+v\noutput:\n%s", foundCmd, lastOut)
+	}
+
+	// Subtest: tiny CLI byte budget drops CLI lines without losing plain cmd or marking scan incomplete.
+	budgetCmd := exec.Command("sh", "-c", cmdScanCommandWithBudget(16, "s:"+realSess))
+	budgetCmd.Env = append(os.Environ(), "HOME="+home)
+	budgetOut, err := budgetCmd.Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(budgetOut), "\ncli\t") {
+		t.Fatalf("expected cli line to be dropped under 16-byte budget:\n%s", budgetOut)
+	}
+	bgot, bwhole := parseCmdScan(string(budgetOut))
+	if !bwhole {
+		t.Fatalf("budget cap must not emit 'more' / mark scan incomplete:\n%s", budgetOut)
+	}
+	if len(bgot[realSess]) != 1 || bgot[realSess][0].Task != "breal0001" || len(bgot[realSess][0].clis) != 0 {
+		t.Fatalf("expected plain cmd preserved when CLI budget exhausted, got %+v", bgot[realSess])
+	}
+
+	// Subtest (Backend review #1): a log directory containing a literal TAB must
+	// NOT be rewritten to spaces to alias onto a sibling space-named directory.
+	const tabSID = "55555555-6666-4777-8888-999999999991"
+	tabBase := filepath.Join(home, "dir\twith\ttab", ".gemini", "antigravity-cli")
+	spaceBase := filepath.Join(home, "dir with tab", ".gemini", "antigravity-cli")
+	for _, b := range []string{tabBase, spaceBase} {
+		for _, sub := range []string{"conversations", filepath.Join("brain", tabSID, ".system_generated", "logs")} {
+			if err := os.MkdirAll(filepath.Join(b, sub), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := os.WriteFile(filepath.Join(b, "conversations", tabSID+".db"), []byte("sqlite"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(b, "brain", tabSID, ".system_generated", "logs", "transcript_full.jsonl"), []byte("{}\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tabOut := filepath.Join(tasksDir, "btab00001.output")
+	pidFile2 := filepath.Join(home, "agy2.pid")
+	tabProc := exec.Command(fakeClaude, "-c", `sh -c '"$1" "$2" "$3" -p tab' bgwrap "$1" "$2" "$3" > "$4" & wait`, "claude", fakeAgy, filepath.Join(tabBase, "conversations", tabSID+".db"), pidFile2, tabOut)
+	if err := tabProc.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		killPidFile(pidFile2)
+		_ = tabProc.Process.Kill()
+		_ = tabProc.Wait()
+	})
+	// Wait until btab00001 appears in scan output, then verify it has NO cli promoted onto spaceBase.
+	seenTabTask := false
+	for i := 0; i < 30; i++ {
+		time.Sleep(50 * time.Millisecond)
+		cmd := exec.Command("sh", "-c", cmdScanCommand("s:"+realSess))
+		cmd.Env = append(os.Environ(), "HOME="+home)
+		out, err := cmd.Output()
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, _ := parseCmdScan(string(out))
+		for _, c := range got[realSess] {
+			if c.Task == "btab00001" {
+				seenTabTask = true
+				if len(c.clis) != 0 {
+					t.Fatalf("tab-containing path was aliased into CLI subagent: %+v\n%s", c.clis, out)
+				}
+			}
+		}
+		if seenTabTask {
+			break
+		}
+	}
+	if !seenTabTask {
+		t.Fatal("btab00001 did not appear in scan")
+	}
+}
+
+// HTTP + SFTP integration test for GET /api/sessions/{id}/conversation/subagent
+// with cli=agy (read-only background CLI) and cli=claude&cli_parent=... (nested
+// native subagent spawned inside a background claude -p).
+func TestApiConversationSubagentBgCLI(t *testing.T) {
+	h := newHarness(t)
+	admin := h.admin()
+	home := t.TempDir()
+	srv := h.sshServer(home)
+
+	r := admin.do("POST", "/api/hosts", map[string]any{
+		"name": "box", "address": "127.0.0.1", "port": srv.Addr.Port,
+		"username": "alice", "auth": "password", "password": "alice-pass",
+	})
+	mustStatus(t, r, 201, "create host")
+	hostID := int64(r.json()["id"].(float64))
+
+	r = admin.do("POST", "/api/sessions", map[string]any{"host_id": hostID})
+	mustStatus(t, r, 201, "open session")
+	sessID := r.json()["id"].(string)
+
+	me := admin.do("GET", "/api/me", nil)
+	adminID := int64(me.json()["id"].(float64))
+	sess, err := h.terms.Get(adminID, sessID)
+	if err != nil {
+		t.Fatalf("terms.Get: %v", err)
+	}
+	sess.Persistence = "herdr"
+
+	const (
+		agySID       = "66666666-7777-4888-8999-aaaaaaaaaaa1"
+		claudeSID    = "77777777-8888-4999-8aaa-bbbbbbbbbbb2"
+		nestedSubID  = "a987654321"
+		unknownUUID  = "88888888-9999-4aaa-8bbb-ccccccccccc3"
+	)
+
+	// Write a real agy transcript_full.jsonl.
+	agyLog := filepath.Join(home, ".gemini", "antigravity-cli", "brain", agySID, ".system_generated", "logs", "transcript_full.jsonl")
+	if err := os.MkdirAll(filepath.Dir(agyLog), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	agyContent := strings.Join([]string{
+		`{"step_index":1,"type":"USER_INPUT","content":"<USER_REQUEST>\nRun WP1\n</USER_REQUEST>"}`,
+		`{"step_index":2,"type":"PLANNER_RESPONSE","content":"WP1 complete."}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(agyLog, []byte(agyContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Write a real claude -p log AND a nested native subagent log under it.
+	claudeLog := filepath.Join(home, ".claude", "projects", "-home-u-proj", claudeSID+".jsonl")
+	nestedLog := filepath.Join(home, ".claude", "projects", "-home-u-proj", claudeSID, "subagents", "agent-"+nestedSubID+".jsonl")
+	for _, p := range []string{claudeLog, nestedLog} {
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(claudeLog, []byte(`{"type":"assistant","uuid":"m1","message":{"content":[{"type":"text","text":"claude bg main"}]}}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(nestedLog, []byte(`{"type":"assistant","uuid":"s1","isSidechain":true,"message":{"content":[{"type":"text","text":"nested subagent reply"}]}}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Seed cmdProber with verified host-scanned CLI logs.
+	p := newCmdSubProber(nil)
+	p.recordCLILogsLocked(map[string][]bgCmd{
+		cmdSess: {
+			{Task: "b1", clis: []bgCLI{{Agent: "agy", Session: agySID, Log: agyLog}}},
+			{Task: "b2", clis: []bgCLI{{Agent: "claude", Session: claudeSID, Log: claudeLog}}},
+		},
+	}, time.Now())
+	h.srv.herdrSocks.setCmds(sessID, p)
+
+	// 1. Reading verified agy background CLI conversation succeeds and parses agy entries.
+	res := admin.do("GET", "/api/sessions/"+sessID+"/conversation/subagent?pane=w1:p1&agent="+agySID+"&cli=agy&gen=0&rev=0", nil)
+	mustStatus(t, res, http.StatusOK, "read agy bg cli")
+	if !strings.Contains(string(res.Body), "WP1 complete.") {
+		t.Fatalf("expected parsed agy reply in body, got: %s", res.Body)
+	}
+
+	// 2. Unverified UUID is rejected with 404.
+	res404 := admin.do("GET", "/api/sessions/"+sessID+"/conversation/subagent?pane=w1:p1&agent="+unknownUUID+"&cli=agy&gen=0&rev=0", nil)
+	mustStatus(t, res404, http.StatusNotFound, "unverified agy sid")
+
+	// 3. Nested native subagent spawned inside background claude -p (via cli_parent) succeeds!
+	resNested := admin.do("GET", "/api/sessions/"+sessID+"/conversation/subagent?pane=w1:p1&agent="+nestedSubID+"&cli=claude&cli_parent="+claudeSID+"&gen=0&rev=0", nil)
+	mustStatus(t, resNested, http.StatusOK, "read nested subagent inside bg claude -p")
+	if !strings.Contains(string(resNested.Body), "nested subagent reply") {
+		t.Fatalf("expected nested subagent reply in body, got: %s", resNested.Body)
+	}
+
+	// 4. Unverified cli_parent is rejected with 404.
+	resBadParent := admin.do("GET", "/api/sessions/"+sessID+"/conversation/subagent?pane=w1:p1&agent="+nestedSubID+"&cli=claude&cli_parent="+unknownUUID+"&gen=0&rev=0", nil)
+	mustStatus(t, resBadParent, http.StatusNotFound, "unverified cli_parent")
 }
