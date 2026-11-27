@@ -2022,6 +2022,7 @@ type convoAnswer struct {
 	// first of them (see convo_tmux_cmds.go).
 	BgCmds      int       `json:"bg_cmds,omitempty"`
 	BgCmdList   []bgCmd   `json:"bg_cmd_list,omitempty"`
+	BgCmdTasks  []string  `json:"bg_cmd_tasks,omitempty"`
 	BgAgentList []bgAgent `json:"bg_agent_list,omitempty"`
 	// Title is the session's own (Claude Code's, or the person's);
 	// Tasks the agent's task list as the log has it.
@@ -2216,14 +2217,14 @@ func (s *Server) apiConversation(w http.ResponseWriter, r *http.Request) {
 	cmds, cliAgents := s.tmuxCmdsTell(sess, st)
 	if len(cmds) > 0 {
 		ans.BgCmds, ans.BgCmdList = len(cmds), cmds[:min(len(cmds), maxCmdsShown)]
+		if len(cmds) > maxCmdsShown {
+			ans.BgCmdTasks = bgCmdTaskIDs(cmds)
+		}
 	}
 	if sess.Persistence == "herdr" && pane != "" && !st.sub && st.bind != nil {
 		if p := s.herdrSocks.cmdsOf(sess.ID); p != nil {
 			cliAgents = p.cliAgentsOf(pane, st.bind.Session)
 		}
-	}
-	if len(cliAgents) > 0 {
-		ans.BgAgentList = cliAgents[:min(len(cliAgents), maxCmdsShown)]
 	}
 	s.codexRunningOnHost(sess, st) // (before its entries are taken: steps it ends are among them)
 	s.agyRunningOnHost(sess, st)
@@ -2255,7 +2256,11 @@ func (s *Server) apiConversation(w http.ResponseWriter, r *http.Request) {
 	if st.agent == "agy" && len(ans.Queued) == 0 && len(st.agyQueued) > 0 && (st.status == "busy" || st.status == "") {
 		ans.Queued = st.agyQueued
 	}
-	ans.Running = upgradeRunningWithCLIs(st.parser.Running(), cliAgents)
+	var keptCLIs []bgAgent
+	ans.Running, keptCLIs = reconcileRunningWithCLIs(st.parser.Running(), cliAgents)
+	if len(keptCLIs) > 0 {
+		ans.BgAgentList = keptCLIs[:min(len(keptCLIs), maxCmdsShown)]
+	}
 	if sess.Persistence == "herdr" && pane != "" && !st.sub {
 		sig := runningSigOf(ans.Running)
 		if sig != st.runningSig {
@@ -5033,7 +5038,11 @@ func (s *Server) apiConversationSubagent(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	q := r.URL.Query()
-	pane, agent, cli, cliParent := q.Get("pane"), q.Get("agent"), q.Get("cli"), q.Get("cli_parent")
+	if q.Has("cli_parent") || q.Has("cli_chain") {
+		writeError(w, http.StatusBadRequest, "bad_request", "nested cli subagents are not supported")
+		return
+	}
+	pane, agent, cli := q.Get("pane"), q.Get("agent"), q.Get("cli")
 	if (pane != "" && !herdrPane.MatchString(pane)) || (!convo.SubagentID(agent) && !convo.CodexAgentID(agent)) {
 		writeError(w, http.StatusBadRequest, "bad_request", "bad pane or subagent")
 		return
@@ -5043,23 +5052,16 @@ func (s *Server) apiConversationSubagent(w http.ResponseWriter, r *http.Request)
 	older := q.Get("older") == "1"
 	w.Header().Set("Cache-Control", "no-store")
 	// A recognized agent CLI running inside a background command (agy, claude,
-	// codex), or a native subagent spawned inside that CLI (when cli_parent is
-	// provided): the CLI's own log path comes strictly from the host process
-	// scan (cmdProber), never from client input, and is read in read-only mode.
+	// codex): its log path comes strictly from the host process scan (cmdProber),
+	// never from client input, and is read in read-only mode with its own parser.
+	// Only the first-level background CLI session itself is served; nested
+	// subagents spawned inside it are not opened through this endpoint.
 	if cli != "" {
-		if cli != "agy" && cli != "claude" && cli != "codex" {
+		if (cli != "agy" && cli != "claude" && cli != "codex") || !convoUUID.MatchString(agent) {
 			writeError(w, http.StatusBadRequest, "bad_request", "bad cli subagent")
 			return
 		}
-		lookupSID := agent
-		if cliParent != "" {
-			lookupSID = cliParent
-		}
-		if !convoUUID.MatchString(lookupSID) {
-			writeError(w, http.StatusBadRequest, "bad_request", "bad cli subagent")
-			return
-		}
-		sid := strings.ToLower(lookupSID)
+		sid := strings.ToLower(agent)
 		stKey := sess.ID + "\x00cli\x00" + cli + "\x00" + sid
 		var file string
 		var p *cmdProber
@@ -5095,11 +5097,6 @@ func (s *Server) apiConversationSubagent(w http.ResponseWriter, r *http.Request)
 		}
 		if err != nil {
 			writeFileError(w, err)
-			return
-		}
-		if cliParent != "" {
-			// Nested native subagent spawned inside this background CLI session.
-			s.serveSubagentFromRoot(w, r, sess, stKey, cli, file, sid, agent, gen, rev, older)
 			return
 		}
 		s.subagentAnswer(w, r, sess, stKey, cli, file, sid, gen, rev, older, false)

@@ -188,6 +188,7 @@ export interface ConvoRunning {
   ts?: string
   note?: string // (the latest it has said of itself)
   cmd?: string // (a command: the whole of it)
+  cmd_cut?: boolean // (true when cmd is truncated/incomplete)
   out?: string // (a command: the file its output goes to, on the host)
   agent?: string // (a background CLI subagent: 'agy' | 'claude' | 'codex')
   task?: string // (the parent background command's task id it was promoted from)
@@ -279,6 +280,7 @@ interface Answer {
   waiting_for?: string // (with waiting: "permission prompt", "input needed", "sandbox request", "worker request", "dialog open", "other")
   bg_cmds?: number // (tmux) a Claude Code at rest: the commands it left running in the background
   bg_cmd_list?: { task: string; title?: string; desc?: string; since?: number; out?: string }[]
+  bg_cmd_tasks?: string[]
   bg_agent_list?: { id: string; what?: string; since?: number; agent?: string; task?: string; cmd?: string }[]
   quiet_ms?: number // (how long since its log last grew, by the gateway's clock)
   title?: string
@@ -297,8 +299,8 @@ interface Answer {
 }
 
 // (tmux) What a Claude Code at rest left running, as the answer says it.
-const cmdsOf = (a: { bg_cmds?: number; bg_cmd_list?: { task: string; title?: string; desc?: string; since?: number; out?: string }[] }): RowCmds | undefined =>
-  a.bg_cmds ? { n: a.bg_cmds, list: (a.bg_cmd_list ?? []).map((c) => ({ task: c.task, title: c.title, desc: c.desc, since: c.since, out: c.out })) } : undefined
+const cmdsOf = (a: { bg_cmds?: number; bg_cmd_list?: { task: string; title?: string; desc?: string; since?: number; out?: string }[]; bg_cmd_tasks?: string[] }): RowCmds | undefined =>
+  a.bg_cmds ? { n: a.bg_cmds, list: (a.bg_cmd_list ?? []).map((c) => ({ task: c.task, title: c.title, desc: c.desc, since: c.since, out: c.out })), tasks: a.bg_cmd_tasks } : undefined
 
 export type ConvoStatus = 'loading' | 'ready' | 'none' | 'error'
 

@@ -85,7 +85,7 @@ type Codex struct {
 	since    int64
 	// scriptCmds: the commands of code-mode calls (by call id); procs: the
 	// processes their scripts left running, by session id (codex_bg.go).
-	scriptCmds map[string][]string
+	scriptCmds map[string][]codexScriptCmd
 	procs      map[string]*codexProc
 	// procsOver: processes told of as ended with no start of theirs read
 	// (it is in a part before, or comes after): by session id, the step
@@ -183,6 +183,10 @@ func (c *Codex) ofNow(ts string) bool {
 
 // setGoing: work set going and left to itself (see running).
 func (c *Codex) setGoing(id, kind, what, at string) {
+	c.setGoingCmd(id, kind, what, "", at, false)
+}
+
+func (c *Codex) setGoingCmd(id, kind, what, cmd, at string, cmdCut bool) {
 	if id == "" || c.ranOut[id] {
 		delete(c.ranOut, id)
 		return
@@ -193,7 +197,19 @@ func (c *Codex) setGoing(id, kind, what, at string) {
 	if c.running == nil {
 		c.running = map[string]Running{}
 	}
-	c.running[id] = Running{ID: id, What: clip(clean(firstLineOf(what)), maxTitle), Kind: kind, Time: at}
+	var keptCmd string
+	var cutCmd bool
+	if kind == "cmd" && cmd != "" {
+		keptCmd, cutCmd = cut(clean(cmd), maxDetail)
+	}
+	c.running[id] = Running{
+		ID:     id,
+		What:   clip(clean(firstLineOf(what)), maxTitle),
+		Kind:   kind,
+		Time:   at,
+		Cmd:    keptCmd,
+		CmdCut: cmdCut || cutCmd,
+	}
 	c.runOrder = append(c.runOrder, id)
 }
 
@@ -251,7 +267,7 @@ func (c *Codex) leftGoing(r *codexRow, ts []*Tool, out codexOut) {
 	for _, t := range ts {
 		switch {
 		case t.Name == "Bash" && !out.failed && out.goesOn:
-			c.setGoing(t.ID, "cmd", t.Detail, r.Timestamp)
+			c.setGoingCmd(t.ID, "cmd", t.Detail, t.Detail, r.Timestamp, t.detailCut)
 		case t.Name == "Agent" && t.AgentID != "":
 			c.setGoing(t.AgentID, "agent", t.Title, r.Timestamp)
 		}
@@ -1224,11 +1240,12 @@ func (c *Codex) ranCommand(r *codexRow, it *codexItem) {
 	if it.Status != "in_progress" {
 		c.provTold(cmd) // (shown meanwhile as its call's line: this is it)
 	}
-	t := &Tool{ID: id, Name: "Bash", Detail: clip(clean(cmd), maxDetail)}
+	detail, dcut := cut(clean(cmd), maxDetail)
+	t := &Tool{ID: id, Name: "Bash", Detail: detail, detailCut: dcut}
 	// (Told of again as it ends: the line it had is the one that changes.)
 	if was, ok := c.seen[id]; ok {
 		t = was
-		t.Detail = clip(clean(cmd), maxDetail)
+		t.Detail, t.detailCut = detail, dcut
 	}
 	t.Done, t.Error = it.Status != "in_progress", failed
 	t.setResult(clean(out))
@@ -1714,7 +1731,8 @@ func codexTools(name, src string) []*Tool {
 		}
 	}
 	if len(cmds) > 0 {
-		out = append(out, &Tool{Name: "Bash", Detail: clip(strings.Join(cmds, "\n"), maxDetail)})
+		detail, dcut := cut(clean(strings.Join(cmds, "\n")), maxDetail)
+		out = append(out, &Tool{Name: "Bash", Detail: detail, detailCut: dcut || len(cmds) > 1})
 	}
 	// The rest of what it calls, by name (its arguments are code, not read
 	// here: what each did is told of on its own, in a newer Codex). Not the

@@ -3,6 +3,7 @@ package web
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"path"
 	"regexp"
 	"slices"
@@ -45,13 +46,24 @@ const (
 )
 
 const (
-	maxCmdsShown    = 8                // listed per agent (all are counted; the card lists each, 11-15)
-	cmdScanMax      = 512 << 10        // (with the subagents out and the background ids of those at work: review of 11-25)
-	cliScanBudget   = 64 << 10         // total byte budget for cli\t lines per scan so cmdScanMax is never blown
-	cliScanMaxLines = 64               // max cli\t lines emitted per scan
-	cliLogKeep      = 30 * time.Minute // keep verified CLI log paths briefly so an open panel stays readable after exit
-	cliLogsMax      = 512
+	maxCmdsShown           = 8                   // listed per agent (all are counted; the card lists each, 11-15)
+	cmdScanMax             = 512 << 10           // (with the subagents out and the background ids of those at work: review of 11-25)
+	cmdScanTotalBudget     = cmdScanMax - 16<<10 // unified script output budget below cmdScanMax so overflow is prevented
+	cliScanBudget          = 64 << 10            // total byte budget for cli\t lines per scan
+	cliScanMaxLines        = 64                  // max cli\t lines emitted per scan
+	maxBgCmdMatchBytes     = 4 << 10             // max full command length kept for synthetic task exact matching
+	subCandPerSession      = 128                 // max candidate subagent files streamed per watched session
+	subCandBytesPerSession = 32 << 10            // max cumulative candidate path bytes streamed per watched session
+	subCandTotalMax        = 1024                // max candidate subagent files streamed across all watched sessions
+	subCandTotalBytes      = 256 << 10           // max cumulative candidate path bytes across all watched sessions
+	cliLogKeep             = 30 * time.Minute    // keep verified CLI log paths briefly so an open panel stays readable after exit
+	cliLogsMax             = 512
 )
+
+// errScanBudget marks a scan cut short specifically by the script's unified
+// output byte budget ("budget" marker), as distinct from SSH/host failures or
+// >256-process truncation ("more").
+var errScanBudget = errors.New("background scan hit output budget")
 
 // bgCLI is a known agent CLI process ("agy", "claude", "codex") discovered
 // inside a background command's process tree, with its verified session UUID
@@ -85,6 +97,12 @@ type bgCmd struct {
 	// clis: known agent CLIs with resolvable sessions found in this command's
 	// process tree. Non-empty promotes the command to background subagent(s).
 	clis []bgCLI
+	// matchCmd: cleaned full command (up to maxBgCmdMatchBytes) kept separately
+	// from the 80-char display Title for exact synthetic task matching.
+	// matchCut is true when the raw command exceeded maxBgCmdMatchBytes so it
+	// must not participate in synthetic upgrade matching.
+	matchCmd string
+	matchCut bool
 }
 
 type cmdProber struct {
@@ -272,6 +290,9 @@ func (p *cmdProber) decorate(sum *herdrSummary) {
 			plain, cliSubs := splitBgCmds(activeCmds)
 			if len(plain) > 0 {
 				a.BgCmds, a.BgCmdList = len(plain), plain[:min(len(plain), maxCmdsShown)]
+				if len(plain) > maxCmdsShown {
+					a.BgCmdTasks = bgCmdTaskIDs(plain)
+				}
 			}
 			var nativeSubs []bgAgent
 			if sess := p.paneSessionLocked(a.PaneID, a.Session); sess != "" {
@@ -477,31 +498,40 @@ func (p *cmdProber) run(ctx context.Context) {
 		p.mu.Lock()
 		// (What this look found, in place of the last's: one ended, or of a session no longer at
 		// work, goes with it — review of 11-25.)
-		if ids == nil {
-			ids = map[string]map[string]bool{}
-		}
-		changed := !sameIDs(p.bgIDs, ids)
-		p.bgIDs = ids
-		if err != nil || !whole {
-			// (Not known, or not all of it: nothing told, rather than what was.)
-			changed = changed || !p.at.IsZero()
-			p.at, p.cmds, p.subs = time.Time{}, nil, nil
+		// On output-budget overflow (ErrOutputTooLarge or script budget marker),
+		// keep the last known lists intact instead of wiping the whole host's
+		// background tasks; they still age out naturally after p.kept if
+		// overflow persists.
+		var changed bool
+		if errors.Is(err, sshx.ErrOutputTooLarge) || errors.Is(err, errScanBudget) {
+			changed = false
 		} else {
-			changed = changed || p.at.IsZero() || !sameCmds(p.cmds, found) || !sameSubs(p.subs, subs)
-			// (Or the same, but now told of a pane it was not before: one
-			// come to done or idle after the last look began.)
-			for _, e := range p.ended {
-				if p.at.Before(e.from) && !began.Before(e.from) && (len(found[e.session]) > 0 || len(subs[e.session]) > 0) {
-					changed = true
-				}
+			if ids == nil {
+				ids = map[string]map[string]bool{}
 			}
-			for _, e := range p.working {
-				if p.at.Before(e.from) && !began.Before(e.from) && (len(found[e.session]) > 0 || len(subs[e.session]) > 0) {
-					changed = true
+			changed = !sameIDs(p.bgIDs, ids)
+			p.bgIDs = ids
+			if err != nil || !whole {
+				// (Not known, or not all of it: nothing told, rather than what was.)
+				changed = changed || !p.at.IsZero()
+				p.at, p.cmds, p.subs = time.Time{}, nil, nil
+			} else {
+				changed = changed || p.at.IsZero() || !sameCmds(p.cmds, found) || !sameSubs(p.subs, subs)
+				// (Or the same, but now told of a pane it was not before: one
+				// come to done or idle after the last look began.)
+				for _, e := range p.ended {
+					if p.at.Before(e.from) && !began.Before(e.from) && (len(found[e.session]) > 0 || len(subs[e.session]) > 0) {
+						changed = true
+					}
 				}
+				for _, e := range p.working {
+					if p.at.Before(e.from) && !began.Before(e.from) && (len(found[e.session]) > 0 || len(subs[e.session]) > 0) {
+						changed = true
+					}
+				}
+				p.at, p.cmds, p.subs = began, found, subs // (as of when the look began)
+				p.recordCLILogsLocked(found, began)
 			}
-			p.at, p.cmds, p.subs = began, found, subs // (as of when the look began)
-			p.recordCLILogsLocked(found, began)
 		}
 		poke := p.poke
 		p.mu.Unlock()
@@ -529,7 +559,7 @@ func sameIDs(a, b map[string]map[string]bool) bool {
 }
 
 func sameBgCmd(a, b bgCmd) bool {
-	return a.Task == b.Task && a.Title == b.Title && a.Since == b.Since && a.Out == b.Out && a.Desc == b.Desc && a.quiet == b.quiet && slices.Equal(a.clis, b.clis)
+	return a.Task == b.Task && a.Title == b.Title && a.Since == b.Since && a.Out == b.Out && a.Desc == b.Desc && a.quiet == b.quiet && a.matchCmd == b.matchCmd && a.matchCut == b.matchCut && slices.Equal(a.clis, b.clis)
 }
 
 func sameCmds(a, b map[string][]bgCmd) bool {
@@ -588,15 +618,53 @@ agy_bg_fds() {
 `
 
 func cmdScanCommand(watched ...string) string {
-	return cmdScanCommandWithBudget(cliScanBudget, watched...)
+	return cmdScanCommandWithBudgets(cmdScanTotalBudget, cliScanBudget, watched...)
 }
 
 func cmdScanCommandWithBudget(budget int, watched ...string) string {
-	if budget < 0 {
-		budget = 0
+	return cmdScanCommandWithBudgets(cmdScanTotalBudget, budget, watched...)
+}
+
+// cmdScanCommandWithBudgets builds the host scan script with a unified total
+// byte budget (totalBudget <= cmdScanMax) and priority emission order:
+//   1. clock + plain cmd / anc / bgid / desc lines (highest priority)
+//   2. sub lines (truncating/omitting subagent description first if tight)
+//   3. cli lines (lowest priority, capped at min(cliBudget, remaining) and cliScanMaxLines)
+func cmdScanCommandWithBudgets(totalBudget, cliBudget int, watched ...string) string {
+	if totalBudget < 0 {
+		totalBudget = 0
 	}
-	script := `btime=$(sed -n 's/^btime \([0-9]*\)$/\1/p' /proc/stat 2>/dev/null); hz=$(getconf CLK_TCK 2>/dev/null)
-printf 'clock\t%s\t%s\n' "$btime" "$hz"
+	if cliBudget < 0 {
+		cliBudget = 0
+	}
+	script := `LC_ALL=C
+_sc_rem=` + strconv.Itoa(totalBudget) + `
+_sc_bcut=0
+_sc_mark_budget() {
+  [ "$_sc_bcut" = 1 ] || { _sc_bcut=1; printf 'budget\n'; }
+}
+_sc_emit() {
+  _sc_l=$((${#1} + 1))
+  if [ "$_sc_l" -le "$_sc_rem" ]; then
+    printf '%s\n' "$1"
+    _sc_rem=$((_sc_rem - _sc_l))
+    return 0
+  fi
+  return 1
+}
+_sc_find_sub() {
+  if find "$1" -maxdepth 0 -printf '' >/dev/null 2>&1; then
+    find "$1" -maxdepth 1 -name 'agent-*.jsonl' -mmin -360 -printf '%T@\t%p\n' 2>/dev/null |
+      sort -rn | cut -f2-
+  else
+    # Fallback without GNU find -printf (e.g. BusyBox): cannot sort by mtime, so
+    # report incomplete once candidates exceed subsScanned (16) to keep old state.
+    find "$1" -maxdepth 1 -name 'agent-*.jsonl' -mmin -360 2>/dev/null |
+      awk -v maxn=` + strconv.Itoa(subsScanned) + ` 'NR > maxn { print "UNSORTED_CAP"; exit } { print }'
+  fi
+}
+btime=$(sed -n 's/^btime \([0-9]*\)$/\1/p' /proc/stat 2>/dev/null); hz=$(getconf CLK_TCK 2>/dev/null)
+_sc_emit "$(printf 'clock\t%s\t%s' "$btime" "$hz")" || true
 ` + codexFdsSh + agyFdsSh + agyBgFdsSh + `
 codex_bg_fds() {
   cxid= cxlog=
@@ -661,26 +729,29 @@ claude_bg_fds() {
   fi
   if [ -z "$cclog" ] || [ ! -f "$cclog" ]; then ccsid= cclog=; fi
 }
-_bt_budget=` + strconv.Itoa(budget) + `
+_bt_budget=` + strconv.Itoa(cliBudget) + `
 _bt_emitted=0
 _bt_tab=$(printf '\t')
 _bt_nl=$(printf '\nx'); _bt_nl=${_bt_nl%x}
 scan_cmd_tree() {
-  [ "$_bt_budget" -gt 0 ] && [ "$_bt_emitted" -lt ` + strconv.Itoa(cliScanMaxLines) + ` ] || return 0
+  [ "$_sc_bcut" = 0 ] || return 0
   _bt_root=$1
   _bt_q=" $_bt_root "
   _bt_vis=" "
   _bt_cnt=0
   _bt_depth=0
-  while [ -n "$_bt_q" ] && [ "$_bt_cnt" -lt 64 ] && [ "$_bt_depth" -lt 16 ] && [ "$_bt_budget" -gt 0 ] && [ "$_bt_emitted" -lt ` + strconv.Itoa(cliScanMaxLines) + ` ]; do
+  while [ -n "$_bt_q" ] && [ "$_bt_cnt" -lt 64 ] && [ "$_bt_depth" -lt 16 ] && [ "$_sc_bcut" = 0 ]; do
     _bt_depth=$((_bt_depth + 1))
     _bt_next=
     for _bt_p in $_bt_q; do
-      [ "$_bt_budget" -gt 0 ] && [ "$_bt_emitted" -lt ` + strconv.Itoa(cliScanMaxLines) + ` ] || break
+      [ "$_sc_bcut" = 0 ] || break
       case $_bt_vis in *" $_bt_p "*) continue;; esac
+      if [ "$_bt_cnt" -ge 64 ]; then
+        _sc_mark_budget
+        break
+      fi
       _bt_vis="$_bt_vis$_bt_p "
       _bt_cnt=$((_bt_cnt + 1))
-      [ "$_bt_cnt" -le 64 ] || break
       [ -O "/proc/$_bt_p" ] || continue
       _bt_comm=$(head -c 64 "/proc/$_bt_p/comm" 2>/dev/null | tr -d '\r\n\t')
       _bt_exe=$(readlink "/proc/$_bt_p/exe" 2>/dev/null | tr -d '\r\n\t')
@@ -722,12 +793,12 @@ scan_cmd_tree() {
         if [ -n "$_bt_sid" ] && [ -n "$_bt_log" ]; then
           _bt_line=$(printf 'cli\t%s\t%s\t%s\t%s\t%s\t%s\t%s' "$_bt_root" "$_bt_p" "$_bt_comm" "$_bt_eclean" "$_bt_sid" "$_bt_log" "$_bt_argv")
           _bt_len=$((${#_bt_line} + 1))
-          if [ "$_bt_len" -le "$_bt_budget" ]; then
-            printf '%s\n' "$_bt_line"
+          if [ "$_bt_emitted" -lt ` + strconv.Itoa(cliScanMaxLines) + ` ] && [ "$_bt_len" -le "$_bt_budget" ] && _sc_emit "$_bt_line"; then
             _bt_budget=$((_bt_budget - _bt_len))
             _bt_emitted=$((_bt_emitted + 1))
           else
             _bt_budget=0
+            _sc_mark_budget
           fi
           _bt_found=1
         fi
@@ -742,35 +813,14 @@ scan_cmd_tree() {
     done
     _bt_q=$_bt_next
   done
+  if [ "$_sc_bcut" = 0 ] && [ -n "$_bt_q" ]; then
+    _sc_mark_budget
+  fi
 }
-# (Of each session watched — "w:<id>" at work, "s:<id>" at rest —, its subagents sent off in the
-# background whose log was written to in the last six hours, not marked finished: what its meta
-# says it was sent for. At most ` + strconv.Itoa(subsScanned) + ` a session.)
-for a in "$@"; do
-  s=${a#?:}
-  for d in "$HOME"/.claude/projects/*/"$s"/subagents; do
-    [ -d "$d" ] || continue
-    find "$d" -maxdepth 1 -name 'agent-*.jsonl' -mmin -360 2>/dev/null | {
-      i=0
-      while IFS= read -r j; do
-        m=${j%.jsonl}.meta.json
-        [ -f "$m" ] || continue
-        meta=$(head -c 8192 "$m" 2>/dev/null | tr '\n\t' '  ')
-        case $meta in *'"requestShape":"background"'*) ;; *) continue;; esac
-        case $meta in *'"finished":true'*) continue;; esac
-        [ "$i" -lt ` + strconv.Itoa(subsScanned) + ` ] || break
-        i=$((i + 1))
-        id=${j##*/agent-}; id=${id%.jsonl}
-        t=$(stat -c %Y "$m" 2>/dev/null || date -r "$m" +%s 2>/dev/null)
-        v=$(head -c 65536 "$j" 2>/dev/null | grep -o '"version":"[0-9.]*"' | head -n 1 | cut -d'"' -f4)
-        w=$(printf '%s' "$meta" | grep -oE '"description":"([^"\\]|\\.)*"' | head -n 1 | head -c 600)
-        printf 'sub\t%s\t%s\t%s\t%s\t{%s}\n' "$s" "$id" "$t" "$v" "$w"
-      done
-    }
-    break
-  done
-done
+# Priority 1: plain background commands (cmd / anc / bgid / desc).
 seen=
+pairs=
+_sc_cmd_pids=
 if command -v pgrep >/dev/null 2>&1; then
   claudes=$( { pgrep -x claude; pgrep -f '[c]laude-code/cli'; pgrep -x codex; pgrep -x agy; } 2>/dev/null | sort -u | grep -vx "$$")
   kids=$(for c in $claudes; do
@@ -816,10 +866,16 @@ for k in $kids; do
   n=$((n + 1))
   st=$(sed 's/^.*) //' "/proc/$k/stat" 2>/dev/null | cut -d' ' -f20)
   case $l in
-  codex:*|agy:*) t=$(tr '\0\n\t' '   ' <"/proc/$k/cmdline" 2>/dev/null | sed 's/^[^ ]*sh -l\{0,1\}c //' | head -c 400);; # (a shell's command; else the program itself, run as it is)
+  codex:*|agy:*) t=$(tr '\0\n\t' '   ' <"/proc/$k/cmdline" 2>/dev/null | sed 's/^[^ ]*sh -l\{0,1\}c //' | head -c ` + strconv.Itoa(maxBgCmdMatchBytes+1) + `);; # (a shell's command; else the program itself, run as it is; +1 byte detects >4 KiB cut)
+  monitor:*) t=$(tr '\0\n\t' '   ' <"/proc/$k/cmdline" 2>/dev/null | awk -v "m=&& eval '" '` + cmdEvalAwk + `' | head -c ` + strconv.Itoa(maxBgCmdMatchBytes+1) + `);;
   *) t=$(tr '\0\n\t' '   ' <"/proc/$k/cmdline" 2>/dev/null | awk -v "m=&& eval '" '` + cmdEvalAwk + `' | head -c 400);;
   esac
-  printf 'cmd\t%s\t%s\t%s\t%s\n' "$k" "$st" "$(printf '%s' "$l" | tr '\t\n' '  ')" "$t"
+  _sc_line=$(printf 'cmd\t%s\t%s\t%s\t%s' "$k" "$st" "$(printf '%s' "$l" | tr '\t\n' '  ')" "$t")
+  if ! _sc_emit "$_sc_line"; then
+    _sc_mark_budget
+    break
+  fi
+  _sc_cmd_pids="$_sc_cmd_pids $k"
   case $l in */tasks/*.output*) x=${l##*/tasks/}; seen="$seen ${x%%.output*}"; y=${l%/tasks/*}; pairs="$pairs ${y##*/}/${x%%.output*}";; esac
   case $l in
   codex:*)
@@ -831,9 +887,8 @@ for k in $kids; do
       case $a in ""|0|1|*[!0-9]*) break;; esac
       anc="$anc,$a"
     done
-    printf 'anc\t%s\t%s\n' "$k" "${anc#,}";;
+    _sc_emit "$(printf 'anc\t%s\t%s' "$k" "${anc#,}")" || true;;
   esac
-  scan_cmd_tree "$k"
 done
 # (Of a session at work, which of the commands found running its log says it set going in the
 # background — the whole log: one begun an hour ago counts; a command run in front writes to a
@@ -844,9 +899,13 @@ for a in "$@"; do
   s=${a#w:}
   for f in "$HOME"/.claude/projects/*/"$s".jsonl; do
     [ -f "$f" ] || continue
-    grep -o '"backgroundTaskId":"[A-Za-z0-9_-]*"' "$f" | sed 's/^"backgroundTaskId":"//; s/"$//' | sort -u | while IFS= read -r id; do
-      case " $seen " in *" $id "*) printf 'bgid\t%s\t%s\n' "$s" "$id";; esac
-    done
+    _sc_ids=$(grep -o '"backgroundTaskId":"[A-Za-z0-9_-]*"' "$f" | sed 's/^"backgroundTaskId":"//; s/"$//' | sort -u)
+    while IFS= read -r id; do
+      [ -n "$id" ] || continue
+      case " $seen " in *" $id "*) _sc_emit "$(printf 'bgid\t%s\t%s' "$s" "$id")" || break;; esac
+    done <<CORRAL_BGIDS
+$_sc_ids
+CORRAL_BGIDS
     break
   done
 done
@@ -868,10 +927,78 @@ for p in $pairs; do
     tu=$(grep -m 1 -F "\"backgroundTaskId\":\"$id\"" "$f" | grep -o '"tool_use_id":"[A-Za-z0-9_-]*"' | head -n 1 | cut -d'"' -f4)
     [ -n "$tu" ] || break
     w=$(grep -m 1 -F "\"id\":\"$tu\"" "$f" | sed "s/^.*\"id\":\"$tu\"//; s/\"id\":\".*//; s/\"type\":\"tool_use\".*//" | grep -oE '"description":"([^"\\]|\\.)*"' | head -n 1 | head -c 600)
-    [ -n "$w" ] && printf 'desc\t%s\t%s\t{%s}\n' "$s" "$id" "$w"
+    [ -n "$w" ] && { _sc_emit "$(printf 'desc\t%s\t%s\t{%s}' "$s" "$id" "$w")" || true; }
     break
   done
 done
+# Priority 2: native background subagents — bounded newest-first streaming
+# (never buffer find output in a shell variable; drop description before
+# marking budget cut; mark budget cut if any required sub/cli line is dropped
+# or any candidate cap is hit), followed in the same consumer shell by
+# Priority 3 (CLI lines) so _sc_rem and _sc_bcut carry over.
+{
+  for a in "$@"; do
+    s=${a#?:}
+    for d in "$HOME"/.claude/projects/*/"$s"/subagents; do
+      [ -d "$d" ] || continue
+      _sc_find_sub "$d" |
+        awk -v s="$s" -v maxn=` + strconv.Itoa(subCandPerSession) + ` -v maxb=` + strconv.Itoa(subCandBytesPerSession) + ` '{
+          b += length($0) + 1
+          if ($0 == "UNSORTED_CAP" || NR > maxn || b > maxb) {
+            print "CAP\t"
+            exit
+          }
+          print s "\t" $0
+        }'
+      break
+    done
+  done
+} | {
+  _sc_cur_s=
+  _sc_cur_i=0
+  _sc_tot_c=0
+  _sc_tot_b=0
+  while IFS="$_bt_tab" read -r s j; do
+    if [ "$_sc_bcut" = 1 ]; then break; fi
+    if [ "$s" = CAP ]; then _sc_mark_budget; break; fi
+    [ -n "$j" ] || continue
+    _sc_tot_c=$((_sc_tot_c + 1))
+    _sc_tot_b=$((_sc_tot_b + ${#j} + 1))
+    if [ "$_sc_tot_c" -gt ` + strconv.Itoa(subCandTotalMax) + ` ] || [ "$_sc_tot_b" -gt ` + strconv.Itoa(subCandTotalBytes) + ` ]; then
+      _sc_mark_budget
+      break
+    fi
+    if [ "$s" != "$_sc_cur_s" ]; then _sc_cur_s=$s; _sc_cur_i=0; fi
+    [ "$_sc_cur_i" -lt ` + strconv.Itoa(subsScanned) + ` ] || continue
+    m=${j%.jsonl}.meta.json
+    [ -f "$m" ] || continue
+    meta=$(head -c 8192 "$m" 2>/dev/null | tr '\n\t' '  ')
+    case $meta in *'"requestShape":"background"'*) ;; *) continue;; esac
+    case $meta in *'"finished":true'*) continue;; esac
+    _sc_cur_i=$((_sc_cur_i + 1))
+    id=${j##*/agent-}; id=${id%.jsonl}
+    t=$(stat -c %Y "$m" 2>/dev/null || date -r "$m" +%s 2>/dev/null)
+    v=$(head -c 65536 "$j" 2>/dev/null | grep -o '"version":"[0-9.]*"' | head -n 1 | cut -d'"' -f4)
+    w=$(printf '%s' "$meta" | grep -oE '"description":"([^"\\]|\\.)*"' | head -n 1 | head -c 600)
+    _sc_line=$(printf 'sub\t%s\t%s\t%s\t%s\t{%s}' "$s" "$id" "$t" "$v" "$w")
+    if ! _sc_emit "$_sc_line"; then
+      # Omitting description text alone still counts as complete; only mark
+      # budget cut if even the description-less sub line cannot be emitted.
+      _sc_line=$(printf 'sub\t%s\t%s\t%s\t%s\t{}' "$s" "$id" "$t" "$v")
+      if ! _sc_emit "$_sc_line"; then
+        _sc_mark_budget
+        break
+      fi
+    fi
+  done
+  exec <&-
+  # Priority 3 (lowest): CLI subagent discovery lines within min(cliBudget, _sc_rem).
+  if [ "$_bt_budget" -gt "$_sc_rem" ]; then _bt_budget=$_sc_rem; fi
+  for _sc_k in $_sc_cmd_pids; do
+    [ "$_sc_bcut" = 0 ] || break
+    scan_cmd_tree "$_sc_k"
+  done
+}
 exit 0`
 	cmd := "sh -c " + sshx.QuoteShell(script) + " corral"
 	n := 0
@@ -954,6 +1081,15 @@ var cmdOutput = regexp.MustCompile(`/([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{
 // whole false where the scan was cut short (not all of them are there), or
 // the host's processes could not be read at all (no /proc: no boot time).
 func parseCmdScan(out string) (cmds map[string][]bgCmd, whole bool) {
+	cmds, whole, _ = parseCmdScanDetail(out)
+	return cmds, whole
+}
+
+// parseCmdScanDetail additionally reports budgetCut when the script stopped
+// emitting plain commands due to hitting its unified output byte budget
+// ("budget" marker), so cmdProber.run can retain previous lists instead of
+// clearing them.
+func parseCmdScanDetail(out string) (cmds map[string][]bgCmd, whole bool, budgetCut bool) {
 	whole = true
 	var btime, hz int64
 	type found struct {
@@ -980,6 +1116,9 @@ func parseCmdScan(out string) (cmds map[string][]bgCmd, whole bool) {
 		switch {
 		case line == "more":
 			whole = false
+		case line == "budget":
+			whole = false
+			budgetCut = true
 		case len(f) == 3 && f[0] == "anc" && cmdPID.MatchString(f[1]):
 			for _, a := range strings.Split(f[2], ",") {
 				if cmdPID.MatchString(a) {
@@ -1038,7 +1177,8 @@ func parseCmdScan(out string) (cmds map[string][]bgCmd, whole bool) {
 			} else {
 				continue
 			}
-			all = append(all, found{pid: f[1], session: strings.ToLower(session), cmd: bgCmd{Task: task, Title: cmdTitle(f[4]), Out: out, quiet: strings.HasPrefix(task, "monitor-")}, start: start})
+			mCmd, mCut := cmdMatchText(f[4])
+			all = append(all, found{pid: f[1], session: strings.ToLower(session), cmd: bgCmd{Task: task, Title: cmdTitle(f[4]), Out: out, quiet: strings.HasPrefix(task, "monitor-"), matchCmd: mCmd, matchCut: mCut}, start: start})
 		}
 	}
 	if btime <= 0 {
@@ -1102,7 +1242,7 @@ func parseCmdScan(out string) (cmds map[string][]bgCmd, whole bool) {
 		c.cmd.clis = attached
 		got[c.session] = append(got[c.session], c.cmd)
 	}
-	return got, whole
+	return got, whole, budgetCut
 }
 
 // identifyBgCLI strictly identifies whether a process inside a background
@@ -1385,11 +1525,13 @@ func bgCLILogValid(agent, log, sid string) bool {
 }
 
 // splitBgCmds partitions background commands into plain commands (no resolved
-// agent CLI) and promoted CLI subagents (one per resolved CLI session).
+// agent CLI, or synthetic task whose command exceeded maxBgCmdMatchBytes so it
+// cannot be safely matched without risking duplicate plain+CLI display) and
+// promoted CLI subagents (one per resolved CLI session).
 func splitBgCmds(cmds []bgCmd) (plain []bgCmd, cliAgents []bgAgent) {
 	seen := map[string]bool{}
 	for _, c := range cmds {
-		if len(c.clis) == 0 {
+		if len(c.clis) == 0 || (isSyntheticBgTask(c.Task) && (c.matchCut || (c.matchCmd == "" && c.Title == ""))) {
 			plain = append(plain, c)
 			continue
 		}
@@ -1404,30 +1546,80 @@ func splitBgCmds(cmds []bgCmd) (plain []bgCmd, cliAgents []bgAgent) {
 			}
 			seen[k] = true
 			cliAgents = append(cliAgents, bgAgent{
-				ID:    cli.Session,
-				What:  what,
-				Since: c.Since,
-				Agent: cli.Agent,
-				Task:  c.Task,
-				Cmd:   c.Title,
-				log:   cli.Log,
+				ID:       cli.Session,
+				What:     what,
+				Since:    c.Since,
+				Agent:    cli.Agent,
+				Task:     c.Task,
+				Cmd:      c.Title,
+				log:      cli.Log,
+				matchCmd: c.matchCmd,
+				matchCut: c.matchCut,
 			})
 		}
 	}
 	return plain, cliAgents
 }
 
+func bgCmdTaskIDs(cmds []bgCmd) []string {
+	out := make([]string, 0, len(cmds))
+	for _, c := range cmds {
+		if c.Task != "" {
+			out = append(out, c.Task)
+		}
+	}
+	return out
+}
+
 func isSyntheticBgTask(task string) bool {
 	return strings.HasPrefix(task, "codex-") || strings.HasPrefix(task, "agy-") || strings.HasPrefix(task, "monitor-")
 }
 
+func normBgCmdText(s string) string {
+	return strings.Join(strings.Fields(s), " ")
+}
+
+func exactBgCmdMatch(r convo.Running, grp []bgAgent) bool {
+	if grp[0].matchCut || r.CmdCut {
+		return false
+	}
+	cmdText := normBgCmdText(grp[0].matchCmd)
+	if cmdText == "" {
+		cmdText = normBgCmdText(grp[0].Cmd)
+	}
+	if cmdText == "" || len(cmdText) > maxBgCmdMatchBytes {
+		return false
+	}
+	// Require the log-side full command (r.Cmd); never fall back to the 300-byte
+	// truncated display summary r.What.
+	rText := normBgCmdText(r.Cmd)
+	if rText == "" || len(rText) > maxBgCmdMatchBytes {
+		return false
+	}
+	return rText == cmdText
+}
+
 // upgradeRunningWithCLIs upgrades any log-tracked background command in running
-// whose task ID (or, for Codex/agy/Monitor synthetic host tasks, whose command
-// text) matches a host-discovered background CLI subagent into a kind="agent"
-// entry carrying the CLI kind and session ID.
+// whose task ID (or, for Codex/agy/Monitor synthetic host tasks, whose exact
+// normalized command text uniquely matches 1-to-1) matches a host-discovered
+// background CLI subagent into a kind="agent" entry carrying the CLI kind,
+// session ID, and host background task ID.
 func upgradeRunningWithCLIs(running []convo.Running, cliAgents []bgAgent) []convo.Running {
-	if len(running) == 0 || len(cliAgents) == 0 {
-		return running
+	out, _ := reconcileRunningWithCLIs(running, cliAgents)
+	return out
+}
+
+// reconcileRunningWithCLIs upgrades matching running commands to CLI subagents
+// AND filters cliAgents to avoid emitting unmatched synthetic CLI entries
+// alongside unupgraded opaque/truncated or ambiguous plain commands (e.g.
+// Codex code-mode multi-command calls where log-side Cmd is empty and CmdCut
+// is true).
+func reconcileRunningWithCLIs(running []convo.Running, cliAgents []bgAgent) ([]convo.Running, []bgAgent) {
+	if len(cliAgents) == 0 {
+		return running, nil
+	}
+	if len(running) == 0 {
+		return running, cliAgents
 	}
 	byTask := map[string][]bgAgent{}
 	var synthOrder []string
@@ -1445,34 +1637,53 @@ func upgradeRunningWithCLIs(running []convo.Running, cliAgents []bgAgent) []conv
 		}
 	}
 	if len(byTask) == 0 {
-		return running
+		return running, cliAgents
 	}
-	usedSynth := map[string]bool{}
+
+	// Pre-compute 1-to-1 exact-text matches for synthetic host tasks so we never
+	// upgrade on substring containment or ambiguous multi-candidate matches.
+	matchedByIdx := map[int][]bgAgent{}
+	matchedTasks := map[string]bool{}
+	runCands := map[int][]string{}
+	synthCands := map[string][]int{}
+	for i, r := range running {
+		if r.Kind != "cmd" {
+			continue
+		}
+		if grp := byTask[r.ID]; len(grp) > 0 {
+			matchedByIdx[i] = grp
+			matchedTasks[r.ID] = true
+			continue
+		}
+		if len(synthOrder) == 0 {
+			continue
+		}
+		for _, task := range synthOrder {
+			if exactBgCmdMatch(r, synthByTask[task]) {
+				runCands[i] = append(runCands[i], task)
+				synthCands[task] = append(synthCands[task], i)
+			}
+		}
+	}
+	for i, tasks := range runCands {
+		if len(tasks) == 1 && len(synthCands[tasks[0]]) == 1 {
+			matchedByIdx[i] = synthByTask[tasks[0]]
+			matchedTasks[tasks[0]] = true
+		}
+	}
+
+	hasOpaqueCmd := false
 	out := make([]convo.Running, 0, len(running))
-	for _, r := range running {
+	for i, r := range running {
 		if r.Kind != "cmd" {
 			out = append(out, r)
 			continue
 		}
-		matched := byTask[r.ID]
-		if len(matched) == 0 && len(synthOrder) > 0 {
-			for _, task := range synthOrder {
-				if usedSynth[task] {
-					continue
-				}
-				grp := synthByTask[task]
-				cmdText := grp[0].Cmd
-				if cmdText == "" {
-					cmdText = grp[0].What
-				}
-				if codexSameCmd(r.Cmd, cmdText) || codexSameCmd(r.What, cmdText) {
-					matched = grp
-					usedSynth[task] = true
-					break
-				}
-			}
-		}
+		matched := matchedByIdx[i]
 		if len(matched) == 0 {
+			if r.CmdCut || normBgCmdText(r.Cmd) == "" {
+				hasOpaqueCmd = true
+			}
 			out = append(out, r)
 			continue
 		}
@@ -1488,6 +1699,10 @@ func upgradeRunningWithCLIs(running []convo.Running, cliAgents []bgAgent) []conv
 			if ts == "" && a.Since > 0 {
 				ts = time.UnixMilli(a.Since).UTC().Format(time.RFC3339)
 			}
+			taskID := a.Task
+			if taskID == "" {
+				taskID = r.ID
+			}
 			out = append(out, convo.Running{
 				ID:    a.ID,
 				What:  what,
@@ -1496,17 +1711,22 @@ func upgradeRunningWithCLIs(running []convo.Running, cliAgents []bgAgent) []conv
 				Cmd:   r.Cmd,
 				Out:   r.Out,
 				Agent: a.Agent,
-				Task:  r.ID,
+				Task:  taskID,
 			})
 		}
 	}
-	return out
+
+	var keptCLIs []bgAgent
+	for _, a := range cliAgents {
+		if isSyntheticBgTask(a.Task) && !matchedTasks[a.Task] && (hasOpaqueCmd || len(synthCands[a.Task]) > 0) {
+			continue
+		}
+		keptCLIs = append(keptCLIs, a)
+	}
+	return out, keptCLIs
 }
 
-// cmdTitle: what a command runs, from its shell's arguments from eval on
-// ("'<command>' < /dev/null && pwd -P >| …" as Claude Code words it; of
-// a long one, its start), on one line; "" when it cannot be told.
-func cmdTitle(s string) string {
+func cleanBgCmdText(s string) string {
 	if i := strings.LastIndex(s, "' < /dev/null"); i >= 0 {
 		s = s[:i]
 	}
@@ -1518,7 +1738,28 @@ func cmdTitle(s string) string {
 		}
 		return r
 	}, s)
-	return truncate(s, 80)
+	return s
+}
+
+// cmdMatchText returns the cleaned full command for exact synthetic task
+// matching, or ("", true) when the command exceeds maxBgCmdMatchBytes so
+// truncated commands never participate in upgrade matching.
+func cmdMatchText(s string) (string, bool) {
+	if len(s) > maxBgCmdMatchBytes {
+		return "", true
+	}
+	cleaned := cleanBgCmdText(s)
+	if len(cleaned) > maxBgCmdMatchBytes {
+		return "", true
+	}
+	return cleaned, false
+}
+
+// cmdTitle: what a command runs, from its shell's arguments from eval on
+// ("'<command>' < /dev/null && pwd -P >| …" as Claude Code words it; of
+// a long one, its start), on one line; "" when it cannot be told.
+func cmdTitle(s string) string {
+	return truncate(cleanBgCmdText(s), 80)
 }
 
 // cmdSession: what pane's agent's commands left running are found by — a

@@ -26,7 +26,10 @@ func (s *Server) tmuxCmdsOf(sess *term.Session) *cmdProber {
 		if err != nil {
 			return nil, false, err
 		}
-		got, whole := parseCmdScan(string(out))
+		got, whole, budgetCut := parseCmdScanDetail(string(out))
+		if budgetCut {
+			return nil, false, errScanBudget
+		}
 		return got, whole, nil
 	})
 	p.forget = tmuxForget
