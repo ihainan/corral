@@ -2022,6 +2022,7 @@ type convoAnswer struct {
 	// first of them (see convo_tmux_cmds.go).
 	BgCmds      int       `json:"bg_cmds,omitempty"`
 	BgCmdList   []bgCmd   `json:"bg_cmd_list,omitempty"`
+	BgCmdTasks  []string  `json:"bg_cmd_tasks,omitempty"`
 	BgAgentList []bgAgent `json:"bg_agent_list,omitempty"`
 	// Title is the session's own (Claude Code's, or the person's);
 	// Tasks the agent's task list as the log has it.
@@ -2216,6 +2217,9 @@ func (s *Server) apiConversation(w http.ResponseWriter, r *http.Request) {
 	cmds, cliAgents := s.tmuxCmdsTell(sess, st)
 	if len(cmds) > 0 {
 		ans.BgCmds, ans.BgCmdList = len(cmds), cmds[:min(len(cmds), maxCmdsShown)]
+		if len(cmds) > maxCmdsShown {
+			ans.BgCmdTasks = bgCmdTaskIDs(cmds)
+		}
 	}
 	if sess.Persistence == "herdr" && pane != "" && !st.sub && st.bind != nil {
 		if p := s.herdrSocks.cmdsOf(sess.ID); p != nil {
@@ -5033,7 +5037,7 @@ func (s *Server) apiConversationSubagent(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	q := r.URL.Query()
-	pane, agent, cli, cliParent := q.Get("pane"), q.Get("agent"), q.Get("cli"), q.Get("cli_parent")
+	pane, agent, cli, cliParent, cliChain := q.Get("pane"), q.Get("agent"), q.Get("cli"), q.Get("cli_parent"), q.Get("cli_chain")
 	if (pane != "" && !herdrPane.MatchString(pane)) || (!convo.SubagentID(agent) && !convo.CodexAgentID(agent)) {
 		writeError(w, http.StatusBadRequest, "bad_request", "bad pane or subagent")
 		return
@@ -5098,8 +5102,9 @@ func (s *Server) apiConversationSubagent(w http.ResponseWriter, r *http.Request)
 			return
 		}
 		if cliParent != "" {
-			// Nested native subagent spawned inside this background CLI session.
-			s.serveSubagentFromRoot(w, r, sess, stKey, cli, file, sid, agent, gen, rev, older)
+			// Nested native subagent (direct child or deeper descendant via cli_chain)
+			// spawned inside this verified background CLI session.
+			s.serveBgCLISubagent(w, r, sess, stKey, cli, file, sid, cliChain, agent, gen, rev, older)
 			return
 		}
 		s.subagentAnswer(w, r, sess, stKey, cli, file, sid, gen, rev, older, false)
@@ -5288,6 +5293,231 @@ func checkBgCLILog(c *sftplite.Client, cli, file, sid string) error {
 		}
 	}
 	return nil
+}
+
+const (
+	maxCLIChainDepth    = 8
+	maxAgyOwnershipScan = 16 << 20
+	agyOwnershipChunk   = 256 << 10
+)
+
+// serveBgCLISubagent resolves and serves a native subagent (direct child or
+// deeper descendant via cliChain) spawned inside a verified background CLI
+// session. Every hop from the scan-verified CLI root (rootSID, rootFile) down
+// to agent is verified server-side; client-supplied cli_chain values are never
+// trusted without walking ownership from rootSID.
+func (s *Server) serveBgCLISubagent(w http.ResponseWriter, r *http.Request, sess *term.Session, rootKey, cli, rootFile, rootSID, cliChain, agent string, gen int64, rev int, older bool) {
+	var hops []string
+	if cliChain != "" {
+		parts := strings.Split(cliChain, ",")
+		if len(parts) > maxCLIChainDepth {
+			writeError(w, http.StatusBadRequest, "bad_request", "bad cli chain")
+			return
+		}
+		for _, p := range parts {
+			if p == "" || (!convo.SubagentID(p) && !convo.CodexAgentID(p)) {
+				writeError(w, http.StatusBadRequest, "bad_request", "bad cli chain")
+				return
+			}
+			hops = append(hops, p)
+		}
+	}
+	hops = append(hops, agent)
+	seen := map[string]bool{strings.ToLower(rootSID): true}
+	for _, h := range hops {
+		hl := strings.ToLower(h)
+		if seen[hl] {
+			writeError(w, http.StatusBadRequest, "bad_request", "bad cli chain")
+			return
+		}
+		seen[hl] = true
+	}
+
+	switch cli {
+	case "codex":
+		for _, h := range hops {
+			if !convo.CodexAgentID(h) {
+				writeError(w, http.StatusBadRequest, "bad_request", "bad pane or subagent")
+				return
+			}
+		}
+		curKey, curLog, curSID := rootKey, rootFile, rootSID
+		var err error
+		for _, hop := range hops {
+			hopKey := curKey + "\x00" + curLog + "\x00" + hop
+			var hopFile string
+			if st := s.subConvos.peek(hopKey); st != nil {
+				st.mu.Lock()
+				hopFile = st.log
+				st.mu.Unlock()
+			}
+			if hopFile != "" {
+				err = s.withSFTP(r.Context(), sess, convoReadLimit, func(c *sftplite.Client) error {
+					return codexSubagentStill(c, curLog, hopFile)
+				})
+			} else {
+				err = s.withSFTP(r.Context(), sess, convoReadLimit, func(c *sftplite.Client) error {
+					var lerr error
+					hopFile, lerr = codexSubagentLog(c, curLog, curSID, hop, time.Now())
+					return lerr
+				})
+			}
+			if err != nil {
+				break
+			}
+			curKey, curLog, curSID = hopKey, hopFile, hop
+		}
+		if errors.Is(err, errSubagentFile) {
+			writeError(w, http.StatusForbidden, "not_allowed", "not a subagent's log")
+			return
+		}
+		if errors.Is(err, errSubagentUnsure) {
+			writeError(w, http.StatusServiceUnavailable, "too_many_logs", err.Error())
+			return
+		}
+		if err != nil {
+			writeFileError(w, err)
+			return
+		}
+		s.subagentAnswer(w, r, sess, curKey, "codex", curLog, agent, gen, rev, older, false)
+		return
+
+	case "agy":
+		bi := strings.LastIndex(rootFile, "/brain/")
+		if bi < 0 {
+			writeError(w, http.StatusForbidden, "not_allowed", "not a subagent's log")
+			return
+		}
+		brain := rootFile[:bi] + "/brain"
+		for _, h := range hops {
+			if !sessionUUID.MatchString(h) {
+				writeError(w, http.StatusBadRequest, "bad_request", "bad pane or subagent")
+				return
+			}
+		}
+		curKey, curLog := rootKey, rootFile
+		var err error
+		for _, rawHop := range hops {
+			hop := strings.ToLower(rawHop)
+			hopLog := brain + "/" + hop + "/.system_generated/logs/transcript_full.jsonl"
+			hopKey := curKey + "\x00" + curLog + "\x00" + hop
+			cached := false
+			if st := s.subConvos.peek(hopKey); st != nil {
+				st.mu.Lock()
+				cached = st.log == hopLog
+				st.mu.Unlock()
+			}
+			inMemOwned := cached
+			if !inMemOwned {
+				if parentSt := s.subConvos.peek(curKey); parentSt != nil {
+					parentSt.mu.Lock()
+					if parentSt.log == curLog && parentSt.parser != nil {
+						inMemOwned = convo.AgyEntriesSpawnedSubagent(parentSt.parser.Since(0), hop)
+					}
+					parentSt.mu.Unlock()
+				}
+			}
+			err = s.withSFTP(r.Context(), sess, convoReadLimit, func(c *sftplite.Client) error {
+				if lerr := checkBgCLILog(c, "agy", hopLog, hop); lerr != nil {
+					return lerr
+				}
+				if inMemOwned {
+					return nil
+				}
+				owned, oerr := agyParentLogHasSubagent(c, curLog, hop)
+				if oerr != nil {
+					return oerr
+				}
+				if !owned {
+					return errSubagentFile
+				}
+				return nil
+			})
+			if err != nil {
+				break
+			}
+			curKey, curLog = hopKey, hopLog
+		}
+		if errors.Is(err, errSubagentFile) {
+			writeError(w, http.StatusForbidden, "not_allowed", "not a subagent's log")
+			return
+		}
+		if err != nil {
+			writeFileError(w, err)
+			return
+		}
+		s.subagentAnswer(w, r, sess, curKey, "agy", curLog, strings.ToLower(agent), gen, rev, older, false)
+		return
+
+	case "claude":
+		for _, h := range hops {
+			if !convo.SubagentID(h) {
+				writeError(w, http.StatusBadRequest, "bad_request", "bad pane or subagent")
+				return
+			}
+		}
+		home := strings.TrimSuffix(rootFile, ".jsonl")
+		dir := home + "/subagents"
+		err := s.withSFTP(r.Context(), sess, convoReadLimit, func(c *sftplite.Client) error {
+			for _, d := range []string{home, dir} {
+				fi, err := c.Lstat(d)
+				if err != nil {
+					return err
+				}
+				if fi.Mode()&fs.ModeSymlink != 0 || !fi.IsDir() {
+					return errSubagentFile
+				}
+			}
+			for _, h := range hops {
+				f := dir + "/agent-" + h + ".jsonl"
+				fi, err := c.Lstat(f)
+				if err != nil {
+					return err
+				}
+				if fi.Mode()&fs.ModeSymlink != 0 || !fi.Mode().IsRegular() {
+					return errSubagentFile
+				}
+			}
+			return nil
+		})
+		if errors.Is(err, errSubagentFile) {
+			writeError(w, http.StatusForbidden, "not_allowed", "not a subagent's log")
+			return
+		}
+		if err != nil {
+			writeFileError(w, err)
+			return
+		}
+		file := dir + "/agent-" + agent + ".jsonl"
+		s.subagentAnswer(w, r, sess, rootKey+"\x00"+rootFile+"\x00"+agent, "claude", file, agent, gen, rev, older, true)
+		return
+	}
+	writeError(w, http.StatusBadRequest, "bad_request", "bad cli subagent")
+}
+
+// agyParentLogHasSubagent streams an agy parent session's transcript_full.jsonl
+// over SFTP (bounded by maxAgyOwnershipScan) and reports whether it contains an
+// invoke_subagent tool call whose paired GENERIC result returned subID.
+func agyParentLogHasSubagent(c *sftplite.Client, parentLog, subID string) (bool, error) {
+	finder := convo.NewAgySubagentFinder(subID)
+	var off int64
+	for off < maxAgyOwnershipScan {
+		chunk, err := c.ReadRange(parentLog, off, agyOwnershipChunk)
+		if err != nil {
+			return false, err
+		}
+		if len(chunk) == 0 {
+			break
+		}
+		if finder.Feed(chunk) {
+			return true, nil
+		}
+		off += int64(len(chunk))
+		if len(chunk) < agyOwnershipChunk {
+			break
+		}
+	}
+	return finder.Finish(), nil
 }
 
 // subagentAnswer reads a subagent's log (file, of kind's: claude, codex, agy)

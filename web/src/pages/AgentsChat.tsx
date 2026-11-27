@@ -271,7 +271,7 @@ const labelOf = (e: Entry, said: string, hosts: number, named = true, sameWsPare
 function cmdsOf(r: AgentRow): RowCmds | undefined {
   const a = r.a
   if (r.lost || !a.bg_cmds || (a.status !== 'done' && a.status !== 'idle')) return undefined
-  return { n: a.bg_cmds, list: (a.bg_cmd_list ?? []).map((c) => ({ task: c.task, title: c.title, desc: c.desc, since: c.since, out: c.out })) }
+  return { n: a.bg_cmds, list: (a.bg_cmd_list ?? []).map((c) => ({ task: c.task, title: c.title, desc: c.desc, since: c.since, out: c.out })), tasks: a.bg_cmd_tasks }
 }
 
 // What it set going in the background, to hang under its row (UI item 8,

@@ -190,6 +190,33 @@ func TestAgySubagentIDAndSetTitle(t *testing.T) {
 	if len(entries) != 1 || entries[0].Parts[0].Tool.Name != "Agent" || entries[0].Parts[0].Tool.AgentID != subUUID {
 		t.Fatalf("subagent tool = %+v", entries[0].Parts[0].Tool)
 	}
+	if !AgyEntriesSpawnedSubagent(entries, subUUID) {
+		t.Fatalf("AgyEntriesSpawnedSubagent = false, want true")
+	}
+	if AgyEntriesSpawnedSubagent(entries, "99999999-2222-3333-4444-555555555555") {
+		t.Fatalf("AgyEntriesSpawnedSubagent matched unrelated UUID")
+	}
+
+	// Streaming finder: ignores UUID in non-invoke_subagent output, handles split chunks.
+	otherUUID := "99999999-2222-3333-4444-555555555555"
+	raw := strings.Join([]string{
+		`{"step_index":1,"type":"PLANNER_RESPONSE","tool_calls":[{"name":"read_file","args":{"Path":"/x"}},{"name":"invoke_subagent","args":{"TypeName":"research","Role":"R","Prompt":"P"}}]}`,
+		`{"step_index":2,"type":"GENERIC","content":"conversationId: ` + otherUUID + `"}`,
+		`{"step_index":3,"type":"GENERIC","content":"Subagent launched with conversationId: ` + subUUID + `"}`,
+	}, "\n") + "\n"
+	fGood := NewAgySubagentFinder(subUUID)
+	fBad := NewAgySubagentFinder(otherUUID)
+	for i := 0; i < len(raw); i += 17 {
+		end := min(i+17, len(raw))
+		fGood.Feed([]byte(raw[i:end]))
+		fBad.Feed([]byte(raw[i:end]))
+	}
+	if !fGood.Finish() {
+		t.Fatalf("NewAgySubagentFinder did not match invoke_subagent UUID across split chunks")
+	}
+	if fBad.Finish() {
+		t.Fatalf("NewAgySubagentFinder falsely matched UUID from read_file output")
+	}
 }
 
 func TestAgySystemMessagePreambleAndReminder(t *testing.T) {

@@ -63,8 +63,9 @@ type herdrAgent struct {
 	// BgCmds: for a Claude Code agent done or idle, how many commands it
 	// left running in the background, the first of them listed (see
 	// cmdProber); none where not known.
-	BgCmds    int     `json:"bg_cmds,omitempty"`
-	BgCmdList []bgCmd `json:"bg_cmd_list,omitempty"`
+	BgCmds     int      `json:"bg_cmds,omitempty"`
+	BgCmdList  []bgCmd  `json:"bg_cmd_list,omitempty"`
+	BgCmdTasks []string `json:"bg_cmd_tasks,omitempty"`
 	// (While a Claude Code agent is at work, BgCmds and BgCmdList tell those
 	// commands it set going in the background, not what it runs in front.)
 	// BgAgentList: for a Claude Code agent, the subagents it sent off in the

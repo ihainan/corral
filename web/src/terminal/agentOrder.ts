@@ -64,6 +64,7 @@ export interface ConvoListRow {
 export interface RowCmds {
   n: number
   list: { task?: string; title?: string; desc?: string; since?: number; out?: string }[] // (desc: what the agent said it does)
+  tasks?: string[] // all task IDs counted in n when n exceeds list.length
 }
 
 // One thing an agent set going in the background, as its row lists them: a

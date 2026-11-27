@@ -259,10 +259,21 @@ export function conversationRunningItems(
   return [...agents, ...cmds]
 }
 
+function exactCmdText(a?: string, b?: string): boolean {
+  const x = normCmd(a)
+  const y = normCmd(b)
+  return !!x && !!y && x === y
+}
+
 // filterHostCmds removes any host-scanned background command already promoted
-// to a CLI subagent in runningItems (by exact task ID or synthetic command text
-// match), decrementing cmds.n accordingly so header status counts and SessionCard
-// never double-count or show a promoted CLI task as a plain command.
+// to a CLI subagent in runningItems, decrementing cmds.n accordingly so header
+// status counts and SessionCard never double-count or double-list it:
+// - When a host command has a task ID, match ONLY by exact task ID.
+// - When a host command has no task ID, match ONLY by exact normalized command
+//   text equality, and each CLI subagent consumes at most one command.
+// - When cmds.tasks lists overflow task IDs beyond the first 8 in cmds.list,
+//   also decrement cmds.n for each unique overflow task ID confirmed to belong
+//   to a promoted CLI subagent (never guessing when uncertain).
 export function filterHostCmds(cmds: RowCmds | undefined, runningItems: RunningTaskLike[]): RowCmds | undefined {
   if (!cmds) return undefined
   const cliRunning = runningItems.filter((r) => r.kind === 'agent' && !!r.agent)
@@ -271,24 +282,60 @@ export function filterHostCmds(cmds: RowCmds | undefined, runningItems: RunningT
   for (const r of cliRunning) {
     if (r.task) ownedTasks.add(r.task)
   }
+  const listTasks = new Set<string>()
+  for (const c of cmds.list) {
+    if (c.task) listTasks.add(c.task)
+  }
+  const usedCli = new Set<number>()
+  for (let i = 0; i < cliRunning.length; i++) {
+    const t = cliRunning[i].task
+    if (t && (listTasks.has(t) || (cmds.tasks?.includes(t) ?? false))) {
+      usedCli.add(i)
+    }
+  }
   const kept: RowCmds['list'] = []
   let removed = 0
   for (const c of cmds.list) {
-    const byTask = !!c.task && ownedTasks.has(c.task)
-    const bySynth =
-      !byTask &&
-      !!c.task &&
-      isSyntheticHostCmd(c.task) &&
-      cliRunning.some((r) => sameCmdText(c.title || c.desc, r.cmd || r.what) || sameCmdText(c.desc || c.title, r.what))
-    if (byTask || bySynth) {
+    if (c.task) {
+      if (ownedTasks.has(c.task)) {
+        removed++
+        continue
+      }
+      kept.push(c)
+      continue
+    }
+    // No task ID on c: fall back to exact normalized command text equality,
+    // consuming at most one host command per unused CLI subagent.
+    let hit = -1
+    for (let i = 0; i < cliRunning.length; i++) {
+      if (usedCli.has(i)) continue
+      const r = cliRunning[i]
+      if (exactCmdText(c.title || c.desc, r.cmd || r.what) || exactCmdText(c.desc || c.title, r.what)) {
+        hit = i
+        break
+      }
+    }
+    if (hit >= 0) {
+      usedCli.add(hit)
       removed++
       continue
     }
     kept.push(c)
   }
+  // Account for promoted tasks that were counted in cmds.n beyond the first 8
+  // items shown in cmds.list, ONLY when cmds.tasks explicitly confirms membership.
+  if (cmds.tasks?.length) {
+    const seenOverflow = new Set<string>()
+    for (const t of cmds.tasks) {
+      if (!t || listTasks.has(t) || seenOverflow.has(t)) continue
+      seenOverflow.add(t)
+      if (ownedTasks.has(t)) removed++
+    }
+  }
   if (removed === 0) return cmds
   const n = Math.max(0, cmds.n - removed)
-  return n > 0 || kept.length > 0 ? { n: Math.max(n, kept.length), list: kept } : undefined
+  const keptTasks = cmds.tasks ? cmds.tasks.filter((t) => !ownedTasks.has(t)) : undefined
+  return n > 0 || kept.length > 0 ? { n: Math.max(n, kept.length), list: kept, ...(keptTasks?.length ? { tasks: keptTasks } : {}) } : undefined
 }
 
 // Cached tmux background state (both plain commands and promoted CLI subagents)
@@ -324,8 +371,9 @@ export function readTmuxBg(
 }
 
 // subagentRequestUrl builds the read-only subagent conversation URL, carrying
-// optional cli ('agy' | 'claude' | 'codex') and cli_parent (for native subagents
-// spawned inside a background CLI session).
+// optional cli ('agy' | 'claude' | 'codex'), cli_parent (the scan-verified root
+// CLI session), and cli_chain (intermediate descendant IDs down to the direct
+// parent when drilling deeper than depth 2).
 export function subagentRequestUrl(
   sessionId: string,
   pane: string,
@@ -335,10 +383,12 @@ export function subagentRequestUrl(
   older: boolean,
   cli?: string,
   cliParent?: string,
+  cliChain?: string[],
 ): string {
   const q = new URLSearchParams({ pane, agent, gen: String(gen), rev: String(rev), older: older ? '1' : '0' })
   if (cli) q.set('cli', cli)
   if (cli && cliParent) q.set('cli_parent', cliParent)
+  if (cli && cliParent && cliChain?.length) q.set('cli_chain', cliChain.join(','))
   return `/api/sessions/${sessionId}/conversation/subagent?` + q.toString()
 }
 
@@ -346,6 +396,138 @@ export function subagentRequestUrl(
 // depth-1 subagents poll only while live; nested subagents poll while their log grew recently.
 export function shouldContinueSubPoll(live: boolean, nested: boolean, grewAt: number, now: number, growingMs = 30000): boolean {
   return live || (nested && now - grewAt < growingMs)
+}
+
+export interface SubPollPage<E extends { seq: number }, R> {
+  entries: E[]
+  gen: number
+  rev: number
+  reset?: boolean
+  older?: boolean
+  older_cut?: boolean
+  more?: boolean
+  running?: R[]
+}
+
+export interface SubPollState<E extends { seq: number }, R> {
+  entries: E[]
+  running: R[]
+  older: boolean
+  olderCut: boolean
+  loading: boolean
+  failed: boolean
+  grewAt: number
+}
+
+export interface SubPollerDeps<E extends { seq: number }, R> {
+  sessionId: string
+  pane: string
+  agent: string
+  cli?: string
+  cliParent?: string
+  cliChain?: string[]
+  nested: boolean
+  live: () => boolean
+  active: () => boolean
+  hidden: () => boolean
+  now?: () => number
+  everyMs?: number
+  growingMs?: number
+  batch?: number
+  fetchPage: (url: string, signal: AbortSignal) => Promise<SubPollPage<E, R>>
+  onState: (update: (prev: SubPollState<E, R>) => SubPollState<E, R>) => void
+  setTimer?: (fn: () => void, ms: number) => unknown
+  clearTimer?: (id: unknown) => void
+}
+
+// createSubConvoPoller encapsulates the polling, batching, abort, and timer
+// lifecycle of useSubConvo so it can be exercised directly with fake timers
+// and stubbed fetches without React/DOM test dependencies.
+export function createSubConvoPoller<E extends { seq: number }, R>(deps: SubPollerDeps<E, R>): {
+  run: (older: boolean) => Promise<void>
+  stop: () => void
+} {
+  const now = deps.now ?? Date.now
+  const everyMs = deps.everyMs ?? 3000
+  const growingMs = deps.growingMs ?? 30000
+  const batch = deps.batch ?? 20
+  const setTimer = deps.setTimer ?? ((fn, ms) => setTimeout(fn, ms))
+  const clearTimer = deps.clearTimer ?? ((id) => clearTimeout(id as ReturnType<typeof setTimeout>))
+
+  let gen = 0
+  let rev = 0
+  let byseq = new Map<number, E>()
+  let again = false
+  let grewAt = 0
+  let curCtl: AbortController | null = null
+  let timer: unknown = undefined
+  let stopped = false
+
+  const clearPendingTimer = () => {
+    if (timer !== undefined) {
+      clearTimer(timer)
+      timer = undefined
+    }
+  }
+
+  const run = async (older: boolean): Promise<void> => {
+    if (stopped || deps.hidden() || !deps.active()) return
+    if (curCtl && !curCtl.signal.aborted) {
+      again = true
+      return
+    }
+    again = false
+    const ctl = new AbortController()
+    curCtl = ctl
+    deps.onState((s) => ({ ...s, loading: true }))
+    let more = false
+    try {
+      for (let n = 0; n < batch; n++) {
+        const url = subagentRequestUrl(deps.sessionId, deps.pane, deps.agent, gen, rev, older && n === 0, deps.cli, deps.cliParent, deps.cliChain)
+        const r = await deps.fetchPage(url, ctl.signal)
+        if (stopped || ctl.signal.aborted) return
+        if (r.reset || r.gen !== gen) byseq = new Map()
+        if (r.entries.length) grewAt = now()
+        for (const e of r.entries) byseq.set(e.seq, e)
+        gen = r.gen
+        rev = r.rev
+        more = !!r.more
+        const entries = [...byseq.values()].sort((x, y) => x.seq - y.seq)
+        const running = r.running ?? []
+        const hasOlder = !!r.older
+        const olderCut = !!r.older_cut
+        const grew = grewAt
+        deps.onState(() => ({ entries, running, older: hasOlder, olderCut, loading: false, failed: false, grewAt: grew }))
+        if (!more || deps.hidden() || !deps.active()) break
+      }
+    } catch {
+      if (!stopped && !ctl.signal.aborted) deps.onState((s) => ({ ...s, loading: false, failed: true }))
+      more = false
+    } finally {
+      if (curCtl === ctl) curCtl = null
+      if (!stopped && !ctl.signal.aborted) {
+        clearPendingTimer()
+        const goesOn = shouldContinueSubPoll(deps.live(), deps.nested, grewAt, now(), growingMs)
+        const wait = again || more ? 0 : goesOn ? everyMs : -1
+        if (wait >= 0) {
+          timer = setTimer(() => {
+            timer = undefined
+            if (!stopped && !deps.hidden() && deps.active()) void run(false)
+          }, wait)
+        }
+      }
+    }
+  }
+
+  const stop = () => {
+    stopped = true
+    again = false
+    curCtl?.abort()
+    curCtl = null
+    clearPendingTimer()
+  }
+
+  return { run, stop }
 }
 
 // convoLastUserMs returns the unix-ms timestamp of the latest non-mid, non-gone

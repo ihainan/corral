@@ -915,6 +915,163 @@ func agyParseSubagentID(body string) string {
 	return strings.ToLower(m[1])
 }
 
+// AgyEntriesSpawnedSubagent reports whether any parsed entry of an Antigravity
+// CLI parent session contains an invoke_subagent (Agent) tool call whose result
+// returned subID.
+func AgyEntriesSpawnedSubagent(entries []Entry, subID string) bool {
+	if subID == "" {
+		return false
+	}
+	for _, e := range entries {
+		for _, p := range e.Parts {
+			if p.Kind == KindTool && p.Tool != nil && p.Tool.Name == "Agent" && strings.EqualFold(p.Tool.AgentID, subID) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// AgySubagentFinder scans an Antigravity CLI parent transcript_full.jsonl
+// stream for an invoke_subagent tool call paired (FIFO) with a GENERIC result
+// carrying the target subagent conversation UUID.
+type AgySubagentFinder struct {
+	target   string
+	pending  []bool
+	buf      []byte
+	skipping bool
+	head     []byte
+	found    bool
+}
+
+const maxAgyOwnershipLine = 4 << 20
+
+// NewAgySubagentFinder returns a streaming finder for subID in an agy parent log.
+func NewAgySubagentFinder(subID string) *AgySubagentFinder {
+	return &AgySubagentFinder{target: strings.ToLower(strings.TrimSpace(subID))}
+}
+
+// Found reports whether target was matched as a spawned subagent.
+func (f *AgySubagentFinder) Found() bool { return f.found }
+
+// Feed ingests the next chunk of transcript_full.jsonl bytes and returns true
+// as soon as the target subagent ownership is confirmed.
+func (f *AgySubagentFinder) Feed(chunk []byte) bool {
+	if f.found || f.target == "" {
+		return f.found
+	}
+	for len(chunk) > 0 {
+		nl := bytes.IndexByte(chunk, '\n')
+		var seg []byte
+		eol := false
+		if nl >= 0 {
+			seg = chunk[:nl]
+			chunk = chunk[nl+1:]
+			eol = true
+		} else {
+			seg = chunk
+			chunk = nil
+		}
+		if f.skipping {
+			if len(f.head) < 1024 {
+				need := min(1024-len(f.head), len(seg))
+				f.head = append(f.head, seg[:need]...)
+			}
+			if eol {
+				f.handleOversized(f.head)
+				f.head = f.head[:0]
+				f.skipping = false
+			}
+			continue
+		}
+		if len(f.buf)+len(seg) > maxAgyOwnershipLine {
+			f.head = append(f.head[:0], f.buf[:min(len(f.buf), 1024)]...)
+			if len(f.head) < 1024 {
+				need := min(1024-len(f.head), len(seg))
+				f.head = append(f.head, seg[:need]...)
+			}
+			f.buf = f.buf[:0]
+			if eol {
+				f.handleOversized(f.head)
+				f.head = f.head[:0]
+			} else {
+				f.skipping = true
+			}
+			continue
+		}
+		f.buf = append(f.buf, seg...)
+		if eol {
+			f.processLine(f.buf)
+			f.buf = f.buf[:0]
+			if f.found {
+				return true
+			}
+		}
+	}
+	return f.found
+}
+
+// Finish processes any trailing unterminated line and returns Found().
+func (f *AgySubagentFinder) Finish() bool {
+	if !f.found && !f.skipping && len(f.buf) > 0 {
+		f.processLine(f.buf)
+		f.buf = f.buf[:0]
+	}
+	return f.found
+}
+
+func (f *AgySubagentFinder) handleOversized(head []byte) {
+	switch {
+	case bytes.Contains(head, []byte(`"type":"USER_INPUT"`)), bytes.Contains(head, []byte(`"type":"ERROR_MESSAGE"`)):
+		f.pending = nil
+	case bytes.Contains(head, []byte(`"type":"GENERIC"`)):
+		if len(f.pending) > 0 {
+			f.pending = f.pending[1:]
+		}
+	}
+}
+
+func (f *AgySubagentFinder) processLine(raw []byte) {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 {
+		return
+	}
+	var r struct {
+		Type      string        `json:"type"`
+		Content   string        `json:"content"`
+		ToolCalls []agyToolCall `json:"tool_calls"`
+	}
+	if json.Unmarshal(raw, &r) != nil {
+		return
+	}
+	switch r.Type {
+	case "USER_INPUT", "ERROR_MESSAGE":
+		f.pending = nil
+	case "PLANNER_RESPONSE":
+		if len(r.ToolCalls) > 0 {
+			f.pending = f.pending[:0]
+			for _, tc := range r.ToolCalls {
+				if len(f.pending) >= maxAgyPending {
+					break
+				}
+				f.pending = append(f.pending, tc.Name == "invoke_subagent")
+			}
+		}
+	case "GENERIC":
+		if len(f.pending) == 0 {
+			return
+		}
+		isSub := f.pending[0]
+		f.pending = f.pending[1:]
+		if isSub {
+			body := agyStripTimestamps(r.Content)
+			if strings.EqualFold(agyParseSubagentID(body), f.target) {
+				f.found = true
+			}
+		}
+	}
+}
+
 // agyStripTimestamps drops leading "Created At: ..." and "Completed At: ..."
 // metadata lines that agy prepends to GENERIC tool results.
 func agyStripTimestamps(s string) string {

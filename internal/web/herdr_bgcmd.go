@@ -3,6 +3,7 @@ package web
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"path"
 	"regexp"
 	"slices"
@@ -45,12 +46,13 @@ const (
 )
 
 const (
-	maxCmdsShown    = 8                // listed per agent (all are counted; the card lists each, 11-15)
-	cmdScanMax      = 512 << 10        // (with the subagents out and the background ids of those at work: review of 11-25)
-	cliScanBudget   = 64 << 10         // total byte budget for cli\t lines per scan so cmdScanMax is never blown
-	cliScanMaxLines = 64               // max cli\t lines emitted per scan
-	cliLogKeep      = 30 * time.Minute // keep verified CLI log paths briefly so an open panel stays readable after exit
-	cliLogsMax      = 512
+	maxCmdsShown       = 8                   // listed per agent (all are counted; the card lists each, 11-15)
+	cmdScanMax         = 512 << 10           // (with the subagents out and the background ids of those at work: review of 11-25)
+	cmdScanTotalBudget = cmdScanMax - 16<<10 // unified script output budget below cmdScanMax so overflow is prevented
+	cliScanBudget      = 64 << 10            // total byte budget for cli\t lines per scan
+	cliScanMaxLines    = 64                  // max cli\t lines emitted per scan
+	cliLogKeep         = 30 * time.Minute    // keep verified CLI log paths briefly so an open panel stays readable after exit
+	cliLogsMax         = 512
 )
 
 // bgCLI is a known agent CLI process ("agy", "claude", "codex") discovered
@@ -272,6 +274,9 @@ func (p *cmdProber) decorate(sum *herdrSummary) {
 			plain, cliSubs := splitBgCmds(activeCmds)
 			if len(plain) > 0 {
 				a.BgCmds, a.BgCmdList = len(plain), plain[:min(len(plain), maxCmdsShown)]
+				if len(plain) > maxCmdsShown {
+					a.BgCmdTasks = bgCmdTaskIDs(plain)
+				}
 			}
 			var nativeSubs []bgAgent
 			if sess := p.paneSessionLocked(a.PaneID, a.Session); sess != "" {
@@ -477,31 +482,39 @@ func (p *cmdProber) run(ctx context.Context) {
 		p.mu.Lock()
 		// (What this look found, in place of the last's: one ended, or of a session no longer at
 		// work, goes with it — review of 11-25.)
-		if ids == nil {
-			ids = map[string]map[string]bool{}
-		}
-		changed := !sameIDs(p.bgIDs, ids)
-		p.bgIDs = ids
-		if err != nil || !whole {
-			// (Not known, or not all of it: nothing told, rather than what was.)
-			changed = changed || !p.at.IsZero()
-			p.at, p.cmds, p.subs = time.Time{}, nil, nil
+		// On output-budget overflow (ErrOutputTooLarge), keep the last known
+		// lists intact instead of wiping the whole host's background tasks;
+		// they still age out naturally after p.kept if overflow persists.
+		var changed bool
+		if errors.Is(err, sshx.ErrOutputTooLarge) {
+			changed = false
 		} else {
-			changed = changed || p.at.IsZero() || !sameCmds(p.cmds, found) || !sameSubs(p.subs, subs)
-			// (Or the same, but now told of a pane it was not before: one
-			// come to done or idle after the last look began.)
-			for _, e := range p.ended {
-				if p.at.Before(e.from) && !began.Before(e.from) && (len(found[e.session]) > 0 || len(subs[e.session]) > 0) {
-					changed = true
-				}
+			if ids == nil {
+				ids = map[string]map[string]bool{}
 			}
-			for _, e := range p.working {
-				if p.at.Before(e.from) && !began.Before(e.from) && (len(found[e.session]) > 0 || len(subs[e.session]) > 0) {
-					changed = true
+			changed = !sameIDs(p.bgIDs, ids)
+			p.bgIDs = ids
+			if err != nil || !whole {
+				// (Not known, or not all of it: nothing told, rather than what was.)
+				changed = changed || !p.at.IsZero()
+				p.at, p.cmds, p.subs = time.Time{}, nil, nil
+			} else {
+				changed = changed || p.at.IsZero() || !sameCmds(p.cmds, found) || !sameSubs(p.subs, subs)
+				// (Or the same, but now told of a pane it was not before: one
+				// come to done or idle after the last look began.)
+				for _, e := range p.ended {
+					if p.at.Before(e.from) && !began.Before(e.from) && (len(found[e.session]) > 0 || len(subs[e.session]) > 0) {
+						changed = true
+					}
 				}
+				for _, e := range p.working {
+					if p.at.Before(e.from) && !began.Before(e.from) && (len(found[e.session]) > 0 || len(subs[e.session]) > 0) {
+						changed = true
+					}
+				}
+				p.at, p.cmds, p.subs = began, found, subs // (as of when the look began)
+				p.recordCLILogsLocked(found, began)
 			}
-			p.at, p.cmds, p.subs = began, found, subs // (as of when the look began)
-			p.recordCLILogsLocked(found, began)
 		}
 		poke := p.poke
 		p.mu.Unlock()
@@ -588,15 +601,38 @@ agy_bg_fds() {
 `
 
 func cmdScanCommand(watched ...string) string {
-	return cmdScanCommandWithBudget(cliScanBudget, watched...)
+	return cmdScanCommandWithBudgets(cmdScanTotalBudget, cliScanBudget, watched...)
 }
 
 func cmdScanCommandWithBudget(budget int, watched ...string) string {
-	if budget < 0 {
-		budget = 0
+	return cmdScanCommandWithBudgets(cmdScanTotalBudget, budget, watched...)
+}
+
+// cmdScanCommandWithBudgets builds the host scan script with a unified total
+// byte budget (totalBudget <= cmdScanMax) and priority emission order:
+//   1. clock + plain cmd / anc / bgid / desc lines (highest priority)
+//   2. sub lines (truncating/omitting subagent description first if tight)
+//   3. cli lines (lowest priority, capped at min(cliBudget, remaining) and cliScanMaxLines)
+func cmdScanCommandWithBudgets(totalBudget, cliBudget int, watched ...string) string {
+	if totalBudget < 0 {
+		totalBudget = 0
 	}
-	script := `btime=$(sed -n 's/^btime \([0-9]*\)$/\1/p' /proc/stat 2>/dev/null); hz=$(getconf CLK_TCK 2>/dev/null)
-printf 'clock\t%s\t%s\n' "$btime" "$hz"
+	if cliBudget < 0 {
+		cliBudget = 0
+	}
+	script := `LC_ALL=C
+_sc_rem=` + strconv.Itoa(totalBudget) + `
+_sc_emit() {
+  _sc_l=$((${#1} + 1))
+  if [ "$_sc_l" -le "$_sc_rem" ]; then
+    printf '%s\n' "$1"
+    _sc_rem=$((_sc_rem - _sc_l))
+    return 0
+  fi
+  return 1
+}
+btime=$(sed -n 's/^btime \([0-9]*\)$/\1/p' /proc/stat 2>/dev/null); hz=$(getconf CLK_TCK 2>/dev/null)
+_sc_emit "$(printf 'clock\t%s\t%s' "$btime" "$hz")" || true
 ` + codexFdsSh + agyFdsSh + agyBgFdsSh + `
 codex_bg_fds() {
   cxid= cxlog=
@@ -661,7 +697,7 @@ claude_bg_fds() {
   fi
   if [ -z "$cclog" ] || [ ! -f "$cclog" ]; then ccsid= cclog=; fi
 }
-_bt_budget=` + strconv.Itoa(budget) + `
+_bt_budget=` + strconv.Itoa(cliBudget) + `
 _bt_emitted=0
 _bt_tab=$(printf '\t')
 _bt_nl=$(printf '\nx'); _bt_nl=${_bt_nl%x}
@@ -722,8 +758,7 @@ scan_cmd_tree() {
         if [ -n "$_bt_sid" ] && [ -n "$_bt_log" ]; then
           _bt_line=$(printf 'cli\t%s\t%s\t%s\t%s\t%s\t%s\t%s' "$_bt_root" "$_bt_p" "$_bt_comm" "$_bt_eclean" "$_bt_sid" "$_bt_log" "$_bt_argv")
           _bt_len=$((${#_bt_line} + 1))
-          if [ "$_bt_len" -le "$_bt_budget" ]; then
-            printf '%s\n' "$_bt_line"
+          if [ "$_bt_len" -le "$_bt_budget" ] && _sc_emit "$_bt_line"; then
             _bt_budget=$((_bt_budget - _bt_len))
             _bt_emitted=$((_bt_emitted + 1))
           else
@@ -743,34 +778,10 @@ scan_cmd_tree() {
     _bt_q=$_bt_next
   done
 }
-# (Of each session watched — "w:<id>" at work, "s:<id>" at rest —, its subagents sent off in the
-# background whose log was written to in the last six hours, not marked finished: what its meta
-# says it was sent for. At most ` + strconv.Itoa(subsScanned) + ` a session.)
-for a in "$@"; do
-  s=${a#?:}
-  for d in "$HOME"/.claude/projects/*/"$s"/subagents; do
-    [ -d "$d" ] || continue
-    find "$d" -maxdepth 1 -name 'agent-*.jsonl' -mmin -360 2>/dev/null | {
-      i=0
-      while IFS= read -r j; do
-        m=${j%.jsonl}.meta.json
-        [ -f "$m" ] || continue
-        meta=$(head -c 8192 "$m" 2>/dev/null | tr '\n\t' '  ')
-        case $meta in *'"requestShape":"background"'*) ;; *) continue;; esac
-        case $meta in *'"finished":true'*) continue;; esac
-        [ "$i" -lt ` + strconv.Itoa(subsScanned) + ` ] || break
-        i=$((i + 1))
-        id=${j##*/agent-}; id=${id%.jsonl}
-        t=$(stat -c %Y "$m" 2>/dev/null || date -r "$m" +%s 2>/dev/null)
-        v=$(head -c 65536 "$j" 2>/dev/null | grep -o '"version":"[0-9.]*"' | head -n 1 | cut -d'"' -f4)
-        w=$(printf '%s' "$meta" | grep -oE '"description":"([^"\\]|\\.)*"' | head -n 1 | head -c 600)
-        printf 'sub\t%s\t%s\t%s\t%s\t{%s}\n' "$s" "$id" "$t" "$v" "$w"
-      done
-    }
-    break
-  done
-done
+# Priority 1: plain background commands (cmd / anc / bgid / desc).
 seen=
+pairs=
+_sc_cmd_pids=
 if command -v pgrep >/dev/null 2>&1; then
   claudes=$( { pgrep -x claude; pgrep -f '[c]laude-code/cli'; pgrep -x codex; pgrep -x agy; } 2>/dev/null | sort -u | grep -vx "$$")
   kids=$(for c in $claudes; do
@@ -819,7 +830,12 @@ for k in $kids; do
   codex:*|agy:*) t=$(tr '\0\n\t' '   ' <"/proc/$k/cmdline" 2>/dev/null | sed 's/^[^ ]*sh -l\{0,1\}c //' | head -c 400);; # (a shell's command; else the program itself, run as it is)
   *) t=$(tr '\0\n\t' '   ' <"/proc/$k/cmdline" 2>/dev/null | awk -v "m=&& eval '" '` + cmdEvalAwk + `' | head -c 400);;
   esac
-  printf 'cmd\t%s\t%s\t%s\t%s\n' "$k" "$st" "$(printf '%s' "$l" | tr '\t\n' '  ')" "$t"
+  _sc_line=$(printf 'cmd\t%s\t%s\t%s\t%s' "$k" "$st" "$(printf '%s' "$l" | tr '\t\n' '  ')" "$t")
+  if ! _sc_emit "$_sc_line"; then
+    echo more
+    break
+  fi
+  _sc_cmd_pids="$_sc_cmd_pids $k"
   case $l in */tasks/*.output*) x=${l##*/tasks/}; seen="$seen ${x%%.output*}"; y=${l%/tasks/*}; pairs="$pairs ${y##*/}/${x%%.output*}";; esac
   case $l in
   codex:*)
@@ -831,9 +847,8 @@ for k in $kids; do
       case $a in ""|0|1|*[!0-9]*) break;; esac
       anc="$anc,$a"
     done
-    printf 'anc\t%s\t%s\n' "$k" "${anc#,}";;
+    _sc_emit "$(printf 'anc\t%s\t%s' "$k" "${anc#,}")" || true;;
   esac
-  scan_cmd_tree "$k"
 done
 # (Of a session at work, which of the commands found running its log says it set going in the
 # background — the whole log: one begun an hour ago counts; a command run in front writes to a
@@ -844,9 +859,13 @@ for a in "$@"; do
   s=${a#w:}
   for f in "$HOME"/.claude/projects/*/"$s".jsonl; do
     [ -f "$f" ] || continue
-    grep -o '"backgroundTaskId":"[A-Za-z0-9_-]*"' "$f" | sed 's/^"backgroundTaskId":"//; s/"$//' | sort -u | while IFS= read -r id; do
-      case " $seen " in *" $id "*) printf 'bgid\t%s\t%s\n' "$s" "$id";; esac
-    done
+    _sc_ids=$(grep -o '"backgroundTaskId":"[A-Za-z0-9_-]*"' "$f" | sed 's/^"backgroundTaskId":"//; s/"$//' | sort -u)
+    while IFS= read -r id; do
+      [ -n "$id" ] || continue
+      case " $seen " in *" $id "*) _sc_emit "$(printf 'bgid\t%s\t%s' "$s" "$id")" || break;; esac
+    done <<CORRAL_BGIDS
+$_sc_ids
+CORRAL_BGIDS
     break
   done
 done
@@ -868,9 +887,47 @@ for p in $pairs; do
     tu=$(grep -m 1 -F "\"backgroundTaskId\":\"$id\"" "$f" | grep -o '"tool_use_id":"[A-Za-z0-9_-]*"' | head -n 1 | cut -d'"' -f4)
     [ -n "$tu" ] || break
     w=$(grep -m 1 -F "\"id\":\"$tu\"" "$f" | sed "s/^.*\"id\":\"$tu\"//; s/\"id\":\".*//; s/\"type\":\"tool_use\".*//" | grep -oE '"description":"([^"\\]|\\.)*"' | head -n 1 | head -c 600)
-    [ -n "$w" ] && printf 'desc\t%s\t%s\t{%s}\n' "$s" "$id" "$w"
+    [ -n "$w" ] && { _sc_emit "$(printf 'desc\t%s\t%s\t{%s}' "$s" "$id" "$w")" || true; }
     break
   done
+done
+# Priority 2: native background subagents (drop subagent description before dropping lines).
+for a in "$@"; do
+  [ "$_sc_rem" -gt 64 ] || break
+  s=${a#?:}
+  for d in "$HOME"/.claude/projects/*/"$s"/subagents; do
+    [ -d "$d" ] || continue
+    _sc_subf=$(find "$d" -maxdepth 1 -name 'agent-*.jsonl' -mmin -360 2>/dev/null)
+    i=0
+    while IFS= read -r j; do
+      [ -n "$j" ] || continue
+      m=${j%.jsonl}.meta.json
+      [ -f "$m" ] || continue
+      meta=$(head -c 8192 "$m" 2>/dev/null | tr '\n\t' '  ')
+      case $meta in *'"requestShape":"background"'*) ;; *) continue;; esac
+      case $meta in *'"finished":true'*) continue;; esac
+      [ "$i" -lt ` + strconv.Itoa(subsScanned) + ` ] || break
+      i=$((i + 1))
+      id=${j##*/agent-}; id=${id%.jsonl}
+      t=$(stat -c %Y "$m" 2>/dev/null || date -r "$m" +%s 2>/dev/null)
+      v=$(head -c 65536 "$j" 2>/dev/null | grep -o '"version":"[0-9.]*"' | head -n 1 | cut -d'"' -f4)
+      w=$(printf '%s' "$meta" | grep -oE '"description":"([^"\\]|\\.)*"' | head -n 1 | head -c 600)
+      _sc_line=$(printf 'sub\t%s\t%s\t%s\t%s\t{%s}' "$s" "$id" "$t" "$v" "$w")
+      if ! _sc_emit "$_sc_line"; then
+        _sc_line=$(printf 'sub\t%s\t%s\t%s\t%s\t{}' "$s" "$id" "$t" "$v")
+        _sc_emit "$_sc_line" || break
+      fi
+    done <<CORRAL_SUBS
+$_sc_subf
+CORRAL_SUBS
+    break
+  done
+done
+# Priority 3 (lowest): CLI subagent discovery lines within min(cliBudget, _sc_rem).
+if [ "$_bt_budget" -gt "$_sc_rem" ]; then _bt_budget=$_sc_rem; fi
+for _sc_k in $_sc_cmd_pids; do
+  [ "$_bt_budget" -gt 0 ] && [ "$_bt_emitted" -lt ` + strconv.Itoa(cliScanMaxLines) + ` ] || break
+  scan_cmd_tree "$_sc_k"
 done
 exit 0`
 	cmd := "sh -c " + sshx.QuoteShell(script) + " corral"
@@ -1417,14 +1474,43 @@ func splitBgCmds(cmds []bgCmd) (plain []bgCmd, cliAgents []bgAgent) {
 	return plain, cliAgents
 }
 
+func bgCmdTaskIDs(cmds []bgCmd) []string {
+	out := make([]string, 0, len(cmds))
+	for _, c := range cmds {
+		if c.Task != "" {
+			out = append(out, c.Task)
+		}
+	}
+	return out
+}
+
 func isSyntheticBgTask(task string) bool {
 	return strings.HasPrefix(task, "codex-") || strings.HasPrefix(task, "agy-") || strings.HasPrefix(task, "monitor-")
 }
 
+func normBgCmdText(s string) string {
+	return strings.Join(strings.Fields(s), " ")
+}
+
+func exactBgCmdMatch(r convo.Running, grp []bgAgent) bool {
+	cmdText := normBgCmdText(grp[0].Cmd)
+	if cmdText == "" {
+		cmdText = normBgCmdText(grp[0].What)
+	}
+	if cmdText == "" {
+		return false
+	}
+	if rc := normBgCmdText(r.Cmd); rc != "" {
+		return rc == cmdText
+	}
+	return normBgCmdText(r.What) == cmdText
+}
+
 // upgradeRunningWithCLIs upgrades any log-tracked background command in running
-// whose task ID (or, for Codex/agy/Monitor synthetic host tasks, whose command
-// text) matches a host-discovered background CLI subagent into a kind="agent"
-// entry carrying the CLI kind and session ID.
+// whose task ID (or, for Codex/agy/Monitor synthetic host tasks, whose exact
+// normalized command text uniquely matches 1-to-1) matches a host-discovered
+// background CLI subagent into a kind="agent" entry carrying the CLI kind,
+// session ID, and host background task ID.
 func upgradeRunningWithCLIs(running []convo.Running, cliAgents []bgAgent) []convo.Running {
 	if len(running) == 0 || len(cliAgents) == 0 {
 		return running
@@ -1447,31 +1533,43 @@ func upgradeRunningWithCLIs(running []convo.Running, cliAgents []bgAgent) []conv
 	if len(byTask) == 0 {
 		return running
 	}
-	usedSynth := map[string]bool{}
+
+	// Pre-compute 1-to-1 exact-text matches for synthetic host tasks so we never
+	// upgrade on substring containment or ambiguous multi-candidate matches.
+	matchedByIdx := map[int][]bgAgent{}
+	runCands := map[int][]string{}
+	synthCands := map[string][]int{}
+	for i, r := range running {
+		if r.Kind != "cmd" {
+			continue
+		}
+		if grp := byTask[r.ID]; len(grp) > 0 {
+			matchedByIdx[i] = grp
+			continue
+		}
+		if len(synthOrder) == 0 {
+			continue
+		}
+		for _, task := range synthOrder {
+			if exactBgCmdMatch(r, synthByTask[task]) {
+				runCands[i] = append(runCands[i], task)
+				synthCands[task] = append(synthCands[task], i)
+			}
+		}
+	}
+	for i, tasks := range runCands {
+		if len(tasks) == 1 && len(synthCands[tasks[0]]) == 1 {
+			matchedByIdx[i] = synthByTask[tasks[0]]
+		}
+	}
+
 	out := make([]convo.Running, 0, len(running))
-	for _, r := range running {
+	for i, r := range running {
 		if r.Kind != "cmd" {
 			out = append(out, r)
 			continue
 		}
-		matched := byTask[r.ID]
-		if len(matched) == 0 && len(synthOrder) > 0 {
-			for _, task := range synthOrder {
-				if usedSynth[task] {
-					continue
-				}
-				grp := synthByTask[task]
-				cmdText := grp[0].Cmd
-				if cmdText == "" {
-					cmdText = grp[0].What
-				}
-				if codexSameCmd(r.Cmd, cmdText) || codexSameCmd(r.What, cmdText) {
-					matched = grp
-					usedSynth[task] = true
-					break
-				}
-			}
-		}
+		matched := matchedByIdx[i]
 		if len(matched) == 0 {
 			out = append(out, r)
 			continue
@@ -1488,6 +1586,10 @@ func upgradeRunningWithCLIs(running []convo.Running, cliAgents []bgAgent) []conv
 			if ts == "" && a.Since > 0 {
 				ts = time.UnixMilli(a.Since).UTC().Format(time.RFC3339)
 			}
+			taskID := a.Task
+			if taskID == "" {
+				taskID = r.ID
+			}
 			out = append(out, convo.Running{
 				ID:    a.ID,
 				What:  what,
@@ -1496,7 +1598,7 @@ func upgradeRunningWithCLIs(running []convo.Running, cliAgents []bgAgent) []conv
 				Cmd:   r.Cmd,
 				Out:   r.Out,
 				Agent: a.Agent,
-				Task:  r.ID,
+				Task:  taskID,
 			})
 		}
 	}

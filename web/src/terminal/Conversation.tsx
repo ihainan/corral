@@ -2635,7 +2635,7 @@ export function ConversationView({
         <ForkAtOf.Provider value={undefined}>
         <RewindAtOf.Provider value={undefined}>
         <SubPanel
-          key={(subs[subs.length - 1].cli ?? '') + ':' + (subs[subs.length - 1].cliParent ?? '') + ':' + subs[subs.length - 1].agent}
+          key={(subs[subs.length - 1].cli ?? '') + ':' + (subs[subs.length - 1].cliParent ?? '') + ':' + (subs[subs.length - 1].cliChain?.join(',') ?? '') + ':' + subs[subs.length - 1].agent}
           of={convo.of}
           sub={subs[subs.length - 1]}
           depth={subs.length}
@@ -6497,9 +6497,9 @@ export const recapText = (s: string) => s.replace(/\s*\((?:disable|turn off)[^()
 // A subagent sent off, whose own conversation can be shown: by its id.
 // When cli is set ('agy' | 'claude' | 'codex'), it is a recognized agent CLI
 // running inside a background command (read-only view, parsed in its own format);
-// cliParent identifies that CLI's root session when drilling into a native
-// subagent spawned inside the background CLI.
-type Sub = { agent: string; title?: string; cli?: string; cliParent?: string; since?: number }
+// cliParent identifies that CLI's root session and cliChain holds any
+// intermediate ancestor IDs down to the direct parent when drilling deeper.
+type Sub = { agent: string; title?: string; cli?: string; cliParent?: string; cliChain?: string[]; since?: number }
 const OpenSub = createContext<((s: Sub) => void) | undefined>(undefined)
 // The turn under way, as Claude Code's spinner line says it beside its seconds — "(9s · ↓ 1.2k tokens · thinking
 // with high effort)": the tokens written so far and how hard it thinks, for the line of the step under way (doc UI 30).
@@ -6614,16 +6614,21 @@ const isSubId = (id: string) => /^[a-z0-9]{6,40}$/.test(id) || /^[0-9a-f]{8}-[0-
 function SubPanel({ of, sub, depth, live, nav, onOpen, onBack, onClose, active, copy }: { of: string; sub: Sub; depth: number; live: (agent: string) => boolean; nav?: WorkNav; onOpen: (s: Sub) => void; onBack: () => void; onClose: () => void; active: boolean; copy: (s: string) => void }) {
   const [sessionId, pane = ''] = of.split(' ')
   const isCli = !!sub.cli
-  // Nested native subagents spawned inside a background CLI carry its cli and
-  // root session ID so the backend resolves them against the CLI's own log.
+  // Nested native subagents spawned inside a background CLI carry its cli,
+  // root session ID (cliParent), and any intermediate ancestor IDs (cliChain)
+  // so the backend verifies ownership hop-by-hop from the scan-verified CLI root.
   const openChild = useCallback(
-    (s: Sub) => onOpen(isCli ? { ...s, cli: sub.cli, cliParent: sub.cliParent ?? sub.agent } : s),
-    [isCli, sub.cli, sub.cliParent, sub.agent, onOpen],
+    (s: Sub) => {
+      if (!isCli) return onOpen(s)
+      if (!sub.cliParent) return onOpen({ ...s, cli: sub.cli, cliParent: sub.agent, cliChain: undefined })
+      return onOpen({ ...s, cli: sub.cli, cliParent: sub.cliParent, cliChain: [...(sub.cliChain ?? []), sub.agent] })
+    },
+    [isCli, sub.cli, sub.cliParent, sub.cliChain, sub.agent, onOpen],
   )
   // (Of one sent off by the session's agent, as its running list says; of
   // one sent off by a subagent, while its log keeps growing.)
   const told = depth === 1 && live(sub.agent)
-  const c = useSubConvo(sessionId, pane, sub.agent, told, active, depth > 1, sub.cli, sub.cliParent)
+  const c = useSubConvo(sessionId, pane, sub.agent, told, active, depth > 1, sub.cli, sub.cliParent, sub.cliChain)
   const going = depth === 1 ? told : c.growing
   const panel = useRef<HTMLElement>(null)
   const [opened, setOpened] = useState<Record<string, boolean>>({})
