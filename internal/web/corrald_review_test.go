@@ -382,6 +382,9 @@ func TestCorraldReview_UninstallMissingBinaryStopsRunningProcess(t *testing.T) {
 	if stOff["state"] != "off" {
 		t.Fatalf("expected off after fallback stopped daemon, got %v", stOff)
 	}
+	if _, err := os.Lstat(filepath.Join(home, ".local", "state", "corral", "run")); !os.IsNotExist(err) {
+		t.Fatalf("corrald run dir should be removed after fallback uninstall (err=%v)", err)
+	}
 	// Verify daemon PID actually exited (not running — either gone or unreaped zombie).
 	if err := syscall.Kill(pid, 0); err == nil {
 		statBytes, rerr := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))

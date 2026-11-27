@@ -41,6 +41,16 @@ func TestUninstallRemovesLocksAndEmptyDirsSingleMachine(t *testing.T) {
 		t.Fatalf("serve failed: %s", out)
 	}
 
+	// serve must have created ~/.local/state/corral/run (0700) for shared pane locks.
+	runDir := filepath.Join(home, ".local", "state", "corral", "run")
+	if fi, err := os.Lstat(runDir); err != nil || !fi.IsDir() || fi.Mode().Perm() != 0o700 {
+		t.Fatalf("expected %s to exist as 0700 dir after serve, err=%v fi=%v", runDir, err, fi)
+	}
+	// Simulate a pane lock file left inside run/ and verify uninstall cleans both run/ and ~/.local/state/corral.
+	if err := os.WriteFile(filepath.Join(runDir, "corral-send-tmux-_0"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
 	out, code := runCLI(t, installedBin, home, env, "uninstall", "--op", "opRmClean1")
 	if code != 0 || parseKV(out)["result"] != "removed" {
 		t.Fatalf("uninstall failed: code=%d\n%s", code, out)
@@ -53,6 +63,7 @@ func TestUninstallRemovesLocksAndEmptyDirsSingleMachine(t *testing.T) {
 		filepath.Join(home, ".local", "state", "corral", "corrald", mid, "op.lock"),
 		filepath.Join(home, ".local", "state", "corral", "corrald", mid),
 		filepath.Join(home, ".local", "state", "corral", "corrald"),
+		runDir,
 		filepath.Join(home, ".local", "state", "corral"),
 	}
 	for _, p := range mustNotExist {
@@ -311,4 +322,63 @@ func TestColdStartUpdatePreservesInstallManifestAndUninstallPartialOnLeftover(t 
 			t.Fatalf("expected left=%s in uninstall output, got:\n%s", orphanDir, out)
 		}
 	})
+}
+
+func TestEnsureRunDirValidation(t *testing.T) {
+	uid := uint32(os.Geteuid())
+
+	// 1. Creates ~/.local/state/corral/run with 0700 when absent.
+	home := t.TempDir()
+	layout, err := ResolveLayout(PathOptions{Home: home, UID: &uid, MachineID: "aabbccddeeff"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := layout.EnsureRunDir(); err != nil {
+		t.Fatalf("EnsureRunDir create: %v", err)
+	}
+	fi, err := os.Lstat(layout.RunDir)
+	if err != nil || !fi.IsDir() || fi.Mode().Perm() != 0o700 {
+		t.Fatalf("created RunDir stat = (%v, %v), want 0700 dir", fi, err)
+	}
+
+	// 2. Existing valid directory is accepted as-is (only checked, not modified).
+	if err := os.Chmod(layout.RunDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := layout.EnsureRunDir(); err != nil {
+		t.Fatalf("EnsureRunDir existing valid dir: %v", err)
+	}
+	if fi2, err := os.Lstat(layout.RunDir); err != nil || fi2.Mode().Perm() != 0o750 {
+		t.Fatalf("EnsureRunDir unexpectedly modified existing dir mode: %v %v", fi2, err)
+	}
+
+	// 3. Symlink at RunDir is rejected and untouched.
+	homeSym := t.TempDir()
+	victim := t.TempDir()
+	layoutSym, err := ResolveLayout(PathOptions{Home: homeSym, UID: &uid, MachineID: "aabbccddeeff"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(layoutSym.RunDir), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(victim, layoutSym.RunDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := layoutSym.EnsureRunDir(); err == nil {
+		t.Fatal("expected EnsureRunDir to reject symlink")
+	}
+	if target, err := os.Readlink(layoutSym.RunDir); err != nil || target != victim {
+		t.Fatalf("EnsureRunDir modified symlink: (%q, %v)", target, err)
+	}
+
+	// 4. Wrong-owner directory is rejected.
+	otherUID := uid + 1
+	layoutWrong, err := ResolveLayout(PathOptions{Home: home, UID: &otherUID, MachineID: "aabbccddeeff"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := layoutWrong.EnsureRunDir(); err == nil {
+		t.Fatal("expected EnsureRunDir to reject directory owned by different UID")
+	}
 }

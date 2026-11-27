@@ -385,6 +385,10 @@ func (s *Server) Serve(parentCtx context.Context) error {
 		s.restoreModuleStates(snap.Modules)
 	}
 
+	if err := s.layout.EnsureRunDir(); err != nil {
+		s.log.Warn("shared pane lock run dir unavailable; will skip state run dir", "dir", s.layout.RunDir, "err", err)
+	}
+
 	if s.ln == nil {
 		ln, err := s.listenUnixPath(s.layout.SocketPath)
 		if err != nil {

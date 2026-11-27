@@ -540,15 +540,24 @@ if [ -d "$SR" ]; then
     if [ -d "$d" ] && [ -f "$d/install.json" ]; then others=1; break; fi
   done
 fi
+SC=$(dirname "$SR")
 if [ "$others" = "0" ]; then
   rm -rf "$L/corrald" "$L"/corrald-* "$L/README.txt" 2>/dev/null || true
   rmdir "$SR" 2>/dev/null || true
+  if [ -d "$SC/run" ] && [ ! -L "$SC/run" ] && [ -O "$SC/run" ]; then
+    rm -rf "$SC/run" 2>/dev/null || true
+  fi
+  rmdir "$SC" 2>/dev/null || true
   rmdir "$L" 2>/dev/null || true
 fi
 left_any=0
 if [ -e "$ST" ]; then
   left_any=1
   echo "left=$ST	failed to remove"
+fi
+if [ "$others" = "0" ] && [ -d "$SC/run" ] && [ ! -L "$SC/run" ] && [ -O "$SC/run" ]; then
+  left_any=1
+  echo "left=$SC/run	corrald run dir still exists after removal"
 fi
 if [ "$others" = "0" ] && [ -d "$L" ]; then
   for rem in "$L/corrald" "$L/README.txt" "$L"/corrald-*; do

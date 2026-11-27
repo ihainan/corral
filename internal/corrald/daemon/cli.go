@@ -1719,6 +1719,17 @@ func cmdUninstall(args []string, stdout io.Writer) int {
 		}
 		_ = os.Remove(filepath.Dir(layout.StateRoot)) // ~/.local/state/corral (best-effort if empty)
 	}
+	if isLast && lastCheckErr == nil && layout.RunDir != "" {
+		if rinfo, rerr := os.Lstat(layout.RunDir); rerr == nil {
+			st, ok := rinfo.Sys().(*syscall.Stat_t)
+			if rinfo.Mode()&os.ModeSymlink == 0 && rinfo.IsDir() && ok && st.Uid == layout.UID {
+				if err := os.RemoveAll(layout.RunDir); err != nil && !errors.Is(err, os.ErrNotExist) {
+					addLeft(layout.RunDir, err.Error())
+				}
+			}
+		}
+		_ = os.Remove(filepath.Dir(layout.StateRoot)) // ~/.local/state/corral (best-effort if empty)
+	}
 	if isLast && lastCheckErr == nil && installErr == nil && libDirExists {
 		if err := os.Remove(layout.SharedLockPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 			addLeft(layout.SharedLockPath, err.Error())

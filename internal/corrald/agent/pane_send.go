@@ -42,14 +42,16 @@ var (
 // directly on the host with identical semantics, pacing, exit codes (0-19),
 // and stdout bytes to Corral's convoGated shell script.
 type PaneSender struct {
-	locator     *Locator
-	val         *PathValidator
-	tmux        *TmuxExecutor
-	herdr       *HerdrExecutor
-	uid         uint32
-	runtimeDir  string
-	sleepFn     func(ctx context.Context, d time.Duration) error
-	lockTimeout time.Duration
+	locator            *Locator
+	val                *PathValidator
+	tmux               *TmuxExecutor
+	herdr              *HerdrExecutor
+	uid                uint32
+	systemRunDir       string
+	stateRunDir        string
+	lockDirsOverridden bool
+	sleepFn            func(ctx context.Context, d time.Duration) error
+	lockTimeout        time.Duration
 
 	bufSeq atomic.Uint64
 
@@ -65,20 +67,31 @@ type paneLockSlot struct {
 // NewPaneSender constructs a PaneSender using loc, val, tmux, and herdr.
 func NewPaneSender(loc *Locator, val *PathValidator, tmux *TmuxExecutor, herdr *HerdrExecutor) *PaneSender {
 	uid := uint32(os.Geteuid())
+	stateRunDir := ""
 	if loc != nil {
 		uid = loc.uid
+		if loc.home != "" {
+			stateRunDir = filepath.Join(loc.home, ".local", "state", "corral", "run")
+		}
 	}
 	return &PaneSender{
-		locator:     loc,
-		val:         val,
-		tmux:        tmux,
-		herdr:       herdr,
-		uid:         uid,
-		runtimeDir:  fmt.Sprintf("/run/user/%d", uid),
-		sleepFn:     contextSleep,
-		lockTimeout: defaultPaneLockTimeout,
-		paneLocks:   make(map[string]*paneLockSlot),
+		locator:      loc,
+		val:          val,
+		tmux:         tmux,
+		herdr:        herdr,
+		uid:          uid,
+		systemRunDir: fmt.Sprintf("/run/user/%d", uid),
+		stateRunDir:  stateRunDir,
+		sleepFn:      contextSleep,
+		lockTimeout:  defaultPaneLockTimeout,
+		paneLocks:    make(map[string]*paneLockSlot),
 	}
+}
+
+// SetStateRunDir sets the corrald-managed fallback lock directory
+// (~/.local/state/corral/run) derived from daemon Layout.
+func (ps *PaneSender) SetStateRunDir(dir string) {
+	ps.stateRunDir = dir
 }
 
 // SetLockTimeoutForTest overrides the per-pane lock timeout for fast unit tests.
@@ -86,10 +99,26 @@ func (ps *PaneSender) SetLockTimeoutForTest(d time.Duration) {
 	ps.lockTimeout = d
 }
 
-// SetRuntimeDirForTest overrides the shared flock runtime directory (normally
-// /run/user/<uid>) for isolated tests.
+// SetRuntimeDirForTest overrides the primary shared flock runtime directory
+// (disabling fallback to stateRunDir) for isolated unit tests.
 func (ps *PaneSender) SetRuntimeDirForTest(dir string) {
-	ps.runtimeDir = dir
+	ps.systemRunDir = dir
+	ps.stateRunDir = ""
+	ps.lockDirsOverridden = true
+}
+
+// SetLockDirsForTest overrides both candidate shared flock directories
+// (systemRunDir and stateRunDir) for isolated priority and fallback tests.
+func (ps *PaneSender) SetLockDirsForTest(systemRunDir, stateRunDir string) {
+	ps.systemRunDir = systemRunDir
+	ps.stateRunDir = stateRunDir
+	ps.lockDirsOverridden = true
+}
+
+// SetLockUIDForTest overrides the expected UID checked on lock directories and
+// files (for unit tests verifying wrong-owner rejection without root).
+func (ps *PaneSender) SetLockUIDForTest(uid uint32) {
+	ps.uid = uid
 }
 
 func contextSleep(ctx context.Context, d time.Duration) error {

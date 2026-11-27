@@ -37,29 +37,48 @@ func PaneLockFilename(mode, pane string) string {
 	return b.String()
 }
 
-// openSharedPaneLockFile validates runtimeDir (must exist, be a directory,
-// not a symlink, owned by uid) and opens filename inside it with O_NOFOLLOW
-// (rejecting symlinks) and verifying the opened fd is a regular file owned by
-// uid. Returns (-1, false) when the runtime directory is unavailable or
-// untrusted so callers fall back to the in-process per-pane lock.
-func openSharedPaneLockFile(runtimeDir, filename string, uid uint32) (int, bool) {
-	if runtimeDir == "" || filename == "" || strings.Contains(filename, "/") {
+// openValidatedLockDir opens dir with O_DIRECTORY|O_NOFOLLOW and verifies via
+// Fstat that it is a real directory (not a symlink) owned by uid.
+func openValidatedLockDir(dir string, uid uint32) (int, bool) {
+	if dir == "" {
 		return -1, false
 	}
-	dirFD, err := unix.Open(runtimeDir, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	dirFD, err := unix.Open(dir, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 	if err != nil {
 		return -1, false
 	}
-	defer unix.Close(dirFD)
-
 	var dirSt unix.Stat_t
-	if err := unix.Fstat(dirFD, &dirSt); err != nil {
+	if err := unix.Fstat(dirFD, &dirSt); err != nil || dirSt.Mode&unix.S_IFMT != unix.S_IFDIR || dirSt.Uid != uid {
+		_ = unix.Close(dirFD)
 		return -1, false
 	}
-	if dirSt.Mode&unix.S_IFMT != unix.S_IFDIR || dirSt.Uid != uid {
-		return -1, false
-	}
+	return dirFD, true
+}
 
+// selectSharedPaneLockDir chooses the first lock directory matching the shared
+// priority rule with convoGated:
+//  1. systemRunDir (/run/user/<uid>)
+//  2. stateRunDir  (~/.local/state/corral/run)
+//
+// A directory is accepted only if it exists, is a directory, is not a symlink,
+// and is owned by uid.
+func selectSharedPaneLockDir(systemRunDir, stateRunDir string, uid uint32) (int, bool) {
+	if fd, ok := openValidatedLockDir(systemRunDir, uid); ok {
+		return fd, true
+	}
+	if fd, ok := openValidatedLockDir(stateRunDir, uid); ok {
+		return fd, true
+	}
+	return -1, false
+}
+
+// openLockFileInDir opens filename inside the already-validated directory fd
+// with O_NOFOLLOW (refusing symlinks) and verifies via Fstat that the target is
+// a regular file owned by uid.
+func openLockFileInDir(dirFD int, filename string, uid uint32) (int, bool) {
+	if filename == "" || strings.Contains(filename, "/") {
+		return -1, false
+	}
 	fd, err := unix.Openat(dirFD, filename, unix.O_CREAT|unix.O_WRONLY|unix.O_APPEND|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0o600)
 	if err != nil {
 		return -1, false
@@ -72,59 +91,73 @@ func openSharedPaneLockFile(runtimeDir, filename string, uid uint32) (int, bool)
 	return fd, true
 }
 
-// acquirePaneLock acquires the shared per-pane flock in /run/user/<uid> (or
-// ps.runtimeDir when injected by tests) using the exact filename and 100ms-poll
-// / 10s-timeout protocol of convoGated so corrald, SSH fallback scripts, and
-// old/new corrald processes during hot-update handoff mutually exclude each
-// other. When the runtime directory is unavailable or untrusted, falls back to
-// the in-process per-pane channel lock.
+// openSharedPaneLockFile validates dir and opens filename inside it with
+// O_NOFOLLOW + UID verification.
+func openSharedPaneLockFile(dir, filename string, uid uint32) (int, bool) {
+	dirFD, ok := openValidatedLockDir(dir, uid)
+	if !ok {
+		return -1, false
+	}
+	defer unix.Close(dirFD)
+	return openLockFileInDir(dirFD, filename, uid)
+}
+
+// acquirePaneLock acquires the shared per-pane flock using the exact directory
+// priority, filename, and 100ms-poll / 10s-timeout protocol of convoGated:
+//  1. /run/user/<uid> (or ps.systemRunDir when injected by tests)
+//  2. ~/.local/state/corral/run (ps.stateRunDir from daemon Layout)
+//  3. In-process per-pane channel lock fallback when neither directory is usable.
 func (ps *PaneSender) acquirePaneLock(ctx context.Context, mode, pane string) (release func(), ok bool) {
 	timeout := ps.lockTimeout
 	if timeout <= 0 {
 		timeout = defaultPaneLockTimeout
 	}
 
-	runtimeDir := ps.runtimeDir
-	if runtimeDir == "" {
-		runtimeDir = fmt.Sprintf("/run/user/%d", ps.uid)
+	systemDir := ps.systemRunDir
+	if systemDir == "" && !ps.lockDirsOverridden {
+		systemDir = fmt.Sprintf("/run/user/%d", ps.uid)
 	}
 	filename := PaneLockFilename(mode, pane)
-	if fd, opened := openSharedPaneLockFile(runtimeDir, filename, ps.uid); opened {
-		deadline := time.Now().Add(timeout)
-		for {
-			err := unix.Flock(fd, unix.LOCK_EX|unix.LOCK_NB)
-			if err == nil {
-				var once sync.Once
-				return func() {
-					once.Do(func() {
-						_ = unix.Flock(fd, unix.LOCK_UN)
+	if dirFD, hasDir := selectSharedPaneLockDir(systemDir, ps.stateRunDir, ps.uid); hasDir {
+		fd, opened := openLockFileInDir(dirFD, filename, ps.uid)
+		_ = unix.Close(dirFD)
+		if opened {
+			deadline := time.Now().Add(timeout)
+			for {
+				err := unix.Flock(fd, unix.LOCK_EX|unix.LOCK_NB)
+				if err == nil {
+					var once sync.Once
+					return func() {
+						once.Do(func() {
+							_ = unix.Flock(fd, unix.LOCK_UN)
+							_ = unix.Close(fd)
+						})
+					}, true
+				}
+				if errors.Is(err, unix.EINTR) {
+					continue
+				}
+				if errors.Is(err, unix.EWOULDBLOCK) || errors.Is(err, unix.EAGAIN) {
+					rem := time.Until(deadline)
+					if rem <= 0 {
 						_ = unix.Close(fd)
-					})
-				}, true
-			}
-			if errors.Is(err, unix.EINTR) {
-				continue
-			}
-			if errors.Is(err, unix.EWOULDBLOCK) || errors.Is(err, unix.EAGAIN) {
-				rem := time.Until(deadline)
-				if rem <= 0 {
-					_ = unix.Close(fd)
-					return nil, false
+						return nil, false
+					}
+					step := paneFlockPollInterval
+					if rem < step {
+						step = rem
+					}
+					if serr := ps.sleepFn(ctx, step); serr != nil {
+						_ = unix.Close(fd)
+						return nil, false
+					}
+					continue
 				}
-				step := paneFlockPollInterval
-				if rem < step {
-					step = rem
-				}
-				if serr := ps.sleepFn(ctx, step); serr != nil {
-					_ = unix.Close(fd)
-					return nil, false
-				}
-				continue
+				// Unexpected flock error (e.g. filesystem without flock support):
+				// close fd and fall back to the in-process lock below.
+				_ = unix.Close(fd)
+				break
 			}
-			// Unexpected flock error (e.g. filesystem without flock support):
-			// close fd and fall back to the in-process lock below.
-			_ = unix.Close(fd)
-			break
 		}
 	}
 

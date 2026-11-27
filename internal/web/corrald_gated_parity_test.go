@@ -417,6 +417,16 @@ func startIsolatedTmuxAgent(t *testing.T, agentComm, claudeCfgSubdir string, ext
 		t.Fatalf("NewLocator: %v", err)
 	}
 	sender := agent.NewPaneSender(loc, val, tmuxExec, nil)
+	// Isolate lock directories inside home so parity tests never touch host /run/user/<uid>.
+	missingSys := filepath.Join(home, "no-sys-run")
+	stateRun := filepath.Join(home, ".local", "state", "corral", "run")
+	if err := os.MkdirAll(stateRun, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	sender.SetLockDirsForTest(missingSys, stateRun)
+	origSysRunBase := convoSystemRunBase
+	convoSystemRunBase = missingSys
+	t.Cleanup(func() { convoSystemRunBase = origSysRunBase })
 
 	return &isolatedTmuxHarness{
 		t:          t,
@@ -1245,6 +1255,15 @@ time.sleep(60)`, paneID, sockPath))
 
 	herdrExec := agent.NewHerdrExecutorForTest(uid, "/proc", val)
 	sender := agent.NewPaneSender(loc, val, agent.NewTmuxExecutor(home), herdrExec)
+	missingSys := filepath.Join(home, "no-sys-run")
+	stateRun := filepath.Join(home, ".local", "state", "corral", "run")
+	if err := os.MkdirAll(stateRun, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	sender.SetLockDirsForTest(missingSys, stateRun)
+	origSysRunBase := convoSystemRunBase
+	convoSystemRunBase = missingSys
+	t.Cleanup(func() { convoSystemRunBase = origSysRunBase })
 
 	runPair := func(name string, setup func(), gate, lenSpec string, keys []string, read int, text string, wantExit int) {
 		t.Run(name, func(t *testing.T) {

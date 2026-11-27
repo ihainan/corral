@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"golang.org/x/sys/unix"
+
+	"github.com/ihainan/corral/internal/corrald/daemon"
 )
 
 // TestPaneLockFilenameMatchesShellTrRule verifies that PaneLockFilename matches
@@ -109,7 +111,8 @@ func TestSharedPaneLockSymlinkAndFallback(t *testing.T) {
 // shared flock file.
 func TestPaneLockSubprocessHelper(t *testing.T) {
 	dir := os.Getenv("CORRAL_TEST_LOCK_DIR")
-	if dir == "" {
+	stateDir := os.Getenv("CORRAL_TEST_LOCK_STATE_DIR")
+	if dir == "" && stateDir == "" {
 		return
 	}
 	mode := os.Getenv("CORRAL_TEST_LOCK_MODE")
@@ -119,7 +122,11 @@ func TestPaneLockSubprocessHelper(t *testing.T) {
 	releaseFile := os.Getenv("CORRAL_TEST_LOCK_RELEASE")
 
 	ps := NewPaneSender(nil, nil, nil, nil)
-	ps.SetRuntimeDirForTest(dir)
+	if stateDir != "" {
+		ps.SetLockDirsForTest(dir, stateDir)
+	} else {
+		ps.SetRuntimeDirForTest(dir)
+	}
 	switch action {
 	case "hold":
 		ps.SetLockTimeoutForTest(2 * time.Second)
@@ -347,6 +354,178 @@ done
 		)
 		if out, err := procB2.CombinedOutput(); err != nil {
 			t.Fatalf("process B2 failed: %v\n%s", err, out)
+		}
+	})
+}
+
+// TestSharedPaneLockStateRunDirFallbackAndPriority verifies the 2-tier lock
+// directory selection in corrald:
+//  1. systemRunDir (/run/user/<uid>) preferred when valid
+//  2. stateRunDir (~/.local/state/corral/run, created by Layout.EnsureRunDir)
+//     used when systemRunDir is unavailable, including mutual exclusion across
+//     two separate corrald processes (simulating hot update)
+//  3. symlink or wrong-owner stateRunDir rejected and skipped (falls back to
+//     in-process lock without touching target)
+func TestSharedPaneLockStateRunDirFallbackAndPriority(t *testing.T) {
+	uid := uint32(os.Geteuid())
+
+	t.Run("fallback_to_state_run_dir_and_two_process_mutex", func(t *testing.T) {
+		home := t.TempDir()
+		layout, err := daemon.ResolveLayout(daemon.PathOptions{
+			Home:      home,
+			UID:       &uid,
+			MachineID: "112233445566",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := layout.EnsureRunDir(); err != nil {
+			t.Fatalf("EnsureRunDir: %v", err)
+		}
+		info, err := os.Lstat(layout.RunDir)
+		if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm() != 0o700 {
+			t.Fatalf("EnsureRunDir created unexpected entry: info=%v err=%v", info, err)
+		}
+
+		missingSys := filepath.Join(home, "no-run-user")
+		mode, pane := "tmux", "%9"
+		readyFile := filepath.Join(home, "pA-ready")
+		releaseFile := filepath.Join(home, "pA-release")
+
+		// Two independent corrald OS processes with missing /run/user/<uid>
+		// must mutually exclude via ~/.local/state/corral/run!
+		procA := exec.Command(os.Args[0], "-test.run=^TestPaneLockSubprocessHelper$")
+		procA.Env = append(os.Environ(),
+			"CORRAL_TEST_LOCK_DIR="+missingSys,
+			"CORRAL_TEST_LOCK_STATE_DIR="+layout.RunDir,
+			"CORRAL_TEST_LOCK_MODE="+mode,
+			"CORRAL_TEST_LOCK_PANE="+pane,
+			"CORRAL_TEST_LOCK_ACTION=hold",
+			"CORRAL_TEST_LOCK_READY="+readyFile,
+			"CORRAL_TEST_LOCK_RELEASE="+releaseFile,
+		)
+		if err := procA.Start(); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() {
+			_ = os.WriteFile(releaseFile, []byte("go"), 0o600)
+			_ = procA.Wait()
+		})
+		for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); {
+			if _, err := os.Stat(readyFile); err == nil {
+				break
+			}
+			time.Sleep(15 * time.Millisecond)
+		}
+		if _, err := os.Stat(readyFile); err != nil {
+			t.Fatal("procA did not acquire stateRunDir lock in time")
+		}
+
+		// Lock file must exist inside layout.RunDir.
+		lockPath := filepath.Join(layout.RunDir, PaneLockFilename(mode, pane))
+		if _, err := os.Stat(lockPath); err != nil {
+			t.Fatalf("expected lock file in stateRunDir %s: %v", lockPath, err)
+		}
+
+		// Second corrald process must time out while procA holds it.
+		procB1 := exec.Command(os.Args[0], "-test.run=^TestPaneLockSubprocessHelper$")
+		procB1.Env = append(os.Environ(),
+			"CORRAL_TEST_LOCK_DIR="+missingSys,
+			"CORRAL_TEST_LOCK_STATE_DIR="+layout.RunDir,
+			"CORRAL_TEST_LOCK_MODE="+mode,
+			"CORRAL_TEST_LOCK_PANE="+pane,
+			"CORRAL_TEST_LOCK_ACTION=try_timeout",
+		)
+		if out, err := procB1.CombinedOutput(); err != nil {
+			t.Fatalf("procB1 failed: %v\n%s", err, out)
+		}
+
+		// Third corrald process waits for procA to release and acquires cleanly.
+		go func() {
+			time.Sleep(250 * time.Millisecond)
+			_ = os.WriteFile(releaseFile, []byte("go"), 0o600)
+		}()
+		procB2 := exec.Command(os.Args[0], "-test.run=^TestPaneLockSubprocessHelper$")
+		procB2.Env = append(os.Environ(),
+			"CORRAL_TEST_LOCK_DIR="+missingSys,
+			"CORRAL_TEST_LOCK_STATE_DIR="+layout.RunDir,
+			"CORRAL_TEST_LOCK_MODE="+mode,
+			"CORRAL_TEST_LOCK_PANE="+pane,
+			"CORRAL_TEST_LOCK_ACTION=wait_acquire",
+		)
+		if out, err := procB2.CombinedOutput(); err != nil {
+			t.Fatalf("procB2 failed: %v\n%s", err, out)
+		}
+	})
+
+	t.Run("system_run_dir_preferred_over_state_run_dir", func(t *testing.T) {
+		base := t.TempDir()
+		sysDir := filepath.Join(base, "sys-run")
+		stateDir := filepath.Join(base, "state-run")
+		for _, d := range []string{sysDir, stateDir} {
+			if err := os.MkdirAll(d, 0o700); err != nil {
+				t.Fatal(err)
+			}
+		}
+		ps := NewPaneSender(nil, nil, nil, nil)
+		ps.SetLockDirsForTest(sysDir, stateDir)
+		rel, ok := ps.acquirePaneLock(context.Background(), "herdr", "w1:p1")
+		if !ok {
+			t.Fatal("acquirePaneLock failed")
+		}
+		rel()
+		if _, err := os.Stat(filepath.Join(sysDir, PaneLockFilename("herdr", "w1:p1"))); err != nil {
+			t.Fatalf("expected lock file in systemRunDir: %v", err)
+		}
+		if entries, _ := os.ReadDir(stateDir); len(entries) != 0 {
+			t.Fatalf("stateRunDir should remain empty when systemRunDir is usable, got %d entries", len(entries))
+		}
+	})
+
+	t.Run("symlink_or_wrong_owner_state_run_dir_ignored", func(t *testing.T) {
+		home := t.TempDir()
+		victim := t.TempDir()
+		stateParent := filepath.Join(home, ".local", "state", "corral")
+		if err := os.MkdirAll(stateParent, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		symRun := filepath.Join(stateParent, "run")
+		if err := os.Symlink(victim, symRun); err != nil {
+			t.Fatal(err)
+		}
+		layout, err := daemon.ResolveLayout(daemon.PathOptions{Home: home, UID: &uid, MachineID: "112233445566"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := layout.EnsureRunDir(); err == nil {
+			t.Fatal("EnsureRunDir accepted symlink run dir")
+		}
+		ps := NewPaneSender(nil, nil, nil, nil)
+		ps.SetLockDirsForTest(filepath.Join(home, "missing-sys"), symRun)
+		rel, ok := ps.acquirePaneLock(context.Background(), "tmux", "%3")
+		if !ok {
+			t.Fatal("expected fallback in-process lock to succeed")
+		}
+		rel()
+		if entries, _ := os.ReadDir(victim); len(entries) != 0 {
+			t.Fatalf("corrald wrote through symlink stateRunDir into victim: %v", entries)
+		}
+
+		// Wrong owner check (simulated via uid+1 without needing root).
+		realRun := filepath.Join(home, "real-run")
+		if err := os.MkdirAll(realRun, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		psWrong := NewPaneSender(nil, nil, nil, nil)
+		psWrong.SetLockUIDForTest(uid + 1)
+		psWrong.SetLockDirsForTest(filepath.Join(home, "missing-sys"), realRun)
+		rel2, ok2 := psWrong.acquirePaneLock(context.Background(), "tmux", "%4")
+		if !ok2 {
+			t.Fatal("expected fallback in-process lock to succeed on uid mismatch")
+		}
+		rel2()
+		if entries, _ := os.ReadDir(realRun); len(entries) != 0 {
+			t.Fatalf("corrald used wrong-owner stateRunDir: %v", entries)
 		}
 	})
 }

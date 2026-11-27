@@ -48,6 +48,7 @@ type Layout struct {
 	SharedLockPath string // ~/.local/lib/corral/.corrald-shared.lock
 
 	StateRoot     string // ~/.local/state/corral/corrald
+	RunDir        string // ~/.local/state/corral/run (shared flock dir with convoGated)
 	StateDir      string // ~/.local/state/corral/corrald/<mid>
 	InstallJSON   string // .../<mid>/install.json
 	LockPath      string // .../<mid>/corrald.lock
@@ -162,7 +163,9 @@ func ResolveLayout(opts PathOptions) (*Layout, error) {
 	}
 
 	libDir := filepath.Join(home, ".local", "lib", "corral")
-	stateRoot := filepath.Join(home, ".local", "state", "corral", "corrald")
+	stateBase := filepath.Join(home, ".local", "state", "corral")
+	stateRoot := filepath.Join(stateBase, "corrald")
+	runDir := filepath.Join(stateBase, "run")
 	stateDir := filepath.Join(stateRoot, mid)
 
 	sockPath := filepath.Join(stateDir, "corrald.sock")
@@ -185,6 +188,7 @@ func ResolveLayout(opts PathOptions) (*Layout, error) {
 		ReadmePath:       filepath.Join(libDir, "README.txt"),
 		SharedLockPath:   filepath.Join(libDir, ".corrald-shared.lock"),
 		StateRoot:        stateRoot,
+		RunDir:           runDir,
 		StateDir:         stateDir,
 		InstallJSON:      filepath.Join(stateDir, "install.json"),
 		LockPath:         filepath.Join(stateDir, "corrald.lock"),
@@ -324,6 +328,53 @@ func (l *Layout) EnsureStateDir() error {
 		return err
 	}
 	return EnsureSecureDir(l.OpsDir, l.UID)
+}
+
+// EnsureRunDir creates ~/.local/state/corral/run with mode 0700 if absent,
+// and verifies it is a real directory (not a symlink) owned by l.UID.
+// If the path already exists and fails validation (e.g. symlink, non-directory,
+// or wrong owner), it is left untouched and an error is returned so callers
+// skip it without failing daemon startup.
+func (l *Layout) EnsureRunDir() error {
+	if l.RunDir == "" {
+		return errors.New("empty run dir")
+	}
+	info, err := os.Lstat(l.RunDir)
+	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("lstat %s: %w", l.RunDir, err)
+		}
+		parent := filepath.Dir(l.RunDir)
+		if err := os.MkdirAll(parent, 0o700); err != nil {
+			return err
+		}
+		if pinfo, perr := os.Lstat(parent); perr != nil {
+			return fmt.Errorf("lstat %s: %w", parent, perr)
+		} else if pinfo.Mode()&os.ModeSymlink != 0 || !pinfo.IsDir() {
+			return fmt.Errorf("parent %s is not a real directory", parent)
+		}
+		if err := os.Mkdir(l.RunDir, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
+			return fmt.Errorf("mkdir %s: %w", l.RunDir, err)
+		}
+		info, err = os.Lstat(l.RunDir)
+		if err != nil {
+			return fmt.Errorf("lstat %s: %w", l.RunDir, err)
+		}
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("directory %s is a symlink", l.RunDir)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("path %s is not a directory", l.RunDir)
+	}
+	st, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return fmt.Errorf("stat metadata unavailable for %s", l.RunDir)
+	}
+	if st.Uid != l.UID {
+		return fmt.Errorf("directory %s is owned by uid %d, expected %d", l.RunDir, st.Uid, l.UID)
+	}
+	return nil
 }
 
 // EnsureSocketDir creates and validates the socket parent directory. When

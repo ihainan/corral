@@ -3809,6 +3809,11 @@ func convoGatedPicCommand(gate, mode, session, pane, socket string, pid, start i
 	return convoGated(gate, mode, session, pane, socket, pid, start, sid, strconv.Itoa(length)+"@", nil, read)
 }
 
+// convoSystemRunBase is the parent of per-uid runtime directories ("/run/user"
+// in production; overridable in tests so tests never depend on or write to the
+// host's /run/user/<uid>).
+var convoSystemRunBase = "/run/user"
+
 func convoGated(gate, mode, session, pane, socket string, pid, start int64, sid, n string, keys []string, read int) string {
 	script := `PATH="$HOME/.local/bin:$HOME/bin:$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
 mode=$1 sess=$2 p=$3 pid=$4 start=$5 len=$6 sock=$7 sid=$8 rd=$9
@@ -3938,8 +3943,20 @@ f=$(mktemp) || exit 4
 trap 'rm -f "$f"; [ -n "${lk:-}" ] && rm -f "$lk"; [ -n "$partdir" ] && rm -rf "$partdir"; [ "$mode" = tmux ] && tmux delete-buffer -b "$b" 2>/dev/null 9>&-' EXIT
 trap '[ "$typing" = 1 ] && exit 6; exit 4' HUP INT TERM
 if [ "$len" != keys ]; then cat >"$f" || exit 4; fi
-l=${XDG_RUNTIME_DIR:-}/corral-send-$(printf '%s' "$mode-$p" | tr -c 'A-Za-z0-9-' _)
-if [ -n "${XDG_RUNTIME_DIR:-}" ] && [ -d "$XDG_RUNTIME_DIR" ] && [ ! -L "$l" ] && command -v flock >/dev/null 2>&1 && (exec 9>>"$l") 2>/dev/null; then
+ld=
+_u=$(id -u 2>/dev/null)
+if [ -n "$_u" ] && [ -d "` + convoSystemRunBase + `/$_u" ] && [ ! -L "` + convoSystemRunBase + `/$_u" ] && [ -O "` + convoSystemRunBase + `/$_u" ]; then
+  ld="` + convoSystemRunBase + `/$_u"
+elif [ -n "${HOME:-}" ] && [ -d "$HOME/.local/state/corral/run" ] && [ ! -L "$HOME/.local/state/corral/run" ] && [ -O "$HOME/.local/state/corral/run" ]; then
+  ld="$HOME/.local/state/corral/run"
+elif [ -n "${XDG_RUNTIME_DIR:-}" ] && [ -d "$XDG_RUNTIME_DIR" ]; then
+  ld="$XDG_RUNTIME_DIR"
+fi
+l=
+if [ -n "$ld" ]; then
+  l="$ld/corral-send-$(printf '%s' "$mode-$p" | tr -c 'A-Za-z0-9-' _)"
+fi
+if [ -n "$l" ] && [ ! -L "$l" ] && command -v flock >/dev/null 2>&1 && (exec 9>>"$l") 2>/dev/null; then
   exec 9>>"$l"
   n=0
   until flock -n 9; do

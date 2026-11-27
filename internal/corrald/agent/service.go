@@ -97,6 +97,9 @@ func Register(srv *daemon.Server, opts ServiceOptions) (*Service, error) {
 
 	herdrExec := NewHerdrExecutor(valUID, loc.rd, val)
 	sender := NewPaneSender(loc, val, loc.tmux, herdrExec)
+	if layout != nil && layout.RunDir != "" {
+		sender.SetStateRunDir(layout.RunDir)
+	}
 
 	watcher := NewWatcher(WatchWatcherOptions{
 		Locator:      loc,

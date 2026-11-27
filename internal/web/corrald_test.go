@@ -561,6 +561,10 @@ func TestCorraldPauseResumeRemoveAndPending(t *testing.T) {
 
 	startCorraldInstall(t, admin, hostID)
 	waitCorraldState(t, admin, hostID, "running")
+	runDir := filepath.Join(home, ".local", "state", "corral", "run")
+	if info, err := os.Lstat(runDir); err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		t.Fatalf("expected corrald startup to create %s: info=%v err=%v", runDir, info, err)
+	}
 
 	// Pause (only user -> stops daemon too).
 	mustStatus(t, admin.do("POST", fmt.Sprintf("/api/hosts/%d/corrald/pause", hostID), nil), http.StatusOK, "pause")
@@ -589,6 +593,12 @@ func TestCorraldPauseResumeRemoveAndPending(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(home, ".local", "lib", "corral", "corrald")); !os.IsNotExist(err) {
 		t.Fatal("corrald symlink should be removed after uninstall")
+	}
+	if _, err := os.Lstat(runDir); !os.IsNotExist(err) {
+		t.Fatalf("corrald run dir %s should be removed after uninstall (err=%v)", runDir, err)
+	}
+	if _, err := os.Lstat(filepath.Join(home, ".local", "state", "corral")); !os.IsNotExist(err) {
+		t.Fatalf("~/.local/state/corral should be removed when empty after uninstall (err=%v)", err)
 	}
 
 	// Re-install then shut down SSH server to test remove_pending!
