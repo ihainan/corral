@@ -14,6 +14,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -98,8 +99,75 @@ func (c *rpcTestClient) readEvent(t *testing.T, timeout time.Duration, pred func
 	return proto.Event{}
 }
 
-func startTestDaemonWithAgent(t *testing.T, home string, opts ServiceOptions) (*daemon.Server, *Service, string) {
+func (c *rpcTestClient) assertNoEvent(t *testing.T, wait time.Duration) {
 	t.Helper()
+	_ = c.conn.SetReadDeadline(time.Now().Add(wait))
+	var env proto.Envelope
+	err := proto.ReadJSON(c.conn, &env)
+	if err == nil && env.IsEvent() {
+		t.Fatalf("received unexpected event after unwatch: %+v", env.AsEvent())
+	}
+}
+
+func countSelfFDs(t *testing.T) int {
+	t.Helper()
+	entries, err := os.ReadDir("/proc/self/fd")
+	if err != nil {
+		t.Fatalf("read /proc/self/fd: %v", err)
+	}
+	return len(entries)
+}
+
+// testPIDRegistry scopes Locator and Watcher PID enumeration strictly to
+// processes spawned by the current test, preventing real agents running on the
+// host under the same UID from polluting test assertions.
+type testPIDRegistry struct {
+	mu   sync.RWMutex
+	pids map[int]struct{}
+}
+
+func newTestPIDRegistry() *testPIDRegistry {
+	return &testPIDRegistry{pids: make(map[int]struct{})}
+}
+
+func (r *testPIDRegistry) add(pid int) {
+	r.mu.Lock()
+	r.pids[pid] = struct{}{}
+	r.mu.Unlock()
+}
+
+func (r *testPIDRegistry) list() ([]string, error) {
+	r.mu.RLock()
+	pids := make([]int, 0, len(r.pids))
+	for p := range r.pids {
+		pids = append(pids, p)
+	}
+	r.mu.RUnlock()
+
+	out := make([]string, 0, len(pids))
+	for _, p := range pids {
+		s := strconv.Itoa(p)
+		if _, err := os.Stat(filepath.Join("/proc", s)); err == nil {
+			out = append(out, s)
+		}
+	}
+	return out, nil
+}
+
+func startTestDaemonWithAgent(t *testing.T, home string, opts ServiceOptions, logBuf ...*bytes.Buffer) (*daemon.Server, *Service, string, *testPIDRegistry) {
+	t.Helper()
+	reg := newTestPIDRegistry()
+	emptyStr := ""
+	if opts.LocatorOpts.ListPIDs == nil && opts.LocatorOpts.ProcRoot == "" {
+		opts.LocatorOpts.ListPIDs = reg.list
+	}
+	if opts.LocatorOpts.ClaudeConfigDir == nil {
+		opts.LocatorOpts.ClaudeConfigDir = &emptyStr
+	}
+	if opts.LocatorOpts.XDGDataHome == nil {
+		opts.LocatorOpts.XDGDataHome = &emptyStr
+	}
+
 	sockTmp, err := os.MkdirTemp("/tmp", "cd-ag-*")
 	if err != nil {
 		t.Fatal(err)
@@ -117,12 +185,16 @@ func startTestDaemonWithAgent(t *testing.T, home string, opts ServiceOptions) (*
 		t.Fatal(err)
 	}
 	ready := make(chan struct{})
-	srv, err := daemon.NewServer(daemon.ServerConfig{
+	cfg := daemon.ServerConfig{
 		Layout:  layout,
 		Build:   proto.BuildInfo{Version: "test", Release: 1, Commit: "abc"},
 		Gateway: "gw.test",
 		OnReady: func() { close(ready) },
-	})
+	}
+	if len(logBuf) > 0 && logBuf[0] != nil {
+		cfg.Logger = daemon.NewLogger(logBuf[0])
+	}
+	srv, err := daemon.NewServer(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -146,7 +218,7 @@ func startTestDaemonWithAgent(t *testing.T, home string, opts ServiceOptions) (*
 	case <-time.After(3 * time.Second):
 		t.Fatal("daemon did not become ready")
 	}
-	return srv, svc, layout.SocketPath
+	return srv, svc, layout.SocketPath, reg
 }
 
 func TestRPCMethodsAndWatchInotifyAndFallback(t *testing.T) {
@@ -163,7 +235,7 @@ func TestRPCMethodsAndWatchInotifyAndFallback(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, svc, sock := startTestDaemonWithAgent(t, home, ServiceOptions{
+	_, svc, sock, reg := startTestDaemonWithAgent(t, home, ServiceOptions{
 		MaxWatches:   4,
 		PollInterval: 100 * time.Millisecond,
 	})
@@ -200,14 +272,12 @@ func TestRPCMethodsAndWatchInotifyAndFallback(t *testing.T) {
 		t.Fatalf("unexpected watch result: %+v", watchRes)
 	}
 
-	// Check daemon.health reports ok for locate, tails, watch.
 	var health proto.HealthResult
 	cl.call(t, proto.MethodDaemonHealth, nil, &health)
 	if health.Caps["locate"] != "ok" || health.Caps["tails"] != "ok" || health.Caps["watch"] != "ok" {
 		t.Fatalf("unexpected health caps: %+v", health.Caps)
 	}
 
-	// Wait briefly for inotify watch to be registered, then append secret-like content.
 	time.Sleep(80 * time.Millisecond)
 	const secretBody = "SENSITIVE_CONVO_PAYLOAD_MUST_NOT_APPEAR_IN_EVENT"
 	f, err := os.OpenFile(logPath, os.O_APPEND|os.O_WRONLY, 0o600)
@@ -249,6 +319,7 @@ func TestRPCMethodsAndWatchInotifyAndFallback(t *testing.T) {
 		t.Fatal(err)
 	}
 	childPID := proc.Process.Pid
+	reg.add(childPID)
 	t.Cleanup(func() {
 		_ = proc.Process.Kill()
 		_ = proc.Wait()
@@ -296,7 +367,6 @@ func TestRPCMethodsAndWatchInotifyAndFallback(t *testing.T) {
 	}
 	cl.call(t, proto.MethodAgentWatch, proto.AgentWatchParams{Logs: extraLogs}, &watchRes)
 
-	// Wait for reconcile to switch to poll mode.
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
 		cl.call(t, proto.MethodDaemonHealth, nil, &health)
@@ -309,7 +379,6 @@ func TestRPCMethodsAndWatchInotifyAndFallback(t *testing.T) {
 		t.Fatalf("expected poll fallback health after exceeding limit, got %q", health.Caps["watch"])
 	}
 
-	// Verify growth is still detected in poll mode.
 	targetPoll := extraLogs[4]
 	pf, err := os.OpenFile(targetPoll, os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
@@ -333,7 +402,7 @@ func TestRPCMethodsAndWatchInotifyAndFallback(t *testing.T) {
 	})
 
 	// 6. StateProvider Snapshot/Restore preserves known located logs.
-	svc.Validator().UpdateDiscovered([]string{logPath}, nil, nil)
+	svc.Validator().UpdateDiscovered(true, []string{logPath}, nil, nil)
 	snap, err := svc.Snapshot()
 	if err != nil {
 		t.Fatal(err)
@@ -351,6 +420,390 @@ func TestRPCMethodsAndWatchInotifyAndFallback(t *testing.T) {
 	cl.call(t, proto.MethodAgentWatch, proto.AgentWatchParams{Stop: true}, &watchRes)
 	if watchRes.Watching || watchRes.Mode != WatchModeIdle {
 		t.Fatalf("expected idle after stop, got %+v", watchRes)
+	}
+}
+
+// Review #3, #4, #5, #6:
+//   - unwatch/stop unsubscribes from EventBus even while other clients remain watching (#6)
+//   - repeated watch/unwatch/disconnect/reconnect 1000 times under -race leaks zero goroutines and zero FDs (#3, #4, #5)
+func TestWatchChurn1000IterationsNoLeakAndUnwatchStopsEvents(t *testing.T) {
+	home := t.TempDir()
+	projDir := filepath.Join(home, ".claude", "projects", "-churn")
+	if err := os.MkdirAll(projDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(projDir, "dddddddd-dddd-4ddd-8ddd-dddddddddddd.jsonl")
+	if err := os.WriteFile(logPath, []byte("seed\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, svc, sock, _ := startTestDaemonWithAgent(t, home, ServiceOptions{
+		MaxWatches:   DefaultMaxInotifyWatches,
+		PollInterval: 500 * time.Millisecond,
+	})
+
+	// Part A (#6): c1 unwatches while c2 keeps watching; c1 must receive NO events.
+	c1 := dialRPCTestClient(t, sock)
+	c2 := dialRPCTestClient(t, sock)
+	var wr proto.AgentWatchResult
+	c1.call(t, proto.MethodAgentWatch, proto.AgentWatchParams{Logs: []string{logPath}}, &wr)
+	c2.call(t, proto.MethodAgentWatch, proto.AgentWatchParams{Logs: []string{logPath}}, &wr)
+	time.Sleep(60 * time.Millisecond)
+
+	c1.call(t, proto.MethodAgentUnwatch, nil, &wr)
+
+	f, err := os.OpenFile(logPath, os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = f.WriteString("after-c1-unwatch\n")
+	_ = f.Close()
+
+	// c2 MUST receive the event; c1 MUST NOT.
+	c2.readEvent(t, 2*time.Second, func(e proto.Event) bool {
+		return e.Event == proto.EventAgentChanged
+	})
+	c1.assertNoEvent(t, 250*time.Millisecond)
+
+	// Same check for agent.watch {stop:true}:
+	c1.call(t, proto.MethodAgentWatch, proto.AgentWatchParams{Logs: []string{logPath}}, &wr)
+	c1.call(t, proto.MethodAgentWatch, proto.AgentWatchParams{Stop: true}, &wr)
+	f, _ = os.OpenFile(logPath, os.O_APPEND|os.O_WRONLY, 0o600)
+	_, _ = f.WriteString("after-c1-stop\n")
+	_ = f.Close()
+	c2.readEvent(t, 2*time.Second, func(e proto.Event) bool {
+		return e.Event == proto.EventAgentChanged
+	})
+	c1.assertNoEvent(t, 250*time.Millisecond)
+
+	// Detach c2 and close c1/c2 to establish clean baseline.
+	c2.call(t, proto.MethodAgentUnwatch, nil, &wr)
+	_ = c1.conn.Close()
+	_ = c2.conn.Close()
+	time.Sleep(80 * time.Millisecond)
+
+	runtime.GC()
+	baseGoroutines := runtime.NumGoroutine()
+	baseFDs := countSelfFDs(t)
+
+	// Part B (#5): 500 watch/unwatch cycles on one persistent connection (including repeated watch updates).
+	persist := dialRPCTestClient(t, sock)
+	for i := 0; i < 500; i++ {
+		persist.call(t, proto.MethodAgentWatch, proto.AgentWatchParams{Logs: []string{logPath}}, &wr)
+		if i%2 == 0 {
+			persist.call(t, proto.MethodAgentUnwatch, nil, &wr)
+		}
+	}
+	persist.call(t, proto.MethodAgentUnwatch, nil, &wr)
+	_ = persist.conn.Close()
+
+	// Part C (#3 & #4): 500 concurrent/rapid connect -> watch -> disconnect cycles.
+	const totalReconnects = 500
+	const workers = 4
+	var wg sync.WaitGroup
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func(workerID int) {
+			defer wg.Done()
+			for i := 0; i < totalReconnects/workers; i++ {
+				conn, err := net.DialUnix("unix", nil, &net.UnixAddr{Name: sock, Net: "unix"})
+				if err != nil {
+					t.Errorf("worker %d iter %d dial: %v", workerID, i, err)
+					return
+				}
+				raw, _ := json.Marshal(proto.AgentWatchParams{Logs: []string{logPath}})
+				_ = proto.WriteJSON(conn, proto.Request{ID: 1, Method: proto.MethodAgentWatch, Params: raw})
+				_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+				var env proto.Envelope
+				_ = proto.ReadJSON(conn, &env)
+				if i%2 == 0 {
+					_ = proto.WriteJSON(conn, proto.Request{ID: 2, Method: proto.MethodAgentUnwatch})
+					_ = proto.ReadJSON(conn, &env)
+				}
+				_ = conn.Close()
+			}
+		}(w)
+	}
+	wg.Wait()
+
+	// Wait briefly for server connection cleanup goroutines to finish.
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if !svc.Watcher().Status().Watching && runtime.NumGoroutine() <= baseGoroutines+6 && countSelfFDs(t) <= baseFDs+4 {
+			break
+		}
+		runtime.GC()
+		time.Sleep(25 * time.Millisecond)
+	}
+
+	st := svc.Watcher().Status()
+	if st.Watching || st.Mode != WatchModeIdle || st.WatchedFiles != 0 {
+		t.Fatalf("watcher not idle after churn: %+v", st)
+	}
+	afterGoroutines := runtime.NumGoroutine()
+	afterFDs := countSelfFDs(t)
+	t.Logf("after 1000 watch/unwatch/reconnect cycles: goroutines %d->%d, fds %d->%d",
+		baseGoroutines, afterGoroutines, baseFDs, afterFDs)
+
+	if afterGoroutines > baseGoroutines+6 {
+		t.Fatalf("goroutine leak detected: baseline=%d after=%d", baseGoroutines, afterGoroutines)
+	}
+	if afterFDs > baseFDs+4 {
+		t.Fatalf("FD leak detected: baseline=%d after=%d", baseFDs, afterFDs)
+	}
+}
+
+// Review #7: after log rotation (rename+create or remove+create), Watcher must
+// evict the stale watch descriptor and re-bind to the new file at the same path.
+func TestWatchRebindsAfterLogRotation(t *testing.T) {
+	home := t.TempDir()
+	projDir := filepath.Join(home, ".claude", "projects", "-rot")
+	if err := os.MkdirAll(projDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(projDir, "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee.jsonl")
+	if err := os.WriteFile(logPath, []byte("gen1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, sock, _ := startTestDaemonWithAgent(t, home, ServiceOptions{
+		MaxWatches:   DefaultMaxInotifyWatches,
+		PollInterval: 80 * time.Millisecond,
+	})
+	cl := dialRPCTestClient(t, sock)
+	var wr proto.AgentWatchResult
+	cl.call(t, proto.MethodAgentWatch, proto.AgentWatchParams{Logs: []string{logPath}}, &wr)
+	time.Sleep(80 * time.Millisecond)
+
+	// Rotate via rename + recreate at the original path.
+	if err := os.Rename(logPath, logPath+".1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(logPath, []byte("gen2\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Give watcher time to receive IN_MOVE_SELF and re-bind to the new inode.
+	time.Sleep(250 * time.Millisecond)
+
+	// Append to the newly rotated file -> must emit agent.changed!
+	f, err := os.OpenFile(logPath, os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = f.WriteString("gen2-appended\n")
+	_ = f.Close()
+
+	cl.readEvent(t, 3*time.Second, func(e proto.Event) bool {
+		if e.Event != proto.EventAgentChanged {
+			return false
+		}
+		var d proto.AgentChangedEventData
+		_ = json.Unmarshal(e.Data, &d)
+		for _, p := range d.ChangedLogs {
+			if p == logPath {
+				return true
+			}
+		}
+		return false
+	})
+}
+
+// Review #8: Watcher detects both (a) an existing non-agent PID exec'ing into
+// an agent (same PID & starttime, changed comm/exe) and (b) rapid PID reuse
+// where (pid, starttime) changes between polls.
+func TestWatchDetectsExecIntoAgentAndPIDReuse(t *testing.T) {
+	// Part A: real process running `sh` -> `exec <fake-codex>` (same PID & starttime).
+	shPath, err := exec.LookPath("sh")
+	if err != nil {
+		t.Skip("no sh")
+	}
+	sleepPath, err := exec.LookPath("sleep")
+	if err != nil {
+		t.Skip("no sleep")
+	}
+	fakeBinDir := t.TempDir()
+	fakeCodex := filepath.Join(fakeBinDir, "codex")
+	if err := os.Symlink(sleepPath, fakeCodex); err != nil {
+		t.Fatal(err)
+	}
+
+	home := t.TempDir()
+	readyFile := filepath.Join(t.TempDir(), "sh-ready")
+	triggerFile := filepath.Join(t.TempDir(), "go-exec")
+	// Script waits as `sh` until triggerFile exists, then `exec`s into `codex`.
+	script := fmt.Sprintf("echo ok > %q; while [ ! -f %q ]; do sleep 0.02; done; exec %q 60", readyFile, triggerFile, fakeCodex)
+	cmd := exec.Command(shPath, "-c", script)
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	pid := cmd.Process.Pid
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+	})
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(readyFile); err == nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	_, _, sock, reg := startTestDaemonWithAgent(t, home, ServiceOptions{
+		PollInterval: 60 * time.Millisecond,
+	})
+	reg.add(pid)
+	cl := dialRPCTestClient(t, sock)
+	var wr proto.AgentWatchResult
+	cl.call(t, proto.MethodAgentWatch, proto.AgentWatchParams{}, &wr)
+	// Wait for seedProcesses() to observe `pid` while it is still `sh`.
+	time.Sleep(150 * time.Millisecond)
+
+	// Now trigger `exec codex` on the exact same PID!
+	if err := os.WriteFile(triggerFile, []byte("go"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cl.readEvent(t, 3*time.Second, func(e proto.Event) bool {
+		if e.Event != proto.EventAgentChanged {
+			return false
+		}
+		var d proto.AgentChangedEventData
+		_ = json.Unmarshal(e.Data, &d)
+		for _, p := range d.AddedPIDs {
+			if p == pid {
+				return true
+			}
+		}
+		return false
+	})
+
+	// Part B: synthetic /proc test for rapid PID reuse (same PID, new starttime).
+	fakeProc := t.TempDir()
+	pidDir := filepath.Join(fakeProc, "4242")
+	if err := os.MkdirAll(pidDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFakeStat := func(st string) {
+		// 20 fields after ") ": state ppid pgrp session tty_nr tpgid ... field20=starttime
+		statLine := fmt.Sprintf("4242 (codex) S 1 4242 4242 0 4242 0 0 0 0 0 0 0 0 0 20 0 1 0 %s 0 0\n", st)
+		if err := os.WriteFile(filepath.Join(pidDir, "stat"), []byte(statLine), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_ = os.WriteFile(filepath.Join(pidDir, "comm"), []byte("codex\n"), 0o600)
+	writeFakeStat("1000")
+
+	loc, err := NewLocator(LocatorOptions{Home: home, ProcRoot: fakeProc})
+	if err != nil {
+		t.Fatal(err)
+	}
+	val := NewPathValidator(home, uint32(os.Geteuid()), fakeProc)
+	w := NewWatcher(WatchWatcherOptions{Locator: loc, Validator: val})
+	w.seedProcesses()
+
+	// Simulate PID 4242 exiting and a new codex reusing PID 4242 with starttime=2000.
+	writeFakeStat("2000")
+	added, removed := w.pollProcesses()
+	if len(removed) != 1 || removed[0] != 4242 || len(added) != 1 || added[0] != 4242 {
+		t.Fatalf("PID reuse (starttime 1000->2000): got added=%v removed=%v, want [4242] and [4242]", added, removed)
+	}
+}
+
+// Review #9: auth secret values (ANTHROPIC_AUTH_TOKEN, ANTHROPIC_API_KEY, and
+// unrelated secrets in settings.json env) must only be tested for presence,
+// never returned in locate output or logs, and readProcEnv must refuse secret caps.
+func TestSecretsNeverMaterializedOrLeaked(t *testing.T) {
+	const (
+		sentinelTok   = "SENTINEL_AUTH_TOKEN_SECRET_987654321"
+		sentinelKey   = "SENTINEL_API_KEY_SECRET_123456789"
+		sentinelOther = "SENTINEL_OTHER_SETTINGS_SECRET_555555"
+	)
+
+	// 1. capReader.readProcEnv must panic if a secret env cap is requested.
+	rd := newCapReader("/proc")
+	for _, secretCap := range []string{proto.ReadEnvAnthropicAuthToken, proto.ReadEnvAnthropicAPIKey} {
+		panicked := false
+		func() {
+			defer func() {
+				if recover() != nil {
+					panicked = true
+				}
+			}()
+			_, _ = rd.readProcEnv("/proc/self", secretCap)
+		}()
+		if !panicked {
+			t.Fatalf("readProcEnv did not refuse secret capability %q", secretCap)
+		}
+	}
+
+	// 2. End-to-end RPC locate with sentinels in BOTH settings.json AND process environ.
+	sleepBin, err := exec.LookPath("sleep")
+	if err != nil {
+		t.Skip("no sleep")
+	}
+	home := t.TempDir()
+	sessDir := filepath.Join(home, ".claude", "sessions")
+	projDir := filepath.Join(home, ".claude", "projects", "-sec")
+	for _, d := range []string{sessDir, projDir} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_ = os.WriteFile(filepath.Join(home, ".claude", "settings.json"), []byte(fmt.Sprintf(`{
+		"env": {
+			"ANTHROPIC_BASE_URL": "https://user:urlsecret@gw.example.com/v1?token=%s",
+			"ANTHROPIC_AUTH_TOKEN": "%s",
+			"ANTHROPIC_API_KEY": "%s",
+			"UNRELATED_SECRET": "%s",
+			"CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "80"
+		},
+		"autoCompactWindow": 200000
+	}`, sentinelOther, sentinelTok, sentinelKey, sentinelOther)), 0o600)
+
+	// Spawn a fake Claude process with secret env vars.
+	p1 := exec.Command(sleepBin, "60")
+	p1.Env = []string{
+		"HOME=" + home,
+		"PATH=/usr/bin:/bin",
+		"ANTHROPIC_API_KEY=" + sentinelKey,
+		"ANTHROPIC_AUTH_TOKEN=" + sentinelTok,
+		"HERDR_PANE_ID=w1:p1",
+	}
+	if err := p1.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = p1.Process.Kill(); _ = p1.Wait() })
+
+	st, _, err := daemon.ProcStartTime(p1.Process.Pid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const sid = "ffffffff-ffff-4fff-8fff-ffffffffffff"
+	_ = os.WriteFile(filepath.Join(sessDir, strconv.Itoa(p1.Process.Pid)+".json"),
+		[]byte(fmt.Sprintf(`{"pid":%d,"sessionId":"%s","procStart":"%s"}`, p1.Process.Pid, sid, st)), 0o600)
+
+	var logBuf bytes.Buffer
+	_, _, sock, reg := startTestDaemonWithAgent(t, home, ServiceOptions{}, &logBuf)
+	reg.add(p1.Process.Pid)
+	cl := dialRPCTestClient(t, sock)
+
+	var locRes proto.AgentLocateResult
+	cl.call(t, proto.MethodAgentLocate, proto.AgentLocateParams{Mode: "herdr"}, &locRes)
+
+	outStr := string(locRes.Out)
+	if !strings.Contains(outStr, "auth=token\n") || !strings.Contains(outStr, "ep=gw.example.com\n") || !strings.Contains(outStr, "pct=80") {
+		t.Fatalf("locate did not derive expected non-secret metadata: %q", outStr)
+	}
+
+	// Assert none of the sentinels appear in RPC output or daemon logs.
+	for _, s := range []string{sentinelTok, sentinelKey, sentinelOther, "urlsecret"} {
+		if strings.Contains(outStr, s) {
+			t.Fatalf("secret sentinel %q leaked into agent.locate output", s)
+		}
+		if strings.Contains(logBuf.String(), s) {
+			t.Fatalf("secret sentinel %q leaked into daemon logs", s)
+		}
 	}
 }
 
@@ -383,7 +836,13 @@ func TestAgentWatchIdleOverhead(t *testing.T) {
 		logs = append(logs, p)
 	}
 
-	loc, err := NewLocator(LocatorOptions{Home: home})
+	emptyStr := ""
+	loc, err := NewLocator(LocatorOptions{
+		Home:            home,
+		ListPIDs:        func() ([]string, error) { return nil, nil },
+		ClaudeConfigDir: &emptyStr,
+		XDGDataHome:     &emptyStr,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -400,7 +859,6 @@ func TestAgentWatchIdleOverhead(t *testing.T) {
 	if !st.Watching || st.Mode != WatchModeInotify {
 		t.Fatalf("expected inotify watch mode, got %+v", st)
 	}
-	// Let initial seed + watch setup complete before measuring idle window.
 	time.Sleep(150 * time.Millisecond)
 
 	runtime.GC()
@@ -427,11 +885,206 @@ func TestAgentWatchIdleOverhead(t *testing.T) {
 	t.Logf("agent.watch idle (50 files, inotify, 1s /proc poll, wall=%v): cpu=%v (user=%v sys=%v, %.2f%%), totalAllocDelta=%.1f KiB, heapInuse=%.1f KiB, procRSS=%d KiB",
 		wall.Round(time.Millisecond), cpuTotal, userDelta, sysDelta, cpuPct, allocDeltaKB, heapInuseKB, rssKB)
 
-	// Sanity guard: idle watcher must stay very lightweight (<20% CPU even on a busy CI box).
 	if cpuPct > 20.0 {
 		t.Fatalf("idle watcher CPU too high: %.2f%%", cpuPct)
 	}
-	_ = strconv.Itoa(0)
+}
+
+// TestAgentTestsIsolatedFrom20HostNoiseAgents spawns 20 unrelated background
+// processes that look like real Claude Code & Codex agents with live log files
+// under the current UID, proves an un-scoped Locator discovers all 20 of them
+// (reproducing the multi-agent host condition), and then verifies that an
+// isolated Service (ListPIDs scoped to test PIDs, MaxWatches=4) stays in
+// inotify mode with WatchedFiles=1 and ignores noise log growth & exits.
+func TestAgentTestsIsolatedFrom20HostNoiseAgents(t *testing.T) {
+	shPath, err := exec.LookPath("sh")
+	if err != nil {
+		t.Skip("no sh")
+	}
+	sleepPath, err := exec.LookPath("sleep")
+	if err != nil {
+		t.Skip("no sleep")
+	}
+
+	noiseHome := t.TempDir()
+	noiseClaudeCfg := filepath.Join(noiseHome, "noise-claude")
+	noiseClaudeSess := filepath.Join(noiseClaudeCfg, "sessions")
+	noiseClaudeProj := filepath.Join(noiseClaudeCfg, "projects", "-noise")
+	noiseCodexHome := filepath.Join(noiseHome, "noise-codex")
+	noiseCodexSess := filepath.Join(noiseCodexHome, "sessions", "2026", "11", "27")
+	noiseBinDir := filepath.Join(noiseHome, "bin")
+	for _, d := range []string{noiseClaudeSess, noiseClaudeProj, noiseCodexSess, noiseBinDir} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	noiseClaudeBin := filepath.Join(noiseBinDir, "claude")
+	noiseCodexBin := filepath.Join(noiseBinDir, "codex")
+	if err := os.Symlink(sleepPath, noiseClaudeBin); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(shPath, noiseCodexBin); err != nil {
+		t.Fatal(err)
+	}
+
+	var noiseCmds []*exec.Cmd
+	var noiseLogs []string
+	t.Cleanup(func() {
+		for _, c := range noiseCmds {
+			if c.Process != nil {
+				_ = c.Process.Kill()
+				_ = c.Wait()
+			}
+		}
+	})
+
+	// Spawn 10 noise Claude processes with custom CLAUDE_CONFIG_DIR + session JSON + log.
+	for i := 0; i < 10; i++ {
+		c := exec.Command(noiseClaudeBin, "60")
+		c.Env = []string{
+			"HOME=" + noiseHome,
+			"PATH=/usr/bin:/bin",
+			"CLAUDE_CONFIG_DIR=" + noiseClaudeCfg,
+			fmt.Sprintf("HERDR_PANE_ID=noise:c%d", i),
+		}
+		if err := c.Start(); err != nil {
+			t.Fatal(err)
+		}
+		noiseCmds = append(noiseCmds, c)
+		pid := c.Process.Pid
+		st, _, err := daemon.ProcStartTime(pid)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sid := fmt.Sprintf("10101010-1010-4010-8010-%012d", i+1)
+		logFile := filepath.Join(noiseClaudeProj, sid+".jsonl")
+		if err := os.WriteFile(logFile, []byte(`{"type":"user"}`+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(noiseClaudeSess, strconv.Itoa(pid)+".json"),
+			[]byte(fmt.Sprintf(`{"pid":%d,"sessionId":"%s","procStart":"%s"}`, pid, sid, st)), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		noiseLogs = append(noiseLogs, logFile)
+	}
+
+	// Spawn 10 noise Codex processes holding open rollout logs via shell redirection.
+	for i := 0; i < 10; i++ {
+		sid := fmt.Sprintf("20202020-2020-4020-8020-%012d", i+1)
+		logFile := filepath.Join(noiseCodexSess, "rollout-2026-11-27T01-00-00-"+sid+".jsonl")
+		if err := os.WriteFile(logFile, []byte(`{"type":"session_meta","payload":{"cwd":"/tmp"}}`+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		// Keep logFile open on FD 3 while process comm is "codex".
+		c := exec.Command(noiseCodexBin, "-c", fmt.Sprintf("exec 3<%q; while :; do read -t 1 _ </dev/null || :; done", logFile))
+		c.Env = []string{
+			"HOME=" + noiseHome,
+			"PATH=/usr/bin:/bin",
+			"CODEX_HOME=" + noiseCodexHome,
+			fmt.Sprintf("HERDR_PANE_ID=noise:x%d", i),
+		}
+		if err := c.Start(); err != nil {
+			t.Fatal(err)
+		}
+		noiseCmds = append(noiseCmds, c)
+		noiseLogs = append(noiseLogs, logFile)
+	}
+	time.Sleep(150 * time.Millisecond)
+
+	// 1. Confirm an un-scoped Locator (production /proc scan) actually discovers
+	// the noise agents' logs (proving that without isolation MaxWatches=4 fails).
+	var unscopedLogs []string
+	emptyStr := ""
+	unscopedLoc, err := NewLocator(LocatorOptions{
+		Home:            t.TempDir(),
+		ClaudeConfigDir: &emptyStr,
+		XDGDataHome:     &emptyStr,
+		OnDiscovered: func(_ bool, logs, _, _ []string) {
+			unscopedLogs = logs
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = unscopedLoc.Locate(context.Background(), proto.AgentLocateParams{Mode: "herdr"})
+	noiseSeen := 0
+	for _, l := range unscopedLogs {
+		if strings.HasPrefix(l, noiseHome+"/") {
+			noiseSeen++
+		}
+	}
+	if noiseSeen < 10 {
+		t.Fatalf("expected un-scoped Locator to see noise agent logs (proving host-noise reproduction), got %d", noiseSeen)
+	}
+
+	// 2. Now run the isolated Service with MaxWatches=4 while all 20 noise agents
+	// are alive: locate + watch must NOT see any noise agent or degrade to poll.
+	testHome := t.TempDir()
+	projDir := filepath.Join(testHome, ".claude", "projects", "-isolated")
+	if err := os.MkdirAll(projDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ownLog := filepath.Join(projDir, "30303030-3030-4030-8030-303030303030.jsonl")
+	if err := os.WriteFile(ownLog, []byte("seed\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, sock, _ := startTestDaemonWithAgent(t, testHome, ServiceOptions{
+		MaxWatches:   4,
+		PollInterval: 60 * time.Millisecond,
+	})
+	cl := dialRPCTestClient(t, sock)
+
+	var locRes proto.AgentLocateResult
+	cl.call(t, proto.MethodAgentLocate, proto.AgentLocateParams{Mode: "herdr"}, &locRes)
+	if strings.Contains(string(locRes.Out), noiseHome) {
+		t.Fatalf("isolated agent.locate leaked noise agent from host: %q", locRes.Out)
+	}
+
+	var watchRes proto.AgentWatchResult
+	cl.call(t, proto.MethodAgentWatch, proto.AgentWatchParams{Logs: []string{ownLog}}, &watchRes)
+	if !watchRes.Watching || watchRes.Mode != WatchModeInotify || watchRes.WatchedFiles != 1 {
+		t.Fatalf("isolated watch affected by 20 noise agents: %+v", watchRes)
+	}
+
+	var health proto.HealthResult
+	cl.call(t, proto.MethodDaemonHealth, nil, &health)
+	if health.Caps["watch"] != "ok" {
+		t.Fatalf("isolated watch health = %q, want ok", health.Caps["watch"])
+	}
+
+	// Modify a noise log and kill a noise agent: isolated watcher must emit NO event.
+	time.Sleep(80 * time.Millisecond)
+	nf, err := os.OpenFile(noiseLogs[0], os.O_APPEND|os.O_WRONLY, 0o600)
+	if err == nil {
+		_, _ = nf.WriteString("noise-write\n")
+		_ = nf.Close()
+	}
+	_ = noiseCmds[0].Process.Kill()
+	_ = noiseCmds[0].Wait()
+	noiseCmds[0].Process = nil
+	cl.assertNoEvent(t, 200*time.Millisecond)
+
+	// Modifying the test's own log still fires agent.changed immediately.
+	of, err := os.OpenFile(ownLog, os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = of.WriteString("own-write\n")
+	_ = of.Close()
+	cl.readEvent(t, 2*time.Second, func(e proto.Event) bool {
+		if e.Event != proto.EventAgentChanged {
+			return false
+		}
+		var d proto.AgentChangedEventData
+		_ = json.Unmarshal(e.Data, &d)
+		for _, p := range d.ChangedLogs {
+			if p == ownLog {
+				return true
+			}
+		}
+		return false
+	})
 }
 
 func timevalDuration(tv syscall.Timeval) time.Duration {

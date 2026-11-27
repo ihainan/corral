@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -18,14 +19,18 @@ import (
 // LocatorOptions configures a Locator instance. Zero values default to the
 // current user's host environment (/proc, os.UserHomeDir, os.Geteuid).
 type LocatorOptions struct {
-	Home            string
-	UID             *uint32
-	ProcRoot        string
+	Home     string
+	UID      *uint32
+	ProcRoot string
+	// ListPIDs optionally overrides /proc PID enumeration (returning numeric
+	// PID strings). When nil (production default), Locator and Watcher read
+	// numeric entries from ProcRoot (default "/proc").
+	ListPIDs        func() ([]string, error)
 	Tmux            *TmuxExecutor
 	ClaudeConfigDir *string // override for /proc/self/environ CLAUDE_CONFIG_DIR
 	XDGDataHome     *string // override for /proc/self/environ XDG_DATA_HOME
 	Now             func() time.Time
-	OnDiscovered    func(logs []string, claudeCfgDirs []string, codexHomes []string)
+	OnDiscovered    func(replace bool, logs []string, claudeCfgDirs []string, codexHomes []string)
 }
 
 // Locator implements the host-side agent discovery logic matching Corral's
@@ -35,12 +40,13 @@ type Locator struct {
 	home                    string
 	uid                     uint32
 	procRoot                string
+	listPIDs                func() ([]string, error)
 	rd                      *capReader
 	tmux                    *TmuxExecutor
 	claudeConfigDirOverride *string
 	xdgDataHomeOverride     *string
 	nowFn                   func() time.Time
-	onDiscovered            func(logs []string, claudeCfgDirs []string, codexHomes []string)
+	onDiscovered            func(replace bool, logs []string, claudeCfgDirs []string, codexHomes []string)
 }
 
 // NewLocator creates a Locator with the supplied options.
@@ -73,6 +79,7 @@ func NewLocator(opts LocatorOptions) (*Locator, error) {
 		home:                    home,
 		uid:                     uid,
 		procRoot:                procRoot,
+		listPIDs:                opts.ListPIDs,
 		rd:                      newCapReader(procRoot),
 		tmux:                    tmuxExec,
 		claudeConfigDirOverride: opts.ClaudeConfigDir,
@@ -122,7 +129,7 @@ func (l *Locator) LocateWith(ctx context.Context, mode, tmuxName, tmuxPane, time
 	// 1. Tmux pane info (only when mode == "tmux").
 	if mode == "tmux" {
 		t := ""
-		if raw, err := l.tmux.DisplayMessage(ctx, "="+tmuxName+":", "#{pane_id} #{pid} #{pane_tty} #{pane_title}"); err == nil {
+		if raw, err := l.tmux.QuerySessionPane(ctx, tmuxName); err == nil {
 			t = trimTmuxOutput(raw, 800)
 		}
 		out.WriteString("tmux=")
@@ -130,7 +137,7 @@ func (l *Locator) LocateWith(ctx context.Context, mode, tmuxName, tmuxPane, time
 		out.WriteByte(0)
 		if tmuxPane != "" {
 			pt := ""
-			if raw, err := l.tmux.DisplayMessage(ctx, tmuxPane, "#{pane_tty}"); err == nil {
+			if raw, err := l.tmux.QueryPaneTTY(ctx, tmuxPane); err == nil {
 				pt = trimTmuxOutput(raw, 200)
 			}
 			out.WriteString("panetty=")
@@ -216,16 +223,31 @@ func (l *Locator) LocateWith(ctx context.Context, mode, tmuxName, tmuxPane, time
 		l.locateTree(only, emitClaude, &agys, &out)
 	} else {
 		// Full or opencode-only scan.
+		procPIDs := l.listProcPIDs()
+		var allowedPIDSet map[string]struct{}
+		if l.listPIDs != nil {
+			allowedPIDSet = make(map[string]struct{}, len(procPIDs))
+			for _, pid := range procPIDs {
+				allowedPIDSet[pid] = struct{}{}
+			}
+		}
+		pidAllowed := func(pid string) bool {
+			if allowedPIDSet == nil {
+				return true
+			}
+			_, ok := allowedPIDSet[pid]
+			return ok
+		}
+
 		if only != "opencode" {
 			homeClaude := l.home + "/.claude"
-			sessFiles, _ := l.rd.glob(proto.ReadAgentLogsClaude, homeClaude+"/sessions/*.json")
-			for _, f := range sessFiles {
+			for _, f := range l.listClaudeSessionFiles(homeClaude) {
 				if !l.rd.isRegularFile(proto.ReadAgentLogsClaude, f) {
 					continue
 				}
 				base := filepath.Base(f)
 				pid := strings.TrimSuffix(base, ".json")
-				if !isAllDigits(pid) {
+				if !isAllDigits(pid) || !pidAllowed(pid) {
 					continue
 				}
 				pidDir := filepath.Join(l.procRoot, pid)
@@ -241,14 +263,13 @@ func (l *Locator) LocateWith(ctx context.Context, mode, tmuxName, tmuxPane, time
 				}
 			}
 			if envCfg := l.selfClaudeConfigDir(); envCfg != "" && l.rd.isDir(proto.ReadAgentLogsClaude, envCfg+"/sessions") {
-				envSessFiles, _ := l.rd.glob(proto.ReadAgentLogsClaude, envCfg+"/sessions/*.json")
-				for _, f := range envSessFiles {
+				for _, f := range l.listClaudeSessionFiles(envCfg) {
 					if !l.rd.isRegularFile(proto.ReadAgentLogsClaude, f) {
 						continue
 					}
 					base := filepath.Base(f)
 					pid := strings.TrimSuffix(base, ".json")
-					if !isAllDigits(pid) {
+					if !isAllDigits(pid) || !pidAllowed(pid) {
 						continue
 					}
 					pidDir := filepath.Join(l.procRoot, pid)
@@ -266,7 +287,7 @@ func (l *Locator) LocateWith(ctx context.Context, mode, tmuxName, tmuxPane, time
 
 		// Single pass over /proc/[0-9]* owned by current uid.
 		var claudes []string
-		for _, pid := range l.listProcPIDs() {
+		for _, pid := range procPIDs {
 			pidDir := filepath.Join(l.procRoot, pid)
 			if !l.rd.ownedByUID(proto.ReadProc, pidDir, l.uid) {
 				continue
@@ -511,9 +532,31 @@ func (l *Locator) LocateWith(ctx context.Context, mode, tmuxName, tmuxPane, time
 	}
 
 	if l.onDiscovered != nil {
-		l.onDiscovered(discoveredLogs, discoveredClaudeDirs, discoveredCodexHomes)
+		// Replace tracked authorization state on full scans (only == "") so
+		// exited sessions and old config directories do not accumulate.
+		l.onDiscovered(only == "", discoveredLogs, discoveredClaudeDirs, discoveredCodexHomes)
 	}
 	return out.Bytes()
+}
+
+// listClaudeSessionFiles lists <cfgDir>/sessions/*.json using literal
+// directory reads so glob metacharacters ([, *, ?) in cfgDir are never
+// interpreted as patterns.
+func (l *Locator) listClaudeSessionFiles(cfgDir string) []string {
+	sessDir := cfgDir + "/sessions"
+	names, err := l.rd.readDirNames(proto.ReadAgentLogsClaude, sessDir)
+	if err != nil {
+		return nil
+	}
+	sort.Strings(names)
+	var out []string
+	for _, name := range names {
+		if strings.HasPrefix(name, ".") || !strings.HasSuffix(name, ".json") {
+			continue
+		}
+		out = append(out, sessDir+"/"+name)
+	}
+	return out
 }
 
 // locateTree implements the `tree:<shell>:<fg1,fg2,...>` fast path from

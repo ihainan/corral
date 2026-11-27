@@ -10,12 +10,19 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"syscall"
 
 	"github.com/ihainan/corral/internal/corrald/proto"
 )
+
+// secretEnvCaps lists declared env capabilities whose values must NEVER be
+// extracted into Go strings or copied; callers may only test non-empty presence
+// via readProcEnvHasNonEmpty.
+var secretEnvCaps = map[string]bool{
+	proto.ReadEnvAnthropicAuthToken: true,
+	proto.ReadEnvAnthropicAPIKey:    true,
+}
 
 // capReader enforces that every host read declares a capability category
 // present in proto.DefaultManifest().Reads.
@@ -61,7 +68,12 @@ func (r *capReader) readTail(cap, path string, maxBytes int64) ([]byte, error) {
 	return readTailFromFile(f, maxBytes)
 }
 
+// readTailFromFile reads at most maxBytes from the end of f, bounding memory
+// allocation strictly with io.LimitReader even if f is actively growing.
 func readTailFromFile(f *os.File, maxBytes int64) ([]byte, error) {
+	if maxBytes <= 0 {
+		return nil, nil
+	}
 	info, err := f.Stat()
 	if err != nil {
 		return nil, err
@@ -72,24 +84,12 @@ func readTailFromFile(f *os.File, maxBytes int64) ([]byte, error) {
 			return nil, err
 		}
 	}
-	data, err := io.ReadAll(f)
-	if err != nil {
-		return nil, err
-	}
-	if int64(len(data)) > maxBytes {
-		data = data[int64(len(data))-maxBytes:]
-	}
-	return data, nil
+	return io.ReadAll(io.LimitReader(f, maxBytes))
 }
 
 func (r *capReader) stat(cap, path string) (os.FileInfo, error) {
 	assertDeclaredRead(cap)
 	return os.Stat(path)
-}
-
-func (r *capReader) lstat(cap, path string) (os.FileInfo, error) {
-	assertDeclaredRead(cap)
-	return os.Lstat(path)
 }
 
 func (r *capReader) isRegularFile(cap, path string) bool {
@@ -131,16 +131,6 @@ func (r *capReader) evalSymlinks(cap, path string) (string, error) {
 	return filepath.EvalSymlinks(path)
 }
 
-func (r *capReader) glob(cap, pattern string) ([]string, error) {
-	assertDeclaredRead(cap)
-	matches, err := filepath.Glob(pattern)
-	if err != nil {
-		return nil, err
-	}
-	sort.Strings(matches)
-	return matches, nil
-}
-
 func (r *capReader) readDirNames(cap, dir string) ([]string, error) {
 	assertDeclaredRead(cap)
 	f, err := os.Open(dir)
@@ -151,7 +141,7 @@ func (r *capReader) readDirNames(cap, dir string) ([]string, error) {
 	return f.Readdirnames(-1)
 }
 
-// envKV is a single NUL-delimited environment entry extracted from
+// envKV is a single NUL-delimited non-secret environment entry extracted from
 // /proc/<pid>/environ with embedded newlines normalized to \x01 so a value can
 // never forge another variable.
 type envKV struct {
@@ -159,14 +149,18 @@ type envKV struct {
 	val string
 }
 
-// readProcEnv reads only the environment variables whose proto.ReadEnv*
-// capability constants are passed in envCaps. Every passed constant must be in
-// proto.DefaultManifest().Reads and start with "env:".
+// readProcEnv reads only the non-secret environment variables whose
+// proto.ReadEnv* capability constants are passed in envCaps. Secret env caps
+// (such as API keys / auth tokens) are rejected here and must be checked via
+// readProcEnvHasNonEmpty so their values are never materialized as Go strings.
 func (r *capReader) readProcEnv(pidDir string, envCaps ...string) ([]envKV, error) {
 	assertDeclaredRead(proto.ReadProc)
 	allowed := make(map[string]struct{}, len(envCaps))
 	for _, c := range envCaps {
 		assertDeclaredRead(c)
+		if secretEnvCaps[c] {
+			panic(fmt.Sprintf("corrald/agent: secret env capability %q must use readProcEnvHasNonEmpty", c))
+		}
 		name, ok := strings.CutPrefix(c, "env:")
 		if !ok || name == "" {
 			panic(fmt.Sprintf("corrald/agent: non-env capability passed to readProcEnv: %q", c))
@@ -177,10 +171,37 @@ func (r *capReader) readProcEnv(pidDir string, envCaps ...string) ([]envKV, erro
 	if err != nil {
 		return nil, err
 	}
+	defer clear(raw)
 	return filterEnvironBytes(raw, allowed), nil
 }
 
-// readSelfEnv reads a single declared environment variable from
+// readProcEnvHasNonEmpty checks whether the first matching entry for envCap in
+// <pidDir>/environ has a non-empty value, without ever allocating a Go string
+// containing the value and zeroing the temporary environ buffer before return.
+func (r *capReader) readProcEnvHasNonEmpty(pidDir, envCap string) bool {
+	assertDeclaredRead(proto.ReadProc)
+	assertDeclaredRead(envCap)
+	name, ok := strings.CutPrefix(envCap, "env:")
+	if !ok || name == "" {
+		panic(fmt.Sprintf("corrald/agent: non-env capability passed to readProcEnvHasNonEmpty: %q", envCap))
+	}
+	raw, err := os.ReadFile(filepath.Join(pidDir, "environ"))
+	if err != nil {
+		return false
+	}
+	defer clear(raw)
+	prefix := append([]byte(name), '=')
+	for _, entry := range bytes.Split(raw, []byte{0}) {
+		if !bytes.HasPrefix(entry, prefix) {
+			continue
+		}
+		val := entry[len(prefix):]
+		return len(val) > 0
+	}
+	return false
+}
+
+// readSelfEnv reads a single declared non-secret environment variable from
 // /proc/self/environ without calling os.Getenv.
 func (r *capReader) readSelfEnv(envCap string) string {
 	kvs, err := r.readProcEnv(filepath.Join(r.procRoot, "self"), envCap)

@@ -33,6 +33,7 @@ type MetaRecord struct {
 	StartedAt  string `json:"started_at"`
 	SocketPath string `json:"socket_path"`
 	Gateway    string `json:"gateway,omitempty"`
+	TmuxPath   string `json:"tmux_path,omitempty"`
 }
 
 // OpRecordFile is persisted at ~/.local/state/corral/corrald/<mid>/ops/<op>.json.

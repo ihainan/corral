@@ -3,7 +3,9 @@
 package agent
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -25,9 +27,12 @@ const (
 	// via Linux inotify before automatically degrading to 1-second stat polling.
 	DefaultMaxInotifyWatches = 256
 
-	// DefaultWatchPollInterval is the cadence for checking /proc PID additions
-	// and exits, as well as stat polling when in poll-fallback mode.
+	// DefaultWatchPollInterval is the cadence for checking /proc PID additions,
+	// exits, exec transitions, and stat polling in poll-fallback mode.
 	DefaultWatchPollInterval = 1 * time.Second
+
+	// maxExtraLogsPerSub caps explicit per-subscriber log paths.
+	maxExtraLogsPerSub = 1024
 )
 
 // WatchMode describes the active file monitoring mode.
@@ -40,7 +45,7 @@ const (
 // WatchEmitter receives hint-only agent.changed events produced by Watcher.
 type WatchEmitter func(eventName string, data any) (proto.Event, error)
 
-// WatcherOptions configures a Watcher instance.
+// WatchWatcherOptions configures a Watcher instance.
 type WatchWatcherOptions struct {
 	Locator      *Locator
 	Validator    *PathValidator
@@ -49,10 +54,24 @@ type WatchWatcherOptions struct {
 	PollInterval time.Duration
 }
 
+type watchSub struct {
+	logs map[string]struct{}
+}
+
+// procEntry records identity and executable metadata of an owned process so
+// Watcher detects both (pid, starttime) reuse and in-place exec transitions
+// (e.g. a shell exec'ing into codex or claude).
+type procEntry struct {
+	start       string
+	comm        string
+	exe         string
+	cmdlineHash [32]byte
+	isAgent     bool
+}
+
 // Watcher monitors agent log file growth (via Linux inotify, with automatic
 // 1-second stat polling fallback when the watched file count exceeds
-// MaxWatches or inotify returns an error) and agent process set changes (via
-// lightweight 1-second /proc directory-name diffing).
+// MaxWatches or inotify returns an error) and agent process set changes.
 type Watcher struct {
 	loc          *Locator
 	val          *PathValidator
@@ -61,25 +80,30 @@ type Watcher struct {
 	pollInterval time.Duration
 	rd           *capReader
 
+	// lifecycleMu strictly serializes Subscribe/Unsubscribe/Stop transitions
+	// so a new run() loop can never start before a stopping run() loop has
+	// completely exited and closed its inotify FD. Lock order: lifecycleMu -> mu.
+	lifecycleMu sync.Mutex
+
 	mu             sync.Mutex
-	subscribers    map[any]struct{}
-	extraLogs      map[string]struct{} // validated logs explicitly requested by agent.watch
-	mode           string              // WatchModeIdle, WatchModeInotify, WatchModePoll
-	fallbackReason string              // "", "limit", or "inotify_error"
+	subs           map[any]*watchSub
+	mode           string // WatchModeIdle, WatchModeInotify, WatchModePoll
+	fallbackReason string // "", "limit", or "inotify_error"
 	watchedCount   int
 	running        bool
 	cancel         context.CancelFunc
 	doneCh         chan struct{}
 	syncCh         chan struct{}
 
-	// Internal loop state (accessed only by run goroutine).
+	// Loop-managed inotify & file state (map access synchronized by mu).
 	inotifyFD   int
 	inotifyFile *os.File
 	wdToPath    map[int32]string
 	pathToWD    map[string]int32
 	fileSizes   map[string]int64
-	allPIDs     map[int]struct{}
-	agentPIDs   map[int]string // pid -> starttime
+
+	// Process tracking state (accessed only by the single active run goroutine).
+	ownedProcs map[int]procEntry
 }
 
 // NewWatcher constructs a paused Watcher. It consumes zero goroutines and zero
@@ -104,16 +128,14 @@ func NewWatcher(opts WatchWatcherOptions) *Watcher {
 		maxWatches:   maxW,
 		pollInterval: interval,
 		rd:           newCapReader(procRoot),
-		subscribers:  make(map[any]struct{}),
-		extraLogs:    make(map[string]struct{}),
+		subs:         make(map[any]*watchSub),
 		mode:         WatchModeIdle,
 		syncCh:       make(chan struct{}, 1),
 		inotifyFD:    -1,
 		wdToPath:     make(map[int32]string),
 		pathToWD:     make(map[string]int32),
 		fileSizes:    make(map[string]int64),
-		allPIDs:      make(map[int]struct{}),
-		agentPIDs:    make(map[int]string),
+		ownedProcs:   make(map[int]procEntry),
 	}
 }
 
@@ -161,29 +183,46 @@ func (w *Watcher) NotifyDiscovered() {
 	}
 }
 
-// Subscribe registers sub as an active watcher and optionally adds validated
-// log paths to the watch set. Starts the background watch loop on the first
-// subscriber.
+// Subscribe registers or updates sub as an active watcher and sets its
+// validated extra log paths (cleaned up automatically when sub unsubscribes).
+// Serialized by lifecycleMu so a new run loop never overlaps a stopping one.
 func (w *Watcher) Subscribe(sub any, logs []string) WatchStatus {
-	var validLogs []string
+	validSet := make(map[string]struct{}, len(logs))
 	for _, p := range logs {
+		if len(validSet) >= maxExtraLogsPerSub {
+			break
+		}
 		if _, ok := w.val.ValidatePath(p); ok {
-			validLogs = append(validLogs, p)
+			validSet[p] = struct{}{}
 		}
 	}
 
+	w.lifecycleMu.Lock()
+	defer w.lifecycleMu.Unlock()
+
 	w.mu.Lock()
-	w.subscribers[sub] = struct{}{}
-	for _, p := range validLogs {
-		w.extraLogs[p] = struct{}{}
+	entry, exists := w.subs[sub]
+	if !exists {
+		entry = &watchSub{logs: validSet}
+		w.subs[sub] = entry
+	} else {
+		// Replace this subscriber's explicit log list so repeated watch calls
+		// do not accumulate stale paths indefinitely.
+		entry.logs = validSet
 	}
+
 	needStart := !w.running
 	if needStart {
 		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan struct{})
 		w.cancel = cancel
-		w.doneCh = make(chan struct{})
+		w.doneCh = done
 		w.running = true
-		// Seed initial mode synchronously so the response reflects current state.
+		w.wdToPath = make(map[int32]string)
+		w.pathToWD = make(map[string]int32)
+		w.fileSizes = make(map[string]int64)
+		w.ownedProcs = make(map[int]procEntry)
+
 		targets := w.collectTargetLogsLocked()
 		w.watchedCount = len(targets)
 		if len(targets) > w.maxWatches {
@@ -193,50 +232,70 @@ func (w *Watcher) Subscribe(sub any, logs []string) WatchStatus {
 			w.mode = WatchModeInotify
 			w.fallbackReason = ""
 		}
-		go w.run(ctx, w.doneCh)
+		go w.run(ctx, done)
 	}
 	w.mu.Unlock()
 
 	if !needStart {
 		w.NotifyDiscovered()
 	}
-	// Give the newly started loop a brief moment to reconcile initial watches if
-	// it just started, or simply return current status.
 	return w.Status()
 }
 
-// Unsubscribe detaches sub. When the last subscriber leaves, the watcher loop
-// stops and releases all inotify descriptors.
+// Unsubscribe detaches sub and removes its extraLogs. When the last subscriber
+// leaves, Unsubscribe waits for the watcher loop to exit completely before
+// releasing lifecycleMu so a concurrent Subscribe cannot launch a second loop.
 func (w *Watcher) Unsubscribe(sub any) WatchStatus {
+	w.lifecycleMu.Lock()
+	defer w.lifecycleMu.Unlock()
+
 	w.mu.Lock()
-	delete(w.subscribers, sub)
+	delete(w.subs, sub)
 	var cancel context.CancelFunc
 	var done chan struct{}
-	if len(w.subscribers) == 0 && w.running {
+	stopping := len(w.subs) == 0 && w.running
+	if stopping {
 		cancel = w.cancel
 		done = w.doneCh
+	}
+	w.mu.Unlock()
+
+	if stopping {
+		cancel()
+		<-done
+		w.mu.Lock()
 		w.running = false
 		w.cancel = nil
 		w.doneCh = nil
 		w.mode = WatchModeIdle
 		w.fallbackReason = ""
 		w.watchedCount = 0
-	}
-	w.mu.Unlock()
-
-	if cancel != nil {
-		cancel()
-		<-done
+		w.mu.Unlock()
+	} else {
+		w.NotifyDiscovered()
 	}
 	return w.Status()
 }
 
-// Stop shuts down the watcher immediately regardless of active subscribers.
+// Stop shuts down the watcher immediately regardless of active subscribers,
+// waiting until the background loop and inotify reader have exited.
 func (w *Watcher) Stop() {
+	w.lifecycleMu.Lock()
+	defer w.lifecycleMu.Unlock()
+
 	w.mu.Lock()
+	w.subs = make(map[any]*watchSub)
 	cancel := w.cancel
 	done := w.doneCh
-	w.subscribers = make(map[any]struct{})
+	running := w.running
+	w.mu.Unlock()
+
+	if running && cancel != nil {
+		cancel()
+		<-done
+	}
+
+	w.mu.Lock()
 	w.running = false
 	w.cancel = nil
 	w.doneCh = nil
@@ -244,17 +303,14 @@ func (w *Watcher) Stop() {
 	w.fallbackReason = ""
 	w.watchedCount = 0
 	w.mu.Unlock()
-
-	if cancel != nil {
-		cancel()
-		<-done
-	}
 }
 
 func (w *Watcher) collectTargetLogsLocked() []string {
-	seen := make(map[string]struct{}, len(w.extraLogs)+16)
-	for p := range w.extraLogs {
-		seen[p] = struct{}{}
+	seen := make(map[string]struct{}, 16)
+	for _, sub := range w.subs {
+		for p := range sub.logs {
+			seen[p] = struct{}{}
+		}
 	}
 	for _, p := range w.val.KnownLogs() {
 		seen[p] = struct{}{}
@@ -269,9 +325,7 @@ func (w *Watcher) collectTargetLogsLocked() []string {
 
 func (w *Watcher) run(ctx context.Context, done chan struct{}) {
 	defer close(done)
-	defer w.closeInotify()
 
-	// Seed baseline PID set and agent PIDs without emitting spurious events.
 	w.seedProcesses()
 	w.reconcileWatches()
 
@@ -302,25 +356,32 @@ func (w *Watcher) run(ctx context.Context, done chan struct{}) {
 			readerCancel = nil
 		}
 	}
-	defer stopReader()
+	defer func() {
+		stopReader()
+		w.closeInotify()
+	}()
 
 	startReader()
 
 	ticker := time.NewTicker(w.pollInterval)
 	defer ticker.Stop()
 
+	syncWatches := func() {
+		wasFile := w.inotifyFile
+		w.reconcileWatches()
+		if wasFile != nil && w.inotifyFile == nil {
+			stopReader()
+		} else if wasFile == nil && w.inotifyFile != nil {
+			startReader()
+		}
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-w.syncCh:
-			wasInotify := w.inotifyFile != nil
-			w.reconcileWatches()
-			if wasInotify && w.inotifyFile == nil {
-				stopReader()
-			} else if !wasInotify && w.inotifyFile != nil {
-				startReader()
-			}
+			syncWatches()
 		case changed := <-inotifyCh:
 			if len(changed) > 0 {
 				w.emitChanged(nil, nil, changed)
@@ -331,20 +392,34 @@ func (w *Watcher) run(ctx context.Context, done chan struct{}) {
 			if w.Status().Mode == WatchModePoll {
 				changedLogs = w.pollFileGrowth()
 			}
-			if len(added) > 0 || len(removed) > 0 {
-				wasInotify := w.inotifyFile != nil
-				w.reconcileWatches()
-				if wasInotify && w.inotifyFile == nil {
-					stopReader()
-				} else if !wasInotify && w.inotifyFile != nil {
-					startReader()
-				}
+			// Reconcile if processes changed OR if any target log was rotated/
+			// unlinked and is currently missing an active inotify watch.
+			if len(added) > 0 || len(removed) > 0 || w.needsWatchRebind() {
+				syncWatches()
 			}
 			if len(added) > 0 || len(removed) > 0 || len(changedLogs) > 0 {
 				w.emitChanged(added, removed, changedLogs)
 			}
 		}
 	}
+}
+
+func (w *Watcher) needsWatchRebind() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.mode != WatchModeInotify {
+		return false
+	}
+	targets := w.collectTargetLogsLocked()
+	if len(targets) != len(w.pathToWD) {
+		return true
+	}
+	for _, p := range targets {
+		if _, ok := w.pathToWD[p]; !ok {
+			return true
+		}
+	}
+	return false
 }
 
 func (w *Watcher) emitChanged(added, removed []int, logs []string) {
@@ -413,7 +488,6 @@ func (w *Watcher) reconcileWatches() {
 		targetSet[p] = struct{}{}
 	}
 
-	// Update fileSizes under lock (preserving existing sizes, pruning removed files).
 	w.mu.Lock()
 	for p, sz := range initialSizes {
 		if _, exists := w.fileSizes[p]; !exists {
@@ -427,7 +501,6 @@ func (w *Watcher) reconcileWatches() {
 	}
 	w.mu.Unlock()
 
-	// If over limit, degrade to 1s poll mode and release inotify watches.
 	if len(validTargets) > w.maxWatches {
 		w.closeInotify()
 		w.mu.Lock()
@@ -448,7 +521,6 @@ func (w *Watcher) reconcileWatches() {
 		return
 	}
 
-	// Remove stale watches.
 	w.mu.Lock()
 	var toRemove []struct {
 		path string
@@ -476,7 +548,6 @@ func (w *Watcher) reconcileWatches() {
 		_, _ = syscall.InotifyRmWatch(w.inotifyFD, uint32(rm.wd))
 	}
 
-	// Add missing watches.
 	const mask = syscall.IN_MODIFY | syscall.IN_DELETE_SELF | syscall.IN_MOVE_SELF
 	for _, p := range toAdd {
 		wd, err := syscall.InotifyAddWatch(w.inotifyFD, p, mask)
@@ -507,6 +578,7 @@ func (w *Watcher) reconcileWatches() {
 
 func (w *Watcher) readInotifyLoop(ctx context.Context, f *os.File, out chan<- []string) {
 	buf := make([]byte, 4096)
+	rawFD := int(f.Fd())
 	for {
 		if ctx.Err() != nil {
 			return
@@ -541,6 +613,18 @@ func (w *Watcher) readInotifyLoop(ctx context.Context, f *os.File, out chan<- []
 				continue
 			}
 			if mask&(syscall.IN_DELETE_SELF|syscall.IN_MOVE_SELF|syscall.IN_IGNORED) != 0 {
+				// Evict stale watch mapping immediately so reconcileWatches
+				// re-binds a newly rotated/recreated file at the same path.
+				w.mu.Lock()
+				delete(w.wdToPath, wd)
+				if w.pathToWD[path] == wd {
+					delete(w.pathToWD, path)
+				}
+				delete(w.fileSizes, path)
+				w.mu.Unlock()
+				if mask&syscall.IN_IGNORED == 0 {
+					_, _ = syscall.InotifyRmWatch(rawFD, uint32(wd))
+				}
 				w.NotifyDiscovered()
 				continue
 			}
@@ -595,14 +679,21 @@ func (w *Watcher) pollFileGrowth() []string {
 	return changed
 }
 
-// seedProcesses builds the initial PID set and agent PID map.
+func (w *Watcher) listPIDNames() ([]string, error) {
+	if w.loc != nil && w.loc.listPIDs != nil {
+		return w.loc.listPIDs()
+	}
+	return w.rd.readDirNames(proto.ReadProc, w.loc.procRoot)
+}
+
+// seedProcesses builds the initial owned-process table keyed by PID with
+// (starttime, comm, exe, cmdlineHash, isAgent).
 func (w *Watcher) seedProcesses() {
-	names, err := w.rd.readDirNames(proto.ReadProc, w.loc.procRoot)
+	names, err := w.listPIDNames()
 	if err != nil {
 		return
 	}
-	w.allPIDs = make(map[int]struct{}, len(names))
-	w.agentPIDs = make(map[int]string)
+	w.ownedProcs = make(map[int]procEntry, 64)
 	for _, name := range names {
 		if !isAllDigits(name) {
 			continue
@@ -611,23 +702,24 @@ func (w *Watcher) seedProcesses() {
 		if err != nil || pid <= 0 {
 			continue
 		}
-		w.allPIDs[pid] = struct{}{}
-		if st, ok := w.classifyAgentPID(name); ok {
-			w.agentPIDs[pid] = st
+		if ent, ok := w.inspectOwnedPID(name); ok {
+			w.ownedProcs[pid] = ent
 		}
 	}
 }
 
-// pollProcesses performs a lightweight /proc directory-name scan, inspecting
-// only newly appeared PIDs and checking whether previously tracked agent PIDs
-// exited. When idle (no new PIDs and no exited agents), it performs only a
-// single /proc Readdirnames call and zero per-PID file opens.
+// pollProcesses compares the current owned process set by (pid, starttime) and
+// re-classifies existing PIDs whose comm, exe, or cmdline changed (e.g. a
+// shell executing `exec codex` or rapid PID reuse between ticks).
 func (w *Watcher) pollProcesses() (added, removed []int) {
-	names, err := w.rd.readDirNames(proto.ReadProc, w.loc.procRoot)
+	names, err := w.listPIDNames()
 	if err != nil {
 		return nil, nil
 	}
-	curAll := make(map[int]struct{}, len(names))
+
+	curPIDs := make(map[int]struct{}, len(names))
+	nextOwned := make(map[int]procEntry, len(w.ownedProcs))
+
 	for _, name := range names {
 		if !isAllDigits(name) {
 			continue
@@ -636,61 +728,143 @@ func (w *Watcher) pollProcesses() (added, removed []int) {
 		if err != nil || pid <= 0 {
 			continue
 		}
-		curAll[pid] = struct{}{}
-		if _, seen := w.allPIDs[pid]; !seen {
-			if st, ok := w.classifyAgentPID(name); ok {
-				w.agentPIDs[pid] = st
+		curPIDs[pid] = struct{}{}
+
+		prev, hadPrev := w.ownedProcs[pid]
+		if !hadPrev {
+			ent, ok := w.inspectOwnedPID(name)
+			if !ok {
+				continue
+			}
+			nextOwned[pid] = ent
+			if ent.isAgent {
+				added = append(added, pid)
+			}
+			continue
+		}
+
+		// Existing owned PID: check starttime, comm, exe, and (for node/bun or
+		// agents) cmdline to catch both PID reuse and in-place exec().
+		pidDir := filepath.Join(w.loc.procRoot, name)
+		st, ok := w.loc.readProcStat(name)
+		if !ok {
+			if prev.isAgent {
+				removed = append(removed, pid)
+			}
+			continue
+		}
+		comm, ok := w.loc.readCommRaw(name)
+		if !ok {
+			if prev.isAgent {
+				removed = append(removed, pid)
+			}
+			continue
+		}
+		exe, _ := w.rd.readLink(proto.ReadProc, filepath.Join(pidDir, "exe"))
+
+		startChanged := st.start != prev.start
+		execChanged := comm != prev.comm || exe != prev.exe
+		var cmdHash [32]byte
+		needCmdCheck := comm == "node" || comm == "bun" || prev.comm == "node" || prev.comm == "bun"
+		if needCmdCheck && !startChanged && !execChanged {
+			cmdHash = w.readCmdlineHash(pidDir)
+			if cmdHash != prev.cmdlineHash {
+				execChanged = true
+			}
+		}
+
+		if !startChanged && !execChanged {
+			nextOwned[pid] = prev
+			continue
+		}
+
+		// Re-classify on PID reuse or exec transition.
+		ent, ok := w.inspectOwnedPID(name)
+		if !ok {
+			if prev.isAgent {
+				removed = append(removed, pid)
+			}
+			continue
+		}
+		nextOwned[pid] = ent
+		if startChanged {
+			if prev.isAgent {
+				removed = append(removed, pid)
+			}
+			if ent.isAgent {
+				added = append(added, pid)
+			}
+		} else {
+			if prev.isAgent && !ent.isAgent {
+				removed = append(removed, pid)
+			} else if !prev.isAgent && ent.isAgent {
 				added = append(added, pid)
 			}
 		}
 	}
-	for pid := range w.agentPIDs {
-		if _, alive := curAll[pid]; !alive {
-			delete(w.agentPIDs, pid)
+
+	for pid, prev := range w.ownedProcs {
+		if _, alive := curPIDs[pid]; !alive && prev.isAgent {
 			removed = append(removed, pid)
 		}
 	}
-	w.allPIDs = curAll
+
+	w.ownedProcs = nextOwned
 	return added, removed
 }
 
-// classifyAgentPID reports whether pid belongs to the current UID and looks
-// like a tracked agent process (claude/codex/opencode/agy/devin).
-func (w *Watcher) classifyAgentPID(pid string) (string, bool) {
+func (w *Watcher) readCmdlineHash(pidDir string) [32]byte {
+	raw, err := w.rd.readFile(proto.ReadProc, filepath.Join(pidDir, "cmdline"))
+	if err != nil || len(raw) == 0 {
+		return [32]byte{}
+	}
+	return sha256.Sum256(raw)
+}
+
+func (w *Watcher) inspectOwnedPID(pid string) (procEntry, bool) {
 	pidDir := filepath.Join(w.loc.procRoot, pid)
 	if !w.rd.ownedByUID(proto.ReadProc, pidDir, w.loc.uid) {
-		return "", false
+		return procEntry{}, false
+	}
+	st, ok := w.loc.readProcStat(pid)
+	if !ok {
+		return procEntry{}, false
 	}
 	comm, ok := w.loc.readCommRaw(pid)
 	if !ok {
-		return "", false
+		return procEntry{}, false
 	}
+	exe, _ := w.rd.readLink(proto.ReadProc, filepath.Join(pidDir, "exe"))
+
+	var cmdHash [32]byte
 	isAgent := false
 	switch {
 	case comm == "codex" || comm == "opencode" || comm == "agy" || comm == "devin" || comm == "claude":
 		isAgent = true
 	case comm == "node" || comm == "bun":
-		if raw, err := w.rd.readFile(proto.ReadProc, filepath.Join(pidDir, "cmdline")); err == nil && strings.Contains(string(raw), "claude") {
-			isAgent = true
+		if raw, err := w.rd.readFile(proto.ReadProc, filepath.Join(pidDir, "cmdline")); err == nil {
+			cmdHash = sha256.Sum256(raw)
+			if bytes.Contains(raw, []byte("claude")) {
+				isAgent = true
+			}
 		}
 	case isVersionComm(comm):
-		if exe, err := w.rd.readLink(proto.ReadProc, filepath.Join(pidDir, "exe")); err == nil && strings.Contains(exe, "/claude/") {
+		if strings.Contains(exe, "/claude/") {
 			isAgent = true
 		}
 	default:
-		// Also recognize fake/renamed processes that have a valid Claude session file.
 		clcfg := w.loc.claudeConfigDir(pidDir)
 		cf := clcfg + "/sessions/" + pid + ".json"
 		if _, _, _, status := w.loc.parseClaudeSession(pid, cf); status == 1 {
 			isAgent = true
 		}
 	}
-	if !isAgent {
-		return "", false
-	}
-	st, ok := w.loc.readProcStat(pid)
-	if !ok {
-		return "", false
-	}
-	return st.start, true
+
+	return procEntry{
+		start:       st.start,
+		comm:        comm,
+		exe:         exe,
+		cmdlineHash: cmdHash,
+		isAgent:     isAgent,
+	}, true
 }

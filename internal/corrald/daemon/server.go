@@ -82,6 +82,7 @@ type ServerConfig struct {
 	Layout              *Layout
 	Build               proto.BuildInfo
 	Gateway             string
+	TmuxPath            string
 	ExpectedUID         *uint32
 	Logger              *slog.Logger
 	IdleTimeout         time.Duration
@@ -290,6 +291,9 @@ func (s *Server) RegisterCloser(fn func()) {
 // Layout returns the server's resolved host path layout.
 func (s *Server) Layout() *Layout { return s.layout }
 
+// TmuxPath returns the validated optional tmux binary path passed via --tmux.
+func (s *Server) TmuxPath() string { return s.cfg.TmuxPath }
+
 // Bus returns the server's EventBus for emitting events.
 func (s *Server) Bus() *EventBus { return s.bus }
 
@@ -371,6 +375,7 @@ func (s *Server) Serve(parentCtx context.Context) error {
 		StartedAt:  s.startedAt.Format(time.RFC3339),
 		SocketPath: s.layout.SocketPath,
 		Gateway:    s.cfg.Gateway,
+		TmuxPath:   s.cfg.TmuxPath,
 	}
 	if err := WriteMetaRecord(s.layout.MetaJSON, meta); err != nil {
 		return fmt.Errorf("write meta.json: %w", err)

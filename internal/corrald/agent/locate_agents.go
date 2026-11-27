@@ -5,10 +5,10 @@ package agent
 import (
 	"bytes"
 	"encoding/json"
-	"io"
 	"path"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -156,12 +156,23 @@ func (l *Locator) parseClaudeSession(pid, sessionFile string) (st procStat, sid,
 }
 
 // resolveClaudeLog finds the unambiguous log file for a Claude session, using
-// /proc/<pid>/fd/* to disambiguate when multiple projects contain <sid>.jsonl.
+// literal directory reads (so glob metacharacters like [, *, ? in cfgDir are
+// treated literally) and /proc/<pid>/fd/* to disambiguate when multiple
+// projects contain <sid>.jsonl.
 func (l *Locator) resolveClaudeLog(pid, cfgDir, sid string) string {
-	matches, _ := l.rd.glob(proto.ReadAgentLogsClaude, cfgDir+"/projects/*/"+sid+".jsonl")
+	projectsDir := cfgDir + "/projects"
+	projEntries, err := l.rd.readDirNames(proto.ReadAgentLogsClaude, projectsDir)
+	if err != nil {
+		return ""
+	}
+	sort.Strings(projEntries)
 	logPath := ""
 	count := 0
-	for _, m := range matches {
+	for _, name := range projEntries {
+		if strings.HasPrefix(name, ".") {
+			continue
+		}
+		m := projectsDir + "/" + name + "/" + sid + ".jsonl"
 		if strings.ContainsRune(m, '\n') {
 			continue
 		}
@@ -240,80 +251,146 @@ func hostOf(rawURL string) string {
 	return s
 }
 
-func extractLastJSONStringField(body, key string) string {
-	needle := `"` + key + `"`
-	lastVal := ""
+type claudeSettingsSubset struct {
+	ModelSettings     json.RawMessage `json:"modelSettings"`
+	AutoCompactWindow json.RawMessage `json:"autoCompactWindow"`
+	Env               *struct {
+		BaseURL        json.RawMessage `json:"ANTHROPIC_BASE_URL"`
+		AuthToken      json.RawMessage `json:"ANTHROPIC_AUTH_TOKEN"`
+		APIKey         json.RawMessage `json:"ANTHROPIC_API_KEY"`
+		AutoCompactPct json.RawMessage `json:"CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"`
+	} `json:"env"`
+}
+
+// rawJSONNonEmptyString inspects a raw JSON value slice directly and reports
+// whether it encodes a non-empty JSON string, without unmarshaling or copying
+// secret contents into a Go string.
+func rawJSONNonEmptyString(raw json.RawMessage) bool {
+	b := bytes.TrimSpace(raw)
+	if len(b) < 3 || b[0] != '"' || b[len(b)-1] != '"' {
+		return false
+	}
+	return true
+}
+
+// bytesLastEnvFieldSpan locates the byte span [start, end) of the last string
+// value for key inside the last `"env": { ... }` object in raw (matching
+// setting_env's sed fallback without ever allocating a Go string for secrets).
+func bytesLastEnvFieldSpan(raw []byte, key string) (int, int, bool) {
+	flat := make([]byte, len(raw))
+	for i, c := range raw {
+		if c == '\n' {
+			flat[i] = ' '
+		} else {
+			flat[i] = c
+		}
+	}
+	defer clear(flat)
+
+	allObjs := settingEnvObjRe.FindAllSubmatchIndex(flat, -1)
+	if len(allObjs) == 0 {
+		return 0, 0, false
+	}
+	objStart, objEnd := allObjs[len(allObjs)-1][2], allObjs[len(allObjs)-1][3]
+	body := flat[objStart:objEnd]
+	needle := []byte(`"` + key + `"`)
+
 	found := false
-	for start := 0; start < len(body); {
-		idx := strings.Index(body[start:], needle)
+	bestStart, bestEnd := 0, 0
+	for pos := 0; pos < len(body); {
+		idx := bytes.Index(body[pos:], needle)
 		if idx < 0 {
 			break
 		}
-		pos := start + idx + len(needle)
-		for pos < len(body) && body[pos] == ' ' {
-			pos++
+		p := pos + idx + len(needle)
+		for p < len(body) && body[p] == ' ' {
+			p++
 		}
-		if pos >= len(body) || body[pos] != ':' {
-			start = start + idx + len(needle)
+		if p >= len(body) || body[p] != ':' {
+			pos = pos + idx + len(needle)
 			continue
 		}
-		pos++
-		for pos < len(body) && body[pos] == ' ' {
-			pos++
+		p++
+		for p < len(body) && body[p] == ' ' {
+			p++
 		}
-		if pos >= len(body) || body[pos] != '"' {
-			start = pos
+		if p >= len(body) || body[p] != '"' {
+			pos = p
 			continue
 		}
-		pos++
-		end := strings.IndexByte(body[pos:], '"')
+		p++
+		end := bytes.IndexByte(body[p:], '"')
 		if end < 0 {
 			break
 		}
-		lastVal = body[pos : pos+end]
+		bestStart = objStart + p
+		bestEnd = objStart + p + end
 		found = true
-		start = pos + end + 1
+		pos = p + end + 1
 	}
-	if !found {
-		return ""
-	}
-	return lastVal
+	return bestStart, bestEnd, found
 }
 
-func (l *Locator) settingEnv(path, key string) string {
-	raw, err := l.rd.readFileLimit(proto.ReadAgentLogsClaude, path, 65536)
+// readClaudeSettingEP extracts non-secret ANTHROPIC_BASE_URL and boolean
+// presence flags for ANTHROPIC_AUTH_TOKEN / ANTHROPIC_API_KEY from settings
+// file sf without ever storing secret values as Go strings.
+func (l *Locator) readClaudeSettingEP(sf string) (baseURL string, hasAuthToken, hasAPIKey bool) {
+	raw, err := l.rd.readFileLimit(proto.ReadAgentLogsClaude, sf, 65536)
 	if err != nil || len(raw) == 0 {
-		return ""
+		return "", false, false
 	}
-	flat := strings.ReplaceAll(string(raw), "\n", " ")
-	allObjs := settingEnvObjRe.FindAllStringSubmatch(flat, -1)
-	if len(allObjs) == 0 {
-		return ""
+	defer clear(raw)
+
+	var sub claudeSettingsSubset
+	if err := json.Unmarshal(raw, &sub); err == nil && sub.Env != nil {
+		if len(sub.Env.BaseURL) > 0 {
+			var bu string
+			if json.Unmarshal(sub.Env.BaseURL, &bu) == nil {
+				if len(bu) > 400 {
+					bu = bu[:400]
+				}
+				baseURL = bu
+			}
+		}
+		hasAuthToken = rawJSONNonEmptyString(sub.Env.AuthToken)
+		hasAPIKey = rawJSONNonEmptyString(sub.Env.APIKey)
+		// Clear any raw slices that pointed into raw (already covered by defer clear(raw)).
+		return baseURL, hasAuthToken, hasAPIKey
 	}
-	envBody := allObjs[len(allObjs)-1][1]
-	val := extractLastJSONStringField(envBody, key)
-	if len(val) > 400 {
-		val = val[:400]
+
+	// Fallback for truncated or non-strict settings files: byte-only scan.
+	if s, e, ok := bytesLastEnvFieldSpan(raw, "ANTHROPIC_BASE_URL"); ok && e > s {
+		val := raw[s:e]
+		if len(val) > 400 {
+			val = val[:400]
+		}
+		baseURL = string(val)
 	}
-	return val
+	if s, e, ok := bytesLastEnvFieldSpan(raw, "ANTHROPIC_AUTH_TOKEN"); ok && e > s {
+		hasAuthToken = true
+	}
+	if s, e, ok := bytesLastEnvFieldSpan(raw, "ANTHROPIC_API_KEY"); ok && e > s {
+		hasAPIKey = true
+	}
+	return baseURL, hasAuthToken, hasAPIKey
 }
 
 // claudeEndpoint mirrors claude_ep in convoEndpointSh (including the Python
-// autoCompactWindow/pct extraction, implemented natively in Go).
+// autoCompactWindow/pct extraction, implemented natively in Go). Secret auth
+// variables (ANTHROPIC_AUTH_TOKEN, ANTHROPIC_API_KEY) are checked strictly for
+// non-empty presence and are never extracted as strings.
 func (l *Locator) claudeEndpoint(pid, cwd string) (ep, auth, ac string) {
 	pidDir := filepath.Join(l.procRoot, pid)
 	kvs, _ := l.rd.readProcEnv(
 		pidDir,
 		proto.ReadEnvAnthropicBaseURL,
-		proto.ReadEnvAnthropicAuthToken,
-		proto.ReadEnvAnthropicAPIKey,
 		proto.ReadEnvClaudeCodeUseBedrock,
 		proto.ReadEnvClaudeCodeUseVertex,
 		proto.ReadEnvClaudeConfigDir,
 		proto.ReadEnvClaudeAutoCompactPctOverride,
 	)
 
-	// Cap filtered env lines at 4096 bytes like claude_ep's `head -c 4096`.
+	// Cap filtered non-secret env lines at 4096 bytes like claude_ep's `head -c 4096`.
 	kvs = capEnvKVs(kvs, 4096)
 
 	cfgd := firstEnvVal(kvs, "CLAUDE_CONFIG_DIR")
@@ -343,14 +420,17 @@ func (l *Locator) claudeEndpoint(pid, cwd string) (ep, auth, ac string) {
 		if !l.rd.isReadableFile(proto.ReadAgentLogsClaude, sf) {
 			continue
 		}
+		if bu != "" && au != "" {
+			break
+		}
+		sbu, hasTok, hasKey := l.readClaudeSettingEP(sf)
 		if bu == "" {
-			bu = l.settingEnv(sf, "ANTHROPIC_BASE_URL")
+			bu = sbu
 		}
 		if au == "" {
-			if l.settingEnv(sf, "ANTHROPIC_AUTH_TOKEN") != "" {
+			if hasTok {
 				au = "token"
-			}
-			if au == "" && l.settingEnv(sf, "ANTHROPIC_API_KEY") != "" {
+			} else if hasKey {
 				au = "key"
 			}
 		}
@@ -359,9 +439,9 @@ func (l *Locator) claudeEndpoint(pid, cwd string) (ep, auth, ac string) {
 		bu = firstEnvVal(kvs, "ANTHROPIC_BASE_URL")
 	}
 	if au == "" {
-		if firstEnvVal(kvs, "ANTHROPIC_AUTH_TOKEN") != "" {
+		if l.rd.readProcEnvHasNonEmpty(pidDir, proto.ReadEnvAnthropicAuthToken) {
 			au = "token"
-		} else if firstEnvVal(kvs, "ANTHROPIC_API_KEY") != "" {
+		} else if l.rd.readProcEnvHasNonEmpty(pidDir, proto.ReadEnvAnthropicAPIKey) {
 			au = "key"
 		}
 	}
@@ -435,20 +515,30 @@ func (l *Locator) computeClaudeAutoCompact(envPct string, settingsFiles []string
 		if err != nil {
 			continue
 		}
-		// Parse top-level JSON object preserving modelSettings key insertion order.
-		var top map[string]json.RawMessage
-		if err := json.Unmarshal(raw, &top); err != nil || top == nil {
+		// Decode only the targeted fields via json.RawMessage so unrelated
+		// secrets inside "env" are skipped without being unmarshaled into
+		// Go strings.
+		var sub claudeSettingsSubset
+		err = json.Unmarshal(raw, &sub)
+		if err != nil {
+			clear(raw)
 			continue
 		}
-		if msRaw, ok := top["modelSettings"]; ok {
-			for _, kv := range parseOrderedJSONObject(msRaw) {
-				var entry map[string]any
-				dec := json.NewDecoder(bytes.NewReader(kv.val))
-				dec.UseNumber()
-				if err := dec.Decode(&entry); err != nil || entry == nil {
+		if len(sub.ModelSettings) > 0 {
+			for _, kv := range parseOrderedJSONObject(sub.ModelSettings) {
+				var entry struct {
+					AutoCompactWindow json.RawMessage `json:"autoCompactWindow"`
+				}
+				if err := json.Unmarshal(kv.val, &entry); err != nil || len(entry.AutoCompactWindow) == 0 {
 					continue
 				}
-				if w, ok := jsonPosInt(entry["autoCompactWindow"]); ok {
+				var v any
+				dec := json.NewDecoder(bytes.NewReader(entry.AutoCompactWindow))
+				dec.UseNumber()
+				if err := dec.Decode(&v); err != nil {
+					continue
+				}
+				if w, ok := jsonPosInt(v); ok {
 					lk := nonCompactModelChar.ReplaceAllString(strings.ToLower(kv.key), "")
 					if len(lk) > 64 {
 						lk = lk[:64]
@@ -460,32 +550,27 @@ func (l *Locator) computeClaudeAutoCompact(envPct string, settingsFiles []string
 				}
 			}
 		}
-		if globalWindow == 0 {
-			if gwRaw, ok := top["autoCompactWindow"]; ok {
-				var v any
-				dec := json.NewDecoder(bytes.NewReader(gwRaw))
-				dec.UseNumber()
-				if err := dec.Decode(&v); err == nil {
-					if w, ok := jsonPosInt(v); ok {
-						globalWindow = w
-					}
+		if globalWindow == 0 && len(sub.AutoCompactWindow) > 0 {
+			var v any
+			dec := json.NewDecoder(bytes.NewReader(sub.AutoCompactWindow))
+			dec.UseNumber()
+			if err := dec.Decode(&v); err == nil {
+				if w, ok := jsonPosInt(v); ok {
+					globalWindow = w
 				}
 			}
 		}
-		if pct == 0 {
-			if evRaw, ok := top["env"]; ok {
-				var ev map[string]any
-				dec := json.NewDecoder(bytes.NewReader(evRaw))
-				dec.UseNumber()
-				if err := dec.Decode(&ev); err == nil && ev != nil {
-					if rawPct, exists := ev["CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"]; exists {
-						if n, ok := parseCompactPct(rawPct); ok {
-							pct = n
-						}
-					}
+		if pct == 0 && sub.Env != nil && len(sub.Env.AutoCompactPct) > 0 {
+			var v any
+			dec := json.NewDecoder(bytes.NewReader(sub.Env.AutoCompactPct))
+			dec.UseNumber()
+			if err := dec.Decode(&v); err == nil {
+				if n, ok := parseCompactPct(v); ok {
+					pct = n
 				}
 			}
 		}
+		clear(raw)
 	}
 
 	if pct == 0 && envPct != "" {
@@ -1297,6 +1382,3 @@ func (l *Locator) selfClaudeConfigDir() string {
 	}
 	return l.rd.readSelfEnv(proto.ReadEnvClaudeConfigDir)
 }
-
-// Keep unused io import guard unnecessary; confirm no unused imports.
-var _ = io.EOF

@@ -382,6 +382,7 @@ func cmdServe(args []string, build proto.BuildInfo, stdout io.Writer) int {
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	gateway := fs.String("gateway", "", "gateway address shown in process list")
+	tmuxPath := fs.String("tmux", "", "optional absolute path to tmux binary")
 	foreground := fs.Bool("foreground", false, "run in foreground without detaching")
 	handoff := fs.Bool("handoff", false, "internal: adopt inherited fds during hot update")
 	listenFD := fs.Int("listen-fd", -1, "internal: inherited Unix listener fd")
@@ -399,6 +400,16 @@ func cmdServe(args []string, build proto.BuildInfo, stdout io.Writer) int {
 		return 1
 	}
 
+	validatedTmux := ""
+	if *tmuxPath != "" {
+		var terr error
+		validatedTmux, terr = ValidateTmuxBinary(*tmuxPath, layout.UID)
+		if terr != nil {
+			writeErr(stdout, "invalid_tmux", terr.Error())
+			return 2
+		}
+	}
+
 	// Tombstone check: never start if uninstall is in progress.
 	if layout.TombstoneExists() {
 		writeErr(stdout, proto.ErrRemoving, "uninstall tombstone present")
@@ -412,13 +423,13 @@ func cmdServe(args []string, build proto.BuildInfo, stdout io.Writer) int {
 
 	// Self-detach when not running in foreground.
 	if !*foreground {
-		return serveDetached(layout, *gateway, stdout)
+		return serveDetached(layout, *gateway, validatedTmux, stdout)
 	}
 
-	return serveForeground(layout, build, *gateway, *handoff, *listenFD, *lockFD, *stateFD, *readyFD, stdout)
+	return serveForeground(layout, build, *gateway, validatedTmux, *handoff, *listenFD, *lockFD, *stateFD, *readyFD, stdout)
 }
 
-func serveDetached(layout *Layout, gateway string, stdout io.Writer) int {
+func serveDetached(layout *Layout, gateway, tmuxPath string, stdout io.Writer) int {
 	// Quick lock probe: if already running, report running without spawning.
 	probeLock, err := AcquireLock(layout.LockPath)
 	if errors.Is(err, ErrLocked) {
@@ -465,6 +476,9 @@ func serveDetached(layout *Layout, gateway string, stdout io.Writer) int {
 	argv := []string{exe, "serve"}
 	if gateway != "" {
 		argv = append(argv, "--gateway", gateway)
+	}
+	if tmuxPath != "" {
+		argv = append(argv, "--tmux", tmuxPath)
 	}
 	argv = append(argv, "--foreground", "--ready-fd=3")
 
@@ -543,6 +557,7 @@ func serveForeground(
 	layout *Layout,
 	build proto.BuildInfo,
 	gateway string,
+	tmuxPath string,
 	handoff bool,
 	listenFD, lockFD, stateFD, readyFD int,
 	stdout io.Writer,
@@ -627,6 +642,11 @@ func serveForeground(
 					if gateway == "" && snap.Gateway != "" {
 						gateway = snap.Gateway
 					}
+					if tmuxPath == "" && snap.TmuxPath != "" {
+						if validTmux, terr := ValidateTmuxBinary(snap.TmuxPath, layout.UID); terr == nil {
+							tmuxPath = validTmux
+						}
+					}
 				}
 			}
 		}
@@ -650,6 +670,7 @@ func serveForeground(
 		Layout:          layout,
 		Build:           build,
 		Gateway:         gateway,
+		TmuxPath:        tmuxPath,
 		Logger:          logger,
 		Lock:            lock,
 		Listener:        ln,

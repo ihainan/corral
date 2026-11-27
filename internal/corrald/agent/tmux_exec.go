@@ -11,61 +11,95 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
+	"regexp"
 	"time"
 
+	"github.com/ihainan/corral/internal/corrald/daemon"
 	"github.com/ihainan/corral/internal/corrald/proto"
 )
 
 const (
 	defaultTmuxTimeout = 5 * time.Second
 	maxTmuxOutputBytes = 4096
+
+	// Hard-coded read-only tmux format strings. Callers cannot pass arbitrary
+	// formats (which prevents tmux `#(command)` shell expansion).
+	tmuxFormatSessionPane = "#{pane_id} #{pid} #{pane_tty} #{pane_title}"
+	tmuxFormatPaneTTY     = "#{pane_tty}"
+)
+
+var (
+	tmuxSessionNameRe = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
+	tmuxPaneIDRe      = regexp.MustCompile(`^%[0-9]{1,9}$`)
+	tmuxSocketNameRe  = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
 )
 
 // TmuxExecutor is the single allowlisted external command runner permitted in
-// host-side corrald production code. It executes only the `tmux` binary
-// directly (never via a shell), with arguments passed individually and only
-// allowlisted read-only subcommands permitted.
+// host-side corrald production code. It executes only a validated `tmux`
+// binary directly (never via a shell), with arguments restricted strictly to
+// fixed read-only display-message forms and validated session/pane targets.
 type TmuxExecutor struct {
 	home       string
-	binaryPath string // optional explicit path (used in tests); basename must still be "tmux"
+	uid        uint32
+	binaryPath string // optional validated absolute path (e.g. from --tmux)
 	socketName string // optional -L <name> for isolated test servers
 	timeout    time.Duration
 }
 
-// NewTmuxExecutor constructs a TmuxExecutor searching standard host paths
+// NewTmuxExecutor constructs a TmuxExecutor searching standard fixed host paths
 // under home without reading $PATH.
 func NewTmuxExecutor(home string) *TmuxExecutor {
 	return &TmuxExecutor{
 		home:    home,
+		uid:     uint32(os.Geteuid()),
 		timeout: defaultTmuxTimeout,
 	}
 }
 
-// DisplayMessage runs `tmux -u display-message -p -t <target> <format>` via
-// the allowlisted executor and returns its raw stdout bytes.
-func (e *TmuxExecutor) DisplayMessage(ctx context.Context, target, format string) ([]byte, error) {
+// NewTmuxExecutorWithPath constructs a TmuxExecutor preferring binaryPath (if
+// non-empty and valid under daemon.ValidateTmuxBinary) and falling back to
+// fixed standard directories otherwise.
+func NewTmuxExecutorWithPath(home, binaryPath string, uid uint32) *TmuxExecutor {
+	return &TmuxExecutor{
+		home:       home,
+		uid:        uid,
+		binaryPath: binaryPath,
+		timeout:    defaultTmuxTimeout,
+	}
+}
+
+// QuerySessionPane runs `tmux -u display-message -p -t =<session>: "#{pane_id} #{pid} #{pane_tty} #{pane_title}"`.
+func (e *TmuxExecutor) QuerySessionPane(ctx context.Context, sessionName string) ([]byte, error) {
 	assertDeclaredRead(proto.ReadPaneScreenTmux)
-	if strings.ContainsAny(target, "\x00") || strings.ContainsAny(format, "\x00") {
-		return nil, errors.New("invalid NUL byte in tmux argument")
+	if !tmuxSessionNameRe.MatchString(sessionName) {
+		return nil, fmt.Errorf("invalid tmux session name %q", sessionName)
 	}
 	args := make([]string, 0, 8)
 	if e.socketName != "" {
 		args = append(args, "-L", e.socketName)
 	}
-	args = append(args, "-u", "display-message", "-p", "-t", target, format)
+	args = append(args, "-u", "display-message", "-p", "-t", "="+sessionName+":", tmuxFormatSessionPane)
+	return e.run(ctx, args)
+}
+
+// QueryPaneTTY runs `tmux -u display-message -p -t <paneID> "#{pane_tty}"`.
+func (e *TmuxExecutor) QueryPaneTTY(ctx context.Context, paneID string) ([]byte, error) {
+	assertDeclaredRead(proto.ReadPaneScreenTmux)
+	if !tmuxPaneIDRe.MatchString(paneID) {
+		return nil, fmt.Errorf("invalid tmux pane id %q", paneID)
+	}
+	args := make([]string, 0, 8)
+	if e.socketName != "" {
+		args = append(args, "-L", e.socketName)
+	}
+	args = append(args, "-u", "display-message", "-p", "-t", paneID, tmuxFormatPaneTTY)
 	return e.run(ctx, args)
 }
 
 func (e *TmuxExecutor) resolveBinary() (string, error) {
+	uid := e.uid
 	if e.binaryPath != "" {
-		if filepath.Base(e.binaryPath) != "tmux" {
-			return "", fmt.Errorf("tmux executor refuses non-tmux binary %q", e.binaryPath)
-		}
-		if info, err := os.Stat(e.binaryPath); err == nil && !info.IsDir() && info.Mode()&0o111 != 0 {
-			return e.binaryPath, nil
-		}
-		return "", fmt.Errorf("tmux binary not executable: %s", e.binaryPath)
+		return daemon.ValidateTmuxBinary(e.binaryPath, uid)
 	}
 	searchDirs := []string{
 		filepath.Join(e.home, ".local", "bin"),
@@ -82,34 +116,50 @@ func (e *TmuxExecutor) resolveBinary() (string, error) {
 			continue
 		}
 		cand := filepath.Join(dir, "tmux")
-		if info, err := os.Stat(cand); err == nil && !info.IsDir() && info.Mode()&0o111 != 0 {
-			return cand, nil
+		if resolved, err := daemon.ValidateTmuxBinary(cand, uid); err == nil {
+			return resolved, nil
 		}
 	}
 	return "", errors.New("tmux binary not found in standard paths")
 }
 
-// validateTmuxArgs enforces that only allowlisted read-only tmux invocations
-// can ever reach exec.CommandContext.
+// validateTmuxArgs enforces that the ENTIRE argument slice matches one of the
+// exact hard-coded read-only display-message forms (no extra args, no
+// arbitrary format strings, no `#(...)` or command chaining).
 func validateTmuxArgs(args []string) error {
-	i := 0
-	for i < len(args) {
-		switch args[i] {
-		case "-u":
-			i++
-		case "-L":
-			if i+1 >= len(args) || args[i+1] == "" {
-				return errors.New("missing tmux socket name after -L")
-			}
-			i += 2
-		default:
-			if args[i] != "display-message" {
-				return fmt.Errorf("disallowed tmux subcommand %q", args[i])
-			}
-			return nil
+	rest := args
+	if len(rest) >= 2 && rest[0] == "-L" {
+		if !tmuxSocketNameRe.MatchString(rest[1]) {
+			return fmt.Errorf("invalid tmux socket name %q", rest[1])
 		}
+		rest = rest[2:]
 	}
-	return errors.New("missing tmux subcommand")
+	if len(rest) != 6 {
+		return fmt.Errorf("unexpected tmux argument count %d", len(rest))
+	}
+	if rest[0] != "-u" || rest[1] != "display-message" || rest[2] != "-p" || rest[3] != "-t" {
+		return fmt.Errorf("disallowed tmux command prefix %v", rest[:4])
+	}
+	target := rest[4]
+	format := rest[5]
+	switch format {
+	case tmuxFormatSessionPane:
+		if len(target) < 3 || target[0] != '=' || target[len(target)-1] != ':' {
+			return fmt.Errorf("invalid session target %q", target)
+		}
+		sess := target[1 : len(target)-1]
+		if !tmuxSessionNameRe.MatchString(sess) {
+			return fmt.Errorf("invalid session name in target %q", target)
+		}
+		return nil
+	case tmuxFormatPaneTTY:
+		if !tmuxPaneIDRe.MatchString(target) {
+			return fmt.Errorf("invalid pane target %q", target)
+		}
+		return nil
+	default:
+		return fmt.Errorf("disallowed tmux format %q", format)
+	}
 }
 
 // run is the sole reviewed os/exec call site in host-side corrald code.

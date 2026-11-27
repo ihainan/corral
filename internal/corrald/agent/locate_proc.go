@@ -197,10 +197,19 @@ func (l *Locator) readClkTck() string {
 	return "100"
 }
 
-// listProcPIDs returns all numeric PID directory names under /proc sorted
-// lexicographically (matching shell glob /proc/[0-9]*).
+// listProcPIDs returns all numeric PID directory names from the configured PID
+// source (or /proc by default), sorted lexicographically (matching shell glob
+// /proc/[0-9]*).
 func (l *Locator) listProcPIDs() []string {
-	names, err := l.rd.readDirNames(proto.ReadProc, l.procRoot)
+	var (
+		names []string
+		err   error
+	)
+	if l.listPIDs != nil {
+		names, err = l.listPIDs()
+	} else {
+		names, err = l.rd.readDirNames(proto.ReadProc, l.procRoot)
+	}
 	if err != nil {
 		return nil
 	}
@@ -214,15 +223,23 @@ func (l *Locator) listProcPIDs() []string {
 	return pids
 }
 
-// listFDLinks returns symlink targets for /proc/<pid>/fd/* sorted by fd name
-// lexicographically (matching shell glob "$1"/fd/*).
+// listFDLinks returns symlink targets for /proc/<pid>/fd/* sorted numerically
+// by FD number ascending, matching procfs directory traversal order and GNU
+// find "$1/fd/".
 func (l *Locator) listFDLinks(pidDir string) []string {
 	fdDir := filepath.Join(pidDir, "fd")
 	names, err := l.rd.readDirNames(proto.ReadProc, fdDir)
 	if err != nil {
 		return nil
 	}
-	sort.Strings(names)
+	sort.Slice(names, func(i, j int) bool {
+		ni, ei := strconv.Atoi(names[i])
+		nj, ej := strconv.Atoi(names[j])
+		if ei == nil && ej == nil {
+			return ni < nj
+		}
+		return names[i] < names[j]
+	})
 	links := make([]string, 0, len(names))
 	for _, name := range names {
 		target, err := l.rd.readLink(proto.ReadProc, filepath.Join(fdDir, name))

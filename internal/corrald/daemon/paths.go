@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"syscall"
 )
@@ -306,4 +307,118 @@ func EnsureSecureDir(dir string, expectedUID uint32) error {
 func (l *Layout) TombstoneExists() bool {
 	_, err := os.Lstat(l.TombstonePath)
 	return err == nil
+}
+
+// ValidateTmuxBinary verifies that candidatePath is an absolute path named
+// "tmux" resolving to a regular executable file owned by root (uid 0) or
+// expectedUID, whose file and containing directories are not world-writable
+// (and whose parent directories are owned by root or expectedUID).
+func ValidateTmuxBinary(candidatePath string, expectedUID uint32) (string, error) {
+	if candidatePath == "" || !filepath.IsAbs(candidatePath) || strings.ContainsAny(candidatePath, "\x00\n") {
+		return "", fmt.Errorf("tmux path must be a clean absolute path: %q", candidatePath)
+	}
+	clean := filepath.Clean(candidatePath)
+	if filepath.Base(clean) != "tmux" {
+		return "", fmt.Errorf("tmux path basename must be \"tmux\": %q", candidatePath)
+	}
+	if err := checkTrustedBinaryDir(filepath.Dir(clean), expectedUID); err != nil {
+		return "", fmt.Errorf("tmux dir %s: %w", filepath.Dir(clean), err)
+	}
+
+	resolved, err := filepath.EvalSymlinks(clean)
+	if err != nil {
+		return "", fmt.Errorf("resolve tmux binary: %w", err)
+	}
+	if filepath.Base(resolved) != "tmux" {
+		return "", fmt.Errorf("resolved tmux target must be named \"tmux\": %q", resolved)
+	}
+	if err := checkTrustedBinaryDir(filepath.Dir(resolved), expectedUID); err != nil {
+		return "", fmt.Errorf("resolved tmux dir %s: %w", filepath.Dir(resolved), err)
+	}
+
+	info, err := os.Stat(resolved)
+	if err != nil {
+		return "", fmt.Errorf("stat tmux binary: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return "", fmt.Errorf("tmux path %s is not a regular file", resolved)
+	}
+	if info.Mode()&0o111 == 0 {
+		return "", fmt.Errorf("tmux binary %s is not executable", resolved)
+	}
+	if info.Mode()&0o002 != 0 {
+		return "", fmt.Errorf("tmux binary %s is world-writable", resolved)
+	}
+	st, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return "", fmt.Errorf("stat metadata unavailable for %s", resolved)
+	}
+	if !isTrustedBinaryOwner(st.Uid, expectedUID) {
+		return "", fmt.Errorf("tmux binary %s owned by uid %d (want 0 or %d)", resolved, st.Uid, expectedUID)
+	}
+	return resolved, nil
+}
+
+func isTrustedBinaryOwner(uid, expectedUID uint32) bool {
+	if uid == 0 || uid == expectedUID {
+		return true
+	}
+	// Inside an unprivileged Linux user namespace where uid 0 is unmapped in
+	// /proc/self/uid_map, host root-owned system directories and binaries (such
+	// as /usr/bin/tmux) appear with the kernel overflow UID (typically 65534).
+	// On a normal host (where uid 0 is mapped), overflowuid/nobody is rejected.
+	if !rootUIDMapped() && uid == kernelOverflowUID() {
+		return true
+	}
+	return false
+}
+
+func rootUIDMapped() bool {
+	b, err := os.ReadFile("/proc/self/uid_map")
+	if err != nil {
+		return true
+	}
+	for _, line := range strings.Split(string(b), "\n") {
+		f := strings.Fields(line)
+		if len(f) < 3 {
+			continue
+		}
+		inside, err1 := strconv.ParseUint(f[0], 10, 64)
+		length, err2 := strconv.ParseUint(f[2], 10, 64)
+		if err1 == nil && err2 == nil && inside == 0 && length > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func kernelOverflowUID() uint32 {
+	b, err := os.ReadFile("/proc/sys/kernel/overflowuid")
+	if err == nil {
+		if n, err := strconv.ParseUint(strings.TrimSpace(string(b)), 10, 32); err == nil {
+			return uint32(n)
+		}
+	}
+	return 65534
+}
+
+func checkTrustedBinaryDir(dir string, expectedUID uint32) error {
+	info, err := os.Stat(dir)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() {
+		return errors.New("not a directory")
+	}
+	if info.Mode()&0o002 != 0 {
+		return errors.New("directory is writable by others")
+	}
+	st, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return errors.New("stat metadata unavailable")
+	}
+	if !isTrustedBinaryOwner(st.Uid, expectedUID) {
+		return fmt.Errorf("directory owned by uid %d (want 0 or %d)", st.Uid, expectedUID)
+	}
+	return nil
 }

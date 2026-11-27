@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ihainan/corral/internal/corrald/daemon"
@@ -20,6 +21,9 @@ type Service struct {
 	locator *Locator
 	val     *PathValidator
 	watcher *Watcher
+
+	watchMu    sync.Mutex
+	watchConns map[*daemon.Conn]chan struct{}
 }
 
 // ServiceOptions overrides default host paths or watcher parameters (mainly for
@@ -53,17 +57,20 @@ func Register(srv *daemon.Server, opts ServiceOptions) (*Service, error) {
 	if locOpts.UID != nil {
 		valUID = *locOpts.UID
 	}
+	if locOpts.Tmux == nil {
+		locOpts.Tmux = NewTmuxExecutorWithPath(locOpts.Home, srv.TmuxPath(), valUID)
+	}
 	val := NewPathValidator(locOpts.Home, valUID, locOpts.ProcRoot)
 
 	var svc *Service
 	userOnDiscovered := locOpts.OnDiscovered
-	locOpts.OnDiscovered = func(logs, claudeDirs, codexHomes []string) {
-		val.UpdateDiscovered(logs, claudeDirs, codexHomes)
+	locOpts.OnDiscovered = func(replace bool, logs, claudeDirs, codexHomes []string) {
+		val.UpdateDiscovered(replace, logs, claudeDirs, codexHomes)
 		if svc != nil && svc.watcher != nil {
 			svc.watcher.NotifyDiscovered()
 		}
 		if userOnDiscovered != nil {
-			userOnDiscovered(logs, claudeDirs, codexHomes)
+			userOnDiscovered(replace, logs, claudeDirs, codexHomes)
 		}
 	}
 
@@ -82,10 +89,11 @@ func Register(srv *daemon.Server, opts ServiceOptions) (*Service, error) {
 	})
 
 	svc = &Service{
-		srv:     srv,
-		locator: loc,
-		val:     val,
-		watcher: watcher,
+		srv:        srv,
+		locator:    loc,
+		val:        val,
+		watcher:    watcher,
+		watchConns: make(map[*daemon.Conn]chan struct{}),
 	}
 
 	srv.Register(proto.MethodAgentLocate, daemon.MethodOptions{}, svc.handleLocate)
@@ -98,9 +106,19 @@ func Register(srv *daemon.Server, opts ServiceOptions) (*Service, error) {
 	srv.RegisterHealthCheck("tails", svc.healthTails)
 	srv.RegisterHealthCheck("watch", svc.healthWatch)
 	srv.RegisterStateProvider("agent", svc)
-	srv.RegisterCloser(watcher.Stop)
+	srv.RegisterCloser(svc.close)
 
 	return svc, nil
+}
+
+func (s *Service) close() {
+	s.watchMu.Lock()
+	for c, stopCh := range s.watchConns {
+		close(stopCh)
+		delete(s.watchConns, c)
+	}
+	s.watchMu.Unlock()
+	s.watcher.Stop()
 }
 
 // Locator returns the service's underlying Locator.
@@ -145,6 +163,19 @@ func (s *Service) handleMessageTails(_ context.Context, _ *daemon.Conn, raw json
 	return proto.ConvoTailsResult{Out: out}, nil
 }
 
+func (s *Service) detachWatchConn(c *daemon.Conn) WatchStatus {
+	if c != nil {
+		s.watchMu.Lock()
+		if stopCh, ok := s.watchConns[c]; ok {
+			close(stopCh)
+			delete(s.watchConns, c)
+		}
+		s.watchMu.Unlock()
+		s.srv.Bus().Unsubscribe(c)
+	}
+	return s.watcher.Unsubscribe(c)
+}
+
 func (s *Service) handleWatch(_ context.Context, c *daemon.Conn, raw json.RawMessage) (any, *proto.RPCError) {
 	var p proto.AgentWatchParams
 	if len(raw) > 0 {
@@ -153,7 +184,7 @@ func (s *Service) handleWatch(_ context.Context, c *daemon.Conn, raw json.RawMes
 		}
 	}
 	if p.Stop {
-		st := s.watcher.Unsubscribe(c)
+		st := s.detachWatchConn(c)
 		return proto.AgentWatchResult{
 			Watching:     st.Watching,
 			Mode:         st.Mode,
@@ -167,12 +198,22 @@ func (s *Service) handleWatch(_ context.Context, c *daemon.Conn, raw json.RawMes
 	seq := s.srv.Bus().Subscribe(c)
 	st := s.watcher.Subscribe(c, p.Logs)
 
-	// Automatically detach this connection from the watcher when it closes.
+	// Maintain at most one disconnect-watcher goroutine per connection; it
+	// exits immediately when unwatch/stop is called or when the connection closes.
 	if c != nil {
-		go func(conn *daemon.Conn) {
-			<-conn.Done()
-			s.watcher.Unsubscribe(conn)
-		}(c)
+		s.watchMu.Lock()
+		if _, exists := s.watchConns[c]; !exists {
+			stopCh := make(chan struct{})
+			s.watchConns[c] = stopCh
+			go func(conn *daemon.Conn, stop <-chan struct{}) {
+				select {
+				case <-conn.Done():
+					s.detachWatchConn(conn)
+				case <-stop:
+				}
+			}(c, stopCh)
+		}
+		s.watchMu.Unlock()
 	}
 
 	return proto.AgentWatchResult{
@@ -186,7 +227,7 @@ func (s *Service) handleWatch(_ context.Context, c *daemon.Conn, raw json.RawMes
 }
 
 func (s *Service) handleUnwatch(_ context.Context, c *daemon.Conn, _ json.RawMessage) (any, *proto.RPCError) {
-	st := s.watcher.Unsubscribe(c)
+	st := s.detachWatchConn(c)
 	return proto.AgentWatchResult{
 		Watching:     st.Watching,
 		Mode:         st.Mode,
@@ -235,10 +276,10 @@ func (s *Service) Restore(data json.RawMessage) error {
 	}
 	var clean []string
 	for _, p := range snap.KnownLogs {
-		if p != "" && filepath.IsAbs(p) && !strings.ContainsAny(p, "\x00\n") {
+		if isCleanAbsPath(p) && !strings.ContainsAny(p, "\x00\n") {
 			clean = append(clean, p)
 		}
 	}
-	s.val.UpdateDiscovered(clean, nil, nil)
+	s.val.UpdateDiscovered(true, clean, nil, nil)
 	return nil
 }

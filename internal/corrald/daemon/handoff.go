@@ -38,6 +38,7 @@ type HandoffSnapshot struct {
 	Modules      map[string]json.RawMessage `json:"modules,omitempty"`
 	SocketPath   string                     `json:"socket_path"`
 	Gateway      string                     `json:"gateway"`
+	TmuxPath     string                     `json:"tmux_path,omitempty"`
 	OldPID       int                        `json:"old_pid"`
 	OldVersion   string                     `json:"old_version"`
 	OldRelease   int64                      `json:"old_release"`
@@ -157,6 +158,7 @@ func (s *Server) dispatchHandoff(ctx context.Context, conn *Conn, req proto.Requ
 		Modules:      s.snapshotModuleStates(),
 		SocketPath:   s.layout.SocketPath,
 		Gateway:      s.cfg.Gateway,
+		TmuxPath:     s.cfg.TmuxPath,
 		OldPID:       os.Getpid(),
 		OldVersion:   s.build.Version,
 		OldRelease:   s.build.Release,
@@ -190,12 +192,17 @@ func (s *Server) dispatchHandoff(ctx context.Context, conn *Conn, req proto.Requ
 		resolvedPath,
 		"serve",
 		"--gateway", s.cfg.Gateway,
+	}
+	if s.cfg.TmuxPath != "" {
+		argv = append(argv, "--tmux", s.cfg.TmuxPath)
+	}
+	argv = append(argv,
 		"--foreground",
 		"--handoff",
 		"--listen-fd=3",
 		"--state-fd=4",
 		"--ready-fd=5",
-	}
+	)
 	if s.lock != nil && s.lock.File() != nil {
 		files = append(files, s.lock.File()) // fd 6: flock file descriptor
 		argv = append(argv, "--lock-fd=6")

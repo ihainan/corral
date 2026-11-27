@@ -4,13 +4,13 @@ package agent
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
 	"syscall"
-	"unicode/utf8"
 
 	"github.com/ihainan/corral/internal/corrald/proto"
 )
@@ -19,26 +19,31 @@ const (
 	convoTailBytes           = 16384
 	convoMsgTailWindowBytes  = 4194304 // 4 MiB
 	convoMsgTailOutputBytes  = 65536   // 64 KiB
-	convoMsgTailMaxLineRunes = 65536
+	convoMsgTailMaxLineBytes = 65536
+
+	// Upper bounds for tracked locate authorization entries so long-lived
+	// daemons never accumulate unbounded state.
+	maxTrackedLogs = 4096
+	maxTrackedDirs = 256
 )
 
 var messageTailTypeRe = regexp.MustCompile(`"type"[ ]*:[ ]*"(message|user_message|agent_message|item_completed|custom_tool_call|function_call|task_started|task_complete|thread_rolled_back)"`)
 
 // PathValidator restricts log file reads to regular files owned by the daemon's
-// UID that either appeared in current locate results or reside under a declared
-// reads agent log directory without following symlinks outside that directory.
+// UID whose literal path string either appeared in the most recent locate
+// result or resides under a declared reads agent log root directory, opened
+// strictly via openat(O_NOFOLLOW|O_DIRECTORY) across every path component so
+// symlinks can neither poison authorization nor race parent directory checks.
 type PathValidator struct {
 	home string
 	uid  uint32
-	rd   *capReader
 
-	mu             sync.RWMutex
-	knownRealLogs  map[string]string // realPath -> capability category
-	claudeCfgDirs  map[string]struct{}
-	codexHomes     map[string]struct{}
-	xdgDataHome    string
-	selfClaudeDir  string
-	explicitAllow  []allowedRoot // optional test-only roots
+	mu            sync.RWMutex
+	knownLogs     map[string]string // literal clean path string -> capability category
+	claudeCfgDirs map[string]struct{}
+	codexHomes    map[string]struct{}
+	xdgDataHome   string
+	selfClaudeDir string
 }
 
 type allowedRoot struct {
@@ -47,62 +52,96 @@ type allowedRoot struct {
 }
 
 // NewPathValidator creates a PathValidator for (home, uid).
-func NewPathValidator(home string, uid uint32, procRoot string) *PathValidator {
-	rd := newCapReader(procRoot)
+func NewPathValidator(home string, uid uint32, _ string) *PathValidator {
+	cleanHome := ""
+	if home != "" {
+		cleanHome = filepath.Clean(home)
+	}
 	return &PathValidator{
-		home:          home,
+		home:          cleanHome,
 		uid:           uid,
-		rd:            rd,
-		knownRealLogs: make(map[string]string),
+		knownLogs:     make(map[string]string),
 		claudeCfgDirs: make(map[string]struct{}),
 		codexHomes:    make(map[string]struct{}),
 	}
 }
 
-// SetEnvDirs overrides the default self CLAUDE_CONFIG_DIR and XDG_DATA_HOME
-// used when computing declared agent log root directories.
+// SetEnvDirs sets the self CLAUDE_CONFIG_DIR and XDG_DATA_HOME used when
+// computing declared agent log root directories.
 func (v *PathValidator) SetEnvDirs(claudeCfgDir, xdgDataHome string) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
-	v.selfClaudeDir = claudeCfgDir
-	v.xdgDataHome = xdgDataHome
+	if claudeCfgDir != "" && filepath.IsAbs(claudeCfgDir) && !strings.ContainsAny(claudeCfgDir, "\x00\n") {
+		v.selfClaudeDir = filepath.Clean(claudeCfgDir)
+	} else {
+		v.selfClaudeDir = ""
+	}
+	if xdgDataHome != "" && filepath.IsAbs(xdgDataHome) && !strings.ContainsAny(xdgDataHome, "\x00\n") {
+		v.xdgDataHome = filepath.Clean(xdgDataHome)
+	} else {
+		v.xdgDataHome = ""
+	}
 }
 
-// UpdateDiscovered records log paths and custom agent config directories seen
-// during the most recent locate scan.
-func (v *PathValidator) UpdateDiscovered(logs, claudeDirs, codexHomes []string) {
+// UpdateDiscovered records literal path strings seen during a locate scan.
+// It NEVER resolves symlinks or adds symlink targets to the authorization set.
+// When replace is true (full scan), previous locate-derived entries are
+// replaced so exited sessions and old config directories do not accumulate.
+func (v *PathValidator) UpdateDiscovered(replace bool, logs, claudeDirs, codexHomes []string) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
+
+	if replace {
+		v.knownLogs = make(map[string]string, len(logs))
+		v.claudeCfgDirs = make(map[string]struct{}, len(claudeDirs))
+		v.codexHomes = make(map[string]struct{}, len(codexHomes))
+	}
+
 	for _, p := range logs {
-		if p == "" || !filepath.IsAbs(p) || strings.ContainsAny(p, "\x00\n") {
+		if len(v.knownLogs) >= maxTrackedLogs {
+			break
+		}
+		if !isCleanAbsPath(p) {
 			continue
 		}
-		capCat := inferLogCap(p)
-		if realPath, err := v.rd.evalSymlinks(capCat, p); err == nil && realPath != "" {
-			v.knownRealLogs[realPath] = capCat
-		}
+		v.knownLogs[p] = inferLogCap(p)
 	}
 	for _, d := range claudeDirs {
-		if d != "" && filepath.IsAbs(d) {
-			v.claudeCfgDirs[d] = struct{}{}
+		if len(v.claudeCfgDirs) >= maxTrackedDirs {
+			break
 		}
+		if !isCleanAbsPath(d) {
+			continue
+		}
+		v.claudeCfgDirs[d] = struct{}{}
 	}
 	for _, d := range codexHomes {
-		if d != "" && filepath.IsAbs(d) {
-			v.codexHomes[d] = struct{}{}
+		if len(v.codexHomes) >= maxTrackedDirs {
+			break
 		}
+		if !isCleanAbsPath(d) {
+			continue
+		}
+		v.codexHomes[d] = struct{}{}
 	}
 }
 
-// KnownLogs returns a snapshot of all currently known located real log paths.
+// KnownLogs returns a snapshot of currently tracked literal located log paths.
 func (v *PathValidator) KnownLogs() []string {
 	v.mu.RLock()
 	defer v.mu.RUnlock()
-	out := make([]string, 0, len(v.knownRealLogs))
-	for p := range v.knownRealLogs {
+	out := make([]string, 0, len(v.knownLogs))
+	for p := range v.knownLogs {
 		out = append(out, p)
 	}
 	return out
+}
+
+func isCleanAbsPath(p string) bool {
+	if p == "" || !filepath.IsAbs(p) || strings.ContainsAny(p, "\x00\n") {
+		return false
+	}
+	return filepath.Clean(p) == p
 }
 
 func inferLogCap(p string) string {
@@ -131,10 +170,10 @@ func (v *PathValidator) allowedRootsLocked() []allowedRoot {
 			allowedRoot{dir: filepath.Join(v.home, ".local", "share", "devin", "cli"), cap: proto.ReadAgentLogsDevin},
 		)
 	}
-	if v.selfClaudeDir != "" && filepath.IsAbs(v.selfClaudeDir) {
+	if v.selfClaudeDir != "" {
 		roots = append(roots, allowedRoot{dir: filepath.Join(v.selfClaudeDir, "projects"), cap: proto.ReadAgentLogsClaude})
 	}
-	if v.xdgDataHome != "" && filepath.IsAbs(v.xdgDataHome) {
+	if v.xdgDataHome != "" {
 		roots = append(roots,
 			allowedRoot{dir: filepath.Join(v.xdgDataHome, "opencode"), cap: proto.ReadAgentLogsOpenCode},
 			allowedRoot{dir: filepath.Join(v.xdgDataHome, "devin", "cli"), cap: proto.ReadAgentLogsDevin},
@@ -146,27 +185,85 @@ func (v *PathValidator) allowedRootsLocked() []allowedRoot {
 	for d := range v.codexHomes {
 		roots = append(roots, allowedRoot{dir: filepath.Join(d, "sessions"), cap: proto.ReadAgentLogsCodex})
 	}
-	roots = append(roots, v.explicitAllow...)
 	return roots
 }
 
-// OpenChecked validates path against all security constraints and returns an
-// already-opened *os.File (opened with O_NOFOLLOW to avoid TOCTOU races) and
-// the declared proto.ReadAgentLogs* capability category. Returns (nil, "", false)
-// if path is disallowed, missing, a symlink, not a regular file, or owned by
-// another UID.
+// authorizePathLocked determines whether literal path string p is authorized
+// without ever consulting EvalSymlinks. Returns (capability, ok).
+func (v *PathValidator) authorizePathLocked(p string) (string, bool) {
+	if capCat, ok := v.knownLogs[p]; ok {
+		return capCat, true
+	}
+	for _, root := range v.allowedRootsLocked() {
+		if isStrictSubpath(root.dir, p) {
+			return root.cap, true
+		}
+	}
+	return "", false
+}
+
+// openNoFollowChain opens fullPath component-by-component from "/" using
+// openat(O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC) for every parent directory
+// and openat(O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_NONBLOCK) for the final file.
+// This eliminates TOCTOU symlink-swap races without EvalSymlinks or Lstat.
+func openNoFollowChain(fullPath string) (*os.File, error) {
+	if !isCleanAbsPath(fullPath) || fullPath == "/" {
+		return nil, errors.New("invalid path")
+	}
+	parts := strings.Split(strings.TrimPrefix(fullPath, "/"), "/")
+	if len(parts) == 0 {
+		return nil, errors.New("empty path")
+	}
+	for _, part := range parts {
+		if part == "" || part == "." || part == ".." {
+			return nil, errors.New("invalid path segment")
+		}
+	}
+
+	dirFD, err := syscall.Open("/", syscall.O_RDONLY|syscall.O_DIRECTORY|syscall.O_CLOEXEC, 0)
+	if err != nil {
+		return nil, err
+	}
+
+	for i := 0; i < len(parts)-1; i++ {
+		nextFD, err := syscall.Openat(dirFD, parts[i], syscall.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
+		_ = syscall.Close(dirFD)
+		if err != nil {
+			return nil, err
+		}
+		dirFD = nextFD
+	}
+
+	leaf := parts[len(parts)-1]
+	fileFD, err := syscall.Openat(dirFD, leaf, syscall.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC|syscall.O_NONBLOCK, 0)
+	_ = syscall.Close(dirFD)
+	if err != nil {
+		return nil, err
+	}
+	return os.NewFile(uintptr(fileFD), fullPath), nil
+}
+
+// OpenChecked authorizes literal path string against the current locate set or
+// declared reads directories, opens every component with openat + O_NOFOLLOW,
+// and verifies via fstat that the opened file is a regular file owned by v.uid.
+// Returns (nil, "", false) if any check fails.
 func (v *PathValidator) OpenChecked(path string) (*os.File, string, bool) {
-	if path == "" || !filepath.IsAbs(path) || strings.ContainsAny(path, "\x00\n") {
+	if !isCleanAbsPath(path) {
 		return nil, "", false
 	}
 
-	// Open leaf without following a leaf symlink; O_NONBLOCK prevents blocking
-	// forever if path is a FIFO/named pipe before fstat rejects non-regular files.
-	fd, err := syscall.Open(path, syscall.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC|syscall.O_NONBLOCK, 0)
+	v.mu.RLock()
+	capCat, authorized := v.authorizePathLocked(path)
+	v.mu.RUnlock()
+	if !authorized {
+		return nil, "", false
+	}
+
+	assertDeclaredRead(capCat)
+	f, err := openNoFollowChain(path)
 	if err != nil {
 		return nil, "", false
 	}
-	f := os.NewFile(uintptr(fd), path)
 	info, err := f.Stat()
 	if err != nil || !info.Mode().IsRegular() {
 		_ = f.Close()
@@ -177,54 +274,7 @@ func (v *PathValidator) OpenChecked(path string) (*os.File, string, bool) {
 		_ = f.Close()
 		return nil, "", false
 	}
-
-	// Resolve parent directory symlinks so a directory symlink escaping an
-	// allowed root (e.g. ~/.claude/projects/escape -> /etc) is detected.
-	realParent, err := filepath.EvalSymlinks(filepath.Dir(path))
-	if err != nil || realParent == "" {
-		_ = f.Close()
-		return nil, "", false
-	}
-	realPath := filepath.Join(realParent, filepath.Base(path))
-
-	// Confirm the opened FD still matches the resolved real path (guards
-	// against symlink swap between Open and EvalSymlinks).
-	realInfo, err := os.Lstat(realPath)
-	if err != nil || !realInfo.Mode().IsRegular() {
-		_ = f.Close()
-		return nil, "", false
-	}
-	realSt, ok := realInfo.Sys().(*syscall.Stat_t)
-	if !ok || realSt.Dev != st.Dev || realSt.Ino != st.Ino || realSt.Uid != v.uid {
-		_ = f.Close()
-		return nil, "", false
-	}
-
-	// Authorize against either (1) current locate results or (2) declared reads
-	// agent log root directories.
-	v.mu.RLock()
-	capCat, known := v.knownRealLogs[realPath]
-	roots := v.allowedRootsLocked()
-	v.mu.RUnlock()
-
-	if known {
-		assertDeclaredRead(capCat)
-		return f, capCat, true
-	}
-
-	for _, root := range roots {
-		realRoot, err := v.rd.evalSymlinks(root.cap, root.dir)
-		if err != nil || realRoot == "" {
-			continue
-		}
-		if isStrictSubpath(realRoot, realPath) {
-			assertDeclaredRead(root.cap)
-			return f, root.cap, true
-		}
-	}
-
-	_ = f.Close()
-	return nil, "", false
+	return f, capCat, true
 }
 
 // ValidatePath reports whether path passes PathValidator.OpenChecked without
@@ -272,9 +322,9 @@ func Tails(v *PathValidator, logs []string) []byte {
 }
 
 // MessageTails reads a bounded 4 MiB window at the end of each validated log
-// file, filters for short message and turn-boundary JSON records, and keeps at
-// most the last 64 KiB per log — byte-for-byte identical to
-// convoMessageTailsCommand.
+// file, filters for short (<= 65536 byte) message and turn-boundary JSON
+// records, and keeps at most the last 64 KiB per log — byte-for-byte identical
+// to convoMessageTailsCommand under LC_ALL=C.
 func MessageTails(v *PathValidator, logs []string) []byte {
 	var out bytes.Buffer
 	for _, l := range logs {
@@ -299,7 +349,8 @@ func MessageTails(v *PathValidator, logs []string) []byte {
 }
 
 // filterMessageTailWindow mirrors the awk + `tail -c 65536` pipeline in
-// convoMessageTailsCommand.
+// convoMessageTailsCommand, measuring line length in bytes (conservative bound
+// matching LC_ALL=C).
 func filterMessageTailWindow(window []byte) []byte {
 	var filtered bytes.Buffer
 	bad := false
@@ -318,7 +369,7 @@ func filterMessageTailWindow(window []byte) []byte {
 			bad = true
 			continue
 		}
-		if utf8.RuneCount(line) <= convoMsgTailMaxLineRunes && messageTailTypeRe.Match(line) {
+		if len(line) <= convoMsgTailMaxLineBytes && messageTailTypeRe.Match(line) {
 			filtered.Write(line)
 			filtered.WriteByte('\n')
 		}

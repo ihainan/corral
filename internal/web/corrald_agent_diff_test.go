@@ -38,6 +38,24 @@ import (
 
 func main() {
 	var held []*os.File
+	if padStr := os.Getenv("FAKE_PAD_FDS"); padStr != "" {
+		// Open files in two groups with dummy /dev/null FDs in between so the
+		// second file gets FD >= 10 while the first gets a low FD (e.g. FD 3).
+		parts := strings.SplitN(padStr, "|", 2)
+		if len(parts) == 2 {
+			if f, err := os.Open(parts[0]); err == nil {
+				held = append(held, f)
+			}
+			for i := 0; i < 12; i++ {
+				if f, err := os.Open(os.DevNull); err == nil {
+					held = append(held, f)
+				}
+			}
+			if f, err := os.Open(parts[1]); err == nil {
+				held = append(held, f)
+			}
+		}
+	}
 	if list := os.Getenv("FAKE_OPEN_FILES"); list != "" {
 		for _, p := range strings.Split(list, ":") {
 			if p == "" {
@@ -285,6 +303,7 @@ func TestCorraldAgentDifferentialAgainstShellScripts(t *testing.T) {
 	defaultClaudeProj := filepath.Join(home, ".claude", "projects", "-work")
 	customAbsClaude := filepath.Join(home, "my cfg", ".claude-abs")
 	customRelClaude := filepath.Join(workDir, ".claude-rel")
+	customGlobClaude := filepath.Join(home, "claude[work]*?")
 	for _, d := range []string{
 		defaultClaudeSess,
 		defaultClaudeProj,
@@ -293,6 +312,8 @@ func TestCorraldAgentDifferentialAgainstShellScripts(t *testing.T) {
 		filepath.Join(customRelClaude, "sessions"),
 		filepath.Join(customRelClaude, "projects", "-p1"),
 		filepath.Join(customRelClaude, "projects", "-p2"),
+		filepath.Join(customGlobClaude, "sessions"),
+		filepath.Join(customGlobClaude, "projects", "-glob"),
 		filepath.Join(workDir, ".claude"),
 	} {
 		if err := os.MkdirAll(d, 0o755); err != nil {
@@ -315,12 +336,13 @@ func TestCorraldAgentDifferentialAgainstShellScripts(t *testing.T) {
 	}`), 0o600)
 
 	const (
-		clSID1 = "11111111-1111-4111-8111-111111111111"
-		clSID2 = "22222222-2222-4222-8222-222222222222"
-		clSID3 = "33333333-3333-4333-8333-333333333333"
-		clSID4 = "44444444-4444-4444-8444-444444444444"
-		clSID5 = "55555555-5555-4555-8555-555555555555"
-		clSID6 = "66666666-6666-4666-8666-666666666666"
+		clSID1    = "11111111-1111-4111-8111-111111111111"
+		clSID2    = "22222222-2222-4222-8222-222222222222"
+		clSID3    = "33333333-3333-4333-8333-333333333333"
+		clSID4    = "44444444-4444-4444-8444-444444444444"
+		clSID5    = "55555555-5555-4555-8555-555555555555"
+		clSID6    = "66666666-6666-4666-8666-666666666666"
+		clSIDGlob = "67676767-6767-4676-8676-676767676767"
 	)
 
 	// Claude 1: default dir, herdr pane, JSONL with timestamp for times mode.
@@ -369,6 +391,16 @@ func TestCorraldAgentDifferentialAgainstShellScripts(t *testing.T) {
 	cl5PID, cl5Start := spawn(claudeBin, workDir, []string{"CORRAL_SIDE_COPY=1", "HERDR_PANE_ID=w1:p5"})
 	_ = os.WriteFile(filepath.Join(defaultClaudeSess, strconv.Itoa(cl5PID)+".json"),
 		[]byte(fmt.Sprintf(`{"pid":%d,"sessionId":"%s","procStart":"%s","entrypoint":"sdk-cli"}`, cl5PID, clSID5, cl5Start)), 0o600)
+
+	// Claude 6 (Review #12): CLAUDE_CONFIG_DIR containing glob metacharacters [, *, ?.
+	clLogGlob := filepath.Join(customGlobClaude, "projects", "-glob", clSIDGlob+".jsonl")
+	_ = os.WriteFile(clLogGlob, []byte(`{"type":"user","timestamp":"2026-11-22T09:00:00Z"}`+"\n"), 0o600)
+	clGlobPID, clGlobStart := spawn(claudeBin, workDir, []string{
+		"CLAUDE_CONFIG_DIR=" + customGlobClaude,
+		"HERDR_PANE_ID=w1:p6",
+	})
+	_ = os.WriteFile(filepath.Join(customGlobClaude, "sessions", strconv.Itoa(clGlobPID)+".json"),
+		[]byte(fmt.Sprintf(`{"pid":%d,"sessionId":"%s","procStart":"%s"}`, clGlobPID, clSIDGlob, clGlobStart)), 0o600)
 
 	// --- 2. Codex scenarios ---
 	cxHome := filepath.Join(home, ".codex")
@@ -424,6 +456,25 @@ base_url = "https://codex-gw.example.net/v1"
 	cxExecPID, _ := spawn(codexBin, workDir, []string{"HERDR_PANE_ID=w2:p5"}, "exec", "do something")
 	// Codex 6: `codex app-server` holding main cand + subagent rollout.
 	_, _ = spawn(codexBin, workDir, []string{"FAKE_OPEN_FILES=" + cxCandLog + ":" + cxSubLog}, "app-server")
+
+	// Codex 7 (Review #11): two main rollouts with IDENTICAL mtime opened at
+	// low FD (<10) vs high FD (>=10) -> numeric FD sort must match GNU find
+	// and select the lower-FD rollout (tieA).
+	const (
+		cxSIDTieA = "12121212-1111-4111-8111-111111111111"
+		cxSIDTieB = "34343434-2222-4222-8222-222222222222"
+	)
+	cxTieLogA := filepath.Join(cxSessDir, "rollout-2026-11-27T03-00-00-"+cxSIDTieA+".jsonl")
+	cxTieLogB := filepath.Join(cxSessDir, "rollout-2026-11-27T03-00-00-"+cxSIDTieB+".jsonl")
+	_ = os.WriteFile(cxTieLogA, []byte(`{"type":"session_meta","payload":{"cwd":"/work/tie"}}`+"\n"), 0o600)
+	_ = os.WriteFile(cxTieLogB, []byte(`{"type":"session_meta","payload":{"cwd":"/work/tie"}}`+"\n"), 0o600)
+	tieTime := time.Date(2026, 11, 27, 3, 0, 0, 0, time.UTC)
+	_ = os.Chtimes(cxTieLogA, tieTime, tieTime)
+	_ = os.Chtimes(cxTieLogB, tieTime, tieTime)
+	cxTiePID, _ := spawn(codexBin, workDir, []string{
+		"FAKE_PAD_FDS=" + cxTieLogA + "|" + cxTieLogB,
+		"HERDR_PANE_ID=w2:p7",
+	})
 
 	// --- 3. OpenCode scenarios (direct + OpenCode 2 serve via loopback TCP) ---
 	ocDir := filepath.Join(home, ".local", "share", "opencode")
@@ -488,6 +539,42 @@ base_url = "https://codex-gw.example.net/v1"
 	// Give devin acp child a moment to open its lock & db.
 	time.Sleep(150 * time.Millisecond)
 
+	// Spawn 20 unrelated background noise agents (10 claude + 10 codex under a
+	// separate noise home) to verify differential comparisons remain completely
+	// unaffected by other live agents on the host.
+	noiseHome := t.TempDir()
+	noiseClaudeCfg := filepath.Join(noiseHome, ".claude-noise")
+	noiseClaudeSess := filepath.Join(noiseClaudeCfg, "sessions")
+	noiseClaudeProj := filepath.Join(noiseClaudeCfg, "projects", "-noise")
+	noiseCodexHome := filepath.Join(noiseHome, ".codex-noise")
+	noiseCodexSess := filepath.Join(noiseCodexHome, "sessions", "2026", "11", "27")
+	for _, d := range []string{noiseClaudeSess, noiseClaudeProj, noiseCodexSess} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := 0; i < 10; i++ {
+		sid := fmt.Sprintf("81818181-8181-4818-8818-%012d", i+1)
+		logFile := filepath.Join(noiseClaudeProj, sid+".jsonl")
+		_ = os.WriteFile(logFile, []byte(`{"type":"user"}`+"\n"), 0o600)
+		npid, nstart := spawn(claudeBin, noiseHome, []string{
+			"CLAUDE_CONFIG_DIR=" + noiseClaudeCfg,
+			fmt.Sprintf("HERDR_PANE_ID=noise:c%d", i),
+		})
+		_ = os.WriteFile(filepath.Join(noiseClaudeSess, strconv.Itoa(npid)+".json"),
+			[]byte(fmt.Sprintf(`{"pid":%d,"sessionId":"%s","procStart":"%s"}`, npid, sid, nstart)), 0o600)
+	}
+	for i := 0; i < 10; i++ {
+		sid := fmt.Sprintf("82828282-8282-4828-8828-%012d", i+1)
+		logFile := filepath.Join(noiseCodexSess, "rollout-2026-11-27T01-00-00-"+sid+".jsonl")
+		_ = os.WriteFile(logFile, []byte(`{"type":"session_meta","payload":{"cwd":"/tmp/noise"}}`+"\n"), 0o600)
+		_, _ = spawn(codexBin, noiseHome, []string{
+			"CODEX_HOME=" + noiseCodexHome,
+			"FAKE_OPEN_FILES=" + logFile,
+			fmt.Sprintf("HERDR_PANE_ID=noise:x%d", i),
+		})
+	}
+
 	// --- Run side-by-side comparisons across all modes! ---
 	emptyStr := ""
 	loc, err := agent.NewLocator(agent.LocatorOptions{
@@ -535,6 +622,12 @@ base_url = "https://codex-gw.example.net/v1"
 	}
 	if _, ok := byPID[int64(cl5PID)]; ok {
 		t.Fatal("side-copy cl5 unexpectedly located")
+	}
+	if p, ok := byPID[int64(clGlobPID)]; !ok || p.sid != clSIDGlob || p.log != clLogGlob {
+		t.Fatalf("claude glob-char config dir mismatch: ok=%v %+v", ok, p)
+	}
+	if p, ok := byPID[int64(cxTiePID)]; !ok || p.sid != cxSIDTieA || p.log != cxTieLogA {
+		t.Fatalf("codex tied-mtime numeric FD mismatch: ok=%v %+v (want %s)", ok, p, cxSIDTieA)
 	}
 	if p, ok := byPID[int64(cx1PID)]; !ok || p.sid != cxSID1 || p.ep != "codex-gw.example.net" {
 		t.Fatalf("codex1 mismatch: ok=%v %+v", ok, p)
@@ -589,8 +682,21 @@ base_url = "https://codex-gw.example.net/v1"
 	shOC := runSh(convoLocateOpenCodeCommand("herdr", ""))
 	goOC := loc.Locate(context.Background(), proto.AgentLocateParams{Mode: "herdr", Only: "opencode"})
 	_, gotOC := compareLocated(t, "opencode-only", shOC, goOC, selfPID, home)
-	if len(gotOC.procs) != 2 {
-		t.Fatalf("opencode-only expected 2 procs, got %d: %+v", len(gotOC.procs), gotOC.procs)
+	ocByPID := map[int64]convoProc{}
+	for _, p := range gotOC.procs {
+		ocByPID[p.pid] = p
+	}
+	if _, ok := ocByPID[int64(oc1PID)]; !ok {
+		t.Fatalf("opencode-only missing oc1PID=%d: %+v", oc1PID, gotOC.procs)
+	}
+	if _, ok := ocByPID[int64(oc2PID)]; !ok {
+		t.Fatalf("opencode-only missing oc2PID=%d: %+v", oc2PID, gotOC.procs)
+	}
+	if _, ok := ocByPID[int64(ocRunPID)]; ok {
+		t.Fatalf("opencode-only unexpectedly included ocRunPID=%d", ocRunPID)
+	}
+	if _, ok := ocByPID[int64(cl1PID)]; ok {
+		t.Fatalf("opencode-only unexpectedly included claude cl1PID=%d", cl1PID)
 	}
 
 	// Mode 3: Times mode (convoLocateTimesCommand).
@@ -684,8 +790,11 @@ func TestCorraldTailsByteForByteAgainstShellScripts(t *testing.T) {
 		busyBuf.WriteString(cxRow(t, "response_item", map[string]any{"type": "function_call_output", "output": strings.Repeat("A", 120000)}))
 	}
 	busyBuf.WriteString(cxSaid(t, "m2", "窗口内的保留消息：原工作区和 tabs 会保留"))
-	// A >65536 char matching line that must be skipped by length($0) <= 65536.
+	// A >65536 char ASCII matching line that must be skipped.
 	busyBuf.WriteString(`{"type":"message","text":"` + strings.Repeat("Z", 70000) + `"}` + "\n")
+	// Review #14: a ~90 KiB UTF-8 line with 30,000 Chinese chars (<65536 runes,
+	// >65536 bytes) must ALSO be dropped to match byte-length limit under LC_ALL=C.
+	busyBuf.WriteString(`{"type":"message","text":"` + strings.Repeat("汉", 30000) + `"}` + "\n")
 	busyBuf.WriteString(cxRow(t, "response_item", map[string]any{"type": "function_call", "name": "exec_command", "arguments": `{"cmd":"ls"}`}))
 	busyBuf.WriteString(cxRow(t, "event_msg", map[string]any{"type": "task_complete"}))
 	_ = os.WriteFile(fBusy, busyBuf.Bytes(), 0o600)
@@ -711,7 +820,10 @@ func TestCorraldTailsByteForByteAgainstShellScripts(t *testing.T) {
 
 	runSh := func(cmdStr string) []byte {
 		t.Helper()
-		out, err := exec.Command(shPath, "-c", cmdStr).Output()
+		c := exec.Command(shPath, "-c", cmdStr)
+		// Run under LC_ALL=C so awk length($0) counts bytes (Review #14).
+		c.Env = []string{"PATH=/usr/bin:/bin", "LC_ALL=C"}
+		out, err := c.Output()
 		if err != nil {
 			t.Fatalf("sh failed: %v", err)
 		}
