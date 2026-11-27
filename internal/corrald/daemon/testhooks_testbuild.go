@@ -5,7 +5,9 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"os"
+	"strconv"
 	"time"
 
 	"github.com/ihainan/corral/internal/corrald/proto"
@@ -21,6 +23,46 @@ func defaultPathOptions() PathOptions {
 		opts.MachineIDSource = MachineIDSourceOverride
 	}
 	return opts
+}
+
+func defaultLifecycleLockTimeout() time.Duration {
+	if v := os.Getenv("CORRALD_TEST_LOCK_TIMEOUT"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			return d
+		}
+	}
+	return DefaultLifecycleLockTimeout
+}
+
+type blockingLogWriter struct {
+	inner    io.Writer
+	substr   string
+	gateFile string
+}
+
+func (b *blockingLogWriter) Write(p []byte) (int, error) {
+	if len(p) > 0 && containsSubstr(string(p), b.substr) {
+		if b.gateFile == "" {
+			select {} // intentionally block forever to test Rule 3 hard-exit timer
+		}
+		deadline := time.Now().Add(10 * time.Second)
+		for time.Now().Before(deadline) {
+			if _, err := os.Stat(b.gateFile); err == nil {
+				break
+			}
+			time.Sleep(15 * time.Millisecond)
+		}
+	}
+	return b.inner.Write(p)
+}
+
+func containsSubstr(s, sub string) bool {
+	for i := 0; i+len(sub) <= len(s); i++ {
+		if s[i:i+len(sub)] == sub {
+			return true
+		}
+	}
+	return false
 }
 
 func applyTestServerConfig(cfg *ServerConfig) {
@@ -54,6 +96,21 @@ func applyTestServerConfig(cfg *ServerConfig) {
 			cfg.PostHandoffExit = d
 		}
 	}
+	if v := os.Getenv("CORRALD_TEST_LOCK_TIMEOUT"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			cfg.LockTimeout = d
+		}
+	}
+	if os.Getenv("CORRALD_TEST_BLOCK_LOG_ON_HANDOFF") == "1" {
+		cfg.Logger = NewLogger(&blockingLogWriter{inner: io.Discard, substr: "handoff completed"})
+	}
+	if os.Getenv("CORRALD_TEST_BLOCK_LOG_ON_ROLLBACK") == "1" {
+		cfg.Logger = NewLogger(&blockingLogWriter{
+			inner:    io.Discard,
+			substr:   "handoff failed",
+			gateFile: os.Getenv("CORRALD_TEST_BLOCK_LOG_GATE"),
+		})
+	}
 }
 
 func shouldFailBeforeReady(handoff bool) bool {
@@ -64,9 +121,22 @@ func shouldFailCutover() bool {
 	return os.Getenv("CORRALD_TEST_FAIL_CUTOVER") == "1"
 }
 
+func waitCutoverTestGate() {
+	if marker := os.Getenv("CORRALD_TEST_CUTOVER_MARKER"); marker != "" {
+		_ = os.WriteFile(marker, []byte(strconv.Itoa(os.Getpid())), 0o600)
+	}
+	if gate := os.Getenv("CORRALD_TEST_CUTOVER_GATE"); gate != "" {
+		deadline := time.Now().Add(10 * time.Second)
+		for time.Now().Before(deadline) {
+			if _, err := os.Stat(gate); err == nil {
+				return
+			}
+			time.Sleep(15 * time.Millisecond)
+		}
+	}
+}
+
 func registerTestMethods(s *Server) {
-	// test.emit emits a synthetic event on the daemon's EventBus. Marked
-	// Mutating so emissions drain cleanly before a hot-update snapshot.
 	s.Register("test.emit", MethodOptions{Mutating: true}, func(_ context.Context, _ *Conn, raw json.RawMessage) (any, *proto.RPCError) {
 		var p struct {
 			Event string          `json:"event"`
@@ -85,9 +155,6 @@ func registerTestMethods(s *Server) {
 		return ev, nil
 	})
 
-	// test.write uses MethodOptions{Mutating: true, Idempotent: true} so
-	// dispatchRequest atomically admits and registers op_id under stateMu BEFORE
-	// this handler even starts executing.
 	s.Register("test.write", MethodOptions{Mutating: true, Idempotent: true}, func(_ context.Context, _ *Conn, raw json.RawMessage) (any, *proto.RPCError) {
 		var p struct {
 			OpID    string `json:"op_id"`
@@ -98,8 +165,6 @@ func registerTestMethods(s *Server) {
 			return nil, &proto.RPCError{Code: proto.ErrInvalidParams, Message: err.Error()}
 		}
 		if p.DelayMS > 0 {
-			// Deliberately sleep without honoring ctx to test hard exit cap
-			// and timed-out write handoff behavior.
 			time.Sleep(time.Duration(p.DelayMS) * time.Millisecond)
 		}
 		return map[string]any{
