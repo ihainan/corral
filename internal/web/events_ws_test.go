@@ -1033,3 +1033,75 @@ func TestEventsRelocAfterSetBeforeConvoHintDelivered(t *testing.T) {
 		})
 	}
 }
+
+// A new log that first appears while the watched pane is still busy (its
+// own log written within the quiet threshold, e.g. Codex /new right after a
+// reply) does not use up its wake: once the pane is quiet, the next write of
+// that log wakes it once (convo hint + relocation), and only once.
+func TestEventsUnmatchedLogSeenWhileBusyStillWakesOnceQuiet(t *testing.T) {
+	h := newHarness(t)
+	h.srv.events.SetCoalesceWindow(5 * time.Millisecond)
+	h.srv.events.SetUnmatchedLogQuietThreshold(2 * time.Second)
+	h.srv.events.SetFallbackWakeTTL(10 * time.Minute)
+
+	admin := h.admin()
+	alice := h.member(admin, "alice")
+	srv := h.sshServer(t.TempDir())
+	hostID, sessID := createAndPinHost(t, alice, srv, "busy-then-quiet-box")
+	aliceID := int64(alice.do("GET", "/api/me", nil).json()["id"].(float64))
+
+	st := h.srv.convos.get(sessID + "\x00w1:p_busy")
+	st.done()
+	h.srv.events.RecordBindingWithActivity(aliceID, hostID, sessID, "w1:p_busy", "w1:p_busy", 71001, "/tmp/old-convo.jsonl", time.Now())
+
+	ws, _, err := dialEventsWS(t, h, alice, h.cfg.Origin())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ws.CloseNow()
+	rd := startPushReader(ws)
+	_ = rd.next(t, 2*time.Second) // initial cover
+	sendWatchHosts(t, ws, []int64{hostID})
+	time.Sleep(40 * time.Millisecond)
+
+	convos := func(wait time.Duration) int {
+		n := 0
+		end := time.Now().Add(wait)
+		for time.Now().Before(end) {
+			select {
+			case m := <-rd.ch:
+				if m.T == "convo" && m.Session == sessID && m.Pane == "w1:p_busy" {
+					n++
+				}
+			case <-time.After(5 * time.Millisecond):
+			}
+		}
+		return n
+	}
+	newLog := proto.AgentChangedEventData{ChangedLogs: []string{"/tmp/new-convo-after-new.jsonl"}}
+
+	h.srv.events.HandleAgentChanged([]int64{hostID}, newLog)
+	if n := convos(50 * time.Millisecond); n != 0 {
+		t.Fatalf("busy pane woken by a new log (%d hints); want none while busy", n)
+	}
+	_ = st.relocAfter.Swap(0)
+
+	// The pane goes quiet (forget the binding first: recording keeps the
+	// newer activity time of the same log).
+	h.srv.events.RecordBindingWithActivity(aliceID, hostID, sessID, "w1:p_busy", "w1:p_busy", 0, "", time.Time{})
+	h.srv.events.RecordBindingWithActivity(aliceID, hostID, sessID, "w1:p_busy", "w1:p_busy", 71001, "/tmp/old-convo.jsonl", time.Now().Add(-5*time.Second))
+	h.srv.events.HandleAgentChanged([]int64{hostID}, newLog)
+	if n := convos(50 * time.Millisecond); n != 1 {
+		t.Fatalf("quiet pane: %d convo hints for the new log seen while busy, want 1", n)
+	}
+	if st.relocAfter.Swap(0) == 0 {
+		t.Fatal("quiet pane woken without a relocation mark")
+	}
+	for i := 0; i < 5; i++ {
+		time.Sleep(10 * time.Millisecond)
+		h.srv.events.HandleAgentChanged([]int64{hostID}, newLog)
+	}
+	if n := convos(50 * time.Millisecond); n != 0 {
+		t.Fatalf("quiet pane woken again (%d) by the same log; want once", n)
+	}
+}

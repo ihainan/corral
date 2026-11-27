@@ -38,9 +38,15 @@ const (
 	maxFallbackWakeScopes      = 2048
 )
 
+// userHostKey scopes the fallback-wake memory to one watched pane (user,
+// host, session, pane): a log or pid is remembered only for a pane it
+// actually woke, so a pane that was busy when a new log first appeared is
+// still woken by it once it goes quiet.
 type userHostKey struct {
-	userID int64
-	hostID int64
+	userID    int64
+	hostID    int64
+	sessionID string
+	pane      string
 }
 
 type hostWakeSeen struct {
@@ -223,8 +229,8 @@ func (h *eventHub) SetOnDeliverHintForTest(fn func(key coalesceKey)) {
 	h.mu.Unlock()
 }
 
-func (h *eventHub) wakeScopeLocked(uid, hid int64, now time.Time, ttl time.Duration) *hostWakeSeen {
-	k := userHostKey{userID: uid, hostID: hid}
+func (h *eventHub) wakeScopeLocked(uid, hid int64, sessionID, pane string, now time.Time, ttl time.Duration) *hostWakeSeen {
+	k := userHostKey{userID: uid, hostID: hid, sessionID: sessionID, pane: pane}
 	if sc := h.wakeSeen[k]; sc != nil {
 		sc.lastUsed = now
 		return sc
@@ -263,7 +269,7 @@ func (h *eventHub) wakeScopeLocked(uid, hid int64, now time.Time, ttl time.Durat
 // markFreshUnmatchedWakes records unmatched log paths and PIDs for (uid, hid)
 // and reports whether at least one of them has not yet triggered a fallback
 // wake within fallbackWakeTTL.
-func (h *eventHub) markFreshUnmatchedWakes(uid, hid int64, logs []string, pids []int, now time.Time) bool {
+func (h *eventHub) markFreshUnmatchedWakes(uid, hid int64, sessionID, pane string, logs []string, pids []int, now time.Time) bool {
 	if len(logs) == 0 && len(pids) == 0 {
 		return false
 	}
@@ -276,7 +282,7 @@ func (h *eventHub) markFreshUnmatchedWakes(uid, hid int64, logs []string, pids [
 	if ttl <= 0 {
 		ttl = DefaultFallbackWakeTTL
 	}
-	sc := h.wakeScopeLocked(uid, hid, now, ttl)
+	sc := h.wakeScopeLocked(uid, hid, sessionID, pane, now, ttl)
 	fresh := false
 
 	for _, logPath := range logs {
@@ -353,7 +359,10 @@ func (h *eventHub) forgetWakePIDs(uid, hid int64, pids []int) {
 		return
 	}
 	h.mu.Lock()
-	if sc := h.wakeSeen[userHostKey{userID: uid, hostID: hid}]; sc != nil {
+	for k, sc := range h.wakeSeen {
+		if k.userID != uid || k.hostID != hid {
+			continue
+		}
 		for _, pid := range pids {
 			delete(sc.pids, pid)
 		}
@@ -665,12 +674,13 @@ func (h *eventHub) HandleAgentChanged(hostIDs []int64, ev proto.AgentChangedEven
 				needAgents = true
 			}
 
-			// Each unmatched log path or unmatched added PID only wakes this
+			// An unmatched log path or unmatched added PID wakes each of this
 			// user's no-log or quiet (>= quietThreshold) bindings on this host
-			// the FIRST time it appears within fallbackWakeTTL, preventing
-			// other busy agents on the same host from causing a relocation
-			// storm while still waking immediately for brand-new logs/PIDs.
-			if h.markFreshUnmatchedWakes(uid, hid, unmatchedLogs, unmatchedAddedPIDs, now) {
+			// once within fallbackWakeTTL: other busy agents on the host cause
+			// no relocation storm, and a binding that was busy when the path
+			// first appeared is still woken by it once it is quiet (only a
+			// binding actually woken remembers the path).
+			if len(unmatchedLogs) > 0 || len(unmatchedAddedPIDs) > 0 {
 				for _, b := range liveBindings {
 					if b.ownerID != uid || b.hostID != hid {
 						continue
@@ -679,7 +689,10 @@ func (h *eventHub) HandleAgentChanged(hostIDs []int64, ev proto.AgentChangedEven
 					if _, already := directMatched[bk]; already {
 						continue
 					}
-					if b.log == "" || b.lastLogChange.IsZero() || now.Sub(b.lastLogChange) >= quietThreshold {
+					if b.log != "" && !b.lastLogChange.IsZero() && now.Sub(b.lastLogChange) < quietThreshold {
+						continue
+					}
+					if h.markFreshUnmatchedWakes(uid, hid, b.sessionID, b.pane, unmatchedLogs, unmatchedAddedPIDs, now) {
 						pendingHints[coalesceKey{
 							kind:      "convo",
 							userID:    uid,
