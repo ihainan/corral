@@ -330,6 +330,7 @@ func claudeRewindCheckVarsSh(mode, pane, socket, tmuxPanePID string, pid, start 
 	q := sshx.QuoteShell
 	var b strings.Builder
 	b.WriteString(`PATH="$HOME/.local/bin:$HOME/bin:$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"` + "\n")
+	b.WriteString(claudeConfigDirSh)
 	b.WriteString("pid=" + strconv.FormatInt(pid, 10) + " start=" + strconv.FormatInt(start, 10) + " sid=" + q(sid) + " pane=" + q(pane) + "\n")
 	if mode == "tmux" {
 		b.WriteString("tpp=" + q(tmuxPanePID) + "\n")
@@ -355,7 +356,8 @@ func claudeRewindCheckBodySh(mode string) string {
 	b.WriteString(`[ "$(printf '%s' "$rest" | cut -d' ' -f20)" = "$start" ] || exit 31` + "\n")
 	b.WriteString(`pgrp=$(printf '%s' "$rest" | cut -d' ' -f3); tpgid=$(printf '%s' "$rest" | cut -d' ' -f6)` + "\n")
 	b.WriteString(`[ -n "$pgrp" ] && [ "$pgrp" = "$tpgid" ] || exit 32` + "\n")
-	b.WriteString(`c=$(head -c 65536 "$HOME/.claude/sessions/$pid.json" 2>/dev/null | tr -d '\n')` + "\n")
+	b.WriteString(`claude_cfg_dir "/proc/$pid"` + "\n")
+	b.WriteString(`c=$(head -c 65536 "$clcfg/sessions/$pid.json" 2>/dev/null | tr -d '\n')` + "\n")
 	b.WriteString(`ps=$(printf '%s' "$c" | grep -o '"procStart" *: *"*[0-9]*"*' | head -n 1 | tr -dc '0-9')` + "\n")
 	b.WriteString(`[ "$ps" = "$start" ] || exit 31` + "\n")
 	b.WriteString(`csid=$(printf '%s' "$c" | grep -o '"sessionId" *: *"[0-9a-fA-F-]*"' | head -n 1 | sed 's/.*"\([0-9a-fA-F-]*\)"$/\1/')` + "\n")
@@ -1357,6 +1359,7 @@ func (s *Server) apiConversationRewind(w http.ResponseWriter, r *http.Request) {
 	// Verify physical pane (herdr live snapshot or tmux pane_pid).
 	socket := s.herdrSocks.get(sess.ID)
 	var liveTermID, liveHerdrSID, liveHerdrStatus, tmuxPanePID string
+	var livePI *herdr.PaneProcessInfoResult
 	if sess.Persistence == "herdr" {
 		if socket == "" {
 			fail(rwErr(http.StatusConflict, "terminal_changed", "herdr socket is not available"))
@@ -1368,6 +1371,11 @@ func (s *Server) apiConversationRewind(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		snap, serr := hc.Snapshot(ctx)
+		if serr == nil {
+			pctx, pcancel := context.WithTimeout(ctx, 2*time.Second)
+			livePI, _ = hc.PaneProcessInfo(pctx, b.Pane)
+			pcancel()
+		}
 		hc.Close()
 		if serr != nil {
 			fail(asRewindErr(serr))
@@ -1398,13 +1406,26 @@ func (s *Server) apiConversationRewind(w http.ResponseWriter, r *http.Request) {
 	if sess.Persistence == "tmux" {
 		tmuxTarget = b.Pane
 	}
-	locOut, lerr := claudeRewindExec(ctx, sess, &running, convoLocateCommand(sess.Persistence, sess.TmuxSession, tmuxTarget), convoLocateMax, 3*time.Second)
-	if lerr != nil {
-		fail(asRewindErr(lerr))
-		return
+	var front *convoProc
+	if sess.Persistence == "herdr" {
+		if plan := planHerdrFastLocate(livePI, b.Pane, herdr.Pane{}, false); plan.mode == herdrFastPIDs {
+			if locOut, lerr := claudeRewindExec(ctx, sess, &running, convoLocatePidsCommand(plan.pids), convoLocateMax, 3*time.Second); lerr == nil {
+				located := parseConvoLocate(string(locOut))
+				if p, ok := fastLocateAccept(located, b.Pane, socket, liveHerdrSID); ok && !located.noProc && p != nil && p.pid == b.PID && p.start == b.Start && p.sid == b.Session {
+					front = p
+				}
+			}
+		}
 	}
-	located := parseConvoLocate(string(locOut))
-	front := pickConvoProc(located.procs, sess.Persistence, b.Pane, socket, located.tmuxPID, located.paneTTY, liveHerdrSID)
+	if front == nil {
+		locOut, lerr := claudeRewindExec(ctx, sess, &running, convoLocateCommand(sess.Persistence, sess.TmuxSession, tmuxTarget), convoLocateMax, 3*time.Second)
+		if lerr != nil {
+			fail(asRewindErr(lerr))
+			return
+		}
+		located := parseConvoLocate(string(locOut))
+		front = pickConvoProc(located.procs, sess.Persistence, b.Pane, socket, located.tmuxPID, located.paneTTY, liveHerdrSID)
+	}
 	switch {
 	case front == nil || front.pid != b.PID || front.start != b.Start:
 		fail(rwErr(http.StatusConflict, "process_changed", "the Claude Code process in this pane changed"))

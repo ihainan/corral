@@ -1,0 +1,319 @@
+package web
+
+import (
+	"bytes"
+	"context"
+	"path"
+	"slices"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/ihainan/corral/internal/herdr"
+	"github.com/ihainan/corral/internal/term"
+)
+
+// maxFastLocatePIDs caps how many foreground PIDs from herdr pane.process_info
+// the single-pane fast path inspects directly before falling back to full scan.
+const maxFastLocatePIDs = 16
+
+// herdrFastMode describes how a single herdr pane should be located after
+// consulting pane.process_info and herdr's cached pane snapshot.
+type herdrFastMode int
+
+const (
+	herdrFastFull     herdrFastMode = iota // run the full host scan
+	herdrFastPIDs                          // inspect only plan.pids under /proc
+	herdrFastOpenCode                      // run OpenCode-only scan (needs serve + sibling OpenCodes)
+)
+
+type herdrFastPlan struct {
+	mode herdrFastMode
+	pids []int
+}
+
+// claudeConfigDirSh defines claude_cfg_dir <procdir>, setting clcfg to the
+// process's CLAUDE_CONFIG_DIR (reading only that variable from <procdir>/environ
+// with NULs turned into newlines and embedded newlines into \001 so another
+// variable's value cannot forge it). Relative paths are resolved against
+// <procdir>/cwd; unset, unreadable, or malformed values fall back to
+// "$HOME/.claude".
+const claudeConfigDirSh = `
+claude_cfg_dir() {
+  clcfg="$HOME/.claude"
+  _clraw=$(tr '\0\n' '\n\001' <"$1/environ" 2>/dev/null | awk '/^CLAUDE_CONFIG_DIR=/{sub(/^CLAUDE_CONFIG_DIR=/,""); print; exit}')
+  if [ -n "$_clraw" ]; then
+    [ -n "${_clsoh:-}" ] || _clsoh=$(printf '\001')
+    case $_clraw in
+    *"$_clsoh"*) ;;
+    /*) clcfg=$_clraw ;;
+    *)
+      _clcwd=$(readlink "$1/cwd" 2>/dev/null)
+      case $_clcwd in
+      /*) clcfg="$_clcwd/$_clraw" ;;
+      esac ;;
+    esac
+    if [ "$clcfg" != "$HOME/.claude" ] && [ -d "$clcfg" ]; then
+      _clabs=$(cd -- "$clcfg" 2>/dev/null && pwd) && [ -n "$_clabs" ] && clcfg=$_clabs
+    fi
+  fi
+  while [ "$clcfg" != / ] && [ "${clcfg%/}" != "$clcfg" ]; do clcfg=${clcfg%/}; done
+}
+`
+
+// claudeConfigDirsSh defines claude_cfg_dirs, setting cldirs to a newline-
+// separated list of unique existing Claude Code config directories: the shell's
+// CLAUDE_CONFIG_DIR (if set), "$HOME/.claude", and any CLAUDE_CONFIG_DIR set on
+// running Claude Code processes of the current user.
+const claudeConfigDirsSh = `claude_cfg_dirs() {
+  _cdnl=$(printf '\nx'); _cdnl=${_cdnl%x}
+  _cdsoh=$(printf '\001')
+  cldirs=
+  _add_cldir() {
+    _cd=$1
+    [ -n "$_cd" ] || return 0
+    case $_cd in *"$_cdnl"*|*"$_cdsoh"*) return 0;; esac
+    [ -d "$_cd" ] || return 0
+    _cd=$(cd -- "$_cd" 2>/dev/null && pwd) || return 0
+    while [ "$_cd" != / ] && [ "${_cd%/}" != "$_cd" ]; do _cd=${_cd%/}; done
+    case "$_cdnl$cldirs$_cdnl" in *"$_cdnl$_cd$_cdnl"*) ;; *) cldirs="${cldirs:+$cldirs$_cdnl}$_cd";; esac
+  }
+  [ -n "${CLAUDE_CONFIG_DIR:-}" ] && _add_cldir "$CLAUDE_CONFIG_DIR"
+  _add_cldir "$HOME/.claude"
+  for _p in /proc/[0-9]*; do
+    [ -O "$_p" ] && [ -r "$_p/environ" ] || continue
+    _cm=; { IFS= read -r _cm <"$_p/comm"; } 2>/dev/null || continue
+    case $_cm in
+    claude) ;;
+    node|bun) grep -q 'claude' "$_p/cmdline" 2>/dev/null || continue;;
+    [0-9]*.[0-9]*)
+      case $(readlink "$_p/exe" 2>/dev/null) in */claude/*) ;; *) continue;; esac;;
+    *) continue;;
+    esac
+    _r=$(tr '\0\n' '\n\001' <"$_p/environ" 2>/dev/null | sed -n 's/^CLAUDE_CONFIG_DIR=//p' | head -n 1)
+    case $_r in ''|*"$_cdsoh"*) continue;; /*) _add_cldir "$_r";; *)
+      _cw=$(readlink "$_p/cwd" 2>/dev/null)
+      case $_cw in /*) _add_cldir "$_cw/$_r";; esac;;
+    esac
+  done
+}
+`
+
+// parseClaudeConfigDir extracts only the CLAUDE_CONFIG_DIR variable from raw
+// NUL-separated /proc/<pid>/environ bytes. Values containing control newlines
+// or \001 are rejected (returning "").
+func parseClaudeConfigDir(environ []byte) string {
+	for _, entry := range bytes.Split(environ, []byte{0}) {
+		v, ok := bytes.CutPrefix(entry, []byte("CLAUDE_CONFIG_DIR="))
+		if !ok {
+			continue
+		}
+		if bytes.ContainsAny(v, "\n\r\x01\x00") {
+			return ""
+		}
+		return string(v)
+	}
+	return ""
+}
+
+// resolveClaudeConfigDir resolves a raw CLAUDE_CONFIG_DIR value into an
+// absolute cleaned directory path. Unset or malformed values fall back to
+// "<home>/.claude". Relative paths are resolved against cwd when cwd is
+// absolute; otherwise they fall back to "<home>/.claude".
+func resolveClaudeConfigDir(raw, cwd, home string) string {
+	fallback := ""
+	if strings.HasPrefix(home, "/") && !strings.ContainsAny(home, "\x00\n\r\x01") {
+		fallback = path.Clean(home + "/.claude")
+	}
+	if raw == "" || strings.ContainsAny(raw, "\x00\n\r\x01") {
+		return fallback
+	}
+	if strings.HasPrefix(raw, "/") {
+		return path.Clean(raw)
+	}
+	if strings.HasPrefix(cwd, "/") && !strings.ContainsAny(cwd, "\x00\n\r\x01") {
+		return path.Clean(cwd + "/" + raw)
+	}
+	return fallback
+}
+
+// claudeSessionFilePath returns "<configDir>/sessions/<pid>.json" for a valid
+// absolute configDir and positive pid.
+func claudeSessionFilePath(configDir string, pid int64) (string, bool) {
+	if pid <= 0 {
+		return "", false
+	}
+	clean, ok := cleanRemotePath(configDir)
+	if !ok {
+		return "", false
+	}
+	return path.Join(clean, "sessions", strconv.FormatInt(pid, 10)+".json"), true
+}
+
+// claudeProjectLogGlob returns "<configDir>/projects/*/<sid>.jsonl" for a valid
+// absolute configDir and Claude session UUID.
+func claudeProjectLogGlob(configDir, sid string) (string, bool) {
+	if !convoUUID.MatchString(sid) {
+		return "", false
+	}
+	clean, ok := cleanRemotePath(configDir)
+	if !ok {
+		return "", false
+	}
+	return path.Join(clean, "projects", "*", sid+".jsonl"), true
+}
+
+// claudeConfigDirFromLog extracts "<configDir>" from a Claude Code session log
+// path of the form "<configDir>/projects/<project>/<sid>.jsonl". Works for both
+// default "$HOME/.claude" and custom CLAUDE_CONFIG_DIR (including paths with
+// spaces).
+func claudeConfigDirFromLog(log string) (string, bool) {
+	clean, ok := cleanRemotePath(log)
+	if !ok || !strings.HasSuffix(clean, ".jsonl") {
+		return "", false
+	}
+	projDir := path.Dir(clean)
+	projectsDir := path.Dir(projDir)
+	if path.Base(projectsDir) != "projects" || projDir == projectsDir {
+		return "", false
+	}
+	cfgDir := path.Dir(projectsDir)
+	if cfgDir == "" || cfgDir == "." || cfgDir == "/" {
+		return "", false
+	}
+	return cfgDir, true
+}
+
+// isOpenCodeProc reports whether a pane.process_info entry looks like OpenCode.
+func isOpenCodeProc(e herdr.ProcessEntry) bool {
+	if strings.EqualFold(e.Name, "opencode") {
+		return true
+	}
+	if len(e.Argv) > 0 && strings.EqualFold(path.Base(e.Argv[0]), "opencode") {
+		return true
+	}
+	return false
+}
+
+// planHerdrFastLocate decides whether locating pane can use the foreground PIDs
+// returned by herdr's pane.process_info, should use the OpenCode-only scan, or
+// must fall back to the full host scan.
+func planHerdrFastLocate(pi *herdr.PaneProcessInfoResult, pane string, hp herdr.Pane, hasHP bool) herdrFastPlan {
+	fallback := herdrFastPlan{mode: herdrFastFull}
+	if hasHP && isOpenCodeAgent(hp.Agent) {
+		fallback.mode = herdrFastOpenCode
+	}
+	if pi == nil || pane == "" || (pi.PaneID != "" && pi.PaneID != pane) || len(pi.ForegroundProcesses) == 0 {
+		return fallback
+	}
+	for _, pr := range pi.ForegroundProcesses {
+		if isOpenCodeProc(pr) {
+			return herdrFastPlan{mode: herdrFastOpenCode}
+		}
+	}
+	// If only the pane's shell is in the foreground, an agent may be suspended
+	// or backgrounded in this pane; fall back to full scan to preserve exact
+	// behavior with the full process scan.
+	if len(pi.ForegroundProcesses) == 1 {
+		only := pi.ForegroundProcesses[0]
+		if pi.ShellPID > 0 && only.PID == pi.ShellPID && ocShells[only.Name] {
+			return fallback
+		}
+	}
+	var pids []int
+	for _, pr := range pi.ForegroundProcesses {
+		if pr.PID <= 0 {
+			continue
+		}
+		if !slices.Contains(pids, pr.PID) {
+			pids = append(pids, pr.PID)
+		}
+	}
+	if len(pids) == 0 || len(pids) > maxFastLocatePIDs {
+		return fallback
+	}
+	slices.Sort(pids)
+	return herdrFastPlan{mode: herdrFastPIDs, pids: pids}
+}
+
+// convoLocatePidsCommand is convoLocateCommand scoped to the given PIDs only.
+func convoLocatePidsCommand(pids []int) string {
+	var parts []string
+	for _, p := range pids {
+		if p > 0 {
+			parts = append(parts, strconv.Itoa(p))
+		}
+	}
+	return convoLocateWith("herdr", "", "", "", "pids:"+strings.Join(parts, ","))
+}
+
+// ancOwnedByHerdrShell reports whether anc reaches a herdr ancestor and every
+// process between the agent and herdr is a known shell (no outer agent or
+// wrapper that could own the pane instead in a full scan).
+func ancOwnedByHerdrShell(anc []convoAnc) bool {
+	for _, a := range anc {
+		if a.comm == "herdr" {
+			return true
+		}
+		if !ocShells[a.comm] {
+			return false
+		}
+	}
+	return false
+}
+
+// fastLocateAccept validates the output of convoLocatePidsCommand for a single
+// herdr pane. It returns (proc, true) only when the fast-path result is
+// guaranteed to match what a full host scan would conclude; otherwise (_, false)
+// tells the caller to fall back to the full scan.
+func fastLocateAccept(l convoLocated, pane, socket, want string) (*convoProc, bool) {
+	if l.noProc {
+		return nil, true
+	}
+	p := pickConvoProc(l.procs, "herdr", pane, socket, "", "", want)
+	if p == nil {
+		return nil, false
+	}
+	switch p.agent {
+	case "claude", "agy":
+	case "codex":
+		// A Codex without an open rollout log needs the app-server daemon's
+		// candidate logs and cross-process claims from a full scan.
+		if p.log == "" {
+			return nil, false
+		}
+	default:
+		return nil, false
+	}
+	if !ancOwnedByHerdrShell(p.anc) {
+		return nil, false
+	}
+	// If herdr reports a specific session for this pane and the foreground
+	// process holds a different one, another process in the pane could hold
+	// want (ranked higher by pickConvoProc); fall back to full scan.
+	if want != "" && p.sid != want {
+		return nil, false
+	}
+	return p, true
+}
+
+// herdrPaneProcessInfo queries herdr's pane.process_info for pane over the
+// existing SSH-forwarded Unix socket. Any error (unsupported method on older
+// herdr, timeout, dial failure) returns nil so the caller falls back cleanly.
+func (s *Server) herdrPaneProcessInfo(ctx context.Context, sess *term.Session, socket, pane string) *herdr.PaneProcessInfoResult {
+	if sess == nil || socket == "" || !herdrPane.MatchString(pane) {
+		return nil
+	}
+	pctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	cl, err := herdr.DialWait(pctx, sess.Client(), socket, 2*time.Second)
+	if err != nil {
+		return nil
+	}
+	defer cl.Close()
+	pi, err := cl.PaneProcessInfo(pctx, pane)
+	if err != nil {
+		return nil
+	}
+	return pi
+}

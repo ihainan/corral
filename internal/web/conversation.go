@@ -252,7 +252,7 @@ codex_sub() {
 codex_resume_of() {
   tr '\0' '\001' <"/proc/$1/cmdline" 2>/dev/null | awk -v want=resume '` + codexArgsAwk + `'
 }
-` + convoEndpointSh + `
+` + convoEndpointSh + claudeConfigDirSh + `
 # A process's record: what it is, where its log is, and where it runs.
 rec() { # pid start fg procstart sid log agent [via]
   env=$(tr '\0\n' '\n\001' <"/proc/$1/environ" 2>/dev/null | grep -E '^(HERDR_PANE_ID|HERDR_SOCKET_PATH|TMUX|TMUX_PANE)=' | head -c 4096)
@@ -347,45 +347,109 @@ json_num() {
   while :; do case $r in '"'*) r=${r#\"};; *) break;; esac; done
   v=${r%%[!0-9]*}
 }
-# Claude Code: each process's session file names its session.
-# (only=opencode: of OpenCode's processes only, see convoLocateOpenCodeCommand.)
-for f in "$HOME"/.claude/sessions/*.json; do
-  [ "$only" = opencode ] && break
-  [ -f "$f" ] || continue
-  pid=${f##*/}; pid=${pid%.json}
-  case $pid in ''|*[!0-9]*) continue;; esac
-  [ -r "/proc/$pid/environ" ] || continue
-  stat_of "$pid" || continue
-  c=$(head -c 65536 "$f" 2>/dev/null | tr -d '\n')
+# Claude Code: each process's session file names its session (under its own
+# CLAUDE_CONFIG_DIR when set, else $HOME/.claude).
+# (only=opencode: of OpenCode's processes only; only=pids:<list>: only the
+# foreground PIDs reported by herdr pane.process_info.)
+_seen_claude=
+emit_claude() { # pid sessionfile cfgdir
+  _ecpid=$1 _ecf=$2 _eccfg=$3
+  case " $_seen_claude " in *" $_ecpid "*) return 0;; esac
+  [ -f "$_ecf" ] && [ -r "/proc/$_ecpid/environ" ] || return 1
+  stat_of "$_ecpid" || return 1
+  c=$(head -c 65536 "$_ecf" 2>/dev/null | tr -d '\n')
   json_str sessionId; sid=$v
   json_num procStart; ps=$v
-  case $ps in ''|*[!0-9]*) continue;; esac
-  case $sid in *[!0-9a-fA-F-]*) continue;; ????????-????-????-????-????????????) ;; *) continue;; esac
+  case $ps in ''|*[!0-9]*) return 1;; esac
+  [ "$ps" = "$st" ] || return 1
+  case $sid in *[!0-9a-fA-F-]*) return 1;; ????????-????-????-????-????????????) ;; *) return 1;; esac
   # (Not a side question's copy of a conversation — a "claude -p" the
   # gateway runs, marked so in its environment (read by its NULs: no value
   # can pass for the mark) — which writes a file here
   # while it runs, under a session of its own: no agent to show or type to.
   # A "claude -p" of the person's own is found as before. side_question.go)
   json_str entrypoint
-  if [ "$v" = sdk-cli ] && tr '\0\n' '\n\001' <"/proc/$pid/environ" 2>/dev/null | grep -qx 'CORRAL_SIDE_COPY=1'; then continue; fi
+  if [ "$v" = sdk-cli ] && tr '\0\n' '\n\001' <"/proc/$_ecpid/environ" 2>/dev/null | grep -qx 'CORRAL_SIDE_COPY=1'; then _seen_claude="$_seen_claude $_ecpid"; return 0; fi
   log=
-  for l in "$HOME"/.claude/projects/*/"$sid".jsonl; do
+  for l in "$_eccfg"/projects/*/"$sid".jsonl; do
     case $l in *"$nl"*) continue;; esac
     [ -f "$l" ] && { log=$l; break; }
   done
-  rec "$pid" "$st" "$fg" "$ps" "$sid" "$log" claude
-done
-# The user's codex, opencode, agy and devin processes, in one pass over
-# /proc (by their names, read with the shell's own read; each kind then as
-# before).
+  _seen_claude="$_seen_claude $_ecpid"
+  rec "$_ecpid" "$st" "$fg" "$ps" "$sid" "$log" claude
+  return 0
+}
 codexes= opencodes= agys= devins=
-for d in /proc/[0-9]*; do
-  [ -O "$d" ] || continue
-  read_all "$d/comm" "$nl"
-  while :; do case $x in *"$nl") x=${x%"$nl"};; *) break;; esac; done # (as $(…) would leave it)
-  case $x in codex) codexes="$codexes $d";; opencode) opencodes="$opencodes $d";; agy) agys="$agys $d";; devin) devins="$devins $d";; esac
-done
-[ "$only" = opencode ] && codexes= agys= devins=
+case $only in
+pids:*)
+  _pids=${only#pids:}
+  _oifs=$IFS; IFS=,; set -f; set -- $_pids; set +f; IFS=$_oifs
+  for pid in "$@"; do
+    case $pid in ''|*[!0-9]*) continue;; esac
+    d="/proc/$pid"
+    [ -O "$d" ] || continue
+    claude_cfg_dir "$d"
+    if [ -f "$clcfg/sessions/$pid.json" ] && emit_claude "$pid" "$clcfg/sessions/$pid.json" "$clcfg"; then
+      continue
+    fi
+    read_all "$d/comm" "$nl"
+    while :; do case $x in *"$nl") x=${x%"$nl"};; *) break;; esac; done
+    case $x in codex) codexes="$codexes $d";; agy) agys="$agys $d";; esac
+  done
+  ;;
+*)
+  if [ "$only" != opencode ]; then
+    for f in "$HOME"/.claude/sessions/*.json; do
+      [ -f "$f" ] || continue
+      pid=${f##*/}; pid=${pid%.json}
+      case $pid in ''|*[!0-9]*) continue;; esac
+      [ -r "/proc/$pid/environ" ] || continue
+      claude_cfg_dir "/proc/$pid"
+      if [ -f "$clcfg/sessions/$pid.json" ]; then
+        emit_claude "$pid" "$clcfg/sessions/$pid.json" "$clcfg" || true
+      else
+        emit_claude "$pid" "$f" "$HOME/.claude" || true
+      fi
+    done
+    if [ -n "${CLAUDE_CONFIG_DIR:-}" ] && [ -d "$CLAUDE_CONFIG_DIR/sessions" ]; then
+      for f in "$CLAUDE_CONFIG_DIR"/sessions/*.json; do
+        [ -f "$f" ] || continue
+        pid=${f##*/}; pid=${pid%.json}
+        case $pid in ''|*[!0-9]*) continue;; esac
+        [ -r "/proc/$pid/environ" ] || continue
+        claude_cfg_dir "/proc/$pid"
+        [ -f "$clcfg/sessions/$pid.json" ] && emit_claude "$pid" "$clcfg/sessions/$pid.json" "$clcfg" || true
+      done
+    fi
+  fi
+  # The user's codex, opencode, agy, devin, and custom-config-dir claude
+  # processes, in one pass over /proc (by their names, read with the shell's
+  # own read; each kind then as before).
+  claudes=
+  for d in /proc/[0-9]*; do
+    [ -O "$d" ] || continue
+    read_all "$d/comm" "$nl"
+    while :; do case $x in *"$nl") x=${x%"$nl"};; *) break;; esac; done # (as $(…) would leave it)
+    case $x in
+    codex) codexes="$codexes $d";;
+    opencode) opencodes="$opencodes $d";;
+    agy) agys="$agys $d";;
+    devin) devins="$devins $d";;
+    claude) [ "$only" = opencode ] || claudes="$claudes $d";;
+    node|bun) [ "$only" = opencode ] || { grep -q 'claude' "$d/cmdline" 2>/dev/null && claudes="$claudes $d"; };;
+    [0-9]*.[0-9]*) [ "$only" = opencode ] || { case $(readlink "$d/exe" 2>/dev/null) in */claude/*) claudes="$claudes $d";; esac; };;
+    esac
+  done
+  for d in $claudes; do
+    pid=${d#/proc/}
+    case " $_seen_claude " in *" $pid "*) continue;; esac
+    [ -r "$d/environ" ] || continue
+    claude_cfg_dir "$d"
+    [ -f "$clcfg/sessions/$pid.json" ] && emit_claude "$pid" "$clcfg/sessions/$pid.json" "$clcfg" || true
+  done
+  [ "$only" = opencode ] && codexes= agys= devins=
+  ;;
+esac
 # What a log says of itself, from its head: where it was begun and when.
 # (What it says of itself is in its first line's payload: the line's own
 # timestamp is of when it was written, which a rewrite moves on.)
@@ -394,6 +458,7 @@ meta_of() { head -n 1 "$1" 2>/dev/null | head -c 8192 | awk 'match($0, /"payload
 # Codex begun by the npm package talks to it and keeps none open of its
 # own): each log it holds, with where that conversation was begun and when,
 # so that the Codex in a pane can be told which of them is its own.
+case $only in pids:*) ;; *)
 for d in $codexes; do
   case $(codex_sub "${d#/proc/}") in app-server) ;; *) continue;; esac
   codex_home "$d"
@@ -406,6 +471,7 @@ for d in $codexes; do
 $links
 CORRAL_FD_LINKS
 done
+;; esac
 # Codex: a process of the user's named codex, its log the session file it
 # has open (rollout-<time>-<session id>.jsonl).
 # (Not one run with exec, as its arguments or its log's head say: no
@@ -2407,35 +2473,63 @@ func (s *Server) locateScan(ctx context.Context, sess *term.Session, st *convoSt
 		after = st.scanAfter // (review494: begun after the press that found another process, however recent one before is)
 	}
 	st.scanAfter = time.Time{}
-	// (A herdr pane herdr says runs OpenCode: of OpenCode's processes only,
-	// a fraction of a scan's time. Its OpenCode not among them — another
-	// program there now, herdr not told yet —: the whole scan, as ever.)
+	// (A herdr pane: query pane.process_info first so we only inspect this
+	// pane's foreground PIDs under /proc instead of scanning every agent on
+	// the host. OpenCode needs its serve process and sibling OpenCodes so it
+	// uses the OpenCode-only scan; any error, miss, or ambiguous result falls
+	// back to the full scan with identical behavior.)
 	socket := s.herdrSocks.get(sess.ID)
+	hp, hasHP := s.herdrSocks.paneOf(sess.ID, pane)
+	var out []byte
+	var at, looked time.Time
+	var err error
+	var l convoLocated
+	fastHit := false
 	ocOnly := false
-	if hp, ok := s.herdrSocks.paneOf(sess.ID, pane); ok && sess.Persistence == "herdr" && pane != "" && socket != "" && isOpenCodeAgent(hp.Agent) {
+	if fast && sess.Persistence == "herdr" && pane != "" && socket != "" {
+		pi := s.herdrPaneProcessInfo(ctx, sess, socket, pane)
+		plan := planHerdrFastLocate(pi, pane, hp, hasHP)
+		switch plan.mode {
+		case herdrFastPIDs:
+			out, at, looked, err = s.convoScans.run(ctx, sess, convoLocatePidsCommand(plan.pids), after)
+			if err != nil {
+				return err
+			}
+			fl := parseConvoLocate(string(out))
+			if _, ok := fastLocateAccept(fl, pane, socket, s.herdrSocks.sid(sess.ID, pane)); ok {
+				l, fastHit = fl, true
+			} else if hasHP && isOpenCodeAgent(hp.Agent) {
+				ocOnly = true
+			}
+		case herdrFastOpenCode:
+			ocOnly = true
+		}
+	} else if hasHP && sess.Persistence == "herdr" && pane != "" && socket != "" && isOpenCodeAgent(hp.Agent) {
 		ocOnly = true
 	}
-	cmd := convoLocateCommand(sess.Persistence, sess.TmuxSession, "")
-	if ocOnly {
-		cmd = convoLocateOpenCodeCommand(sess.Persistence, sess.TmuxSession)
-	}
-	out, at, looked, err := s.convoScans.run(ctx, sess, cmd, after)
-	// (The script ends with exit 0: an error is a scan cut short, by its size
-	// or a failure, which may leave out the agent started last. What was
-	// found before stays, rather than a part of it.)
-	if err != nil {
-		return err
-	}
-	l := parseConvoLocate(string(out))
-	if ocOnly && !l.noProc && !ocPaneOwn(l.procs, pane, socket) {
-		if out, at, looked, err = s.convoScans.run(ctx, sess, convoLocateCommand(sess.Persistence, sess.TmuxSession, ""), after); err != nil {
+	if !fastHit {
+		cmd := convoLocateCommand(sess.Persistence, sess.TmuxSession, "")
+		if ocOnly {
+			cmd = convoLocateOpenCodeCommand(sess.Persistence, sess.TmuxSession)
+		}
+		out, at, looked, err = s.convoScans.run(ctx, sess, cmd, after)
+		// (The script ends with exit 0: an error is a scan cut short, by its size
+		// or a failure, which may leave out the agent started last. What was
+		// found before stays, rather than a part of it.)
+		if err != nil {
 			return err
 		}
 		l = parseConvoLocate(string(out))
+		if ocOnly && !l.noProc && !ocPaneOwn(l.procs, pane, socket) {
+			if out, at, looked, err = s.convoScans.run(ctx, sess, convoLocateCommand(sess.Persistence, sess.TmuxSession, ""), after); err != nil {
+				return err
+			}
+			l = parseConvoLocate(string(out))
+		}
+		// (The Codexes the daemons' conversations are of, seen running, whatever
+		// the pane runs.)
+		s.convoClaimed.seeAlive(l, aliveCodex(l), l.now())
 	}
-	// (The Codexes the daemons' conversations are of, seen running, whatever
-	// the pane runs.)
-	s.convoClaimed.seeAlive(l, aliveCodex(l), l.now())
 	st.located, st.pane = at, pane // (when the scan was made: one shared may be a little older)
 	sid, log, reason, agent := "", "", "", ""
 	guessed := false
@@ -3066,12 +3160,15 @@ func convoProcStatus(c *sftplite.Client, st *convoState) string {
 	if st.bind == nil {
 		return ""
 	}
-	i := strings.LastIndex(st.log, "/.claude/projects/")
-	if i < 0 {
+	cfgDir, ok := claudeConfigDirFromLog(st.log)
+	if !ok {
 		return ""
 	}
-	base := st.log[:i]
-	b, err := c.ReadRange(base+"/.claude/sessions/"+strconv.FormatInt(st.bind.PID, 10)+".json", 0, 64<<10)
+	sessFile, ok := claudeSessionFilePath(cfgDir, st.bind.PID)
+	if !ok {
+		return ""
+	}
+	b, err := c.ReadRange(sessFile, 0, 64<<10)
 	if err != nil {
 		return ""
 	}
@@ -3079,8 +3176,9 @@ func convoProcStatus(c *sftplite.Client, st *convoState) string {
 }
 
 // convoFreshStatus is convoProcStatus for a Claude Code with no log yet (a
-// new conversation): its file read on the host, in $HOME as locating read
-// it (the SFTP session may start elsewhere). "" when it cannot tell.
+// new conversation): its file read on the host, under its CLAUDE_CONFIG_DIR
+// (or $HOME/.claude) as locating read it (the SFTP session may start
+// elsewhere). "" when it cannot tell.
 func (s *Server) convoFreshStatus(ctx context.Context, sess *term.Session, b *convoBind) string {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
@@ -3092,7 +3190,9 @@ func (s *Server) convoFreshStatus(ctx context.Context, sess *term.Session, b *co
 }
 
 func freshStatusCommand(pid int64) string {
-	return `head -c 65536 "$HOME/.claude/sessions/` + strconv.FormatInt(pid, 10) + `.json"`
+	script := claudeConfigDirSh + `claude_cfg_dir "/proc/$1"
+head -c 65536 "$clcfg/sessions/$1.json"`
+	return "sh -c " + sshx.QuoteShell(script) + " corral " + strconv.FormatInt(pid, 10)
 }
 
 // shellWord: the word told the page for a status: "shell" (a shell of
@@ -3420,7 +3520,7 @@ if [ -n "$parts" ]; then
     at=$((at + x))
   done
 fi
-` + codexFdsSh + agyFdsSh + `
+` + codexFdsSh + agyFdsSh + claudeConfigDirSh + `
 front() {
   stat=$(tr '\n' ' ' <"/proc/$pid/stat" 2>/dev/null) || return 1
   rest=${stat##*) }
@@ -3428,7 +3528,33 @@ front() {
   pgrp=$(printf '%s' "$rest" | cut -d' ' -f3); tpgid=$(printf '%s' "$rest" | cut -d' ' -f6)
   [ -n "$pgrp" ] && [ "$pgrp" = "$tpgid" ] || return 1
   if [ "$mode" = tmux ]; then k=TMUX_PANE; else k=HERDR_PANE_ID; fi
-  tr '\0\n' '\n\001' <"/proc/$pid/environ" 2>/dev/null | grep -qxF "$k=$p" || return 1
+  _evnl='
+'
+  _ev=$(tr '\0\n' '\n\001' <"/proc/$pid/environ" 2>/dev/null | grep -E "^($k|CLAUDE_CONFIG_DIR)=")
+  case "$_evnl$_ev$_evnl" in *"$_evnl$k=$p$_evnl"*) ;; *) return 1;; esac
+  if [ -z "${clcfg:-}" ]; then
+    clcfg="$HOME/.claude"
+    case "$_evnl$_ev$_evnl" in
+    *"${_evnl}CLAUDE_CONFIG_DIR="*)
+      _clraw="$_evnl$_ev$_evnl"
+      _clraw=${_clraw#*"${_evnl}CLAUDE_CONFIG_DIR="}
+      _clraw=${_clraw%%"$_evnl"*}
+      if [ -n "$_clraw" ]; then
+        [ -n "${_clsoh:-}" ] || _clsoh=$(printf '\001')
+        case $_clraw in
+        *"$_clsoh"*) ;;
+        /*) clcfg=$_clraw ;;
+        *)
+          _clcwd=$(readlink "/proc/$pid/cwd" 2>/dev/null)
+          case $_clcwd in /*) clcfg="$_clcwd/$_clraw" ;; esac ;;
+        esac
+        if [ "$clcfg" != "$HOME/.claude" ] && [ -d "$clcfg" ]; then
+          _clabs=$(cd -- "$clcfg" 2>/dev/null && pwd) && [ -n "$_clabs" ] && clcfg=$_clabs
+        fi
+      fi ;;
+    esac
+    while [ "$clcfg" != / ] && [ "${clcfg%/}" != "$clcfg" ]; do clcfg=${clcfg%/}; done
+  fi
   kind=claude
   if [ "$(head -c 16 "/proc/$pid/comm" 2>/dev/null)" = codex ]; then
     kind=codex
@@ -3509,7 +3635,8 @@ front() {
       [ "$agysid" = "$sid" ] || return 1
     fi
   else
-    c=$(head -c 65536 "$HOME/.claude/sessions/$pid.json" 2>/dev/null | tr -d '\n')
+    [ -n "${clcfg:-}" ] || claude_cfg_dir "/proc/$pid"
+    c=$(head -c 65536 "$clcfg/sessions/$pid.json" 2>/dev/null | tr -d '\n')
     [ "$(printf '%s' "$c" | grep -o '"sessionId" *: *"[0-9a-fA-F-]*"' | head -n 1 | sed 's/.*"\([0-9a-fA-F-]*\)"$/\1/')" = "$sid" ] || return 1
   fi
   if [ "$mode" = tmux ]; then
@@ -3582,7 +3709,8 @@ waiting() {
     case $t in '[ ! ] Action Required'*|'[ . ] Action Required'*) st=waiting wf='permission prompt' ;; *) st=busy ;; esac
     return 0
   fi
-  c=$(head -c 65536 "$HOME/.claude/sessions/$pid.json" 2>/dev/null | tr -d '\n')
+  [ -n "${clcfg:-}" ] || claude_cfg_dir "/proc/$pid"
+  c=$(head -c 65536 "$clcfg/sessions/$pid.json" 2>/dev/null | tr -d '\n')
   st=$(printf '%s' "$c" | grep -o '"status" *: *"[a-z]*"' | head -n 1 | sed 's/.*"\([a-z]*\)"$/\1/')
   wf=$(printf '%s' "$c" | grep -o '"waitingFor" *: *"[a-z ]*"' | head -n 1 | sed 's/.*"\([a-z ]*\)"$/\1/')
 }
@@ -4394,63 +4522,98 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 		if sess.Persistence == "tmux" {
 			tmuxTarget = b.Pane
 		}
-		lr, err := sshx.Exec(ctx, sess.Client(), convoLocateCommand(sess.Persistence, sess.TmuxSession, tmuxTarget), convoLocateMax, sshx.ExecOptions{AwaitSlot: pressSlotWait(what)})
-		out := lr.Out
-		if errors.Is(err, sshx.ErrBusy) {
-			reason = "busy"
-			writeError(w, http.StatusTooManyRequests, "busy", "the host is still answering earlier requests")
-			return
+		var plan herdrFastPlan
+		if sess.Persistence == "herdr" && b.Pane != "" && socket != "" {
+			hp, hasPane := s.herdrSocks.paneOf(sess.ID, b.Pane)
+			pi := s.herdrPaneProcessInfo(ctx, sess, socket, b.Pane)
+			plan = planHerdrFastLocate(pi, b.Pane, hp, hasPane)
 		}
-		// (A scan cut short, by its size or a failure, may leave out the agent
-		// started last: what it found does not decide where keys go.)
-		if err != nil {
-			if signedOut() {
-				return
+		wantSID := s.herdrSocks.sid(sess.ID, b.Pane)
+		var l convoLocated
+		for attempt := 0; attempt < 2; attempt++ {
+			cmd := convoLocateCommand(sess.Persistence, sess.TmuxSession, tmuxTarget)
+			fastTry := attempt == 0 && plan.mode != herdrFastFull
+			if fastTry {
+				if plan.mode == herdrFastPIDs {
+					cmd = convoLocatePidsCommand(plan.pids)
+				} else {
+					cmd = convoLocateOpenCodeCommand(sess.Persistence, sess.TmuxSession)
+				}
 			}
-			reason = "host_error"
-			writeError(w, http.StatusBadGateway, "host_error", "the host did not answer")
-			return
-		}
-		// The process must be the one the pane's conversation shows now (chosen
-		// as reading chooses it): a Claude Code started inside it since, or a
-		// restart, is not the one the press was asked for.
-		l := parseConvoLocate(string(out))
-		tty := l.paneTTY // (tmux: the pane's terminal, active or not)
-		front = pickConvoProc(l.procs, sess.Persistence, b.Pane, socket, l.tmuxPID, tty, s.herdrSocks.sid(sess.ID, b.Pane))
-		// A Codex whose log its daemon keeps: the session this gateway gave
-		// that very process when it read its conversation (not the one asked
-		// of it, which is no word on what the pane runs).
-		if front != nil && front.agent == "codex" && front.log == "" {
-			// (Not where and when it began instead, which is no proof: where
-			// what was read is weak, or a read holds it, nothing is typed.)
-			log, sid, why := s.convoBound(sess, b.Pane, front.pid, front.start)
-			switch {
-			case sid != "":
-				front.log, front.sid = log, sid
-			case why == "busy":
+			lr, err := sshx.Exec(ctx, sess.Client(), cmd, convoLocateMax, sshx.ExecOptions{AwaitSlot: pressSlotWait(what)})
+			out := lr.Out
+			if errors.Is(err, sshx.ErrBusy) {
 				reason = "busy"
-				writeError(w, http.StatusTooManyRequests, "busy", "its conversation is being read: try again in a moment")
+				writeError(w, http.StatusTooManyRequests, "busy", "the host is still answering earlier requests")
 				return
-			case why == "fresh" && b.Session == convoNoSession && s.codexStillFresh(ctx, sess, socket, b.Pane, front.pid, front.start):
-				// (Read with no log, as the page shows it, and none begun since
-				// — its first message, from the page: 11-15, a Codex begun in
-				// the terminal could not be written to from the page at all.)
-				front.sid = convoNoSession
-			case sess.Persistence == "tmux" && why != "busy" && s.codexTmuxNamedNow(ctx, sess, front, l):
-				// (Named, its pane's title showing that name now, looked at
-				// now: as a herdr pane's codexFront — codexTmuxNamed.)
-			default:
-				// (Weak, none, or another's: agent_changed below — what is shown
-				// is checked anew, by the scan; nothing is typed by a log's age.)
-				front.sid = ""
 			}
+			// (A scan cut short, by its size or a failure, may leave out the agent
+			// started last: what it found does not decide where keys go.)
+			if err != nil {
+				if signedOut() {
+					return
+				}
+				reason = "host_error"
+				writeError(w, http.StatusBadGateway, "host_error", "the host did not answer")
+				return
+			}
+			l = parseConvoLocate(string(out))
+			if fastTry {
+				if plan.mode == herdrFastPIDs {
+					if p, ok := fastLocateAccept(l, b.Pane, socket, wantSID); ok && !l.noProc && p != nil && p.pid == b.PID && p.start == b.Start && p.sid == b.Session {
+						front = p
+						break
+					}
+					continue
+				}
+				if !l.noProc && ocPaneOwn(l.procs, b.Pane, socket) {
+					break
+				}
+				continue
+			}
+			break
 		}
-		// An OpenCode: the session it is at now, asked anew (it may have gone to
-		// another since it was read; one that cannot be told is not typed to).
-		if front != nil && front.agent == "opencode" {
-			var why string
-			if front.sid, why = s.ocSessionOf(ctx, sess, front, b.Pane, l); why != "" {
-				front.sid = ""
+		if front == nil {
+			// The process must be the one the pane's conversation shows now (chosen
+			// as reading chooses it): a Claude Code started inside it since, or a
+			// restart, is not the one the press was asked for.
+			tty := l.paneTTY // (tmux: the pane's terminal, active or not)
+			front = pickConvoProc(l.procs, sess.Persistence, b.Pane, socket, l.tmuxPID, tty, wantSID)
+			// A Codex whose log its daemon keeps: the session this gateway gave
+			// that very process when it read its conversation (not the one asked
+			// of it, which is no word on what the pane runs).
+			if front != nil && front.agent == "codex" && front.log == "" {
+				// (Not where and when it began instead, which is no proof: where
+				// what was read is weak, or a read holds it, nothing is typed.)
+				log, sid, why := s.convoBound(sess, b.Pane, front.pid, front.start)
+				switch {
+				case sid != "":
+					front.log, front.sid = log, sid
+				case why == "busy":
+					reason = "busy"
+					writeError(w, http.StatusTooManyRequests, "busy", "its conversation is being read: try again in a moment")
+					return
+				case why == "fresh" && b.Session == convoNoSession && s.codexStillFresh(ctx, sess, socket, b.Pane, front.pid, front.start):
+					// (Read with no log, as the page shows it, and none begun since
+					// — its first message, from the page: 11-15, a Codex begun in
+					// the terminal could not be written to from the page at all.)
+					front.sid = convoNoSession
+				case sess.Persistence == "tmux" && why != "busy" && s.codexTmuxNamedNow(ctx, sess, front, l):
+					// (Named, its pane's title showing that name now, looked at
+					// now: as a herdr pane's codexFront — codexTmuxNamed.)
+				default:
+					// (Weak, none, or another's: agent_changed below — what is shown
+					// is checked anew, by the scan; nothing is typed by a log's age.)
+					front.sid = ""
+				}
+			}
+			// An OpenCode: the session it is at now, asked anew (it may have gone to
+			// another since it was read; one that cannot be told is not typed to).
+			if front != nil && front.agent == "opencode" {
+				var why string
+				if front.sid, why = s.ocSessionOf(ctx, sess, front, b.Pane, l); why != "" {
+					front.sid = ""
+				}
 			}
 		}
 	}
@@ -5391,6 +5554,8 @@ claude_ep() { # pid cwd
     grep -E '^(ANTHROPIC_BASE_URL|ANTHROPIC_AUTH_TOKEN|ANTHROPIC_API_KEY|CLAUDE_CODE_USE_BEDROCK|CLAUDE_CODE_USE_VERTEX|CLAUDE_CONFIG_DIR|CLAUDE_AUTOCOMPACT_PCT_OVERRIDE)=' | head -c 4096)
   bu= au= ac=
   cfgd=$(printf '%s\n' "$aev" | sed -n 's/^CLAUDE_CONFIG_DIR=//p' | head -1)
+  _clsoh=$(printf '\001')
+  case $cfgd in ''|*"$_clsoh"*) cfgd=;; /*) ;; *) case $2 in /*) cfgd="$2/$cfgd";; *) cfgd=;; esac;; esac
   [ -n "$cfgd" ] || cfgd=$HOME/.claude
   for sf in /etc/claude-code/managed-settings.json "$2/.claude/settings.local.json" "$2/.claude/settings.json" "$cfgd/settings.local.json" "$cfgd/settings.json"; do
     [ -r "$sf" ] || continue

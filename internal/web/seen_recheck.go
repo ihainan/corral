@@ -225,12 +225,22 @@ func codexRecheckLog(panes map[string]codexPane, pane string) string {
 // folder put it (the newest of that name, under the account's own config).
 func logsWroteCommand(files []string) string {
 	var b strings.Builder
+	needClaude := false
+	for _, f := range files {
+		if sid, ok := strings.CutPrefix(f, "claude:"); ok && claudeSessionID.MatchString(sid) {
+			needClaude = true
+			break
+		}
+	}
+	if needClaude {
+		b.WriteString(claudeConfigDirsSh + "claude_cfg_dirs\n")
+	}
 	for _, f := range files {
 		if sid, ok := strings.CutPrefix(f, "claude:"); ok {
 			if !claudeSessionID.MatchString(sid) {
 				b.WriteString(`f=; `)
 			} else {
-				b.WriteString(`f=$(ls -t "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/projects/*/` + sid + `.jsonl 2>/dev/null | head -n 1); `)
+				b.WriteString(`f=; while IFS= read -r _cd; do [ -n "$_cd" ] || continue; for _cf in "$_cd"/projects/*/` + sid + `.jsonl; do [ -f "$_cf" ] || continue; { [ -z "$f" ] || [ "$_cf" -nt "$f" ]; } && f=$_cf; done; done <<CORRAL_CLDIRS` + "\n" + `$cldirs` + "\n" + `CORRAL_CLDIRS` + "\n")
 			}
 		} else {
 			b.WriteString(`f=` + sshx.QuoteShell(f) + `; `)

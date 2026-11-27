@@ -15,8 +15,15 @@ func TestHostScriptsParse(t *testing.T) {
 		t.Skip("no sh here")
 	}
 	cmds := map[string]string{
-		"locate herdr":  convoLocateCommand("herdr", "", ""),
-		"locate tmux":   convoLocateCommand("tmux", "main", "%1"),
+		"locate herdr":       convoLocateCommand("herdr", "", ""),
+		"locate pids":        convoLocatePidsCommand([]int{100, 200}),
+		"locate tmux":        convoLocateCommand("tmux", "main", "%1"),
+		"fresh status":       freshStatusCommand(123),
+		"line alive":         lineAliveCommand(123, 456),
+		"bg tail":            bgTailCommand([]string{"11111111-2222-4333-8444-555555555501"}, 4096),
+		"cmd scan":           cmdScanCommand("w:11111111-2222-4333-8444-555555555501"),
+		"fork find claude":   forkFindCommand("claude", "11111111-2222-4333-8444-555555555501"),
+		"logs wrote claude":  logsWroteCommand([]string{"claude:11111111-2222-4333-8444-555555555501"}) + "; " + hostNowCommand,
 		"screen":        convoScreenCommand("herdr", "w1:p1", "/tmp/herdr.sock"),
 		"screen joined": convoScreenJoinedCommand("tmux", "%1", ""),
 		"tails":         convoTailsCommand([]string{"/home/u/.claude/projects/-w/a.jsonl"}),

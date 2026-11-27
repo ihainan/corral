@@ -385,7 +385,8 @@ func lineAliveCommand(pid, start int64) string {
 stat=$(tr '\n' ' ' <"/proc/$1/stat" 2>/dev/null) || exit 3
 rest=${stat##*) }
 [ "$(printf '%s' "$rest" | cut -d' ' -f20)" = "$2" ] || exit 3
-head -c 65536 "$HOME/.claude/sessions/$1.json" 2>/dev/null | tr -d '\n' | grep -o '"sessionId" *: *"[0-9a-f-]*"' | head -n 1 | sed 's/.*"\([0-9a-f-]*\)"$/\1/'
+` + claudeConfigDirSh + `claude_cfg_dir "/proc/$1"
+head -c 65536 "$clcfg/sessions/$1.json" 2>/dev/null | tr -d '\n' | grep -o '"sessionId" *: *"[0-9a-f-]*"' | head -n 1 | sed 's/.*"\([0-9a-f-]*\)"$/\1/'
 exit 0`
 	return "sh -c " + sshx.QuoteShell(script) + " corral " + strconv.FormatInt(pid, 10) + " " + strconv.FormatInt(start, 10)
 }

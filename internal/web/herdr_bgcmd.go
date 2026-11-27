@@ -438,34 +438,43 @@ func sameCmds(a, b map[string][]bgCmd) bool {
 // which names Claude Code's program too (its children, its subshells, run
 // as Claude Code's shell would: "&& eval '" … "pwd -P >| "). Fixed script.
 func cmdScanCommand(watched ...string) string {
-	script := `btime=$(sed -n 's/^btime \([0-9]*\)$/\1/p' /proc/stat 2>/dev/null); hz=$(getconf CLK_TCK 2>/dev/null)
+	script := claudeConfigDirsSh + `btime=$(sed -n 's/^btime \([0-9]*\)$/\1/p' /proc/stat 2>/dev/null); hz=$(getconf CLK_TCK 2>/dev/null)
 printf 'clock\t%s\t%s\n' "$btime" "$hz"
+claude_cfg_dirs
 # (Of each session watched — "w:<id>" at work, "s:<id>" at rest —, its subagents sent off in the
 # background whose log was written to in the last six hours, not marked finished: what its meta
 # says it was sent for. At most ` + strconv.Itoa(subsScanned) + ` a session.)
 for a in "$@"; do
   s=${a#?:}
-  for d in "$HOME"/.claude/projects/*/"$s"/subagents; do
-    [ -d "$d" ] || continue
-    find "$d" -maxdepth 1 -name 'agent-*.jsonl' -mmin -360 2>/dev/null | {
-      i=0
-      while IFS= read -r j; do
-        m=${j%.jsonl}.meta.json
-        [ -f "$m" ] || continue
-        meta=$(head -c 8192 "$m" 2>/dev/null | tr '\n\t' '  ')
-        case $meta in *'"requestShape":"background"'*) ;; *) continue;; esac
-        case $meta in *'"finished":true'*) continue;; esac
-        [ "$i" -lt ` + strconv.Itoa(subsScanned) + ` ] || break
-        i=$((i + 1))
-        id=${j##*/agent-}; id=${id%.jsonl}
-        t=$(stat -c %Y "$m" 2>/dev/null || date -r "$m" +%s 2>/dev/null)
-        v=$(head -c 65536 "$j" 2>/dev/null | grep -o '"version":"[0-9.]*"' | head -n 1 | cut -d'"' -f4)
-        w=$(printf '%s' "$meta" | grep -oE '"description":"([^"\\]|\\.)*"' | head -n 1 | head -c 600)
-        printf 'sub\t%s\t%s\t%s\t%s\t{%s}\n' "$s" "$id" "$t" "$v" "$w"
-      done
-    }
-    break
-  done
+  _found=
+  while IFS= read -r _cd; do
+    [ -n "$_cd" ] || continue
+    for d in "$_cd"/projects/*/"$s"/subagents; do
+      [ -d "$d" ] || continue
+      find "$d" -maxdepth 1 -name 'agent-*.jsonl' -mmin -360 2>/dev/null | {
+        i=0
+        while IFS= read -r j; do
+          m=${j%.jsonl}.meta.json
+          [ -f "$m" ] || continue
+          meta=$(head -c 8192 "$m" 2>/dev/null | tr '\n\t' '  ')
+          case $meta in *'"requestShape":"background"'*) ;; *) continue;; esac
+          case $meta in *'"finished":true'*) continue;; esac
+          [ "$i" -lt ` + strconv.Itoa(subsScanned) + ` ] || break
+          i=$((i + 1))
+          id=${j##*/agent-}; id=${id%.jsonl}
+          t=$(stat -c %Y "$m" 2>/dev/null || date -r "$m" +%s 2>/dev/null)
+          v=$(head -c 65536 "$j" 2>/dev/null | grep -o '"version":"[0-9.]*"' | head -n 1 | cut -d'"' -f4)
+          w=$(printf '%s' "$meta" | grep -oE '"description":"([^"\\]|\\.)*"' | head -n 1 | head -c 600)
+          printf 'sub\t%s\t%s\t%s\t%s\t{%s}\n' "$s" "$id" "$t" "$v" "$w"
+        done
+      }
+      _found=1
+      break
+    done
+    [ -n "$_found" ] && break
+  done <<CORRAL_CLDIRS
+$cldirs
+CORRAL_CLDIRS
 done
 seen=
 if command -v pgrep >/dev/null 2>&1; then
@@ -538,13 +547,21 @@ for a in "$@"; do
   case $a in w:*) ;; *) continue;; esac
   [ -n "$seen" ] || break
   s=${a#w:}
-  for f in "$HOME"/.claude/projects/*/"$s".jsonl; do
-    [ -f "$f" ] || continue
-    grep -o '"backgroundTaskId":"[A-Za-z0-9_-]*"' "$f" | sed 's/^"backgroundTaskId":"//; s/"$//' | sort -u | while IFS= read -r id; do
-      case " $seen " in *" $id "*) printf 'bgid\t%s\t%s\n' "$s" "$id";; esac
+  _found=
+  while IFS= read -r _cd; do
+    [ -n "$_cd" ] || continue
+    for f in "$_cd"/projects/*/"$s".jsonl; do
+      [ -f "$f" ] || continue
+      grep -o '"backgroundTaskId":"[A-Za-z0-9_-]*"' "$f" | sed 's/^"backgroundTaskId":"//; s/"$//' | sort -u | while IFS= read -r id; do
+        case " $seen " in *" $id "*) printf 'bgid\t%s\t%s\n' "$s" "$id";; esac
+      done
+      _found=1
+      break
     done
-    break
-  done
+    [ -n "$_found" ] && break
+  done <<CORRAL_CLDIRS
+$cldirs
+CORRAL_CLDIRS
 done
 # (Of each command a Claude Code's task file tells, what the agent said it does — its call's
 # "description", as the agent's own page shows it: the call is the one whose result names the
@@ -558,15 +575,23 @@ for p in $pairs; do
   s=${p%%/*}; id=${p#*/}
   case $s in *[!0-9a-fA-F-]*|"") continue;; esac
   case $id in *[!A-Za-z0-9_-]*|"") continue;; esac
-  for f in "$HOME"/.claude/projects/*/"$s".jsonl; do
-    [ -f "$f" ] || continue
-    i=$((i + 1))
-    tu=$(grep -m 1 -F "\"backgroundTaskId\":\"$id\"" "$f" | grep -o '"tool_use_id":"[A-Za-z0-9_-]*"' | head -n 1 | cut -d'"' -f4)
-    [ -n "$tu" ] || break
-    w=$(grep -m 1 -F "\"id\":\"$tu\"" "$f" | sed "s/^.*\"id\":\"$tu\"//; s/\"id\":\".*//; s/\"type\":\"tool_use\".*//" | grep -oE '"description":"([^"\\]|\\.)*"' | head -n 1 | head -c 600)
-    [ -n "$w" ] && printf 'desc\t%s\t%s\t{%s}\n' "$s" "$id" "$w"
-    break
-  done
+  _found=
+  while IFS= read -r _cd; do
+    [ -n "$_cd" ] || continue
+    for f in "$_cd"/projects/*/"$s".jsonl; do
+      [ -f "$f" ] || continue
+      i=$((i + 1))
+      tu=$(grep -m 1 -F "\"backgroundTaskId\":\"$id\"" "$f" | grep -o '"tool_use_id":"[A-Za-z0-9_-]*"' | head -n 1 | cut -d'"' -f4)
+      _found=1
+      [ -n "$tu" ] || break
+      w=$(grep -m 1 -F "\"id\":\"$tu\"" "$f" | sed "s/^.*\"id\":\"$tu\"//; s/\"id\":\".*//; s/\"type\":\"tool_use\".*//" | grep -oE '"description":"([^"\\]|\\.)*"' | head -n 1 | head -c 600)
+      [ -n "$w" ] && printf 'desc\t%s\t%s\t{%s}\n' "$s" "$id" "$w"
+      break
+    done
+    [ -n "$_found" ] && break
+  done <<CORRAL_CLDIRS
+$cldirs
+CORRAL_CLDIRS
 done
 exit 0`
 	cmd := "sh -c " + sshx.QuoteShell(script) + " corral"

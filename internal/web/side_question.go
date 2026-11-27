@@ -81,12 +81,14 @@ func sideQuestionCommand(pid, start int64, sid, model, nonce string) string {
 func sideQuestionRun(pid, start int64, sid, model, nonce string, secs int) string {
 	script := `PATH="$HOME/.local/bin:$HOME/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"; ` +
 		`p=$1; st=$2; sid=$3; m=$4; N=$5; S=$6; ` +
+		claudeConfigDirSh +
 		// (Still that process — its start time after the last ") ", whatever its name — at that
 		// session, as its session file says now (not one it has left by /clear or /resume
 		// since it was found). Asked before and after what is read of it: what is read is its.)
 		`same() { x=; { IFS= read -r x; } <"/proc/$p/stat" 2>/dev/null; x=${x##*) }; set -f; set -- $x; set +f; ` +
 		`[ -n "$x" ] && [ "${20-}" = "$st" ] || return 1; ` +
-		`c=$(head -c 65536 "$HOME/.claude/sessions/$p.json" 2>/dev/null | tr -d '\n'); ` +
+		`claude_cfg_dir "/proc/$p"; ` +
+		`c=$(head -c 65536 "$clcfg/sessions/$p.json" 2>/dev/null | tr -d '\n'); ` +
 		`[ "$(printf '%s' "$c" | grep -o '"sessionId" *: *"[0-9a-fA-F-]*"' | head -n 1 | sed 's/.*"\([0-9a-fA-F-]*\)"$/\1/')" = "$sid" ]; }; ` +
 		`same && [ -r "/proc/$p/environ" ] || { echo 'E gone'; exit 0; }; ` +
 		`cwd=$(readlink "/proc/$p/cwd" 2>/dev/null); ` +
@@ -321,22 +323,44 @@ func (s *Server) apiConversationSide(w http.ResponseWriter, r *http.Request) {
 	if sess.Persistence == "tmux" {
 		tmuxTarget = b.Pane
 	}
-	lctx, lcancel := context.WithTimeout(ctx, 15*time.Second)
-	lr, err := sshx.Exec(lctx, sess.Client(), convoLocateCommand(sess.Persistence, sess.TmuxSession, tmuxTarget), convoLocateMax, sshx.ExecOptions{AwaitSlot: 2 * time.Second})
-	lcancel()
-	switch {
-	case errors.Is(err, sshx.ErrBusy):
-		reason = "busy"
-		writeError(w, http.StatusTooManyRequests, "busy", "the host is still answering earlier requests")
-		return
-	case err != nil:
-		reason = "host_error"
-		writeError(w, http.StatusBadGateway, "host_error", "the host did not answer")
-		return
-	}
-	l := parseConvoLocate(string(lr.Out))
 	socket := s.herdrSocks.get(sess.ID)
-	front := pickConvoProc(l.procs, sess.Persistence, b.Pane, socket, l.tmuxPID, l.paneTTY, s.herdrSocks.sid(sess.ID, b.Pane))
+	wantSID := s.herdrSocks.sid(sess.ID, b.Pane)
+	var fastPlan herdrFastPlan
+	if sess.Persistence == "herdr" && b.Pane != "" && socket != "" {
+		hp, hasHP := s.herdrSocks.paneOf(sess.ID, b.Pane)
+		fastPlan = planHerdrFastLocate(s.herdrPaneProcessInfo(ctx, sess, socket, b.Pane), b.Pane, hp, hasHP)
+	}
+	var front *convoProc
+	for attempt := 0; attempt < 2; attempt++ {
+		cmd := convoLocateCommand(sess.Persistence, sess.TmuxSession, tmuxTarget)
+		fastTry := attempt == 0 && fastPlan.mode == herdrFastPIDs
+		if fastTry {
+			cmd = convoLocatePidsCommand(fastPlan.pids)
+		}
+		lctx, lcancel := context.WithTimeout(ctx, 15*time.Second)
+		lr, err := sshx.Exec(lctx, sess.Client(), cmd, convoLocateMax, sshx.ExecOptions{AwaitSlot: 2 * time.Second})
+		lcancel()
+		switch {
+		case errors.Is(err, sshx.ErrBusy):
+			reason = "busy"
+			writeError(w, http.StatusTooManyRequests, "busy", "the host is still answering earlier requests")
+			return
+		case err != nil:
+			reason = "host_error"
+			writeError(w, http.StatusBadGateway, "host_error", "the host did not answer")
+			return
+		}
+		l := parseConvoLocate(string(lr.Out))
+		if fastTry {
+			if p, ok := fastLocateAccept(l, b.Pane, socket, wantSID); ok && !l.noProc && p != nil && p.agent == "claude" && p.pid == b.PID && p.start == b.Start && p.sid == b.Session {
+				front = p
+				break
+			}
+			continue
+		}
+		front = pickConvoProc(l.procs, sess.Persistence, b.Pane, socket, l.tmuxPID, l.paneTTY, wantSID)
+		break
+	}
 	if front == nil || front.agent != "claude" || front.pid != b.PID || front.start != b.Start || front.sid != b.Session {
 		reason = "agent_changed"
 		writeError(w, http.StatusConflict, "agent_changed", "that pane no longer runs this agent")

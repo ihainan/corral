@@ -428,10 +428,23 @@ func (s *Server) locatedEverywhere(sess *term.Session, pane, sid string, at time
 // a line "@@corral-bg <id>" and the end of its log. Fixed script; the ids
 // are its arguments.
 func bgTailCommand(sessions []string, tail int) string {
-	script := `n=$1; shift
+	script := claudeConfigDirsSh + `n=$1; shift
+claude_cfg_dirs
 for s in "$@"; do
   printf '\n@@corral-bg %s\n' "$s"
-  for f in "$HOME"/.claude/projects/*/"$s".jsonl; do [ -f "$f" ] && tail -c "$n" "$f"; break; done
+  _found=
+  while IFS= read -r _cd; do
+    [ -n "$_cd" ] || continue
+    for f in "$_cd"/projects/*/"$s".jsonl; do
+      [ -f "$f" ] || continue
+      tail -c "$n" "$f"
+      _found=1
+      break
+    done
+    [ -n "$_found" ] && break
+  done <<CORRAL_CLDIRS
+$cldirs
+CORRAL_CLDIRS
 done`
 	cmd := "sh -c " + sshx.QuoteShell(script) + " corral " + strconv.Itoa(tail)
 	for _, s := range sessions {
