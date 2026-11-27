@@ -1,4 +1,4 @@
-import { cloneElement, createContext, isValidElement, useCallback, useContext, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
+import { cloneElement, createContext, isValidElement, useCallback, useContext, useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { Check, CircleAlert, CircleCheck, CircleHelp, Copy, Info, TriangleAlert, X } from 'lucide-react'
 import { errorText } from '../api'
@@ -350,6 +350,164 @@ export function Confirm(props: { title: string; body: string; confirm: string; d
   )
 }
 
+// Alert ----------------------------------------------------------------------
+// Desktop-native centered alert dialog: app icon, centered title (receives
+// focus on open and on view changes so Enter does not trigger the default
+// action), scrollable body, equal-width wrapping buttons pinned at the bottom.
+// Stays centered on phones (never becomes a bottom sheet).
+
+export interface AlertAction {
+  label: string
+  onClick: () => void
+  tone?: 'primary' | 'danger' | 'default'
+  disabled?: boolean
+}
+
+export function Alert(props: {
+  title: string
+  viewKey?: string | number
+  icon?: boolean
+  onClose: () => void
+  canClose?: boolean
+  children?: ReactNode
+  actions?: AlertAction[]
+  live?: string
+  className?: string
+}) {
+  const titleId = useId()
+  const boxRef = useRef<HTMLDivElement>(null)
+  const titleRef = useRef<HTMLHeadingElement>(null)
+  const backDown = useRef(false)
+  const canClose = props.canClose !== false
+  const closeRef = useRef(() => {
+    if (canClose) props.onClose()
+  })
+  closeRef.current = () => {
+    if (canClose) props.onClose()
+  }
+  const isTop = useLayer()
+
+  useEffect(() => {
+    if (++openDialogs === 1) document.documentElement.classList.add('modal-open')
+    return () => {
+      if (--openDialogs <= 0) {
+        openDialogs = 0
+        document.documentElement.classList.remove('modal-open')
+      }
+    }
+  }, [])
+
+  useEffect(() => {
+    const prev = document.activeElement as HTMLElement | null
+    const root = boxRef.current
+    leaveField()
+    titleRef.current?.focus()
+    const focusables = () =>
+      [...(root?.querySelectorAll<HTMLElement>('a[href], button:not([disabled]), input:not([disabled]), select, textarea, [tabindex]:not([tabindex="-1"])') ?? [])]
+        .filter((el) => el.offsetParent !== null || el === document.activeElement)
+    const onKey = (e: KeyboardEvent) => {
+      if (!isTop()) return
+      if (e.key === 'Escape') {
+        e.stopPropagation()
+        e.preventDefault()
+        closeRef.current()
+        return
+      }
+      if (e.key !== 'Tab') return
+      const list = focusables()
+      if (list.length === 0) {
+        e.preventDefault()
+        return
+      }
+      const active = document.activeElement as HTMLElement | null
+      const i = active ? list.indexOf(active) : -1
+      if (e.shiftKey) {
+        if (i <= 0) {
+          e.preventDefault()
+          list[list.length - 1].focus()
+        }
+      } else if (i === -1 || i === list.length - 1) {
+        e.preventDefault()
+        list[0].focus()
+      }
+    }
+    document.addEventListener('keydown', onKey, true)
+    return () => {
+      document.removeEventListener('keydown', onKey, true)
+      restoreFocus(prev, root)
+    }
+  }, [isTop])
+
+  // Move focus to the new view's heading when switching steps inside the alert.
+  const firstView = useRef(true)
+  useEffect(() => {
+    if (firstView.current) {
+      firstView.current = false
+      return
+    }
+    titleRef.current?.focus()
+  }, [props.viewKey])
+
+  return createPortal(
+    <div
+      className="alert-overlay"
+      onPointerDown={(e) => {
+        backDown.current = e.target === e.currentTarget
+      }}
+      onClick={(e) => {
+        const hit = backDown.current && e.target === e.currentTarget
+        backDown.current = false
+        if (!hit) return
+        e.preventDefault()
+        e.stopPropagation()
+        if (canClose) props.onClose()
+      }}
+    >
+      <div
+        ref={boxRef}
+        className={'alert-box' + (props.className ? ' ' + props.className : '')}
+        role="alertdialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+      >
+        <div className="alert-scroll">
+          {props.icon !== false && (
+            <img className="alert-icon" src="/icons/icon.svg" alt="" width={48} height={48} aria-hidden="true" />
+          )}
+          <h4 ref={titleRef} id={titleId} className="alert-title" tabIndex={-1}>
+            {props.title}
+          </h4>
+          {props.children}
+        </div>
+        {props.actions && props.actions.length > 0 && (
+          <div className="alert-actions">
+            {props.actions.map((a, idx) => (
+              <button
+                key={idx}
+                type="button"
+                className={
+                  'alert-btn' +
+                  (a.tone === 'primary' ? ' is-primary' : a.tone === 'danger' ? ' is-danger' : '')
+                }
+                disabled={a.disabled}
+                onClick={a.onClick}
+              >
+                {a.label}
+              </button>
+            ))}
+          </div>
+        )}
+        {props.live !== undefined && (
+          <span className="sr-only" aria-live="polite" aria-atomic="true">
+            {props.live}
+          </span>
+        )}
+      </div>
+    </div>,
+    document.body,
+  )
+}
+
 // Menu: a popover on desktop, a bottom sheet on touch screens. Rendered in a
 // portal so lists and scroll containers never clip it.
 
@@ -592,28 +750,84 @@ export interface ToastAction {
   run: () => void
 }
 
+// Top-right corner notice variant (desktop-style notification with app icon,
+// two-line title + body, optional action button, and close button).
+export interface ToastNotice {
+  title: string
+  body?: string
+  icon?: string
+  action?: ToastAction
+  error?: boolean
+  durationMs?: number
+}
+
+export type ToastFn = {
+  (text: string, error?: boolean, action?: ToastAction): void
+  notice: (n: ToastNotice) => void
+}
+
 interface ToastItem {
   id: number
   text: string
+  title?: string
+  icon?: string
+  corner?: boolean
   error?: boolean
   action?: ToastAction
 }
 
-const ToastCtx = createContext<(text: string, error?: boolean, action?: ToastAction) => void>(() => {})
+const noopToast = Object.assign((() => {}) as (text: string, error?: boolean, action?: ToastAction) => void, {
+  notice: () => {},
+})
+const ToastCtx = createContext<ToastFn>(noopToast)
 
 export function ToastProvider({ children }: { children: ReactNode }) {
   const [items, setItems] = useState<ToastItem[]>([])
   const drop = useCallback((id: number) => setItems((xs) => xs.filter((x) => x.id !== id)), [])
-  const push = useCallback((text: string, error?: boolean, action?: ToastAction) => {
-    const id = Date.now() + Math.random()
-    setItems((xs) => [...xs.slice(-2), { id, text, error, action }])
-    setTimeout(() => drop(id), action ? 12000 : error ? 5000 : 2600)
-  }, [drop])
+  const push = useCallback<ToastFn>(
+    Object.assign(
+      (text: string, error?: boolean, action?: ToastAction) => {
+        const id = Date.now() + Math.random()
+        setItems((xs) => {
+          const corners = xs.filter((x) => x.corner)
+          const normal = xs.filter((x) => !x.corner).slice(-2)
+          return [...corners, ...normal, { id, text, error, action }]
+        })
+        setTimeout(() => drop(id), action ? 12000 : error ? 5000 : 2600)
+      },
+      {
+        notice: (n: ToastNotice) => {
+          const id = Date.now() + Math.random()
+          setItems((xs) => {
+            const normal = xs.filter((x) => !x.corner)
+            const corners = xs.filter((x) => x.corner).slice(-2)
+            return [
+              ...normal,
+              ...corners,
+              {
+                id,
+                corner: true,
+                title: n.title,
+                text: n.body ?? '',
+                icon: n.icon ?? '/icons/icon.svg',
+                error: n.error,
+                action: n.action,
+              },
+            ]
+          })
+          setTimeout(() => drop(id), n.durationMs ?? (n.action ? 10000 : 6000))
+        },
+      },
+    ),
+    [drop],
+  )
+  const normal = items.filter((i) => !i.corner)
+  const corners = items.filter((i) => i.corner)
   return (
     <ToastCtx.Provider value={push}>
       {children}
       <div className="toasts" aria-live="polite">
-        {items.map((i) => (
+        {normal.map((i) => (
           <div key={i.id} className={'toast' + (i.error ? ' error' : '') + (i.action ? ' has-action' : '')} role={i.error ? 'alert' : 'status'}>
             {i.error ? <CircleAlert size={16} /> : i.action ? <Info size={16} /> : <CircleCheck size={16} />}
             <span>{i.text}</span>
@@ -632,6 +846,42 @@ export function ToastProvider({ children }: { children: ReactNode }) {
           </div>
         ))}
       </div>
+      {corners.length > 0 && (
+        <div className="toasts-corner" aria-live="polite">
+          {corners.map((i) => (
+            <div key={i.id} className="toast-note" role={i.error ? 'alert' : 'status'}>
+              <img className="toast-note-icon" src={i.icon || '/icons/icon.svg'} alt="" width={28} height={28} aria-hidden="true" />
+              <div className="toast-note-text">
+                <strong className="toast-note-title">{i.title}</strong>
+                {i.text && <span className="toast-note-body">{i.text}</span>}
+              </div>
+              <div className="toast-note-acts">
+                {i.action && (
+                  <button
+                    type="button"
+                    className="toast-note-btn"
+                    onClick={() => {
+                      drop(i.id)
+                      i.action!.run()
+                    }}
+                  >
+                    {i.action.label}
+                  </button>
+                )}
+                <button
+                  type="button"
+                  className="toast-note-close"
+                  onClick={() => drop(i.id)}
+                  aria-label={t('common.close')}
+                  title={t('common.close')}
+                >
+                  <X size={14} />
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
     </ToastCtx.Provider>
   )
 }

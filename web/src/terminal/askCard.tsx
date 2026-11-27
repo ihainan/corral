@@ -1,6 +1,7 @@
 import { useContext, useEffect, useRef, useState } from 'react'
 import { ShowTerminal } from './showTerminal'
 import { ApiError } from '../api'
+import { isCorraldUnknownResult } from '../corraldLogic'
 import { t } from '../i18n'
 import { registerDraftCheck } from '../leaveGuard'
 import { Markdown } from './markdown'
@@ -137,7 +138,7 @@ class Unsure extends Error {}
 // reached at all); anything else (no answer, cut off, signed out on the
 // way back, another error) may have pressed it.
 const refused = (e: unknown) =>
-  e instanceof ApiError && ([400, 403, 404, 409, 429].includes(e.status) || (e.status === 502 && (e.code === 'host_error' || e.code === 'send_failed')))
+  e instanceof ApiError && !isCorraldUnknownResult(e) && ([400, 403, 404, 409, 429].includes(e.status) || (e.status === 502 && (e.code === 'host_error' || e.code === 'send_failed')))
 
 const within = <T,>(p: Promise<T>, ms: number) => Promise.race([p, new Promise<never>((_, no) => setTimeout(() => no(new Unsure()), ms))])
 
@@ -148,7 +149,7 @@ async function step(target: ReplyTarget, from: Screen, keys: string[], done: (s:
   try {
     await target.reply({ digest: from.digest, keys })
   } catch (e) {
-    if (refused(e)) throw e
+    if (isCorraldUnknownResult(e) || refused(e)) throw e
     throw new Unsure()
   }
   const until = Date.now() + 3500
@@ -184,6 +185,12 @@ export function useDrive(screen: Screen | null, set: (s: Screen) => void, reload
       .then(() => run(screen))
       .then((s) => (s && readAskScreen(s.text).kind !== 'unknown' ? set(s) : onDone()))
       .catch((e) => {
+        if (isCorraldUnknownResult(e)) {
+          setUnsureOn(callId || '?')
+          setError(t('corrald.unknownResult'))
+          void reload()
+          return
+        }
         // (The person's own words: refused before anything was typed, read
         // anew; typed, or Enter perhaps gone, said so and not tried again.)
         if (e instanceof NotAsShown) {

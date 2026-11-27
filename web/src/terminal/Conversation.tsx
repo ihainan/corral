@@ -134,6 +134,7 @@ export interface ConvoPending {
   quiet?: boolean // (long since, nothing in the log: said so, quietly)
   queued?: boolean // (a Codex's, queued after its turn: in its log once that is over)
   unqueued?: boolean // (queued, then its turn stopped: Codex put it back in its input)
+  unknownResult?: boolean // (corrald 409 corrald_unknown_result: may have been sent, not auto-resent)
   // The screen, looked at once it had not turned up: being read; or went: the
   // subagent that took it in, found in its own log (Claude Code had that
   // subagent's conversation in front as it was typed): said for sure.
@@ -1715,8 +1716,8 @@ export function ConversationView({
       <div key={p.id} className={'convo-user convo-pending' + (p.state === 'sending' ? ' is-sending' : '')}>
         <div className="convo-user-text">{p.shown ?? p.text}</div>
         <div className="convo-meta">
-          <span role="status">{t(p.opened ? 'convo.sentOnly' : p.state === 'sending' ? 'convo.sending' : went ? 'convo.wentSub' : p.state === 'stuck' ? 'convo.stuck' : 'convo.sent')}</span>
-          {(went || p.quiet || p.queued || p.state === 'stuck') && (
+          <span role="status">{t(p.unknownResult ? 'corrald.unknownResultLabel' : p.opened ? 'convo.sentOnly' : p.state === 'sending' ? 'convo.sending' : went ? 'convo.wentSub' : p.state === 'stuck' ? 'convo.stuck' : 'convo.sent')}</span>
+          {(went || p.quiet || p.queued || p.state === 'stuck' || p.unknownResult) && (
             <button type="button" className="link-btn" onClick={() => onDismiss(p.id)}>{t('common.close')}</button>
           )}
         </div>
@@ -6817,6 +6818,13 @@ function SentNote({ p, onEnter, onResend, onShowTerminal }: { p: ConvoPending; o
   // (Enter pressed from here: under way, or what became of it.)
   const [entering, setEntering] = useState<'' | 'busy' | 'gone' | 'failed'>('')
   const went = wentOf(p)
+  if (p.unknownResult)
+    return (
+      <div className="convo-missing" role="alert">
+        <p>{t('corrald.unknownResult')}</p>
+        <button type="button" className="link-btn" onClick={onShowTerminal}>{t('convo.showTerminal')}</button>
+      </div>
+    )
   if (went)
     return (
       <div className="convo-missing">

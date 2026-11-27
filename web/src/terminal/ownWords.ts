@@ -287,7 +287,8 @@ async function after(target: ReplyTarget, done: (text: string) => boolean): Prom
   return null
 }
 
-const refusal = (e: unknown) => e instanceof ApiError && [409, 429].includes(e.status)
+const unknownResult = (e: unknown) => e instanceof ApiError && e.status === 409 && e.code === 'corrald_unknown_result'
+const refusal = (e: unknown) => e instanceof ApiError && !unknownResult(e) && [409, 429].includes(e.status)
 
 // (Claude Code blinks its tool's bullet while it waits: a screen read is
 // often not the one a moment later, and the press is refused (nothing
@@ -315,6 +316,7 @@ async function press(target: ReplyTarget, from: Screen, keys: string[], done: (t
   try {
     await tries(target, from, pre, (s) => target.reply({ digest: s.digest, keys }))
   } catch (e) {
+    if (unknownResult(e)) throw e
     if (e instanceof NotAsShown || refusal(e)) throw new NotAsShown()
     throw fail()
   }
@@ -371,6 +373,7 @@ export async function ownWords(target0: ReplyTarget, now: Screen, r: OwnRow, tex
   try {
     await tries(target, s, (t) => same(t) && cursorRow(t)?.n === r.n && r.ready(cursorRow(t)!.rest), (x) => fill({ digest: x.digest, text }))
   } catch (e) {
+    if (unknownResult(e)) throw e
     if (e instanceof NotAsShown || refusal(e)) throw new NotAsShown() // (refused before anything was typed)
     throw new Filled()
   }
@@ -388,6 +391,7 @@ export async function ownWords(target0: ReplyTarget, now: Screen, r: OwnRow, tex
   try {
     await tries(target, got, shows, (x) => target.reply({ digest: x.digest, keys: ['enter'] }))
   } catch (e) {
+    if (unknownResult(e)) throw e
     if (e instanceof NotAsShown || refusal(e)) throw new Filled() // (the words there; Enter not pressed)
     throw new MaybeSent()
   }

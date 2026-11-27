@@ -4,6 +4,7 @@ import { api, authGen, type Host, type SessionInfo, type SharedSession } from '.
 import { relTime, t } from '../i18n'
 import { linkHandler, navigate } from '../router'
 import { Confirm, EmptyState, LoadError, Menu } from '../components/ui'
+import { DeleteHostAlert } from '../components/CorraldDialogs'
 import { useConnect } from '../connect'
 import { useFlip } from '../flip'
 import { useSession } from '../app'
@@ -109,16 +110,11 @@ export function HostsPage() {
     )
   const deleteHost = (h: Host) =>
     setConfirm(
-      <Confirm
-        title={t('host.delete')}
-        body={t('hosts.deleteConfirm', { name: h.name })}
-        confirm={t('common.delete')}
-        danger
+      <DeleteHostAlert
+        host={h}
+        codeEnabled={boot.code}
+        onDeleted={load}
         onClose={() => setConfirm(null)}
-        onConfirm={async () => {
-          await api('DELETE', '/api/hosts/' + h.id)
-          load()
-        }}
       />,
     )
 

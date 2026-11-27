@@ -47,6 +47,8 @@ import { agentKey, sessionWhich } from '../terminal/sessionName'
 import { pickKey as isPickKey } from '../terminal/pageKeys'
 import { firstShown, hideBox, keptBox, KeptPart, KeptView, letGoBox, modalShown, useEffectOnChange, useShownAt, useWhenGone, type KeptBox } from '../shown'
 import { Rail, StatusBar, StatusItem, useWorkbench } from '../workbench'
+import { CorraldStatusBarItem } from '../components/CorraldStatusBarItem'
+import { isCorraldUnknownResult } from '../corraldLogic'
 import { AgentTabBar, askPickInTab, isTabsKey, newTabId, OPEN_PICKER, readFront, readTabs, takePickInTab, writeFront, writeTabs, type AgentTab, type PickHow, type TabView } from './agentTabs'
 import { agentMark } from '../terminal/agentIcons'
 import { useComposerFit } from '../terminal/autosize'
@@ -1386,6 +1388,7 @@ export function AgentsChat({ bar, active = true, onHead }: { bar?: ReactNode; ac
               {cur.s.persistence && cur.s.persistence !== 'none' ? ' · ' + cur.s.persistence : ''}
             </StatusItem>
           )}
+          {cur && <CorraldStatusBarItem hostId={cur.s.host_id} hostName={cur.s.host_name} />}
           {/* (The conversation in front fills this: its branch, the quota.) */}
           <span className="wb-status-slot" />
         </StatusBar>
@@ -2336,7 +2339,7 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
   // Later still, one quiet line: the conversation has not caught up. Nothing
   // here says a message did not arrive: nothing here can know that.
   useEffect(() => {
-    const open = sent.filter((p) => p.state === 'waiting' && ofThis(p.bind))
+    const open = sent.filter((p) => p.state === 'waiting' && !p.unknownResult && ofThis(p.bind))
     if (!open.length) return
     // (A command's note, while its panel is open: held, nothing to wake for.)
     const dues = open.flatMap((p) => (isCommand(p.text) ? (panelOpen ? [] : [p.at + COMMAND_NOTE_MS]) : [...(p.looked ? [] : [p.at + LOOK_AFTER_MS]), ...(p.quiet ? [] : [p.at + QUIET_AFTER_MS])]))
@@ -3051,6 +3054,12 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
           // as one sent meanwhile.)
           toast(e.code === 'typed_not_sent' ? t('agents.typedNotSent') : e.code === 'enter_not_taken' ? t('agents.enterNotTaken') : t('convo.err.typedOtherView'), true)
           mark({ state: 'waiting', was })
+          return
+        }
+        if (isCorraldUnknownResult(e)) {
+          // Helper daemon write result unconfirmed (409 corrald_unknown_result):
+          // do not auto-resend; show warning right below the message in the thread.
+          mark({ state: 'waiting', unknownResult: true })
           return
         }
         if (e instanceof ApiError && (e.code === 'unknown' || e.code === 'network')) {

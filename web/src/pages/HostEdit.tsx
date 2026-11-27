@@ -6,6 +6,7 @@ import { linkHandler, navigate } from '../router'
 import { CopyButton, Dialog, Field, LoadError, useToast } from '../components/ui'
 import { checkText, hostFormErrors, type HostCheck } from './pageText'
 import { AskHookRow, BellHookRow } from '../terminal/askHook'
+import { CorraldSection } from '../components/CorraldSection'
 import { ImportDialog } from './Keys'
 
 type Auth = Host['auth']
@@ -466,6 +467,7 @@ export function HostEditPage({ id }: { id?: number }) {
           }}
         />
       )}
+      {editing && loaded && <CorraldSection hostId={id} hostName={name} />}
       {editing && loaded && <AskHookRow hostId={id} hostName={name} />}
       {editing && loaded && <BellHookRow hostId={id} hostName={name} />}
     </main>

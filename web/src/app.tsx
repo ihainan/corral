@@ -2,6 +2,7 @@ import { createContext, useCallback, useContext, useEffect, useRef, useState, ty
 import { forgetConversations } from './terminal/conversation'
 import { appBadge, forgetSessions, useWaitingCount } from './terminal/agents'
 import { forgetColours } from './terminal/Code'
+import { forgetCorraldCache } from './corraldApi'
 import { Bot, ChevronLeft, Film, KeyRound, LogOut, ScrollText, Server, Settings, SquareTerminal, Users } from 'lucide-react'
 import { api, ApiError, bumpAuthGen, setUnauthorizedHandler, type Bootstrap, type Me } from './api'
 import { applyDefaultLanguage, t } from './i18n'
@@ -123,6 +124,7 @@ export function App() {
     forgetConversations()
     forgetSessions()
     forgetColours()
+    forgetCorraldCache()
     // (The app icon's number was another's: gone. Not when the page starts
     // and learns who is signed in: that one's stays.)
     if (wasMe.current !== undefined && wasMe.current !== me?.id) appBadge(0)
