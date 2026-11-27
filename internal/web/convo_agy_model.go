@@ -640,6 +640,11 @@ func (s *Server) convoAgyModels(w http.ResponseWriter, ctx context.Context, sess
 	wg.Wait()
 
 	if err != nil {
+		if errors.Is(err, sshx.ErrBusy) {
+			*reason = "ssh_channels_busy"
+			writeSSHChannelsBusy(w)
+			return
+		}
 		*reason = "models_failed"
 		writeError(w, http.StatusBadGateway, "models_failed", "could not list Antigravity models")
 		return
@@ -668,6 +673,11 @@ func (s *Server) convoAgyModel(w http.ResponseWriter, ctx context.Context, sess 
 
 	groups, err := s.fetchAgyModels(ctx, sess, false)
 	if err != nil {
+		if errors.Is(err, sshx.ErrBusy) {
+			*reason = "ssh_channels_busy"
+			writeSSHChannelsBusy(w)
+			return
+		}
 		*reason = "models_failed"
 		writeError(w, http.StatusBadGateway, "models_failed", "could not list Antigravity models")
 		return
@@ -678,6 +688,11 @@ func (s *Server) convoAgyModel(w http.ResponseWriter, ctx context.Context, sess 
 	rawAnsi := rawRes.Out
 	scancel()
 	if err != nil {
+		if errors.Is(err, sshx.ErrBusy) {
+			*reason = "ssh_channels_busy"
+			writeSSHChannelsBusy(w)
+			return
+		}
 		*reason = "cannot_verify"
 		writeError(w, http.StatusConflict, "cannot_verify", "could not read Antigravity's screen: nothing sent")
 		return
@@ -746,6 +761,11 @@ func (s *Server) convoAgyEffort(w http.ResponseWriter, ctx context.Context, sess
 	rawAnsi := rawRes.Out
 	scancel()
 	if err != nil {
+		if errors.Is(err, sshx.ErrBusy) {
+			*reason = "ssh_channels_busy"
+			writeSSHChannelsBusy(w)
+			return
+		}
 		*reason = "cannot_verify"
 		writeError(w, http.StatusConflict, "cannot_verify", "could not read Antigravity's screen: nothing sent")
 		return
@@ -802,6 +822,11 @@ func (s *Server) runAgySlashSwitch(
 	saved, none, err := readAgySettings(rctx, sess)
 	rcancel()
 	was, had, perr := settingsModel(saved, none)
+	if errors.Is(err, sshx.ErrBusy) {
+		*reason = "ssh_channels_busy"
+		writeSSHChannelsBusy(w)
+		return
+	}
 	if err != nil || perr != nil {
 		*reason = "settings"
 		writeError(w, http.StatusBadGateway, "settings", "Antigravity's settings could not be read: nothing done")
@@ -831,7 +856,7 @@ func (s *Server) runAgySlashSwitch(
 			if err != nil {
 				return true, err
 			}
-			_, werr := sshx.Exec(ctx2, sess.Client(), agySettingsWriteCommand(now, fixed), 4096, sshx.ExecOptions{Stdin: bytes.NewReader(fixed), Interactive: true})
+			_, werr := sshx.Exec(ctx2, sess.Client(), agySettingsWriteCommand(now, fixed), 4096, sshx.ExecOptions{Stdin: bytes.NewReader(fixed), Interactive: true, AwaitSlot: 2 * time.Second})
 			var exitErr *sshx.ExitError
 			if errors.As(werr, &exitErr) && exitErr.Status == 9 {
 				continue
@@ -851,8 +876,8 @@ func (s *Server) runAgySlashSwitch(
 	switch {
 	case err == nil:
 	case errors.Is(err, sshx.ErrBusy):
-		*reason = "busy"
-		writeError(w, http.StatusTooManyRequests, "busy", "busy")
+		*reason = "ssh_channels_busy"
+		writeSSHChannelsBusy(w)
 		return
 	case errors.As(err, &exitErr) && exitErr.Status == 3:
 		*reason = "agent_changed"
@@ -880,6 +905,9 @@ poll:
 		case <-time.After(200 * time.Millisecond):
 		}
 		pctx, pcancel := context.WithTimeout(ctx, 5*time.Second)
+		// Fast 200ms confirmation poll inside the 3.5s deadline: intentionally
+		// AwaitSlot: 0 so a busy connection skips this tick and retries on the
+		// next iteration instead of burning 2s of the confirmation window.
 		scrRes, serr := sshx.Exec(pctx, sess.Client(), agyScreenCommand(sess.Persistence, pane, socket), 512<<10, sshx.ExecOptions{Interactive: true})
 		scr := scrRes.Out
 		pcancel()

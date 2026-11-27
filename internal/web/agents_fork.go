@@ -103,6 +103,9 @@ func (s *Server) forkCopy(ctx context.Context, sess *term.Session, src, from, at
 	}
 	cutRes, err := sshx.Exec(ctx, sess.Client(), forkCutCommand(src, at), 256, sshx.ExecOptions{Interactive: true, AwaitSlot: 2 * time.Second})
 	out := cutRes.Out
+	if errors.Is(err, sshx.ErrBusy) {
+		return "", err
+	}
 	if err != nil {
 		return "", errForkAt
 	}
@@ -128,6 +131,9 @@ func (s *Server) forkCopy(ctx context.Context, sess *term.Session, src, from, at
 	// list of sessions.)
 	copyRes, err := sshx.Exec(ctx, sess.Client(), forkCopyCommand(src, dst, off, from, id), 64, sshx.ExecOptions{Interactive: true, AwaitSlot: 2 * time.Second})
 	out = copyRes.Out
+	if errors.Is(err, sshx.ErrBusy) {
+		return "", err
+	}
 	if err != nil || strings.TrimSpace(string(out)) != "ok" {
 		return "", errors.New("the conversation could not be copied")
 	}
@@ -210,7 +216,7 @@ func (s *Server) dropForkCopy(sess *term.Session, src, id string) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	_, _ = sshx.Exec(ctx, sess.Client(), forkDropCommand(src[:strings.LastIndexByte(src, '/')+1]+id+".jsonl"), 64, sshx.ExecOptions{Interactive: true})
+	_, _ = sshx.Exec(ctx, sess.Client(), forkDropCommand(src[:strings.LastIndexByte(src, '/')+1]+id+".jsonl"), 64, sshx.ExecOptions{Interactive: true, AwaitSlot: 2 * time.Second})
 }
 
 // forkDropCommand removes a copy forkCopyCommand made.

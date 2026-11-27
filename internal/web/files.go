@@ -74,53 +74,69 @@ type sftpPool struct {
 }
 
 type sharedSFTP struct {
-	ready  chan struct{}    // closed once opening has finished
-	gone   chan struct{}    // closed when the channel is given up
-	client *sftplite.Client // set before ready closes; nil if opening failed
-	close  func()
-	err    error
-	users  int
-	idle   *time.Timer
-	dead   bool
+	ready       chan struct{}    // closed once opening has finished
+	gone        chan struct{}    // closed when the channel is given up
+	client      *sftplite.Client // set before ready closes; nil if opening failed
+	close       func()
+	err         error
+	users       int
+	idle        *time.Timer
+	dead        bool
+	interactive bool // true if this open attempt had interactive priority
 }
 
 func newSFTPPool() *sftpPool { return &sftpPool{m: map[string]*sharedSFTP{}} }
 
 // get returns the session's shared channel, opening it if needed. Every
-// successful get is paired with one put.
-func (p *sftpPool) get(ctx context.Context, sess *term.Session) (*sharedSFTP, error) {
-	p.mu.Lock()
-	c := p.m[sess.ID]
-	if c == nil || c.dead {
-		c = &sharedSFTP{ready: make(chan struct{}), gone: make(chan struct{})}
-		p.m[sess.ID] = c
-		go p.open(sess, c)
-	}
-	if c.users >= maxSharedUsers {
+// successful get is paired with one put. interactive controls whether a cold
+// open may draw from InteractiveReserve and wait up to sftpSlotWait (background
+// opens use non-interactive priority and return ErrBusy immediately).
+func (p *sftpPool) get(ctx context.Context, sess *term.Session, interactive bool) (*sharedSFTP, error) {
+	retried := false
+	for {
+		p.mu.Lock()
+		c := p.m[sess.ID]
+		if c == nil || c.dead {
+			c = &sharedSFTP{ready: make(chan struct{}), gone: make(chan struct{}), interactive: interactive}
+			p.m[sess.ID] = c
+			go p.open(sess, c, interactive)
+		}
+		if c.users >= maxSharedUsers {
+			p.mu.Unlock()
+			return nil, errFilesBusy
+		}
+		c.users++
+		if c.idle != nil {
+			c.idle.Stop()
+			c.idle = nil
+		}
 		p.mu.Unlock()
-		return nil, errFilesBusy
+		select {
+		case <-c.ready:
+		case <-ctx.Done():
+			p.put(sess.ID, c, false)
+			return nil, ctx.Err()
+		}
+		if c.err != nil {
+			p.put(sess.ID, c, false)
+			if interactive && !c.interactive && !retried && errors.Is(c.err, sshx.ErrBusy) {
+				// A concurrent background open failed because it could not draw
+				// from InteractiveReserve; retry once with interactive priority.
+				retried = true
+				continue
+			}
+			return nil, c.err
+		}
+		return c, nil
 	}
-	c.users++
-	if c.idle != nil {
-		c.idle.Stop()
-		c.idle = nil
-	}
-	p.mu.Unlock()
-	select {
-	case <-c.ready:
-	case <-ctx.Done():
-		p.put(sess.ID, c, false)
-		return nil, ctx.Err()
-	}
-	if c.err != nil {
-		p.put(sess.ID, c, false)
-		return nil, c.err
-	}
-	return c, nil
 }
 
-func (p *sftpPool) open(sess *term.Session, c *sharedSFTP) {
-	client, closeFn, err := openSFTPLite(context.Background(), sess.Client())
+func (p *sftpPool) open(sess *term.Session, c *sharedSFTP, interactive bool) {
+	var await time.Duration
+	if interactive {
+		await = sftpSlotWait
+	}
+	client, closeFn, err := openSFTPLite(context.Background(), sess.Client(), interactive, await)
 	p.mu.Lock()
 	if err != nil {
 		c.err = fmt.Errorf("%w: %w", errSFTPUnavailable, err)
@@ -205,7 +221,19 @@ func (p *sftpPool) shutdown() {
 // errFileTimeout is returned. A browser that gives up does not stop f: the
 // operation is short and others may share the channel.
 func (s *Server) withSFTP(ctx context.Context, sess *term.Session, limit time.Duration, f func(*sftplite.Client) error) error {
-	return s.withSFTPFor(ctx, sess, func() time.Duration { return limit }, f)
+	return s.withSFTPFor(ctx, sess, true, func() time.Duration { return limit }, f)
+}
+
+// withSFTPBackground is withSFTP for background polling and probes: when the
+// shared channel is not already open, opening it uses non-interactive priority
+// and returns ErrBusy immediately rather than drawing from InteractiveReserve.
+func (s *Server) withSFTPBackground(ctx context.Context, sess *term.Session, limit time.Duration, f func(*sftplite.Client) error) error {
+	return s.withSFTPFor(ctx, sess, false, func() time.Duration { return limit }, f)
+}
+
+// withSFTPPriority is withSFTP with explicit interactive priority.
+func (s *Server) withSFTPPriority(ctx context.Context, sess *term.Session, interactive bool, limit time.Duration, f func(*sftplite.Client) error) error {
+	return s.withSFTPFor(ctx, sess, interactive, func() time.Duration { return limit }, f)
 }
 
 // withSFTPUntil is withSFTP with all of it, the channel's making too, done
@@ -213,11 +241,11 @@ func (s *Server) withSFTP(ctx context.Context, sess *term.Session, limit time.Du
 func (s *Server) withSFTPUntil(ctx context.Context, sess *term.Session, deadline time.Time, f func(*sftplite.Client) error) error {
 	ctx, cancel := context.WithDeadline(ctx, deadline)
 	defer cancel()
-	return s.withSFTPFor(ctx, sess, func() time.Duration { return max(time.Until(deadline), 100*time.Millisecond) }, f)
+	return s.withSFTPFor(ctx, sess, true, func() time.Duration { return max(time.Until(deadline), 100*time.Millisecond) }, f)
 }
 
-func (s *Server) withSFTPFor(ctx context.Context, sess *term.Session, limit func() time.Duration, f func(*sftplite.Client) error) error {
-	c, err := s.files.get(ctx, sess)
+func (s *Server) withSFTPFor(ctx context.Context, sess *term.Session, interactive bool, limit func() time.Duration, f func(*sftplite.Client) error) error {
+	c, err := s.files.get(ctx, sess, interactive)
 	if err != nil {
 		return err
 	}
@@ -270,12 +298,16 @@ func validName(n string) bool {
 	return n != "" && n != "." && n != ".." && len(n) <= maxRemoteName && !strings.ContainsAny(n, "/\x00") && utf8.ValidString(n)
 }
 
+func writeSSHChannelsBusy(w http.ResponseWriter) {
+	writeError(w, http.StatusTooManyRequests, "ssh_channels_busy", "too many active SSH channels on this connection; close a panel or try again shortly")
+}
+
 func writeFileError(w http.ResponseWriter, err error) {
 	var status *sftp.StatusError
 	var lstatus *sftplite.StatusError
 	switch {
 	case errors.Is(err, sshx.ErrBusy):
-		writeError(w, http.StatusTooManyRequests, "ssh_channels_busy", "too many active SSH channels on this connection; close a panel or try again shortly")
+		writeSSHChannelsBusy(w)
 	case errors.Is(err, errFilesBusy):
 		writeError(w, http.StatusTooManyRequests, "busy", "too many file operations at once")
 	case errors.Is(err, errFileTimeout):
@@ -1256,7 +1288,7 @@ func (s *Server) pathPrefix(ctx context.Context, sess *term.Session) string {
 			}
 		}
 	case "tmux":
-		res, err := sshx.Exec(ctx, sess.Client(), tmuxForegroundCommand(sess.TmuxSession), 4096, sshx.ExecOptions{Interactive: true})
+		res, err := sshx.Exec(ctx, sess.Client(), tmuxForegroundCommand(sess.TmuxSession), 4096, sshx.ExecOptions{Interactive: true, AwaitSlot: 2 * time.Second})
 		if err != nil {
 			return ""
 		}

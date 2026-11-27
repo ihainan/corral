@@ -212,13 +212,14 @@ echo ok`
 // operation's slot rather than refused at once where the connection is busy
 // (the page reading the while).
 func rewindExec(ctx context.Context, sess *term.Session, cmd string, limit int) ([]byte, error) {
-	res, err := sshx.Exec(ctx, sess.Client(), cmd, limit, sshx.ExecOptions{Interactive: true, AwaitSlot: 5 * time.Second})
+	res, err := sshx.Exec(ctx, sess.Client(), cmd, limit, sshx.ExecOptions{Interactive: true, AwaitSlot: 2 * time.Second})
 	return res.Out, err
 }
 
-// rewindSend: a key or text sent — not waiting for a slot: a key late on a
-// screen read before it is not sent; refused (ErrBusy, nothing ran), the
-// screen is read again first (pressOn) — review fork8-2.
+// rewindSend: a key or text sent — intentionally AwaitSlot: 0 (immediate
+// refusal on busy) because of screen-timing requirements: a key delayed behind
+// a slot wait would be sent against a stale screen; on ErrBusy (nothing ran),
+// pressOn re-reads the screen first (review fork8-2).
 func rewindSend(ctx context.Context, sess *term.Session, cmd string, limit int) ([]byte, error) {
 	res, err := sshx.Exec(ctx, sess.Client(), cmd, limit, sshx.ExecOptions{Interactive: true})
 	return res.Out, err

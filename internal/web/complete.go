@@ -153,7 +153,7 @@ func (s *Server) apiComplete(w http.ResponseWriter, r *http.Request) {
 	// (pane: the agents page's agent, a herdr pane maybe not in front.)
 	cwd, err := s.paneCwdInteractive(ctx, sess, r.URL.Query().Get("pane"), true)
 	if errors.Is(err, sshx.ErrBusy) {
-		writeError(w, http.StatusTooManyRequests, "busy", "the host is still answering earlier requests")
+		writeSSHChannelsBusy(w)
 		return
 	}
 	key := sess.ID + "\x00" + cwd
@@ -161,11 +161,11 @@ func (s *Server) apiComplete(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, l)
 		return
 	}
-	res, err := sshx.Exec(ctx, sess.Client(), completeCommand(cwd), completeOutMax, sshx.ExecOptions{Interactive: true})
+	res, err := sshx.Exec(ctx, sess.Client(), completeCommand(cwd), completeOutMax, sshx.ExecOptions{Interactive: true, AwaitSlot: 2 * time.Second})
 	out := res.Out
 	switch {
 	case errors.Is(err, sshx.ErrBusy):
-		writeError(w, http.StatusTooManyRequests, "busy", "the host is still answering earlier requests")
+		writeSSHChannelsBusy(w)
 		return
 	case err != nil && len(out) == 0:
 		writeError(w, http.StatusBadGateway, "host_error", "the host did not list the files")

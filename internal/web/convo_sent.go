@@ -130,8 +130,13 @@ func (s *Server) sentEnter(w http.ResponseWriter, ctx context.Context, sess *ter
 	if agent == "agy" {
 		scrCmd = agyScreenCommand(sess.Persistence, pane, socket)
 	}
-	res, err := sshx.Exec(ctx, sess.Client(), scrCmd, 256<<10, sshx.ExecOptions{Release: held.Done, Interactive: true})
+	res, err := sshx.Exec(ctx, sess.Client(), scrCmd, 256<<10, sshx.ExecOptions{Release: held.Done, Interactive: true, AwaitSlot: 2 * time.Second})
 	if err != nil {
+		if errors.Is(err, sshx.ErrBusy) {
+			*outcome, *reason = "refused", "ssh_channels_busy"
+			writeSSHChannelsBusy(w)
+			return
+		}
 		*outcome, *reason = "unknown", "no_screen"
 		writeError(w, http.StatusBadGateway, "no_screen", "the pane's screen could not be read")
 		return
@@ -159,11 +164,15 @@ func (s *Server) sentEnter(w http.ResponseWriter, ctx context.Context, sess *ter
 		freeGate = "amode" // (agy's input box present: Enter goes there, never into a prompt)
 	}
 	_, err = sshx.Exec(ctx, sess.Client(), convoGatedCommand(freeGate, sess.Persistence, sess.TmuxSession, pane, socket, pid, start, sid, 0, enter, sendLines), sendOut,
-		sshx.ExecOptions{Stdin: strings.NewReader(""), Release: held.Done, Interactive: true})
+		sshx.ExecOptions{Stdin: strings.NewReader(""), Release: held.Done, Interactive: true, AwaitSlot: 2 * time.Second})
 	var exitErr *sshx.ExitError
 	switch {
 	case err == nil:
-	case errors.Is(err, sshx.ErrBusy), errors.As(err, &exitErr) && exitErr.Status == 7:
+	case errors.Is(err, sshx.ErrBusy):
+		*outcome, *reason = "refused", "ssh_channels_busy" // (nothing pressed)
+		writeSSHChannelsBusy(w)
+		return
+	case errors.As(err, &exitErr) && exitErr.Status == 7:
 		*outcome, *reason = "refused", "busy" // (nothing pressed)
 		writeError(w, http.StatusConflict, "busy", "the pane is busy with another request: try again")
 		return

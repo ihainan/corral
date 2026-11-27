@@ -443,3 +443,116 @@ func TestPaneSocketSetupFailureHoldsSlotUntilChannelEnds(t *testing.T) {
 		})
 	}
 }
+
+// Pane WebSocket exit codes must preserve golang.org/x/crypto/ssh's
+// exit-signal mapping (e.g. TERM -> 143, KILL -> 137, unknown -> 128) and
+// exit-status precedence over exit-signal.
+func TestPaneSocketExitSignalCodeMapping(t *testing.T) {
+	type exitSignalPayload struct {
+		Signal     string
+		CoreDumped bool
+		Error      string
+		Lang       string
+	}
+	cases := []struct {
+		name       string
+		signal     string
+		hasStatus  bool
+		statusCode uint32
+		wantCode   int
+	}{
+		{name: "sigterm_143", signal: "TERM", wantCode: 143},
+		{name: "sigkill_137", signal: "KILL", wantCode: 137},
+		{name: "unknown_signal_128", signal: "USR99", wantCode: 128},
+		{name: "exit_status_precedence", signal: "TERM", hasStatus: true, statusCode: 42, wantCode: 42},
+		{name: "missing_status_and_signal_1", wantCode: 1},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t)
+			admin := h.admin()
+			srv := h.sshServer(t.TempDir())
+
+			var sessCount atomic.Int32
+			srv.HandleChannel(func(nc ssh.NewChannel) bool {
+				if nc.ChannelType() != "session" {
+					return false
+				}
+				if sessCount.Add(1) == 1 {
+					return false // main terminal
+				}
+				ch, reqs, err := nc.Accept()
+				if err != nil {
+					return true
+				}
+				go func() {
+					defer ch.Close()
+					for r := range reqs {
+						switch r.Type {
+						case "pty-req":
+							_ = r.Reply(true, nil)
+						case "exec":
+							_ = r.Reply(true, nil)
+							if tc.signal != "" {
+								_, _ = ch.SendRequest("exit-signal", false, ssh.Marshal(&exitSignalPayload{
+									Signal: tc.signal,
+								}))
+							}
+							if tc.hasStatus {
+								_, _ = ch.SendRequest("exit-status", false, ssh.Marshal(&struct{ Status uint32 }{tc.statusCode}))
+							}
+							return
+						default:
+							if r.WantReply {
+								_ = r.Reply(false, nil)
+							}
+						}
+					}
+				}()
+				return true
+			})
+
+			r := admin.do("POST", "/api/hosts", map[string]any{
+				"name": "box", "address": "127.0.0.1", "port": srv.Addr.Port,
+				"username": "alice", "auth": "password", "password": "alice-pass",
+			})
+			mustStatus(t, r, 201, "create host")
+			r = admin.do("POST", "/api/sessions", map[string]any{"host_id": r.json()["id"]})
+			mustStatus(t, r, 201, "open session")
+			sessID := r.json()["id"].(string)
+
+			h.srv.herdrSocks.set(sessID, "/run/herdr.sock")
+			h.srv.herdrSocks.setServer(sessID, "test", h.userID(admin), func() (*herdr.Snapshot, time.Time) {
+				return &herdr.Snapshot{
+					Panes: []herdr.Pane{{ID: "w1:p1", TerminalID: "term_sig_1"}},
+				}, time.Now()
+			}, nil)
+
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			wsURL := strings.Replace(h.ts.URL, "http", "ws", 1) + "/api/sessions/" + sessID + "/pane-ws?pane=w1:p1"
+			hdr := http.Header{}
+			hdr.Set("Origin", h.cfg.Origin())
+			hdr.Set("Cookie", h.srv.cookieName()+"="+admin.cookie)
+
+			ws, _, err := websocket.Dial(ctx, wsURL, &websocket.DialOptions{HTTPHeader: hdr})
+			if err != nil {
+				t.Fatalf("ws dial: %v", err)
+			}
+			defer ws.CloseNow()
+
+			typ, data, err := ws.Read(ctx)
+			if err != nil || typ != websocket.MessageText {
+				t.Fatalf("read exit msg: typ=%v err=%v", typ, err)
+			}
+			var msg struct {
+				T    string `json:"t"`
+				Code int    `json:"code"`
+			}
+			if err := json.Unmarshal(data, &msg); err != nil || msg.T != "exit" || msg.Code != tc.wantCode {
+				t.Fatalf("got message %s, want exit code %d", data, tc.wantCode)
+			}
+		})
+	}
+}

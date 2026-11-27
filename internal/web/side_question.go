@@ -326,8 +326,8 @@ func (s *Server) apiConversationSide(w http.ResponseWriter, r *http.Request) {
 	lcancel()
 	switch {
 	case errors.Is(err, sshx.ErrBusy):
-		reason = "busy"
-		writeError(w, http.StatusTooManyRequests, "busy", "the host is still answering earlier requests")
+		reason = "ssh_channels_busy"
+		writeSSHChannelsBusy(w)
 		return
 	case err != nil:
 		reason = "host_error"
@@ -360,8 +360,8 @@ func (s *Server) apiConversationSide(w http.ResponseWriter, r *http.Request) {
 	}
 	switch {
 	case errors.Is(err, sshx.ErrBusy):
-		reason = "busy"
-		writeError(w, http.StatusTooManyRequests, "busy", "the host is still answering earlier requests")
+		reason = "ssh_channels_busy"
+		writeSSHChannelsBusy(w)
 	case errors.Is(err, context.DeadlineExceeded) && ctx.Err() != nil && time.Now().Before(expiry):
 		reason = "timeout"
 		writeError(w, http.StatusGatewayTimeout, "timeout", "no answer in time")

@@ -510,6 +510,92 @@ func TestExecAwaitSlotDoesNotImplyInteractive(t *testing.T) {
 	}
 }
 
+// Long-running background Aux execs must be capped below MaxAuxPerConn (at 3
+// out of 4) so the 4th background exec fails immediately with ErrBusy while an
+// interactive exec can still claim the reserved in-class Aux slot.
+func TestSessionLedgerBackgroundAuxLeavesInteractiveSlot(t *testing.T) {
+	srv := testutil.StartSSHServer(t, "alice", "alice-pass", t.TempDir())
+	releaseBg := make(chan struct{})
+	t.Cleanup(func() {
+		select {
+		case <-releaseBg:
+		default:
+			close(releaseBg)
+		}
+	})
+	bgStarted := make(chan struct{}, MaxAuxPerConn)
+	srv.HandleExec(func(cmd string) func(ssh.Channel) {
+		if cmd == "bg-hold" {
+			return func(ch ssh.Channel) {
+				bgStarted <- struct{}{}
+				<-releaseBg
+				_ = ch.CloseWrite()
+				_, _ = ch.SendRequest("exit-status", false, []byte{0, 0, 0, 0})
+			}
+		}
+		return func(ch ssh.Channel) {
+			_, _ = ch.Write([]byte("interactive-ok"))
+			_ = ch.CloseWrite()
+			_, _ = ch.SendRequest("exit-status", false, []byte{0, 0, 0, 0})
+		}
+	})
+
+	c := dialTest(t, srv)
+	ctx := context.Background()
+
+	// Hold 1 main terminal slot (total 1/9).
+	relTerm, err := AcquireSession(ctx, c, SessionTerminal, true, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer relTerm()
+
+	// Start 3 long-running background execs (MaxAuxPerConn - AuxInteractiveReserve = 3).
+	bgCap := MaxAuxPerConn - AuxInteractiveReserve
+	if bgCap != 3 {
+		t.Fatalf("expected background Aux cap 3, got %d (MaxAux=%d, AuxReserve=%d)", bgCap, MaxAuxPerConn, AuxInteractiveReserve)
+	}
+	var bgWG sync.WaitGroup
+	for range bgCap {
+		bgWG.Add(1)
+		go func() {
+			defer bgWG.Done()
+			_, _ = Output(ctx, c, "bg-hold", 1<<20)
+		}()
+	}
+	for range bgCap {
+		select {
+		case <-bgStarted:
+		case <-time.After(3 * time.Second):
+			t.Fatal("background exec did not start in time")
+		}
+	}
+	if got := SessionClassInUse(c, SessionAux); got != 3 {
+		t.Fatalf("SessionAux inUse = %d, want 3", got)
+	}
+
+	// A 4th background exec MUST be refused immediately with ErrBusy.
+	start := time.Now()
+	if _, err := Output(ctx, c, "bg-hold", 1<<20); !errors.Is(err, ErrBusy) {
+		t.Fatalf("4th background exec: got %v, want ErrBusy", err)
+	}
+	if d := time.Since(start); d > 100*time.Millisecond {
+		t.Fatalf("4th background exec did not fail immediately: waited %v", d)
+	}
+
+	// An interactive exec MUST still succeed into the reserved 4th Aux slot.
+	res, err := Exec(ctx, c, "user-action", 1<<20, ExecOptions{Interactive: true})
+	if err != nil || string(res.Out) != "interactive-ok" {
+		t.Fatalf("interactive exec blocked by 3 background Aux execs: out=%q err=%v", res.Out, err)
+	}
+
+	close(releaseBg)
+	bgWG.Wait()
+	eventually(t, "background Aux slots did not release", func() bool {
+		return SessionClassInUse(c, SessionAux) == 0
+	})
+}
+
 // Forwarded channels (direct-tcpip and direct-streamlocal, including Aux and
 // Watch dials) do not consume OpenSSH's MaxSessions and must NOT be counted
 // in the session ledger or blocked when the session ledger is full.

@@ -23,8 +23,13 @@ func setGrace(t *testing.T, d time.Duration) {
 
 func setMaxAux(t *testing.T, n int) {
 	old := MaxAuxPerConn
+	oldRes := AuxInteractiveReserve
 	MaxAuxPerConn = n
-	t.Cleanup(func() { MaxAuxPerConn = old })
+	AuxInteractiveReserve = 0
+	t.Cleanup(func() {
+		MaxAuxPerConn = old
+		AuxInteractiveReserve = oldRes
+	})
 }
 
 func setMaxWatch(t *testing.T, n int) {

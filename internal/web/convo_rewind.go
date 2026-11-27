@@ -936,7 +936,7 @@ func (s *Server) claudeRewindFullText(ctx context.Context, sess *term.Session, i
 	if logPath == "" {
 		return "", rwErr(http.StatusConflict, "message_text_unavailable", "could not read the full original text of this message from the session log")
 	}
-	out, err := claudeRewindExec(ctx, sess, inflight, claudeRewindRowCommand(logPath, uuid), imageLineMax, 3*time.Second)
+	out, err := claudeRewindExec(ctx, sess, inflight, claudeRewindRowCommand(logPath, uuid), imageLineMax, 2*time.Second)
 	if err != nil {
 		if errors.Is(err, sshx.ErrOutputTooLarge) {
 			return "", rwErr(http.StatusConflict, "message_too_long", "message exceeds the 100 KiB composer limit and cannot be restored completely")
@@ -1090,7 +1090,7 @@ func (p *herdrClaudeRewindPane) verify(ctx context.Context) error {
 	if err := p.checkHerdrSnapshot(ctx); err != nil {
 		return err
 	}
-	_, err := claudeRewindExec(ctx, p.sess, p.inflight, "sh -c "+sshx.QuoteShell(claudeRewindCheckSh("herdr", p.pane, p.socket, "", p.pid, p.start, p.sid)), 128, 3*time.Second)
+	_, err := claudeRewindExec(ctx, p.sess, p.inflight, "sh -c "+sshx.QuoteShell(claudeRewindCheckSh("herdr", p.pane, p.socket, "", p.pid, p.start, p.sid)), 128, 2*time.Second)
 	return mapRewindExitErr(err)
 }
 
@@ -1102,6 +1102,8 @@ func (p *herdrClaudeRewindPane) press(ctx context.Context, keys ...string) error
 	if err != nil {
 		return err
 	}
+	// Screen-timing sensitive keystroke: intentionally AwaitSlot: 0 so a busy
+	// connection refuses immediately instead of sending rewind keys to a stale screen.
 	out, err := claudeRewindExec(ctx, p.sess, p.inflight, "sh -c "+sshx.QuoteShell(sh), 128, 0)
 	if err != nil {
 		return mapRewindExitErr(err)
@@ -1120,6 +1122,7 @@ func (p *herdrClaudeRewindPane) pickerEnter(ctx context.Context, targetText stri
 	if err != nil {
 		return err
 	}
+	// Screen-timing sensitive keystroke: intentionally AwaitSlot: 0 (refuse rather than wait behind stale picker state).
 	out, err := claudeRewindExec(ctx, p.sess, p.inflight, "sh -c "+sshx.QuoteShell(sh), 128, 0)
 	if err != nil {
 		return mapRewindExitErr(err)
@@ -1138,6 +1141,7 @@ func (p *herdrClaudeRewindPane) commitEnter(ctx context.Context, targetText stri
 	if err != nil {
 		return claudeRewindCommit{started: false}, err
 	}
+	// Screen-timing sensitive commit Enter: intentionally AwaitSlot: 0 so we refuse immediately instead of waiting while the confirmation screen could shift.
 	res, err := claudeRewindExecResult(ctx, p.sess, p.inflight, "sh -c "+sshx.QuoteShell(sh), 128, 0)
 	return evalCommitExec(res, err)
 }
@@ -1173,7 +1177,7 @@ type tmuxClaudeRewindPane struct {
 }
 
 func (p *tmuxClaudeRewindPane) verify(ctx context.Context) error {
-	_, err := claudeRewindExec(ctx, p.sess, p.inflight, "sh -c "+sshx.QuoteShell(claudeRewindCheckSh("tmux", p.pane, "", p.panePID, p.pid, p.start, p.sid)), 128, 3*time.Second)
+	_, err := claudeRewindExec(ctx, p.sess, p.inflight, "sh -c "+sshx.QuoteShell(claudeRewindCheckSh("tmux", p.pane, "", p.panePID, p.pid, p.start, p.sid)), 128, 2*time.Second)
 	return mapRewindExitErr(err)
 }
 
@@ -1182,6 +1186,8 @@ func (p *tmuxClaudeRewindPane) press(ctx context.Context, keys ...string) error 
 	if err != nil {
 		return err
 	}
+	// Screen-timing sensitive keystroke: intentionally AwaitSlot: 0 so a busy
+	// connection refuses immediately instead of sending rewind keys to a stale screen.
 	out, err := claudeRewindExec(ctx, p.sess, p.inflight, "sh -c "+sshx.QuoteShell(sh), 128, 0)
 	if err != nil {
 		return mapRewindExitErr(err)
@@ -1197,6 +1203,7 @@ func (p *tmuxClaudeRewindPane) pickerEnter(ctx context.Context, targetText strin
 	if err != nil {
 		return err
 	}
+	// Screen-timing sensitive keystroke: intentionally AwaitSlot: 0 (refuse rather than wait behind stale picker state).
 	out, err := claudeRewindExec(ctx, p.sess, p.inflight, "sh -c "+sshx.QuoteShell(sh), 128, 0)
 	if err != nil {
 		return mapRewindExitErr(err)
@@ -1212,6 +1219,7 @@ func (p *tmuxClaudeRewindPane) commitEnter(ctx context.Context, targetText strin
 	if err != nil {
 		return claudeRewindCommit{started: false}, err
 	}
+	// Screen-timing sensitive commit Enter: intentionally AwaitSlot: 0 so we refuse immediately instead of waiting while the confirmation screen could shift.
 	res, err := claudeRewindExecResult(ctx, p.sess, p.inflight, "sh -c "+sshx.QuoteShell(sh), 128, 0)
 	return evalCommitExec(res, err)
 }
@@ -1222,13 +1230,13 @@ func (p *tmuxClaudeRewindPane) waitInFlight(ctx context.Context) error {
 
 func (p *tmuxClaudeRewindPane) screen(ctx context.Context) (string, error) {
 	sh := claudeRewindCheckSh("tmux", p.pane, "", p.panePID, p.pid, p.start, p.sid) + `tmux -u capture-pane -p -t "$pane" 2>/dev/null 9>&-`
-	out, err := claudeRewindExec(ctx, p.sess, p.inflight, "sh -c "+sshx.QuoteShell(sh), 256<<10, 5*time.Second)
+	out, err := claudeRewindExec(ctx, p.sess, p.inflight, "sh -c "+sshx.QuoteShell(sh), 256<<10, 2*time.Second)
 	return string(out), mapRewindExitErr(err)
 }
 
 func (p *tmuxClaudeRewindPane) colorScreen(ctx context.Context) (string, error) {
 	sh := claudeRewindCheckSh("tmux", p.pane, "", p.panePID, p.pid, p.start, p.sid) + `tmux -u capture-pane -p -e -t "$pane" 2>/dev/null 9>&-`
-	out, err := claudeRewindExec(ctx, p.sess, p.inflight, "sh -c "+sshx.QuoteShell(sh), 512<<10, 5*time.Second)
+	out, err := claudeRewindExec(ctx, p.sess, p.inflight, "sh -c "+sshx.QuoteShell(sh), 512<<10, 2*time.Second)
 	return string(out), mapRewindExitErr(err)
 }
 
@@ -1380,7 +1388,7 @@ func (s *Server) apiConversationRewind(w http.ResponseWriter, r *http.Request) {
 		}
 		liveTermID, liveHerdrSID, liveHerdrStatus = info.TerminalID, herdrValidatedUUID(info), info.AgentStatus
 	} else {
-		out, terr := claudeRewindExec(ctx, sess, &running, claudeRewindTmuxPaneSh(b.Pane), 512, 3*time.Second)
+		out, terr := claudeRewindExec(ctx, sess, &running, claudeRewindTmuxPaneSh(b.Pane), 512, 2*time.Second)
 		if terr != nil {
 			fail(asRewindErr(terr))
 			return
@@ -1398,7 +1406,7 @@ func (s *Server) apiConversationRewind(w http.ResponseWriter, r *http.Request) {
 	if sess.Persistence == "tmux" {
 		tmuxTarget = b.Pane
 	}
-	locOut, lerr := claudeRewindExec(ctx, sess, &running, convoLocateCommand(sess.Persistence, sess.TmuxSession, tmuxTarget), convoLocateMax, 3*time.Second)
+	locOut, lerr := claudeRewindExec(ctx, sess, &running, convoLocateCommand(sess.Persistence, sess.TmuxSession, tmuxTarget), convoLocateMax, 2*time.Second)
 	if lerr != nil {
 		fail(asRewindErr(lerr))
 		return
@@ -1439,7 +1447,7 @@ func (s *Server) apiConversationRewind(w http.ResponseWriter, r *http.Request) {
 		st.bind = &convoBind{PID: front.pid, Start: front.start, Session: front.sid, Agent: "claude", Pane: b.Pane, TerminalID: liveTermID}
 		st.adopt(front.sid, front.log, "claude", "")
 	}
-	_, rerr := s.readConvo(sess, st)
+	_, rerr := s.readConvoWith(sess, st, true)
 	if rerr != nil {
 		st.mu.Unlock()
 		fail(asRewindErr(rerr))

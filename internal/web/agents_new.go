@@ -248,6 +248,9 @@ func (s *Server) newAgent(ctx context.Context, w http.ResponseWriter, sess *term
 	if how.fork && kind == "claude" {
 		id, err := s.forkCopy(ctx, sess, src, how.resume, how.at)
 		switch {
+		case errors.Is(err, sshx.ErrBusy):
+			writeSSHChannelsBusy(w)
+			return
 		case errors.Is(err, errForkAt):
 			writeError(w, http.StatusBadRequest, "bad_message", "that is not a message of yours in this conversation")
 			return
@@ -277,6 +280,11 @@ func (s *Server) newAgent(ctx context.Context, w http.ResponseWriter, sess *term
 		}
 		res, err := sshx.Exec(ctx, sess.Client(), agentTmuxCmd(name, dir, kind, home, how), 8<<10, sshx.ExecOptions{Interactive: true, AwaitSlot: 2 * time.Second})
 		out := res.Out
+		if errors.Is(err, sshx.ErrBusy) {
+			keep = false
+			writeSSHChannelsBusy(w)
+			return
+		}
 		if err != nil || !strings.HasSuffix(strings.TrimSpace(string(out)), "started") {
 			keep = false
 			why := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(string(out)), "exited"))
@@ -361,8 +369,21 @@ func (s *Server) newAgent(ctx context.Context, w http.ResponseWriter, sess *term
 	if how.placement == "split" && rawLabel == "" {
 		startName = agentName(kind, kind)
 	}
-	failed, why := s.startAgent(ctx, sess, socket, pane, startName, kind, how)
+	failed, busy, why := s.startAgent(ctx, sess, socket, pane, startName, kind, how)
 	switch {
+	case busy:
+		keep = false
+		if how.placement == "split" {
+			_ = s.closePane(sess, socket, pane)
+		} else if how.herdrWorktree {
+			if s.removeWorktree(sess, socket, ws) != nil {
+				_ = s.closeWorkspace(sess, socket, ws)
+			}
+		} else {
+			_ = s.closeWorkspace(sess, socket, ws)
+		}
+		writeSSHChannelsBusy(w)
+		return
 	case failed:
 		keep = false
 		var closed bool
@@ -513,9 +534,12 @@ echo started`
 // startAgent runs herdr's own `agent start` on the host, against the
 // session's herdr: failed (with why) where herdr said it failed; why alone
 // where what became of it is not known.
-func (s *Server) startAgent(ctx context.Context, sess *term.Session, socket, pane, name, kind string, how agentStart) (failed bool, why string) {
+func (s *Server) startAgent(ctx context.Context, sess *term.Session, socket, pane, name, kind string, how agentStart) (failed, busy bool, why string) {
 	cmd := agentStartCmd(socket, pane, name, kind, how)
 	execRes, err := sshx.Exec(ctx, sess.Client(), cmd, 64<<10, sshx.ExecOptions{Interactive: true, AwaitSlot: 2 * time.Second})
+	if errors.Is(err, sshx.ErrBusy) {
+		return false, true, ""
+	}
 	out := execRes.Out
 	var res struct {
 		Error *struct {
@@ -530,23 +554,23 @@ func (s *Server) startAgent(ctx context.Context, sess *term.Session, socket, pan
 	}
 	if json.Unmarshal(line, &res) != nil {
 		if err == nil {
-			return false, "herdr said nothing that can be read"
+			return false, false, "herdr said nothing that can be read"
 		}
-		return false, "herdr did not answer"
+		return false, false, "herdr did not answer"
 	}
 	if res.Error != nil {
 		why := clipText(res.Error.Message, 300)
 		// (herdr lost hold of it, or of its name, on the way: started or not,
 		// it cannot be told.)
 		if strings.Contains(res.Error.Code, "transport") || res.Error.Code == "agent_name_not_found" {
-			return false, why
+			return false, false, why
 		}
-		return true, why
+		return true, false, why
 	}
 	if err != nil || len(res.Result) == 0 {
-		return false, "herdr did not say whether it started"
+		return false, false, "herdr did not say whether it started"
 	}
-	return false, ""
+	return false, false, ""
 }
 
 // closeWorkspace closes the workspace made for an agent that did not

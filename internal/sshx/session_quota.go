@@ -39,6 +39,10 @@ const (
 	// operations (file panel, live pane terminal, interactive exec) so background
 	// scans cannot fill the connection to capacity.
 	DefaultInteractiveReserve = 2
+	// DefaultAuxInteractiveReserve keeps 1 slot within MaxAuxPerConn exclusively
+	// for interactive execs (so background execs are capped at 3 out of 4) and
+	// cannot exhaust the Aux class even while total < MaxSessionChannels.
+	DefaultAuxInteractiveReserve = 1
 	// MinMaxSessionChannels is the smallest per-connection cap that still allows
 	// a background operation on an empty connection without violating
 	// DefaultTerminalReserve and DefaultInteractiveReserve (1 + 1 + 2 = 4).
@@ -55,9 +59,10 @@ var (
 	MaxSFTPPerConn     = 4
 	MaxPanePerConn     = 4
 
-	// Reserves within MaxSessionChannels.
-	TerminalReserve    = DefaultTerminalReserve
-	InteractiveReserve = DefaultInteractiveReserve
+	// Reserves within MaxSessionChannels and within MaxAuxPerConn.
+	TerminalReserve       = DefaultTerminalReserve
+	InteractiveReserve    = DefaultInteractiveReserve
+	AuxInteractiveReserve = DefaultAuxInteractiveReserve
 )
 
 type clientSessionState struct {
@@ -107,6 +112,14 @@ func (l *sessionLedger) canTakeLocked(st *clientSessionState, class SessionClass
 	}
 	if curClass >= clsLimit {
 		return false
+	}
+	// Background Aux operations must leave AuxInteractiveReserve slots free
+	// within MaxAuxPerConn so long-running background execs cannot exhaust the
+	// Aux class and block user-triggered interactive execs.
+	if class == SessionAux && !interactive && AuxInteractiveReserve > 0 {
+		if curClass+1+AuxInteractiveReserve > clsLimit {
+			return false
+		}
 	}
 	if curTotal+1 > totalLimit {
 		return false

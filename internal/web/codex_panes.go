@@ -550,7 +550,11 @@ func (c *codexPaneLooks) runInteractive(ctx context.Context, sess *term.Session,
 		known = append(known, k)
 	}
 	c.mu.Unlock()
-	res, err := sshx.Exec(ctx, sess.Client(), codexPanesCommand(socket, known, target), codexPanesMax, sshx.ExecOptions{Interactive: interactive})
+	var await time.Duration
+	if interactive {
+		await = 2 * time.Second
+	}
+	res, err := sshx.Exec(ctx, sess.Client(), codexPanesCommand(socket, known, target), codexPanesMax, sshx.ExecOptions{Interactive: interactive, AwaitSlot: await})
 	out := res.Out
 	if err != nil {
 		return nil, err
@@ -811,29 +815,39 @@ func (s *Server) locateCodexFast(ctx context.Context, sess *term.Session, st *co
 // folder of that name (codexPressSure) — the conversation taken as its own
 // (claimed, as one its screen showed).
 func (s *Server) codexTmuxNamed(ctx context.Context, sess *term.Session, p *convoProc, l convoLocated) (codexPane, bool) {
+	c, ok, _ := s.codexTmuxNamedWith(ctx, sess, p, l, false)
+	return c, ok
+}
+
+func (s *Server) codexTmuxNamedWith(ctx context.Context, sess *term.Session, p *convoProc, l convoLocated, interactive bool) (codexPane, bool, error) {
 	if p == nil || p.agent != "codex" || !tmuxPane.MatchString(p.tmuxPane) {
-		return codexPane{}, false
+		return codexPane{}, false, nil
 	}
-	panes, err := s.codexPanes.run(ctx, sess, "tmux", p.tmuxPane)
+	panes, err := s.codexPanes.runInteractive(ctx, sess, "tmux", p.tmuxPane, interactive)
 	if err != nil {
-		return codexPane{}, false
+		return codexPane{}, false, err
 	}
 	c, ok := panes[p.tmuxPane]
 	if !ok || c.Several || c.PID != p.pid || c.Start != p.start || c.Src == "fd" || c.Thread == "" || c.Path == "" || c.Name == "" || !codexPressSure(c) {
-		return codexPane{}, false
+		return codexPane{}, false, nil
 	}
 	if !s.convoClaimed.take(strings.ToLower(c.Thread), p.id(), p.started, aliveCodex(l), l.now(), true) {
-		return codexPane{}, false // (another Codex's)
+		return codexPane{}, false, nil // (another Codex's)
 	}
-	return c, true
+	return c, true, nil
 }
 
 // codexTmuxNamedNow: codexTmuxNamed for a press: front's log and session
-// set to what its name tells, where it does.
-func (s *Server) codexTmuxNamedNow(ctx context.Context, sess *term.Session, front *convoProc, l convoLocated) bool {
-	c, ok := s.codexTmuxNamed(ctx, sess, front, l)
+// set to what its name tells, where it does. Preserves errors (such as
+// sshx.ErrBusy) so the caller can return 429 ssh_channels_busy rather than
+// misreporting agent_changed.
+func (s *Server) codexTmuxNamedNow(ctx context.Context, sess *term.Session, front *convoProc, l convoLocated, interactive bool) (bool, error) {
+	c, ok, err := s.codexTmuxNamedWith(ctx, sess, front, l, interactive)
+	if err != nil {
+		return false, err
+	}
 	if ok {
 		front.log, front.sid = c.Path, strings.ToLower(c.Thread)
 	}
-	return ok
+	return ok, nil
 }

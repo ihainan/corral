@@ -249,7 +249,7 @@ func (s *Server) convoEffort(w http.ResponseWriter, ctx context.Context, sess *t
 		}
 		running.Add(1)
 		res, err := sshx.Exec(ctx, sess.Client(), convoGatedCommand(gate, sess.Persistence, sess.TmuxSession, pane, socket, pid, start, sid, len(text), press, read), 64<<10,
-			sshx.ExecOptions{Stdin: strings.NewReader(text), Release: running.Done, Interactive: true})
+			sshx.ExecOptions{Stdin: strings.NewReader(text), Release: running.Done, Interactive: true, AwaitSlot: 2 * time.Second})
 		if err == nil && (len(press) > 0 || text != "") {
 			typed = true
 		}
@@ -270,7 +270,10 @@ func (s *Server) convoEffort(w http.ResponseWriter, ctx context.Context, sess *t
 	case err == nil:
 		*outcome = "typed"
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "effort": took})
-	case errors.Is(err, sshx.ErrBusy) || errors.As(err, &exitErr) && exitErr.Status == 7:
+	case errors.Is(err, sshx.ErrBusy):
+		*outcome, *reason = "refused", "ssh_channels_busy"
+		writeSSHChannelsBusy(w)
+	case errors.As(err, &exitErr) && exitErr.Status == 7:
 		*outcome, *reason = "refused", "busy"
 		writeError(w, http.StatusTooManyRequests, "busy", "the host is still answering earlier requests")
 	case errors.Is(err, errViewSubagent):

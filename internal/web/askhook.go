@@ -355,7 +355,7 @@ func (s *Server) askHookState(ctx context.Context, h *store.Host, fresh bool) (a
 	defer cancel()
 	f, err := readAskHookFile(rctx, c)
 	if errors.Is(err, sshx.ErrBusy) {
-		return askHookInfo{}, http.StatusServiceUnavailable, "busy", "too many commands are running on this host; try again in a moment"
+		return askHookInfo{}, http.StatusTooManyRequests, "ssh_channels_busy", "too many active SSH channels on this connection; close a panel or try again shortly"
 	}
 	if err != nil {
 		return askHookInfo{}, http.StatusBadGateway, "read_failed", "could not read the Claude Code settings on the host"
@@ -419,6 +419,10 @@ func (s *Server) apiSetAskHook(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	f, err := readAskHookFile(ctx, c)
 	if err != nil {
+		if errors.Is(err, sshx.ErrBusy) {
+			writeSSHChannelsBusy(w)
+			return
+		}
 		writeError(w, http.StatusBadGateway, "read_failed", "could not read the Claude Code settings on the host")
 		return
 	}
@@ -499,7 +503,7 @@ func (s *Server) apiSetAskHook(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadGateway, "write_failed", "the settings file could not be changed; it is as it was")
 		return
 	case errors.Is(err, sshx.ErrBusy):
-		writeError(w, http.StatusServiceUnavailable, "busy", "too many commands are running on this host; try again in a moment")
+		writeSSHChannelsBusy(w)
 		return
 	default:
 		// (Not known to have ended, or ended unlike the script does: what the

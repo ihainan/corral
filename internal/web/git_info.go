@@ -485,7 +485,7 @@ func (s *Server) gitAnswer(w http.ResponseWriter, r *http.Request, pr bool) {
 			writeJSON(w, http.StatusOK, gitInfo{Reason: "nodir"})
 		}
 	case errors.Is(err, sshx.ErrBusy):
-		writeError(w, http.StatusTooManyRequests, "busy", "the host is still answering earlier requests")
+		writeSSHChannelsBusy(w)
 	case err != nil:
 		writeError(w, http.StatusBadGateway, "host_error", "the host did not say")
 	default:

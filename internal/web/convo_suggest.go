@@ -99,7 +99,7 @@ else HERDR_SOCKET_PATH=$3 herdr pane read "$2" --source visible --format ansi 2>
 // suggestion as words. Read only when that screen shows words in the box.
 func (s *Server) greyedSuggestion(ctx context.Context, sess *term.Session, pane, socket string, running *sync.WaitGroup) string {
 	running.Add(1)
-	res, err := sshx.Exec(ctx, sess.Client(), convoColorScreenCommand(sess.Persistence, pane, socket), 512<<10, sshx.ExecOptions{Release: running.Done, Interactive: true})
+	res, err := sshx.Exec(ctx, sess.Client(), convoColorScreenCommand(sess.Persistence, pane, socket), 512<<10, sshx.ExecOptions{Release: running.Done, Interactive: true, AwaitSlot: 2 * time.Second})
 	if err != nil || claudeOwner(sgr.ReplaceAllString(string(res.Out), ""), false) != "main" {
 		return ""
 	}

@@ -833,6 +833,11 @@ func (s *Server) convoModel(w http.ResponseWriter, ctx context.Context, sess *te
 	}
 	if err != nil || perr != nil {
 		release()
+		if errors.Is(err, sshx.ErrBusy) {
+			*reason = "ssh_channels_busy"
+			writeSSHChannelsBusy(w)
+			return
+		}
 		*reason = "settings"
 		writeError(w, http.StatusBadGateway, "settings", "Claude Code's settings could not be read: nothing done")
 		return
@@ -896,7 +901,7 @@ func (s *Server) convoModel(w http.ResponseWriter, ctx context.Context, sess *te
 				}
 			}
 			running.Add(1)
-			_, err = sshx.Exec(rctx, sess.Client(), settingsWriteCommand(now, fixed), 4096, sshx.ExecOptions{Stdin: bytes.NewReader(fixed), Release: running.Done, Interactive: true})
+			_, err = sshx.Exec(rctx, sess.Client(), settingsWriteCommand(now, fixed), 4096, sshx.ExecOptions{Stdin: bytes.NewReader(fixed), Release: running.Done, Interactive: true, AwaitSlot: 2 * time.Second})
 			var exitErr *sshx.ExitError
 			if errors.As(err, &exitErr) && exitErr.Status == 9 {
 				continue
@@ -953,7 +958,7 @@ func (s *Server) convoModel(w http.ResponseWriter, ctx context.Context, sess *te
 		}
 		running.Add(1)
 		res, err := sshx.Exec(ctx, sess.Client(), convoGatedCommand(gate, sess.Persistence, sess.TmuxSession, pane, socket, pid, start, sid, len(text), press, read), 64<<10,
-			sshx.ExecOptions{Stdin: strings.NewReader(text), Release: running.Done, Interactive: true})
+			sshx.ExecOptions{Stdin: strings.NewReader(text), Release: running.Done, Interactive: true, AwaitSlot: 2 * time.Second})
 		if err == nil && (len(press) > 0 || text != "") {
 			typed = true
 		}
@@ -981,7 +986,7 @@ func (s *Server) convoModel(w http.ResponseWriter, ctx context.Context, sess *te
 			}
 		}
 		running.Add(1)
-		res, err := sshx.Exec(ctx, sess.Client(), convoScreenCommand(sess.Persistence, pane, socket), 512<<10, sshx.ExecOptions{Release: running.Done, Interactive: true})
+		res, err := sshx.Exec(ctx, sess.Client(), convoScreenCommand(sess.Persistence, pane, socket), 512<<10, sshx.ExecOptions{Release: running.Done, Interactive: true, AwaitSlot: 2 * time.Second})
 		if err != nil {
 			return "", "", err
 		}
@@ -995,7 +1000,7 @@ func (s *Server) convoModel(w http.ResponseWriter, ctx context.Context, sess *te
 			lctx, lcancel := context.WithTimeout(context.WithoutCancel(ctx), 8*time.Second)
 			defer lcancel()
 			running.Add(1)
-			res, err := sshx.Exec(lctx, sess.Client(), convoScreenCommand(sess.Persistence, pane, socket), 512<<10, sshx.ExecOptions{Release: running.Done, Interactive: true})
+			res, err := sshx.Exec(lctx, sess.Client(), convoScreenCommand(sess.Persistence, pane, socket), 512<<10, sshx.ExecOptions{Release: running.Done, Interactive: true, AwaitSlot: 2 * time.Second})
 			if err != nil {
 				return "", "", err
 			}
@@ -1252,7 +1257,10 @@ func writeSwitchError(w http.ResponseWriter, err error, typed bool, outcome, rea
 	case errors.As(err, &exitErr) && exitErr.Status == 11:
 		*outcome, *reason = said(typed), "cannot_verify"
 		writeError(w, http.StatusConflict, "cannot_verify", "its screen cannot be checked on the host: switch in the terminal")
-	case errors.Is(err, sshx.ErrBusy) || errors.As(err, &exitErr) && exitErr.Status == 7:
+	case errors.Is(err, sshx.ErrBusy):
+		*reason = "ssh_channels_busy"
+		writeSSHChannelsBusy(w)
+	case errors.As(err, &exitErr) && exitErr.Status == 7:
 		*reason = "busy"
 		writeError(w, http.StatusTooManyRequests, "busy", "the host is still answering earlier requests")
 	case errors.Is(err, errBusyAgent):
@@ -1369,7 +1377,7 @@ const maxSettings = 1 << 20
 
 // readSettings: Claude Code's settings as they are (none: there are none).
 func readSettings(ctx context.Context, sess *term.Session) (doc []byte, none bool, err error) {
-	res, err := sshx.Exec(ctx, sess.Client(), settingsReadCommand, maxSettings+16, sshx.ExecOptions{Interactive: true})
+	res, err := sshx.Exec(ctx, sess.Client(), settingsReadCommand, maxSettings+16, sshx.ExecOptions{Interactive: true, AwaitSlot: 2 * time.Second})
 	out := res.Out
 	var exitErr *sshx.ExitError
 	switch {
@@ -1502,7 +1510,7 @@ func jsonSame(a, b json.RawMessage) bool {
 // readCodexConfig reads ~/.codex/config.toml (none: there is none), as
 // readSettings reads Claude Code's settings.
 func readCodexConfig(ctx context.Context, sess *term.Session) (doc []byte, none bool, err error) {
-	res, err := sshx.Exec(ctx, sess.Client(), codexConfigReadCommand, maxSettings+16, sshx.ExecOptions{Interactive: true})
+	res, err := sshx.Exec(ctx, sess.Client(), codexConfigReadCommand, maxSettings+16, sshx.ExecOptions{Interactive: true, AwaitSlot: 2 * time.Second})
 	out := res.Out
 	var exitErr *sshx.ExitError
 	switch {

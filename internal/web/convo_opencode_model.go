@@ -3,6 +3,7 @@ package web
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"regexp"
 	"slices"
@@ -285,6 +286,11 @@ func (s *Server) convoOpenCodeMode(w http.ResponseWriter, ctx context.Context, s
 	rctx, rcancel := context.WithTimeout(ctx, 8*time.Second)
 	defer rcancel()
 	if _, err := sshx.Exec(rctx, sess.Client(), ocAPICommand("POST", "/api/session/"+sid+"/agent", string(body)), 64<<10, sshx.ExecOptions{Interactive: true, AwaitSlot: 2 * time.Second}); err != nil {
+		if errors.Is(err, sshx.ErrBusy) {
+			*reason = "ssh_channels_busy"
+			writeSSHChannelsBusy(w)
+			return
+		}
 		*reason = "host_error"
 		writeError(w, http.StatusBadGateway, "host_error", "failed to switch OpenCode mode")
 		return
@@ -301,6 +307,11 @@ func (s *Server) convoOpenCodeModels(w http.ResponseWriter, ctx context.Context,
 		return
 	}
 	models, provs, err := s.ocFetchModels(ctx, sess)
+	if errors.Is(err, sshx.ErrBusy) {
+		*reason = "ssh_channels_busy"
+		writeSSHChannelsBusy(w)
+		return
+	}
 	if err != nil || len(models) == 0 {
 		*reason = "no_models"
 		writeError(w, http.StatusBadGateway, "host_error", "could not list OpenCode models")
@@ -338,6 +349,11 @@ func (s *Server) convoOpenCodeModel(w http.ResponseWriter, ctx context.Context, 
 	rctx, rcancel := context.WithTimeout(ctx, 8*time.Second)
 	defer rcancel()
 	if _, err := sshx.Exec(rctx, sess.Client(), ocAPICommand("POST", "/api/session/"+sid+"/model", string(body)), 64<<10, sshx.ExecOptions{Interactive: true, AwaitSlot: 2 * time.Second}); err != nil {
+		if errors.Is(err, sshx.ErrBusy) {
+			*reason = "ssh_channels_busy"
+			writeSSHChannelsBusy(w)
+			return
+		}
 		*reason = "host_error"
 		writeError(w, http.StatusBadGateway, "host_error", "failed to switch OpenCode model")
 		return
@@ -364,6 +380,11 @@ func (s *Server) convoOpenCodeEffort(w http.ResponseWriter, ctx context.Context,
 		return
 	}
 	cur, err := s.ocReadSessionRef(ctx, sess, sid)
+	if errors.Is(err, sshx.ErrBusy) {
+		*reason = "ssh_channels_busy"
+		writeSSHChannelsBusy(w)
+		return
+	}
 	if err != nil || cur.ProviderID == "" || cur.ModelID == "" {
 		*reason = "no_model"
 		writeError(w, http.StatusConflict, "unsupported", "current OpenCode model could not be read")
@@ -377,6 +398,11 @@ func (s *Server) convoOpenCodeEffort(w http.ResponseWriter, ctx context.Context,
 	rctx, rcancel := context.WithTimeout(ctx, 8*time.Second)
 	defer rcancel()
 	if _, err := sshx.Exec(rctx, sess.Client(), ocAPICommand("POST", "/api/session/"+sid+"/model", string(body)), 64<<10, sshx.ExecOptions{Interactive: true, AwaitSlot: 2 * time.Second}); err != nil {
+		if errors.Is(err, sshx.ErrBusy) {
+			*reason = "ssh_channels_busy"
+			writeSSHChannelsBusy(w)
+			return
+		}
 		*reason = "host_error"
 		writeError(w, http.StatusBadGateway, "host_error", "failed to switch OpenCode thinking variant")
 		return

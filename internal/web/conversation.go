@@ -2634,13 +2634,17 @@ func (st *convoState) adopt(sid, log, agent, reason string) {
 // first, then forward. A log that got shorter was replaced and is read
 // again. more says one request did not take all there is.
 func (s *Server) readConvo(sess *term.Session, st *convoState) (more bool, err error) {
+	return s.readConvoWith(sess, st, false)
+}
+
+func (s *Server) readConvoWith(sess *term.Session, st *convoState, interactive bool) (more bool, err error) {
 	if st.agent == "opencode" {
 		return false, s.readOpenCode(sess, st)
 	}
 	if st.agent == "devin" {
 		return false, s.readDevin(sess, st)
 	}
-	err = s.withSFTP(context.Background(), sess, convoReadLimit, func(c *sftplite.Client) error {
+	err = s.withSFTPPriority(context.Background(), sess, interactive, convoReadLimit, func(c *sftplite.Client) error {
 		if sess.Persistence == "tmux" && st.agent == "claude" && !st.sub {
 			st.status = convoProcStatus(c, st)
 		}
@@ -3088,7 +3092,11 @@ func (s *Server) convoFreshStatus(ctx context.Context, sess *term.Session, b *co
 func (s *Server) convoFreshStatusInteractive(ctx context.Context, sess *term.Session, b *convoBind, interactive bool) string {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	res, err := sshx.Exec(ctx, sess.Client(), freshStatusCommand(b.PID), 64<<10, sshx.ExecOptions{Interactive: interactive})
+	var await time.Duration
+	if interactive {
+		await = 2 * time.Second
+	}
+	res, err := sshx.Exec(ctx, sess.Client(), freshStatusCommand(b.PID), 64<<10, sshx.ExecOptions{Interactive: interactive, AwaitSlot: await})
 	if err != nil {
 		return ""
 	}
@@ -4401,8 +4409,8 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 		lr, err := sshx.Exec(ctx, sess.Client(), convoLocateCommand(sess.Persistence, sess.TmuxSession, tmuxTarget), convoLocateMax, sshx.ExecOptions{Interactive: pressInteractive(what), AwaitSlot: pressSlotWait(what)})
 		out := lr.Out
 		if errors.Is(err, sshx.ErrBusy) {
-			reason = "busy"
-			writeError(w, http.StatusTooManyRequests, "busy", "the host is still answering earlier requests")
+			reason = "ssh_channels_busy"
+			writeSSHChannelsBusy(w)
 			return
 		}
 		// (A scan cut short, by its size or a failure, may leave out the agent
@@ -4435,14 +4443,43 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 				reason = "busy"
 				writeError(w, http.StatusTooManyRequests, "busy", "its conversation is being read: try again in a moment")
 				return
-			case why == "fresh" && b.Session == convoNoSession && s.codexStillFresh(ctx, sess, socket, b.Pane, front.pid, front.start):
-				// (Read with no log, as the page shows it, and none begun since
-				// — its first message, from the page: 11-15, a Codex begun in
-				// the terminal could not be written to from the page at all.)
-				front.sid = convoNoSession
-			case sess.Persistence == "tmux" && why != "busy" && s.codexTmuxNamedNow(ctx, sess, front, l):
+			case why == "fresh" && b.Session == convoNoSession:
+				freshOK, freshErr := s.codexStillFresh(ctx, sess, socket, b.Pane, front.pid, front.start)
+				if errors.Is(freshErr, sshx.ErrBusy) {
+					reason = "busy"
+					writeSSHChannelsBusy(w)
+					return
+				}
+				if freshOK {
+					// (Read with no log, as the page shows it, and none begun since
+					// — its first message, from the page: 11-15, a Codex begun in
+					// the terminal could not be written to from the page at all.)
+					front.sid = convoNoSession
+				} else if sess.Persistence == "tmux" {
+					namedOK, namedErr := s.codexTmuxNamedNow(ctx, sess, front, l, pressInteractive(what))
+					if errors.Is(namedErr, sshx.ErrBusy) {
+						reason = "busy"
+						writeSSHChannelsBusy(w)
+						return
+					}
+					if !namedOK {
+						front.sid = ""
+					}
+				} else {
+					front.sid = ""
+				}
+			case sess.Persistence == "tmux" && why != "busy":
 				// (Named, its pane's title showing that name now, looked at
 				// now: as a herdr pane's codexFront — codexTmuxNamed.)
+				namedOK, namedErr := s.codexTmuxNamedNow(ctx, sess, front, l, pressInteractive(what))
+				if errors.Is(namedErr, sshx.ErrBusy) {
+					reason = "busy"
+					writeSSHChannelsBusy(w)
+					return
+				}
+				if !namedOK {
+					front.sid = ""
+				}
 			default:
 				// (Weak, none, or another's: agent_changed below — what is shown
 				// is checked anew, by the scan; nothing is typed by a log's age.)
@@ -4702,8 +4739,14 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 			writeError(w, status, code, msg)
 		}
 		sctx, scancel := context.WithTimeout(ctx, 10*time.Second)
-		res, err := sshx.Exec(sctx, sess.Client(), agyColorScreenCommand(sess.Persistence, b.Pane, socket), 512<<10, sshx.ExecOptions{Interactive: true})
+		res, err := sshx.Exec(sctx, sess.Client(), agyColorScreenCommand(sess.Persistence, b.Pane, socket), 512<<10, sshx.ExecOptions{Interactive: true, AwaitSlot: 2 * time.Second})
 		scancel()
+		if errors.Is(err, sshx.ErrBusy) {
+			ended.Done()
+			reason = "busy"
+			writeSSHChannelsBusy(w)
+			return
+		}
 		if err != nil {
 			refuse(http.StatusBadGateway, "no_screen", "the pane's screen could not be read")
 			return
@@ -4754,8 +4797,14 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 			writeError(w, status, code, msg)
 		}
 		sctx, scancel := context.WithTimeout(ctx, 10*time.Second)
-		res, err := sshx.Exec(sctx, sess.Client(), convoScreenCommand(sess.Persistence, b.Pane, socket), 512<<10, sshx.ExecOptions{Interactive: true})
+		res, err := sshx.Exec(sctx, sess.Client(), convoScreenCommand(sess.Persistence, b.Pane, socket), 512<<10, sshx.ExecOptions{Interactive: true, AwaitSlot: 2 * time.Second})
 		scancel()
+		if errors.Is(err, sshx.ErrBusy) {
+			ended.Done()
+			reason = "busy"
+			writeSSHChannelsBusy(w)
+			return
+		}
 		if err != nil {
 			refuse(http.StatusBadGateway, "no_screen", "the pane's screen could not be read")
 			return
@@ -4787,8 +4836,14 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 			writeError(w, status, code, msg)
 		}
 		sctx, scancel := context.WithTimeout(ctx, 10*time.Second)
-		res, err := sshx.Exec(sctx, sess.Client(), convoScreenCommand(sess.Persistence, b.Pane, socket), 512<<10, sshx.ExecOptions{Interactive: true})
+		res, err := sshx.Exec(sctx, sess.Client(), convoScreenCommand(sess.Persistence, b.Pane, socket), 512<<10, sshx.ExecOptions{Interactive: true, AwaitSlot: 2 * time.Second})
 		scancel()
+		if errors.Is(err, sshx.ErrBusy) {
+			ended.Done()
+			reason = "busy"
+			writeSSHChannelsBusy(w)
+			return
+		}
 		if err != nil {
 			refuse(http.StatusBadGateway, "no_screen", "the pane's screen could not be read")
 			return
@@ -4841,7 +4896,7 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 		look := func() (string, bool) {
 			sctx, scancel := context.WithTimeout(ctx, 10*time.Second)
 			defer scancel()
-			res, err := sshx.Exec(sctx, sess.Client(), convoColorScreenCommand(sess.Persistence, b.Pane, socket), 512<<10, sshx.ExecOptions{Interactive: true})
+			res, err := sshx.Exec(sctx, sess.Client(), convoColorScreenCommand(sess.Persistence, b.Pane, socket), 512<<10, sshx.ExecOptions{Interactive: true, AwaitSlot: 2 * time.Second})
 			return string(res.Out), err == nil
 		}
 		scr, ok := look()
@@ -4917,7 +4972,7 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 	case err == nil:
 		outcome = "typed"
 	case errors.Is(err, sshx.ErrBusy):
-		reason = "busy" // (not started: nothing was typed)
+		reason = "ssh_channels_busy" // (not started: nothing was typed)
 	case errors.As(err, &exitErr) && exitErr.Status == 3:
 		reason = "agent_changed"
 		writeError(w, http.StatusConflict, "agent_changed", "that pane no longer runs this agent")
@@ -4995,7 +5050,7 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 		if front.agent == "agy" {
 			pcmd = agyColorScreenCommand(sess.Persistence, b.Pane, socket)
 		}
-		if r2, err := sshx.Exec(sctx, sess.Client(), pcmd, 512<<10, sshx.ExecOptions{Interactive: true}); err == nil {
+		if r2, err := sshx.Exec(sctx, sess.Client(), pcmd, 512<<10, sshx.ExecOptions{Interactive: true, AwaitSlot: 2 * time.Second}); err == nil {
 			text, _, _ := screenOf(r2.Out)
 			out["text"], out["digest"], out["look"] = text, panelDigest(r2.Out), lookDigest(r2.Out)
 		}
@@ -5003,6 +5058,8 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 		writeJSON(w, http.StatusOK, out)
 	case outcome == "typed":
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "in_box": inBox})
+	case reason == "ssh_channels_busy":
+		writeSSHChannelsBusy(w)
 	case reason == "busy":
 		writeError(w, http.StatusTooManyRequests, "busy", "the host is still answering earlier requests")
 	case outcome == "refused":
@@ -5069,7 +5126,7 @@ func (s *Server) apiConversationSubagent(w http.ResponseWriter, r *http.Request)
 		sysDir := subDir + "/.system_generated"
 		logsDir := sysDir + "/logs"
 		file := logsDir + "/transcript_full.jsonl"
-		err := s.withSFTP(r.Context(), sess, convoReadLimit, func(c *sftplite.Client) error {
+		err := s.withSFTPPriority(r.Context(), sess, older, convoReadLimit, func(c *sftplite.Client) error {
 			for _, p := range []string{brain, subDir, sysDir, logsDir, file} {
 				fi, err := c.Lstat(p)
 				if err != nil {
@@ -5110,12 +5167,12 @@ func (s *Server) apiConversationSubagent(w http.ResponseWriter, r *http.Request)
 		if file != "" {
 			// (Found before: still a plain file, in plain folders — not one
 			// put in its place as a link since, review500.)
-			err = s.withSFTP(r.Context(), sess, convoReadLimit, func(c *sftplite.Client) error {
+			err = s.withSFTPPriority(r.Context(), sess, older, convoReadLimit, func(c *sftplite.Client) error {
 				return codexSubagentStill(c, root, file)
 			})
 		}
 		if file == "" {
-			err = s.withSFTP(r.Context(), sess, convoReadLimit, func(c *sftplite.Client) error {
+			err = s.withSFTPPriority(r.Context(), sess, older, convoReadLimit, func(c *sftplite.Client) error {
 				var err error
 				file, err = codexSubagentLog(c, root, mainSID, agent, time.Now())
 				return err
@@ -5149,7 +5206,7 @@ func (s *Server) apiConversationSubagent(w http.ResponseWriter, r *http.Request)
 	// the account itself could change them, which can read all it reaches
 	// in its terminal anyway; this keeps a log from being taken for
 	// another, not a boundary.)
-	err := s.withSFTP(r.Context(), sess, convoReadLimit, func(c *sftplite.Client) error {
+	err := s.withSFTPPriority(r.Context(), sess, older, convoReadLimit, func(c *sftplite.Client) error {
 		for _, p := range []string{home, dir, file} {
 			fi, err := c.Lstat(p)
 			if err != nil {
@@ -5663,7 +5720,7 @@ func pressInteractive(what string) bool {
 // when a next message is likeliest, 11-15) — rather than be refused at
 // once. Its own looks (a suggestion, a screen) do not wait: they come again.
 func pressSlotWait(what string) time.Duration {
-	if what == "suggest" || what == "screen" || what == "panel_screen" || what == "sent_missing" {
+	if !pressInteractive(what) {
 		return 0
 	}
 	return 2 * time.Second
@@ -5672,17 +5729,17 @@ func pressSlotWait(what string) time.Duration {
 // codexStillFresh: pane's Codex (pid, start) has begun no conversation yet,
 // as a look begun now finds it (Codex's own word, Fresh: of a herdr
 // server's panes, or the user's tmux server's).
-func (s *Server) codexStillFresh(ctx context.Context, sess *term.Session, socket, pane string, pid, start int64) bool {
+func (s *Server) codexStillFresh(ctx context.Context, sess *term.Session, socket, pane string, pid, start int64) (bool, error) {
 	switch {
 	case sess.Persistence == "tmux":
 		socket = "tmux" // (codexPanesCommand: the user's tmux server)
 	case sess.Persistence != "herdr" || socket == "":
-		return false
+		return false, nil
 	}
 	panes, err := s.codexPanes.runInteractive(ctx, sess, socket, pane, true)
 	if err != nil {
-		return false
+		return false, err
 	}
 	c, ok := panes[pane]
-	return ok && c.Fresh && !c.Several && c.PID == pid && c.Start == start
+	return ok && c.Fresh && !c.Several && c.PID == pid && c.Start == start, nil
 }

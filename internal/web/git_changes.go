@@ -542,7 +542,7 @@ func (s *Server) apiGitChanges(w http.ResponseWriter, r *http.Request) {
 	case errors.Is(err, errGitNoDir):
 		writeJSON(w, http.StatusOK, gitChanges{Reason: "nodir", Files: []gitChangedFile{}})
 	case errors.Is(err, sshx.ErrBusy):
-		writeError(w, http.StatusTooManyRequests, "busy", "the host is still answering earlier requests")
+		writeSSHChannelsBusy(w)
 	case errors.Is(err, errGitTimeout), errors.Is(err, context.DeadlineExceeded):
 		writeError(w, http.StatusGatewayTimeout, "timeout", "git took too long")
 	case err != nil:

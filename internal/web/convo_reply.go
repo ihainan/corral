@@ -42,7 +42,7 @@ func (s *Server) apiConversationReply(w http.ResponseWriter, r *http.Request) {
 func (s *Server) convoScreen(w http.ResponseWriter, ctx context.Context, sess *term.Session, pane, socket string, outcome, reason *string, release func()) {
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
-	res, err := sshx.Exec(ctx, sess.Client(), convoScreenJoinedCommand(sess.Persistence, pane, socket), 512<<10+unwrapMax+64, sshx.ExecOptions{Release: release, Interactive: true})
+	res, err := sshx.Exec(ctx, sess.Client(), convoScreenJoinedCommand(sess.Persistence, pane, socket), 512<<10+unwrapMax+64, sshx.ExecOptions{Release: release, Interactive: true, AwaitSlot: 2 * time.Second})
 	var shown []byte
 	var joined string
 	if err == nil {
@@ -52,6 +52,11 @@ func (s *Server) convoScreen(w http.ResponseWriter, ctx context.Context, sess *t
 		}
 	}
 	if err != nil {
+		if errors.Is(err, sshx.ErrBusy) {
+			*outcome, *reason = "refused", "ssh_channels_busy"
+			writeSSHChannelsBusy(w)
+			return
+		}
 		*outcome, *reason = "unknown", "no_screen"
 		writeError(w, http.StatusBadGateway, "no_screen", "the pane's screen could not be read")
 		return

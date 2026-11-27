@@ -498,8 +498,12 @@ func (s *Server) ocSessionOfInteractive(ctx context.Context, sess *term.Session,
 	// Try exact terminal title ("OC | <title>") disambiguation first: works
 	// both when two OpenCode 2 panes share a directory and when a single pane
 	// resumed an older session whose time_updated predates p.started.
+	var await time.Duration
+	if interactive {
+		await = 2 * time.Second
+	}
 	if title, ok := s.ocPaneTitle(sess, pane, p.cwd, l); ok {
-		res, err := sshx.Exec(ctx, sess.Client(), ocQueryCommand(p.log, "find_title", p.cwd, title), 4096, sshx.ExecOptions{Interactive: interactive})
+		res, err := sshx.Exec(ctx, sess.Client(), ocQueryCommand(p.log, "find_title", p.cwd, title), 4096, sshx.ExecOptions{Interactive: interactive, AwaitSlot: await})
 		out := res.Out
 		if err == nil {
 			var r struct {
@@ -528,7 +532,7 @@ func (s *Server) ocSessionOfInteractive(ctx context.Context, sess *term.Session,
 	// is read off the host.)
 	ended, justEnded, seen := s.ocContested.note(key, false)
 	since = max(since, ended)
-	res, err := sshx.Exec(ctx, sess.Client(), ocQueryCommand(p.log, "find", p.cwd, strconv.FormatInt(since, 10)), 4096, sshx.ExecOptions{Interactive: interactive})
+	res, err := sshx.Exec(ctx, sess.Client(), ocQueryCommand(p.log, "find", p.cwd, strconv.FormatInt(since, 10)), 4096, sshx.ExecOptions{Interactive: interactive, AwaitSlot: await})
 	out := res.Out
 	if err != nil {
 		return convoNoSession, ""
@@ -642,7 +646,12 @@ var (
 func (s *Server) ocRead(sess *term.Session, st *convoState, mode string, args ...string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), convoReadLimit)
 	defer cancel()
-	res, err := sshx.Exec(ctx, sess.Client(), ocQueryCommand(st.log, mode, append([]string{st.sid}, args...)...), ocReadMax, sshx.ExecOptions{Interactive: mode == "older"})
+	interactive := mode == "older"
+	var await time.Duration
+	if interactive {
+		await = 2 * time.Second
+	}
+	res, err := sshx.Exec(ctx, sess.Client(), ocQueryCommand(st.log, mode, append([]string{st.sid}, args...)...), ocReadMax, sshx.ExecOptions{Interactive: interactive, AwaitSlot: await})
 	out := res.Out
 	if err != nil {
 		return err

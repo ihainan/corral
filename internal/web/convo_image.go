@@ -198,6 +198,10 @@ func (s *Server) apiConversationImage(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "not_found", "no such picture")
 			return
 		}
+		if errors.Is(err, sshx.ErrBusy) {
+			writeSSHChannelsBusy(w)
+			return
+		}
 		if r.Context().Err() != nil {
 			return
 		}

@@ -116,8 +116,13 @@ func (s *Server) convoModeTo(w http.ResponseWriter, ctx context.Context, sess *t
 	if agent == "agy" {
 		scrCmd = agyScreenCommand(sess.Persistence, pane, socket)
 	}
-	res, err := sshx.Exec(ctx, sess.Client(), scrCmd, 256<<10, sshx.ExecOptions{Release: ended.Done, Interactive: true})
+	res, err := sshx.Exec(ctx, sess.Client(), scrCmd, 256<<10, sshx.ExecOptions{Release: ended.Done, Interactive: true, AwaitSlot: 2 * time.Second})
 	if err != nil {
+		if errors.Is(err, sshx.ErrBusy) {
+			*reason = "ssh_channels_busy"
+			writeSSHChannelsBusy(w)
+			return
+		}
 		*reason = "no_screen"
 		writeError(w, http.StatusBadGateway, "no_screen", "the pane's screen could not be read")
 		return
@@ -138,7 +143,7 @@ func (s *Server) convoModeTo(w http.ResponseWriter, ctx context.Context, sess *t
 		ended.Add(1)
 		// (Not while it waits: Shift+Tab is a question's then. Exit 9.)
 		res, err := sshx.Exec(ctx, sess.Client(), convoGatedCommand(gate, sess.Persistence, sess.TmuxSession, pane, socket, pid, start, sid, 0, press, convoModeLines), 16<<10,
-			sshx.ExecOptions{Stdin: strings.NewReader(""), Release: ended.Done, Interactive: true})
+			sshx.ExecOptions{Stdin: strings.NewReader(""), Release: ended.Done, Interactive: true, AwaitSlot: 2 * time.Second})
 		var exitErr *sshx.ExitError
 		switch {
 		case err == nil:
@@ -148,7 +153,11 @@ func (s *Server) convoModeTo(w http.ResponseWriter, ctx context.Context, sess *t
 			*outcome, *reason = "unknown", "stopped"
 			writeError(w, http.StatusBadGateway, "unknown", "the switch stopped on the way")
 			return
-		case errors.Is(err, sshx.ErrBusy) || (errors.As(err, &exitErr) && exitErr.Status == 7):
+		case errors.Is(err, sshx.ErrBusy):
+			*reason = "ssh_channels_busy"
+			writeSSHChannelsBusy(w)
+			return
+		case errors.As(err, &exitErr) && exitErr.Status == 7:
 			*reason = "busy"
 			writeError(w, http.StatusTooManyRequests, "busy", "the host is still answering earlier requests")
 			return
@@ -182,6 +191,8 @@ func (s *Server) convoModeTo(w http.ResponseWriter, ctx context.Context, sess *t
 		// missing, or pressing again, back where it began.)
 		for j := 0; (agent == "codex" || agent == "agy") && now == from && j < 6; j++ {
 			time.Sleep(400 * time.Millisecond)
+			// Fast 400ms screen-redraw poll loop: intentionally AwaitSlot: 0 so
+			// a busy tick yields immediately to the next poll iteration.
 			if r, err := sshx.Exec(ctx, sess.Client(), scrCmd, 256<<10, sshx.ExecOptions{Interactive: true}); err == nil {
 				now = modeOnScreenOf(agent, string(r.Out))
 			}

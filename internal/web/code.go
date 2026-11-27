@@ -605,6 +605,9 @@ func (s *Server) codeRun(ctx context.Context, c *ssh.Client, cmd string, limit t
 	ctx, cancel := context.WithTimeout(ctx, limit)
 	defer cancel()
 	opt.Interactive = true
+	if opt.AwaitSlot == 0 {
+		opt.AwaitSlot = 2 * time.Second
+	}
 	r, err := sshx.Exec(ctx, c, cmd, sshx.MaxOutput, opt)
 	fields := codeserver.Fields(r.Out)
 	switch {

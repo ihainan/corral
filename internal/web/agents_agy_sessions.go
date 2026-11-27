@@ -3,6 +3,7 @@ package web
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 	"time"
@@ -28,6 +29,10 @@ func (s *Server) apiAgySessions(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	res, err := sshx.Exec(ctx, sess.Client(), agySessionsCommand(dir), 256<<10, sshx.ExecOptions{Interactive: true, AwaitSlot: 2 * time.Second})
 	out := res.Out
+	if errors.Is(err, sshx.ErrBusy) {
+		writeSSHChannelsBusy(w)
+		return
+	}
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "host_error", "the host's list could not be read")
 		return

@@ -48,6 +48,22 @@ type paneWindowChangeMsg struct {
 	Height  uint32
 }
 
+// paneSSHSignals matches golang.org/x/crypto/ssh's RFC 4254 signal-to-number
+// table so exit-signal maps to 128 + signal (e.g. TERM -> 143, KILL -> 137).
+var paneSSHSignals = map[ssh.Signal]int{
+	ssh.SIGABRT: 6,
+	ssh.SIGALRM: 14,
+	ssh.SIGFPE:  8,
+	ssh.SIGHUP:  1,
+	ssh.SIGILL:  4,
+	ssh.SIGINT:  2,
+	ssh.SIGKILL: 9,
+	ssh.SIGPIPE: 13,
+	ssh.SIGQUIT: 3,
+	ssh.SIGSEGV: 11,
+	ssh.SIGTERM: 15,
+}
+
 func encodeTerminalModes(modes ssh.TerminalModes) string {
 	var tm []byte
 	for k, v := range modes {
@@ -362,20 +378,38 @@ func (s *Server) apiPaneSocket(w http.ResponseWriter, r *http.Request) {
 		}
 		reqDone := make(chan int, 1)
 		go func() {
-			exitCode := -1
+			exitStatus := -1
+			exitSignal := ""
 			for req := range reqs {
 				switch req.Type {
 				case "exit-status":
 					if len(req.Payload) >= 4 {
-						exitCode = int(binary.BigEndian.Uint32(req.Payload))
+						exitStatus = int(binary.BigEndian.Uint32(req.Payload))
 					}
 				case "exit-signal":
-					if exitCode < 0 {
-						exitCode = 1
+					var sigval struct {
+						Signal     string
+						CoreDumped bool
+						Error      string
+						Lang       string
+					}
+					if ssh.Unmarshal(req.Payload, &sigval) == nil {
+						exitSignal = sigval.Signal
 					}
 				}
 				if req.WantReply {
 					_ = req.Reply(false, nil)
+				}
+			}
+			// Match golang.org/x/crypto/ssh.Session.wait semantics:
+			// exit-status takes precedence over exit-signal; when only
+			// exit-signal was sent, map to 128 + signal number (or 128 if
+			// unknown); when neither arrived, report -1 (mapped to 1).
+			exitCode := exitStatus
+			if exitCode < 0 && exitSignal != "" {
+				exitCode = 128
+				if num, ok := paneSSHSignals[ssh.Signal(exitSignal)]; ok {
+					exitCode += num
 				}
 			}
 			reqDone <- exitCode

@@ -85,7 +85,7 @@ func (s *Server) roomyPane(ctx context.Context, sess *term.Session, pane, socket
 	}
 	lctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	res, err := sshx.Exec(lctx, sess.Client(), paneLayoutCommand(pane, socket), 64<<10, sshx.ExecOptions{Interactive: true})
+	res, err := sshx.Exec(lctx, sess.Client(), paneLayoutCommand(pane, socket), 64<<10, sshx.ExecOptions{Interactive: true, AwaitSlot: 2 * time.Second})
 	if err != nil {
 		return
 	}

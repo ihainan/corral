@@ -524,7 +524,7 @@ func (s *Server) newServerAgyTitler(sess *term.Session, socket string) *agyTitle
 	userID := sess.OwnerID
 	at := newAgyTitler(
 		func(ctx context.Context) (map[string]agyPaneTitleInfo, error) {
-			res, err := sshx.Exec(ctx, sess.Client(), agyTitlesCommand(socket), agyTitleScanMax, sshx.ExecOptions{AwaitSlot: 12 * time.Second})
+			res, err := sshx.Exec(ctx, sess.Client(), agyTitlesCommand(socket), agyTitleScanMax, sshx.ExecOptions{})
 			if err != nil {
 				return nil, err
 			}

@@ -413,7 +413,7 @@ func (s *Server) installKey(ctx context.Context, form *store.Host, keyed sshx.Ta
 	defer res.Client.Close()
 	nonce := installNonce()
 	ectx, cancel := context.WithTimeout(ctx, 20*time.Second)
-	out, err := sshx.Exec(ectx, res.Client, installKeyCommand(nonce), 64<<10, sshx.ExecOptions{Stdin: strings.NewReader(line + "\n"), Interactive: true})
+	out, err := sshx.Exec(ectx, res.Client, installKeyCommand(nonce), 64<<10, sshx.ExecOptions{Stdin: strings.NewReader(line + "\n"), Interactive: true, AwaitSlot: 2 * time.Second})
 	cancel()
 	res.Client.Close()
 	if err != nil && len(out.Out) == 0 {

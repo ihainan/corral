@@ -974,7 +974,7 @@ func takeSFTPChan(c *ssh.Client) (release func(), ok bool) {
 //     until it has really ended (its request stream closes), not merely until
 //     we gave up on it, so a host that never lets go cannot pile up channels.
 func openSFTP(ctx context.Context, c *ssh.Client) (*sftp.Client, func(), error) {
-	return openSFTPWith(ctx, c, sftpSlotWait, func(r io.Reader, w io.WriteCloser, closeAll func()) (*sftp.Client, func(), error) {
+	return openSFTPWith(ctx, c, true, sftpSlotWait, func(r io.Reader, w io.WriteCloser, closeAll func()) (*sftp.Client, func(), error) {
 		client, err := sftp.NewClientPipe(r, w)
 		if err != nil {
 			return nil, nil, err
@@ -983,9 +983,11 @@ func openSFTP(ctx context.Context, c *ssh.Client) (*sftp.Client, func(), error) 
 	})
 }
 
-// openSFTPLite is openSFTP for the file panel's quick operations.
-func openSFTPLite(ctx context.Context, c *ssh.Client) (*sftplite.Client, func(), error) {
-	return openSFTPWith(ctx, c, sftpSlotWait, func(r io.Reader, w io.WriteCloser, closeAll func()) (*sftplite.Client, func(), error) {
+// openSFTPLite is openSFTP for the file panel's quick operations and shared
+// SFTP log readers. interactive and await propagate caller priority so
+// background log polling never draws from InteractiveReserve.
+func openSFTPLite(ctx context.Context, c *ssh.Client, interactive bool, await time.Duration) (*sftplite.Client, func(), error) {
+	return openSFTPWith(ctx, c, interactive, await, func(r io.Reader, w io.WriteCloser, closeAll func()) (*sftplite.Client, func(), error) {
 		client, err := sftplite.New(r, w, closeAll)
 		if err != nil {
 			return nil, nil, err
@@ -996,9 +998,9 @@ func openSFTPLite(ctx context.Context, c *ssh.Client) (*sftplite.Client, func(),
 
 // openSFTPWith does the work of openSFTP; mk starts the client on the local
 // pipes (r: from the host, w: to it), closeAll ends them and the channel.
-func openSFTPWith[T any](ctx context.Context, c *ssh.Client, await time.Duration, mk func(r io.Reader, w io.WriteCloser, closeAll func()) (T, func(), error)) (T, func(), error) {
+func openSFTPWith[T any](ctx context.Context, c *ssh.Client, interactive bool, await time.Duration, mk func(r io.Reader, w io.WriteCloser, closeAll func()) (T, func(), error)) (T, func(), error) {
 	var zero T
-	releaseChan, err := sshx.AcquireSession(ctx, c, sshx.SessionSFTP, true, await)
+	releaseChan, err := sshx.AcquireSession(ctx, c, sshx.SessionSFTP, interactive, await)
 	if err != nil {
 		return zero, nil, err
 	}

@@ -886,7 +886,7 @@ func (t *lineageTracker) probeCandidateParents(ctx context.Context, newPanes []s
 	defer cancel()
 
 	var totalBytes int64
-	_ = t.srv.withSFTP(pctx, t.sess, lineageProbeTimeout, func(c *sftplite.Client) error {
+	_ = t.srv.withSFTPBackground(pctx, t.sess, lineageProbeTimeout, func(c *sftplite.Client) error {
 		for _, cand := range cands {
 			if pctx.Err() != nil || totalBytes >= lineageProbeMaxBytes {
 				break
