@@ -547,14 +547,19 @@ function makeRow(partial) {
   }
 }
 
-// 10. Round 4 #3 & #4: When an oversized (>4 KiB) Codex command is not upgraded
-// (kept in host plain cmds, absent from bg_agent_list), conversationRunningItems
-// and mergeRowTasks show 0 CLI duplicates alongside the plain command.
+// 10. Round 4 #3 & #4 + Round 5 #2:
+// - When an oversized (>4 KiB) Codex command is not upgraded (kept in host plain
+//   cmds, absent from bg_agent_list), conversationRunningItems and mergeRowTasks
+//   show 0 CLI duplicates alongside the plain command.
+// - When Codex code mode runs multiple commands so convo.running has Cmd="" and
+//   cmd_cut=true while herdrTasks still carries a synthetic CLI (codex-8597),
+//   both conversationRunningItems and mergeRowTasks keep only the plain command
+//   and suppress the unmatched synthetic CLI subagent.
 {
   const hugeTitle = `agy -p '${'q'.repeat(68)}…`
   const hugeCmd = `agy -p '${'q'.repeat(4200)}'`
   const hostTasks = rowTasks([], { n: 1, list: [{ task: 'codex-8597', title: hugeTitle, since: 1700000000000 }] })
-  const convoRunning = [{ id: 'call_huge_1', kind: 'cmd', what: hugeTitle, cmd: hugeCmd }]
+  const convoRunning = [{ id: 'call_huge_1', kind: 'cmd', what: hugeTitle, cmd: hugeCmd, cmd_cut: true }]
   const runningItems = conversationRunningItems(convoRunning, hostTasks)
   assert.deepEqual(
     runningItems.map((x) => [x.kind, x.agent ?? '', x.id]),
@@ -562,6 +567,21 @@ function makeRow(partial) {
   )
   const merged = mergeRowTasks(hostTasks, convoRunning)
   assert.equal(splitRowTasks(merged).cliAgents.length, 0)
+
+  const multiHostTasks = rowTasks([
+    { id: '11111111-2222-4333-8444-555555555799', what: 'agy -p audit', since: 1700000000000, agent: 'agy', task: 'codex-8597', cmd: 'agy -p audit' },
+  ])
+  const multiConvoRunning = [{ id: 'proc:37553@2026-11-27T10:02:01Z', kind: 'cmd', what: '', cmd: '', cmd_cut: true }]
+  const multiItems = conversationRunningItems(multiConvoRunning, multiHostTasks)
+  assert.deepEqual(
+    multiItems.map((x) => [x.kind, x.agent ?? '', x.id]),
+    [['cmd', '', 'proc:37553@2026-11-27T10:02:01Z']],
+  )
+  const multiMerged = mergeRowTasks(multiHostTasks, multiConvoRunning)
+  assert.deepEqual(
+    (multiMerged ?? []).map((x) => [x.kind, x.agent ?? '', x.id]),
+    [['cmd', '', 'proc:37553@2026-11-27T10:02:01Z']],
+  )
 }
 
 // 11. Read-only SubPanel wiring check:

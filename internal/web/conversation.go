@@ -2226,9 +2226,6 @@ func (s *Server) apiConversation(w http.ResponseWriter, r *http.Request) {
 			cliAgents = p.cliAgentsOf(pane, st.bind.Session)
 		}
 	}
-	if len(cliAgents) > 0 {
-		ans.BgAgentList = cliAgents[:min(len(cliAgents), maxCmdsShown)]
-	}
 	s.codexRunningOnHost(sess, st) // (before its entries are taken: steps it ends are among them)
 	s.agyRunningOnHost(sess, st)
 	if !st.sub && st.bind != nil {
@@ -2259,7 +2256,11 @@ func (s *Server) apiConversation(w http.ResponseWriter, r *http.Request) {
 	if st.agent == "agy" && len(ans.Queued) == 0 && len(st.agyQueued) > 0 && (st.status == "busy" || st.status == "") {
 		ans.Queued = st.agyQueued
 	}
-	ans.Running = upgradeRunningWithCLIs(st.parser.Running(), cliAgents)
+	var keptCLIs []bgAgent
+	ans.Running, keptCLIs = reconcileRunningWithCLIs(st.parser.Running(), cliAgents)
+	if len(keptCLIs) > 0 {
+		ans.BgAgentList = keptCLIs[:min(len(keptCLIs), maxCmdsShown)]
+	}
 	if sess.Persistence == "herdr" && pane != "" && !st.sub {
 		sig := runningSigOf(ans.Running)
 		if sig != st.runningSig {
@@ -5037,7 +5038,7 @@ func (s *Server) apiConversationSubagent(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	q := r.URL.Query()
-	if q.Get("cli_parent") != "" || q.Get("cli_chain") != "" {
+	if q.Has("cli_parent") || q.Has("cli_chain") {
 		writeError(w, http.StatusBadRequest, "bad_request", "nested cli subagents are not supported")
 		return
 	}

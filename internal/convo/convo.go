@@ -144,7 +144,7 @@ type Running struct {
 	// Of a command: the whole of it, and the file its output goes to (as
 	// Claude Code said when it set it going), to be looked at.
 	Cmd    string `json:"cmd,omitempty"`
-	CmdCut bool   `json:"-"` // true when Cmd was truncated/incomplete (disables synthetic CLI upgrade)
+	CmdCut bool   `json:"cmd_cut,omitempty"` // true when Cmd was truncated/incomplete (disables synthetic CLI upgrade)
 	Out    string `json:"out,omitempty"`
 	// Of a background command recognized as a known agent CLI (agy, claude,
 	// codex): the CLI kind and the parent background task ID it came from.

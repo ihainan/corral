@@ -35,6 +35,7 @@ export interface RunningTaskLike {
   ts?: string
   note?: string
   cmd?: string
+  cmd_cut?: boolean
   out?: string
   agent?: string
   task?: string
@@ -131,11 +132,30 @@ export function mergeRowTasks(
   // Track background command task IDs already promoted to CLI subagents so a
   // raw cmd entry from the conversation log never duplicates a promoted CLI row.
   const promotedTasks = new Set<string>()
+  const convoAgentIds = new Set<string>()
   for (const a of agents) {
     if (a.agent && a.task) promotedTasks.add(a.task)
   }
   for (const r of convoRunning ?? []) {
-    if (r.kind === 'agent' && r.agent && r.task) promotedTasks.add(r.task)
+    if (r.kind === 'agent') {
+      if (r.id) convoAgentIds.add(r.id)
+      if (r.agent && r.task) promotedTasks.add(r.task)
+    }
+  }
+  // If convoRunning still has an unupgraded plain cmd whose full command is
+  // missing/truncated (e.g. Codex code mode running multiple commands where
+  // cmd="" and cmd_cut=true), drop unmatched synthetic CLI subagents from
+  // herdrTasks so we keep only the plain command instead of duplicating both.
+  const hasOpaqueCmd = (convoRunning ?? []).some(
+    (r) => !!r.id && r.kind === 'cmd' && !promotedTasks.has(r.id) && (r.cmd_cut || !normCmd(r.cmd)),
+  )
+  if (hasOpaqueCmd) {
+    for (let i = agents.length - 1; i >= 0; i--) {
+      const a = agents[i]
+      if (a.agent && a.task && isSyntheticHostCmd(a.task) && !convoAgentIds.has(a.id)) {
+        agents.splice(i, 1)
+      }
+    }
   }
   // Drop any plain cmd from herdrTasks whose task is now promoted by convoRunning.
   for (let i = cmds.length - 1; i >= 0; i--) {
@@ -215,6 +235,7 @@ export function conversationRunningItems(
   const seenAgent = new Set<string>()
   const agents: RunningTaskLike[] = []
   const cmds: RunningTaskLike[] = []
+  let hasOpaqueCmd = false
   for (const r of convoRunning ?? []) {
     if (!r.id) continue
     if (r.kind === 'agent') {
@@ -240,10 +261,12 @@ export function conversationRunningItems(
       }
       continue
     }
+    if (r.cmd_cut || !normCmd(r.cmd)) hasOpaqueCmd = true
     cmds.push(r)
   }
   for (const x of cliFromTasks) {
     if (seenAgent.has(x.id)) continue
+    if (hasOpaqueCmd && x.task && isSyntheticHostCmd(x.task)) continue
     seenAgent.add(x.id)
     agents.push({
       id: x.id,

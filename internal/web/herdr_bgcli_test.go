@@ -804,6 +804,35 @@ func TestOversizedCodexAndMonitorRealParserNoUpgradeNoDuplicate(t *testing.T) {
 	if len(monUp) != 2 || monUp[0].Kind != "agent" || monUp[0].ID != agySIDMon || monUp[1].Kind != "cmd" || monUp[1].ID != "mon_2" {
 		t.Fatalf("monitor upgrade result = %+v", monUp)
 	}
+
+	// 4. Round 5 #2: Codex code-mode multi-command script leaves one process
+	// running with empty Cmd and CmdCut=true, while host scan finds a short
+	// complete synthetic CLI (codex-7030). reconcileRunningWithCLIs must keep
+	// only the plain command and drop the unmatched synthetic CLI from keptCLIs
+	// so the UI never displays both a plain command and a CLI subagent.
+	pMulti := convo.NewCodex()
+	pMulti.Feed([]byte(strings.Join([]string{
+		`{"timestamp":"2026-11-27T10:02:00Z","type":"response_item","payload":{"type":"custom_tool_call","status":"completed","call_id":"call_cm_multi","name":"exec","input":"await tools.exec_command({cmd:\"echo prep\"}); await tools.exec_command({cmd:\"agy -p audit\"})"}}`,
+		`{"timestamp":"2026-11-27T10:02:01Z","type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"call_cm_multi","output":[{"type":"input_text","text":"{\"chunk_id\":\"659349\",\"wall_time_seconds\":0.5,\"session_id\":37553,\"output\":\"\"}"}]}}`,
+	}, "\n") + "\n"))
+	multiRunning := pMulti.Running()
+	if len(multiRunning) != 1 || multiRunning[0].Kind != "cmd" || multiRunning[0].Cmd != "" || !multiRunning[0].CmdCut {
+		t.Fatalf("real Codex code-mode multi-cmd running = %+v, want Cmd=\"\" and CmdCut=true", multiRunning)
+	}
+	multiScan := strings.Join([]string{
+		"clock\t1700000000\t100",
+		"cmd\t7030\t4300\tcodex:" + parentThread + "\tagy -p audit",
+		"cli\t7030\t7031\tagy\t/home/u/.local/bin/agy\t" + agySIDMid + "\t" + logOf(agySIDMid) + "\t" + argv,
+	}, "\n") + "\n"
+	multiParsed, _, _ := parseCmdScanDetail(multiScan)
+	_, multiCLIs := splitBgCmds(multiParsed[parentThread])
+	if len(multiCLIs) != 1 {
+		t.Fatalf("expected 1 host CLI for short command, got %+v", multiCLIs)
+	}
+	reconciledRun, keptCLIs := reconcileRunningWithCLIs(multiRunning, multiCLIs)
+	if len(reconciledRun) != 1 || reconciledRun[0].Kind != "cmd" || len(keptCLIs) != 0 {
+		t.Fatalf("opaque Codex multi-cmd must keep plain cmd only and drop synthetic CLI: run=%+v keptCLIs=%+v", reconciledRun, keptCLIs)
+	}
 }
 
 // Round 3 review #2 & #5:
@@ -1255,6 +1284,152 @@ func TestCmdScanSubagentBudgetAndCap(t *testing.T) {
 	if capWhole || !capCut {
 		t.Fatalf("exceeding subCandPerSession (%d) must report whole=false, budgetCut=true; got whole=%v cut=%v\n%s", subCandPerSession, capWhole, capCut, capOut)
 	}
+
+	// 5. Round 5 #4: BusyBox-style find without -printf support:
+	//    - <= 16 candidates -> whole=true, budgetCut=false (all 16 returned)
+	//    - > 16 candidates -> whole=false, budgetCut=true (keep old state)
+	realFind, err := exec.LookPath("find")
+	if err != nil {
+		t.Skip("no find")
+	}
+	fakeBin := filepath.Join(home, "fakebin")
+	if err := os.MkdirAll(fakeBin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	fakeFind := filepath.Join(fakeBin, "find")
+	fakeFindScript := "#!/bin/sh\nfor a in \"$@\"; do [ \"$a\" = -printf ] && exit 1; done\nexec " + sshx.QuoteShell(realFind) + " \"$@\"\n"
+	if err := os.WriteFile(fakeFind, []byte(fakeFindScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	const busySess = "99999999-1111-4222-8333-444444444477"
+	busyDir := filepath.Join(home, ".claude", "projects", "-home-u-proj", busySess, "subagents")
+	if err := os.MkdirAll(busyDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeSub := func(idx int) {
+		id := fmt.Sprintf("subbusy%02d", idx)
+		if err := os.WriteFile(filepath.Join(busyDir, "agent-"+id+".jsonl"), []byte(`{"version":"2.1.331"}`+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(busyDir, "agent-"+id+".meta.json"), []byte(`{"requestShape":"background","description":"Task"}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := 0; i < subsScanned; i++ {
+		writeSub(i)
+	}
+	busyEnv := append(os.Environ(), "HOME="+home, "PATH="+fakeBin+":"+os.Getenv("PATH"))
+	busy16Cmd := exec.Command("sh", "-c", cmdScanCommand("s:"+busySess))
+	busy16Cmd.Env = busyEnv
+	busy16Out, err := busy16Cmd.Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, b16Whole, b16Cut := parseCmdScanDetail(string(busy16Out))
+	if !b16Whole || b16Cut {
+		t.Fatalf("BusyBox fallback with 16 candidates must be whole=true, budgetCut=false; got whole=%v cut=%v\n%s", b16Whole, b16Cut, busy16Out)
+	}
+	if got := parseBgSubScan(string(busy16Out))[busySess]; len(got) != subsScanned {
+		t.Fatalf("BusyBox fallback with 16 candidates got %d subs, want %d", len(got), subsScanned)
+	}
+	writeSub(subsScanned) // 17th candidate
+	busy17Cmd := exec.Command("sh", "-c", cmdScanCommand("s:"+busySess))
+	busy17Cmd.Env = busyEnv
+	busy17Out, err := busy17Cmd.Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, b17Whole, b17Cut := parseCmdScanDetail(string(busy17Out))
+	if b17Whole || !b17Cut {
+		t.Fatalf("BusyBox fallback with 17 candidates (>16) must report whole=false, budgetCut=true; got whole=%v cut=%v\n%s", b17Whole, b17Cut, busy17Out)
+	}
+}
+
+// Round 5 #3: scan_cmd_tree hitting either its 16-level depth cap or 64-node
+// cap with unvisited processes remaining MUST emit "budget" (whole=false,
+// budgetCut=true) so cmdProber retains previous CLI subagent state.
+func TestCmdScanTreeLimitMarksBudgetCut(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("reads /proc")
+	}
+	sh, err := exec.LookPath("sh")
+	if err != nil {
+		t.Skip("no sh")
+	}
+
+	runCase := func(t *testing.T, sessID, taskID, body string, expectedLines int) {
+		t.Helper()
+		home := t.TempDir()
+		binDir := filepath.Join(home, "bin")
+		tasksDir := filepath.Join(home, "tmp", "claude-1000", "-home-u-proj", sessID, "tasks")
+		for _, d := range []string{binDir, tasksDir} {
+			if err := os.MkdirAll(d, 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		fakeClaude := filepath.Join(binDir, "claude")
+		if err := os.Symlink(sh, fakeClaude); err != nil {
+			t.Fatal(err)
+		}
+		outFile := filepath.Join(tasksDir, taskID+".output")
+		pidFile := filepath.Join(home, "pids.txt")
+		proc := exec.Command(fakeClaude, "-c", `sh -c "$1" bgwrap "$2" > "$3" & wait`, "claude", body, pidFile, outFile)
+		if err := proc.Start(); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() {
+			if b, err := os.ReadFile(pidFile); err == nil {
+				for _, f := range strings.Fields(string(b)) {
+					if pid, err := strconv.Atoi(f); err == nil && pid > 1 {
+						_ = syscall.Kill(pid, syscall.SIGKILL)
+					}
+				}
+			}
+			_ = proc.Process.Kill()
+			_ = proc.Wait()
+		})
+		// Wait until all spawned PIDs have recorded themselves.
+		for i := 0; i < 60; i++ {
+			if b, err := os.ReadFile(pidFile); err == nil && len(strings.Fields(string(b))) >= expectedLines {
+				break
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+		var lastOut string
+		var whole, budgetCut bool
+		for i := 0; i < 20; i++ {
+			cmd := exec.Command("sh", "-c", cmdScanCommand("s:"+sessID))
+			cmd.Env = append(os.Environ(), "HOME="+home)
+			out, err := cmd.Output()
+			if err != nil {
+				t.Fatal(err)
+			}
+			lastOut = string(out)
+			_, whole, budgetCut = parseCmdScanDetail(lastOut)
+			if !whole && budgetCut {
+				return
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+		t.Fatalf("expected scan_cmd_tree limit to report whole=false, budgetCut=true; got whole=%v budgetCut=%v\n%s", whole, budgetCut, lastOut)
+	}
+
+	t.Run("depth_gt_16", func(t *testing.T) {
+		// Recursive helper script creates an 18-level process chain (depth > 16).
+		chainPath := filepath.Join(t.TempDir(), "chain.sh")
+		chainScript := "#!/bin/sh\necho $$ >> \"$2\"\nif [ \"$1\" -le 0 ]; then\n  sleep 30 & echo $! >> \"$2\"\n  wait\nelse\n  \"$0\" $(($1 - 1)) \"$2\" & wait\nfi\n"
+		if err := os.WriteFile(chainPath, []byte(chainScript), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		body := `echo $$ >> "$1"; ` + sshx.QuoteShell(chainPath) + ` 17 "$1" & wait`
+		runCase(t, "99999999-1111-4222-8333-444444444501", "bdepth01", body, 20)
+	})
+
+	t.Run("nodes_gt_64", func(t *testing.T) {
+		// Spawn 66 sleep children under the background shell (total nodes = 67 > 64).
+		body := `echo $$ >> "$1"; i=0; while [ "$i" -lt 66 ]; do sleep 30 & echo $! >> "$1"; i=$((i + 1)); done; wait`
+		runCase(t, "99999999-1111-4222-8333-444444444502", "bnodes01", body, 67)
+	})
 }
 
 // HTTP + SFTP integration test for GET /api/sessions/{id}/conversation/subagent:
@@ -1364,7 +1539,8 @@ func TestApiConversationSubagentBgCLI(t *testing.T) {
 	res404 := admin.do("GET", "/api/sessions/"+sessID+"/conversation/subagent?pane=w1:p1&agent="+unknownUUID+"&cli=agy&gen=0&rev=0", nil)
 	mustStatus(t, res404, http.StatusNotFound, "unverified agy sid")
 
-	// 3. Any request with cli_parent or cli_chain MUST return 400 Bad Request.
+	// 3. Any request with cli_parent or cli_chain (including empty or repeated
+	//    with empty first value) MUST return 400 Bad Request.
 	for _, tc := range []struct {
 		name string
 		q    string
@@ -1374,6 +1550,10 @@ func TestApiConversationSubagentBgCLI(t *testing.T) {
 		{"cli_chain with cli=codex", "pane=w1:p1&agent=" + unknownUUID + "&cli=codex&cli_chain=" + codexSID + "&gen=0&rev=0"},
 		{"cli_parent without cli", "pane=w1:p1&agent=" + nestedSubID + "&cli_parent=" + claudeSID + "&gen=0&rev=0"},
 		{"cli_chain without cli", "pane=w1:p1&agent=" + nestedSubID + "&cli_chain=hop1&gen=0&rev=0"},
+		{"empty cli_parent with cli=agy", "pane=w1:p1&agent=" + agySID + "&cli=agy&cli_parent=&gen=0&rev=0"},
+		{"empty cli_chain with cli=agy", "pane=w1:p1&agent=" + agySID + "&cli=agy&cli_chain=&gen=0&rev=0"},
+		{"repeated cli_parent starting empty", "pane=w1:p1&agent=" + agySID + "&cli=agy&cli_parent=&cli_parent=" + agySID + "&gen=0&rev=0"},
+		{"empty cli_parent without cli", "pane=w1:p1&agent=" + nestedSubID + "&cli_parent=&gen=0&rev=0"},
 	} {
 		res400 := admin.do("GET", "/api/sessions/"+sessID+"/conversation/subagent?"+tc.q, nil)
 		mustStatus(t, res400, http.StatusBadRequest, tc.name)

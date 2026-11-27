@@ -657,7 +657,10 @@ _sc_find_sub() {
     find "$1" -maxdepth 1 -name 'agent-*.jsonl' -mmin -360 -printf '%T@\t%p\n' 2>/dev/null |
       sort -rn | cut -f2-
   else
-    find "$1" -maxdepth 1 -name 'agent-*.jsonl' -mmin -360 2>/dev/null
+    # Fallback without GNU find -printf (e.g. BusyBox): cannot sort by mtime, so
+    # report incomplete once candidates exceed subsScanned (16) to keep old state.
+    find "$1" -maxdepth 1 -name 'agent-*.jsonl' -mmin -360 2>/dev/null |
+      awk -v maxn=` + strconv.Itoa(subsScanned) + ` 'NR > maxn { print "UNSORTED_CAP"; exit } { print }'
   fi
 }
 btime=$(sed -n 's/^btime \([0-9]*\)$/\1/p' /proc/stat 2>/dev/null); hz=$(getconf CLK_TCK 2>/dev/null)
@@ -743,9 +746,12 @@ scan_cmd_tree() {
     for _bt_p in $_bt_q; do
       [ "$_sc_bcut" = 0 ] || break
       case $_bt_vis in *" $_bt_p "*) continue;; esac
+      if [ "$_bt_cnt" -ge 64 ]; then
+        _sc_mark_budget
+        break
+      fi
       _bt_vis="$_bt_vis$_bt_p "
       _bt_cnt=$((_bt_cnt + 1))
-      [ "$_bt_cnt" -le 64 ] || break
       [ -O "/proc/$_bt_p" ] || continue
       _bt_comm=$(head -c 64 "/proc/$_bt_p/comm" 2>/dev/null | tr -d '\r\n\t')
       _bt_exe=$(readlink "/proc/$_bt_p/exe" 2>/dev/null | tr -d '\r\n\t')
@@ -807,6 +813,9 @@ scan_cmd_tree() {
     done
     _bt_q=$_bt_next
   done
+  if [ "$_sc_bcut" = 0 ] && [ -n "$_bt_q" ]; then
+    _sc_mark_budget
+  fi
 }
 # Priority 1: plain background commands (cmd / anc / bgid / desc).
 seen=
@@ -935,7 +944,7 @@ done
       _sc_find_sub "$d" |
         awk -v s="$s" -v maxn=` + strconv.Itoa(subCandPerSession) + ` -v maxb=` + strconv.Itoa(subCandBytesPerSession) + ` '{
           b += length($0) + 1
-          if (NR > maxn || b > maxb) {
+          if ($0 == "UNSORTED_CAP" || NR > maxn || b > maxb) {
             print "CAP\t"
             exit
           }
@@ -1596,8 +1605,21 @@ func exactBgCmdMatch(r convo.Running, grp []bgAgent) bool {
 // background CLI subagent into a kind="agent" entry carrying the CLI kind,
 // session ID, and host background task ID.
 func upgradeRunningWithCLIs(running []convo.Running, cliAgents []bgAgent) []convo.Running {
-	if len(running) == 0 || len(cliAgents) == 0 {
-		return running
+	out, _ := reconcileRunningWithCLIs(running, cliAgents)
+	return out
+}
+
+// reconcileRunningWithCLIs upgrades matching running commands to CLI subagents
+// AND filters cliAgents to avoid emitting unmatched synthetic CLI entries
+// alongside unupgraded opaque/truncated or ambiguous plain commands (e.g.
+// Codex code-mode multi-command calls where log-side Cmd is empty and CmdCut
+// is true).
+func reconcileRunningWithCLIs(running []convo.Running, cliAgents []bgAgent) ([]convo.Running, []bgAgent) {
+	if len(cliAgents) == 0 {
+		return running, nil
+	}
+	if len(running) == 0 {
+		return running, cliAgents
 	}
 	byTask := map[string][]bgAgent{}
 	var synthOrder []string
@@ -1615,12 +1637,13 @@ func upgradeRunningWithCLIs(running []convo.Running, cliAgents []bgAgent) []conv
 		}
 	}
 	if len(byTask) == 0 {
-		return running
+		return running, cliAgents
 	}
 
 	// Pre-compute 1-to-1 exact-text matches for synthetic host tasks so we never
 	// upgrade on substring containment or ambiguous multi-candidate matches.
 	matchedByIdx := map[int][]bgAgent{}
+	matchedTasks := map[string]bool{}
 	runCands := map[int][]string{}
 	synthCands := map[string][]int{}
 	for i, r := range running {
@@ -1629,6 +1652,7 @@ func upgradeRunningWithCLIs(running []convo.Running, cliAgents []bgAgent) []conv
 		}
 		if grp := byTask[r.ID]; len(grp) > 0 {
 			matchedByIdx[i] = grp
+			matchedTasks[r.ID] = true
 			continue
 		}
 		if len(synthOrder) == 0 {
@@ -1644,9 +1668,11 @@ func upgradeRunningWithCLIs(running []convo.Running, cliAgents []bgAgent) []conv
 	for i, tasks := range runCands {
 		if len(tasks) == 1 && len(synthCands[tasks[0]]) == 1 {
 			matchedByIdx[i] = synthByTask[tasks[0]]
+			matchedTasks[tasks[0]] = true
 		}
 	}
 
+	hasOpaqueCmd := false
 	out := make([]convo.Running, 0, len(running))
 	for i, r := range running {
 		if r.Kind != "cmd" {
@@ -1655,6 +1681,9 @@ func upgradeRunningWithCLIs(running []convo.Running, cliAgents []bgAgent) []conv
 		}
 		matched := matchedByIdx[i]
 		if len(matched) == 0 {
+			if r.CmdCut || normBgCmdText(r.Cmd) == "" {
+				hasOpaqueCmd = true
+			}
 			out = append(out, r)
 			continue
 		}
@@ -1686,7 +1715,15 @@ func upgradeRunningWithCLIs(running []convo.Running, cliAgents []bgAgent) []conv
 			})
 		}
 	}
-	return out
+
+	var keptCLIs []bgAgent
+	for _, a := range cliAgents {
+		if isSyntheticBgTask(a.Task) && !matchedTasks[a.Task] && (hasOpaqueCmd || len(synthCands[a.Task]) > 0) {
+			continue
+		}
+		keptCLIs = append(keptCLIs, a)
+	}
+	return out, keptCLIs
 }
 
 func cleanBgCmdText(s string) string {

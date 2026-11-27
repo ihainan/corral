@@ -188,6 +188,7 @@ export interface ConvoRunning {
   ts?: string
   note?: string // (the latest it has said of itself)
   cmd?: string // (a command: the whole of it)
+  cmd_cut?: boolean // (true when cmd is truncated/incomplete)
   out?: string // (a command: the file its output goes to, on the host)
   agent?: string // (a background CLI subagent: 'agy' | 'claude' | 'codex')
   task?: string // (the parent background command's task id it was promoted from)
