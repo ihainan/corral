@@ -85,8 +85,10 @@ func registerTestMethods(s *Server) {
 		return ev, nil
 	})
 
-	// test.write exercises Mutating + OpTable idempotency across requests/handoffs.
-	s.Register("test.write", MethodOptions{Mutating: true}, func(_ context.Context, _ *Conn, raw json.RawMessage) (any, *proto.RPCError) {
+	// test.write uses MethodOptions{Mutating: true, Idempotent: true} so
+	// dispatchRequest atomically admits and registers op_id under stateMu BEFORE
+	// this handler even starts executing.
+	s.Register("test.write", MethodOptions{Mutating: true, Idempotent: true}, func(_ context.Context, _ *Conn, raw json.RawMessage) (any, *proto.RPCError) {
 		var p struct {
 			OpID    string `json:"op_id"`
 			Value   string `json:"value"`
@@ -95,18 +97,15 @@ func registerTestMethods(s *Server) {
 		if err := json.Unmarshal(raw, &p); err != nil {
 			return nil, &proto.RPCError{Code: proto.ErrInvalidParams, Message: err.Error()}
 		}
-		return s.Ops().Execute(p.OpID, func() (json.RawMessage, *proto.RPCError) {
-			if p.DelayMS > 0 {
-				// Deliberately sleep without honoring ctx to test hard exit cap
-				// and timed-out write handoff behavior.
-				time.Sleep(time.Duration(p.DelayMS) * time.Millisecond)
-			}
-			b, _ := json.Marshal(map[string]any{
-				"op_id": p.OpID,
-				"value": p.Value,
-				"pid":   os.Getpid(),
-			})
-			return b, nil
-		})
+		if p.DelayMS > 0 {
+			// Deliberately sleep without honoring ctx to test hard exit cap
+			// and timed-out write handoff behavior.
+			time.Sleep(time.Duration(p.DelayMS) * time.Millisecond)
+		}
+		return map[string]any{
+			"op_id": p.OpID,
+			"value": p.Value,
+			"pid":   os.Getpid(),
+		}, nil
 	})
 }

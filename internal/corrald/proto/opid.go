@@ -11,9 +11,21 @@ import (
 )
 
 // OpDedupWindow is the protocol-defined deduplication window for mutating RPC
-// op_id values. Both the gateway (which generates op_ids) and corrald (which
-// enforces at-most-once execution) agree on this window. Any op_id older than
-// OpDedupWindow is rejected with ErrOpExpired instead of being re-executed.
+// op_id values within a single daemon epoch.
+//
+// Deduplication scope contract (enforced jointly by corrald and the gateway):
+//   - Within the same daemon epoch (including across clean zero-gap hot updates
+//     that preserve epoch and transfer the OpTable and eviction watermark),
+//     corrald guarantees at-most-once execution per op_id: duplicates return
+//     in_progress, op_unknown (if still in flight across handoff), the cached
+//     first result, or op_expired (if older than OpDedupWindow or evicted by
+//     capacity pressure).
+//   - Across a daemon cold restart or epoch rotation, daemon.hello returns a
+//     new epoch. Whenever the gateway reconnects and observes a changed epoch,
+//     it MUST treat any previously unacknowledged mutating RPC from the old
+//     epoch as outcome-unknown and MUST NOT retry it with the same op_id.
+//   - On cold start, corrald begins a fresh epoch with an empty in-memory
+//     OpTable and treats any valid non-expired op_id as a new request.
 const OpDedupWindow = 30 * time.Minute
 
 // OpMaxClockSkew is the maximum forward clock skew tolerated between the

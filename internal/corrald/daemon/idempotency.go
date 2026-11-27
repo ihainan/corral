@@ -34,7 +34,7 @@ type OpSnapshotEntry struct {
 
 // OpTableSnapshot captures all tracked op_id records plus the eviction
 // watermark so post-handoff retries of evicted or in-flight ops are never
-// re-executed.
+// re-executed within the same epoch.
 type OpTableSnapshot struct {
 	Entries           []OpSnapshotEntry `json:"entries,omitempty"`
 	MinValidCreatedAt time.Time         `json:"min_valid_created_at,omitempty"`
@@ -49,8 +49,8 @@ type opEntry struct {
 	completedAt time.Time
 }
 
-// OpTable guarantees at-most-once execution for mutating RPCs keyed by a
-// protocol-formatted timestamped op_id ("<unix_ms>-<token>").
+// OpTable guarantees at-most-once execution within a daemon epoch for mutating
+// RPCs keyed by a protocol-formatted timestamped op_id ("<unix_ms>-<token>").
 //
 //   - Invalid/missing op_id -> invalid_params.
 //   - op_id older than the dedup window (or older than the capacity-eviction
@@ -84,73 +84,90 @@ func NewOpTable(capacity int, ttl time.Duration) *OpTable {
 	}
 }
 
-// Execute runs fn at most once for opID.
-func (t *OpTable) Execute(opID string, fn func() (json.RawMessage, *proto.RPCError)) (json.RawMessage, *proto.RPCError) {
+// Begin validates opID and atomically registers it as in-progress if it has not
+// been seen before.
+//
+//   - If admitted == true: caller MUST invoke Finish(opID, res, rpcErr) once done.
+//   - If admitted == false: caller MUST NOT execute the operation and should
+//     return (cachedRes, cachedErr) directly.
+func (t *OpTable) Begin(opID string) (admitted bool, cachedRes json.RawMessage, cachedErr *proto.RPCError) {
 	createdAt, err := proto.ParseOpID(opID)
 	if err != nil {
-		return nil, &proto.RPCError{
+		return false, nil, &proto.RPCError{
 			Code:    proto.ErrInvalidParams,
 			Message: "invalid or missing op_id (expected <unix_ms>-<token>)",
 		}
 	}
 
 	t.mu.Lock()
+	defer t.mu.Unlock()
 	now := t.nowFn().UTC()
 	t.pruneLocked(now)
 
 	if existing, ok := t.entries[opID]; ok {
 		if existing.inProgress {
-			t.mu.Unlock()
-			return nil, &proto.RPCError{
+			return false, nil, &proto.RPCError{
 				Code:      proto.ErrInProgress,
 				Message:   "operation already in progress",
 				Retryable: true,
 			}
 		}
 		if existing.unknown {
-			t.mu.Unlock()
-			return nil, &proto.RPCError{
+			return false, nil, &proto.RPCError{
 				Code:    proto.ErrOpUnknown,
 				Message: "operation was in progress during handoff; outcome unknown",
 			}
 		}
-		res := cloneRaw(existing.result)
-		errCopy := cloneRPCError(existing.rpcErr)
-		t.mu.Unlock()
-		return res, errCopy
+		return false, cloneRaw(existing.result), cloneRPCError(existing.rpcErr)
 	}
 
-	// Reject op_ids older than the protocol deduplication window or older than
-	// any record evicted by capacity pressure so an evicted op can never be
-	// silently re-executed.
 	if now.Sub(createdAt) > t.ttl {
-		t.mu.Unlock()
-		return nil, &proto.RPCError{
+		return false, nil, &proto.RPCError{
 			Code:    proto.ErrOpExpired,
 			Message: "op_id is older than the deduplication window",
 		}
 	}
 	if !t.minValidCreatedAt.IsZero() && !createdAt.After(t.minValidCreatedAt) {
-		t.mu.Unlock()
-		return nil, &proto.RPCError{
+		return false, nil, &proto.RPCError{
 			Code:    proto.ErrOpExpired,
 			Message: "op_id predates deduplication retention watermark",
 		}
 	}
 	if createdAt.Sub(now) > proto.OpMaxClockSkew {
-		t.mu.Unlock()
-		return nil, &proto.RPCError{
+		return false, nil, &proto.RPCError{
 			Code:    proto.ErrInvalidParams,
 			Message: "op_id timestamp is too far in the future",
 		}
 	}
 
-	entry := &opEntry{
+	t.entries[opID] = &opEntry{
 		inProgress: true,
 		createdAt:  createdAt,
 	}
-	t.entries[opID] = entry
-	t.mu.Unlock()
+	return true, nil, nil
+}
+
+// Finish records the terminal outcome of an opID previously admitted by Begin.
+func (t *OpTable) Finish(opID string, res json.RawMessage, rpcErr *proto.RPCError) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	entry, ok := t.entries[opID]
+	if !ok {
+		return
+	}
+	entry.inProgress = false
+	entry.result = cloneRaw(res)
+	entry.rpcErr = cloneRPCError(rpcErr)
+	entry.completedAt = t.nowFn().UTC()
+	t.pruneLocked(entry.completedAt)
+}
+
+// Execute runs fn at most once for opID.
+func (t *OpTable) Execute(opID string, fn func() (json.RawMessage, *proto.RPCError)) (json.RawMessage, *proto.RPCError) {
+	admitted, cachedRes, cachedErr := t.Begin(opID)
+	if !admitted {
+		return cachedRes, cachedErr
+	}
 
 	var (
 		res    json.RawMessage
@@ -168,21 +185,12 @@ func (t *OpTable) Execute(opID string, fn func() (json.RawMessage, *proto.RPCErr
 		res, rpcErr = fn()
 	}()
 
-	t.mu.Lock()
-	entry.inProgress = false
-	entry.result = cloneRaw(res)
-	entry.rpcErr = cloneRPCError(rpcErr)
-	entry.completedAt = t.nowFn().UTC()
-	t.pruneLocked(entry.completedAt)
-	t.mu.Unlock()
-
+	t.Finish(opID, res, rpcErr)
 	return cloneRaw(res), cloneRPCError(rpcErr)
 }
 
 // Snapshot returns all completed AND currently in-flight operations (marked
 // state="unknown") along with the eviction watermark for hot-update handoff.
-// Including in-flight operations guarantees that a write exceeding the drain
-// window on v1 cannot be re-executed on v2.
 func (t *OpTable) Snapshot() OpTableSnapshot {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -289,8 +297,6 @@ func (t *OpTable) pruneLocked(now time.Time) {
 	if len(retained) <= t.capacity {
 		return
 	}
-	// Evict by oldest createdAt so advancing minValidCreatedAt never creates
-	// gaps that could admit an evicted op_id while keeping newer ones.
 	sort.Slice(retained, func(i, j int) bool {
 		if !retained[i].createdAt.Equal(retained[j].createdAt) {
 			return retained[i].createdAt.Before(retained[j].createdAt)

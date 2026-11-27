@@ -967,7 +967,7 @@ func TestIntegrationHandoffRejectsCorruptSnapshot(t *testing.T) {
 	defer readyR.Close()
 
 	// Write truncated JSON and close write end.
-	_, _ = stateW.WriteString(`{"schema":1,"epoch":"abc","events":[`)
+	_, _ = stateW.WriteString(`{"schema":2,"epoch":"abc","events":[`)
 	_ = stateW.Close()
 
 	cmd := exec.Command(bins.v2, "serve", "--gateway", "gw.corrupt", "--foreground", "--handoff", "--state-fd=3", "--ready-fd=4")
@@ -991,6 +991,55 @@ func TestIntegrationHandoffRejectsCorruptSnapshot(t *testing.T) {
 	}
 	if parseKV(out.String())["error"] != "snapshot_invalid" {
 		t.Fatalf("expected error=snapshot_invalid, got:\n%s", out.String())
+	}
+}
+
+func TestIntegrationHandoffRejectsSchema1Snapshot(t *testing.T) {
+	// Round-2 Item 12: Snapshot schema bumped to 2; valid JSON with schema=1
+	// MUST be rejected with snapshot_invalid and MUST NOT emit READY.
+	bins := getTestBinaries(t)
+	home := t.TempDir()
+	const mid = "121212121212"
+	stateDir := filepath.Join(home, ".local", "state", "corral", "corrald", mid)
+	if err := os.MkdirAll(stateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	stateR, stateW, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	readyR, readyW, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stateR.Close()
+	defer readyR.Close()
+
+	_, _ = stateW.WriteString(`{"schema":1,"epoch":"old","last_seq":1,"events":[],"clients":[]}`)
+	_ = stateW.Close()
+
+	cmd := exec.Command(bins.v2, "serve", "--gateway", "gw.s1", "--foreground", "--handoff", "--state-fd=3", "--ready-fd=4")
+	cmd.Env = []string{"HOME=" + home, "PATH=/usr/bin:/bin", "CORRALD_TEST_MACHINE_ID=" + mid}
+	cmd.ExtraFiles = []*os.File{stateR, readyW}
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &out
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	_ = readyW.Close()
+
+	readyOut, _ := io.ReadAll(readyR)
+	waitErr := cmd.Wait()
+	if waitErr == nil {
+		t.Fatalf("expected non-zero exit for schema=1 snapshot, got 0 (ready=%q out=%q)", readyOut, out.String())
+	}
+	if strings.HasPrefix(string(readyOut), "READY") {
+		t.Fatalf("schema=1 snapshot unexpectedly emitted READY: %q", readyOut)
+	}
+	if parseKV(out.String())["error"] != "snapshot_invalid" {
+		t.Fatalf("expected error=snapshot_invalid for schema=1, got:\n%s", out.String())
 	}
 }
 
@@ -1317,14 +1366,13 @@ func TestIntegrationSharedLockPreventsNFSRace(t *testing.T) {
 		done <- cliRes{out: out, code: code}
 	}()
 
-	// Wait until Machine A has removed its own StateDir and is waiting on SharedLock.
+	// Round-2 Item 5: While uninstall waits on SharedLock, Machine A MUST NOT
+	// have deleted its StateDir or tombstone yet!
 	stateA := filepath.Join(sharedHome, ".local", "state", "corral", "corrald", midA)
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		if _, err := os.Lstat(stateA); os.IsNotExist(err) {
-			break
-		}
-		time.Sleep(20 * time.Millisecond)
+	time.Sleep(120 * time.Millisecond)
+	if _, err := os.Lstat(stateA); err != nil {
+		_ = sharedLock.Release()
+		t.Fatalf("Machine A deleted StateDir before acquiring SharedLock: %v", err)
 	}
 
 	// Simulate Machine B finishing install under SharedLock right before releasing it!
@@ -1348,6 +1396,53 @@ func TestIntegrationSharedLockPreventsNFSRace(t *testing.T) {
 	}
 	if _, err := os.Lstat(installedBin); err != nil {
 		t.Fatalf("shared symlink was deleted despite concurrent Machine B install: %v", err)
+	}
+	if _, err := os.Lstat(stateA); !os.IsNotExist(err) {
+		t.Fatal("Machine A StateDir was not deleted after shared check")
+	}
+}
+
+func TestIntegrationUninstallWithoutInstallJSONPreservesSharedAndReturnsPartial(t *testing.T) {
+	// Round-2 Item 13: When install.json is missing/corrupt, uninstall MUST NOT
+	// delete shared program directories, symlink, or README.txt; it removes only
+	// this machine's StateDir and reports result=partial with left= entries.
+	bins := getTestBinaries(t)
+	home := t.TempDir()
+	const mid = "131313131313"
+	env := []string{"CORRALD_TEST_MACHINE_ID=" + mid}
+
+	stage := stageBinary(t, home, mid, "op1", bins.v1)
+	if out, code := runCLI(t, filepath.Join(stage, "corrald"), home, env,
+		"install", "--stage", stage, "--op", "op1", "--gateway", "gw.noinst", "--by", "alice"); code != 0 {
+		t.Fatalf("install: %s", out)
+	}
+	installedBin := filepath.Join(home, ".local", "lib", "corral", "corrald")
+	readmePath := filepath.Join(home, ".local", "lib", "corral", "README.txt")
+	verDir := filepath.Join(home, ".local", "lib", "corral", "corrald-0.1.0-100")
+	stateDir := filepath.Join(home, ".local", "state", "corral", "corrald", mid)
+
+	// Remove install.json to simulate missing manifest.
+	if err := os.Remove(filepath.Join(stateDir, "install.json")); err != nil {
+		t.Fatal(err)
+	}
+
+	out, code := runCLI(t, installedBin, home, env, "uninstall")
+	kv := parseKV(out)
+	if code == 0 || kv["result"] != "partial" {
+		t.Fatalf("expected result=partial when install.json missing, got code=%d:\n%s", code, out)
+	}
+	// StateDir must be deleted.
+	if _, err := os.Lstat(stateDir); !os.IsNotExist(err) {
+		t.Fatal("StateDir should still be removed when install.json is missing")
+	}
+	// Shared symlink, version dir, and README.txt MUST be preserved and listed in left=!
+	for _, preserved := range []string{installedBin, readmePath, verDir} {
+		if _, err := os.Lstat(preserved); err != nil {
+			t.Fatalf("shared path %s was deleted without install.json: %v", preserved, err)
+		}
+		if !strings.Contains(out, "left="+preserved+"\t") {
+			t.Fatalf("preserved path %s not listed in left=:\n%s", preserved, out)
+		}
 	}
 }
 

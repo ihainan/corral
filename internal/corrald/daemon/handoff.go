@@ -24,7 +24,9 @@ import (
 )
 
 // HandoffSnapshotSchema is the current handoff state snapshot format version.
-const HandoffSnapshotSchema = 1
+// Version 2 carries OpTableSnapshot ("ops") and ForceNewEpoch. Snapshots with
+// any other schema version are rejected so incompatible upgrades fail closed.
+const HandoffSnapshotSchema = 2
 
 const (
 	// MaxHandoffSnapshotBytes bounds serialized handoff snapshots sent over the
@@ -40,19 +42,20 @@ const (
 // HandoffSnapshot is streamed from v1 to v2 over the inherited state pipe
 // during a zero-gap hot update (spec §6).
 type HandoffSnapshot struct {
-	Schema       int                        `json:"schema"`
-	Epoch        string                     `json:"epoch"`
-	LastSeq      uint64                     `json:"last_seq"`
-	Events       []proto.Event              `json:"events"`
-	Clients      []proto.ClientInfo         `json:"clients"`
-	Ops          OpTableSnapshot            `json:"ops"`
-	Modules      map[string]json.RawMessage `json:"modules,omitempty"`
-	SocketPath   string                     `json:"socket_path"`
-	Gateway      string                     `json:"gateway"`
-	OldPID       int                        `json:"old_pid"`
-	OldStartTime string                     `json:"old_start_time,omitempty"`
-	OldVersion   string                     `json:"old_version"`
-	OldRelease   int64                      `json:"old_release"`
+	Schema        int                        `json:"schema"`
+	Epoch         string                     `json:"epoch"`
+	LastSeq       uint64                     `json:"last_seq"`
+	ForceNewEpoch bool                       `json:"force_new_epoch,omitempty"`
+	Events        []proto.Event              `json:"events"`
+	Clients       []proto.ClientInfo         `json:"clients"`
+	Ops           OpTableSnapshot            `json:"ops"`
+	Modules       map[string]json.RawMessage `json:"modules,omitempty"`
+	SocketPath    string                     `json:"socket_path"`
+	Gateway       string                     `json:"gateway"`
+	OldPID        int                        `json:"old_pid"`
+	OldStartTime  string                     `json:"old_start_time,omitempty"`
+	OldVersion    string                     `json:"old_version"`
+	OldRelease    int64                      `json:"old_release"`
 }
 
 // BuildBoundedSnapshot marshals snap within maxBytes. If the serialized
@@ -71,7 +74,6 @@ func BuildBoundedSnapshot(snap HandoffSnapshot, maxBytes int) ([]byte, error) {
 		return b, nil
 	}
 
-	// Binary search the maximum suffix of snap.Events that fits in maxBytes.
 	events := snap.Events
 	lo, hi := 0, len(events)
 	var best []byte
@@ -101,12 +103,12 @@ func BuildBoundedSnapshot(snap HandoffSnapshot, maxBytes int) ([]byte, error) {
 }
 
 type cutoverBackup struct {
-	hasSymlink bool
-	symlink    string
-	hasInstall bool
-	install    []byte
-	hasReadme  bool
-	readme     []byte
+	hasSymlink  bool
+	symlink     string
+	hasInstall  bool
+	origVersion string
+	origRelease int64
+	origCommit  string
 }
 
 func captureCutoverBackup(layout *Layout) cutoverBackup {
@@ -115,30 +117,102 @@ func captureCutoverBackup(layout *Layout) cutoverBackup {
 		bk.hasSymlink = true
 		bk.symlink = target
 	}
-	if b, err := os.ReadFile(layout.InstallJSON); err == nil {
+	if rec, err := ReadInstallRecord(layout.InstallJSON); err == nil {
 		bk.hasInstall = true
-		bk.install = b
-	}
-	if b, err := os.ReadFile(layout.ReadmePath); err == nil {
-		bk.hasReadme = true
-		bk.readme = b
+		bk.origVersion = rec.Version
+		bk.origRelease = rec.Release
+		bk.origCommit = rec.Commit
 	}
 	return bk
 }
 
-func restoreCutoverBackup(layout *Layout, bk cutoverBackup, meta *MetaRecord) {
-	if bk.hasSymlink {
-		_ = AtomicSymlink(bk.symlink, layout.CurrentSymlink)
+// compareAndRestoreCutoverLocked compares persistent files against the values
+// written by the failed handoff candidate (expectedNewSymlink / expectedNewPID
+// / expectedNewRelease) and restores ONLY entries that still match those
+// candidate values. Any newer update written concurrently by another machine or
+// install is preserved untouched. Caller must hold SharedLock (if LibDir
+// exists) and OpLock (if StateDir exists).
+func compareAndRestoreCutoverLocked(
+	layout *Layout,
+	bk cutoverBackup,
+	v1Meta *MetaRecord,
+	expectedNewSymlink string,
+	expectedNewPID int,
+	expectedNewRelease int64,
+	forceMetaEpochUpdate bool,
+) error {
+	var errs []string
+	revertedGlobal := false
+
+	// 1. Symlink: compare current target against expectedNewSymlink before restoring.
+	if expectedNewSymlink != "" {
+		if curLink, err := os.Readlink(layout.CurrentSymlink); err == nil && curLink == expectedNewSymlink {
+			if bk.hasSymlink {
+				if aerr := AtomicSymlink(bk.symlink, layout.CurrentSymlink); aerr != nil {
+					errs = append(errs, fmt.Sprintf("restore symlink: %v", aerr))
+				} else {
+					revertedGlobal = true
+				}
+			} else {
+				// Symlink did not exist before cutover; remove the newly created link.
+				if rerr := os.Remove(layout.CurrentSymlink); rerr != nil && !errors.Is(rerr, os.ErrNotExist) {
+					errs = append(errs, fmt.Sprintf("remove newly created symlink: %v", rerr))
+				} else {
+					revertedGlobal = true
+				}
+			}
+		}
 	}
+
+	// 2. install.json: only revert Version/Release/Commit if current release
+	// still matches the failed candidate, preserving any concurrent Files edits.
 	if bk.hasInstall {
-		_ = WriteFileAtomic(layout.InstallJSON, bk.install, 0o600)
+		if curRec, err := ReadInstallRecord(layout.InstallJSON); err == nil && curRec.Release == expectedNewRelease {
+			curRec.Version = bk.origVersion
+			curRec.Release = bk.origRelease
+			curRec.Commit = bk.origCommit
+			if werr := WriteInstallRecord(layout.InstallJSON, curRec); werr != nil {
+				errs = append(errs, fmt.Sprintf("restore install.json: %v", werr))
+			} else {
+				revertedGlobal = true
+				if revertedGlobal {
+					readmeText := proto.RenderReadme(proto.ReadmeData{
+						Version:    curRec.Version,
+						Release:    curRec.Release,
+						Gateway:    curRec.Gateway,
+						EnabledBy:  curRec.EnabledBy,
+						EnabledAt:  curRec.EnabledAt,
+						MachineID:  layout.MachineID,
+						LibDir:     layout.LibDir,
+						StateDir:   layout.StateDir,
+						SocketPath: layout.SocketPath,
+						Files:      curRec.Files,
+					})
+					if rerr := WriteFileAtomic(layout.ReadmePath, []byte(readmeText), 0o644); rerr != nil {
+						errs = append(errs, fmt.Sprintf("restore README.txt: %v", rerr))
+					}
+				}
+			}
+		}
 	}
-	if bk.hasReadme {
-		_ = WriteFileAtomic(layout.ReadmePath, bk.readme, 0o644)
+
+	// 3. meta.json: restore v1's MetaRecord if meta.json currently points to the
+	// failed child, is missing, or needs an updated epoch after frozen drops.
+	if v1Meta != nil {
+		curMeta, merr := ReadMetaRecord(layout.MetaJSON)
+		needMeta := forceMetaEpochUpdate || errors.Is(merr, os.ErrNotExist) ||
+			(merr == nil && ((expectedNewPID > 0 && curMeta.PID == expectedNewPID) || curMeta.Release == expectedNewRelease))
+		if needMeta {
+			if werr := WriteMetaRecord(layout.MetaJSON, v1Meta); werr != nil {
+				errs = append(errs, fmt.Sprintf("restore meta.json: %v", werr))
+			}
+		}
 	}
-	if meta != nil {
-		_ = WriteMetaRecord(layout.MetaJSON, meta)
+
+	if len(errs) > 0 {
+		return errors.New(strings.Join(errs, "; "))
 	}
+	return nil
 }
 
 func (s *Server) handleHandoff(_ context.Context, _ *Conn, _ json.RawMessage) (any, *proto.RPCError) {
@@ -193,6 +267,8 @@ func (s *Server) dispatchHandoff(ctx context.Context, conn *Conn, req proto.Requ
 		return
 	}
 
+	expectedNewSymlink, _ := filepath.Rel(s.layout.LibDir, resolvedPath)
+
 	// 2. Enter draining atomically (reject concurrent handoffs).
 	s.stateMu.Lock()
 	if s.handoffActive || s.handedOff {
@@ -209,25 +285,54 @@ func (s *Server) dispatchHandoff(ctx context.Context, conn *Conn, req proto.Requ
 	s.stateMu.Unlock()
 
 	backup := captureCutoverBackup(s.layout)
-	v1Meta := s.currentMetaRecord()
 
-	rollback := func(reason string) {
-		restoreCutoverBackup(s.layout, backup, v1Meta)
-		s.bus.Unfreeze()
+	// listenerLocked tracks whether listenerOpMu is currently held so rollback
+	// always releases it cleanly after resuming accept.
+	listenerLocked := false
+	releaseListenerLock := func() {
+		if listenerLocked {
+			listenerLocked = false
+			s.listenerOpMu.Unlock()
+		}
+	}
+
+	rollback := func(reason string, childPID int) {
+		rotated := s.bus.Unfreeze()
+		v1Meta := s.currentMetaRecord()
+
+		// Perform compare-and-restore under SharedLock + OpLock so we never
+		// clobber concurrent installs or updates from other hosts.
+		restoreErr := s.runCompareAndRestore(backup, v1Meta, expectedNewSymlink, childPID, p.Release, rotated)
+
 		s.resumeAccept()
 		s.stateMu.Lock()
 		s.handoffActive = false
 		s.state = proto.StateRunning
+		if restoreErr != nil {
+			s.rollbackDegraded = restoreErr.Error()
+		} else {
+			s.rollbackDegraded = ""
+		}
 		s.stateMu.Unlock()
+		releaseListenerLock()
+
+		fullReason := reason
+		if restoreErr != nil {
+			fullReason = fmt.Sprintf("%s (rollback restore failed: %v)", reason, restoreErr)
+		}
 		if p.Release > 0 {
-			if recErr := RecordFailedRelease(s.layout.FailedJSON, p.Release, reason); recErr != nil {
+			if recErr := RecordFailedRelease(s.layout.FailedJSON, p.Release, fullReason); recErr != nil {
 				s.log.Warn("record failed release error", "release", p.Release, "err", recErr)
 			}
 		}
-		s.log.Error("handoff failed; resumed serving on current process", "release", p.Release, "reason", reason)
+		s.log.Error("handoff failed; resumed serving on current process",
+			"release", p.Release,
+			"reason", fullReason,
+			"epoch_rotated", rotated,
+		)
 		conn.enqueueResponse(req.ID, nil, &proto.RPCError{
 			Code:    proto.ErrHandoffFailed,
-			Message: reason,
+			Message: fullReason,
 		})
 	}
 
@@ -236,26 +341,30 @@ func (s *Server) dispatchHandoff(ctx context.Context, conn *Conn, req proto.Requ
 
 	// Re-check tombstone after draining.
 	if s.layout.TombstoneExists() {
-		rollback("uninstall tombstone appeared during drain")
+		rollback("uninstall tombstone appeared during drain", 0)
 		return
 	}
 
-	// 3. Pause accept loop while keeping the listening socket FD open in the kernel backlog.
+	// 3. Acquire listenerOpMu to exclude concurrent socket rebinding across the
+	// entire pause -> dup -> spawn -> READY/rollback sequence.
+	s.listenerOpMu.Lock()
+	listenerLocked = true
+
 	if err := s.pauseAccept(); err != nil {
-		rollback("pause accept: " + err.Error())
+		rollback("pause accept: "+err.Error(), 0)
 		return
 	}
 
 	listenFile, err := s.ln.File()
 	if err != nil {
-		rollback("dup listen fd: " + err.Error())
+		rollback("dup listen fd: "+err.Error(), 0)
 		return
 	}
 
 	stateR, stateW, err := os.Pipe()
 	if err != nil {
 		_ = listenFile.Close()
-		rollback("create state pipe: " + err.Error())
+		rollback("create state pipe: "+err.Error(), 0)
 		return
 	}
 	readyR, readyW, err := os.Pipe()
@@ -263,7 +372,7 @@ func (s *Server) dispatchHandoff(ctx context.Context, conn *Conn, req proto.Requ
 		_ = listenFile.Close()
 		_ = stateR.Close()
 		_ = stateW.Close()
-		rollback("create ready pipe: " + err.Error())
+		rollback("create ready pipe: "+err.Error(), 0)
 		return
 	}
 	devNull, err := os.OpenFile(os.DevNull, os.O_RDWR, 0)
@@ -273,7 +382,7 @@ func (s *Server) dispatchHandoff(ctx context.Context, conn *Conn, req proto.Requ
 		_ = stateW.Close()
 		_ = readyR.Close()
 		_ = readyW.Close()
-		rollback("open /dev/null: " + err.Error())
+		rollback("open /dev/null: "+err.Error(), 0)
 		return
 	}
 	logOut, err := OpenLogFileNoFollow(s.layout.LogPath)
@@ -281,23 +390,27 @@ func (s *Server) dispatchHandoff(ctx context.Context, conn *Conn, req proto.Requ
 		logOut = devNull
 	}
 
-	// Freeze the EventBus atomically with capturing the snapshot so v1 can never
-	// allocate sequence numbers under the same epoch concurrently with v2.
-	epoch, lastSeq, events := s.bus.FreezeAndSnapshot()
+	// Freeze the EventBus BEFORE snapshotting module states so any producer
+	// attempting Emit while frozen sets droppedWhileFrozen -> ForceNewEpoch.
+	s.bus.Freeze()
+	mods := s.snapshotModuleStates()
+	epoch, lastSeq, events, droppedWhileFrozen := s.bus.FrozenSnapshot()
+
 	snap := HandoffSnapshot{
-		Schema:       HandoffSnapshotSchema,
-		Epoch:        epoch,
-		LastSeq:      lastSeq,
-		Events:       events,
-		Clients:      s.clients.List(),
-		Ops:          s.ops.Snapshot(),
-		Modules:      s.snapshotModuleStates(),
-		SocketPath:   s.layout.SocketPath,
-		Gateway:      s.cfg.Gateway,
-		OldPID:       os.Getpid(),
-		OldStartTime: s.procStart,
-		OldVersion:   s.build.Version,
-		OldRelease:   s.build.Release,
+		Schema:        HandoffSnapshotSchema,
+		Epoch:         epoch,
+		LastSeq:       lastSeq,
+		ForceNewEpoch: droppedWhileFrozen,
+		Events:        events,
+		Clients:       s.clients.List(),
+		Ops:           s.ops.Snapshot(),
+		Modules:       mods,
+		SocketPath:    s.layout.SocketPath,
+		Gateway:       s.cfg.Gateway,
+		OldPID:        os.Getpid(),
+		OldStartTime:  s.procStart,
+		OldVersion:    s.build.Version,
+		OldRelease:    s.build.Release,
 	}
 	snapBytes, err := BuildBoundedSnapshot(snap, MaxHandoffSnapshotBytes)
 	if err != nil {
@@ -310,7 +423,7 @@ func (s *Server) dispatchHandoff(ctx context.Context, conn *Conn, req proto.Requ
 		if logOut != devNull {
 			_ = logOut.Close()
 		}
-		rollback("build bounded snapshot: " + err.Error())
+		rollback("build bounded snapshot: "+err.Error(), 0)
 		return
 	}
 
@@ -359,7 +472,7 @@ func (s *Server) dispatchHandoff(ctx context.Context, conn *Conn, req proto.Requ
 	if err != nil {
 		_ = stateW.Close()
 		_ = readyR.Close()
-		rollback("spawn new corrald: " + err.Error())
+		rollback("spawn new corrald: "+err.Error(), 0)
 		return
 	}
 
@@ -376,13 +489,13 @@ func (s *Server) dispatchHandoff(ctx context.Context, conn *Conn, req proto.Requ
 	if readyErr != nil {
 		_ = proc.Kill()
 		_, _ = proc.Wait()
-		rollback("new process did not become ready: " + readyErr.Error())
+		rollback("new process did not become ready: "+readyErr.Error(), proc.Pid)
 		return
 	}
 
 	// 5. Handoff succeeded! Mark handed off, establish hard exit deadline, close
-	// our copy of listener without unlinking the socket, reply to caller, push
-	// daemon.reconnect, and exit within the hard cap.
+	// our copy of listener without unlinking the socket, release listenerOpMu,
+	// reply to caller, push daemon.reconnect, and exit within the hard cap.
 	elapsedMS := time.Since(started).Milliseconds()
 	s.stateMu.Lock()
 	s.handedOff = true
@@ -396,6 +509,7 @@ func (s *Server) dispatchHandoff(ctx context.Context, conn *Conn, req proto.Requ
 	s.stateMu.Unlock()
 
 	s.closeListenerForExit()
+	releaseListenerLock()
 
 	if newPID == 0 {
 		newPID = proc.Pid
@@ -404,7 +518,6 @@ func (s *Server) dispatchHandoff(ctx context.Context, conn *Conn, req proto.Requ
 		newRelease = p.Release
 	}
 
-	// Enqueue RPC response first, then broadcast daemon.reconnect to all clients.
 	conn.enqueueResponse(req.ID, proto.HandoffResult{
 		PID:        newPID,
 		Release:    newRelease,
@@ -454,6 +567,38 @@ func (s *Server) dispatchHandoff(ctx context.Context, conn *Conn, req proto.Requ
 		}
 		s.RequestShutdown()
 	}()
+}
+
+func (s *Server) runCompareAndRestore(
+	bk cutoverBackup,
+	v1Meta *MetaRecord,
+	expectedNewSymlink string,
+	childPID int,
+	expectedNewRelease int64,
+	forceMetaEpochUpdate bool,
+) error {
+	var (
+		sharedLock *FileLock
+		opLock     *FileLock
+		err        error
+	)
+	if _, statErr := os.Lstat(s.layout.LibDir); statErr == nil {
+		sharedLock, err = AcquireLockWait(s.layout.SharedLockPath, 5*time.Second)
+		if err != nil {
+			return fmt.Errorf("acquire shared lock for rollback: %w", err)
+		}
+		defer sharedLock.Release()
+	}
+	if _, statErr := os.Lstat(s.layout.StateDir); statErr == nil {
+		opLock, err = AcquireLockWait(s.layout.OpLockPath, 5*time.Second)
+		if err != nil {
+			return fmt.Errorf("acquire op lock for rollback: %w", err)
+		}
+		defer opLock.Release()
+	}
+	return compareAndRestoreCutoverLocked(
+		s.layout, bk, v1Meta, expectedNewSymlink, childPID, expectedNewRelease, forceMetaEpochUpdate,
+	)
 }
 
 func (s *Server) allConnsFlushed() bool {
@@ -547,7 +692,6 @@ func OpenValidatedHandoffBinary(layout *Layout, candidatePath, expectedSHA256 st
 		return nil, "", 0, errors.New("invalid sha256 hex digest")
 	}
 
-	// Verify LibDir is a real directory owned by expectedUID and not group/other writable.
 	if err := CheckNonWritableDir(layout.LibDir, expectedUID); err != nil {
 		return nil, "", 0, fmt.Errorf("lib dir check failed: %w", err)
 	}
@@ -565,8 +709,6 @@ func OpenValidatedHandoffBinary(layout *Layout, candidatePath, expectedSHA256 st
 		return nil, "", 0, fmt.Errorf("handoff parent %q is not a valid corrald-<version>-<release> directory", filepath.Base(parentDir))
 	}
 
-	// Verify version parent directory is a real directory (not symlink), owned by
-	// expectedUID, and strictly 0700 (no group/other write or access).
 	pinfo, err := os.Lstat(parentDir)
 	if err != nil {
 		return nil, "", 0, fmt.Errorf("lstat parent dir: %w", err)
@@ -582,7 +724,6 @@ func OpenValidatedHandoffBinary(layout *Layout, candidatePath, expectedSHA256 st
 		return nil, "", 0, fmt.Errorf("handoff parent directory mode is %04o, want 0700", pinfo.Mode().Perm())
 	}
 
-	// Open the candidate with O_NOFOLLOW so a symlink cannot be substituted.
 	f, err := os.OpenFile(cleanCand, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
 	if err != nil {
 		return nil, "", 0, fmt.Errorf("open handoff binary: %w", err)
@@ -610,7 +751,6 @@ func OpenValidatedHandoffBinary(layout *Layout, candidatePath, expectedSHA256 st
 		return nil, "", 0, fmt.Errorf("handoff binary mode is %04o, want 0700", info.Mode().Perm())
 	}
 
-	// Hash the already-open file descriptor directly.
 	h := sha256.New()
 	if _, err := io.Copy(h, f); err != nil {
 		_ = f.Close()
@@ -696,39 +836,64 @@ func waitForReadyLine(r *os.File, timeout time.Duration) (pid int, release int64
 	}
 }
 
-// PruneOldVersions retains the current running version and the single newest
-// healthy previous version (release < currentRelease and not in failed.json),
-// while removing older managed versions and recorded failed candidates.
+// PruneOldVersions removes old managed corrald version directories only when
+// this machine is the sole machine directory under StateRoot (if any other
+// machine directory exists in a shared NFS home, no version directory is
+// deleted).
 //
-// Only version directories matching the strict "corrald-<Version>-<Release>"
-// format AND recorded in install.json are eligible for deletion; arbitrary
-// directories (such as corrald-backups or code-server-*) and versions actively
-// referenced by other machines in a shared NFS home are never touched.
+// When pruning runs, it retains:
+//   - the current running version
+//   - the single newest healthy previous version (release < currentRelease and
+//     not in failed.json)
+//   - any non-failed pending candidate with release >= currentRelease listed in
+//     install.json
+//
+// Unlisted directories (such as corrald-backups or code-server-*) are never
+// touched.
 func PruneOldVersions(layout *Layout, currentVersion string, currentRelease int64) ([]string, error) {
-	// Skip non-blockingly if an install/uninstall currently holds the shared lock.
+	// Follow global lock order SharedLock -> OpLock (non-blocking; skip GC if
+	// an install, uninstall, or handoff cutover is in progress).
 	sharedLock, err := AcquireLock(layout.SharedLockPath)
 	if err != nil {
-		if errors.Is(err, ErrLocked) {
-			return nil, nil
-		}
-		// If LibDir doesn't exist yet, nothing to prune.
-		if errors.Is(err, os.ErrNotExist) {
+		if errors.Is(err, ErrLocked) || errors.Is(err, os.ErrNotExist) {
 			return nil, nil
 		}
 		return nil, err
 	}
 	defer sharedLock.Release()
 
+	opLock, err := AcquireLock(layout.OpLockPath)
+	if err != nil {
+		if errors.Is(err, ErrLocked) || errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	defer opLock.Release()
+
+	// Conservative NFS rule: if ANY other machine directory exists under
+	// StateRoot (or StateRoot cannot be read), do not delete any version dir.
+	stateEntries, err := os.ReadDir(layout.StateRoot)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	for _, se := range stateEntries {
+		if se.IsDir() && se.Name() != layout.MachineID {
+			return nil, nil
+		}
+	}
+
 	installRec, err := ReadInstallRecord(layout.InstallJSON)
 	if err != nil {
-		// Without an authoritative install manifest, never guess which dirs to remove.
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, nil
 		}
 		return nil, err
 	}
 
-	// Build the set of version directories explicitly recorded as managed by corrald.
 	managed := make(map[string]struct{})
 	for _, f := range installRec.Files {
 		clean := filepath.Clean(f)
@@ -742,14 +907,6 @@ func PruneOldVersions(layout *Layout, currentVersion string, currentRelease int6
 		return nil, nil
 	}
 
-	// Collect version dirs currently referenced by other machines sharing $HOME.
-	inUseByOthers, err := activeVersionDirsOfOtherMachines(layout)
-	if err != nil {
-		// Conservative on NFS / I/O errors: do not delete shared versions.
-		return nil, err
-	}
-
-	// Build failed release set from failed.json.
 	failedSet := make(map[int64]bool)
 	if frec, err := ReadFailedRecord(layout.FailedJSON); err == nil {
 		for _, fe := range frec.Releases {
@@ -784,9 +941,6 @@ func PruneOldVersions(layout *Layout, currentVersion string, currentRelease int6
 		if _, isManaged := managed[name]; !isManaged {
 			continue
 		}
-		if inUseByOthers[name] {
-			continue
-		}
 		_, rel, ok := ParseVersionDirName(name)
 		if !ok {
 			continue
@@ -808,12 +962,10 @@ func PruneOldVersions(layout *Layout, currentVersion string, currentRelease int6
 		if rel < currentRelease {
 			healthyPrev = append(healthyPrev, ve)
 		}
-		// Note: non-failed directories with rel >= currentRelease are left alone
-		// (e.g. a freshly staged upgrade awaiting handoff).
+		// Non-failed dirs with rel >= currentRelease are preserved as pending
+		// upgrade candidates listed in install.json.
 	}
 
-	// Sort healthy previous versions descending by release so healthyPrev[0] is
-	// the newest valid rollback version.
 	sort.Slice(healthyPrev, func(i, j int) bool {
 		if healthyPrev[i].release != healthyPrev[j].release {
 			return healthyPrev[i].release > healthyPrev[j].release
@@ -839,7 +991,6 @@ func PruneOldVersions(layout *Layout, currentVersion string, currentRelease int6
 		}
 	}
 
-	// Update install.json to drop removed paths.
 	if len(removedSet) > 0 {
 		kept := make([]string, 0, len(installRec.Files))
 		for _, f := range installRec.Files {
@@ -856,32 +1007,4 @@ func PruneOldVersions(layout *Layout, currentVersion string, currentRelease int6
 		_ = WriteInstallRecord(layout.InstallJSON, installRec)
 	}
 	return removed, nil
-}
-
-func activeVersionDirsOfOtherMachines(layout *Layout) (map[string]bool, error) {
-	inUse := make(map[string]bool)
-	entries, err := os.ReadDir(layout.StateRoot)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return inUse, nil
-		}
-		return nil, err
-	}
-	for _, e := range entries {
-		if !e.IsDir() || e.Name() == layout.MachineID {
-			continue
-		}
-		dir := filepath.Join(layout.StateRoot, e.Name())
-		if rec, err := ReadInstallRecord(filepath.Join(dir, "install.json")); err == nil {
-			inUse[fmt.Sprintf("corrald-%s-%d", rec.Version, rec.Release)] = true
-		} else if !errors.Is(err, os.ErrNotExist) {
-			return nil, err
-		}
-		if meta, err := ReadMetaRecord(filepath.Join(dir, "meta.json")); err == nil {
-			inUse[fmt.Sprintf("corrald-%s-%d", meta.Version, meta.Release)] = true
-		} else if !errors.Is(err, os.ErrNotExist) {
-			return nil, err
-		}
-	}
-	return inUse, nil
 }

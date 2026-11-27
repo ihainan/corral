@@ -453,18 +453,36 @@ func TestEventBusRingBufferAndFreeze(t *testing.T) {
 	if snapEpoch != epoch || snapSeq != 8 || len(snapEvents) != 5 {
 		t.Fatalf("FreezeAndSnapshot: epoch=%q seq=%d len=%d", snapEpoch, snapSeq, len(snapEvents))
 	}
-	if _, err := bus.Emit("test.ev", map[string]int{"i": 9}); !errors.Is(err, ErrBusFrozen) {
-		t.Fatalf("Emit while frozen: got %v, want ErrBusFrozen", err)
-	}
 	if bus.CurrentSeq() != 8 {
 		t.Fatalf("seq advanced while frozen: got %d, want 8", bus.CurrentSeq())
 	}
 
-	// Unfreeze (rollback path) allows emitting again.
-	bus.Unfreeze()
+	// Unfreeze (rollback path) without frozen drops keeps epoch and allows emitting.
+	if rotated := bus.Unfreeze(); rotated {
+		t.Fatal("Unfreeze should not rotate epoch when no emit was dropped while frozen")
+	}
 	ev9, err := bus.Emit("test.ev", map[string]int{"i": 9})
-	if err != nil || ev9.Seq != 9 {
-		t.Fatalf("Emit after Unfreeze: %+v, %v", ev9, err)
+	if err != nil || ev9.Seq != 9 || ev9.Epoch != epoch {
+		t.Fatalf("Emit after clean Unfreeze: %+v, %v", ev9, err)
+	}
+
+	// Item 3: Freeze, attempt Emit (dropped), then Unfreeze -> MUST rotate epoch!
+	bus.Freeze()
+	if _, err := bus.Emit("test.ev", map[string]int{"i": 10}); !errors.Is(err, ErrBusFrozen) {
+		t.Fatalf("Emit while frozen: got %v, want ErrBusFrozen", err)
+	}
+	_, _, _, dropped := bus.FrozenSnapshot()
+	if !dropped {
+		t.Fatal("FrozenSnapshot did not report dropped=true after frozen Emit")
+	}
+	if rotated := bus.Unfreeze(); !rotated {
+		t.Fatal("Unfreeze must rotate epoch after frozen Emit was dropped")
+	}
+	if bus.Epoch() == epoch || bus.CurrentSeq() != 0 {
+		t.Fatalf("expected rotated epoch and seq=0, got epoch=%q (old %q) seq=%d", bus.Epoch(), epoch, bus.CurrentSeq())
+	}
+	if _, _, rpcErr := bus.Resume(epoch, 9, nil, nil); rpcErr == nil || rpcErr.Code != proto.ErrResyncRequired {
+		t.Fatalf("resume with pre-rotation epoch: got %v, want resync_required", rpcErr)
 	}
 }
 
@@ -1121,5 +1139,557 @@ func TestFinalizeHandoffCutoverFailClosedAndRestoresState(t *testing.T) {
 	gotLink, rerr := os.Readlink(layout.CurrentSymlink)
 	if rerr != nil || gotLink != origTarget {
 		t.Fatalf("symlink not restored after failed cutover: got %q (%v), want %q", gotLink, rerr, origTarget)
+	}
+}
+
+func TestServeDoesNotAcceptOrExecuteBeforePreReady(t *testing.T) {
+	// Round-2 Item 1: New process must NOT accept or execute any request before
+	// PreReady finishes; if PreReady fails, zero requests may have run.
+	home := t.TempDir()
+	layout, err := ResolveLayout(PathOptions{Home: home, MachineID: "111100001111"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := layout.EnsureStateDir(); err != nil {
+		t.Fatal(err)
+	}
+	if layout.SocketUsesTmpDir {
+		t.Cleanup(func() { _ = os.RemoveAll(layout.SocketDir) })
+	}
+
+	// Pre-bind listener (as inherited during handoff).
+	if err := layout.EnsureSocketDir(); err != nil {
+		t.Fatal(err)
+	}
+	_ = os.Remove(layout.SocketPath)
+	ln, err := net.ListenUnix("unix", &net.UnixAddr{Name: layout.SocketPath, Net: "unix"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ln.SetUnlinkOnClose(false)
+
+	preReadyEntered := make(chan struct{})
+	preReadyRelease := make(chan struct{})
+	var writesExecuted atomic.Int32
+
+	srv, err := NewServer(ServerConfig{
+		Layout:   layout,
+		Build:    proto.BuildInfo{Version: "0.2.0", Release: 200},
+		Listener: ln,
+		PreReady: func(_ *MetaRecord) error {
+			close(preReadyEntered)
+			<-preReadyRelease
+			return errors.New("cutover failed")
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv.Register("test.idem", MethodOptions{Mutating: true, Idempotent: true}, func(_ context.Context, _ *Conn, _ json.RawMessage) (any, *proto.RPCError) {
+		writesExecuted.Add(1)
+		return map[string]bool{"ok": true}, nil
+	})
+
+	serveDone := make(chan error, 1)
+	go func() { serveDone <- srv.Serve(context.Background()) }()
+
+	<-preReadyEntered
+	// Dial and send a write request while PreReady is blocked!
+	conn, err := net.DialTimeout("unix", layout.SocketPath, time.Second)
+	if err != nil {
+		t.Fatalf("dial queued listener: %v", err)
+	}
+	defer conn.Close()
+	raw, _ := json.Marshal(map[string]string{"op_id": proto.NewOpID(time.Now())})
+	_ = proto.WriteJSON(conn, proto.Request{ID: 1, Method: "test.idem", Params: raw})
+
+	// Give scheduler time; handler MUST NOT run while PreReady is incomplete!
+	time.Sleep(80 * time.Millisecond)
+	if writesExecuted.Load() != 0 {
+		t.Fatalf("write executed BEFORE PreReady completed! count=%d", writesExecuted.Load())
+	}
+
+	close(preReadyRelease)
+	if err := <-serveDone; err == nil {
+		t.Fatal("expected Serve to fail when PreReady returned error")
+	}
+	if writesExecuted.Load() != 0 {
+		t.Fatalf("write executed despite failed PreReady! count=%d", writesExecuted.Load())
+	}
+}
+
+func TestAtomicIdempotentAdmissionBeforeHandlerRuns(t *testing.T) {
+	// Round-2 Item 2: An admitted idempotent write MUST already be present in
+	// OpTable.Snapshot() BEFORE the handler finishes (even if handler stalls
+	// immediately upon entry), and duplicates get retryable in_progress.
+	home := t.TempDir()
+	layout, err := ResolveLayout(PathOptions{Home: home, MachineID: "222200002222"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := layout.EnsureStateDir(); err != nil {
+		t.Fatal(err)
+	}
+	if layout.SocketUsesTmpDir {
+		t.Cleanup(func() { _ = os.RemoveAll(layout.SocketDir) })
+	}
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	ready := make(chan struct{})
+	srv, err := NewServer(ServerConfig{
+		Layout:  layout,
+		Build:   proto.BuildInfo{Version: "0.1.0", Release: 100},
+		OnReady: func() { close(ready) },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv.Register("test.atomic_write", MethodOptions{Mutating: true, Idempotent: true}, func(_ context.Context, _ *Conn, _ json.RawMessage) (any, *proto.RPCError) {
+		close(entered)
+		<-release
+		return map[string]bool{"done": true}, nil
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- srv.Serve(ctx) }()
+	<-ready
+	defer func() { cancel(); <-done }()
+
+	opID := proto.NewOpID(time.Now())
+	c1 := dialRPC(t, layout.SocketPath)
+	defer c1.close()
+	resCh := make(chan proto.Response, 1)
+	go func() {
+		r, _ := c1.call(t, "test.atomic_write", map[string]string{"op_id": opID})
+		resCh <- r
+	}()
+
+	<-entered
+	// Snapshot immediately while handler is blocked: opID MUST be in snapshot as unknown!
+	snap := srv.Ops().Snapshot()
+	found := false
+	for _, e := range snap.Entries {
+		if e.OpID == opID && e.State == OpStateUnknown {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("admitted op_id %q missing from OpTable.Snapshot() while handler stalled: %+v", opID, snap)
+	}
+
+	// Duplicate while running gets retryable in_progress.
+	c2 := dialRPC(t, layout.SocketPath)
+	defer c2.close()
+	dup, _ := c2.call(t, "test.atomic_write", map[string]string{"op_id": opID})
+	if dup.Error == nil || dup.Error.Code != proto.ErrInProgress || !dup.Error.Retryable {
+		t.Fatalf("duplicate while running: got %+v, want retryable in_progress", dup)
+	}
+
+	close(release)
+	r1 := <-resCh
+	if r1.Error != nil {
+		t.Fatalf("first call failed: %v", r1.Error)
+	}
+}
+
+func TestForceNewEpochInHandoffSnapshot(t *testing.T) {
+	// Round-2 Item 3: When ForceNewEpoch is true in HandoffSnapshot, v2 MUST
+	// rotate to a fresh epoch while still restoring OpTable and Clients.
+	home := t.TempDir()
+	layout, err := ResolveLayout(PathOptions{Home: home, MachineID: "333300003333"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := layout.EnsureStateDir(); err != nil {
+		t.Fatal(err)
+	}
+	if layout.SocketUsesTmpDir {
+		t.Cleanup(func() { _ = os.RemoveAll(layout.SocketDir) })
+	}
+
+	opID := proto.NewOpID(time.Now())
+	ready := make(chan struct{})
+	srv, err := NewServer(ServerConfig{
+		Layout: layout,
+		Build:  proto.BuildInfo{Version: "0.2.0", Release: 200},
+		InitialSnapshot: &HandoffSnapshot{
+			Schema:        HandoffSnapshotSchema,
+			Epoch:         "old-epoch-1111",
+			LastSeq:       42,
+			ForceNewEpoch: true,
+			Clients:       []proto.ClientInfo{{Gateway: "gw", CorralUser: "alice", LastSeen: "2026-11-27T00:00:00Z"}},
+			Ops: OpTableSnapshot{
+				Entries: []OpSnapshotEntry{{OpID: opID, State: OpStateUnknown, CompletedAt: time.Now().UTC()}},
+			},
+		},
+		OnReady: func() { close(ready) },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- srv.Serve(ctx) }()
+	<-ready
+	defer func() { cancel(); <-done }()
+
+	if srv.Bus().Epoch() == "old-epoch-1111" {
+		t.Fatal("v2 did not rotate epoch when ForceNewEpoch=true")
+	}
+	if srv.Bus().CurrentSeq() != 0 {
+		t.Fatalf("expected seq=0 on new epoch, got %d", srv.Bus().CurrentSeq())
+	}
+	// OpTable must still have been restored!
+	if _, rpcErr := srv.Ops().Execute(opID, func() (json.RawMessage, *proto.RPCError) {
+		t.Fatal("restored unknown op_id must not re-execute")
+		return nil, nil
+	}); rpcErr == nil || rpcErr.Code != proto.ErrOpUnknown {
+		t.Fatalf("expected op_unknown, got %v", rpcErr)
+	}
+}
+
+func TestRebindDoesNotInterleaveOrUnpauseHandoff(t *testing.T) {
+	// Round-2 Item 4: Socket rebind shares listenerOpMu with handoff and must
+	// never unpause a handoff-paused accept loop or swap listener during handoff.
+	home := t.TempDir()
+	layout, err := ResolveLayout(PathOptions{Home: home, MachineID: "444400004444"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := layout.EnsureStateDir(); err != nil {
+		t.Fatal(err)
+	}
+	if layout.SocketUsesTmpDir {
+		t.Cleanup(func() { _ = os.RemoveAll(layout.SocketDir) })
+	}
+
+	ready := make(chan struct{})
+	srv, err := NewServer(ServerConfig{
+		Layout:  layout,
+		Build:   proto.BuildInfo{Version: "0.1.0", Release: 100},
+		OnReady: func() { close(ready) },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- srv.Serve(ctx) }()
+	<-ready
+	defer func() { cancel(); <-done }()
+
+	// Simulate handoff holding listenerOpMu with handoffActive=true & acceptPaused=true.
+	srv.stateMu.Lock()
+	srv.handoffActive = true
+	srv.stateMu.Unlock()
+	srv.listenerOpMu.Lock()
+	if err := srv.pauseAccept(); err != nil {
+		srv.listenerOpMu.Unlock()
+		t.Fatal(err)
+	}
+	_ = os.Remove(layout.SocketPath)
+
+	rebindDone := make(chan error, 1)
+	go func() { rebindDone <- srv.rebindSocket() }()
+
+	// rebindSocket MUST block on listenerOpMu and NOT unpause acceptPaused!
+	select {
+	case err := <-rebindDone:
+		t.Fatalf("rebindSocket returned while handoff held listenerOpMu: %v", err)
+	case <-time.After(80 * time.Millisecond):
+	}
+	srv.acceptMu.Lock()
+	paused := srv.acceptPaused
+	srv.acceptMu.Unlock()
+	if !paused {
+		t.Fatal("rebindSocket unpaused accept loop during handoff")
+	}
+
+	// Simulate handoff completion (handedOff=true) and release listenerOpMu.
+	srv.stateMu.Lock()
+	srv.handedOff = true
+	srv.stateMu.Unlock()
+	srv.listenerOpMu.Unlock()
+
+	if err := <-rebindDone; err != nil {
+		t.Fatalf("rebindSocket after handoff: %v", err)
+	}
+	// Socket must NOT have been recreated after handoff completed.
+	if _, err := os.Lstat(layout.SocketPath); !os.IsNotExist(err) {
+		t.Fatal("rebindSocket recreated socket after handoff already completed")
+	}
+}
+
+func TestAcquireLockMutualExclusionWithUnlink(t *testing.T) {
+	// Round-2 Item 6: Standard inode-verified AcquireLock guarantees mutual
+	// exclusion even when the lock holder unlinks the lock file before releasing.
+	lockPath := filepath.Join(t.TempDir(), "shared.lock")
+	var active atomic.Int32
+	var violations atomic.Int32
+	var wg sync.WaitGroup
+
+	for g := 0; g < 6; g++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			for i := 0; i < 15; i++ {
+				lk, err := AcquireLockWait(lockPath, 5*time.Second)
+				if err != nil {
+					t.Errorf("goroutine %d iter %d: %v", id, i, err)
+					return
+				}
+				if cur := active.Add(1); cur != 1 {
+					violations.Add(1)
+				}
+				time.Sleep(2 * time.Millisecond)
+				if i%3 == 0 {
+					// Unlink while holding lock (last-machine uninstall pattern).
+					_ = os.Remove(lockPath)
+				}
+				active.Add(-1)
+				_ = lk.Release()
+			}
+		}(g)
+	}
+	wg.Wait()
+	if violations.Load() > 0 {
+		t.Fatalf("detected %d lock mutual-exclusion violations across unlink", violations.Load())
+	}
+}
+
+func TestPruneOldVersionsSkipsWhenAnyOtherMachineDirExists(t *testing.T) {
+	// Round-2 Item 7: Simplified GC MUST NOT delete ANY version dir whenever
+	// any other machine directory exists under StateRoot.
+	home := t.TempDir()
+	layout, err := ResolveLayout(PathOptions{Home: home, MachineID: "aaaaaaaaaaaa", TmpBase: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = layout.EnsureLibDir()
+	_ = layout.EnsureStateDir()
+
+	var files []string
+	for _, d := range []string{"corrald-0.1.0-100", "corrald-0.2.0-200", "corrald-0.3.0-300"} {
+		p := filepath.Join(layout.LibDir, d)
+		_ = os.MkdirAll(p, 0o700)
+		files = append(files, p)
+	}
+	_ = WriteInstallRecord(layout.InstallJSON, &InstallRecord{Version: "0.3.0", Release: 300, Files: files})
+
+	// Create another machine directory under StateRoot (even without install.json).
+	otherDir := filepath.Join(layout.StateRoot, "bbbbbbbbbbbb")
+	if err := os.MkdirAll(otherDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	removed, err := PruneOldVersions(layout, "0.3.0", 300)
+	if err != nil || len(removed) != 0 {
+		t.Fatalf("GC deleted versions while another machine dir existed: removed=%v err=%v", removed, err)
+	}
+	if _, err := os.Stat(filepath.Join(layout.LibDir, "corrald-0.1.0-100")); err != nil {
+		t.Fatal("corrald-0.1.0-100 was deleted while another machine existed")
+	}
+
+	// Once the other machine directory is gone, GC deletes 0.1.0-100 and keeps 0.2.0-200 + 0.3.0-300.
+	_ = os.RemoveAll(otherDir)
+	removed, err = PruneOldVersions(layout, "0.3.0", 300)
+	if err != nil || len(removed) != 1 {
+		t.Fatalf("GC when sole machine: removed=%v err=%v, want 1", removed, err)
+	}
+}
+
+func TestFinalizeHandoffCutoverFailsWhenTargetMissing(t *testing.T) {
+	// Round-2 Item 7: If the target binary was deleted on disk before cutover,
+	// finalizeHandoffCutover MUST fail and MUST NOT write a dangling symlink.
+	home := t.TempDir()
+	layout, err := ResolveLayout(PathOptions{Home: home, MachineID: "777700007777", TmpBase: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = layout.EnsureLibDir()
+	_ = layout.EnsureStateDir()
+
+	missingBin := filepath.Join(layout.LibDir, "corrald-0.2.0-200", "corrald")
+	err = finalizeHandoffCutover(layout, proto.BuildInfo{Version: "0.2.0", Release: 200}, missingBin, &MetaRecord{PID: 999, Release: 200})
+	if err == nil {
+		t.Fatal("expected finalizeHandoffCutover to fail for missing binary")
+	}
+	if _, statErr := os.Lstat(layout.CurrentSymlink); !os.IsNotExist(statErr) {
+		t.Fatal("finalizeHandoffCutover created a dangling symlink for missing binary")
+	}
+}
+
+func TestCompareAndRestorePreservesExternalUpdateDeletesNewLinkAndReportsHealth(t *testing.T) {
+	// Round-2 Items 8 & 9:
+	// 1. Compare-and-restore must NOT overwrite a newer symlink written by another host
+	//    and must preserve concurrent additions to install.json.Files.
+	// 2. When symlink did not exist previously, compare-and-restore must DELETE the
+	//    newly created link if it still points to the failed candidate.
+	// 3. When restore fails, error is returned (and Server surfaces it via daemon.health).
+	home := t.TempDir()
+	layout, err := ResolveLayout(PathOptions{Home: home, MachineID: "888800008888"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = layout.EnsureLibDir()
+	_ = layout.EnsureStateDir()
+	if layout.SocketUsesTmpDir {
+		t.Cleanup(func() { _ = os.RemoveAll(layout.SocketDir) })
+	}
+
+	// Case 1: Machine B concurrently upgraded symlink to 0.3.0-300 while A rolled back 0.2.0-200.
+	bk := cutoverBackup{
+		hasSymlink:  true,
+		symlink:     "corrald-0.1.0-100/corrald",
+		hasInstall:  true,
+		origVersion: "0.1.0",
+		origRelease: 100,
+	}
+	_ = AtomicSymlink("corrald-0.3.0-300/corrald", layout.CurrentSymlink)
+	_ = WriteInstallRecord(layout.InstallJSON, &InstallRecord{
+		Version: "0.2.0",
+		Release: 200,
+		Files:   []string{"/a", "/concurrently-added"},
+	})
+	if err := compareAndRestoreCutoverLocked(layout, bk, &MetaRecord{PID: 10, Release: 100}, "corrald-0.2.0-200/corrald", 20, 200, false); err != nil {
+		t.Fatalf("compareAndRestore Case 1: %v", err)
+	}
+	// Symlink MUST still be 0.3.0-300 (NOT clobbered back to 0.1.0-100)!
+	if link, _ := os.Readlink(layout.CurrentSymlink); link != "corrald-0.3.0-300/corrald" {
+		t.Fatalf("external newer symlink was overwritten: got %q", link)
+	}
+	// install.json reverted Release to 100 while preserving "/concurrently-added" in Files!
+	rec, _ := ReadInstallRecord(layout.InstallJSON)
+	if rec.Release != 100 || !strings.Contains(strings.Join(rec.Files, ","), "/concurrently-added") {
+		t.Fatalf("install.json rollback lost concurrent Files or failed revert: %+v", rec)
+	}
+
+	// Case 2: Symlink did NOT exist before (hasSymlink=false), candidate created it -> MUST be deleted!
+	bkNoLink := cutoverBackup{hasSymlink: false}
+	_ = AtomicSymlink("corrald-0.2.0-200/corrald", layout.CurrentSymlink)
+	if err := compareAndRestoreCutoverLocked(layout, bkNoLink, nil, "corrald-0.2.0-200/corrald", 20, 200, false); err != nil {
+		t.Fatalf("compareAndRestore Case 2: %v", err)
+	}
+	if _, err := os.Lstat(layout.CurrentSymlink); !os.IsNotExist(err) {
+		t.Fatal("newly created symlink was not removed when hasSymlink=false")
+	}
+
+	// Case 3: Health reports rollback_failed when rollbackDegraded is set.
+	ready := make(chan struct{})
+	srv, err := NewServer(ServerConfig{
+		Layout:  layout,
+		Build:   proto.BuildInfo{Version: "0.1.0", Release: 100},
+		OnReady: func() { close(ready) },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- srv.Serve(ctx) }()
+	<-ready
+	defer func() { cancel(); <-done }()
+
+	srv.stateMu.Lock()
+	srv.rollbackDegraded = "restore symlink: permission denied"
+	srv.stateMu.Unlock()
+
+	var health proto.HealthResult
+	if err := callLocalRPC(layout.SocketPath, proto.MethodDaemonHealth, nil, &health, 2*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(health.Caps["state"], "rollback_failed:") {
+		t.Fatalf("expected daemon.health caps[state] rollback_failed, got %+v", health.Caps)
+	}
+}
+
+func TestHardExitInvokesCallbackWithoutReleasingLock(t *testing.T) {
+	// Round-2 Item 10: On hard exit deadline, OnHardExit (os.Exit(0)) must be
+	// invoked WITHOUT pre-releasing s.lock (the OS releases the lock atomically
+	// when the process exits).
+	home := t.TempDir()
+	layout, err := ResolveLayout(PathOptions{Home: home, MachineID: "999900009999"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = layout.EnsureStateDir()
+	if layout.SocketUsesTmpDir {
+		t.Cleanup(func() { _ = os.RemoveAll(layout.SocketDir) })
+	}
+
+	lock, err := AcquireLock(layout.LockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Release()
+
+	var lockStillHeld atomic.Bool
+	var hardExitCalled atomic.Bool
+	blockWrite := make(chan struct{})
+	defer close(blockWrite)
+	entered := make(chan struct{})
+	ready := make(chan struct{})
+
+	srv, err := NewServer(ServerConfig{
+		Layout:  layout,
+		Build:   proto.BuildInfo{Version: "0.1.0", Release: 100},
+		Lock:    lock,
+		OnReady: func() { close(ready) },
+		OnHardExit: func() {
+			hardExitCalled.Store(true)
+			if _, err := AcquireLock(layout.LockPath); errors.Is(err, ErrLocked) {
+				lockStillHeld.Store(true)
+			}
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv.Register("test.stuck", MethodOptions{Mutating: true}, func(_ context.Context, _ *Conn, _ json.RawMessage) (any, *proto.RPCError) {
+		close(entered)
+		<-blockWrite
+		return nil, nil
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- srv.Serve(ctx) }()
+	<-ready
+
+	c := dialRPC(t, layout.SocketPath)
+	defer c.close()
+	go func() {
+		id := c.nextID.Add(1)
+		_ = proto.WriteJSON(c.conn, proto.Request{ID: id, Method: "test.stuck"})
+	}()
+	<-entered
+
+	// Simulate post-handoff hard exit deadline expiring while test.stuck is blocked.
+	srv.stateMu.Lock()
+	srv.handedOff = true
+	srv.hardExitDeadline = time.Now().Add(60 * time.Millisecond)
+	srv.stateMu.Unlock()
+	cancel()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Serve returned error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Serve did not return at hard exit deadline")
+	}
+
+	if !hardExitCalled.Load() {
+		t.Fatal("OnHardExit callback was not invoked")
+	}
+	if !lockStillHeld.Load() {
+		t.Fatal("s.lock was released BEFORE OnHardExit (os.Exit) was invoked")
 	}
 }

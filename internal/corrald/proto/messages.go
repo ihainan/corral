@@ -170,6 +170,11 @@ type HelloParams struct {
 }
 
 // HelloResult is returned by daemon.hello.
+//
+// Epoch uniquely identifies the current daemon state lineage. It is preserved
+// across clean hot updates and changes on cold restart or when events were
+// missed while frozen. Gateways must treat any unacknowledged write from an
+// earlier epoch as outcome-unknown and never retry it with the same op_id.
 type HelloResult struct {
 	Version   string       `json:"version"`
 	Release   int64        `json:"release"`

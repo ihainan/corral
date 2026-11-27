@@ -25,37 +25,48 @@ type FileLock struct {
 	file *os.File
 }
 
-// AcquireLock opens path (0600, refusing symlinks) and acquires a non-blocking
-// exclusive flock.
+// AcquireLock opens path (0600, refusing symlinks), acquires a non-blocking
+// exclusive flock, and verifies that path still refers to the same inode as
+// the locked descriptor. If another process unlinked or replaced the lock file
+// between open and flock, AcquireLock releases the stale descriptor and retries.
 func AcquireLock(path string) (*FileLock, error) {
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|syscall.O_NOFOLLOW, 0o600)
-	if err != nil {
-		return nil, err
-	}
-	info, err := f.Stat()
-	if err != nil {
-		_ = f.Close()
-		return nil, err
-	}
-	if !info.Mode().IsRegular() {
-		_ = f.Close()
-		return nil, fmt.Errorf("lock path %s is not a regular file", path)
-	}
-	for {
-		err = syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
-		if errors.Is(err, syscall.EINTR) {
-			continue
+	const maxInodeRetries = 32
+	for attempt := 0; attempt < maxInodeRetries; attempt++ {
+		f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|syscall.O_NOFOLLOW, 0o600)
+		if err != nil {
+			return nil, err
 		}
-		break
-	}
-	if err != nil {
-		_ = f.Close()
-		if errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EAGAIN) {
-			return nil, ErrLocked
+		finfo, err := f.Stat()
+		if err != nil {
+			_ = f.Close()
+			return nil, err
 		}
-		return nil, fmt.Errorf("flock %s: %w", path, err)
+		if !finfo.Mode().IsRegular() {
+			_ = f.Close()
+			return nil, fmt.Errorf("lock path %s is not a regular file", path)
+		}
+		for {
+			err = syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+			if errors.Is(err, syscall.EINTR) {
+				continue
+			}
+			break
+		}
+		if err != nil {
+			_ = f.Close()
+			if errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EAGAIN) {
+				return nil, ErrLocked
+			}
+			return nil, fmt.Errorf("flock %s: %w", path, err)
+		}
+		pinfo, err := os.Lstat(path)
+		if err == nil && os.SameFile(finfo, pinfo) {
+			return &FileLock{file: f}, nil
+		}
+		// Path was unlinked or replaced while acquiring flock; drop stale inode and retry.
+		_ = f.Close()
 	}
-	return &FileLock{file: f}, nil
+	return nil, fmt.Errorf("flock %s: path changed repeatedly while locking", path)
 }
 
 // AcquireLockWait acquires an exclusive flock on path, retrying up to timeout
