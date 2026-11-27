@@ -443,8 +443,10 @@ func TestRemoteExecCallSitesAreReviewed(t *testing.T) {
 		"web/convo_opencode_model.go: if _, err := sshx.Exec(rctx, sess.Client(), ocAPICommand(\"POST\", \"/api/session/\"+sid+\"/model\", string(body)), 64<<10, sshx.ExecOptions{Interactive: true, AwaitSlot: 2 * time.Second}); err != nil {":                                       true, // fixed opencode api POST /api/session/<validated ocSessionID>/model with validated provider/id/variant JSON body
 		"web/convo_rewind.go: res, err := sshx.Exec(ctx, sess.Client(), cmd, limit, sshx.ExecOptions{Interactive: true, AwaitSlot: await, Release: inflight.Done})":                                                                                                                     true, // fixed Claude Code rewind scripts: convoLocateCommand, tmux pane_pid/capture-pane checks, and identity-gated send-keys with validated pane/pid/start/session and fixed allowlisted keys (esc, up, down, enter, ctrl+c), all quoted
 		"term/session.go: s.rec.Output(buf[:n])": true, // the session recorder, not a process
+		"corrald/daemon/cli.go: proc, err := os.StartProcess(exe, argv, &os.ProcAttr{":            true, // corrald serve detaching: re-executes its own binary (os.Executable) with fixed serve arguments; runs on the user's host, never anything from a request
+		"corrald/daemon/handoff.go: proc, err := os.StartProcess(resolvedPath, argv, &os.ProcAttr{": true, // hot update: executes the new corrald only after the path is checked to be under ~/.local/lib/corral/, owned by the user, mode 0700 and matching the sha256 the gateway sent
 	}
-	re := regexp.MustCompile(`\.(Start|Run|Output|CombinedOutput|Exec)\(|SendRequest\("exec"`)
+	re := regexp.MustCompile(`\.(Start|Run|Output|CombinedOutput|Exec|StartProcess)\(|SendRequest\("exec"`)
 	root, _ := filepath.Abs("..")
 	filepath.Walk(root, func(p string, info os.FileInfo, err error) error {
 		if err != nil || info.IsDir() || !strings.HasSuffix(p, ".go") || strings.HasSuffix(p, "_test.go") || strings.Contains(p, "testutil") {

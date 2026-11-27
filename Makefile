@@ -1,9 +1,16 @@
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+RELEASE ?= $(shell git log -1 --format=%ct 2>/dev/null || echo 0)
+COMMIT ?= $(shell git rev-parse --short=12 HEAD 2>/dev/null || echo unknown)
 
-.PHONY: build web web-deps test check notices clean codex-check codex-bench codex-contract codex-browser
+.PHONY: build corrald web web-deps test check notices clean codex-check codex-bench codex-contract codex-browser
 
 build: web
 	CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=$(VERSION)" -o corral ./cmd/corral
+
+corrald:
+	mkdir -p dist/corrald/linux-amd64 dist/corrald/linux-arm64
+	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "-s -w -X main.version=$(VERSION) -X main.release=$(RELEASE) -X main.commit=$(COMMIT)" -o dist/corrald/linux-amd64/corrald ./cmd/corrald
+	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags "-s -w -X main.version=$(VERSION) -X main.release=$(RELEASE) -X main.commit=$(COMMIT)" -o dist/corrald/linux-arm64/corrald ./cmd/corrald
 
 web-deps:
 	cd web && pnpm install --frozen-lockfile
