@@ -5643,8 +5643,6 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 	case errors.Is(err, gw.ErrUnknownResult):
 		outcome = "unknown"
 		reason = "corrald_unknown_result"
-		writeCorraldUnknownResult(w)
-		return
 	case errors.Is(err, sshx.ErrBusy):
 		reason = "ssh_channels_busy" // (not started: nothing was typed)
 	case errors.As(err, &exitErr) && exitErr.Status == 3:
@@ -5732,6 +5730,8 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 		writeJSON(w, http.StatusOK, out)
 	case outcome == "typed":
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "in_box": inBox})
+	case reason == "corrald_unknown_result":
+		writeCorraldUnknownResult(w)
 	case reason == "ssh_channels_busy":
 		writeSSHChannelsBusy(w)
 	case reason == "busy":

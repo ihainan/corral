@@ -146,7 +146,14 @@ func effortFlow(step, leave modelStep, target string, greyed ...func() string) (
 			return "", e
 		}
 		for i := 0; i < 2; i++ {
-			if scr, err := leave([]string{"esc"}, "", effortLines); err != nil || !effortShows(scr) {
+			scr, lerr := leave([]string{"esc"}, "", effortLines)
+			if lerr != nil {
+				if errors.Is(lerr, gw.ErrUnknownResult) {
+					return "", lerr
+				}
+				break
+			}
+			if !effortShows(scr) {
 				break
 			}
 		}

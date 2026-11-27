@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ihainan/corral/internal/corrald/gw"
 	"github.com/ihainan/corral/internal/sshx"
 	"github.com/ihainan/corral/internal/store"
 	"github.com/ihainan/corral/internal/term"
@@ -839,13 +840,16 @@ func (s *Server) convoModelLine(w http.ResponseWriter, ctx context.Context, sess
 		return end, res, final, err
 	}
 	end, res, final, _ := conclude()
-	// (How it ended, found by now where the flow had not: its log's word.)
-	if err != nil && end == lineRan {
+	// (How it ended, found by now where the flow had not: its log's word.
+	// Never overwrite gw.ErrUnknownResult so callers always receive HTTP 409
+	// corrald_unknown_result and no follow-up Escape is pressed.)
+	unknownResult := errors.Is(err, gw.ErrUnknownResult)
+	if err != nil && !unknownResult && end == lineRan {
 		if name, err = watch.log.name, nil; !lineSame(name, want) {
 			err = errElsewhere
 		}
 	}
-	if err != nil && end == lineKept {
+	if err != nil && !unknownResult && end == lineKept {
 		err = errNotTaken
 	}
 	// (Not said by its log, and the default was the line's word: it ran.)
@@ -856,7 +860,7 @@ func (s *Server) convoModelLine(w http.ResponseWriter, ctx context.Context, sess
 	switch {
 	case err == nil:
 		offeredNow(procKey, target)
-	case errors.Is(err, errElsewhere), errors.Is(err, errUnsure):
+	case errors.Is(err, errElsewhere), errors.Is(err, errUnsure), unknownResult:
 		s.forgetLists(bg, procKey, kinKey)
 	}
 	go func(end lineEnd, res settled, final bool) { // (its own: the answer below goes by the first look)
@@ -876,7 +880,7 @@ func (s *Server) convoModelLine(w http.ResponseWriter, ctx context.Context, sess
 				break
 			}
 			time.Sleep(d)
-			if end, res, final, _ = conclude(); !final && end == lineOpen && held {
+			if end, res, final, _ = conclude(); !final && end == lineOpen && held && !unknownResult {
 				// (Still open by what its log says now: its question come late,
 				// for the model asked for, left, as in the flow.)
 				lctx, lcancel := context.WithTimeout(bg, 8*time.Second)

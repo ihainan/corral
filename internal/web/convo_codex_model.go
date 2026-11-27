@@ -252,7 +252,10 @@ func codexModelFlow(do, undo codexIO, model, effort string) (opts []modelOpt, er
 		}
 		scr, d, err := undo.look()
 		for i := 0; i < 2 && err == nil && codexPickerOpen(scr); i++ {
-			if undo.press([]string{"esc"}, "", d) != nil {
+			if lerr := undo.press([]string{"esc"}, "", d); lerr != nil {
+				if errors.Is(lerr, gw.ErrUnknownResult) {
+					return nil, lerr
+				}
 				break
 			}
 			scr, d, err = undo.settle(func(s string) bool { return !codexPickerOpen(s) })
@@ -363,7 +366,11 @@ func codexModelFlow(do, undo codexIO, model, effort string) (opts []modelOpt, er
 		if err := do.press([]string{"esc"}, "", digest); err != nil {
 			return out(err)
 		}
-		if scr, _, err := do.settle(func(s string) bool { return !codexPickerOpen(s) }); err != nil || codexPickerOpen(scr) {
+		scr, _, serr := do.settle(func(s string) bool { return !codexPickerOpen(s) })
+		if serr != nil {
+			return out(serr)
+		}
+		if codexPickerOpen(scr) {
 			return out(errScreen)
 		}
 		return models, nil

@@ -20,10 +20,17 @@ import (
 var (
 	// ErrClientClosed is returned when a call is made on a closed Client.
 	ErrClientClosed = errors.New("corrald client closed")
+	// ErrNotSent marks failures proven to have occurred BEFORE the request
+	// frame began writing on the wire (e.g. client already closed or cancelled
+	// while waiting for the write slot). Only ErrNotSent (or a whitelisted
+	// pre-execution rejection RPCError) permits a mutating caller to fall back
+	// to SSH without risking duplicate execution.
+	ErrNotSent = errors.New("corrald request not sent")
 	// ErrUnknownResult is returned when the outcome of a mutating RPC cannot be
-	// confirmed (disconnect/timeout after send, op_expired, op_unknown, or epoch
-	// change across reconnect), so the gateway must return 409
-	// corrald_unknown_result and NEVER retry with the same op_id.
+	// confirmed (write error, disconnect/timeout after send, response decode
+	// error, op_expired, op_unknown, or epoch change across reconnect), so the
+	// gateway must return 409 corrald_unknown_result and NEVER retry blindly or
+	// fall back to SSH.
 	ErrUnknownResult = errors.New("corrald write result unknown")
 )
 
@@ -220,15 +227,21 @@ func (c *Client) call(ctx context.Context, method string, params any, dst any, m
 		ctx, cancel = context.WithTimeout(ctx, DefaultCallTimeout)
 		defer cancel()
 	}
-	if err := ctx.Err(); err != nil {
+	wrapPreSend := func(err error) error {
+		if mutating {
+			return fmt.Errorf("%w: %w", ErrNotSent, err)
+		}
 		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return wrapPreSend(err)
 	}
 
 	var rawParams json.RawMessage
 	if params != nil {
 		b, err := json.Marshal(params)
 		if err != nil {
-			return err
+			return wrapPreSend(err)
 		}
 		rawParams = b
 	}
@@ -240,10 +253,10 @@ func (c *Client) call(ctx context.Context, method string, params any, dst any, m
 	if c.closed {
 		err := c.err
 		c.mu.Unlock()
-		if err != nil {
-			return err
+		if err == nil {
+			err = ErrClientClosed
 		}
-		return ErrClientClosed
+		return wrapPreSend(err)
 	}
 	c.pending[id] = ch
 	c.mu.Unlock()
@@ -259,19 +272,20 @@ func (c *Client) call(ctx context.Context, method string, params any, dst any, m
 	case <-c.wsem:
 	case <-c.done:
 		cleanupPending()
-		if err := c.Err(); err != nil {
-			return err
+		err := c.Err()
+		if err == nil {
+			err = ErrClientClosed
 		}
-		return ErrClientClosed
+		return wrapPreSend(err)
 	case <-ctx.Done():
 		cleanupPending()
-		return ctx.Err()
+		return wrapPreSend(ctx.Err())
 	}
 
 	if err := ctx.Err(); err != nil {
 		c.wsem <- struct{}{}
 		cleanupPending()
-		return err
+		return wrapPreSend(err)
 	}
 
 	// Bound the write itself: set write deadline when supported and close the
@@ -325,6 +339,9 @@ func (c *Client) call(ctx context.Context, method string, params any, dst any, m
 		}
 		if dst != nil && len(resp.Result) > 0 {
 			if err := json.Unmarshal(resp.Result, dst); err != nil {
+				if mutating {
+					return fmt.Errorf("%w: decode %s result: %v", ErrUnknownResult, method, err)
+				}
 				return fmt.Errorf("decode %s result: %w", method, err)
 			}
 		}

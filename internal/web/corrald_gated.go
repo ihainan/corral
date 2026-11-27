@@ -202,7 +202,14 @@ func (s *Server) runGated(ctx context.Context, sess *term.Session, req gatedReq)
 			switch rpcErr.Code {
 			case proto.ErrHandoffInProgress:
 				// Rejected cleanly before admitting op_id during drain; retry
-				// with the SAME op_id within the caller's original deadline.
+				// with the SAME op_id within the caller's original deadline
+				// (never fall back to SSH).
+				if inProgressEpoch != "" {
+					if s.corrald != nil {
+						s.corrald.ReportCapFailure(sess.HostID, cl, capName, gw.ErrUnknownResult)
+					}
+					return corraldDone(nil, gw.ErrUnknownResult)
+				}
 				if !gatedSleep(ctx, retryDelay) {
 					return corraldDone(nil, ctx.Err())
 				}
@@ -235,32 +242,43 @@ func (s *Server) runGated(ctx context.Context, sess *term.Session, req gatedReq)
 				cl = nextCl
 				continue
 
-			case proto.ErrMethodNotFound, proto.ErrNotSupported, proto.ErrInvalidParams:
+			default:
+				if inProgressEpoch == "" && proto.IsPreExecutionRejectionCode(rpcErr.Code) {
+					if s.corrald != nil {
+						s.corrald.ReportCapFailure(sess.HostID, cl, capName, err)
+					}
+					return sshFallback()
+				}
+				// Every non-whitelisted RPC error (internal_error, panic,
+				// unknown code, etc.) may have occurred after partial or full
+				// execution -> ErrUnknownResult (409), NEVER fall back to SSH.
 				if s.corrald != nil {
 					s.corrald.ReportCapFailure(sess.HostID, cl, capName, err)
 				}
-				if inProgressEpoch != "" {
-					return corraldDone(nil, gw.ErrUnknownResult)
-				}
-				return sshFallback()
+				return corraldDone(nil, fmt.Errorf("%w: %w", gw.ErrUnknownResult, err))
 			}
 		}
 
-		if errors.Is(err, gw.ErrUnknownResult) || inProgressEpoch != "" {
+		// Whitelist-only SSH fallback: ONLY errors proven to have failed BEFORE
+		// the request frame began writing on the wire (gw.ErrNotSent) may fall
+		// back to SSH (and never if the caller's ctx already expired or an
+		// earlier attempt was already in_progress).
+		if inProgressEpoch == "" && errors.Is(err, gw.ErrNotSent) {
+			if ctx.Err() != nil {
+				return corraldDone(nil, ctx.Err())
+			}
 			if s.corrald != nil {
 				s.corrald.ReportCapFailure(sess.HostID, cl, capName, err)
 			}
-			return corraldDone(nil, gw.ErrUnknownResult)
+			return sshFallback()
 		}
 
-		// Pre-send failure (e.g., client closed before the request frame began
-		// writing): report failure and fall back to SSH unless ctx expired.
-		if s.corrald != nil && ctx.Err() == nil {
+		// Everything else (decode errors, write errors, disconnects, timeouts,
+		// op_expired, op_unknown, unknown errors) -> ErrUnknownResult (409),
+		// NEVER fall back to SSH and NEVER retry with a new op_id.
+		if s.corrald != nil {
 			s.corrald.ReportCapFailure(sess.HostID, cl, capName, err)
 		}
-		if ctx.Err() != nil {
-			return corraldDone(nil, ctx.Err())
-		}
-		return sshFallback()
+		return corraldDone(nil, fmt.Errorf("%w: %w", gw.ErrUnknownResult, err))
 	}
 }

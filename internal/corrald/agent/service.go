@@ -172,6 +172,12 @@ func (s *Service) handlePaneSend(ctx context.Context, _ *daemon.Conn, raw json.R
 	if p.Pane == "" {
 		return nil, &proto.RPCError{Code: proto.ErrInvalidParams, Message: "missing pane"}
 	}
+	if p.Mode == "herdr" && p.Socket != "" && s.val != nil && !s.val.HasHerdrSocket(p.Socket) {
+		_ = s.locator.LocateWith(ctx, "", "", "", "", "")
+		if !s.val.HasHerdrSocket(p.Socket) {
+			return nil, &proto.RPCError{Code: proto.ErrPaneNotLocated, Message: "herdr socket not in located sockets"}
+		}
+	}
 	return s.sender.Send(ctx, p), nil
 }
 

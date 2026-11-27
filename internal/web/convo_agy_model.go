@@ -893,6 +893,14 @@ func (s *Server) runAgySlashSwitch(
 	switch {
 	case err == nil:
 	case errors.Is(err, gw.ErrUnknownResult):
+		if ctx.Err() == nil {
+			if _, rerr := restore(); rerr != nil {
+				defaultChanged.Store(sess.ID, time.Now())
+				*outcome, *reason = "default_changed", "default_changed"
+				writeError(w, http.StatusInternalServerError, "default_changed", "Antigravity's default model in settings.json changed and could not be restored")
+				return
+			}
+		}
 		*outcome, *reason = "unknown", "corrald_unknown_result"
 		writeCorraldUnknownResult(w)
 		return

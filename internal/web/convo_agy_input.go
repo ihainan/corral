@@ -486,7 +486,8 @@ END {
 
 // agyQueuedBulletRe matches queued user message lines agy renders directly
 // above its input box while working, e.g.:
-//   ▸ follow-up prompt text (alt+m to send immediately)
+//
+//	▸ follow-up prompt text (alt+m to send immediately)
 var (
 	agyQueuedBulletRe = regexp.MustCompile(`^[ \t]*[▸►▶][ \t]+(.+?)\s*$`)
 	agyQueuedHintRe   = regexp.MustCompile(`\s*\(alt\+m to send immediately\)\s*$`)

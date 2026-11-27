@@ -551,7 +551,14 @@ func modelFlow(step, leave modelStep, target, effort string, greyed ...func() st
 			return nil, e
 		}
 		for i := 0; i < 2; i++ {
-			if scr, err := leave([]string{"esc"}, "", pickerLines); err != nil || !pickerShows(scr) && !askShows(scr, "") {
+			scr, lerr := leave([]string{"esc"}, "", pickerLines)
+			if lerr != nil {
+				if errors.Is(lerr, gw.ErrUnknownResult) {
+					return nil, lerr
+				}
+				break
+			}
+			if !pickerShows(scr) && !askShows(scr, "") {
 				break
 			}
 		}
@@ -579,7 +586,11 @@ func modelFlow(step, leave modelStep, target, effort string, greyed ...func() st
 		return out(errNoPicker)
 	}
 	if target == "" {
-		if screen, err = step([]string{"esc"}, "", pickerLines); err != nil || pickerShows(screen) || askShows(screen, "") {
+		screen, err = step([]string{"esc"}, "", pickerLines)
+		if err != nil {
+			return out(err)
+		}
+		if pickerShows(screen) || askShows(screen, "") {
 			return out(errScreen)
 		}
 		return pk.offered(), nil
@@ -1050,7 +1061,7 @@ func (s *Server) convoModel(w http.ResponseWriter, ctx context.Context, sess *te
 		switch {
 		case err == nil && target == "" && len(opts) > 0:
 			s.noteCodexModels(ctx, sess.HostID, via, auth, opts)
-		case errors.Is(err, errNoModel), errors.Is(err, errUnsure), errors.Is(err, errElsewhere):
+		case errors.Is(err, errNoModel), errors.Is(err, errUnsure), errors.Is(err, errElsewhere), errors.Is(err, gw.ErrUnknownResult):
 			s.forgetCodexModels(ctx, sess.HostID, via, auth)
 		}
 	} else {
@@ -1060,7 +1071,7 @@ func (s *Server) convoModel(w http.ResponseWriter, ctx context.Context, sess *te
 		switch {
 		case err == nil && target != "" && len(opts) == 1:
 			confirmOffered(procKey, kinKey, opts[0], time.Now())
-		case errors.Is(err, errNoModel), errors.Is(err, errUnsure), errors.Is(err, errElsewhere):
+		case errors.Is(err, errNoModel), errors.Is(err, errUnsure), errors.Is(err, errElsewhere), errors.Is(err, gw.ErrUnknownResult):
 			// (Not as the lists kept said, or not known how it ended: read again.)
 			s.forgetLists(context.WithoutCancel(ctx), procKey, kinKey)
 		}

@@ -46,6 +46,8 @@ type PaneSender struct {
 	val         *PathValidator
 	tmux        *TmuxExecutor
 	herdr       *HerdrExecutor
+	uid         uint32
+	runtimeDir  string
 	sleepFn     func(ctx context.Context, d time.Duration) error
 	lockTimeout time.Duration
 
@@ -62,11 +64,17 @@ type paneLockSlot struct {
 
 // NewPaneSender constructs a PaneSender using loc, val, tmux, and herdr.
 func NewPaneSender(loc *Locator, val *PathValidator, tmux *TmuxExecutor, herdr *HerdrExecutor) *PaneSender {
+	uid := uint32(os.Geteuid())
+	if loc != nil {
+		uid = loc.uid
+	}
 	return &PaneSender{
 		locator:     loc,
 		val:         val,
 		tmux:        tmux,
 		herdr:       herdr,
+		uid:         uid,
+		runtimeDir:  fmt.Sprintf("/run/user/%d", uid),
 		sleepFn:     contextSleep,
 		lockTimeout: defaultPaneLockTimeout,
 		paneLocks:   make(map[string]*paneLockSlot),
@@ -76,6 +84,12 @@ func NewPaneSender(loc *Locator, val *PathValidator, tmux *TmuxExecutor, herdr *
 // SetLockTimeoutForTest overrides the per-pane lock timeout for fast unit tests.
 func (ps *PaneSender) SetLockTimeoutForTest(d time.Duration) {
 	ps.lockTimeout = d
+}
+
+// SetRuntimeDirForTest overrides the shared flock runtime directory (normally
+// /run/user/<uid>) for isolated tests.
+func (ps *PaneSender) SetRuntimeDirForTest(dir string) {
+	ps.runtimeDir = dir
 }
 
 func contextSleep(ctx context.Context, d time.Duration) error {
@@ -89,49 +103,6 @@ func contextSleep(ctx context.Context, d time.Duration) error {
 		return ctx.Err()
 	case <-t.C:
 		return nil
-	}
-}
-
-func (ps *PaneSender) acquirePaneLock(ctx context.Context, key string) (release func(), ok bool) {
-	timeout := ps.lockTimeout
-	if timeout <= 0 {
-		timeout = defaultPaneLockTimeout
-	}
-	ps.lockMu.Lock()
-	slot := ps.paneLocks[key]
-	if slot == nil {
-		slot = &paneLockSlot{ch: make(chan struct{}, 1)}
-		ps.paneLocks[key] = slot
-	}
-	slot.n++
-	ps.lockMu.Unlock()
-
-	leave := func() {
-		ps.lockMu.Lock()
-		slot.n--
-		if slot.n == 0 {
-			delete(ps.paneLocks, key)
-		}
-		ps.lockMu.Unlock()
-	}
-
-	timer := time.NewTimer(timeout)
-	defer timer.Stop()
-	select {
-	case slot.ch <- struct{}{}:
-		var once sync.Once
-		return func() {
-			once.Do(func() {
-				<-slot.ch
-				leave()
-			})
-		}, true
-	case <-timer.C:
-		leave()
-		return nil, false
-	case <-ctx.Done():
-		leave()
-		return nil, false
 	}
 }
 
@@ -330,9 +301,9 @@ func (ps *PaneSender) Send(ctx context.Context, p proto.PaneSendParams) proto.Pa
 		return proto.PaneSendResult{Exit: 4}
 	}
 
-	// Acquire per-pane host lock (10s timeout -> exit 7).
-	lockKey := p.Mode + "\x00" + p.Pane
-	release, locked := ps.acquirePaneLock(ctx, lockKey)
+	// Acquire per-pane host lock (shared flock in /run/user/<uid>, fallback
+	// in-process; 10s timeout -> exit 7).
+	release, locked := ps.acquirePaneLock(ctx, p.Mode, p.Pane)
 	if !locked {
 		if ctx.Err() != nil {
 			return proto.PaneSendResult{Exit: 4}

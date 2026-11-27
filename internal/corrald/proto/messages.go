@@ -52,7 +52,23 @@ const (
 	ErrRemoving          = "removing"
 	ErrUnauthorized      = "unauthorized"
 	ErrNotSupported      = "not_supported"
+	ErrPaneNotLocated    = "pane_not_located"
 )
+
+// IsPreExecutionRejectionCode reports whether code is a daemon RPC error that
+// corrald ONLY returns before executing any side-effecting pane operation.
+// Only these whitelisted codes (plus proven pre-write transport failures) may
+// fall back to SSH; handoff_in_progress retries with the same op_id, and every
+// other error (internal_error, panic, decode error, unknown code, etc.) MUST
+// surface as ErrUnknownResult (HTTP 409) without SSH fallback.
+func IsPreExecutionRejectionCode(code string) bool {
+	switch code {
+	case ErrMethodNotFound, ErrNotSupported, ErrInvalidParams, ErrPaneNotLocated:
+		return true
+	default:
+		return false
+	}
+}
 
 // Limits on daemon.hello identity fields and persisted client registry size
 // so hello responses always remain well below MaxFrameSize.

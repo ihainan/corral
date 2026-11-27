@@ -534,10 +534,20 @@ func modelLineFlow(io lineIO, log *lineLog, off *int64, want string, greyed ...f
 	}
 	// leave: its question for the model asked for — this line's, none
 	// other — where it is (still) on the screen, left with Escape, on the
-	// screen it was read off only. Whether it was left.
-	leave := func() bool {
+	// screen it was read off only. Whether it was left, or an ErrUnknownResult
+	// that must propagate without further retries/keypresses.
+	leave := func() (bool, error) {
 		text, digest, err := io.dialog()
-		return err == nil && lineAsks(text, want) && io.pressOn(digest, "esc") == nil
+		if err != nil || !lineAsks(text, want) {
+			return false, nil
+		}
+		if perr := io.pressOn(digest, "esc"); perr != nil {
+			if errors.Is(perr, gw.ErrUnknownResult) {
+				return false, perr
+			}
+			return false, nil
+		}
+		return true, nil
 	}
 	if !wait(lineLogFirst) {
 		// (Nothing said: its question, "Switch model?", may be what it waits
@@ -561,7 +571,11 @@ func modelLineFlow(io lineIO, log *lineLog, off *int64, want string, greyed ...f
 				}
 				// (Not pressed: the screen is another by now. Its question, if it
 				// still stands, left; what its log says by now, taken.)
-				if leave() {
+				left, lerr := leave()
+				if lerr != nil {
+					return "", lineMaybe, lerr
+				}
+				if left {
 					return "", lineMaybe, errNotTaken
 				}
 				if !wait(0) {
@@ -570,7 +584,11 @@ func modelLineFlow(io lineIO, log *lineLog, off *int64, want string, greyed ...f
 			}
 		}
 		if log.end == lineOpen && !wait(lineLogAfter) {
-			if leave() {
+			left, lerr := leave()
+			if lerr != nil {
+				return "", lineMaybe, lerr
+			}
+			if left {
 				return "", lineMaybe, errNotTaken
 			}
 			return "", lineMaybe, errUnsure
