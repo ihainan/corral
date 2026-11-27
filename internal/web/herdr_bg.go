@@ -424,31 +424,54 @@ func (s *Server) locatedEverywhere(sess *term.Session, pane, sid string, at time
 	}
 }
 
-// bgTailCommand prints, for each Claude Code session id given (validated),
-// a line "@@corral-bg <id>" and the end of its log. Fixed script; the ids
-// are its arguments.
+// bgTailCommand prints, for each Claude Code session id given (validated,
+// optionally suffixed with "=<configDir>" when locate already confirmed the
+// session's CLAUDE_CONFIG_DIR), a line "@@corral-bg <id>" and the end of its
+// log. When pinned to a configDir, only that directory is searched; otherwise
+// all discovered Claude config dirs are checked and the newest log by mtime
+// wins. Fixed script; the ids are its arguments.
 func bgTailCommand(sessions []string, tail int) string {
 	script := claudeConfigDirsSh + `n=$1; shift
-claude_cfg_dirs
-for s in "$@"; do
+_cldirs_loaded=0
+for arg in "$@"; do
+  case $arg in
+  *=*) s=${arg%%=*}; _pin=${arg#*=} ;;
+  *) s=$arg; _pin= ;;
+  esac
   printf '\n@@corral-bg %s\n' "$s"
-  _found=
-  while IFS= read -r _cd; do
-    [ -n "$_cd" ] || continue
-    for f in "$_cd"/projects/*/"$s".jsonl; do
+  _best=
+  if [ -n "$_pin" ]; then
+    for f in "$_pin"/projects/*/"$s".jsonl; do
       [ -f "$f" ] || continue
-      tail -c "$n" "$f"
-      _found=1
-      break
+      if [ -z "$_best" ] || [ "$f" -nt "$_best" ]; then _best=$f; fi
     done
-    [ -n "$_found" ] && break
-  done <<CORRAL_CLDIRS
+  else
+    if [ "$_cldirs_loaded" = 0 ]; then claude_cfg_dirs; _cldirs_loaded=1; fi
+    while IFS= read -r _cd; do
+      [ -n "$_cd" ] || continue
+      for f in "$_cd"/projects/*/"$s".jsonl; do
+        [ -f "$f" ] || continue
+        if [ -z "$_best" ] || [ "$f" -nt "$_best" ]; then _best=$f; fi
+      done
+    done <<CORRAL_CLDIRS
 $cldirs
 CORRAL_CLDIRS
+  fi
+  [ -n "$_best" ] && tail -c "$n" "$_best"
 done`
 	cmd := "sh -c " + sshx.QuoteShell(script) + " corral " + strconv.Itoa(tail)
-	for _, s := range sessions {
-		cmd += " " + sshx.QuoteShell(s)
+	for _, raw := range sessions {
+		sid, dir, hasDir := strings.Cut(raw, "=")
+		if !convoUUID.MatchString(sid) {
+			continue
+		}
+		if hasDir {
+			if clean, ok := cleanRemotePath(dir); ok && !strings.ContainsAny(clean, "\n\r\x01\x00") {
+				cmd += " " + sshx.QuoteShell(sid+"="+clean)
+				continue
+			}
+		}
+		cmd += " " + sshx.QuoteShell(sid)
 	}
 	return cmd
 }

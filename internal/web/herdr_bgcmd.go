@@ -441,40 +441,94 @@ func cmdScanCommand(watched ...string) string {
 	script := claudeConfigDirsSh + `btime=$(sed -n 's/^btime \([0-9]*\)$/\1/p' /proc/stat 2>/dev/null); hz=$(getconf CLK_TCK 2>/dev/null)
 printf 'clock\t%s\t%s\n' "$btime" "$hz"
 claude_cfg_dirs
-# (Of each session watched — "w:<id>" at work, "s:<id>" at rest —, its subagents sent off in the
-# background whose log was written to in the last six hours, not marked finished: what its meta
-# says it was sent for. At most ` + strconv.Itoa(subsScanned) + ` a session.)
+_pnl=$(printf '\nx'); _pnl=${_pnl%x}
+_pins=
 for a in "$@"; do
-  s=${a#?:}
-  _found=
+  _rest=${a#?:}
+  case $_rest in
+  *=*) _pins="${_pins}${_rest%%=*}	${_rest#*=}$_pnl" ;;
+  esac
+done
+_pin_of() {
+  _pin=
+  [ -n "$_pins" ] || return 0
+  while IFS='	' read -r _ps _pd; do
+    [ "$_ps" = "$1" ] && { _pin=$_pd; break; }
+  done <<CORRAL_PINS
+$_pins
+CORRAL_PINS
+}
+_best_claude_log() {
+  _best=
+  _pin_of "$1"
+  if [ -n "$_pin" ]; then
+    for _f in "$_pin"/projects/*/"$1".jsonl; do
+      [ -f "$_f" ] || continue
+      if [ -z "$_best" ] || [ "$_f" -nt "$_best" ]; then _best=$_f; fi
+    done
+    return 0
+  fi
   while IFS= read -r _cd; do
     [ -n "$_cd" ] || continue
-    for d in "$_cd"/projects/*/"$s"/subagents; do
-      [ -d "$d" ] || continue
-      find "$d" -maxdepth 1 -name 'agent-*.jsonl' -mmin -360 2>/dev/null | {
-        i=0
-        while IFS= read -r j; do
-          m=${j%.jsonl}.meta.json
-          [ -f "$m" ] || continue
-          meta=$(head -c 8192 "$m" 2>/dev/null | tr '\n\t' '  ')
-          case $meta in *'"requestShape":"background"'*) ;; *) continue;; esac
-          case $meta in *'"finished":true'*) continue;; esac
-          [ "$i" -lt ` + strconv.Itoa(subsScanned) + ` ] || break
-          i=$((i + 1))
-          id=${j##*/agent-}; id=${id%.jsonl}
-          t=$(stat -c %Y "$m" 2>/dev/null || date -r "$m" +%s 2>/dev/null)
-          v=$(head -c 65536 "$j" 2>/dev/null | grep -o '"version":"[0-9.]*"' | head -n 1 | cut -d'"' -f4)
-          w=$(printf '%s' "$meta" | grep -oE '"description":"([^"\\]|\\.)*"' | head -n 1 | head -c 600)
-          printf 'sub\t%s\t%s\t%s\t%s\t{%s}\n' "$s" "$id" "$t" "$v" "$w"
-        done
-      }
-      _found=1
-      break
+    for _f in "$_cd"/projects/*/"$1".jsonl; do
+      [ -f "$_f" ] || continue
+      if [ -z "$_best" ] || [ "$_f" -nt "$_best" ]; then _best=$_f; fi
     done
-    [ -n "$_found" ] && break
   done <<CORRAL_CLDIRS
 $cldirs
 CORRAL_CLDIRS
+}
+_best_claude_subs() {
+  _bestd=
+  _best_claude_log "$1"
+  if [ -n "$_best" ] && [ -d "${_best%.jsonl}/subagents" ]; then
+    _bestd="${_best%.jsonl}/subagents"
+    return 0
+  fi
+  _pin_of "$1"
+  if [ -n "$_pin" ]; then
+    for _d in "$_pin"/projects/*/"$1"/subagents; do
+      [ -d "$_d" ] || continue
+      if [ -z "$_bestd" ] || [ "$_d" -nt "$_bestd" ]; then _bestd=$_d; fi
+    done
+    return 0
+  fi
+  while IFS= read -r _cd; do
+    [ -n "$_cd" ] || continue
+    for _d in "$_cd"/projects/*/"$1"/subagents; do
+      [ -d "$_d" ] || continue
+      if [ -z "$_bestd" ] || [ "$_d" -nt "$_bestd" ]; then _bestd=$_d; fi
+    done
+  done <<CORRAL_CLDIRS
+$cldirs
+CORRAL_CLDIRS
+}
+# (Of each session watched — "w:<id>" at work, "s:<id>" at rest, optionally
+# with "=<configDir>" when locate already confirmed its CLAUDE_CONFIG_DIR —,
+# its subagents sent off in the background whose log was written to in the last
+# six hours, not marked finished: what its meta says it was sent for. At most ` + strconv.Itoa(subsScanned) + ` a session.)
+for a in "$@"; do
+  s=${a#?:}; s=${s%%=*}
+  _best_claude_subs "$s"
+  d=$_bestd
+  [ -d "$d" ] || continue
+  find "$d" -maxdepth 1 -name 'agent-*.jsonl' -mmin -360 2>/dev/null | {
+    i=0
+    while IFS= read -r j; do
+      m=${j%.jsonl}.meta.json
+      [ -f "$m" ] || continue
+      meta=$(head -c 8192 "$m" 2>/dev/null | tr '\n\t' '  ')
+      case $meta in *'"requestShape":"background"'*) ;; *) continue;; esac
+      case $meta in *'"finished":true'*) continue;; esac
+      [ "$i" -lt ` + strconv.Itoa(subsScanned) + ` ] || break
+      i=$((i + 1))
+      id=${j##*/agent-}; id=${id%.jsonl}
+      t=$(stat -c %Y "$m" 2>/dev/null || date -r "$m" +%s 2>/dev/null)
+      v=$(head -c 65536 "$j" 2>/dev/null | grep -o '"version":"[0-9.]*"' | head -n 1 | cut -d'"' -f4)
+      w=$(printf '%s' "$meta" | grep -oE '"description":"([^"\\]|\\.)*"' | head -n 1 | head -c 600)
+      printf 'sub\t%s\t%s\t%s\t%s\t{%s}\n' "$s" "$id" "$t" "$v" "$w"
+    done
+  }
 done
 seen=
 if command -v pgrep >/dev/null 2>&1; then
@@ -546,22 +600,13 @@ done
 for a in "$@"; do
   case $a in w:*) ;; *) continue;; esac
   [ -n "$seen" ] || break
-  s=${a#w:}
-  _found=
-  while IFS= read -r _cd; do
-    [ -n "$_cd" ] || continue
-    for f in "$_cd"/projects/*/"$s".jsonl; do
-      [ -f "$f" ] || continue
-      grep -o '"backgroundTaskId":"[A-Za-z0-9_-]*"' "$f" | sed 's/^"backgroundTaskId":"//; s/"$//' | sort -u | while IFS= read -r id; do
-        case " $seen " in *" $id "*) printf 'bgid\t%s\t%s\n' "$s" "$id";; esac
-      done
-      _found=1
-      break
-    done
-    [ -n "$_found" ] && break
-  done <<CORRAL_CLDIRS
-$cldirs
-CORRAL_CLDIRS
+  s=${a#w:}; s=${s%%=*}
+  _best_claude_log "$s"
+  f=$_best
+  [ -f "$f" ] || continue
+  grep -o '"backgroundTaskId":"[A-Za-z0-9_-]*"' "$f" | sed 's/^"backgroundTaskId":"//; s/"$//' | sort -u | while IFS= read -r id; do
+    case " $seen " in *" $id "*) printf 'bgid\t%s\t%s\n' "$s" "$id";; esac
+  done
 done
 # (Of each command a Claude Code's task file tells, what the agent said it does — its call's
 # "description", as the agent's own page shows it: the call is the one whose result names the
@@ -575,32 +620,36 @@ for p in $pairs; do
   s=${p%%/*}; id=${p#*/}
   case $s in *[!0-9a-fA-F-]*|"") continue;; esac
   case $id in *[!A-Za-z0-9_-]*|"") continue;; esac
-  _found=
-  while IFS= read -r _cd; do
-    [ -n "$_cd" ] || continue
-    for f in "$_cd"/projects/*/"$s".jsonl; do
-      [ -f "$f" ] || continue
-      i=$((i + 1))
-      tu=$(grep -m 1 -F "\"backgroundTaskId\":\"$id\"" "$f" | grep -o '"tool_use_id":"[A-Za-z0-9_-]*"' | head -n 1 | cut -d'"' -f4)
-      _found=1
-      [ -n "$tu" ] || break
-      w=$(grep -m 1 -F "\"id\":\"$tu\"" "$f" | sed "s/^.*\"id\":\"$tu\"//; s/\"id\":\".*//; s/\"type\":\"tool_use\".*//" | grep -oE '"description":"([^"\\]|\\.)*"' | head -n 1 | head -c 600)
-      [ -n "$w" ] && printf 'desc\t%s\t%s\t{%s}\n' "$s" "$id" "$w"
-      break
-    done
-    [ -n "$_found" ] && break
-  done <<CORRAL_CLDIRS
-$cldirs
-CORRAL_CLDIRS
+  _best_claude_log "$s"
+  f=$_best
+  [ -f "$f" ] || continue
+  i=$((i + 1))
+  tu=$(grep -m 1 -F "\"backgroundTaskId\":\"$id\"" "$f" | grep -o '"tool_use_id":"[A-Za-z0-9_-]*"' | head -n 1 | cut -d'"' -f4)
+  [ -n "$tu" ] || continue
+  w=$(grep -m 1 -F "\"id\":\"$tu\"" "$f" | sed "s/^.*\"id\":\"$tu\"//; s/\"id\":\".*//; s/\"type\":\"tool_use\".*//" | grep -oE '"description":"([^"\\]|\\.)*"' | head -n 1 | head -c 600)
+  [ -n "$w" ] && printf 'desc\t%s\t%s\t{%s}\n' "$s" "$id" "$w"
 done
 exit 0`
 	cmd := "sh -c " + sshx.QuoteShell(script) + " corral"
 	n := 0
 	for _, a := range watched {
-		if (strings.HasPrefix(a, "w:") || strings.HasPrefix(a, "s:")) && convoUUID.MatchString(a[2:]) && n < maxWatchedScanned {
-			cmd += " " + sshx.QuoteShell(a)
-			n++
+		if n >= maxWatchedScanned || (!strings.HasPrefix(a, "w:") && !strings.HasPrefix(a, "s:")) {
+			continue
 		}
+		prefix := a[:2]
+		sid, dir, hasDir := strings.Cut(a[2:], "=")
+		if !convoUUID.MatchString(sid) {
+			continue
+		}
+		if hasDir {
+			if clean, ok := cleanRemotePath(dir); ok && !strings.ContainsAny(clean, "\t\n\r\x01\x00") {
+				cmd += " " + sshx.QuoteShell(prefix+sid+"="+clean)
+				n++
+				continue
+			}
+		}
+		cmd += " " + sshx.QuoteShell(prefix+sid)
+		n++
 	}
 	return cmd
 }

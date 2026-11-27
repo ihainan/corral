@@ -1409,7 +1409,7 @@ func (s *Server) apiConversationRewind(w http.ResponseWriter, r *http.Request) {
 	var front *convoProc
 	if sess.Persistence == "herdr" {
 		if plan := planHerdrFastLocate(livePI, b.Pane, herdr.Pane{}, false); plan.mode == herdrFastPIDs {
-			if locOut, lerr := claudeRewindExec(ctx, sess, &running, convoLocatePidsCommand(plan.pids), convoLocateMax, 3*time.Second); lerr == nil {
+			if locOut, lerr := claudeRewindExec(ctx, sess, &running, convoLocatePidsCommand(plan.shellPID, plan.pids), convoLocateMax, 3*time.Second); lerr == nil {
 				located := parseConvoLocate(string(locOut))
 				if p, ok := fastLocateAccept(located, b.Pane, socket, liveHerdrSID); ok && !located.noProc && p != nil && p.pid == b.PID && p.start == b.Start && p.sid == b.Session {
 					front = p

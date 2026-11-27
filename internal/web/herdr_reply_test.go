@@ -29,9 +29,10 @@ type fakeHerdr struct {
 	// onSend: "" answers, "refuse" answers with an error, "drop" types and
 	// closes the connection without answering.
 	onSend string
-	tabs   []any // the snapshot's tabs
-	panes  []any // the snapshot's panes
-	agents []any // the snapshot's agent panes
+	tabs     []any                                  // the snapshot's tabs
+	panes    []any                                  // the snapshot's panes
+	agents   []any                                  // the snapshot's agent panes
+	procInfo map[string]herdr.PaneProcessInfoResult // pane.process_info answers by pane_id
 }
 
 func newFakeHerdr(t *testing.T) *fakeHerdr {
@@ -78,6 +79,23 @@ func (f *fakeHerdr) serve(c net.Conn) {
 			result = map[string]any{"snapshot": map[string]any{"version": "0.9.5", "focused_workspace_id": "w1", "workspaces": []any{}, "panes": f.panes, "agents": f.agents, "tabs": f.tabs}}
 		case "pane.read":
 			result = map[string]any{"read": map[string]any{"text": f.screen}}
+		case "pane.process_info":
+			pid, _ := req.Params["pane_id"].(string)
+			if pi, ok := f.procInfo[pid]; ok {
+				result = map[string]any{"process_info": pi}
+			} else {
+				f.mu.Unlock()
+				b, _ := json.Marshal(map[string]any{"id": req.ID, "error": map[string]any{"code": "unknown_method", "message": "unknown method"}})
+				c.Write(append(b, '\n'))
+				return
+			}
+		case "workspace.create":
+			req.Params["method"] = req.Method
+			f.sent = append(f.sent, req.Params)
+			result = map[string]any{
+				"workspace": map[string]any{"workspace_id": "w9"},
+				"root_pane": map[string]any{"pane_id": "w9:p1", "terminal_id": "t9"},
+			}
 		case "pane.zoom", "tab.create", "pane.split", "pane.focus_direction", "tab.focus", "workspace.rename", "tab.rename", "pane.rename":
 			req.Params["method"] = req.Method
 			f.sent = append(f.sent, req.Params)

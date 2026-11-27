@@ -418,6 +418,9 @@ type herdrSockets struct {
 	server map[string]watchedServer
 	// lineage: terminal session → parent-child lineage tracker for its herdr server.
 	lineage map[string]*lineageTracker
+	// claudeCfg: terminal session → Claude session UUID → confirmed CLAUDE_CONFIG_DIR
+	// (from locate), so background log/subagent probes read that exact directory.
+	claudeCfg map[string]map[string]string
 }
 
 type watchedServer struct {
@@ -655,6 +658,7 @@ func (h *herdrSockets) set(id, path string) {
 		delete(h.inView, id)
 		delete(h.server, id)
 		delete(h.lineage, id)
+		delete(h.claudeCfg, id)
 	} else {
 		h.path[id] = path
 	}
@@ -733,6 +737,85 @@ func (h *herdrSockets) sid(id, pane string) string {
 	return h.sids[id][pane]
 }
 
+func (h *herdrSockets) setClaudeCfg(id, sid, cfgDir string) {
+	if !convoUUID.MatchString(sid) || cfgDir == "" {
+		return
+	}
+	sid = strings.ToLower(sid)
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if _, ok := h.path[id]; !ok {
+		return
+	}
+	if h.claudeCfg == nil {
+		h.claudeCfg = map[string]map[string]string{}
+	}
+	m := h.claudeCfg[id]
+	if m == nil {
+		m = map[string]string{}
+		h.claudeCfg[id] = m
+	}
+	if _, had := m[sid]; !had && len(m) >= 256 {
+		return
+	}
+	m[sid] = cfgDir
+}
+
+func (h *herdrSockets) claudeCfgOf(id, sid string) string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.claudeCfg[id][strings.ToLower(sid)]
+}
+
+func (s *Server) noteClaudeCfgEverywhere(sess *term.Session, sid, log string) {
+	cfgDir, ok := claudeConfigDirFromLog(log)
+	if !ok || !convoUUID.MatchString(sid) {
+		return
+	}
+	s.herdrSocks.setClaudeCfg(sess.ID, sid, cfgDir)
+	socket := s.herdrSocks.get(sess.ID)
+	if socket == "" {
+		return
+	}
+	for _, o := range s.terms.Running(sess.OwnerID, sess.HostID) {
+		if o.ID != sess.ID && s.herdrSocks.get(o.ID) == socket {
+			s.herdrSocks.setClaudeCfg(o.ID, sid, cfgDir)
+		}
+	}
+}
+
+func attachBgClaudeDirs(sids []string, cfgOf func(string) string) []string {
+	if cfgOf == nil {
+		return sids
+	}
+	out := make([]string, len(sids))
+	for i, sid := range sids {
+		if d := cfgOf(sid); d != "" {
+			out[i] = sid + "=" + d
+		} else {
+			out[i] = sid
+		}
+	}
+	return out
+}
+
+func attachCmdClaudeDirs(watched []string, cfgOf func(string) string) []string {
+	if cfgOf == nil {
+		return watched
+	}
+	out := make([]string, len(watched))
+	for i, w := range watched {
+		if (strings.HasPrefix(w, "w:") || strings.HasPrefix(w, "s:")) && len(w) > 2 {
+			if d := cfgOf(w[2:]); d != "" {
+				out[i] = w + "=" + d
+				continue
+			}
+		}
+		out[i] = w
+	}
+	return out
+}
+
 func (h *herdrSockets) get(id string) string {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -803,6 +886,7 @@ func (s *Server) watchHerdr(sess *term.Session, h *store.Host) {
 	})
 	s.herdrSocks.setRounds(sess.ID, rounds)
 	bg := newBgProber(func(ctx context.Context, sids []string, tail int) (map[string]bgRecord, error) {
+		sids = attachBgClaudeDirs(sids, func(sid string) string { return s.herdrSocks.claudeCfgOf(sess.ID, sid) })
 		out, err := sshx.Output(ctx, sess.Client(), bgTailCommand(sids, tail), len(sids)*(tail+256))
 		if err != nil {
 			return nil, err
@@ -816,6 +900,7 @@ func (s *Server) watchHerdr(sess *term.Session, h *store.Host) {
 	s.herdrSocks.setLineage(sess.ID, lineage)
 	go bg.run(ctx)
 	cmds := newCmdSubProber(func(ctx context.Context, watched []string) (map[string][]bgCmd, map[string][]bgAgent, map[string]map[string]bool, bool, error) {
+		watched = attachCmdClaudeDirs(watched, func(sid string) string { return s.herdrSocks.claudeCfgOf(sess.ID, sid) })
 		out, err := sshx.Output(ctx, sess.Client(), cmdScanCommand(watched...), cmdScanMax)
 		if err != nil {
 			return nil, nil, nil, false, err
@@ -882,6 +967,9 @@ func (s *Server) watchHerdr(sess *term.Session, h *store.Host) {
 						s.locatedEverywhere(sess, p.herdrPane, p.sid, began)
 					}
 					if p.log != "" {
+						if p.agent == "claude" {
+							s.noteClaudeCfgEverywhere(sess, p.sid, p.log)
+						}
 						lineage.notePaneLog(p.herdrPane, p.agent, p.sid, p.log)
 					}
 					if w := procWrote(p, found.cands); w > at[p.herdrPane] {

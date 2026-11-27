@@ -335,11 +335,14 @@ func (s *Server) apiConversationSide(w http.ResponseWriter, r *http.Request) {
 		cmd := convoLocateCommand(sess.Persistence, sess.TmuxSession, tmuxTarget)
 		fastTry := attempt == 0 && fastPlan.mode == herdrFastPIDs
 		if fastTry {
-			cmd = convoLocatePidsCommand(fastPlan.pids)
+			cmd = convoLocatePidsCommand(fastPlan.shellPID, fastPlan.pids)
 		}
 		lctx, lcancel := context.WithTimeout(ctx, 15*time.Second)
 		lr, err := sshx.Exec(lctx, sess.Client(), cmd, convoLocateMax, sshx.ExecOptions{AwaitSlot: 2 * time.Second})
 		lcancel()
+		if err != nil && fastTry {
+			continue
+		}
 		switch {
 		case errors.Is(err, sshx.ErrBusy):
 			reason = "busy"

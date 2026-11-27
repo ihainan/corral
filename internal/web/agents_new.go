@@ -214,13 +214,22 @@ func (s *Server) newAgent(ctx context.Context, w http.ResponseWriter, sess *term
 		}
 	}
 	// The folder: the home's when under ~/, a folder that is there.
+	var sftpHome, defClaudeReal string
 	err := s.withSFTP(ctx, sess, convoReadLimit, func(c *sftplite.Client) error {
-		if strings.HasPrefix(dir, "~") {
+		if strings.HasPrefix(dir, "~") || (kind == "claude" && src != "") {
 			home, err := c.RealPath(".")
 			if err != nil {
 				return err
 			}
-			dir = path.Join(home, strings.TrimPrefix(dir, "~"))
+			sftpHome = home
+			if strings.HasPrefix(dir, "~") {
+				dir = path.Join(home, strings.TrimPrefix(dir, "~"))
+			}
+			if kind == "claude" && src != "" {
+				if rp, rerr := c.RealPath(path.Join(home, ".claude")); rerr == nil {
+					defClaudeReal = rp
+				}
+			}
 		}
 		fi, err := c.Stat(dir)
 		if err != nil {
@@ -231,6 +240,10 @@ func (s *Server) newAgent(ctx context.Context, w http.ResponseWriter, sess *term
 		}
 		return nil
 	})
+	claudeCfgDir := ""
+	if kind == "claude" && src != "" {
+		claudeCfgDir = claudeCustomConfigDir(src, sftpHome, defClaudeReal)
+	}
 	if errors.Is(err, fs.ErrNotExist) || errors.Is(err, errNotDir) {
 		writeError(w, http.StatusBadRequest, "bad_folder", "no such folder")
 		return
@@ -266,7 +279,8 @@ func (s *Server) newAgent(ctx context.Context, w http.ResponseWriter, sess *term
 	// named after it, in the folder; the page opens a terminal on it.
 	if socket == "" {
 		name := agentName(label, kind)
-		// (A Codex's conversation taken up or copied: in the home its log is in.)
+		// (A Codex's or Claude Code's conversation taken up or copied: in the
+		// config home its log is in.)
 		home := ""
 		if kind == "codex" && src != "" {
 			// (<home>/sessions/<year>/<month>/<day>/rollout-…: up from the log, not
@@ -274,6 +288,8 @@ func (s *Server) newAgent(ctx context.Context, w http.ResponseWriter, sess *term
 			if s := path.Dir(path.Dir(path.Dir(path.Dir(src)))); path.Base(s) == "sessions" {
 				home = path.Dir(s)
 			}
+		} else if kind == "claude" && claudeCfgDir != "" {
+			home = claudeCfgDir
 		}
 		out, err := sshx.Output(ctx, sess.Client(), agentTmuxCmd(name, dir, kind, home, how), 8<<10)
 		if err != nil || !strings.HasSuffix(strings.TrimSpace(string(out)), "started") {
@@ -314,6 +330,12 @@ func (s *Server) newAgent(ctx context.Context, w http.ResponseWriter, sess *term
 				spawnEnv["CORRAL_PARENT_SESSION"] = parentSess
 			}
 		}
+	}
+	if claudeCfgDir != "" {
+		if spawnEnv == nil {
+			spawnEnv = map[string]string{}
+		}
+		spawnEnv["CLAUDE_CONFIG_DIR"] = claudeCfgDir
 	}
 	if how.placement == "split" && !hasParent {
 		keep = false
@@ -474,7 +496,11 @@ func agentTmuxCmd(name, dir, kind, home string, how agentStart) string {
 	q := sshx.QuoteShell
 	run := "exec " + q(kind)
 	if home != "" {
-		run = "CODEX_HOME=" + q(home) + " " + run
+		if kind == "claude" {
+			run = "CLAUDE_CONFIG_DIR=" + q(home) + " " + run
+		} else {
+			run = "CODEX_HOME=" + q(home) + " " + run
+		}
 	}
 	for _, a := range agentArgs(kind, how) {
 		run += " " + q(a)

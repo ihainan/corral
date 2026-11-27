@@ -23,13 +23,14 @@ type herdrFastMode int
 
 const (
 	herdrFastFull     herdrFastMode = iota // run the full host scan
-	herdrFastPIDs                          // inspect only plan.pids under /proc
+	herdrFastPIDs                          // inspect only the pane's process subtree rooted at shellPID
 	herdrFastOpenCode                      // run OpenCode-only scan (needs serve + sibling OpenCodes)
 )
 
 type herdrFastPlan struct {
-	mode herdrFastMode
-	pids []int
+	mode     herdrFastMode
+	shellPID int
+	pids     []int
 }
 
 // claudeConfigDirSh defines claude_cfg_dir <procdir>, setting clcfg to the
@@ -37,7 +38,7 @@ type herdrFastPlan struct {
 // with NULs turned into newlines and embedded newlines into \001 so another
 // variable's value cannot forge it). Relative paths are resolved against
 // <procdir>/cwd; unset, unreadable, or malformed values fall back to
-// "$HOME/.claude".
+// "$HOME/.claude". Existing directories are canonicalized via pwd -P.
 const claudeConfigDirSh = `
 claude_cfg_dir() {
   clcfg="$HOME/.claude"
@@ -54,7 +55,7 @@ claude_cfg_dir() {
       esac ;;
     esac
     if [ "$clcfg" != "$HOME/.claude" ] && [ -d "$clcfg" ]; then
-      _clabs=$(cd -- "$clcfg" 2>/dev/null && pwd) && [ -n "$_clabs" ] && clcfg=$_clabs
+      _clabs=$(cd -- "$clcfg" 2>/dev/null && pwd -P) && [ -n "$_clabs" ] && clcfg=$_clabs
     fi
   fi
   while [ "$clcfg" != / ] && [ "${clcfg%/}" != "$clcfg" ]; do clcfg=${clcfg%/}; done
@@ -62,9 +63,10 @@ claude_cfg_dir() {
 `
 
 // claudeConfigDirsSh defines claude_cfg_dirs, setting cldirs to a newline-
-// separated list of unique existing Claude Code config directories: the shell's
-// CLAUDE_CONFIG_DIR (if set), "$HOME/.claude", and any CLAUDE_CONFIG_DIR set on
-// running Claude Code processes of the current user.
+// separated list of unique existing Claude Code config directories canonicalized
+// by physical path (pwd -P, so symlinks such as $HOME/.claude -> /data/claude do
+// not duplicate entries): the shell's CLAUDE_CONFIG_DIR (if set), "$HOME/.claude",
+// and any CLAUDE_CONFIG_DIR set on running Claude Code processes of the current user.
 const claudeConfigDirsSh = `claude_cfg_dirs() {
   _cdnl=$(printf '\nx'); _cdnl=${_cdnl%x}
   _cdsoh=$(printf '\001')
@@ -74,7 +76,7 @@ const claudeConfigDirsSh = `claude_cfg_dirs() {
     [ -n "$_cd" ] || return 0
     case $_cd in *"$_cdnl"*|*"$_cdsoh"*) return 0;; esac
     [ -d "$_cd" ] || return 0
-    _cd=$(cd -- "$_cd" 2>/dev/null && pwd) || return 0
+    _cd=$(cd -- "$_cd" 2>/dev/null && pwd -P) || return 0
     while [ "$_cd" != / ] && [ "${_cd%/}" != "$_cd" ]; do _cd=${_cd%/}; done
     case "$_cdnl$cldirs$_cdnl" in *"$_cdnl$_cd$_cdnl"*) ;; *) cldirs="${cldirs:+$cldirs$_cdnl}$_cd";; esac
   }
@@ -184,6 +186,24 @@ func claudeConfigDirFromLog(log string) (string, bool) {
 	return cfgDir, true
 }
 
+// claudeCustomConfigDir returns the custom CLAUDE_CONFIG_DIR extracted from
+// log when it differs from the account's default "~/.claude" (checking both
+// logical "<home>/.claude" and its resolved physical target defReal, if any).
+// Returns "" when log is in the default directory or not a valid Claude log.
+func claudeCustomConfigDir(log, home, defReal string) string {
+	cfgDir, ok := claudeConfigDirFromLog(log)
+	if !ok {
+		return ""
+	}
+	if strings.HasPrefix(home, "/") && cfgDir == path.Clean(home+"/.claude") {
+		return ""
+	}
+	if strings.HasPrefix(defReal, "/") && cfgDir == path.Clean(defReal) {
+		return ""
+	}
+	return cfgDir
+}
+
 // isOpenCodeProc reports whether a pane.process_info entry looks like OpenCode.
 func isOpenCodeProc(e herdr.ProcessEntry) bool {
 	if strings.EqualFold(e.Name, "opencode") {
@@ -195,18 +215,38 @@ func isOpenCodeProc(e herdr.ProcessEntry) bool {
 	return false
 }
 
-// planHerdrFastLocate decides whether locating pane can use the foreground PIDs
-// returned by herdr's pane.process_info, should use the OpenCode-only scan, or
-// must fall back to the full host scan.
+// isCodexProc reports whether a pane.process_info entry looks like Codex.
+func isCodexProc(e herdr.ProcessEntry) bool {
+	if strings.EqualFold(e.Name, "codex") {
+		return true
+	}
+	if len(e.Argv) > 0 && strings.EqualFold(path.Base(e.Argv[0]), "codex") {
+		return true
+	}
+	return false
+}
+
+// planHerdrFastLocate decides whether locating pane can use the pane's process
+// subtree rooted at pi.ShellPID, should use the OpenCode-only scan, or must
+// fall back to the full host scan.
+//
+// Codex panes never use the subtree fast path (they have locateCodexFast /
+// codexFront and rely on host-wide convoClaimed.seeAlive protection).
 func planHerdrFastLocate(pi *herdr.PaneProcessInfoResult, pane string, hp herdr.Pane, hasHP bool) herdrFastPlan {
 	fallback := herdrFastPlan{mode: herdrFastFull}
 	if hasHP && isOpenCodeAgent(hp.Agent) {
 		fallback.mode = herdrFastOpenCode
 	}
-	if pi == nil || pane == "" || (pi.PaneID != "" && pi.PaneID != pane) || len(pi.ForegroundProcesses) == 0 {
+	if hasHP && isCodexAgent(hp.Agent) {
+		return herdrFastPlan{mode: herdrFastFull}
+	}
+	if pi == nil || pane == "" || (pi.PaneID != "" && pi.PaneID != pane) || pi.ShellPID <= 0 || len(pi.ForegroundProcesses) == 0 {
 		return fallback
 	}
 	for _, pr := range pi.ForegroundProcesses {
+		if isCodexProc(pr) {
+			return herdrFastPlan{mode: herdrFastFull}
+		}
 		if isOpenCodeProc(pr) {
 			return herdrFastPlan{mode: herdrFastOpenCode}
 		}
@@ -216,7 +256,7 @@ func planHerdrFastLocate(pi *herdr.PaneProcessInfoResult, pane string, hp herdr.
 	// behavior with the full process scan.
 	if len(pi.ForegroundProcesses) == 1 {
 		only := pi.ForegroundProcesses[0]
-		if pi.ShellPID > 0 && only.PID == pi.ShellPID && ocShells[only.Name] {
+		if only.PID == pi.ShellPID && ocShells[only.Name] {
 			return fallback
 		}
 	}
@@ -233,18 +273,20 @@ func planHerdrFastLocate(pi *herdr.PaneProcessInfoResult, pane string, hp herdr.
 		return fallback
 	}
 	slices.Sort(pids)
-	return herdrFastPlan{mode: herdrFastPIDs, pids: pids}
+	return herdrFastPlan{mode: herdrFastPIDs, shellPID: pi.ShellPID, pids: pids}
 }
 
-// convoLocatePidsCommand is convoLocateCommand scoped to the given PIDs only.
-func convoLocatePidsCommand(pids []int) string {
+// convoLocatePidsCommand is convoLocateCommand scoped to the pane's process
+// subtree rooted at shellPID (verifying all fg pids are inside it and that the
+// subtree contains strictly one candidate agent process).
+func convoLocatePidsCommand(shellPID int, pids []int) string {
 	var parts []string
 	for _, p := range pids {
 		if p > 0 {
 			parts = append(parts, strconv.Itoa(p))
 		}
 	}
-	return convoLocateWith("herdr", "", "", "", "pids:"+strings.Join(parts, ","))
+	return convoLocateWith("herdr", "", "", "", "tree:"+strconv.Itoa(shellPID)+":"+strings.Join(parts, ","))
 }
 
 // ancOwnedByHerdrShell reports whether anc reaches a herdr ancestor and every
@@ -263,34 +305,31 @@ func ancOwnedByHerdrShell(anc []convoAnc) bool {
 }
 
 // fastLocateAccept validates the output of convoLocatePidsCommand for a single
-// herdr pane. It returns (proc, true) only when the fast-path result is
-// guaranteed to match what a full host scan would conclude; otherwise (_, false)
+// herdr pane. It returns (proc, true) only when the pane's process subtree was
+// verified completely and contains strictly one candidate Claude/Agy agent
+// whose result is guaranteed to match a full host scan; otherwise (_, false)
 // tells the caller to fall back to the full scan.
 func fastLocateAccept(l convoLocated, pane, socket, want string) (*convoProc, bool) {
 	if l.noProc {
 		return nil, true
 	}
+	if l.fastIncomplete || len(l.procs) != 1 {
+		return nil, false
+	}
 	p := pickConvoProc(l.procs, "herdr", pane, socket, "", "", want)
 	if p == nil {
 		return nil, false
 	}
-	switch p.agent {
-	case "claude", "agy":
-	case "codex":
-		// A Codex without an open rollout log needs the app-server daemon's
-		// candidate logs and cross-process claims from a full scan.
-		if p.log == "" {
-			return nil, false
-		}
-	default:
+	// Only Claude Code and Agy use the subtree fast path; Codex, OpenCode,
+	// Devin, and any unknown agent fall back to their dedicated/full paths.
+	if p.agent != "claude" && p.agent != "agy" {
 		return nil, false
 	}
 	if !ancOwnedByHerdrShell(p.anc) {
 		return nil, false
 	}
-	// If herdr reports a specific session for this pane and the foreground
-	// process holds a different one, another process in the pane could hold
-	// want (ranked higher by pickConvoProc); fall back to full scan.
+	// If herdr reports a specific session for this pane and the process holds a
+	// different one, fall back to full scan.
 	if want != "" && p.sid != want {
 		return nil, false
 	}

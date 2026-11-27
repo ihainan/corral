@@ -1,6 +1,10 @@
 package web
 
 import (
+	"context"
+	"encoding/binary"
+	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -8,17 +12,21 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/pkg/sftp"
+	"golang.org/x/crypto/ssh"
 
 	"github.com/ihainan/corral/internal/herdr"
 	"github.com/ihainan/corral/internal/sftplite"
+	"github.com/ihainan/corral/internal/sshx"
 )
 
 func TestPlanHerdrFastLocate(t *testing.T) {
 	hpClaude := herdr.Pane{ID: "w1:p1", Agent: "claude"}
+	hpCodex := herdr.Pane{ID: "w1:p1", Agent: "codex"}
 	hpOC := herdr.Pane{ID: "w1:p1", Agent: "opencode"}
 
 	// Nil result (e.g. older herdr without pane.process_info) falls back to full scan,
@@ -30,9 +38,33 @@ func TestPlanHerdrFastLocate(t *testing.T) {
 		t.Fatalf("nil pi for opencode: got %+v, want opencode", got)
 	}
 
+	// Codex never uses the subtree fast path (snapshot or process entry).
+	codexPI := &herdr.PaneProcessInfoResult{
+		PaneID:              "w1:p1",
+		ShellPID:            50,
+		ForegroundProcesses: []herdr.ProcessEntry{{PID: 100, Name: "codex"}},
+	}
+	if got := planHerdrFastLocate(codexPI, "w1:p1", hpCodex, true); got.mode != herdrFastFull {
+		t.Fatalf("codex snapshot: got %+v, want full", got)
+	}
+	if got := planHerdrFastLocate(codexPI, "w1:p1", herdr.Pane{}, false); got.mode != herdrFastFull {
+		t.Fatalf("codex proc: got %+v, want full", got)
+	}
+
+	// Missing shell_pid falls back because the pane's process tree cannot be verified.
+	noShell := &herdr.PaneProcessInfoResult{
+		PaneID:              "w1:p1",
+		ShellPID:            0,
+		ForegroundProcesses: []herdr.ProcessEntry{{PID: 100, Name: "claude"}},
+	}
+	if got := planHerdrFastLocate(noShell, "w1:p1", hpClaude, true); got.mode != herdrFastFull {
+		t.Fatalf("missing shell_pid: got %+v, want full", got)
+	}
+
 	// Mismatched pane_id falls back.
 	mismatch := &herdr.PaneProcessInfoResult{
 		PaneID:              "w1:p9",
+		ShellPID:            50,
 		ForegroundProcesses: []herdr.ProcessEntry{{PID: 100, Name: "claude"}},
 	}
 	if got := planHerdrFastLocate(mismatch, "w1:p1", hpClaude, true); got.mode != herdrFastFull {
@@ -55,14 +87,14 @@ func TestPlanHerdrFastLocate(t *testing.T) {
 		t.Fatalf("shell-only fg: got %+v, want full", got)
 	}
 
-	// Agent replacing the shell via `exec claude` (PID == ShellPID, Name == claude) must still use fast PIDs.
+	// Agent replacing the shell via `exec claude` (PID == ShellPID, Name == claude) must still use fast tree scan.
 	execClaude := &herdr.PaneProcessInfoResult{
 		PaneID:              "w1:p1",
 		ShellPID:            50,
 		ForegroundProcesses: []herdr.ProcessEntry{{PID: 50, Name: "claude"}},
 	}
-	if got := planHerdrFastLocate(execClaude, "w1:p1", hpClaude, true); got.mode != herdrFastPIDs || !slices.Equal(got.pids, []int{50}) {
-		t.Fatalf("exec claude: got %+v, want pids [50]", got)
+	if got := planHerdrFastLocate(execClaude, "w1:p1", hpClaude, true); got.mode != herdrFastPIDs || got.shellPID != 50 || !slices.Equal(got.pids, []int{50}) {
+		t.Fatalf("exec claude: got %+v, want shellPID=50 pids=[50]", got)
 	}
 
 	// Normal foreground processes: deduplicated, sorted ascending, ignoring non-positive PIDs.
@@ -77,13 +109,14 @@ func TestPlanHerdrFastLocate(t *testing.T) {
 			{PID: 300, Name: "claude"},
 		},
 	}
-	if got := planHerdrFastLocate(normal, "w1:p1", hpClaude, true); got.mode != herdrFastPIDs || !slices.Equal(got.pids, []int{200, 300}) {
-		t.Fatalf("normal fg: got %+v, want pids [200 300]", got)
+	if got := planHerdrFastLocate(normal, "w1:p1", hpClaude, true); got.mode != herdrFastPIDs || got.shellPID != 50 || !slices.Equal(got.pids, []int{200, 300}) {
+		t.Fatalf("normal fg: got %+v, want shellPID=50 pids=[200 300]", got)
 	}
 
 	// OpenCode detected by Name or Argv[0] switches directly to OpenCode-only scan.
 	ocByName := &herdr.PaneProcessInfoResult{
 		PaneID:              "w1:p1",
+		ShellPID:            50,
 		ForegroundProcesses: []herdr.ProcessEntry{{PID: 400, Name: "opencode"}},
 	}
 	if got := planHerdrFastLocate(ocByName, "w1:p1", herdr.Pane{}, false); got.mode != herdrFastOpenCode {
@@ -91,6 +124,7 @@ func TestPlanHerdrFastLocate(t *testing.T) {
 	}
 	ocByArgv := &herdr.PaneProcessInfoResult{
 		PaneID:              "w1:p1",
+		ShellPID:            50,
 		ForegroundProcesses: []herdr.ProcessEntry{{PID: 401, Name: "bun", Argv: []string{"/usr/local/bin/opencode"}}},
 	}
 	if got := planHerdrFastLocate(ocByArgv, "w1:p1", herdr.Pane{}, false); got.mode != herdrFastOpenCode {
@@ -98,7 +132,7 @@ func TestPlanHerdrFastLocate(t *testing.T) {
 	}
 
 	// Too many foreground PIDs falls back to full scan.
-	many := &herdr.PaneProcessInfoResult{PaneID: "w1:p1"}
+	many := &herdr.PaneProcessInfoResult{PaneID: "w1:p1", ShellPID: 50}
 	for i := 1; i <= maxFastLocatePIDs+1; i++ {
 		many.ForegroundProcesses = append(many.ForegroundProcesses, herdr.ProcessEntry{PID: 1000 + i, Name: "worker"})
 	}
@@ -130,6 +164,19 @@ func TestFastLocateAccept(t *testing.T) {
 		t.Fatalf("valid claude: got p=%+v ok=%v", p, ok)
 	}
 
+	// fastIncomplete -> must fall back even if a proc record was present.
+	if _, ok := fastLocateAccept(convoLocated{procs: []convoProc{claude}, fastIncomplete: true}, "w1:p1", sock, ""); ok {
+		t.Fatal("fastIncomplete should fall back")
+	}
+
+	// Multiple candidate procs -> must fall back.
+	sibling := claude
+	sibling.pid = 101
+	sibling.start = 600
+	if _, ok := fastLocateAccept(convoLocated{procs: []convoProc{claude, sibling}}, "w1:p1", sock, ""); ok {
+		t.Fatal("multiple candidate procs should fall back")
+	}
+
 	// Valid Claude directly under herdr (no intermediate shell, e.g. herdr agent start).
 	claudeDirect := claude
 	claudeDirect.anc = directAnc
@@ -144,7 +191,7 @@ func TestFastLocateAccept(t *testing.T) {
 		t.Fatalf("fresh claude: got p=%+v ok=%v", p, ok)
 	}
 
-	// Herdr reports a different session want -> must fall back so a sibling holding want isn't missed.
+	// Herdr reports a different session want -> must fall back.
 	if _, ok := fastLocateAccept(convoLocated{procs: []convoProc{claude}}, "w1:p1", sock, sidB); ok {
 		t.Fatal("want mismatch should fall back")
 	}
@@ -177,18 +224,11 @@ func TestFastLocateAccept(t *testing.T) {
 		t.Fatalf("valid agy: got p=%+v ok=%v", p, ok)
 	}
 
-	// Codex with its own open rollout log -> accepted; daemon-held Codex (log=="") -> must fall back.
+	// Codex (even with its own open log), OpenCode, and Devin must all fall back.
 	codexOwn := convoProc{pid: 300, start: 700, agent: "codex", sid: sidA, log: "/home/u/.codex/sessions/2026/rollout-1-" + sidA + ".jsonl", herdrPane: "w1:p1", herdrSocket: sock, anc: shellAnc}
-	if p, ok := fastLocateAccept(convoLocated{procs: []convoProc{codexOwn}}, "w1:p1", sock, ""); !ok || p == nil || p.pid != 300 {
-		t.Fatalf("codex with open log: got p=%+v ok=%v", p, ok)
+	if _, ok := fastLocateAccept(convoLocated{procs: []convoProc{codexOwn}}, "w1:p1", sock, ""); ok {
+		t.Fatal("codex must not use fast path")
 	}
-	codexDaemon := codexOwn
-	codexDaemon.log = ""
-	if _, ok := fastLocateAccept(convoLocated{procs: []convoProc{codexDaemon}}, "w1:p1", sock, ""); ok {
-		t.Fatal("daemon-held codex (empty log) should fall back")
-	}
-
-	// OpenCode and Devin must fall back.
 	oc := convoProc{pid: 400, start: 800, agent: "opencode", sid: convoNoSession, log: "/home/u/.local/share/opencode/opencode.db", herdrPane: "w1:p1", herdrSocket: sock, anc: shellAnc}
 	if _, ok := fastLocateAccept(convoLocated{procs: []convoProc{oc}}, "w1:p1", sock, ""); ok {
 		t.Fatal("opencode should fall back")
@@ -205,12 +245,10 @@ func TestClaudeConfigDirParsingAndPaths(t *testing.T) {
 	if got := parseClaudeConfigDir(env); got != "/opt/my cfg/.claude-work/" {
 		t.Fatalf("parseClaudeConfigDir = %q, want %q", got, "/opt/my cfg/.claude-work/")
 	}
-	// Forged inside another variable's value only -> empty.
 	forged := []byte("OTHER=x\nCLAUDE_CONFIG_DIR=/forged\x00PATH=/usr/bin\x00")
 	if got := parseClaudeConfigDir(forged); got != "" {
 		t.Fatalf("forged CLAUDE_CONFIG_DIR = %q, want empty", got)
 	}
-	// Embedded newline in CLAUDE_CONFIG_DIR -> rejected.
 	badNL := []byte("CLAUDE_CONFIG_DIR=/good\n/bad\x00")
 	if got := parseClaudeConfigDir(badNL); got != "" {
 		t.Fatalf("newline CLAUDE_CONFIG_DIR = %q, want empty", got)
@@ -254,7 +292,7 @@ func TestClaudeConfigDirParsingAndPaths(t *testing.T) {
 		t.Error("claudeProjectLogGlob accepted non-uuid")
 	}
 
-	// claudeConfigDirFromLog: default, custom, spaces, non-claude rejected.
+	// claudeConfigDirFromLog & claudeCustomConfigDir.
 	logCases := []struct {
 		log  string
 		want string
@@ -273,6 +311,15 @@ func TestClaudeConfigDirParsingAndPaths(t *testing.T) {
 		if ok != tc.ok || got != tc.want {
 			t.Errorf("claudeConfigDirFromLog(%q) = (%q, %v), want (%q, %v)", tc.log, got, ok, tc.want, tc.ok)
 		}
+	}
+	if got := claudeCustomConfigDir("/home/u/.claude/projects/-w/"+sidA+".jsonl", "/home/u", "/data/claude"); got != "" {
+		t.Errorf("default logical dir should return empty, got %q", got)
+	}
+	if got := claudeCustomConfigDir("/data/claude/projects/-w/"+sidA+".jsonl", "/home/u", "/data/claude"); got != "" {
+		t.Errorf("symlink target of default dir should return empty, got %q", got)
+	}
+	if got := claudeCustomConfigDir("/opt/my cfg/.claude-alt/projects/-w/"+sidA+".jsonl", "/home/u", "/data/claude"); got != "/opt/my cfg/.claude-alt" {
+		t.Errorf("custom dir = %q, want /opt/my cfg/.claude-alt", got)
 	}
 }
 
@@ -312,6 +359,570 @@ func TestConvoProcStatusCustomConfigDir(t *testing.T) {
 	}
 }
 
+// spawnFakeHerdrTree launches a real process tree:
+//
+//	<tmp>/herdr (symlink to /bin/sh) -> sh (shellPID) -> N sleep children
+//
+// so /proc/<child>/stat has herdr as grandparent via shellPID, matching real herdr panes.
+func spawnFakeHerdrTree(t *testing.T, workDir, home string, childEnvs [][]string) (shellPID int, childPIDs []int, childStarts []string) {
+	t.Helper()
+	shPath, err := exec.LookPath("sh")
+	if err != nil {
+		t.Skip("no sh")
+	}
+	binDir := t.TempDir()
+	herdrBin := filepath.Join(binDir, "herdr")
+	if err := os.Symlink(shPath, herdrBin); err != nil {
+		t.Fatal(err)
+	}
+	pidFile := filepath.Join(binDir, "pids.txt")
+	var childScript strings.Builder
+	childScript.WriteString("echo \"shell=$$\" > " + strconv.Quote(pidFile) + "\n")
+	for i, env := range childEnvs {
+		if i > 0 {
+			childScript.WriteString("sleep 0.05\n")
+		}
+		childScript.WriteString("(\n")
+		for _, kv := range env {
+			k, v, _ := strings.Cut(kv, "=")
+			childScript.WriteString(k + "=$(printf '%s' " + shellSingleQuote(v) + "); export " + k + "\n")
+		}
+		childScript.WriteString("exec sleep 60\n) &\n")
+		childScript.WriteString(fmt.Sprintf("echo \"child%d=$!\" >> %s\n", i, strconv.Quote(pidFile)))
+	}
+	childScript.WriteString("echo done >> " + strconv.Quote(pidFile) + "\nwait\n")
+
+	outer := exec.Command(herdrBin, "-c", shPath+" -c "+shellSingleQuote(childScript.String())+" & wait")
+	outer.Dir = workDir
+	outer.Env = []string{"PATH=/usr/bin:/bin", "HOME=" + home}
+	if err := outer.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		for _, p := range childPIDs {
+			if pr, err := os.FindProcess(p); err == nil {
+				_ = pr.Kill()
+			}
+		}
+		if shellPID > 0 {
+			if pr, err := os.FindProcess(shellPID); err == nil {
+				_ = pr.Kill()
+			}
+		}
+		_ = outer.Process.Kill()
+		_ = outer.Wait()
+	})
+
+	for i := 0; i < 100; i++ {
+		if b, err := os.ReadFile(pidFile); err == nil && strings.Contains(string(b), "done\n") {
+			childPIDs = make([]int, len(childEnvs))
+			for _, line := range strings.Split(strings.TrimSpace(string(b)), "\n") {
+				if v, ok := strings.CutPrefix(line, "shell="); ok {
+					shellPID, _ = strconv.Atoi(v)
+				} else if strings.HasPrefix(line, "child") {
+					k, v, _ := strings.Cut(line, "=")
+					idx, _ := strconv.Atoi(strings.TrimPrefix(k, "child"))
+					childPIDs[idx], _ = strconv.Atoi(v)
+				}
+			}
+			break
+		}
+		time.Sleep(15 * time.Millisecond)
+	}
+	if shellPID <= 0 {
+		t.Fatalf("failed to start fake herdr tree (pidFile=%q)", pidFile)
+	}
+	childStarts = make([]string, len(childPIDs))
+	for i, pid := range childPIDs {
+		for try := 0; try < 50 && childStarts[i] == ""; try++ {
+			b, _ := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/stat")
+			if j := strings.LastIndex(string(b), ") "); j >= 0 {
+				if f := strings.Fields(string(b)[j+2:]); len(f) > 19 {
+					childStarts[i] = f[19]
+				}
+			}
+			if childStarts[i] == "" {
+				time.Sleep(10 * time.Millisecond)
+			}
+		}
+		if childStarts[i] == "" {
+			t.Fatalf("could not read /proc/%d/stat", pid)
+		}
+	}
+	return shellPID, childPIDs, childStarts
+}
+
+func shellSingleQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// Review Item 1: When a pane's shell has TWO sibling Claude Code processes
+// (e.g. old in foreground, new in background), the fast path must detect both
+// in the pane subtree, emit fast_incomplete=1, and fall back to full scan so
+// pickConvoProc / convoPress still selects the newer sibling (agent_changed).
+func TestFastLocateSiblingAgentFallsBack(t *testing.T) {
+	if _, err := os.Stat("/proc/self/stat"); err != nil {
+		t.Skip("no /proc")
+	}
+	sh, err := exec.LookPath("sh")
+	if err != nil {
+		t.Skip("no sh")
+	}
+	home := t.TempDir()
+	work := filepath.Join(home, "work")
+	sessDir := filepath.Join(home, ".claude", "sessions")
+	projDir := filepath.Join(home, ".claude", "projects", "-work")
+	for _, d := range []string{work, sessDir, projDir} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	shellPID, pids, starts := spawnFakeHerdrTree(t, work, home, [][]string{
+		{"HERDR_PANE_ID=w1:p1", "HERDR_SOCKET_PATH=/run/herdr.sock"},
+		{"HERDR_PANE_ID=w1:p1", "HERDR_SOCKET_PATH=/run/herdr.sock"},
+	})
+	oldPID, newPID := pids[0], pids[1]
+	oldStart, newStart := starts[0], starts[1]
+	os.WriteFile(filepath.Join(projDir, sidA+".jsonl"), []byte(`{"type":"user"}`+"\n"), 0o644)
+	os.WriteFile(filepath.Join(sessDir, strconv.Itoa(oldPID)+".json"),
+		[]byte(`{"pid":`+strconv.Itoa(oldPID)+`,"sessionId":"`+sidA+`","procStart":"`+oldStart+`"}`), 0o644)
+
+	// Case 1: Only ONE Claude candidate in the pane subtree -> fast path hits and accepts oldPID.
+	runTree := func(shPID int, fg []int) convoLocated {
+		c := exec.Command(sh, "-c", convoLocatePidsCommand(shPID, fg))
+		c.Env = []string{"HOME=" + home, "PATH=/usr/bin:/bin"}
+		out, err := c.Output()
+		if err != nil {
+			t.Fatalf("convoLocatePidsCommand failed: %v", err)
+		}
+		return parseConvoLocate(string(out))
+	}
+	single := runTree(shellPID, []int{oldPID})
+	if single.fastIncomplete {
+		t.Fatalf("single candidate unexpectedly marked fastIncomplete: %+v", single)
+	}
+	if p, ok := fastLocateAccept(single, "w1:p1", "/run/herdr.sock", ""); !ok || p == nil || p.pid != int64(oldPID) {
+		t.Fatalf("single candidate fastLocateAccept = (%+v, %v), want pid %d", p, ok, oldPID)
+	}
+
+	// Case 2: Second sibling Claude appears in the same pane (even with same sessionId,
+	// while pane.process_info only lists oldPID in foreground!) -> must mark fastIncomplete
+	// and fall back to full scan, which picks the newer sibling (preserving agent_changed).
+	os.WriteFile(filepath.Join(sessDir, strconv.Itoa(newPID)+".json"),
+		[]byte(`{"pid":`+strconv.Itoa(newPID)+`,"sessionId":"`+sidA+`","procStart":"`+newStart+`"}`), 0o644)
+	both := runTree(shellPID, []int{oldPID})
+	if !both.fastIncomplete {
+		t.Fatalf("two siblings in pane must set fastIncomplete=true, got %+v", both)
+	}
+	if p, ok := fastLocateAccept(both, "w1:p1", "/run/herdr.sock", ""); ok || p != nil {
+		t.Fatalf("two siblings must fall back to full scan, got (%+v, %v)", p, ok)
+	}
+
+	// Verify full scan picks the later-started sibling (so convoPress for oldPID returns agent_changed).
+	cFull := exec.Command(sh, "-c", convoLocateCommand("herdr", "", ""))
+	cFull.Env = []string{"HOME=" + home, "PATH=/usr/bin:/bin"}
+	fullOut, err := cFull.Output()
+	if err != nil {
+		t.Fatalf("full scan failed: %v", err)
+	}
+	fullLoc := parseConvoLocate(string(fullOut))
+	picked := pickConvoProc(fullLoc.procs, "herdr", "w1:p1", "/run/herdr.sock", "", "", "")
+	if picked == nil || picked.pid != int64(newPID) {
+		t.Fatalf("full scan picked %+v, want newer sibling pid %d", picked, newPID)
+	}
+
+	// Case 3: Stale fgPID not in subtree -> fastIncomplete.
+	stale := runTree(shellPID, []int{9999999})
+	if !stale.fastIncomplete {
+		t.Fatalf("stale fgPID outside subtree must set fastIncomplete=true, got %+v", stale)
+	}
+
+	// Case 4: Root PID whose parent is NOT herdr -> fastIncomplete.
+	notHerdr := runTree(os.Getpid(), []int{os.Getpid()})
+	if !notHerdr.fastIncomplete {
+		t.Fatalf("shell_pid not parented by herdr must set fastIncomplete=true, got %+v", notHerdr)
+	}
+}
+
+// Review Item 2: convoClaimed.seeAlive must still be refreshed periodically on
+// hosts with active Codex claims so a newer Codex cannot steal an exited Codex's
+// old session while only Claude/Agy panes are hitting the fast path.
+func TestConvoClaimsAliveRefreshOnFastHit(t *testing.T) {
+	var claims convoClaims
+	now := time.Now()
+	if claims.needsAliveRefresh(now, convoLocateTTL) {
+		t.Fatal("empty claims must not trigger refresh")
+	}
+	claims.contest(sidB) // contested-only (pid==0) is not an active owner
+	if claims.needsAliveRefresh(now, convoLocateTTL) {
+		t.Fatal("contested-only claim must not trigger refresh")
+	}
+
+	codexA := procID{pid: 100, start: 1000}
+	codexB := procID{pid: 200, start: 2000}
+	logA := "/home/u/.codex/sessions/2026/11/27/rollout-2026-11-27T01-00-00-" + sidA + ".jsonl"
+	if !claims.take(sidA, codexA, 1000, map[procID]bool{codexA: true}, 1000, false) {
+		t.Fatal("codexA should claim sidA")
+	}
+	if !claims.needsAliveRefresh(now, convoLocateTTL) {
+		t.Fatal("active claim with no seeAlive yet must need refresh")
+	}
+	// Simulate periodic full-scan seeAlive while codexA and codexB coexist (codexB started at 2000).
+	claims.seeAlive(convoLocated{cands: []convoCand{{log: logA}}}, map[procID]bool{codexA: true}, 5000)
+	if claims.needsAliveRefresh(time.Now(), convoLocateTTL) {
+		t.Fatal("right after seeAlive, refresh should not be due yet")
+	}
+	if !claims.needsAliveRefresh(time.Now().Add(convoLocateTTL+time.Second), convoLocateTTL) {
+		t.Fatal("after TTL elapses, active claim must need refresh again")
+	}
+	// After codexA exits, codexB (started at 2000 <= seen 5000) must be blocked from claiming sidA.
+	if claims.take(sidA, codexB, 2000, map[procID]bool{codexB: true}, 9000, false) {
+		t.Fatal("codexB stole codexA's session despite seeAlive refresh")
+	}
+}
+
+func sshExecReply(out string, code uint32) func(ssh.Channel) {
+	return func(ch ssh.Channel) {
+		if out != "" {
+			_, _ = ch.Write([]byte(out))
+		}
+		_ = ch.CloseWrite()
+		var b [4]byte
+		binary.BigEndian.PutUint32(b[:], code)
+		_, _ = ch.SendRequest("exit-status", false, b[:])
+	}
+}
+
+func herdrExecEnv(t *testing.T, h *harness, admin *client, hd *fakeHerdr, sftpRoot string, extra func(cmd string) func(ssh.Channel)) string {
+	t.Helper()
+	srv := h.sshServer(sftpRoot)
+	srv.HandleExec(func(cmd string) func(ssh.Channel) {
+		if cmd == herdr.KeysCommand {
+			return noHerdrConfig
+		}
+		if cmd == herdr.DiscoverCommand {
+			return func(ch ssh.Channel) {
+				b, _ := json.Marshal(map[string]any{"sessions": []any{map[string]any{"name": "default", "default": true, "running": true, "socket_path": hd.path}}})
+				_, _ = ch.Write(b)
+				_ = ch.CloseWrite()
+				time.Sleep(50 * time.Millisecond)
+				_, _ = ch.SendRequest("exit-status", false, []byte{0, 0, 0, 0})
+			}
+		}
+		if extra != nil {
+			if fn := extra(cmd); fn != nil {
+				return fn
+			}
+		}
+		return nil
+	})
+	r := admin.do("POST", "/api/hosts", map[string]any{"name": "box", "address": "127.0.0.1", "port": srv.Addr.Port,
+		"username": "alice", "auth": "password", "password": "alice-pass", "persistence": "herdr"})
+	mustStatus(t, r, 201, "create host")
+	r = admin.do("POST", "/api/sessions", map[string]any{"host_id": int64(r.json()["id"].(float64))})
+	mustStatus(t, r, 201, "open herdr session")
+	id := r.json()["id"].(string)
+	eventually(t, "herdr session was never discovered", func() bool { return h.srv.herdrSocks.get(id) == hd.path })
+	return id
+}
+
+// Review Item 3: Execution failures on the fast-path scan in locateScan,
+// convoPress, and apiSideQuestion must fall back to the full scan (including
+// reusing a cached full scan in locateScan) rather than failing early.
+func TestFastLocateErrorFallsBackToFull(t *testing.T) {
+	h := newHarness(t)
+	admin := h.admin()
+	hd := newFakeHerdr(t)
+	hd.setSnapshot(
+		[]any{map[string]any{"pane_id": "w1:p1", "tab_id": "t1", "workspace_id": "w1", "agent": "claude", "agent_status": "idle", "cwd": "/work"}},
+		[]any{map[string]any{"pane_id": "w1:p1", "tab_id": "t1", "workspace_id": "w1", "agent": "claude", "agent_status": "idle", "cwd": "/work"}},
+	)
+	hd.procInfo = map[string]herdr.PaneProcessInfoResult{
+		"w1:p1": {
+			PaneID:              "w1:p1",
+			ShellPID:            50,
+			ForegroundProcesses: []herdr.ProcessEntry{{PID: 100, Name: "claude"}},
+		},
+	}
+
+	fullOut := convoRec(
+		"pid=100", "start=500", "fg=1", "procstart=500", "sid="+sidA,
+		"log=/home/u/.claude/projects/-w/"+sidA+".jsonl",
+		"anc=50:zsh,40:herdr,", "agent=claude",
+		"HERDR_PANE_ID=w1:p1", "HERDR_SOCKET_PATH="+hd.path,
+	)
+
+	var treeCalls, fullCalls atomic.Int32
+	sessID := herdrExecEnv(t, h, admin, hd, t.TempDir(), func(cmd string) func(ssh.Channel) {
+		if strings.Contains(cmd, "'tree:50:100'") {
+			treeCalls.Add(1)
+			return sshExecReply("", 1)
+		}
+		if strings.HasSuffix(cmd, ` corral 'herdr' '' '' '' ''`) {
+			fullCalls.Add(1)
+			return sshExecReply(fullOut, 0)
+		}
+		return nil
+	})
+	sess, err := h.terms.Get(1, sessID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 1. locateScan: pre-populate a fresh cached full scan in convoScans; fast
+	// tree scan fails -> locateScan falls back and reuses the cached full scan
+	// with zero additional full-scan SSH call!
+	fullCmd := convoLocateCommand("herdr", "", "")
+	cached := &convoScan{done: make(chan struct{}), out: []byte(fullOut), at: time.Now(), began: time.Now()}
+	close(cached.done)
+	h.srv.convoScans.mu.Lock()
+	if h.srv.convoScans.m == nil {
+		h.srv.convoScans.m = map[string]*convoScan{}
+	}
+	h.srv.convoScans.m[sess.ID+"\x00"+fullCmd] = cached
+	h.srv.convoScans.mu.Unlock()
+
+	st := &convoState{}
+	if err := h.srv.locateScan(context.Background(), sess, st, "w1:p1", true, nil); err != nil {
+		t.Fatalf("locateScan should fall back to cached full scan, got err: %v", err)
+	}
+	if treeCalls.Load() != 1 || fullCalls.Load() != 0 {
+		t.Fatalf("expected 1 failed tree call and 0 new full calls (reused cache), got tree=%d full=%d", treeCalls.Load(), fullCalls.Load())
+	}
+	if st.bind == nil || st.bind.PID != 100 || st.sid != sidA {
+		t.Fatalf("locateScan fallback bind = %+v sid=%q, want pid=100 sid=%s", st.bind, st.sid, sidA)
+	}
+
+	// 2. convoPress: fast tree scan fails -> falls back to full scan and returns
+	// 409 agent_changed for wrong expected PID (proving full scan ran instead of
+	// returning 502 host_error on the fast-scan failure).
+	r := admin.do("POST", "/api/sessions/"+sessID+"/conversation/interrupt", map[string]any{
+		"pane": "w1:p1", "pid": 999, "start": 500, "session": sidA,
+	})
+	if r.Status != 409 || r.code() != "agent_changed" {
+		t.Fatalf("convoPress fast-fail fallback: status=%d code=%q body=%s, want 409 agent_changed", r.Status, r.code(), r.Body)
+	}
+	if treeCalls.Load() < 2 || fullCalls.Load() < 1 {
+		t.Fatalf("convoPress did not fall back: tree=%d full=%d", treeCalls.Load(), fullCalls.Load())
+	}
+
+	// 3. apiSideQuestion: fast tree scan fails -> falls back to full scan and
+	// returns 409 agent_changed for wrong expected PID (not 502 host_error).
+	prevTree, prevFull := treeCalls.Load(), fullCalls.Load()
+	r2 := admin.do("POST", "/api/sessions/"+sessID+"/conversation/side", map[string]any{
+		"pane": "w1:p1", "pid": 999, "start": 500, "session": sidA, "question": "hello?",
+	})
+	if r2.Status != 409 || r2.code() != "agent_changed" {
+		t.Fatalf("apiSideQuestion fast-fail fallback: status=%d code=%q body=%s, want 409 agent_changed", r2.Status, r2.code(), r2.Body)
+	}
+	if treeCalls.Load() <= prevTree || fullCalls.Load() <= prevFull {
+		t.Fatalf("apiSideQuestion did not fall back: tree=%d->%d full=%d->%d", prevTree, treeCalls.Load(), prevFull, fullCalls.Load())
+	}
+}
+
+// Review Items 5 & 6:
+// - Physical deduplication (pwd -P) when $HOME/.claude is a symlink to the same
+//   directory as CLAUDE_CONFIG_DIR so forkFindCommand returns 1 path (not 2).
+// - Forking a Claude session in a custom CLAUDE_CONFIG_DIR passes
+//   CLAUDE_CONFIG_DIR to both tmux (QuoteShell'd) and herdr (workspace.create env).
+func TestClaudeConfigDirsPhysicalDedupAndFork(t *testing.T) {
+	sh, err := exec.LookPath("sh")
+	if err != nil {
+		t.Skip("no sh")
+	}
+	base := t.TempDir()
+	realCfg := filepath.Join(base, "real data", "claude-dir")
+	projDir := filepath.Join(realCfg, "projects", "-work")
+	if err := os.MkdirAll(projDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	home := filepath.Join(base, "home")
+	if err := os.MkdirAll(home, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// $HOME/.claude is a symlink to realCfg!
+	if err := os.Symlink(realCfg, filepath.Join(home, ".claude")); err != nil {
+		t.Fatal(err)
+	}
+	logFile := filepath.Join(projDir, sidA+".jsonl")
+	if err := os.WriteFile(logFile, []byte(`{"type":"user","cwd":"/work","message":{"role":"user","content":"hi"}}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Both CLAUDE_CONFIG_DIR (physical) and $HOME/.claude (symlink) point to realCfg:
+	// forkFindCommand must deduplicate by physical path and emit strictly 1 line.
+	for _, bin := range []string{sh, "dash"} {
+		p, err := exec.LookPath(bin)
+		if err != nil {
+			continue
+		}
+		c := exec.Command(p, "-c", forkFindCommand("claude", sidA))
+		c.Env = []string{"HOME=" + home, "CLAUDE_CONFIG_DIR=" + realCfg, "PATH=/usr/bin:/bin"}
+		out, err := c.Output()
+		if err != nil {
+			t.Fatalf("%s forkFindCommand failed: %v", bin, err)
+		}
+		lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+		if len(lines) != 1 || lines[0] != logFile {
+			t.Fatalf("%s forkFindCommand with symlinked .claude = %q, want single line %q", bin, string(out), logFile)
+		}
+	}
+
+	// Review Item 6 (tmux): agentTmuxCmd sets QuoteShell'd CLAUDE_CONFIG_DIR for Claude.
+	customDir := "/opt/user's cfg/.claude-alt"
+	tmuxCmd := agentTmuxCmd("fork-claude-1", "/work", "claude", customDir, agentStart{resume: sidA})
+	if strings.Contains(tmuxCmd, "CODEX_HOME=") {
+		t.Fatalf("agentTmuxCmd for claude must not set CODEX_HOME: %s", tmuxCmd)
+	}
+	wantRunPrefix := "CLAUDE_CONFIG_DIR=" + sshx.QuoteShell(customDir) + " exec 'claude'"
+	wantInnerPrefix := sshx.QuoteShell(`exec "${SHELL:-/bin/sh}" -lc ` + sshx.QuoteShell(wantRunPrefix))
+	// Check the quoted prefix up to the closing quotes of the inner command.
+	if !strings.Contains(tmuxCmd, strings.TrimSuffix(wantInnerPrefix, `'\'''`)) {
+		t.Fatalf("agentTmuxCmd quoting mismatch:\n got: %s\nwant contains: %s", tmuxCmd, strings.TrimSuffix(wantInnerPrefix, `'\'''`))
+	}
+
+	// Review Item 6 (herdr): POST /api/sessions/{id}/agents with fork=true for a
+	// Claude session in a custom CLAUDE_CONFIG_DIR passes env.CLAUDE_CONFIG_DIR
+	// to workspace.create.
+	h := newHarness(t)
+	admin := h.admin()
+	hd := newFakeHerdr(t)
+	workDir := filepath.Join(base, "projwork")
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	customForkCfg := filepath.Join(base, "my custom", ".claude-fork")
+	customForkProj := filepath.Join(customForkCfg, "projects", "-projwork")
+	if err := os.MkdirAll(customForkProj, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	forkLog := filepath.Join(customForkProj, sidB+".jsonl")
+	if err := os.WriteFile(forkLog, []byte(`{"type":"user","uuid":"aaaaaaaa-0000-4000-8000-000000000001","sessionId":"`+sidB+`","cwd":`+strconv.Quote(workDir)+`,"message":{"role":"user","content":"hello"}}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Use a separate home whose ~/.claude does NOT contain sidB.
+	forkHome := filepath.Join(base, "forkhome")
+	os.MkdirAll(filepath.Join(forkHome, ".claude"), 0o755)
+	sessID := herdrExecEnv(t, h, admin, hd, forkHome, func(cmd string) func(ssh.Channel) {
+		if strings.Contains(cmd, "herdr agent start") {
+			return sshExecReply(`{"result":{"ok":true}}`+"\n", 0)
+		}
+		if strings.Contains(cmd, "claude_cfg_dirs") || strings.Contains(cmd, "mktemp") || strings.Contains(cmd, "wc -l") {
+			c := exec.Command(sh, "-c", cmd)
+			c.Env = []string{"HOME=" + forkHome, "CLAUDE_CONFIG_DIR=" + customForkCfg, "PATH=/usr/bin:/bin"}
+			out, err := c.CombinedOutput()
+			var code uint32
+			if err != nil {
+				code = 1
+			}
+			return sshExecReply(string(out), code)
+		}
+		return nil
+	})
+	resp := admin.do("POST", "/api/sessions/"+sessID+"/agents", map[string]any{
+		"kind": "claude", "fork": true, "resume": sidB, "key": "k-custom-fork-1234",
+	})
+	if resp.Status != 200 {
+		t.Fatalf("herdr custom-dir fork failed: status=%d body=%s", resp.Status, resp.Body)
+	}
+	hd.mu.Lock()
+	defer hd.mu.Unlock()
+	foundCreate := false
+	for _, s := range hd.sent {
+		if s["method"] == "workspace.create" {
+			foundCreate = true
+			envMap, _ := s["env"].(map[string]any)
+			if envMap == nil || envMap["CLAUDE_CONFIG_DIR"] != customForkCfg {
+				t.Fatalf("workspace.create env = %#v, want CLAUDE_CONFIG_DIR=%q", envMap, customForkCfg)
+			}
+		}
+	}
+	if !foundCreate {
+		t.Fatalf("workspace.create not called: sent=%#v", hd.sent)
+	}
+}
+
+// Review Item 7: bgTailCommand & cmdScanCommand must:
+// 1. Read ONLY the pinned config dir when "<sid>=<cfgDir>" is passed.
+// 2. When unpinned and two dirs contain logs for the same session ID, pick the
+//    NEWEST by mtime rather than stopping at an older copy in $HOME/.claude.
+func TestBgTailAndCmdScanPinnedAndNewest(t *testing.T) {
+	sh, err := exec.LookPath("sh")
+	if err != nil {
+		t.Skip("no sh")
+	}
+	home := t.TempDir()
+	defCfg := filepath.Join(home, ".claude")
+	newCfg := filepath.Join(home, "my cfg", ".claude-new")
+	defProj := filepath.Join(defCfg, "projects", "-work")
+	newProj := filepath.Join(newCfg, "projects", "-work")
+	defSubs := filepath.Join(defProj, sidA, "subagents")
+	newSubs := filepath.Join(newProj, sidA, "subagents")
+	for _, d := range []string{defSubs, newSubs} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	defLog := filepath.Join(defProj, sidA+".jsonl")
+	newLog := filepath.Join(newProj, sidA+".jsonl")
+	os.WriteFile(defLog, []byte(`{"type":"system","subtype":"turn_duration","uuid":"old-uuid","pendingBackgroundAgentCount":1}`+"\n"), 0o644)
+	os.WriteFile(newLog, []byte(`{"type":"system","subtype":"turn_duration","uuid":"new-uuid","pendingBackgroundAgentCount":3}`+"\n"), 0o644)
+	oldTime := time.Now().Add(-10 * time.Minute)
+	newTime := time.Now().Add(-1 * time.Minute)
+	os.Chtimes(defLog, oldTime, oldTime)
+	os.Chtimes(newLog, newTime, newTime)
+
+	os.WriteFile(filepath.Join(defSubs, "agent-oldsub.jsonl"), []byte(`{"version":"2.1.305"}`+"\n"), 0o644)
+	os.WriteFile(filepath.Join(defSubs, "agent-oldsub.meta.json"), []byte(`{"requestShape":"background","description":"from default"}`), 0o644)
+	os.WriteFile(filepath.Join(newSubs, "agent-newsub.jsonl"), []byte(`{"version":"2.1.305"}`+"\n"), 0o644)
+	os.WriteFile(filepath.Join(newSubs, "agent-newsub.meta.json"), []byte(`{"requestShape":"background","description":"from custom"}`), 0o644)
+
+	run := func(cmd string) []byte {
+		c := exec.Command(sh, "-c", cmd)
+		c.Env = []string{"HOME=" + home, "CLAUDE_CONFIG_DIR=" + newCfg, "PATH=/usr/bin:/bin"}
+		out, err := c.Output()
+		if err != nil {
+			t.Fatalf("cmd failed: %v", err)
+		}
+		return out
+	}
+
+	// Unpinned bgTailCommand picks the NEWEST log (newCfg) even though defCfg is also present.
+	bgNewest := parseBgTails(run(bgTailCommand([]string{sidA}, 4096)))
+	if r := bgNewest[sidA]; r.uuid != "new-uuid" || r.n != 3 {
+		t.Fatalf("unpinned bgTailCommand = %+v, want new-uuid n=3", r)
+	}
+	// Pinned bgTailCommand reads strictly from defCfg even though newCfg is newer.
+	bgPinned := parseBgTails(run(bgTailCommand([]string{sidA + "=" + defCfg}, 4096)))
+	if r := bgPinned[sidA]; r.uuid != "old-uuid" || r.n != 1 {
+		t.Fatalf("pinned bgTailCommand = %+v, want old-uuid n=1", r)
+	}
+
+	// Unpinned cmdScanCommand picks subagents beside the NEWEST session log (newCfg).
+	subsNewest := parseBgSubScan(string(run(cmdScanCommand("w:" + sidA))))
+	if len(subsNewest[sidA]) != 1 || subsNewest[sidA][0].ID != "newsub" || subsNewest[sidA][0].What != "from custom" {
+		t.Fatalf("unpinned cmdScanCommand subs = %+v, want newsub", subsNewest)
+	}
+	// Pinned cmdScanCommand reads subagents strictly from defCfg.
+	subsPinned := parseBgSubScan(string(run(cmdScanCommand("w:" + sidA + "=" + defCfg))))
+	if len(subsPinned[sidA]) != 1 || subsPinned[sidA][0].ID != "oldsub" || subsPinned[sidA][0].What != "from default" {
+		t.Fatalf("pinned cmdScanCommand subs = %+v, want oldsub", subsPinned)
+	}
+
+	// Pure helpers attachBgClaudeDirs / attachCmdClaudeDirs + herdrSockets claudeCfg store.
+	hs := herdrSockets{path: map[string]string{"s1": "/run/h.sock"}}
+	hs.setClaudeCfg("s1", sidA, newCfg)
+	if got := hs.claudeCfgOf("s1", strings.ToUpper(sidA)); got != newCfg {
+		t.Fatalf("claudeCfgOf = %q, want %q", got, newCfg)
+	}
+	if got := attachBgClaudeDirs([]string{sidA, sidB}, func(s string) string { return hs.claudeCfgOf("s1", s) }); !slices.Equal(got, []string{sidA + "=" + newCfg, sidB}) {
+		t.Fatalf("attachBgClaudeDirs = %v", got)
+	}
+	if got := attachCmdClaudeDirs([]string{"w:" + sidA, "s:" + sidB}, func(s string) string { return hs.claudeCfgOf("s1", s) }); !slices.Equal(got, []string{"w:" + sidA + "=" + newCfg, "s:" + sidB}) {
+		t.Fatalf("attachCmdClaudeDirs = %v", got)
+	}
+}
+
 func TestConvoLocatePidsAndCustomConfigDirHost(t *testing.T) {
 	if _, err := os.Stat("/proc/self/stat"); err != nil {
 		t.Skip("no /proc")
@@ -341,105 +952,73 @@ func TestConvoLocatePidsAndCustomConfigDirHost(t *testing.T) {
 		}
 	}
 
-	startSleep := func(cwd string, env ...string) (int, string) {
-		p := exec.Command("sleep", "60")
-		p.Dir = cwd
-		p.Env = append([]string{"PATH=/usr/bin:/bin", "HOME=" + home}, env...)
-		if err := p.Start(); err != nil {
-			t.Fatal(err)
-		}
-		t.Cleanup(func() { p.Process.Kill(); p.Wait() })
-		pid := p.Process.Pid
-		var st string
-		for i := 0; i < 50 && st == ""; i++ {
-			b, _ := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/stat")
-			if j := strings.LastIndex(string(b), ") "); j >= 0 {
-				if f := strings.Fields(string(b)[j+2:]); len(f) > 19 {
-					st = f[19]
-				}
-			}
-			if st == "" {
-				time.Sleep(10 * time.Millisecond)
-			}
-		}
-		if st == "" {
-			t.Fatalf("could not read /proc/%d/stat", pid)
-		}
-		return pid, st
-	}
-
 	sid1 := "11111111-1111-4111-8111-111111111111"
 	sid2 := "22222222-2222-4222-8222-222222222222"
 	sid3 := "33333333-3333-4333-8333-333333333333"
 
+	// Spawn 3 independent single-pane herdr trees:
 	// 1. Absolute CLAUDE_CONFIG_DIR with spaces.
-	pidAbs, stAbs := startSleep(workDir,
-		"CLAUDE_CONFIG_DIR="+absCustom,
+	shellAbs, pidsAbs, stsAbs := spawnFakeHerdrTree(t, workDir, home, [][]string{{
+		"CLAUDE_CONFIG_DIR=" + absCustom,
 		"HERDR_PANE_ID=w1:p1",
 		"HERDR_SOCKET_PATH=/run/herdr.sock",
-	)
+	}})
+	pidAbs, stAbs := pidsAbs[0], stsAbs[0]
 	logAbs := filepath.Join(absCustom, "projects", "-work", sid1+".jsonl")
 	os.WriteFile(filepath.Join(absCustom, "sessions", strconv.Itoa(pidAbs)+".json"),
 		[]byte(`{"pid":`+strconv.Itoa(pidAbs)+`,"sessionId":"`+sid1+`","procStart":"`+stAbs+`","status":"waiting","waitingFor":"dialog open"}`), 0o644)
 	os.WriteFile(logAbs, []byte(`{"type":"system","subtype":"turn_duration","uuid":"u1","pendingBackgroundAgentCount":2}`+"\n"), 0o644)
 
 	// 2. Relative CLAUDE_CONFIG_DIR with spaces (resolved against /proc/<pid>/cwd).
-	pidRel, stRel := startSleep(workDir,
-		"CLAUDE_CONFIG_DIR="+relCustomName,
+	shellRel, pidsRel, stsRel := spawnFakeHerdrTree(t, workDir, home, [][]string{{
+		"CLAUDE_CONFIG_DIR=" + relCustomName,
 		"HERDR_PANE_ID=w1:p2",
 		"HERDR_SOCKET_PATH=/run/herdr.sock",
-	)
+	}})
+	pidRel, stRel := pidsRel[0], stsRel[0]
 	logRel := filepath.Join(relCustom, "projects", "-work", sid2+".jsonl")
 	os.WriteFile(filepath.Join(relCustom, "sessions", strconv.Itoa(pidRel)+".json"),
 		[]byte(`{"pid":`+strconv.Itoa(pidRel)+`,"sessionId":"`+sid2+`","procStart":"`+stRel+`","status":"idle"}`), 0o644)
 	os.WriteFile(logRel, []byte(`{"type":"user"}`+"\n"), 0o644)
 
 	// 3. Default $HOME/.claude (unset CLAUDE_CONFIG_DIR, with a forged CLAUDE_CONFIG_DIR inside OTHER).
-	pidDef, stDef := startSleep(workDir,
-		"OTHER=foo\nCLAUDE_CONFIG_DIR="+absCustom,
+	shellDef, pidsDef, stsDef := spawnFakeHerdrTree(t, workDir, home, [][]string{{
+		"OTHER=foo\nCLAUDE_CONFIG_DIR=" + absCustom,
 		"HERDR_PANE_ID=w1:p3",
 		"HERDR_SOCKET_PATH=/run/herdr.sock",
-	)
+	}})
+	pidDef, stDef := pidsDef[0], stsDef[0]
 	logDef := filepath.Join(defaultCfg, "projects", "-work", sid3+".jsonl")
 	os.WriteFile(filepath.Join(defaultCfg, "sessions", strconv.Itoa(pidDef)+".json"),
 		[]byte(`{"pid":`+strconv.Itoa(pidDef)+`,"sessionId":"`+sid3+`","procStart":"`+stDef+`"}`), 0o644)
 	os.WriteFile(logDef, []byte(`{"type":"user"}`+"\n"), 0o644)
 
-	// Fast path scoped only to [pidAbs, pidRel] must find both with their custom logs,
-	// and must NOT scan pidDef.
-	c := exec.Command(sh, "-c", convoLocatePidsCommand([]int{pidAbs, pidRel}))
-	c.Env = []string{"HOME=" + home, "PATH=/usr/bin:/bin"}
-	out, err := c.Output()
-	if err != nil {
-		t.Fatalf("convoLocatePidsCommand failed: %v", err)
-	}
-	by := map[int64]convoProc{}
-	for _, p := range parseConvoLocate(string(out)).procs {
-		by[p.pid] = p
-	}
-	if len(by) != 2 {
-		t.Fatalf("expected 2 procs from pids fast path, got %d: %+v", len(by), by)
-	}
-	if p := by[int64(pidAbs)]; p.agent != "claude" || p.sid != sid1 || p.log != logAbs || p.herdrPane != "w1:p1" {
-		t.Errorf("abs custom proc mismatch: %+v (want log %q)", p, logAbs)
-	}
-	if p := by[int64(pidRel)]; p.agent != "claude" || p.sid != sid2 || p.log != logRel || p.herdrPane != "w1:p2" {
-		t.Errorf("rel custom proc mismatch: %+v (want log %q)", p, logRel)
-	}
-	if _, leaked := by[int64(pidDef)]; leaked {
-		t.Errorf("pids fast path should not have scanned unrelated pid %d", pidDef)
+	runTree := func(shPID, pid int) convoLocated {
+		c := exec.Command(sh, "-c", convoLocatePidsCommand(shPID, []int{pid}))
+		c.Env = []string{"HOME=" + home, "PATH=/usr/bin:/bin"}
+		out, err := c.Output()
+		if err != nil {
+			t.Fatalf("convoLocatePidsCommand failed: %v", err)
+		}
+		return parseConvoLocate(string(out))
 	}
 
-	// Forged CLAUDE_CONFIG_DIR inside OTHER must fall back to $HOME/.claude.
-	cDef := exec.Command(sh, "-c", convoLocatePidsCommand([]int{pidDef}))
-	cDef.Env = []string{"HOME=" + home, "PATH=/usr/bin:/bin"}
-	outDef, err := cDef.Output()
-	if err != nil {
-		t.Fatalf("convoLocatePidsCommand default failed: %v", err)
+	// Pane 1 (abs custom with spaces): finds ONLY pidAbs, does not scan pidRel/pidDef.
+	lAbs := runTree(shellAbs, pidAbs)
+	if lAbs.fastIncomplete || len(lAbs.procs) != 1 || lAbs.procs[0].pid != int64(pidAbs) || lAbs.procs[0].sid != sid1 || lAbs.procs[0].log != logAbs {
+		t.Fatalf("abs custom tree mismatch: %+v (want log %q)", lAbs, logAbs)
 	}
-	procsDef := parseConvoLocate(string(outDef)).procs
-	if len(procsDef) != 1 || procsDef[0].pid != int64(pidDef) || procsDef[0].sid != sid3 || procsDef[0].log != logDef {
-		t.Fatalf("default/forged proc mismatch: %+v (want log %q)", procsDef, logDef)
+
+	// Pane 2 (rel custom with spaces): resolves against /proc/<pid>/cwd.
+	lRel := runTree(shellRel, pidRel)
+	if lRel.fastIncomplete || len(lRel.procs) != 1 || lRel.procs[0].pid != int64(pidRel) || lRel.procs[0].sid != sid2 || lRel.procs[0].log != logRel {
+		t.Fatalf("rel custom tree mismatch: %+v (want log %q)", lRel, logRel)
+	}
+
+	// Pane 3 (forged CLAUDE_CONFIG_DIR inside OTHER): falls back to $HOME/.claude.
+	lDef := runTree(shellDef, pidDef)
+	if lDef.fastIncomplete || len(lDef.procs) != 1 || lDef.procs[0].pid != int64(pidDef) || lDef.procs[0].sid != sid3 || lDef.procs[0].log != logDef {
+		t.Fatalf("default/forged tree mismatch: %+v (want log %q)", lDef, logDef)
 	}
 
 	// freshStatusCommand reads from the process's custom CLAUDE_CONFIG_DIR (with spaces).
@@ -466,19 +1045,17 @@ func TestConvoLocatePidsAndCustomConfigDirHost(t *testing.T) {
 		t.Fatalf("lineAliveCommand custom dir = %q, want %q", got, sid2)
 	}
 
-	// bgTailCommand finds log under CLAUDE_CONFIG_DIR with spaces.
+	// bgTailCommand, forkFindCommand, logsWroteCommand, cmdScanCommand with spaces.
 	cBg := exec.Command(sh, "-c", bgTailCommand([]string{sid1}, 4096))
 	cBg.Env = []string{"HOME=" + home, "CLAUDE_CONFIG_DIR=" + absCustom, "PATH=/usr/bin:/bin"}
 	outBg, err := cBg.Output()
 	if err != nil {
 		t.Fatalf("bgTailCommand failed: %v", err)
 	}
-	bgRecs := parseBgTails(outBg)
-	if r, ok := bgRecs[sid1]; !ok || r.uuid != "u1" || r.n != 2 {
-		t.Fatalf("bgTailCommand custom dir = %+v, want uuid=u1 n=2", bgRecs)
+	if r, ok := parseBgTails(outBg)[sid1]; !ok || r.uuid != "u1" || r.n != 2 {
+		t.Fatalf("bgTailCommand custom dir = %+v, want uuid=u1 n=2", r)
 	}
 
-	// forkFindCommand finds log under CLAUDE_CONFIG_DIR with spaces.
 	cFork := exec.Command(sh, "-c", forkFindCommand("claude", sid1))
 	cFork.Env = []string{"HOME=" + home, "CLAUDE_CONFIG_DIR=" + absCustom, "PATH=/usr/bin:/bin"}
 	outFork, err := cFork.Output()
@@ -489,7 +1066,6 @@ func TestConvoLocatePidsAndCustomConfigDirHost(t *testing.T) {
 		t.Fatalf("forkFindCommand custom dir = %q, want %q", got, logAbs)
 	}
 
-	// logsWroteCommand finds log under CLAUDE_CONFIG_DIR with spaces.
 	cWrote := exec.Command(sh, "-c", logsWroteCommand([]string{"claude:" + sid1}))
 	cWrote.Env = []string{"HOME=" + home, "CLAUDE_CONFIG_DIR=" + absCustom, "PATH=/usr/bin:/bin"}
 	outWrote, err := cWrote.Output()
@@ -501,7 +1077,6 @@ func TestConvoLocatePidsAndCustomConfigDirHost(t *testing.T) {
 		t.Fatalf("logsWroteCommand custom dir returned no mtime: %q", string(outWrote))
 	}
 
-	// cmdScanCommand finds background subagent under custom CLAUDE_CONFIG_DIR with spaces.
 	subDir := filepath.Join(absCustom, "projects", "-work", sid1, "subagents")
 	if err := os.MkdirAll(subDir, 0o755); err != nil {
 		t.Fatal(err)
@@ -521,13 +1096,7 @@ func TestConvoLocatePidsAndCustomConfigDirHost(t *testing.T) {
 }
 
 func TestClaudeRewindCheckCustomConfigDir(t *testing.T) {
-	sh, err := exec.LookPath("sh")
-	if err != nil {
-		t.Skip("no sh")
-	}
-	_ = sh
 	binDir, homeDir, fakeProc, _ := setupFakeRewindHost(t, 5555, 12345, sidA, "w1:p1", "/run/herdr.sock")
-	// Remove default $HOME/.claude/sessions/5555.json so test FAILS if CLAUDE_CONFIG_DIR is ignored!
 	os.Remove(filepath.Join(homeDir, ".claude", "sessions", "5555.json"))
 
 	customDir := filepath.Join(homeDir, "my cfg", ".claude-rewind")
@@ -580,17 +1149,14 @@ time.sleep(15)`, customCfg)
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { helper.Process.Kill(); helper.Wait() })
-	var pid int
-	if _, err := strconv.Atoi(strings.TrimSpace("0")); err == nil {
-		b := make([]byte, 64)
-		n, rerr := out.Read(b)
-		if rerr != nil {
-			t.Fatal(rerr)
-		}
-		pid, err = strconv.Atoi(strings.TrimSpace(string(b[:n])))
-		if err != nil {
-			t.Fatalf("bad pid %q: %v", string(b[:n]), err)
-		}
+	b := make([]byte, 64)
+	n, rerr := out.Read(b)
+	if rerr != nil {
+		t.Fatal(rerr)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(b[:n])))
+	if err != nil {
+		t.Fatalf("bad pid %q: %v", string(b[:n]), err)
 	}
 	var start int64
 	for i := 0; i < 50 && start == 0; i++ {
@@ -605,7 +1171,6 @@ time.sleep(15)`, customCfg)
 			time.Sleep(10 * time.Millisecond)
 		}
 	}
-	// Put session file ONLY in customCfg (NOT in $HOME/.claude) so test fails if CLAUDE_CONFIG_DIR is ignored.
 	os.WriteFile(filepath.Join(customCfg, "sessions", strconv.Itoa(pid)+".json"),
 		[]byte(`{"pid":`+strconv.Itoa(pid)+`,"sessionId":"`+sidA+`","procStart":"`+strconv.FormatInt(start, 10)+`","status":"idle"}`), 0o644)
 
