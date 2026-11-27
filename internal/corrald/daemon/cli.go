@@ -682,6 +682,7 @@ func serveForeground(
 		}
 		return reportReadyErr("server_init_failed", err.Error())
 	}
+	attachRegisteredModules(srv)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()

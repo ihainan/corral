@@ -136,11 +136,9 @@ func TestScopeGrewAllRules(t *testing.T) {
 
 	// Reordered slices -> no growth.
 	reordered := DefaultManifest()
-	reordered.Reads = []string{
-		ReadEnvCodexHome, ReadProc, ReadAgentLogsClaude, ReadAgentLogsCodex,
-		ReadAgentLogsOpenCode, ReadAgentLogsDevin, ReadAgentLogsAgy,
-		ReadPaneScreenHerdr, ReadPaneScreenTmux, ReadEnvClaudeConfigDir,
-		ReadEnvClaudeCodeSessionID,
+	reordered.Reads = make([]string, len(base.Reads))
+	for i := range base.Reads {
+		reordered.Reads[i] = base.Reads[len(base.Reads)-1-i]
 	}
 	reordered.Actions = []string{ActionAnswerCard, ActionPaneInput}
 	if got := ScopeGrew(base, reordered); len(got) != 0 {
@@ -260,7 +258,7 @@ func TestManifestSerializationStable(t *testing.T) {
 	}
 
 	// Check exact expected shape of DefaultManifest.
-	const want = `{"schema":1,"reads":["proc","agent-logs:claude","agent-logs:codex","agent-logs:opencode","agent-logs:devin","agent-logs:agy","pane-screen:herdr","pane-screen:tmux","env:CLAUDE_CONFIG_DIR","env:CLAUDE_CODE_SESSION_ID","env:CODEX_HOME"],"actions":["pane-input","answer-card"],"writes":["self"],"egress":["gateway"],"budget":{"rss_mb":50,"disk_mb":30,"log_mb":10},"optional":[]}`
+	const want = `{"schema":1,"reads":["proc","agent-logs:claude","agent-logs:codex","agent-logs:opencode","agent-logs:devin","agent-logs:agy","pane-screen:tmux","env:CLAUDE_CONFIG_DIR","env:CODEX_HOME","env:HERDR_PANE_ID","env:HERDR_SOCKET_PATH","env:TMUX","env:TMUX_PANE","env:CORRAL_SIDE_COPY","env:ANTHROPIC_BASE_URL","env:ANTHROPIC_AUTH_TOKEN","env:ANTHROPIC_API_KEY","env:CLAUDE_CODE_USE_BEDROCK","env:CLAUDE_CODE_USE_VERTEX","env:CLAUDE_AUTOCOMPACT_PCT_OVERRIDE","env:OPENAI_BASE_URL","env:XDG_DATA_HOME"],"actions":["pane-input","answer-card"],"writes":["self"],"egress":["gateway"],"budget":{"rss_mb":50,"disk_mb":30,"log_mb":10},"optional":[]}`
 	if string(m1) != want {
 		t.Fatalf("default manifest JSON:\ngot:  %s\nwant: %s", m1, want)
 	}

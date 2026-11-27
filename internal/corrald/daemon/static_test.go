@@ -12,8 +12,9 @@ import (
 
 // TestHostCodeStaticConstraints verifies spec §1 and §4 static guarantees
 // across all production host-side code (cmd/corrald, internal/corrald/proto,
-// internal/corrald/daemon):
-//   - No os/exec import and no exec.Command / exec.CommandContext calls
+// internal/corrald/daemon, internal/corrald/agent):
+//   - No os/exec import or exec.Command / exec.CommandContext calls EXCEPT the
+//     single reviewed allowlisted tmux executor in internal/corrald/agent/tmux_exec.go
 //   - No cgo ("C") import and no net/http server/client import
 //   - No non-unix net.Listen calls (no network port listeners)
 //   - No os.Getenv / os.LookupEnv / os.Environ calls outside test-tagged files
@@ -28,15 +29,23 @@ func TestHostCodeStaticConstraints(t *testing.T) {
 		filepath.Join(repoRoot, "cmd", "corrald"),
 		filepath.Join(repoRoot, "internal", "corrald", "proto"),
 		filepath.Join(repoRoot, "internal", "corrald", "daemon"),
+		filepath.Join(repoRoot, "internal", "corrald", "agent"),
 	}
 
 	allowedStartProcess := map[string]bool{
 		"internal/corrald/daemon/cli.go:serveDetached":       true,
 		"internal/corrald/daemon/handoff.go:dispatchHandoff": true,
 	}
+	allowedOSExecImport := map[string]bool{
+		"internal/corrald/agent/tmux_exec.go": true,
+	}
+	allowedExecCommandContext := map[string]bool{
+		"internal/corrald/agent/tmux_exec.go:run": true,
+	}
 
 	fset := token.NewFileSet()
 	checkedFiles := 0
+	sawTmuxExec := false
 
 	for _, dir := range dirs {
 		entries, err := os.ReadDir(dir)
@@ -60,6 +69,9 @@ func TestHostCodeStaticConstraints(t *testing.T) {
 
 			relPath, _ := filepath.Rel(repoRoot, fullPath)
 			relPath = filepath.ToSlash(relPath)
+			if relPath == "internal/corrald/agent/tmux_exec.go" {
+				sawTmuxExec = true
+			}
 
 			file, err := parser.ParseFile(fset, fullPath, src, parser.ParseComments)
 			if err != nil {
@@ -69,7 +81,11 @@ func TestHostCodeStaticConstraints(t *testing.T) {
 			for _, imp := range file.Imports {
 				p := strings.Trim(imp.Path.Value, `"`)
 				switch p {
-				case "os/exec", "C", "net/http":
+				case "os/exec":
+					if !allowedOSExecImport[relPath] {
+						t.Errorf("%s imports forbidden package %q (only allowlisted tmux executor may import os/exec)", relPath, p)
+					}
+				case "C", "net/http":
 					t.Errorf("%s imports forbidden package %q", relPath, p)
 				}
 			}
@@ -95,8 +111,13 @@ func TestHostCodeStaticConstraints(t *testing.T) {
 					}
 					qual := pkgIdent.Name + "." + sel.Sel.Name
 					switch qual {
-					case "exec.Command", "exec.CommandContext":
+					case "exec.Command":
 						t.Errorf("%s:%s calls forbidden %s", relPath, fnName, qual)
+					case "exec.CommandContext":
+						site := relPath + ":" + fnName
+						if !allowedExecCommandContext[site] {
+							t.Errorf("unreviewed exec.CommandContext call site: %s", site)
+						}
 					case "os.Getenv", "os.LookupEnv", "os.Environ":
 						t.Errorf("%s:%s reads environment via %s (forbidden in production host code)", relPath, fnName, qual)
 					case "net.Listen", "net.ListenTCP", "net.ListenUDP", "net.ListenPacket":
@@ -113,8 +134,11 @@ func TestHostCodeStaticConstraints(t *testing.T) {
 		}
 	}
 
-	if checkedFiles < 10 {
-		t.Fatalf("expected to scan at least 10 host production files, scanned %d", checkedFiles)
+	if checkedFiles < 15 {
+		t.Fatalf("expected to scan at least 15 host production files, scanned %d", checkedFiles)
+	}
+	if !sawTmuxExec {
+		t.Fatal("expected to scan internal/corrald/agent/tmux_exec.go")
 	}
 }
 

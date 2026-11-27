@@ -15,18 +15,22 @@ const (
 	MethodDaemonForget   = "daemon.forget"
 
 	// Stage 1 agent methods (implemented by T3).
-	MethodAgentLocate      = "agent.locate"
-	MethodAgentWatch       = "agent.watch"
-	MethodConvoSubscribe   = "convo.subscribe"
-	MethodConvoUnsubscribe = "convo.unsubscribe"
-	MethodPaneSend         = "pane.send"
-	MethodPaneAnswer       = "pane.answer"
+	MethodAgentLocate       = "agent.locate"
+	MethodAgentWatch        = "agent.watch"
+	MethodAgentUnwatch      = "agent.unwatch"
+	MethodConvoTails        = "convo.tails"
+	MethodConvoMessageTails = "convo.message_tails"
+	MethodConvoSubscribe    = "convo.subscribe"
+	MethodConvoUnsubscribe  = "convo.unsubscribe"
+	MethodPaneSend          = "pane.send"
+	MethodPaneAnswer        = "pane.answer"
 )
 
 // Server-pushed event names.
 const (
 	EventDaemonReconnect = "daemon.reconnect"
 	EventAgentStatus     = "agent.status"
+	EventAgentChanged    = "agent.changed"
 	EventConvoDelta      = "convo.delta"
 )
 
@@ -243,4 +247,62 @@ type ReconnectEventData struct {
 	Seq        uint64 `json:"seq"`
 	NewPID     int    `json:"new_pid,omitempty"`
 	NewRelease int64  `json:"new_release,omitempty"`
+}
+
+// AgentLocateParams are the parameters for agent.locate, mirroring the five
+// positional arguments of convoLocateWith plus optional structured fast-path
+// fields (ShellPID + PIDs).
+type AgentLocateParams struct {
+	Mode     string `json:"mode,omitempty"`
+	TmuxName string `json:"tmux_name,omitempty"`
+	TmuxPane string `json:"tmux_pane,omitempty"`
+	Times    bool   `json:"times,omitempty"`
+	Only     string `json:"only,omitempty"`
+	ShellPID int    `json:"shell_pid,omitempty"`
+	PIDs     []int  `json:"pids,omitempty"`
+}
+
+// AgentLocateResult is returned by agent.locate.
+// Out is encoded as base64 in JSON ([]byte) so NUL record separators and any
+// non-UTF-8 bytes in paths/titles survive wire framing verbatim.
+type AgentLocateResult struct {
+	Out []byte `json:"out"`
+}
+
+// ConvoTailsParams are the parameters for convo.tails and convo.message_tails.
+type ConvoTailsParams struct {
+	Logs []string `json:"logs"`
+}
+
+// ConvoTailsResult is returned by convo.tails and convo.message_tails.
+// Out is base64-encoded ([]byte) so NUL delimiters, \x01 error markers, and
+// byte-bounded tail slices that may split multi-byte UTF-8 sequences are
+// preserved byte-for-byte.
+type ConvoTailsResult struct {
+	Out []byte `json:"out"`
+}
+
+// AgentWatchParams are the parameters for agent.watch.
+type AgentWatchParams struct {
+	Stop bool     `json:"stop,omitempty"`
+	Logs []string `json:"logs,omitempty"`
+}
+
+// AgentWatchResult is returned by agent.watch and agent.unwatch.
+type AgentWatchResult struct {
+	Watching     bool   `json:"watching"`
+	Mode         string `json:"mode"` // "inotify", "poll", or "idle"
+	WatchedFiles int    `json:"watched_files"`
+	MaxFiles     int    `json:"max_files"`
+	Epoch        string `json:"epoch"`
+	Seq          uint64 `json:"seq"`
+}
+
+// AgentChangedEventData is the hint-only payload of agent.changed events.
+// It carries only PIDs and log paths that changed, never conversation or
+// terminal content.
+type AgentChangedEventData struct {
+	AddedPIDs   []int    `json:"added_pids,omitempty"`
+	RemovedPIDs []int    `json:"removed_pids,omitempty"`
+	ChangedLogs []string `json:"changed_logs,omitempty"`
 }

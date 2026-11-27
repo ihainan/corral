@@ -14,17 +14,33 @@ const ManifestSchema = 1
 // Declared capability category constants. Stage 1 agent readers (T3) reference
 // these constants so the declared manifest stays in sync with host reads.
 const (
-	ReadProc                   = "proc"
-	ReadAgentLogsClaude        = "agent-logs:claude"
-	ReadAgentLogsCodex         = "agent-logs:codex"
-	ReadAgentLogsOpenCode      = "agent-logs:opencode"
-	ReadAgentLogsDevin         = "agent-logs:devin"
-	ReadAgentLogsAgy           = "agent-logs:agy"
-	ReadPaneScreenHerdr        = "pane-screen:herdr"
-	ReadPaneScreenTmux         = "pane-screen:tmux"
-	ReadEnvClaudeConfigDir     = "env:CLAUDE_CONFIG_DIR"
-	ReadEnvClaudeCodeSessionID = "env:CLAUDE_CODE_SESSION_ID"
-	ReadEnvCodexHome           = "env:CODEX_HOME"
+	ReadProc              = "proc"
+	ReadAgentLogsClaude   = "agent-logs:claude"
+	ReadAgentLogsCodex    = "agent-logs:codex"
+	ReadAgentLogsOpenCode = "agent-logs:opencode"
+	ReadAgentLogsDevin    = "agent-logs:devin"
+	ReadAgentLogsAgy      = "agent-logs:agy"
+	ReadPaneScreenTmux    = "pane-screen:tmux"
+
+	// Declared environment variable reads. Only these variables are inspected
+	// from target /proc/<pid>/environ (and /proc/self/environ where needed);
+	// secret values (such as API keys / auth tokens) are checked for non-empty
+	// presence only and never leave the host.
+	ReadEnvClaudeConfigDir              = "env:CLAUDE_CONFIG_DIR"
+	ReadEnvCodexHome                    = "env:CODEX_HOME"
+	ReadEnvHerdrPaneID                  = "env:HERDR_PANE_ID"
+	ReadEnvHerdrSocketPath              = "env:HERDR_SOCKET_PATH"
+	ReadEnvTmux                         = "env:TMUX"
+	ReadEnvTmuxPane                     = "env:TMUX_PANE"
+	ReadEnvCorralSideCopy               = "env:CORRAL_SIDE_COPY"
+	ReadEnvAnthropicBaseURL             = "env:ANTHROPIC_BASE_URL"
+	ReadEnvAnthropicAuthToken           = "env:ANTHROPIC_AUTH_TOKEN"
+	ReadEnvAnthropicAPIKey              = "env:ANTHROPIC_API_KEY"
+	ReadEnvClaudeCodeUseBedrock         = "env:CLAUDE_CODE_USE_BEDROCK"
+	ReadEnvClaudeCodeUseVertex          = "env:CLAUDE_CODE_USE_VERTEX"
+	ReadEnvClaudeAutoCompactPctOverride = "env:CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"
+	ReadEnvOpenAIBaseURL                = "env:OPENAI_BASE_URL"
+	ReadEnvXDGDataHome                  = "env:XDG_DATA_HOME"
 
 	ActionPaneInput  = "pane-input"
 	ActionAnswerCard = "answer-card"
@@ -65,11 +81,22 @@ func DefaultManifest() Manifest {
 			ReadAgentLogsOpenCode,
 			ReadAgentLogsDevin,
 			ReadAgentLogsAgy,
-			ReadPaneScreenHerdr,
 			ReadPaneScreenTmux,
 			ReadEnvClaudeConfigDir,
-			ReadEnvClaudeCodeSessionID,
 			ReadEnvCodexHome,
+			ReadEnvHerdrPaneID,
+			ReadEnvHerdrSocketPath,
+			ReadEnvTmux,
+			ReadEnvTmuxPane,
+			ReadEnvCorralSideCopy,
+			ReadEnvAnthropicBaseURL,
+			ReadEnvAnthropicAuthToken,
+			ReadEnvAnthropicAPIKey,
+			ReadEnvClaudeCodeUseBedrock,
+			ReadEnvClaudeCodeUseVertex,
+			ReadEnvClaudeAutoCompactPctOverride,
+			ReadEnvOpenAIBaseURL,
+			ReadEnvXDGDataHome,
 		},
 		Actions: []string{
 			ActionPaneInput,
@@ -88,6 +115,16 @@ func DefaultManifest() Manifest {
 		},
 		Optional: []string{},
 	}
+}
+
+// IsDeclaredRead reports whether category is present in DefaultManifest().Reads.
+func IsDeclaredRead(category string) bool {
+	for _, r := range DefaultManifest().Reads {
+		if r == category {
+			return true
+		}
+	}
+	return false
 }
 
 // MarshalManifest encodes m as canonical UTF-8 JSON with non-nil slices so the

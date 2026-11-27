@@ -445,6 +445,7 @@ func TestRemoteExecCallSitesAreReviewed(t *testing.T) {
 		"term/session.go: s.rec.Output(buf[:n])": true, // the session recorder, not a process
 		"corrald/daemon/cli.go: proc, err := os.StartProcess(exe, argv, &os.ProcAttr{":            true, // corrald serve detaching: re-executes its own binary (os.Executable) with fixed serve arguments; runs on the user's host, never anything from a request
 		"corrald/daemon/handoff.go: proc, err := os.StartProcess(resolvedPath, argv, &os.ProcAttr{": true, // hot update: executes the new corrald only after the path is checked to be under ~/.local/lib/corral/, owned by the user, mode 0700 and matching the sha256 the gateway sent
+		"corrald/agent/tmux_exec.go: if err := cmd.Run(); err != nil {":                             true, // single allowlisted host tmux executor: runs tmux directly (never sh) from fixed paths with args passed individually and strictly validated against read-only display-message subcommand
 	}
 	re := regexp.MustCompile(`\.(Start|Run|Output|CombinedOutput|Exec|StartProcess)\(|SendRequest\("exec"`)
 	root, _ := filepath.Abs("..")
