@@ -291,7 +291,7 @@ func TestReportCapFailureConsecutiveDegradation(t *testing.T) {
 
 	// Caller cancellation does not degrade capability.
 	for i := 0; i < 5; i++ {
-		mgr.ReportCapFailure(h.ID, "locate", context.Canceled)
+		mgr.ReportCapFailure(h.ID, cl, "locate", context.Canceled)
 	}
 	if _, ok := mgr.ClientForCap(u.ID, h.ID, "locate"); !ok {
 		t.Fatal("context.Canceled should not degrade locate")
@@ -299,17 +299,17 @@ func TestReportCapFailureConsecutiveDegradation(t *testing.T) {
 
 	// Two consecutive failures + one success resets counter.
 	busyErr := &proto.RPCError{Code: proto.ErrBusy, Message: "busy"}
-	mgr.ReportCapFailure(h.ID, "locate", busyErr)
-	mgr.ReportCapFailure(h.ID, "locate", busyErr)
-	mgr.ReportCapSuccess(h.ID, "locate")
-	mgr.ReportCapFailure(h.ID, "locate", busyErr)
+	mgr.ReportCapFailure(h.ID, cl, "locate", busyErr)
+	mgr.ReportCapFailure(h.ID, cl, "locate", busyErr)
+	mgr.ReportCapSuccess(h.ID, cl, "locate")
+	mgr.ReportCapFailure(h.ID, cl, "locate", busyErr)
 	if _, ok := mgr.ClientForCap(u.ID, h.ID, "locate"); !ok {
 		t.Fatal("locate should still be active after reset + 1 failure")
 	}
 
 	// Reach 3 consecutive failures -> locate degrades while tails stays active.
-	mgr.ReportCapFailure(h.ID, "locate", busyErr)
-	mgr.ReportCapFailure(h.ID, "locate", busyErr)
+	mgr.ReportCapFailure(h.ID, cl, "locate", busyErr)
+	mgr.ReportCapFailure(h.ID, cl, "locate", busyErr)
 	if _, ok := mgr.ClientForCap(u.ID, h.ID, "locate"); ok {
 		t.Fatal("locate should be degraded after 3 consecutive failures")
 	}
@@ -318,12 +318,39 @@ func TestReportCapFailureConsecutiveDegradation(t *testing.T) {
 	}
 
 	// method_not_found degrades immediately on first error.
-	mgr.ReportCapFailure(h.ID, "tails", &proto.RPCError{Code: proto.ErrMethodNotFound, Message: "missing"})
+	mgr.ReportCapFailure(h.ID, cl, "tails", &proto.RPCError{Code: proto.ErrMethodNotFound, Message: "missing"})
 	if _, ok := mgr.ClientForCap(u.ID, h.ID, "tails"); ok {
 		t.Fatal("tails should degrade immediately on method_not_found")
 	}
 	if _, ok := mgr.ClientForCap(u.ID, h.ID, "watch"); !ok {
 		t.Fatal("other capabilities (watch) should remain active")
+	}
+
+	// C-8: Stale reports from an old Client generation must not affect a new Client.
+	c3, c4 := net.Pipe()
+	defer c3.Close()
+	defer c4.Close()
+	clNew := NewClient(c3, nil)
+	defer clNew.Close()
+	sc.mu.Lock()
+	sc.client = clNew
+	clear(sc.capFailures)
+	clear(sc.capDegraded)
+	sc.mu.Unlock()
+
+	for i := 0; i < 5; i++ {
+		mgr.ReportCapFailure(h.ID, cl, "locate", busyErr)
+	}
+	if _, ok := mgr.ClientForCap(u.ID, h.ID, "locate"); !ok {
+		t.Fatal("stale failures from old client generation degraded new connection")
+	}
+	mgr.ReportCapFailure(h.ID, clNew, "locate", busyErr)
+	mgr.ReportCapFailure(h.ID, clNew, "locate", busyErr)
+	// Stale success from old client must NOT clear new client's failure count!
+	mgr.ReportCapSuccess(h.ID, cl, "locate")
+	mgr.ReportCapFailure(h.ID, clNew, "locate", busyErr)
+	if _, ok := mgr.ClientForCap(u.ID, h.ID, "locate"); ok {
+		t.Fatal("stale success from old client generation cleared new connection failure count")
 	}
 }
 

@@ -30,7 +30,7 @@ type FileLock struct {
 // the locked descriptor. If another process unlinked or replaced the lock file
 // between open and flock, AcquireLock releases the stale descriptor and retries.
 func AcquireLock(path string) (*FileLock, error) {
-	const maxInodeRetries = 32
+	const maxInodeRetries = 64
 	for attempt := 0; attempt < maxInodeRetries; attempt++ {
 		f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|syscall.O_NOFOLLOW, 0o600)
 		if err != nil {
@@ -65,8 +65,43 @@ func AcquireLock(path string) (*FileLock, error) {
 		}
 		// Path was unlinked or replaced while acquiring flock; drop stale inode and retry.
 		_ = f.Close()
+		if attempt >= 4 {
+			time.Sleep(5 * time.Millisecond)
+		}
 	}
 	return nil, fmt.Errorf("flock %s: path changed repeatedly while locking", path)
+}
+
+// AcquireDirLockWait ensures the lock's parent directory via ensureDir and
+// acquires an exclusive inode-verified flock on path, retrying on ErrLocked or
+// ENOENT (e.g. when a concurrent uninstall removes the lock file and empty
+// parent directory right as this operation starts).
+func AcquireDirLockWait(ensureDir func() error, path string, timeout time.Duration) (*FileLock, error) {
+	if timeout <= 0 {
+		timeout = 15 * time.Second
+	}
+	deadline := time.Now().Add(timeout)
+	for {
+		if ensureDir != nil {
+			if err := ensureDir(); err != nil {
+				return nil, err
+			}
+		}
+		lock, err := AcquireLock(path)
+		if err == nil {
+			return lock, nil
+		}
+		if !errors.Is(err, ErrLocked) && !errors.Is(err, os.ErrNotExist) {
+			return nil, err
+		}
+		if time.Now().After(deadline) {
+			if errors.Is(err, os.ErrNotExist) {
+				return nil, fmt.Errorf("timed out waiting for lock %s: %w", path, ErrLocked)
+			}
+			return nil, fmt.Errorf("timed out waiting for lock %s: %w", path, ErrLocked)
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
 }
 
 // AcquireLockWait acquires an exclusive flock on path, retrying up to timeout

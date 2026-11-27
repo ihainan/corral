@@ -284,7 +284,9 @@ func compareLocated(t *testing.T, label string, shRaw, goRaw []byte, allowedPIDs
 	if diffNow < 0 {
 		diffNow = -diffNow
 	}
-	if diffNow > 5000 {
+	// Under -race with 50+ agents the shell script itself can take >5s between
+	// emitting hostnow= at the start and finishing before Go runs.
+	if diffNow > 20000 {
 		t.Fatalf("%s: hostNow diverged by %dms (sh=%d, go=%d)", label, diffNow, shLoc.hostNow, goLoc.hostNow)
 	}
 

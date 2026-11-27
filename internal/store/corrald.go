@@ -336,6 +336,60 @@ func (s *Store) UpdateCorraldHostIfOp(ctx context.Context, ch *CorraldHost, expe
 	return false, nil
 }
 
+// ClaimCorraldHostOp atomically claims active_op_id = opID on hostID ONLY when
+// no other op is currently active and the host is not off/removing/remove_pending.
+// When nextState is non-empty it updates state; when manifestJSON is non-empty
+// it updates manifest_json.
+func (s *Store) ClaimCorraldHostOp(ctx context.Context, hostID int64, opID, nextState, manifestJSON string) (bool, error) {
+	now := s.unix()
+	var (
+		res sql.Result
+		err error
+	)
+	switch {
+	case nextState != "" && manifestJSON != "":
+		res, err = s.db.ExecContext(ctx, `
+			UPDATE corrald_hosts
+			SET active_op_id = ?, state = ?, manifest_json = ?, last_error = '', updated_at = ?
+			WHERE host_id = ? AND active_op_id = '' AND state NOT IN ('off', 'removing', 'remove_pending')`,
+			opID, nextState, manifestJSON, now, hostID)
+	case nextState != "":
+		res, err = s.db.ExecContext(ctx, `
+			UPDATE corrald_hosts
+			SET active_op_id = ?, state = ?, last_error = '', updated_at = ?
+			WHERE host_id = ? AND active_op_id = '' AND state NOT IN ('off', 'removing', 'remove_pending')`,
+			opID, nextState, now, hostID)
+	default:
+		res, err = s.db.ExecContext(ctx, `
+			UPDATE corrald_hosts
+			SET active_op_id = ?, updated_at = ?
+			WHERE host_id = ? AND active_op_id = '' AND state NOT IN ('off', 'removing', 'remove_pending')`,
+			opID, now, hostID)
+	}
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
+}
+
+// CommitCorraldManifestIfOp atomically updates ONLY manifest_json and clears
+// active_op_id = ” when active_op_id matches opID and the host is not
+// off/removing/remove_pending. Prevents scope confirmation from overwriting a
+// concurrent withdrawal-first remove.
+func (s *Store) CommitCorraldManifestIfOp(ctx context.Context, hostID int64, opID, manifestJSON string) (bool, error) {
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE corrald_hosts
+		SET manifest_json = ?, active_op_id = '', updated_at = ?
+		WHERE host_id = ? AND active_op_id = ? AND state NOT IN ('off', 'removing', 'remove_pending')`,
+		manifestJSON, s.unix(), hostID, opID)
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
+}
+
 // UpdateCorraldFingerprint updates bound_fingerprint on host key rotation, or marks
 // the host as rebind when keepAuth is false. Only acts if a corrald_hosts row exists
 // and is not off/removing/remove_pending.

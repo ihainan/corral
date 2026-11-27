@@ -400,6 +400,15 @@ func (s *Server) dispatchHandoff(ctx context.Context, conn *Conn, req proto.Requ
 		logOut = devNull
 	}
 
+	handoffTmux := ""
+	if s.cfg.TmuxPath != "" {
+		if valid, terr := ValidateTmuxBinary(s.cfg.TmuxPath, s.layout.UID); terr == nil {
+			handoffTmux = valid
+		} else {
+			s.log.Warn("dropping invalid tmux path during handoff", "path", s.cfg.TmuxPath, "err", terr)
+		}
+	}
+
 	snap := HandoffSnapshot{
 		Schema:       HandoffSnapshotSchema,
 		Clients:      s.clients.List(),
@@ -407,7 +416,7 @@ func (s *Server) dispatchHandoff(ctx context.Context, conn *Conn, req proto.Requ
 		Modules:      s.snapshotModuleStates(),
 		SocketPath:   s.layout.SocketPath,
 		Gateway:      s.cfg.Gateway,
-		TmuxPath:     s.cfg.TmuxPath,
+		TmuxPath:     handoffTmux,
 		OldPID:       os.Getpid(),
 		OldStartTime: s.procStart,
 		OldVersion:   s.build.Version,
@@ -442,8 +451,8 @@ func (s *Server) dispatchHandoff(ctx context.Context, conn *Conn, req proto.Requ
 		"serve",
 		"--gateway", s.cfg.Gateway,
 	}
-	if s.cfg.TmuxPath != "" {
-		argv = append(argv, "--tmux", s.cfg.TmuxPath)
+	if handoffTmux != "" {
+		argv = append(argv, "--tmux", handoffTmux)
 	}
 	argv = append(argv,
 		"--foreground",

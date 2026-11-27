@@ -66,19 +66,37 @@ func main() {
 }
 `
 
+var (
+	fakeLauncherOnce sync.Once
+	fakeLauncherBin  string
+	fakeLauncherErr  error
+)
+
 func buildFakeLauncherBinary(t *testing.T) string {
 	t.Helper()
-	dir := t.TempDir()
-	src := filepath.Join(dir, "main.go")
-	if err := os.WriteFile(src, []byte(fakeLauncherSrc), 0o600); err != nil {
-		t.Fatal(err)
+	fakeLauncherOnce.Do(func() {
+		dir, err := os.MkdirTemp("", "corral-fake-launcher-*")
+		if err != nil {
+			fakeLauncherErr = err
+			return
+		}
+		src := filepath.Join(dir, "main.go")
+		if err := os.WriteFile(src, []byte(fakeLauncherSrc), 0o600); err != nil {
+			fakeLauncherErr = err
+			return
+		}
+		bin := filepath.Join(dir, "launcher")
+		cmd := exec.Command("go", "build", "-o", bin, src)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			fakeLauncherErr = fmt.Errorf("build fake launcher: %v\n%s", err, out)
+			return
+		}
+		fakeLauncherBin = bin
+	})
+	if fakeLauncherErr != nil {
+		t.Fatal(fakeLauncherErr)
 	}
-	bin := filepath.Join(dir, "launcher")
-	cmd := exec.Command("go", "build", "-o", bin, src)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("build fake launcher: %v\n%s", err, out)
-	}
-	return bin
+	return fakeLauncherBin
 }
 
 // spawnE2EFakeAgents starts self-contained fake Claude Code and Codex processes
@@ -548,7 +566,9 @@ func TestCorraldAgentFallbackScenarios(t *testing.T) {
 		t.Fatal("expected mode=tmux with empty tmux result to trigger fallback (ok=false)")
 	}
 	// Reset failure counter from the 1 empty tmux probe.
-	h.srv.CorraldManager().ReportCapSuccess(hostID, "locate")
+	if cl, ok := h.srv.CorraldClient(uid, hostID, "locate"); ok {
+		h.srv.CorraldManager().ReportCapSuccess(hostID, cl, "locate")
+	}
 
 	// --- Scenario 3: Corrald stopped (paused/stopped) falls back seamlessly ---
 	rPause := admin.do("POST", fmt.Sprintf("/api/hosts/%d/corrald/pause", hostID), nil)

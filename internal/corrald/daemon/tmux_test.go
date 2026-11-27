@@ -162,11 +162,14 @@ func TestValidateTmuxBinaryAndServeTmuxFlag(t *testing.T) {
 		}
 	}
 
-	// CLI `serve --tmux /bin/sh` must fail with error=invalid_tmux.
+	// C-9: CLI `serve --tmux /bin/sh` must NOT fail with error=invalid_tmux;
+	// it logs a warning and continues as if --tmux was omitted (so when not
+	// installed it fails with not_installed rather than invalid_tmux).
 	var out bytes.Buffer
+	t.Setenv("HOME", t.TempDir())
 	code := Main([]string{"serve", "--foreground", "--tmux", "/bin/sh"}, proto.BuildInfo{Version: "test", Release: 1}, &out, &out)
-	if code == 0 || !strings.Contains(out.String(), "error=invalid_tmux") {
-		t.Fatalf("serve --tmux /bin/sh: code=%d out=%q, want non-zero with error=invalid_tmux", code, out.String())
+	if strings.Contains(out.String(), "error=invalid_tmux") {
+		t.Fatalf("serve --tmux /bin/sh should ignore invalid tmux instead of returning invalid_tmux: code=%d out=%q", code, out.String())
 	}
 
 	// Server with validated TmuxPath persists tmux_path into meta.json.

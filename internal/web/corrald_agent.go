@@ -13,11 +13,37 @@ import (
 
 var errCorraldTmuxEmpty = errors.New("corrald agent.locate returned empty tmux info")
 
+// maxCorraldRPCBudget caps the portion of a request's remaining deadline spent
+// waiting on corrald before falling back to the original SSH script (C-5).
+var maxCorraldRPCBudget = 3 * time.Second
+
+func corraldBudgetDuration(ctx context.Context) time.Duration {
+	budget := maxCorraldRPCBudget
+	if dl, ok := ctx.Deadline(); ok {
+		rem := time.Until(dl)
+		if rem <= 0 {
+			return 0
+		}
+		if half := rem / 2; half < budget {
+			budget = half
+		}
+	}
+	return budget
+}
+
+func corraldCallBudget(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(ctx, corraldBudgetDuration(ctx))
+}
+
 // tryCorraldLocate attempts to satisfy a locate scan via corrald's agent.locate
 // RPC through the unified Server.CorraldClient entrypoint (spec §9).
 // Returns (out, true) on success, or (nil, false) when the caller must fall
 // back immediately to the original SSH locate script.
 func (s *Server) tryCorraldLocate(ctx context.Context, sess *term.Session, params proto.AgentLocateParams) ([]byte, bool) {
+	return s.tryCorraldLocateBudget(ctx, sess, params, corraldBudgetDuration(ctx))
+}
+
+func (s *Server) tryCorraldLocateBudget(ctx context.Context, sess *term.Session, params proto.AgentLocateParams, budget time.Duration) ([]byte, bool) {
 	if s == nil || sess == nil || sess.HostID <= 0 {
 		return nil, false
 	}
@@ -25,21 +51,23 @@ func (s *Server) tryCorraldLocate(ctx context.Context, sess *term.Session, param
 	if !ok {
 		return nil, false
 	}
-	out, err := cl.Locate(ctx, params)
+	rpcCtx, cancel := context.WithTimeout(ctx, budget)
+	out, err := cl.Locate(rpcCtx, params)
+	cancel()
 	if err != nil {
-		if s.corrald != nil {
-			s.corrald.ReportCapFailure(sess.HostID, "locate", err)
+		if s.corrald != nil && ctx.Err() == nil {
+			s.corrald.ReportCapFailure(sess.HostID, cl, "locate", err)
 		}
 		return nil, false
 	}
 	if locateTmuxEmpty(params, out) {
 		if s.corrald != nil {
-			s.corrald.ReportCapFailure(sess.HostID, "locate", errCorraldTmuxEmpty)
+			s.corrald.ReportCapFailure(sess.HostID, cl, "locate", errCorraldTmuxEmpty)
 		}
 		return nil, false
 	}
 	if s.corrald != nil {
-		s.corrald.ReportCapSuccess(sess.HostID, "locate")
+		s.corrald.ReportCapSuccess(sess.HostID, cl, "locate")
 	}
 	if params.Times {
 		out = appendHostNowRecord(out)
@@ -51,8 +79,12 @@ func (s *Server) tryCorraldLocate(ctx context.Context, sess *term.Session, param
 // preferring corrald agent.locate when available and falling back to the
 // original SSH script cmd while keeping the convoScans cache key unchanged.
 func (s *Server) runConvoScan(ctx context.Context, sess *term.Session, params proto.AgentLocateParams, cmd string, after time.Time) ([]byte, time.Time, time.Time, bool, error) {
+	// Capture the caller's RPC time budget BEFORE convoScans detaches ctx via
+	// context.WithoutCancel so a hung corrald still leaves time for SSH fallback
+	// within the caller's original deadline (C-5).
+	budget := corraldBudgetDuration(ctx)
 	return s.convoScans.runWith(ctx, sess, cmd, after, func(sctx context.Context) ([]byte, bool) {
-		return s.tryCorraldLocate(sctx, sess, params)
+		return s.tryCorraldLocateBudget(sctx, sess, params, budget)
 	})
 }
 
@@ -75,21 +107,23 @@ func (s *Server) tryCorraldTailsWith(ctx context.Context, sess *term.Session, lo
 	if !ok {
 		return nil, false
 	}
+	rpcCtx, cancel := corraldCallBudget(ctx)
 	var out []byte
 	var err error
 	if messageOnly {
-		out, err = cl.MessageTails(ctx, logs)
+		out, err = cl.MessageTails(rpcCtx, logs)
 	} else {
-		out, err = cl.Tails(ctx, logs)
+		out, err = cl.Tails(rpcCtx, logs)
 	}
+	cancel()
 	if err != nil {
-		if s.corrald != nil {
-			s.corrald.ReportCapFailure(sess.HostID, "tails", err)
+		if s.corrald != nil && ctx.Err() == nil {
+			s.corrald.ReportCapFailure(sess.HostID, cl, "tails", err)
 		}
 		return nil, false
 	}
 	if s.corrald != nil {
-		s.corrald.ReportCapSuccess(sess.HostID, "tails")
+		s.corrald.ReportCapSuccess(sess.HostID, cl, "tails")
 	}
 	if len(splitTails(string(out), logs)) != len(logs) {
 		return nil, false

@@ -10,6 +10,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"os"
 	"os/signal"
@@ -190,25 +191,24 @@ func cmdInstall(args []string, build proto.BuildInfo, stdout io.Writer) int {
 		return 2
 	}
 
-	if err := layout.EnsureLibDir(); err != nil {
+	lockTimeout := defaultLifecycleLockTimeout()
+	sharedLock, err := AcquireDirLockWait(layout.EnsureLibDir, layout.SharedLockPath, lockTimeout)
+	if err != nil {
+		if errors.Is(err, ErrLocked) {
+			return writeLockErr(stdout, err)
+		}
 		writeErr(stdout, "lib_dir_failed", err.Error())
 		return 1
 	}
-	if err := layout.EnsureStateDir(); err != nil {
-		writeErr(stdout, "state_dir_failed", err.Error())
-		return 1
-	}
-
-	lockTimeout := defaultLifecycleLockTimeout()
-	sharedLock, err := AcquireLockWait(layout.SharedLockPath, lockTimeout)
-	if err != nil {
-		return writeLockErr(stdout, err)
-	}
 	defer sharedLock.Release()
 
-	opLock, err := AcquireLockWait(layout.OpLockPath, lockTimeout)
+	opLock, err := AcquireDirLockWait(layout.EnsureStateDir, layout.OpLockPath, lockTimeout)
 	if err != nil {
-		return writeLockErr(stdout, err)
+		if errors.Is(err, ErrLocked) {
+			return writeLockErr(stdout, err)
+		}
+		writeErr(stdout, "state_dir_failed", err.Error())
+		return 1
 	}
 	defer opLock.Release()
 
@@ -487,8 +487,10 @@ func cmdServe(args []string, build proto.BuildInfo, stdout io.Writer) int {
 		var terr error
 		validatedTmux, terr = ValidateTmuxBinary(*tmuxPath, layout.UID)
 		if terr != nil {
-			writeErr(stdout, "invalid_tmux", terr.Error())
-			return 2
+			// C-9: optional --tmux failure must never block serve or handoff;
+			// log and continue as if --tmux was not provided.
+			slog.Warn("ignoring invalid --tmux path", "path", *tmuxPath, "err", terr)
+			validatedTmux = ""
 		}
 	}
 
@@ -519,6 +521,10 @@ func cmdServe(args []string, build proto.BuildInfo, stdout io.Writer) int {
 func serveDetached(layout *Layout, gateway, tmuxPath string, stdout io.Writer) int {
 	opLock, err := AcquireLockWait(layout.OpLockPath, defaultLifecycleLockTimeout())
 	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			writeErr(stdout, "not_installed", "install.json not found")
+			return 1
+		}
 		return writeLockErr(stdout, err)
 	}
 	if code, detail, ok := checkServeAllowed(layout); !ok {
@@ -526,19 +532,27 @@ func serveDetached(layout *Layout, gateway, tmuxPath string, stdout io.Writer) i
 		writeErr(stdout, code, detail)
 		return 1
 	}
-	probeLock, err := AcquireLock(layout.LockPath)
-	if errors.Is(err, ErrLocked) {
-		_ = opLock.Release()
-		pid, sock := waitForRunningMeta(layout, 2*time.Second)
-		fmt.Fprintf(stdout, "result=running\n")
-		fmt.Fprintf(stdout, "pid=%d\n", pid)
-		fmt.Fprintf(stdout, "socket=%s\n", sock)
-		return 0
-	}
+	probeLock, runPID, runSock, busy, err := acquireServeLockOrConfirmRunning(layout, 3*time.Second)
 	if err != nil {
 		_ = opLock.Release()
+		if errors.Is(err, os.ErrNotExist) {
+			writeErr(stdout, "not_installed", "install.json not found")
+			return 1
+		}
 		writeErr(stdout, "lock_failed", err.Error())
 		return 1
+	}
+	if busy {
+		_ = opLock.Release()
+		writeErr(stdout, proto.ErrBusy, "existing daemon is stopping or busy")
+		return 1
+	}
+	if probeLock == nil {
+		_ = opLock.Release()
+		fmt.Fprintf(stdout, "result=running\n")
+		fmt.Fprintf(stdout, "pid=%d\n", runPID)
+		fmt.Fprintf(stdout, "socket=%s\n", runSock)
+		return 0
 	}
 	_ = probeLock.Release()
 	_ = opLock.Release()
@@ -737,6 +751,9 @@ func serveForeground(
 	} else {
 		opLock, err = AcquireLockWait(layout.OpLockPath, defaultLifecycleLockTimeout())
 		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return reportReadyErr("not_installed", "install.json not found")
+			}
 			if errors.Is(err, ErrLocked) {
 				return reportReadyErr(proto.ErrBusy, err.Error())
 			}
@@ -745,22 +762,32 @@ func serveForeground(
 		if code, detail, ok := checkServeAllowed(layout); !ok {
 			return reportReadyErr(code, detail)
 		}
-		lock, err = AcquireLock(layout.LockPath)
-		if errors.Is(err, ErrLocked) {
+		var (
+			runPID  int
+			runSock string
+			busy    bool
+		)
+		lock, runPID, runSock, busy, err = acquireServeLockOrConfirmRunning(layout, 3*time.Second)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return reportReadyErr("not_installed", "install.json not found")
+			}
+			return reportReadyErr("lock_failed", err.Error())
+		}
+		if busy {
+			return reportReadyErr(proto.ErrBusy, "existing daemon is stopping or busy")
+		}
+		if lock == nil {
 			releaseLifecycleLocks()
-			pid, sock := waitForRunningMeta(layout, 2*time.Second)
 			if readyFile != nil {
-				_, _ = fmt.Fprintf(readyFile, "RUNNING %d %s\n", pid, sock)
+				_, _ = fmt.Fprintf(readyFile, "RUNNING %d %s\n", runPID, runSock)
 				_ = readyFile.Close()
 				return 0
 			}
 			fmt.Fprintf(stdout, "result=running\n")
-			fmt.Fprintf(stdout, "pid=%d\n", pid)
-			fmt.Fprintf(stdout, "socket=%s\n", sock)
+			fmt.Fprintf(stdout, "pid=%d\n", runPID)
+			fmt.Fprintf(stdout, "socket=%s\n", runSock)
 			return 0
-		}
-		if err != nil {
-			return reportReadyErr("lock_failed", err.Error())
 		}
 		if code, detail, ok := checkServeAllowed(layout); !ok {
 			_ = lock.Release()
@@ -812,6 +839,8 @@ func serveForeground(
 		if tmuxPath == "" && snap.TmuxPath != "" {
 			if validTmux, terr := ValidateTmuxBinary(snap.TmuxPath, layout.UID); terr == nil {
 				tmuxPath = validTmux
+			} else {
+				slog.Warn("ignoring invalid tmux path from handoff snapshot", "path", snap.TmuxPath, "err", terr)
 			}
 		}
 
@@ -1106,6 +1135,54 @@ func finalizeHandoffCutover(layout *Layout, build proto.BuildInfo, binaryPath st
 	return nil
 }
 
+func acquireServeLockOrConfirmRunning(layout *Layout, wait time.Duration) (lock *FileLock, pid int, sock string, busy bool, err error) {
+	lock, err = AcquireLock(layout.LockPath)
+	if err == nil {
+		return lock, 0, "", false, nil
+	}
+	if !errors.Is(err, ErrLocked) {
+		return nil, 0, "", false, err
+	}
+
+	deadline := time.Now().Add(wait)
+	for {
+		candSock := layout.SocketPath
+		candPID := 0
+		if meta, merr := ReadMetaRecord(layout.MetaJSON); merr == nil {
+			if meta.PID > 0 {
+				candPID = meta.PID
+			}
+			if meta.SocketPath != "" {
+				candSock = meta.SocketPath
+			}
+		}
+		var health proto.HealthResult
+		if herr := callLocalRPC(candSock, proto.MethodDaemonHealth, nil, &health, 300*time.Millisecond); herr == nil {
+			if health.State == "" || health.State == proto.StateRunning {
+				if health.PID > 0 {
+					candPID = health.PID
+				}
+				if health.Socket != "" {
+					candSock = health.Socket
+				}
+				return nil, candPID, candSock, false, nil
+			}
+		}
+
+		lock, err = AcquireLock(layout.LockPath)
+		if err == nil {
+			return lock, 0, "", false, nil
+		}
+		if !errors.Is(err, ErrLocked) {
+			return nil, 0, "", false, err
+		}
+		if time.Now().After(deadline) {
+			return nil, 0, "", true, nil
+		}
+		time.Sleep(40 * time.Millisecond)
+	}
+}
+
 func waitForRunningMeta(layout *Layout, wait time.Duration) (int, string) {
 	deadline := time.Now().Add(wait)
 	for {
@@ -1383,12 +1460,18 @@ func cmdUninstall(args []string, stdout io.Writer) int {
 	// StateDir, install.json, or other-machine checks from before SharedLock!
 	libDirExists := false
 	if _, err := os.Lstat(layout.LibDir); err == nil {
-		libDirExists = true
 		sharedLock, err = AcquireLockWait(layout.SharedLockPath, lockTimeout)
 		if err != nil {
-			return writeLockErr(stdout, err)
+			if errors.Is(err, os.ErrNotExist) {
+				// Concurrent uninstall already removed LibDir.
+				libDirExists = false
+			} else {
+				return writeLockErr(stdout, err)
+			}
+		} else {
+			libDirExists = true
+			defer sharedLock.Release()
 		}
-		defer sharedLock.Release()
 	} else if !errors.Is(err, os.ErrNotExist) {
 		writeErr(stdout, "lib_dir_failed", err.Error())
 		return 1
@@ -1411,23 +1494,29 @@ func cmdUninstall(args []string, stdout io.Writer) int {
 	if stateDirExists {
 		opLock, err = AcquireLockWait(layout.OpLockPath, lockTimeout)
 		if err != nil {
-			return writeLockErr(stdout, err)
-		}
-		defer opLock.Release()
+			if errors.Is(err, os.ErrNotExist) {
+				stateDirExists = false
+				installErr = os.ErrNotExist
+			} else {
+				return writeLockErr(stdout, err)
+			}
+		} else {
+			defer opLock.Release()
 
-		metaBefore, _ = ReadMetaRecord(layout.MetaJSON)
-		installRec, installErr = ReadInstallRecord(layout.InstallJSON)
+			metaBefore, _ = ReadMetaRecord(layout.MetaJSON)
+			installRec, installErr = ReadInstallRecord(layout.InstallJSON)
 
-		// Rule 4: Under OpLock, first remove install.json, then write the
-		// removing tombstone. If either step fails, abort before stopping the
-		// running daemon or touching other files.
-		if err := os.Remove(layout.InstallJSON); err != nil && !errors.Is(err, os.ErrNotExist) {
-			writeErr(stdout, "remove_install_json_failed", err.Error())
-			return 1
-		}
-		if err := WriteFileAtomic(layout.TombstonePath, []byte(time.Now().UTC().Format(time.RFC3339)+"\n"), 0o600); err != nil {
-			writeErr(stdout, "tombstone_failed", err.Error())
-			return 1
+			// Rule 4: Under OpLock, first remove install.json, then write the
+			// removing tombstone. If either step fails, abort before stopping the
+			// running daemon or touching other files.
+			if err := os.Remove(layout.InstallJSON); err != nil && !errors.Is(err, os.ErrNotExist) {
+				writeErr(stdout, "remove_install_json_failed", err.Error())
+				return 1
+			}
+			if err := WriteFileAtomic(layout.TombstonePath, []byte(time.Now().UTC().Format(time.RFC3339)+"\n"), 0o600); err != nil {
+				writeErr(stdout, "tombstone_failed", err.Error())
+				return 1
+			}
 		}
 	} else {
 		installErr = os.ErrNotExist
@@ -1574,6 +1663,23 @@ func cmdUninstall(args []string, stdout io.Writer) int {
 			fmt.Fprintf(stdout, "left=%s\t%s\n", l.path, l.reason)
 		}
 		return 1
+	}
+
+	// Part B: Removal succeeded with zero leftovers. While still holding
+	// lifeLock -> opLock -> sharedLock, unlink the lock files and remove any
+	// now-empty Corral-created directories (os.Remove only removes empty dirs).
+	// All lock acquirers verify path inode == locked fd inode after flock, so
+	// unlinking while held cannot create two mutually non-exclusive locks.
+	if stateDirExists {
+		_ = os.Remove(layout.LockPath)
+		_ = os.Remove(layout.OpLockPath)
+		_ = os.Remove(layout.StateDir)
+		_ = os.Remove(layout.StateRoot)
+		_ = os.Remove(filepath.Dir(layout.StateRoot)) // ~/.local/state/corral
+	}
+	if isLast && lastCheckErr == nil && installErr == nil && libDirExists {
+		_ = os.Remove(layout.SharedLockPath)
+		_ = os.Remove(layout.LibDir) // ~/.local/lib/corral
 	}
 
 	fmt.Fprintf(stdout, "result=removed\n")

@@ -554,14 +554,69 @@ echo "result=removed"
 `, "L", libDir, "ST", stateDir, "SOCK", sockPath, "OP", opID)
 }
 
-// SwitchSymlinkCommand atomically updates ~/.local/lib/corral/corrald to point
-// to relTarget (used when rolling back to a previous version after crash loop).
-func SwitchSymlinkCommand(libDir, relTarget string) string {
-	return shellScript(`TMP="$L/.corrald.rb.$$"
-rm -f "$TMP"
-ln -s "$REL" "$TMP" && mv -Tf "$TMP" "$L/corrald" || { rm -f "$TMP"; echo "error=symlink_failed"; exit 1; }
-echo "result=ok"
-`, "L", libDir, "REL", relTarget)
+// parseVersionDirRelease extracts the release number from a "corrald-<ver>-<rel>"
+// directory name (or relative symlink target "corrald-<ver>-<rel>/corrald").
+func parseVersionDirRelease(name string) (int64, bool) {
+	name = strings.TrimSpace(name)
+	name = strings.TrimSuffix(name, "/corrald")
+	if idx := strings.LastIndexByte(name, '/'); idx >= 0 {
+		name = name[idx+1:]
+	}
+	if !strings.HasPrefix(name, "corrald-") {
+		return 0, false
+	}
+	rest := strings.TrimPrefix(name, "corrald-")
+	idx := strings.LastIndexByte(rest, '-')
+	if idx <= 0 || idx+1 >= len(rest) {
+		return 0, false
+	}
+	rel, err := strconv.ParseInt(rest[idx+1:], 10, 64)
+	if err != nil || rel <= 0 {
+		return 0, false
+	}
+	return rel, true
+}
+
+// SelectStartBinary picks the binary path to launch with `corrald serve`.
+// Normally this is probe.CurrentBin (the shared symlink). If the shared symlink
+// currently points to a release in failedReleases (e.g. after a post-update
+// crash-loop rollback on an NFS shared home where the shared symlink is never
+// lowered), it selects the highest non-failed installed version directory instead.
+func SelectStartBinary(probe *HostProbe, failedReleases []int64) string {
+	if probe == nil {
+		return ""
+	}
+	isFailed := func(rel int64) bool {
+		if rel <= 0 {
+			return false
+		}
+		for _, fr := range failedReleases {
+			if fr == rel {
+				return true
+			}
+		}
+		return false
+	}
+	curRel, hasCur := parseVersionDirRelease(probe.CurrentTarget)
+	if !hasCur || !isFailed(curRel) {
+		return probe.CurrentBin
+	}
+	bestRel := int64(-1)
+	bestDir := ""
+	for _, dir := range probe.Versions {
+		rel, ok := parseVersionDirRelease(dir)
+		if !ok || isFailed(rel) {
+			continue
+		}
+		if rel > bestRel {
+			bestRel = rel
+			bestDir = dir
+		}
+	}
+	if bestDir != "" && probe.LibDir != "" {
+		return probe.LibDir + "/" + bestDir + "/corrald"
+	}
+	return probe.CurrentBin
 }
 
 // FriendlyOSName maps uname -s output to user-facing OS names for failure text.
