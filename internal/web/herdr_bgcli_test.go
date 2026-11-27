@@ -1158,6 +1158,10 @@ func TestCmdScanSubagentBudgetAndCap(t *testing.T) {
 	if err := os.MkdirAll(budgetSubDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	// (Subagents are read only beside the session's sole log.)
+	if err := os.WriteFile(filepath.Join(filepath.Dir(budgetSubDir), "..", budgetSess+".jsonl"), []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(filepath.Join(budgetSubDir, "agent-subbudget1.jsonl"), []byte(`{"version":"2.1.331"}`+"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -1218,6 +1222,10 @@ func TestCmdScanSubagentBudgetAndCap(t *testing.T) {
 	// 3. Newest-first mtime ordering (20 recent active subagents -> newest 16, whole=true, budgetCut=false).
 	capSubDir := filepath.Join(home, ".claude", "projects", "-home-u-proj", capSess, "subagents")
 	if err := os.MkdirAll(capSubDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// (Subagents are read only beside the session's sole log.)
+	if err := os.WriteFile(filepath.Join(filepath.Dir(capSubDir), "..", capSess+".jsonl"), []byte("{}\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	baseTime := time.Now().Add(-2 * time.Minute)
@@ -1304,6 +1312,10 @@ func TestCmdScanSubagentBudgetAndCap(t *testing.T) {
 	const busySess = "99999999-1111-4222-8333-444444444477"
 	busyDir := filepath.Join(home, ".claude", "projects", "-home-u-proj", busySess, "subagents")
 	if err := os.MkdirAll(busyDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// (Subagents are read only beside the session's sole log.)
+	if err := os.WriteFile(filepath.Join(filepath.Dir(busyDir), "..", busySess+".jsonl"), []byte("{}\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	writeSub := func(idx int) {

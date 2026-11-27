@@ -85,7 +85,7 @@ type bgProber struct {
 	models map[string]paneModel
 	wake   chan struct{}
 	poke   func() // (the watcher's last summary goes again)
-	read   func(ctx context.Context, sessions []string, tail int) (map[string]bgRecord, error)
+	read func(ctx context.Context, sessions []string, tail int) (map[string]bgRecord, error)
 	// back: told of a pane whose subagents a look of the prober's own found
 	// back, no turn's end told meanwhile (two changes in one snapshot): the
 	// "finished" held back goes.
@@ -94,11 +94,12 @@ type bgProber struct {
 
 // bgRecord is a log's last turn record: its uuid, and the subagents out.
 type bgRecord struct {
-	uuid   string
-	n      int
-	said   string // (the agent's last words before the record: lastSaidIn)
-	failed string // (the API error the turn ended on: failedIn)
-	model  string // (the model its last answer was of: modelIn)
+	uuid    string
+	n       int
+	said    string // (the agent's last words before the record: lastSaidIn)
+	failed  string // (the API error the turn ended on: failedIn)
+	model   string // (the model its last answer was of: modelIn)
+	readErr bool   // (an existing log failed to read on the host; distinct from missing)
 }
 
 type paneModel struct{ session, model string }
@@ -128,6 +129,7 @@ func (p *bgProber) consider(pane, agent, status, session string, round int64) {
 		}
 		return
 	}
+	session = strings.ToLower(session)
 	if b != nil && b.session == session {
 		b.round = round // (done, then idle: the same turn's end)
 		return
@@ -203,10 +205,10 @@ func (p *bgProber) decorate(sum *herdrSummary) {
 	for i := range sum.Workspaces {
 		for j := range sum.Workspaces[i].Agents {
 			a := &sum.Workspaces[i].Agents[j]
-			if m, ok := p.models[a.PaneID]; ok && a.Session != "" && m.session == a.Session {
+			if m, ok := p.models[a.PaneID]; ok && a.Session != "" && strings.EqualFold(m.session, a.Session) {
 				a.Model = m.model
 			}
-			if b := p.panes[a.PaneID]; b != nil && (a.Session == "" || b.session == a.Session) {
+			if b := p.panes[a.PaneID]; b != nil && (a.Session == "" || strings.EqualFold(b.session, a.Session)) {
 				a.Bg, a.BgN, a.BgSince = b.state, b.n, b.since
 				if b.state == bgNone {
 					a.Failed = b.failed // (with subagents out, its turn is not over: not failed yet)
@@ -291,7 +293,7 @@ func (p *bgProber) once(ctx context.Context) {
 			continue // (worked again, or another session, meanwhile: what was read is of before)
 		}
 		r, ok := got[b.session]
-		if err == nil && ok && r.model != "" {
+		if err == nil && ok && !r.readErr && r.model != "" {
 			if m := p.models[pane]; m.session != b.session || m.model != r.model {
 				p.models[pane] = paneModel{b.session, r.model}
 				changed = true
@@ -309,8 +311,8 @@ func (p *bgProber) once(ctx context.Context) {
 		}
 		was, have := p.taken[b.session]
 		switch {
-		case err != nil || !ok || r.uuid == "":
-			if err == nil && ok {
+		case err != nil || !ok || r.readErr || r.uuid == "":
+			if err == nil && ok && !r.readErr {
 				b.far = true // (none near the end: further back next)
 			}
 			if b.state == bgRunning {
@@ -424,35 +426,84 @@ func (s *Server) locatedEverywhere(sess *term.Session, pane, sid string, at time
 	}
 }
 
-// bgTailCommand prints, for each Claude Code session id given (validated),
-// a line "@@corral-bg <id>" and the end of its log. Fixed script; the ids
-// are its arguments.
+// bgTailCommand prints, for each validated Claude Code session id given,
+// either "@@corral-bg <id>" followed by the end of its log (and
+// "@@corral-bg-err <id>" if tail fails on an existing log), or
+// "@@corral-bg-missing <id>" when the log is absent or ambiguous across
+// multiple projects/config dirs (discovered via claude_cfg_dirs, deduplicated
+// by physical path; never guesses by mtime). Always exits 0 so a missing log
+// on the last item never discards earlier records in the batch.
 func bgTailCommand(sessions []string, tail int) string {
-	script := `n=$1; shift
+	script := claudeConfigDirsSh + `n=$1; shift
+claude_cfg_dirs
 for s in "$@"; do
-  printf '\n@@corral-bg %s\n' "$s"
-  for f in "$HOME"/.claude/projects/*/"$s".jsonl; do [ -f "$f" ] && tail -c "$n" "$f"; break; done
-done`
+  _log= _found=0
+  if [ "$cldirs_incomplete" = 0 ]; then
+    while IFS= read -r _cd; do
+      [ -n "$_cd" ] || continue
+      for f in "$_cd"/projects/*/"$s".jsonl; do
+        [ -f "$f" ] || continue
+        _found=$((_found + 1))
+        if [ "$_found" -eq 1 ]; then
+          _log=$f
+        else
+          _log=
+          break
+        fi
+      done
+      [ "$_found" -le 1 ] || break
+    done <<CORRAL_CLDIRS
+$cldirs
+CORRAL_CLDIRS
+  fi
+  if [ -n "$_log" ]; then
+    printf '\n@@corral-bg %s\n' "$s"
+    if ! tail -c "$n" "$_log"; then
+      printf '\n@@corral-bg-err %s\n' "$s"
+    fi
+  else
+    printf '\n@@corral-bg-missing %s\n' "$s"
+  fi
+done
+exit 0`
 	cmd := "sh -c " + sshx.QuoteShell(script) + " corral " + strconv.Itoa(tail)
 	for _, s := range sessions {
-		cmd += " " + sshx.QuoteShell(s)
+		if convoUUID.MatchString(s) {
+			cmd += " " + sshx.QuoteShell(strings.ToLower(s))
+		}
 	}
 	return cmd
 }
 
 // parseBgTails reads what bgTailCommand printed: each log's last turn
-// record (none where the end read has none).
+// record (none where the end read has none). Missing/ambiguous entries are
+// omitted; genuine read errors on an existing file are recorded with
+// readErr=true (discarding any partial output).
 func parseBgTails(out []byte) map[string]bgRecord {
 	got := map[string]bgRecord{}
-	for _, part := range bytes.Split(out, []byte("\n@@corral-bg "))[1:] {
+	for _, part := range bytes.Split(out, []byte("\n@@corral-bg"))[1:] {
 		nl := bytes.IndexByte(part, '\n')
 		if nl < 0 {
 			continue
 		}
-		sid := string(part[:nl])
-		if !convoUUID.MatchString(sid) {
+		hdr := string(part[:nl])
+		if rest, ok := strings.CutPrefix(hdr, "-missing "); ok {
+			if convoUUID.MatchString(rest) {
+				delete(got, strings.ToLower(rest))
+			}
 			continue
 		}
+		if rest, ok := strings.CutPrefix(hdr, "-err "); ok {
+			if convoUUID.MatchString(rest) {
+				got[strings.ToLower(rest)] = bgRecord{readErr: true}
+			}
+			continue
+		}
+		sid, ok := strings.CutPrefix(hdr, " ")
+		if !ok || !convoUUID.MatchString(sid) {
+			continue
+		}
+		sid = strings.ToLower(sid)
 		lines := bytes.Split(part[nl+1:], []byte("\n"))
 		rec := bgRecord{}
 		at := -1

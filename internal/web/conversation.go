@@ -252,7 +252,7 @@ codex_sub() {
 codex_resume_of() {
   tr '\0' '\001' <"/proc/$1/cmdline" 2>/dev/null | awk -v want=resume '` + codexArgsAwk + `'
 }
-` + convoEndpointSh + `
+` + convoEndpointSh + claudeConfigDirSh + `
 # A process's record: what it is, where its log is, and where it runs.
 rec() { # pid start fg procstart sid log agent [via]
   env=$(tr '\0\n' '\n\001' <"/proc/$1/environ" 2>/dev/null | grep -E '^(HERDR_PANE_ID|HERDR_SOCKET_PATH|TMUX|TMUX_PANE)=' | head -c 4096)
@@ -347,45 +347,234 @@ json_num() {
   while :; do case $r in '"'*) r=${r#\"};; *) break;; esac; done
   v=${r%%[!0-9]*}
 }
-# Claude Code: each process's session file names its session.
-# (only=opencode: of OpenCode's processes only, see convoLocateOpenCodeCommand.)
-for f in "$HOME"/.claude/sessions/*.json; do
-  [ "$only" = opencode ] && break
-  [ -f "$f" ] || continue
-  pid=${f##*/}; pid=${pid%.json}
-  case $pid in ''|*[!0-9]*) continue;; esac
-  [ -r "/proc/$pid/environ" ] || continue
-  stat_of "$pid" || continue
-  c=$(head -c 65536 "$f" 2>/dev/null | tr -d '\n')
+# Claude Code: each process's session file names its session (under its own
+# CLAUDE_CONFIG_DIR when set, else $HOME/.claude).
+# (only=opencode: of OpenCode's processes only; only=pids:<list>: only the
+# foreground PIDs reported by herdr pane.process_info.)
+_seen_claude=
+emit_claude() { # pid sessionfile cfgdir
+  _ecpid=$1 _ecf=$2 _eccfg=$3
+  case " $_seen_claude " in *" $_ecpid "*) return 0;; esac
+  [ -f "$_ecf" ] && [ -r "/proc/$_ecpid/environ" ] || return 1
+  stat_of "$_ecpid" || return 1
+  c=$(head -c 65536 "$_ecf" 2>/dev/null | tr -d '\n')
   json_str sessionId; sid=$v
   json_num procStart; ps=$v
-  case $ps in ''|*[!0-9]*) continue;; esac
-  case $sid in *[!0-9a-fA-F-]*) continue;; ????????-????-????-????-????????????) ;; *) continue;; esac
+  case $ps in ''|*[!0-9]*) return 1;; esac
+  [ "$ps" = "$st" ] || return 1
+  case $sid in *[!0-9a-fA-F-]*) return 1;; ????????-????-????-????-????????????) ;; *) return 1;; esac
   # (Not a side question's copy of a conversation — a "claude -p" the
   # gateway runs, marked so in its environment (read by its NULs: no value
   # can pass for the mark) — which writes a file here
   # while it runs, under a session of its own: no agent to show or type to.
   # A "claude -p" of the person's own is found as before. side_question.go)
   json_str entrypoint
-  if [ "$v" = sdk-cli ] && tr '\0\n' '\n\001' <"/proc/$pid/environ" 2>/dev/null | grep -qx 'CORRAL_SIDE_COPY=1'; then continue; fi
-  log=
-  for l in "$HOME"/.claude/projects/*/"$sid".jsonl; do
+  if [ "$v" = sdk-cli ] && tr '\0\n' '\n\001' <"/proc/$_ecpid/environ" 2>/dev/null | grep -qx 'CORRAL_SIDE_COPY=1'; then _seen_claude="$_seen_claude $_ecpid"; return 0; fi
+  log= _ln=0
+  for l in "$_eccfg"/projects/*/"$sid".jsonl; do
     case $l in *"$nl"*) continue;; esac
-    [ -f "$l" ] && { log=$l; break; }
+    [ -f "$l" ] || continue
+    _ln=$((_ln + 1))
+    if [ "$_ln" -eq 1 ]; then log=$l; else log=; fi
   done
-  rec "$pid" "$st" "$fg" "$ps" "$sid" "$log" claude
-done
-# The user's codex, opencode, agy and devin processes, in one pass over
-# /proc (by their names, read with the shell's own read; each kind then as
-# before).
+  if [ "$_ln" -gt 1 ]; then
+    _ecreal=$(cd -- "$_eccfg" 2>/dev/null && pwd -P)
+    _fdm=0
+    for _fd in "/proc/$_ecpid"/fd/*; do
+      _fdt=$(readlink "$_fd" 2>/dev/null) || continue
+      case $_fdt in
+      *"$nl"*) continue;;
+      "$_eccfg"/projects/*/"$sid".jsonl) ;;
+      *)
+        if [ -n "$_ecreal" ]; then
+          case $_fdt in
+          "$_ecreal"/projects/*/"$sid".jsonl) ;;
+          *) continue;;
+          esac
+        else
+          continue
+        fi ;;
+      esac
+      [ -f "$_fdt" ] || continue
+      if [ "$_fdm" -eq 0 ]; then
+        log=$_fdt _fdm=1
+      elif [ "$log" != "$_fdt" ]; then
+        log= _fdm=2
+        break
+      fi
+    done
+  fi
+  _seen_claude="$_seen_claude $_ecpid"
+  rec "$_ecpid" "$st" "$fg" "$ps" "$sid" "$log" claude
+  return 0
+}
 codexes= opencodes= agys= devins=
-for d in /proc/[0-9]*; do
-  [ -O "$d" ] || continue
-  read_all "$d/comm" "$nl"
-  while :; do case $x in *"$nl") x=${x%"$nl"};; *) break;; esac; done # (as $(…) would leave it)
-  case $x in codex) codexes="$codexes $d";; opencode) opencodes="$opencodes $d";; agy) agys="$agys $d";; devin) devins="$devins $d";; esac
-done
-[ "$only" = opencode ] && codexes= agys= devins=
+case $only in
+tree:*)
+  _t=${only#tree:}
+  _shell=${_t%%:*}
+  _fg=${_t#*:}
+  _fast_inc=0 _cand_n=0 _one_kind= _one_pid= _one_f= _one_cfg=
+  case $_shell in ''|*[!0-9]*) _fast_inc=1;; esac
+  if [ "$_fast_inc" = 0 ] && [ -O "/proc/$_shell" ]; then
+    ppid_of "$_shell"
+    case $pp in ''|0|1|*[!0-9]*) _fast_inc=1;; *)
+      read_all "/proc/$pp/comm" ''
+      [ "$x" = herdr ] || _fast_inc=1 ;;
+    esac
+  else
+    _fast_inc=1
+  fi
+  _tree=
+  if [ "$_fast_inc" = 0 ]; then
+    _ps=$(ps -e -o pid=,ppid= 2>/dev/null || ps -o pid,ppid 2>/dev/null)
+    _tree=$(printf '%s\n' "$_ps" | awk -v root="$_shell" '
+      $1 ~ /^[0-9]+$/ && $2 ~ /^[0-9]+$/ {
+        if ($1 == root) seen_root = 1
+        kids[$2] = kids[$2] " " $1
+      }
+      END {
+        if (!seen_root) { print "OVERFLOW"; exit }
+        q[1] = root; seen[root] = 1; head = 1; tail = 1
+        while (head <= tail) {
+          cur = q[head++]
+          n = split(kids[cur], a, " ")
+          for (i = 1; i <= n; i++) {
+            c = a[i]
+            if (c != "" && !(c in seen)) {
+              seen[c] = 1
+              q[++tail] = c
+              if (tail > 64) { print "OVERFLOW"; exit }
+            }
+          }
+        }
+        for (i = 1; i <= tail; i++) print q[i]
+      }')
+    case $_tree in ''|*OVERFLOW*) _fast_inc=1;; esac
+  fi
+  if [ "$_fast_inc" = 0 ]; then
+    _tlist=" $(printf '%s' "$_tree" | tr '\n' ' ') "
+    _oifs=$IFS; IFS=,; set -f; set -- $_fg; set +f; IFS=$_oifs
+    for _fp in "$@"; do
+      case $_fp in ''|*[!0-9]*) _fast_inc=1; break;; esac
+      case $_tlist in *" $_fp "*) ;; *) _fast_inc=1; break;; esac
+    done
+  fi
+  if [ "$_fast_inc" = 0 ]; then
+    for pid in $_tree; do
+      case $pid in ''|*[!0-9]*) continue;; esac
+      d="/proc/$pid"
+      [ -O "$d" ] || { _fast_inc=1; break; }
+      claude_cfg_dir "$d"
+      _cf="$clcfg/sessions/$pid.json"
+      if [ -f "$_cf" ] && [ -r "$d/environ" ] && stat_of "$pid"; then
+        c=$(head -c 65536 "$_cf" 2>/dev/null | tr -d '\n')
+        json_str sessionId; sid=$v
+        json_num procStart; ps=$v
+        _cl_ok=0
+        case $ps in ''|*[!0-9]*) ;; *)
+          if [ "$ps" = "$st" ]; then
+            case $sid in *[!0-9a-fA-F-]*) ;; ????????-????-????-????-????????????)
+              json_str entrypoint
+              if [ "$v" = sdk-cli ] && tr '\0\n' '\n\001' <"$d/environ" 2>/dev/null | grep -qx 'CORRAL_SIDE_COPY=1'; then
+                _cl_ok=2
+              else
+                _cl_ok=1
+              fi ;;
+            esac
+          fi ;;
+        esac
+        if [ "$_cl_ok" = 1 ]; then
+          _cand_n=$((_cand_n + 1))
+          if [ "$_cand_n" -eq 1 ]; then
+            _one_kind=claude _one_pid=$pid _one_f=$_cf _one_cfg=$clcfg
+          else
+            _fast_inc=1; break
+          fi
+          continue
+        elif [ "$_cl_ok" = 2 ]; then
+          continue
+        fi
+      fi
+      read_all "$d/comm" "$nl"
+      while :; do case $x in *"$nl") x=${x%"$nl"};; *) break;; esac; done
+      case $x in
+      agy)
+        if [ -z "$(agy_noninter "$pid")" ]; then
+          _cand_n=$((_cand_n + 1))
+          if [ "$_cand_n" -eq 1 ]; then
+            _one_kind=agy _one_pid=$pid
+          else
+            _fast_inc=1; break
+          fi
+        fi ;;
+      codex|opencode|devin) _fast_inc=1; break;;
+      esac
+    done
+  fi
+  if [ "$_fast_inc" = 0 ] && [ "$_cand_n" = 1 ]; then
+    if [ "$_one_kind" = claude ]; then
+      emit_claude "$_one_pid" "$_one_f" "$_one_cfg" || printf 'fast_incomplete=1\0'
+    else
+      agys="/proc/$_one_pid"
+    fi
+  else
+    printf 'fast_incomplete=1\0'
+  fi
+  ;;
+*)
+  if [ "$only" != opencode ]; then
+    for f in "$HOME"/.claude/sessions/*.json; do
+      [ -f "$f" ] || continue
+      pid=${f##*/}; pid=${pid%.json}
+      case $pid in ''|*[!0-9]*) continue;; esac
+      [ -r "/proc/$pid/environ" ] || continue
+      claude_cfg_dir "/proc/$pid"
+      if [ -f "$clcfg/sessions/$pid.json" ]; then
+        emit_claude "$pid" "$clcfg/sessions/$pid.json" "$clcfg" || true
+      else
+        emit_claude "$pid" "$f" "$HOME/.claude" || true
+      fi
+    done
+    if [ -n "${CLAUDE_CONFIG_DIR:-}" ] && [ -d "$CLAUDE_CONFIG_DIR/sessions" ]; then
+      for f in "$CLAUDE_CONFIG_DIR"/sessions/*.json; do
+        [ -f "$f" ] || continue
+        pid=${f##*/}; pid=${pid%.json}
+        case $pid in ''|*[!0-9]*) continue;; esac
+        [ -r "/proc/$pid/environ" ] || continue
+        claude_cfg_dir "/proc/$pid"
+        [ -f "$clcfg/sessions/$pid.json" ] && emit_claude "$pid" "$clcfg/sessions/$pid.json" "$clcfg" || true
+      done
+    fi
+  fi
+  # The user's codex, opencode, agy, devin, and custom-config-dir claude
+  # processes, in one pass over /proc (by their names, read with the shell's
+  # own read; each kind then as before).
+  claudes=
+  for d in /proc/[0-9]*; do
+    [ -O "$d" ] || continue
+    read_all "$d/comm" "$nl"
+    while :; do case $x in *"$nl") x=${x%"$nl"};; *) break;; esac; done # (as $(…) would leave it)
+    case $x in
+    codex) codexes="$codexes $d";;
+    opencode) opencodes="$opencodes $d";;
+    agy) agys="$agys $d";;
+    devin) devins="$devins $d";;
+    claude) [ "$only" = opencode ] || claudes="$claudes $d";;
+    node|bun) [ "$only" = opencode ] || { grep -q 'claude' "$d/cmdline" 2>/dev/null && claudes="$claudes $d"; };;
+    [0-9]*.[0-9]*) [ "$only" = opencode ] || { case $(readlink "$d/exe" 2>/dev/null) in */claude/*) claudes="$claudes $d";; esac; };;
+    esac
+  done
+  for d in $claudes; do
+    pid=${d#/proc/}
+    case " $_seen_claude " in *" $pid "*) continue;; esac
+    [ -r "$d/environ" ] || continue
+    claude_cfg_dir "$d"
+    [ -f "$clcfg/sessions/$pid.json" ] && emit_claude "$pid" "$clcfg/sessions/$pid.json" "$clcfg" || true
+  done
+  [ "$only" = opencode ] && codexes= agys= devins=
+  ;;
+esac
 # What a log says of itself, from its head: where it was begun and when.
 # (What it says of itself is in its first line's payload: the line's own
 # timestamp is of when it was written, which a rewrite moves on.)
@@ -394,6 +583,7 @@ meta_of() { head -n 1 "$1" 2>/dev/null | head -c 8192 | awk 'match($0, /"payload
 # Codex begun by the npm package talks to it and keeps none open of its
 # own): each log it holds, with where that conversation was begun and when,
 # so that the Codex in a pane can be told which of them is its own.
+case $only in tree:*) ;; *)
 for d in $codexes; do
   case $(codex_sub "${d#/proc/}") in app-server) ;; *) continue;; esac
   codex_home "$d"
@@ -406,6 +596,7 @@ for d in $codexes; do
 $links
 CORRAL_FD_LINKS
 done
+;; esac
 # Codex: a process of the user's named codex, its log the session file it
 # has open (rollout-<time>-<session id>.jsonl).
 # (Not one run with exec, as its arguments or its log's head say: no
@@ -761,6 +952,7 @@ type convoLocated struct {
 	tmuxTTY                        string           // (the active pane's terminal)
 	paneTTY                        string           // (the terminal of the pane asked of)
 	noProc                         bool             // the host has no /proc
+	fastIncomplete                 bool             // pane-tree fast locate could not confirm a single candidate
 	hostNow                        int64            // the host's clock when it was looked at, unix milliseconds (0: not known)
 	resumeOf                       map[int64]string // ("codex resume <id>": by pid, the conversation each was started at)
 }
@@ -788,6 +980,10 @@ func parseConvoLocate(out string) (l convoLocated) {
 	for _, rec := range strings.Split(out, "\x00") {
 		if rec == "noproc" {
 			l.noProc = true
+			continue
+		}
+		if rec == "fast_incomplete=1" {
+			l.fastIncomplete = true
 			continue
 		}
 		if strings.HasPrefix(rec, "cand=") {
@@ -1240,7 +1436,11 @@ func candAt(l convoLocated, log, cwd string) *convoCand {
 // could have begun it, or was found to be its own, and was never one that
 // could be either of two; more for any other.
 func (s *Server) screenEnoughFor(p *convoProc, c *convoCand, sid string, l convoLocated) int {
-	if !s.convoClaimed.contested(sid) && (s.convoClaimed.owns(sid, p.id()) || onlyItsByTime(p, c, l)) {
+	return s.screenEnoughForHost("", p, c, sid, l)
+}
+
+func (s *Server) screenEnoughForHost(hostKey string, p *convoProc, c *convoCand, sid string, l convoLocated) int {
+	if !s.convoClaimed.contestedOn(hostKey, sid) && (s.convoClaimed.ownsOn(hostKey, sid, p.id()) || onlyItsByTime(p, c, l)) {
 		return screenEnough
 	}
 	return screenEnough2
@@ -1381,11 +1581,15 @@ func onlyItsByTime(p *convoProc, c *convoCand, l convoLocated) bool {
 // Codex there started. Then nothing is shown rather than another's. One
 // already found to be this Codex's (its screen showed it) is of it still.
 func (s *Server) daemonLog(p *convoProc, l convoLocated) (took, refused bool) {
+	return s.daemonLogFor("", p, l)
+}
+
+func (s *Server) daemonLogFor(hostKey string, p *convoProc, l convoLocated) (took, refused bool) {
 	if p == nil || p.agent != "codex" || p.log != "" || p.cwd == "" || p.started <= 0 {
 		return false, false
 	}
 	alive := aliveCodex(l)
-	s.convoClaimed.seeAlive(l, alive, l.now())
+	s.convoClaimed.seeAliveOn(hostKey, l, alive, l.now())
 	var best *convoCand
 	var bestSID string
 	resumed := false // (best is the one it was started at: not claimed by this — review fork3-6)
@@ -1404,7 +1608,7 @@ func (s *Server) daemonLog(p *convoProc, l convoLocated) (took, refused bool) {
 			}
 			continue
 		}
-		if !s.convoClaimed.owns(sid, p.id()) {
+		if !s.convoClaimed.ownsOn(hostKey, sid, p.id()) {
 			// Begun where this Codex runs, and after it started: one begun
 			// before it is another's.
 			if c.began <= 0 || c.began+convoBeganSlack < p.started {
@@ -1415,7 +1619,7 @@ func (s *Server) daemonLog(p *convoProc, l convoLocated) (took, refused bool) {
 			// Neither takes it by this, then or later: once that other has
 			// ended, the one left is no more its owner than it was.
 			if !onlyItsByTime(p, c, l) {
-				s.convoClaimed.contest(sid)
+				s.convoClaimed.contestOn(hostKey, sid)
 				refused = true
 				continue
 			}
@@ -1432,13 +1636,13 @@ func (s *Server) daemonLog(p *convoProc, l convoLocated) (took, refused bool) {
 	// may have gone on from since, so that another Codex at it is not kept
 	// from it.)
 	if resumed {
-		if s.convoClaimed.ownedByAnother(bestSID, p.id(), alive) {
+		if s.convoClaimed.ownedByAnotherOn(hostKey, bestSID, p.id(), alive) {
 			return false, true
 		}
 		p.log, p.sid = best.log, bestSID
 		return true, refused
 	}
-	if !s.convoClaimed.take(bestSID, p.id(), p.started, alive, l.now(), false) {
+	if !s.convoClaimed.takeOn(hostKey, bestSID, p.id(), p.started, alive, l.now(), false) {
 		return false, true // (there is one, but it is another Codex's)
 	}
 	p.log, p.sid = best.log, bestSID
@@ -1453,10 +1657,36 @@ func (s *Server) daemonLog(p *convoProc, l convoLocated) (took, refused bool) {
 // is forgotten rather than any of it being opened up again — nothing more
 // is taken then.
 type convoClaims struct {
-	mu   sync.Mutex
-	by   map[string]convoClaim
-	in   []string // (in the order they were claimed)
-	full bool     // it has been full: nothing is taken any more
+	mu    sync.Mutex
+	by    map[string]convoClaim
+	in    []string // (in the order they were claimed)
+	full  bool     // it has been full: nothing is taken any more
+	hosts map[string]*convoHostAlive
+}
+
+// convoHostAlive tracks Codex claim liveness refresh state per remote host
+// and SSH identity so activity on host B never suppresses refreshes on host A.
+type convoHostAlive struct {
+	lastAlive  time.Time
+	refreshing bool
+}
+
+// convoClaimHostKey identifies the remote host and SSH account/identity of sess.
+func convoClaimHostKey(sess *term.Session) string {
+	if sess == nil {
+		return ""
+	}
+	user, addr := "", ""
+	if c := sess.Client(); c != nil {
+		user = c.User()
+		if ra := c.RemoteAddr(); ra != nil {
+			addr = ra.String()
+		}
+	}
+	if sess.OwnerID == 0 && sess.HostID == 0 && sess.HostConfig == "" && user == "" && addr == "" {
+		return "sess:" + sess.ID
+	}
+	return strconv.FormatInt(sess.OwnerID, 10) + "\x00" + strconv.FormatInt(sess.HostID, 10) + "\x00" + sess.HostConfig + "\x00" + user + "@" + addr
 }
 
 // convoClaim: the Codex a conversation was found to be of (pid 0: of none
@@ -1464,13 +1694,17 @@ type convoClaims struct {
 // running (by the host's clock).
 type convoClaim struct {
 	pid, start int64
-	seen       int64 // unix milliseconds
-	disputed   bool  // it was of none once, either of two: its screen showed whose
+	seen       int64  // unix milliseconds
+	disputed   bool   // it was of none once, either of two: its screen showed whose
+	host       string // convoClaimHostKey of the host that claimed it
 }
 
 func (c convoClaim) of() procID { return procID{c.pid, c.start} }
 
-const maxConvoClaims = 4096
+const (
+	maxConvoClaims     = 4096
+	maxConvoClaimHosts = 1024
+)
 
 // aliveCodex: the Codexes running now.
 func aliveCodex(l convoLocated) map[procID]bool {
@@ -1483,20 +1717,35 @@ func aliveCodex(l convoLocated) map[procID]bool {
 	return alive
 }
 
+func convoClaimKey(hostKey, sid string) string {
+	if hostKey == "" {
+		return sid
+	}
+	return hostKey + "\x1f" + sid
+}
+
 // owns: the conversation was found to be that process's.
 func (c *convoClaims) owns(sid string, p procID) bool {
+	return c.ownsOn("", sid, p)
+}
+
+func (c *convoClaims) ownsOn(hostKey, sid string, p procID) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	was, ok := c.by[sid]
+	was, ok := c.by[convoClaimKey(hostKey, sid)]
 	return ok && was.pid != 0 && was.of() == p
 }
 
 // ownedByAnother: the conversation was found to be another Codex's, one
 // running now.
 func (c *convoClaims) ownedByAnother(sid string, p procID, alive map[procID]bool) bool {
+	return c.ownedByAnotherOn("", sid, p, alive)
+}
+
+func (c *convoClaims) ownedByAnotherOn(hostKey, sid string, p procID, alive map[procID]bool) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	was, ok := c.by[sid]
+	was, ok := c.by[convoClaimKey(hostKey, sid)]
 	return ok && was.pid != 0 && was.of() != p && alive[was.of()]
 }
 
@@ -1508,19 +1757,24 @@ func (c *convoClaims) ownedByAnother(sid string, p procID, alive map[procID]bool
 // of, if there, is seen again (now: the host's clock). Looking and taking
 // are one, so that two readings cannot take the same one.
 func (c *convoClaims) take(sid string, p procID, started int64, alive map[procID]bool, now int64, shown bool) bool {
+	return c.takeOn("", sid, p, started, alive, now, shown)
+}
+
+func (c *convoClaims) takeOn(hostKey, sid string, p procID, started int64, alive map[procID]bool, now int64, shown bool) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	was, ok := c.by[sid]
+	k := convoClaimKey(hostKey, sid)
+	was, ok := c.by[k]
 	if ok && was.pid != 0 && alive[was.of()] {
 		was.seen = max(was.seen, now) // (a scan read before another may come in after it)
-		c.by[sid] = was
+		c.by[k] = was
 	}
 	switch {
 	case c.full:
 		return false
 	case ok && was.pid != 0 && was.of() == p:
 		was.seen = max(was.seen, now)
-		c.by[sid] = was
+		c.by[k] = was
 		return true
 	case ok && was.pid == 0 && !shown:
 		return false // (it could be either of two: of neither, till one's screen shows it)
@@ -1529,38 +1783,159 @@ func (c *convoClaims) take(sid string, p procID, started int64, alive map[procID
 	case ok && was.pid != 0 && started <= was.seen:
 		return false // (it was there beside the one it is of)
 	}
-	return c.set(sid, convoClaim{pid: p.pid, start: p.start, seen: now, disputed: ok && (was.pid == 0 || was.disputed)})
+	return c.set(k, convoClaim{pid: p.pid, start: p.start, seen: now, disputed: ok && (was.pid == 0 || was.disputed), host: hostKey})
 }
 
 // contested: it could be either of two (and is of none yet, or was once).
 func (c *convoClaims) contested(sid string) bool {
+	return c.contestedOn("", sid)
+}
+
+func (c *convoClaims) contestedOn(hostKey, sid string) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	was, ok := c.by[sid]
+	was, ok := c.by[convoClaimKey(hostKey, sid)]
 	return ok && (was.pid == 0 || was.disputed)
+}
+
+func (c *convoClaims) hostStateLocked(hostKey string) *convoHostAlive {
+	if c.hosts == nil {
+		c.hosts = map[string]*convoHostAlive{}
+	}
+	st, ok := c.hosts[hostKey]
+	if !ok {
+		if len(c.hosts) >= maxConvoClaimHosts {
+			var oldestKey string
+			var oldestAt time.Time
+			for k, v := range c.hosts {
+				if v.refreshing {
+					continue
+				}
+				if oldestKey == "" || v.lastAlive.Before(oldestAt) {
+					oldestKey, oldestAt = k, v.lastAlive
+				}
+			}
+			if oldestKey != "" {
+				delete(c.hosts, oldestKey)
+			}
+		}
+		st = &convoHostAlive{}
+		c.hosts[hostKey] = st
+	}
+	return st
 }
 
 // seeAlive: the Codexes a conversation the host's daemons hold is of, seen
 // running now (now: the host's clock), whichever is read.
 func (c *convoClaims) seeAlive(l convoLocated, alive map[procID]bool, now int64) {
+	c.seeAliveOn("", l, alive, now)
+}
+
+// seeAliveOn updates liveness for claims belonging to hostKey and records
+// hostKey's lastAlive timestamp. Must only be called for full scans covering
+// hostKey's Codex processes (never OpenCode-only or single-pane fast scans).
+func (c *convoClaims) seeAliveOn(hostKey string, l convoLocated, alive map[procID]bool, now int64) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.hostStateLocked(hostKey).lastAlive = time.Now()
 	for i := range l.cands {
-		if was, ok := c.by[convoSessionOf(l.cands[i].log)]; ok && was.pid != 0 && alive[was.of()] && was.seen < now {
+		sid := convoSessionOf(l.cands[i].log)
+		if sid == "" {
+			continue
+		}
+		k := convoClaimKey(hostKey, sid)
+		if was, ok := c.by[k]; ok && was.pid != 0 && alive[was.of()] && was.seen < now {
 			was.seen = now
-			c.by[convoSessionOf(l.cands[i].log)] = was
+			c.by[k] = was
 		}
 	}
+}
+
+func (c *convoClaims) needsAliveRefreshLocked(hostKey string, now time.Time, ttl time.Duration) bool {
+	has := false
+	for _, cl := range c.by {
+		if cl.pid != 0 && cl.host == hostKey {
+			has = true
+			break
+		}
+	}
+	if !has {
+		return false
+	}
+	st := c.hosts[hostKey]
+	return st == nil || st.lastAlive.IsZero() || now.Sub(st.lastAlive) >= ttl
+}
+
+// needsAliveRefresh reports whether convoClaims holds at least one active
+// Codex claim for hostKey whose liveness has not been refreshed within ttl.
+func (c *convoClaims) needsAliveRefresh(hostKey string, now time.Time, ttl time.Duration) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.needsAliveRefreshLocked(hostKey, now, ttl)
+}
+
+func (c *convoClaims) beginAliveRefresh(hostKey string, now time.Time, ttl time.Duration) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.needsAliveRefreshLocked(hostKey, now, ttl) {
+		return false
+	}
+	st := c.hostStateLocked(hostKey)
+	if st.refreshing {
+		return false
+	}
+	st.refreshing = true
+	return true
+}
+
+func (c *convoClaims) endAliveRefresh(hostKey string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if st := c.hosts[hostKey]; st != nil {
+		st.refreshing = false
+	}
+}
+
+// refreshCodexClaims runs a per-host deduplicated background full scan via
+// convoScans so fast-path hits on Claude/Agy panes (or OpenCode-only scans) do
+// not starve convoClaimed.seeAliveOn for Codexes running on the same host.
+func (s *Server) refreshCodexClaims(sess *term.Session) {
+	hostKey := convoClaimHostKey(sess)
+	if !s.convoClaimed.beginAliveRefresh(hostKey, time.Now(), convoLocateTTL) {
+		return
+	}
+	go func() {
+		defer s.convoClaimed.endAliveRefresh(hostKey)
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+		tScan := time.Now()
+		out, _, _, shared, err := s.convoScans.run(ctx, sess, convoLocateCommand(sess.Persistence, sess.TmuxSession, ""), time.Time{})
+		if err != nil {
+			s.perfLocate(locateOp("locate.full", shared), tScan, err, 0, sess.HostID)
+			return
+		}
+		l := parseConvoLocate(string(out))
+		s.perfLocate(locateOp("locate.full", shared), tScan, nil, len(l.procs), sess.HostID)
+		if l.noProc {
+			return
+		}
+		s.convoClaimed.seeAliveOn(hostKey, l, aliveCodex(l), l.now())
+	}()
 }
 
 // contest: it could be either of two Codexes, so it is of neither (one of
 // them ending makes the other no more its owner) — unless it was found to
 // be one's already: that stands.
 func (c *convoClaims) contest(sid string) {
+	c.contestOn("", sid)
+}
+
+func (c *convoClaims) contestOn(hostKey, sid string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if _, ok := c.by[sid]; !ok {
-		c.set(sid, convoClaim{})
+	k := convoClaimKey(hostKey, sid)
+	if _, ok := c.by[k]; !ok {
+		c.set(k, convoClaim{host: hostKey})
 	}
 }
 
@@ -2463,67 +2838,102 @@ func (s *Server) locateScan(ctx context.Context, sess *term.Session, st *convoSt
 		after = st.scanAfter // (review494: begun after the press that found another process, however recent one before is)
 	}
 	st.scanAfter = time.Time{}
-	// (A herdr pane herdr says runs OpenCode: of OpenCode's processes only,
-	// a fraction of a scan's time. Its OpenCode not among them — another
-	// program there now, herdr not told yet —: the whole scan, as ever.)
+	// (A herdr pane: query pane.process_info first so we only inspect this
+	// pane's foreground PIDs under /proc instead of scanning every agent on
+	// the host. OpenCode needs its serve process and sibling OpenCodes so it
+	// uses the OpenCode-only scan; any error, miss, or ambiguous result falls
+	// back to the full scan with identical behavior.)
 	socket := s.herdrSocks.get(sess.ID)
+	hp, hasHP := s.herdrSocks.paneOf(sess.ID, pane)
+	var out []byte
+	var at, looked time.Time
+	var err error
+	var l convoLocated
+	fastHit := false
 	ocOnly := false
-	if hp, ok := s.herdrSocks.paneOf(sess.ID, pane); ok && sess.Persistence == "herdr" && pane != "" && socket != "" && isOpenCodeAgent(hp.Agent) {
+	if fast && sess.Persistence == "herdr" && pane != "" && socket != "" {
+		pi := s.herdrPaneProcessInfo(ctx, sess, socket, pane)
+		plan := planHerdrFastLocate(pi, pane, hp, hasHP)
+		switch plan.mode {
+		case herdrFastPIDs:
+			// On any execution error (e.g. ErrBusy while a cached full scan is
+			// available) or rejected result, fall through to the original path.
+			tPid := time.Now()
+			if fout, fat, flooked, fshared, ferr := s.convoScans.run(ctx, sess, convoLocatePidsCommand(plan.shellPID, plan.pids), after); ferr == nil {
+				fl := parseConvoLocate(string(fout))
+				outcome := "pids_miss"
+				if _, ok := fastLocateAccept(fl, pane, socket, s.herdrSocks.sid(sess.ID, pane)); ok {
+					out, at, looked, l, fastHit = fout, fat, flooked, fl, true
+					outcome = "pids_hit"
+				}
+				s.perfLocateOutcome(locateOp("locate.fast", fshared), tPid, outcome, len(fl.procs), true, sess.HostID)
+			} else {
+				s.perfLocate(locateOp("locate.fast", fshared), tPid, ferr, 0, sess.HostID)
+			}
+			if !fastHit && hasHP && isOpenCodeAgent(hp.Agent) {
+				ocOnly = true
+			}
+		case herdrFastOpenCode:
+			ocOnly = true
+		}
+	} else if hasHP && sess.Persistence == "herdr" && pane != "" && socket != "" && isOpenCodeAgent(hp.Agent) {
 		ocOnly = true
 	}
-	cmd := convoLocateCommand(sess.Persistence, sess.TmuxSession, "")
-	if ocOnly {
-		cmd = convoLocateOpenCodeCommand(sess.Persistence, sess.TmuxSession)
-	}
-	tScan := time.Now()
-	out, at, looked, shared, err := s.convoScans.run(ctx, sess, cmd, after)
-	// (The script ends with exit 0: an error is a scan cut short, by its size
-	// or a failure, which may leave out the agent started last. What was
-	// found before stays, rather than a part of it.)
-	if err != nil {
-		op := "locate.full"
+	hostKey := convoClaimHostKey(sess)
+	if fastHit {
+		if !l.noProc && s.convoClaimed.needsAliveRefresh(hostKey, time.Now(), convoLocateTTL) {
+			s.refreshCodexClaims(sess)
+		}
+	} else {
+		var shared bool
+		cmd := convoLocateCommand(sess.Persistence, sess.TmuxSession, "")
+		base := "locate.full"
 		if ocOnly {
-			op = "locate.fast"
+			cmd = convoLocateOpenCodeCommand(sess.Persistence, sess.TmuxSession)
+			base = "locate.fast"
 		}
-		if shared {
-			op = "locate.shared"
+		tScan := time.Now()
+		out, at, looked, shared, err = s.convoScans.run(ctx, sess, cmd, after)
+		// (If OpenCode-only failed, fall back to full scan, which may reuse a
+		// cached full scan.)
+		if err != nil && ocOnly && ctx.Err() == nil {
+			s.perfLocate(locateOp(base, shared), tScan, err, 0, sess.HostID)
+			ocOnly, base = false, "locate.full"
+			tScan = time.Now()
+			out, at, looked, shared, err = s.convoScans.run(ctx, sess, convoLocateCommand(sess.Persistence, sess.TmuxSession, ""), after)
 		}
-		s.perfLocate(op, tScan, err, 0, sess.HostID)
-		return err
-	}
-	l := parseConvoLocate(string(out))
-	if ocOnly && !l.noProc && !ocPaneOwn(l.procs, pane, socket) {
-		tFull := time.Now()
-		if out, at, looked, shared, err = s.convoScans.run(ctx, sess, convoLocateCommand(sess.Persistence, sess.TmuxSession, ""), after); err != nil {
-			op := "locate.full"
-			if shared {
-				op = "locate.shared"
-			}
-			s.perfLocate(op, tFull, err, 0, sess.HostID)
+		// (The script ends with exit 0: an error is a scan cut short, by its size
+		// or a failure, which may leave out the agent started last. What was
+		// found before stays, rather than a part of it.)
+		if err != nil {
+			s.perfLocate(locateOp(base, shared), tScan, err, 0, sess.HostID)
 			return err
 		}
 		l = parseConvoLocate(string(out))
-		op := "locate.full"
-		if shared {
-			op = "locate.shared"
+		if ocOnly && !l.noProc && !ocPaneOwn(l.procs, pane, socket) {
+			ocOnly = false
+			tFull := time.Now()
+			if out, at, looked, shared, err = s.convoScans.run(ctx, sess, convoLocateCommand(sess.Persistence, sess.TmuxSession, ""), after); err != nil {
+				s.perfLocate(locateOp("locate.full", shared), tFull, err, 0, sess.HostID)
+				return err
+			}
+			l = parseConvoLocate(string(out))
+			s.perfLocate(locateOp("locate.full", shared), tFull, nil, len(l.procs), sess.HostID)
+		} else if ocOnly {
+			s.perfLocateOutcome(locateOp("locate.fast", shared), tScan, "opencode_fast", len(l.procs), true, sess.HostID)
+		} else {
+			s.perfLocate(locateOp(base, shared), tScan, nil, len(l.procs), sess.HostID)
 		}
-		s.perfLocate(op, tFull, nil, len(l.procs), sess.HostID)
-	} else if ocOnly {
-		op := "locate.fast"
-		if shared {
-			op = "locate.shared"
+		// (Only a full scan covering this host's Codexes may refresh its
+		// Codex claim liveness; OpenCode-only scans skip Codexes.)
+		if ocOnly {
+			if !l.noProc && s.convoClaimed.needsAliveRefresh(hostKey, time.Now(), convoLocateTTL) {
+				s.refreshCodexClaims(sess)
+			}
+		} else if !l.noProc {
+			s.convoClaimed.seeAliveOn(hostKey, l, aliveCodex(l), l.now())
 		}
-		s.perfLocateOutcome(op, tScan, "opencode_fast", len(l.procs), true, sess.HostID)
-	} else {
-		op := "locate.full"
-		if shared {
-			op = "locate.shared"
-		}
-		s.perfLocate(op, tScan, nil, len(l.procs), sess.HostID)
 	}
-	// (The Codexes the daemons' conversations are of, seen running, whatever
-	// the pane runs.)
-	s.convoClaimed.seeAlive(l, aliveCodex(l), l.now())
 	st.located, st.pane = at, pane // (when the scan was made: one shared may be a little older)
 	sid, log, reason, agent := "", "", "", ""
 	guessed := false
@@ -2549,7 +2959,7 @@ func (s *Server) locateScan(ctx context.Context, sess *term.Session, st *convoSt
 		}
 		var refused bool
 		held := p != nil && p.agent == "codex" && p.log == "" // (its log, if any, its daemon's)
-		guessed, refused = s.daemonLog(p, l)
+		guessed, refused = s.daemonLogFor(hostKey, p, l)
 		// What the pane shows has the last word on which conversation it
 		// is at: a Codex that has begun another (/new), or resumed one,
 		// shows that one's words, as does one of two Codexes there that
@@ -2576,9 +2986,9 @@ func (s *Server) locateScan(ctx context.Context, sess *term.Session, st *convoSt
 				if log, sid, on, read := s.screenSays(ctx, sess, pane, p, l, p.log, st.screenLog); read {
 					st.screenNo, st.screenWeak = false, false
 					if sid != "" && sid != st.screenSID {
-						if c := candAt(l, log, p.cwd); c == nil || on < s.screenEnoughFor(p, c, sid, l) {
+						if c := candAt(l, log, p.cwd); c == nil || on < s.screenEnoughForHost(hostKey, p, c, sid, l) {
 							st.screenWeak = true
-						} else if s.convoClaimed.take(sid, p.id(), p.started, aliveCodex(l), l.now(), true) {
+						} else if s.convoClaimed.takeOn(hostKey, sid, p.id(), p.started, aliveCodex(l), l.now(), true) {
 							st.screenLog, st.screenSID = log, sid
 						} else {
 							st.screenNo = true
@@ -2590,7 +3000,7 @@ func (s *Server) locateScan(ctx context.Context, sess *term.Session, st *convoSt
 			if st.screenSID != "" && candAt(l, st.screenLog, p.cwd) == nil {
 				st.screenSID, st.screenLog = "", ""
 			}
-			if st.screenSID != "" && st.screenSID != p.sid && !st.screenNo && !s.convoClaimed.take(st.screenSID, p.id(), p.started, aliveCodex(l), l.now(), true) {
+			if st.screenSID != "" && st.screenSID != p.sid && !st.screenNo && !s.convoClaimed.takeOn(hostKey, st.screenSID, p.id(), p.started, aliveCodex(l), l.now(), true) {
 				st.screenNo = true
 			}
 			switch {
@@ -3154,12 +3564,15 @@ func convoProcStatus(c *sftplite.Client, st *convoState) string {
 	if st.bind == nil {
 		return ""
 	}
-	i := strings.LastIndex(st.log, "/.claude/projects/")
-	if i < 0 {
+	cfgDir, ok := claudeConfigDirFromLog(st.log)
+	if !ok {
 		return ""
 	}
-	base := st.log[:i]
-	b, err := c.ReadRange(base+"/.claude/sessions/"+strconv.FormatInt(st.bind.PID, 10)+".json", 0, 64<<10)
+	sessFile, ok := claudeSessionFilePath(cfgDir, st.bind.PID)
+	if !ok {
+		return ""
+	}
+	b, err := c.ReadRange(sessFile, 0, 64<<10)
 	if err != nil {
 		return ""
 	}
@@ -3167,8 +3580,9 @@ func convoProcStatus(c *sftplite.Client, st *convoState) string {
 }
 
 // convoFreshStatus is convoProcStatus for a Claude Code with no log yet (a
-// new conversation): its file read on the host, in $HOME as locating read
-// it (the SFTP session may start elsewhere). "" when it cannot tell.
+// new conversation): its file read on the host, under its CLAUDE_CONFIG_DIR
+// (or $HOME/.claude) as locating read it (the SFTP session may start
+// elsewhere). "" when it cannot tell.
 func (s *Server) convoFreshStatus(ctx context.Context, sess *term.Session, b *convoBind) string {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
@@ -3180,7 +3594,9 @@ func (s *Server) convoFreshStatus(ctx context.Context, sess *term.Session, b *co
 }
 
 func freshStatusCommand(pid int64) string {
-	return `head -c 65536 "$HOME/.claude/sessions/` + strconv.FormatInt(pid, 10) + `.json"`
+	script := claudeConfigDirSh + `claude_cfg_dir "/proc/$1"
+head -c 65536 "$clcfg/sessions/$1.json"`
+	return "sh -c " + sshx.QuoteShell(script) + " corral " + strconv.FormatInt(pid, 10)
 }
 
 // shellWord: the word told the page for a status: "shell" (a shell of
@@ -3508,7 +3924,7 @@ if [ -n "$parts" ]; then
     at=$((at + x))
   done
 fi
-` + codexFdsSh + agyFdsSh + `
+` + codexFdsSh + agyFdsSh + claudeConfigDirSh + `
 front() {
   stat=$(tr '\n' ' ' <"/proc/$pid/stat" 2>/dev/null) || return 1
   rest=${stat##*) }
@@ -3516,7 +3932,33 @@ front() {
   pgrp=$(printf '%s' "$rest" | cut -d' ' -f3); tpgid=$(printf '%s' "$rest" | cut -d' ' -f6)
   [ -n "$pgrp" ] && [ "$pgrp" = "$tpgid" ] || return 1
   if [ "$mode" = tmux ]; then k=TMUX_PANE; else k=HERDR_PANE_ID; fi
-  tr '\0\n' '\n\001' <"/proc/$pid/environ" 2>/dev/null | grep -qxF "$k=$p" || return 1
+  _evnl='
+'
+  _ev=$(tr '\0\n' '\n\001' <"/proc/$pid/environ" 2>/dev/null | grep -E "^($k|CLAUDE_CONFIG_DIR)=")
+  case "$_evnl$_ev$_evnl" in *"$_evnl$k=$p$_evnl"*) ;; *) return 1;; esac
+  if [ -z "${clcfg:-}" ]; then
+    clcfg="$HOME/.claude"
+    case "$_evnl$_ev$_evnl" in
+    *"${_evnl}CLAUDE_CONFIG_DIR="*)
+      _clraw="$_evnl$_ev$_evnl"
+      _clraw=${_clraw#*"${_evnl}CLAUDE_CONFIG_DIR="}
+      _clraw=${_clraw%%"$_evnl"*}
+      if [ -n "$_clraw" ]; then
+        [ -n "${_clsoh:-}" ] || _clsoh=$(printf '\001')
+        case $_clraw in
+        *"$_clsoh"*) ;;
+        /*) clcfg=$_clraw ;;
+        *)
+          _clcwd=$(readlink "/proc/$pid/cwd" 2>/dev/null)
+          case $_clcwd in /*) clcfg="$_clcwd/$_clraw" ;; esac ;;
+        esac
+        if [ "$clcfg" != "$HOME/.claude" ] && [ -d "$clcfg" ]; then
+          _clabs=$(cd -- "$clcfg" 2>/dev/null && pwd -P) && [ -n "$_clabs" ] && clcfg=$_clabs
+        fi
+      fi ;;
+    esac
+    while [ "$clcfg" != / ] && [ "${clcfg%/}" != "$clcfg" ]; do clcfg=${clcfg%/}; done
+  fi
   kind=claude
   if [ "$(head -c 16 "/proc/$pid/comm" 2>/dev/null)" = codex ]; then
     kind=codex
@@ -3597,7 +4039,8 @@ front() {
       [ "$agysid" = "$sid" ] || return 1
     fi
   else
-    c=$(head -c 65536 "$HOME/.claude/sessions/$pid.json" 2>/dev/null | tr -d '\n')
+    [ -n "${clcfg:-}" ] || claude_cfg_dir "/proc/$pid"
+    c=$(head -c 65536 "$clcfg/sessions/$pid.json" 2>/dev/null | tr -d '\n')
     [ "$(printf '%s' "$c" | grep -o '"sessionId" *: *"[0-9a-fA-F-]*"' | head -n 1 | sed 's/.*"\([0-9a-fA-F-]*\)"$/\1/')" = "$sid" ] || return 1
   fi
   if [ "$mode" = tmux ]; then
@@ -3670,7 +4113,8 @@ waiting() {
     case $t in '[ ! ] Action Required'*|'[ . ] Action Required'*) st=waiting wf='permission prompt' ;; *) st=busy ;; esac
     return 0
   fi
-  c=$(head -c 65536 "$HOME/.claude/sessions/$pid.json" 2>/dev/null | tr -d '\n')
+  [ -n "${clcfg:-}" ] || claude_cfg_dir "/proc/$pid"
+  c=$(head -c 65536 "$clcfg/sessions/$pid.json" 2>/dev/null | tr -d '\n')
   st=$(printf '%s' "$c" | grep -o '"status" *: *"[a-z]*"' | head -n 1 | sed 's/.*"\([a-z]*\)"$/\1/')
   wf=$(printf '%s' "$c" | grep -o '"waitingFor" *: *"[a-z ]*"' | head -n 1 | sed 's/.*"\([a-z ]*\)"$/\1/')
 }
@@ -4490,67 +4934,113 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 		if sess.Persistence == "tmux" {
 			tmuxTarget = b.Pane
 		}
-		tLoc := time.Now()
-		lr, err := sshx.Exec(ctx, sess.Client(), convoLocateCommand(sess.Persistence, sess.TmuxSession, tmuxTarget), convoLocateMax, sshx.ExecOptions{AwaitSlot: pressSlotWait(what)})
-		out := lr.Out
-		if errors.Is(err, sshx.ErrBusy) {
-			s.perfLocate("locate.full", tLoc, err, 0, sess.HostID)
-			reason = "busy"
-			writeError(w, http.StatusTooManyRequests, "busy", "the host is still answering earlier requests")
-			return
+		var plan herdrFastPlan
+		if sess.Persistence == "herdr" && b.Pane != "" && socket != "" {
+			hp, hasPane := s.herdrSocks.paneOf(sess.ID, b.Pane)
+			pi := s.herdrPaneProcessInfo(ctx, sess, socket, b.Pane)
+			plan = planHerdrFastLocate(pi, b.Pane, hp, hasPane)
 		}
-		// (A scan cut short, by its size or a failure, may leave out the agent
-		// started last: what it found does not decide where keys go.)
-		if err != nil {
-			s.perfLocate("locate.full", tLoc, err, 0, sess.HostID)
-			if signedOut() {
-				return
+		wantSID := s.herdrSocks.sid(sess.ID, b.Pane)
+		var l convoLocated
+		for attempt := 0; attempt < 2; attempt++ {
+			cmd := convoLocateCommand(sess.Persistence, sess.TmuxSession, tmuxTarget)
+			fastTry := attempt == 0 && plan.mode != herdrFastFull
+			if fastTry {
+				if plan.mode == herdrFastPIDs {
+					cmd = convoLocatePidsCommand(plan.shellPID, plan.pids)
+				} else {
+					cmd = convoLocateOpenCodeCommand(sess.Persistence, sess.TmuxSession)
+				}
 			}
-			reason = "host_error"
-			writeError(w, http.StatusBadGateway, "host_error", "the host did not answer")
-			return
-		}
-		// The process must be the one the pane's conversation shows now (chosen
-		// as reading chooses it): a Claude Code started inside it since, or a
-		// restart, is not the one the press was asked for.
-		l := parseConvoLocate(string(out))
-		s.perfLocate("locate.full", tLoc, nil, len(l.procs), sess.HostID)
-		tty := l.paneTTY // (tmux: the pane's terminal, active or not)
-		front = pickConvoProc(l.procs, sess.Persistence, b.Pane, socket, l.tmuxPID, tty, s.herdrSocks.sid(sess.ID, b.Pane))
-		// A Codex whose log its daemon keeps: the session this gateway gave
-		// that very process when it read its conversation (not the one asked
-		// of it, which is no word on what the pane runs).
-		if front != nil && front.agent == "codex" && front.log == "" {
-			// (Not where and when it began instead, which is no proof: where
-			// what was read is weak, or a read holds it, nothing is typed.)
-			log, sid, why := s.convoBound(sess, b.Pane, front.pid, front.start)
-			switch {
-			case sid != "":
-				front.log, front.sid = log, sid
-			case why == "busy":
+			op := "locate.full"
+			if fastTry {
+				op = "locate.fast"
+			}
+			tLoc := time.Now()
+			lr, err := sshx.Exec(ctx, sess.Client(), cmd, convoLocateMax, sshx.ExecOptions{AwaitSlot: pressSlotWait(what)})
+			out := lr.Out
+			if err != nil {
+				s.perfLocate(op, tLoc, err, 0, sess.HostID)
+			}
+			if err != nil && fastTry {
+				if signedOut() {
+					return
+				}
+				continue
+			}
+			if errors.Is(err, sshx.ErrBusy) {
 				reason = "busy"
-				writeError(w, http.StatusTooManyRequests, "busy", "its conversation is being read: try again in a moment")
+				writeError(w, http.StatusTooManyRequests, "busy", "the host is still answering earlier requests")
 				return
-			case why == "fresh" && b.Session == convoNoSession && s.codexStillFresh(ctx, sess, socket, b.Pane, front.pid, front.start):
-				// (Read with no log, as the page shows it, and none begun since
-				// — its first message, from the page: 11-15, a Codex begun in
-				// the terminal could not be written to from the page at all.)
-				front.sid = convoNoSession
-			case sess.Persistence == "tmux" && why != "busy" && s.codexTmuxNamedNow(ctx, sess, front, l):
-				// (Named, its pane's title showing that name now, looked at
-				// now: as a herdr pane's codexFront — codexTmuxNamed.)
-			default:
-				// (Weak, none, or another's: agent_changed below — what is shown
-				// is checked anew, by the scan; nothing is typed by a log's age.)
-				front.sid = ""
 			}
+			// (A scan cut short, by its size or a failure, may leave out the agent
+			// started last: what it found does not decide where keys go.)
+			if err != nil {
+				if signedOut() {
+					return
+				}
+				reason = "host_error"
+				writeError(w, http.StatusBadGateway, "host_error", "the host did not answer")
+				return
+			}
+			l = parseConvoLocate(string(out))
+			s.perfLocate(op, tLoc, nil, len(l.procs), sess.HostID)
+			if fastTry {
+				if plan.mode == herdrFastPIDs {
+					if p, ok := fastLocateAccept(l, b.Pane, socket, wantSID); ok && !l.noProc && p != nil && p.pid == b.PID && p.start == b.Start && p.sid == b.Session {
+						front = p
+						break
+					}
+					continue
+				}
+				if !l.noProc && ocPaneOwn(l.procs, b.Pane, socket) {
+					break
+				}
+				continue
+			}
+			break
 		}
-		// An OpenCode: the session it is at now, asked anew (it may have gone to
-		// another since it was read; one that cannot be told is not typed to).
-		if front != nil && front.agent == "opencode" {
-			var why string
-			if front.sid, why = s.ocSessionOf(ctx, sess, front, b.Pane, l); why != "" {
-				front.sid = ""
+		if front == nil {
+			// The process must be the one the pane's conversation shows now (chosen
+			// as reading chooses it): a Claude Code started inside it since, or a
+			// restart, is not the one the press was asked for.
+			tty := l.paneTTY // (tmux: the pane's terminal, active or not)
+			front = pickConvoProc(l.procs, sess.Persistence, b.Pane, socket, l.tmuxPID, tty, wantSID)
+			// A Codex whose log its daemon keeps: the session this gateway gave
+			// that very process when it read its conversation (not the one asked
+			// of it, which is no word on what the pane runs).
+			if front != nil && front.agent == "codex" && front.log == "" {
+				// (Not where and when it began instead, which is no proof: where
+				// what was read is weak, or a read holds it, nothing is typed.)
+				log, sid, why := s.convoBound(sess, b.Pane, front.pid, front.start)
+				switch {
+				case sid != "":
+					front.log, front.sid = log, sid
+				case why == "busy":
+					reason = "busy"
+					writeError(w, http.StatusTooManyRequests, "busy", "its conversation is being read: try again in a moment")
+					return
+				case why == "fresh" && b.Session == convoNoSession && s.codexStillFresh(ctx, sess, socket, b.Pane, front.pid, front.start):
+					// (Read with no log, as the page shows it, and none begun since
+					// — its first message, from the page: 11-15, a Codex begun in
+					// the terminal could not be written to from the page at all.)
+					front.sid = convoNoSession
+				case sess.Persistence == "tmux" && why != "busy" && s.codexTmuxNamedNow(ctx, sess, front, l):
+					// (Named, its pane's title showing that name now, looked at
+					// now: as a herdr pane's codexFront — codexTmuxNamed.)
+				default:
+					// (Weak, none, or another's: agent_changed below — what is shown
+					// is checked anew, by the scan; nothing is typed by a log's age.)
+					front.sid = ""
+				}
+			}
+			// An OpenCode: the session it is at now, asked anew (it may have gone to
+			// another since it was read; one that cannot be told is not typed to).
+			if front != nil && front.agent == "opencode" {
+				var why string
+				if front.sid, why = s.ocSessionOf(ctx, sess, front, b.Pane, l); why != "" {
+					front.sid = ""
+				}
 			}
 		}
 	}
@@ -5597,6 +6087,8 @@ claude_ep() { # pid cwd
     grep -E '^(ANTHROPIC_BASE_URL|ANTHROPIC_AUTH_TOKEN|ANTHROPIC_API_KEY|CLAUDE_CODE_USE_BEDROCK|CLAUDE_CODE_USE_VERTEX|CLAUDE_CONFIG_DIR|CLAUDE_AUTOCOMPACT_PCT_OVERRIDE)=' | head -c 4096)
   bu= au= ac=
   cfgd=$(printf '%s\n' "$aev" | sed -n 's/^CLAUDE_CONFIG_DIR=//p' | head -1)
+  _clsoh=$(printf '\001')
+  case $cfgd in ''|*"$_clsoh"*) cfgd=;; /*) ;; *) case $2 in /*) cfgd="$2/$cfgd";; *) cfgd=;; esac;; esac
   [ -n "$cfgd" ] || cfgd=$HOME/.claude
   for sf in /etc/claude-code/managed-settings.json "$2/.claude/settings.local.json" "$2/.claude/settings.json" "$cfgd/settings.local.json" "$cfgd/settings.json"; do
     [ -r "$sf" ] || continue

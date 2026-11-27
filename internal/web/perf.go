@@ -187,3 +187,13 @@ func (s *Server) perfRecordPress(what string, start time.Time, outcome, reason s
 		s.perfObserve("convo."+what, start, pressPerfOutcome(outcome, reason), hostID, "")
 	}
 }
+
+// locateOp names a locate scan for the perf table: "locate.shared" when the
+// scan reused one another request had just made (its time is not this
+// path's), else the path it took (op).
+func locateOp(op string, shared bool) string {
+	if shared {
+		return "locate.shared"
+	}
+	return op
+}

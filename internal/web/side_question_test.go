@@ -159,8 +159,8 @@ func TestSideQuestionCommandRuns(t *testing.T) {
 			time.Sleep(10 * time.Millisecond)
 		}
 	}
-	// (Its session file, as Claude Code keeps one: at that session.)
-	sessions := filepath.Join(home, ".claude", "sessions")
+	// (Its session file, as Claude Code keeps one under its CLAUDE_CONFIG_DIR: at that session.)
+	sessions := filepath.Join(home, "cfg", "sessions")
 	os.MkdirAll(sessions, 0o755)
 	setSession := func(sid string) {
 		doc := `{"pid":` + strconv.FormatInt(pid, 10) + `,"sessionId":"` + sid + `","procStart":"` + strconv.FormatInt(start, 10) + `"}`

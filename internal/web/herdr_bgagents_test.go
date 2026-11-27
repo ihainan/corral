@@ -37,8 +37,12 @@ func TestCmdScanSubagents(t *testing.T) {
 	const other = "11111111-2222-4333-8444-555555555555"
 	home := t.TempDir()
 	sub := func(session, id, meta string, old bool) {
-		d := filepath.Join(home, ".claude", "projects", "-home-u-proj", session, "subagents")
+		proj := filepath.Join(home, ".claude", "projects", "-home-u-proj")
+		d := filepath.Join(proj, session, "subagents")
 		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(proj, session+".jsonl"), []byte(`{"type":"user"}`+"\n"), 0o644); err != nil {
 			t.Fatal(err)
 		}
 		j := filepath.Join(d, "agent-"+id+".jsonl")

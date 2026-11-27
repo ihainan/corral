@@ -125,7 +125,7 @@ type cmdProber struct {
 	soon    time.Time // a look due soon (a pane came to done or idle)
 	wake    chan struct{}
 	poke    func()
-	scan    func(ctx context.Context, watched []string) (cmds map[string][]bgCmd, subs map[string][]bgAgent, bgIDs map[string]map[string]bool, whole bool, err error)
+	scan func(ctx context.Context, watched []string) (cmds map[string][]bgCmd, subs map[string][]bgAgent, bgIDs map[string]map[string]bool, whole bool, err error)
 	// bgIDs: of the sessions at work, which of their commands running the
 	// last look found their log says they set going in the background.
 	bgIDs map[string]map[string]bool
@@ -637,7 +637,35 @@ func cmdScanCommandWithBudgets(totalBudget, cliBudget int, watched ...string) st
 	if cliBudget < 0 {
 		cliBudget = 0
 	}
-	script := `LC_ALL=C
+	script := claudeConfigDirsSh + `LC_ALL=C
+_cldirs_loaded=0
+_ensure_cldirs() {
+  if [ "$_cldirs_loaded" = 0 ]; then claude_cfg_dirs; _cldirs_loaded=1; fi
+}
+# _sole_claude_log <sid>: sets _best to the sole matching log across $cldirs
+# and _lfound to the match count (0, 1, or 2 for ambiguous). Never guesses by
+# mtime, and returns empty when config dir enumeration was incomplete.
+_sole_claude_log() {
+  _best= _lfound=0
+  _ensure_cldirs
+  [ "$cldirs_incomplete" = 0 ] || return 0
+  while IFS= read -r _cd; do
+    [ -n "$_cd" ] || continue
+    for _f in "$_cd"/projects/*/"$1".jsonl; do
+      [ -f "$_f" ] || continue
+      _lfound=$((_lfound + 1))
+      if [ "$_lfound" -eq 1 ]; then
+        _best=$_f
+      else
+        _best=
+        break
+      fi
+    done
+    [ "$_lfound" -le 1 ] || break
+  done <<CORRAL_CLDIRS
+$cldirs
+CORRAL_CLDIRS
+}
 _sc_rem=` + strconv.Itoa(totalBudget) + `
 _sc_bcut=0
 _sc_mark_budget() {
@@ -897,17 +925,16 @@ for a in "$@"; do
   case $a in w:*) ;; *) continue;; esac
   [ -n "$seen" ] || break
   s=${a#w:}
-  for f in "$HOME"/.claude/projects/*/"$s".jsonl; do
-    [ -f "$f" ] || continue
-    _sc_ids=$(grep -o '"backgroundTaskId":"[A-Za-z0-9_-]*"' "$f" | sed 's/^"backgroundTaskId":"//; s/"$//' | sort -u)
-    while IFS= read -r id; do
-      [ -n "$id" ] || continue
-      case " $seen " in *" $id "*) _sc_emit "$(printf 'bgid\t%s\t%s' "$s" "$id")" || break;; esac
-    done <<CORRAL_BGIDS
+  _sole_claude_log "$s"
+  f=$_best
+  [ -f "$f" ] || continue
+  _sc_ids=$(grep -o '"backgroundTaskId":"[A-Za-z0-9_-]*"' "$f" | sed 's/^"backgroundTaskId":"//; s/"$//' | sort -u)
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    case " $seen " in *" $id "*) _sc_emit "$(printf 'bgid\t%s\t%s' "$s" "$id")" || break;; esac
+  done <<CORRAL_BGIDS
 $_sc_ids
 CORRAL_BGIDS
-    break
-  done
 done
 # (Of each command a Claude Code's task file tells, what the agent said it does — its call's
 # "description", as the agent's own page shows it: the call is the one whose result names the
@@ -921,15 +948,14 @@ for p in $pairs; do
   s=${p%%/*}; id=${p#*/}
   case $s in *[!0-9a-fA-F-]*|"") continue;; esac
   case $id in *[!A-Za-z0-9_-]*|"") continue;; esac
-  for f in "$HOME"/.claude/projects/*/"$s".jsonl; do
-    [ -f "$f" ] || continue
-    i=$((i + 1))
-    tu=$(grep -m 1 -F "\"backgroundTaskId\":\"$id\"" "$f" | grep -o '"tool_use_id":"[A-Za-z0-9_-]*"' | head -n 1 | cut -d'"' -f4)
-    [ -n "$tu" ] || break
-    w=$(grep -m 1 -F "\"id\":\"$tu\"" "$f" | sed "s/^.*\"id\":\"$tu\"//; s/\"id\":\".*//; s/\"type\":\"tool_use\".*//" | grep -oE '"description":"([^"\\]|\\.)*"' | head -n 1 | head -c 600)
-    [ -n "$w" ] && { _sc_emit "$(printf 'desc\t%s\t%s\t{%s}' "$s" "$id" "$w")" || true; }
-    break
-  done
+  _sole_claude_log "$s"
+  f=$_best
+  [ -f "$f" ] || continue
+  i=$((i + 1))
+  tu=$(grep -m 1 -F "\"backgroundTaskId\":\"$id\"" "$f" | grep -o '"tool_use_id":"[A-Za-z0-9_-]*"' | head -n 1 | cut -d'"' -f4)
+  [ -n "$tu" ] || continue
+  w=$(grep -m 1 -F "\"id\":\"$tu\"" "$f" | sed "s/^.*\"id\":\"$tu\"//; s/\"id\":\".*//; s/\"type\":\"tool_use\".*//" | grep -oE '"description":"([^"\\]|\\.)*"' | head -n 1 | head -c 600)
+  [ -n "$w" ] && { _sc_emit "$(printf 'desc\t%s\t%s\t{%s}' "$s" "$id" "$w")" || true; }
 done
 # Priority 2: native background subagents — bounded newest-first streaming
 # (never buffer find output in a shell variable; drop description before
@@ -939,7 +965,9 @@ done
 {
   for a in "$@"; do
     s=${a#?:}
-    for d in "$HOME"/.claude/projects/*/"$s"/subagents; do
+    _sole_claude_log "$s"
+    [ "$_lfound" -eq 1 ] || continue
+    for d in "${_best%.jsonl}/subagents"; do
       [ -d "$d" ] || continue
       _sc_find_sub "$d" |
         awk -v s="$s" -v maxn=` + strconv.Itoa(subCandPerSession) + ` -v maxb=` + strconv.Itoa(subCandBytesPerSession) + ` '{
@@ -1003,10 +1031,11 @@ exit 0`
 	cmd := "sh -c " + sshx.QuoteShell(script) + " corral"
 	n := 0
 	for _, a := range watched {
-		if (strings.HasPrefix(a, "w:") || strings.HasPrefix(a, "s:")) && convoUUID.MatchString(a[2:]) && n < maxWatchedScanned {
-			cmd += " " + sshx.QuoteShell(a)
-			n++
+		if n >= maxWatchedScanned || (!strings.HasPrefix(a, "w:") && !strings.HasPrefix(a, "s:")) || !convoUUID.MatchString(a[2:]) {
+			continue
 		}
+		cmd += " " + sshx.QuoteShell(a[:2]+strings.ToLower(a[2:]))
+		n++
 	}
 	return cmd
 }

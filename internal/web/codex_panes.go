@@ -817,7 +817,7 @@ func (s *Server) codexTmuxNamed(ctx context.Context, sess *term.Session, p *conv
 	if !ok || c.Several || c.PID != p.pid || c.Start != p.start || c.Src == "fd" || c.Thread == "" || c.Path == "" || c.Name == "" || !codexPressSure(c) {
 		return codexPane{}, false
 	}
-	if !s.convoClaimed.take(strings.ToLower(c.Thread), p.id(), p.started, aliveCodex(l), l.now(), true) {
+	if !s.convoClaimed.takeOn(convoClaimHostKey(sess), strings.ToLower(c.Thread), p.id(), p.started, aliveCodex(l), l.now(), true) {
 		return codexPane{}, false // (another Codex's)
 	}
 	return c, true
