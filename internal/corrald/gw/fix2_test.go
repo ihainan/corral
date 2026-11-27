@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -375,7 +376,7 @@ func TestHandoffBusyReconnectAndFailureBlacklistPolicy(t *testing.T) {
 		_ = os.MkdirAll(stateDir, 0o700)
 		_ = os.MkdirAll(filepath.Join(home, ".local", "lib", "corral"), 0o755)
 		probe := &HostProbe{
-			OS: "Linux", Machine: "x86_64", Arch: "amd64", UID: "1000",
+			OS: "Linux", Machine: "x86_64", Arch: "amd64", UID: strconv.Itoa(os.Getuid()),
 			Home: home, HomeWritable: true, FreeKB: 100000, MachineID: "0123456789ab",
 			LibDir:     filepath.Join(home, ".local", "lib", "corral"),
 			CurrentBin: filepath.Join(home, ".local", "lib", "corral", "corrald"),
