@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from 'react'
 import { ChevronDown, ExternalLink, Link2, Plus, X } from 'lucide-react'
-import { t } from '../i18n'
+import { t, type I18nKey } from '../i18n'
 import { local, session } from '../storage'
 import { AgentIcon } from '../terminal/agentIcons'
+import type { AgentStatusMark } from '../terminal/sideState'
 import { showFront, useTabDrag, useTabSlide } from '../terminal/tabDrag'
 import { copyText, isCoarse, MenuLayer, useToast, type MenuItem } from '../components/ui'
 
@@ -64,14 +65,25 @@ export type PickHow = 'tab' | 'split'
 export const howOf = (e: { metaKey: boolean; ctrlKey: boolean; altKey: boolean }): PickHow | undefined => (e.metaKey || e.ctrlKey ? 'tab' : e.altKey ? 'split' : undefined)
 
 // What a tab shows of its agent: its name, program and state, as the side list has them.
-const STATUS_WORD: Record<string, 'agentTabs.status.blocked' | 'agentTabs.status.working' | 'agentTabs.status.done' | 'agentTabs.status.idle'> = {
+const MARK_WORD: Record<Exclude<AgentStatusMark, ''>, I18nKey> = {
   blocked: 'agentTabs.status.blocked',
   working: 'agentTabs.status.working',
   done: 'agentTabs.status.done',
-  idle: 'agentTabs.status.idle',
+  bg: 'agentTabs.status.bg',
+  stale: 'agentTabs.status.stale',
+  failed: 'agentTabs.status.failed',
 }
-const statusWord = (st: string) => (STATUS_WORD[st] ? t(STATUS_WORD[st]) : '')
-export type TabView = { tab: AgentTab; title: string; program?: string; status: string; ended: boolean; address: string }
+const MARK_CLASS: Record<Exclude<AgentStatusMark, ''>, string> = {
+  blocked: 'term-tab-wait',
+  working: 'term-tab-busy',
+  done: 'term-tab-done',
+  bg: 'term-tab-bg',
+  stale: 'term-tab-stale',
+  failed: 'term-tab-failed',
+}
+const statusWord = (mark: AgentStatusMark, st: string) =>
+  mark ? t(MARK_WORD[mark]) : st === 'idle' ? t('agentTabs.status.idle') : ''
+export type TabView = { tab: AgentTab; title: string; program?: string; status: string; mark: AgentStatusMark; ended: boolean; address: string }
 
 export function AgentTabBar(p: {
   views: TabView[]
@@ -134,14 +146,15 @@ export function AgentTabBar(p: {
     ]
   }
   const menuView = menu && p.views.find((v) => v.tab.id === menu.id)
-  const dot = (st: string) => (st === 'blocked' ? 'term-tab-wait' : st === 'working' ? 'term-tab-busy' : st === 'done' ? 'term-tab-done' : '')
   return (
     <>
       <nav className={'term-tabs agent-tabs' + (drag ? ' dragging' : '') + fade} aria-label={t('tabs.agentsLabel')} ref={ref}>
         {p.views.map((v, j) => {
           const dx = offset(j)
           const front = v.tab.id === p.front
-          const tip = [v.title, v.ended ? t('agentTabs.ended') : statusWord(v.status)].filter(Boolean).join(' · ')
+          const label = statusWord(v.mark, v.status)
+          const markCls = !v.ended && v.mark ? MARK_CLASS[v.mark] : ''
+          const tip = [v.title, v.ended ? t('agentTabs.ended') : label].filter(Boolean).join(' · ')
           return (
             <div
               key={v.tab.id}
@@ -152,6 +165,7 @@ export function AgentTabBar(p: {
               aria-current={front ? 'page' : undefined}
               title={tip}
               onPointerDown={(e) => onPointerDown(e, v.tab.id, j)}
+              onMouseDown={(e) => e.button === 1 && e.preventDefault()}
               onAuxClick={(e) => e.button === 1 && (e.preventDefault(), p.onClose(v.tab))}
               onContextMenu={(e) => {
                 e.preventDefault()
@@ -161,20 +175,16 @@ export function AgentTabBar(p: {
             >
               <button type="button" className="term-tab-main" aria-current={front ? 'page' : undefined} onClick={() => !dragged() && !front && p.onGo(v.tab)}>
                 <AgentIcon program={v.program} size={15} bare />
-                <span className="term-tab-name">{v.title}</span>
-              </button>
-              {/* (Its state and its close in one place: see terminal.css.) */}
-              {/* (A tap on its state goes to the tab, as on its name: the tab's button has the keys.) */}
-              <span className="term-tab-end" onClick={(e) => !(e.target as Element).closest('.term-tab-x') && !dragged() && !front && p.onGo(v.tab)}>
-                {!v.ended && dot(v.status) && (
-                  <span className={'term-tab-count ' + dot(v.status)} role="img" aria-label={statusWord(v.status)}>
-                    <span className="term-tab-sdot" aria-hidden="true" />
+                {markCls && (
+                  <span className={'term-tab-count ' + markCls} role="img" aria-label={label}>
+                    <span className={'term-tab-sdot is-' + v.mark} aria-hidden="true" />
                   </span>
                 )}
-                <button type="button" className="term-tab-x" aria-label={t('agentTabs.closeTab', { name: v.title })} title={t('agentTabs.close')} onPointerDown={(e) => e.stopPropagation()} onClick={() => p.onClose(v.tab)}>
-                  <X size={14} aria-hidden="true" />
-                </button>
-              </span>
+                <span className="term-tab-name">{v.title}</span>
+              </button>
+              <button type="button" className="term-tab-x" aria-label={t('agentTabs.closeTab', { name: v.title })} title={t('agentTabs.close')} onPointerDown={(e) => e.stopPropagation()} onClick={() => p.onClose(v.tab)}>
+                <X size={14} aria-hidden="true" />
+              </button>
             </div>
           )
         })}
@@ -209,7 +219,7 @@ export function AgentTabBar(p: {
           items={p.views.map((v) => ({
             label: v.title,
             icon: <AgentIcon program={v.program} size={16} bare />,
-            hint: v.ended ? t('agentTabs.ended') : statusWord(v.status) || undefined,
+            hint: v.ended ? t('agentTabs.ended') : statusWord(v.mark, v.status) || undefined,
             onSelect: () => v.tab.id !== p.front && p.onGo(v.tab),
           }))}
           onClose={() => setAll(null)}

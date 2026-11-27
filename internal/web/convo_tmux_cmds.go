@@ -26,7 +26,10 @@ func (s *Server) tmuxCmdsOf(sess *term.Session) *cmdProber {
 		if err != nil {
 			return nil, false, err
 		}
-		got, whole := parseCmdScan(string(out))
+		got, whole, budgetCut := parseCmdScanDetail(string(out))
+		if budgetCut {
+			return nil, false, errScanBudget
+		}
 		return got, whole, nil
 	})
 	p.forget = tmuxForget
@@ -45,10 +48,10 @@ func (s *Server) tmuxCmdsOf(sess *term.Session) *cmdProber {
 
 // tmuxCmdsTell: what the conversation read of a tmux Claude Code (status as
 // convoProcStatus says it) is told to its prober; what it left running, if
-// that is known.
-func (s *Server) tmuxCmdsTell(sess *term.Session, st *convoState) []bgCmd {
+// that is known (plain background commands and recognized CLI subagents).
+func (s *Server) tmuxCmdsTell(sess *term.Session, st *convoState) ([]bgCmd, []bgAgent) {
 	if sess.Persistence != "tmux" || (st.agent != "claude" && st.agent != "codex" && st.agent != "agy") || st.sub || st.bind == nil {
-		return nil
+		return nil, nil
 	}
 	p := s.tmuxCmdsOf(sess)
 	status := st.status
@@ -60,5 +63,5 @@ func (s *Server) tmuxCmdsTell(sess *term.Session, st *convoState) []bgCmd {
 		session = strings.ToLower(session) // (a Codex's/agy's commands are found by its thread/conversation, as the scan prints it)
 	}
 	p.consider(st.bind.Pane, st.agent, status, session)
-	return p.of(st.bind.Pane, session)
+	return splitBgCmds(p.of(st.bind.Pane, session))
 }

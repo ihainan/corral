@@ -560,3 +560,93 @@ func TestWatchAndAuxConcurrentAcquireRelease(t *testing.T) {
 		t.Fatalf("slots leaked: aux=%d watch=%d", fwdAuxInUse(c), watchInUse(c))
 	}
 }
+
+func TestBusyObserverCalledOnErrBusy(t *testing.T) {
+	c := &ssh.Client{}
+	defer SetBusyObserver(c, nil)
+
+	var mu sync.Mutex
+	var got []string
+	SetBusyObserver(c, func(kind string) {
+		mu.Lock()
+		got = append(got, kind)
+		mu.Unlock()
+	})
+
+	// Fill SessionAux slots (via unified ledger), forwarded Aux slots, and
+	// Watch slots so Exec, AcquireSession(SFTP), DialVia(Aux), and DialVia(Watch)
+	// each hit ErrBusy once.
+	var releases []func()
+	for range MaxAuxPerConn {
+		rel, err := AcquireSession(context.Background(), c, SessionAux, true, 0)
+		if err != nil {
+			t.Fatalf("failed to take SessionAux slot: %v", err)
+		}
+		releases = append(releases, rel)
+	}
+	for range MaxSFTPPerConn {
+		rel, err := AcquireSession(context.Background(), c, SessionSFTP, true, 0)
+		if err != nil {
+			t.Fatalf("failed to take SessionSFTP slot: %v", err)
+		}
+		releases = append(releases, rel)
+	}
+	for range MaxAuxPerConn {
+		rel, ok := takeFwdAux(c)
+		if !ok {
+			t.Fatal("failed to take fwd aux slot")
+		}
+		releases = append(releases, rel)
+	}
+	// Fill all Watch slots so DialVia(Watch) hits ErrBusy.
+	for range MaxWatchPerConn {
+		rel, ok := takeWatch(c)
+		if !ok {
+			t.Fatal("failed to take watch slot")
+		}
+		releases = append(releases, rel)
+	}
+	defer func() {
+		for _, r := range releases {
+			r()
+		}
+	}()
+
+	ctx := context.Background()
+	if _, err := Output(ctx, c, "true", 1024); !errors.Is(err, ErrBusy) {
+		t.Fatalf("Output: got %v, want ErrBusy", err)
+	}
+	if _, err := AcquireSession(ctx, c, SessionSFTP, true, 0); !errors.Is(err, ErrBusy) {
+		t.Fatalf("AcquireSession(SFTP): got %v, want ErrBusy", err)
+	}
+	if _, err := DialVia(ctx, c, "unix", "/run/aux.sock", DialOptions{Aux: true}); !errors.Is(err, ErrBusy) {
+		t.Fatalf("DialVia(Aux): got %v, want ErrBusy", err)
+	}
+	if _, err := DialVia(ctx, c, "unix", "/run/watch.sock", DialOptions{Watch: true}); !errors.Is(err, ErrBusy) {
+		t.Fatalf("DialVia(Watch): got %v, want ErrBusy", err)
+	}
+	// Context cancellation must NOT invoke NotifyBusy.
+	cctx, cancel := context.WithCancel(ctx)
+	cancel()
+	if _, err := AcquireSession(cctx, c, SessionAux, true, 0); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled AcquireSession: got %v, want context.Canceled", err)
+	}
+
+	// Clearing observer must stop further notifications.
+	SetBusyObserver(c, nil)
+	if _, err := Output(ctx, c, "true", 1024); !errors.Is(err, ErrBusy) {
+		t.Fatalf("Output after clear: got %v, want ErrBusy", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	want := []string{"exec", "sftp", "dial_aux", "dial_watch"}
+	if len(got) != len(want) {
+		t.Fatalf("observer kinds = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("observer kinds[%d] = %q, want %q (all=%v)", i, got[i], want[i], got)
+		}
+	}
+}

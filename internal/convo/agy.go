@@ -339,7 +339,7 @@ func (c *Agy) applyGeneric(e *Entry, t *Tool, r agyRow) {
 			if what == "" {
 				what = firstNonEmpty(t.Title, t.Detail)
 			}
-			c.setGoing(id, "cmd", what, t.Detail, logPath, r.CreatedAt)
+			c.setGoing(id, "cmd", what, t.Detail, t.detailCut, logPath, r.CreatedAt)
 		}
 	}
 	// Background task cancelled/killed via manage_task.
@@ -481,7 +481,7 @@ func (c *Agy) errorMessage(r agyRow) {
 	})
 }
 
-func (c *Agy) setGoing(id, kind, what, cmd, outPath, at string) {
+func (c *Agy) setGoing(id, kind, what, cmd string, cmdCut bool, outPath, at string) {
 	if id == "" || c.ranOut[id] {
 		delete(c.ranOut, id)
 		return
@@ -492,13 +492,15 @@ func (c *Agy) setGoing(id, kind, what, cmd, outPath, at string) {
 	if c.running == nil {
 		c.running = map[string]Running{}
 	}
+	keptCmd, cutCmd := cut(clean(cmd), maxDetail)
 	c.running[id] = Running{
-		ID:   clip(id, maxID),
-		What: clip(clean(firstLineOf(what)), maxTitle),
-		Kind: kind,
-		Time: clip(at, 64),
-		Cmd:  clip(clean(cmd), maxDetail),
-		Out:  clip(outPath, maxImagePath),
+		ID:     clip(id, maxID),
+		What:   clip(clean(firstLineOf(what)), maxTitle),
+		Kind:   kind,
+		Time:   clip(at, 64),
+		Cmd:    keptCmd,
+		CmdCut: cmdCut || cutCmd,
+		Out:    clip(outPath, maxImagePath),
 	}
 	c.runOrder = append(c.runOrder, id)
 }
@@ -672,7 +674,7 @@ func agyBuildTool(id string, tc agyToolCall) *Tool {
 	switch name {
 	case "Bash":
 		t.Title = d(str("toolSummary", "description"))
-		t.Detail = d(str("CommandLine", "command"))
+		t.Detail, t.detailCut = cut(clean(str("CommandLine", "command")), maxDetail)
 	case "Read":
 		t.Detail = d(str("Path", "AbsolutePath", "file_path", "path"))
 	case "Write":

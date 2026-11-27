@@ -422,8 +422,10 @@ func (s *Server) restoreOne(parent context.Context, t *store.OpenTab) {
 		}
 		return err
 	}
+	s.observeSSHBusy(client, t.HostID)
 	sess, err := s.terms.Start(ctx, res, t.OwnerID, t.HostID, h.Name, client, opts)
 	if err != nil {
+		sshx.SetBusyObserver(client, nil)
 		started = true // (Start closed it)
 		switch {
 		case committed && errors.Is(err, term.ErrClosing):

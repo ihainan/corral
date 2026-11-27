@@ -1112,3 +1112,113 @@ func TestWatcherStreamBreakDuringRefreshRetryTriggersLostImmediately(t *testing.
 		t.Fatalf("step = %q, want %q", warnRec.Attrs["step"].String(), stepStream)
 	}
 }
+
+func TestWatcherDisconnectAndReconnectHooks(t *testing.T) {
+	srv := testutil.StartSSHServer(t, "alice", "alice-pass", t.TempDir())
+	var attempts atomic.Int32
+	srv.HandleChannel(func(nc ssh.NewChannel) bool {
+		if nc.ChannelType() != streamLocal {
+			return false
+		}
+		if attempts.Add(1) <= 2 {
+			_ = nc.Reject(ssh.ConnectionFailed, "temporary outage")
+			return true
+		}
+		ch, reqs, err := nc.Accept()
+		if err != nil {
+			return true
+		}
+		go ssh.DiscardRequests(reqs)
+		go func() {
+			defer ch.Close()
+			r := bufio.NewReader(ch)
+			line, err := r.ReadBytes('\n')
+			if err != nil {
+				return
+			}
+			var req struct {
+				ID     string `json:"id"`
+				Method string `json:"method"`
+			}
+			if json.Unmarshal(line, &req) != nil {
+				return
+			}
+			switch req.Method {
+			case "session.snapshot":
+				_, _ = ch.Write([]byte(`{"id":"` + req.ID + `","result":{"snapshot":{"version":"0.8.0","panes":[{"pane_id":"w1:p1","workspace_id":"w1","tab_id":"t1"}]}}}` + "\n"))
+			case "events.subscribe":
+				_, _ = ch.Write([]byte(`{"id":"` + req.ID + `","result":{"ok":true}}` + "\n"))
+				_, _ = io.Copy(io.Discard, r)
+			}
+		}()
+		return true
+	})
+
+	c, err := ssh.Dial("tcp", srv.Addr.String(), &ssh.ClientConfig{
+		User:            "alice",
+		Auth:            []ssh.AuthMethod{ssh.Password("alice-pass")},
+		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var (
+		mu          sync.Mutex
+		discSteps   []string
+		discBusies  []bool
+		reconnDurs  []time.Duration
+		reconnFails []int
+	)
+	reconnected := make(chan struct{}, 1)
+
+	w := NewWatcher(c, "/run/herdr/hooks.sock", nil, nil)
+	w.baseBackoff = 15 * time.Millisecond
+	w.maxBackoff = 30 * time.Millisecond
+	w.OnDisconnect = func(step string, busy bool) {
+		mu.Lock()
+		discSteps = append(discSteps, step)
+		discBusies = append(discBusies, busy)
+		mu.Unlock()
+	}
+	w.OnReconnect = func(downFor time.Duration, failures int) {
+		mu.Lock()
+		reconnDurs = append(reconnDurs, downFor)
+		reconnFails = append(reconnFails, failures)
+		mu.Unlock()
+		select {
+		case reconnected <- struct{}{}:
+		default:
+		}
+	}
+
+	done := make(chan struct{})
+	go func() {
+		w.Run(ctx)
+		close(done)
+	}()
+
+	select {
+	case <-reconnected:
+	case <-ctx.Done():
+		t.Fatal("timed out waiting for OnReconnect")
+	}
+	cancel()
+	<-done
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(discSteps) != 1 || discSteps[0] != stepDial || discBusies[0] {
+		t.Fatalf("OnDisconnect = (%v, %v), want ([dial], [false])", discSteps, discBusies)
+	}
+	if len(reconnFails) != 1 || reconnFails[0] != 2 {
+		t.Fatalf("OnReconnect failures = %v, want [2]", reconnFails)
+	}
+	if reconnDurs[0] <= 0 {
+		t.Fatalf("OnReconnect downFor = %v, want > 0", reconnDurs[0])
+	}
+}

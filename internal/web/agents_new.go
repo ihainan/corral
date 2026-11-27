@@ -194,6 +194,7 @@ type agentStart struct {
 	parentPane     string // (optional herdr parent pane for corral_spawn lineage)
 	placement      string // ("workspace" or "split")
 	key            string // (idempotency key, reused as spawn evidence_key)
+	claudeVersion  string // host's Claude Code version (empty: unknown -> keep inline ask hook)
 }
 
 func (s *Server) newAgent(ctx context.Context, w http.ResponseWriter, sess *term.Session, socket, dir, kind, label string, how agentStart) {
@@ -214,6 +215,10 @@ func (s *Server) newAgent(ctx context.Context, w http.ResponseWriter, sess *term
 		}
 	}
 	// The folder: the home's when under ~/, a folder that is there.
+	// When forking a Claude session, always resolve and pass the source log's
+	// physical CLAUDE_CONFIG_DIR (including default ~/.claude) so an inherited
+	// CLAUDE_CONFIG_DIR in the target shell/herdr cannot redirect resume.
+	var claudeCfgDir string
 	err := s.withSFTP(ctx, sess, convoReadLimit, func(c *sftplite.Client) error {
 		if strings.HasPrefix(dir, "~") {
 			home, err := c.RealPath(".")
@@ -221,6 +226,15 @@ func (s *Server) newAgent(ctx context.Context, w http.ResponseWriter, sess *term
 				return err
 			}
 			dir = path.Join(home, strings.TrimPrefix(dir, "~"))
+		}
+		if kind == "claude" && src != "" {
+			realCfg := ""
+			if cfgDir, ok := claudeConfigDirFromLog(src); ok {
+				if rp, rerr := c.RealPath(cfgDir); rerr == nil {
+					realCfg = rp
+				}
+			}
+			claudeCfgDir = claudeForkConfigDir(src, realCfg)
 		}
 		fi, err := c.Stat(dir)
 		if err != nil {
@@ -265,11 +279,15 @@ func (s *Server) newAgent(ctx context.Context, w http.ResponseWriter, sess *term
 			}
 		}()
 	}
+	if kind == "claude" {
+		how.claudeVersion = s.claudeVersionForStart(ctx, sess)
+	}
 	// From a tmux session (no herdr): the agent in a tmux session of its own,
 	// named after it, in the folder; the page opens a terminal on it.
 	if socket == "" {
 		name := agentName(label, kind)
-		// (A Codex's conversation taken up or copied: in the home its log is in.)
+		// (A Codex's or Claude Code's conversation taken up or copied: in the
+		// config home its log is in.)
 		home := ""
 		if kind == "codex" && src != "" {
 			// (<home>/sessions/<year>/<month>/<day>/rollout-…: up from the log, not
@@ -277,6 +295,8 @@ func (s *Server) newAgent(ctx context.Context, w http.ResponseWriter, sess *term
 			if s := path.Dir(path.Dir(path.Dir(path.Dir(src)))); path.Base(s) == "sessions" {
 				home = path.Dir(s)
 			}
+		} else if kind == "claude" && claudeCfgDir != "" {
+			home = claudeCfgDir
 		}
 		res, err := sshx.Exec(ctx, sess.Client(), agentTmuxCmd(name, dir, kind, home, how), 8<<10, sshx.ExecOptions{Interactive: true, AwaitSlot: 2 * time.Second})
 		out := res.Out
@@ -323,6 +343,12 @@ func (s *Server) newAgent(ctx context.Context, w http.ResponseWriter, sess *term
 				spawnEnv["CORRAL_PARENT_SESSION"] = parentSess
 			}
 		}
+	}
+	if claudeCfgDir != "" {
+		if spawnEnv == nil {
+			spawnEnv = map[string]string{}
+		}
+		spawnEnv["CLAUDE_CONFIG_DIR"] = claudeCfgDir
 	}
 	if how.placement == "split" && !hasParent {
 		keep = false
@@ -456,11 +482,12 @@ func agentStartCmd(socket, pane, name, kind string, how agentStart) string {
 }
 
 // agentArgs: what an agent of kind is started with, after its program's
-// name: Claude Code the question hook inline; a session taken up or copied;
+// name: Claude Code the question hook inline (only when its version is below
+// askhook.NoHookMinVersion or unknown); a session taken up or copied;
 // a worktree of its own (worktreeFlag).
 func agentArgs(kind string, how agentStart) []string {
 	var args []string
-	if kind == "claude" {
+	if kind == "claude" && askhook.NeedsHook(how.claudeVersion) {
 		args = append(args, "--settings", askhook.Inline())
 	}
 	switch {
@@ -496,7 +523,11 @@ func agentTmuxCmd(name, dir, kind, home string, how agentStart) string {
 	q := sshx.QuoteShell
 	run := "exec " + q(kind)
 	if home != "" {
-		run = "CODEX_HOME=" + q(home) + " " + run
+		if kind == "claude" {
+			run = "CLAUDE_CONFIG_DIR=" + q(home) + " " + run
+		} else {
+			run = "CODEX_HOME=" + q(home) + " " + run
+		}
 	}
 	for _, a := range agentArgs(kind, how) {
 		run += " " + q(a)

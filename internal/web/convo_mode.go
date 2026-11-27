@@ -144,8 +144,10 @@ func (s *Server) convoModeTo(w http.ResponseWriter, ctx context.Context, sess *t
 		// (Not while it waits: Shift+Tab is a question's then. Exit 9.)
 		// Terminal keypress after checking screen mode: intentionally AwaitSlot: 0
 		// so a busy connection refuses immediately rather than pressing against a stale screen.
+		t0 := time.Now()
 		res, err := sshx.Exec(ctx, sess.Client(), convoGatedCommand(gate, sess.Persistence, sess.TmuxSession, pane, socket, pid, start, sid, 0, press, convoModeLines), 16<<10,
 			sshx.ExecOptions{Stdin: strings.NewReader(""), Release: ended.Done, Interactive: true})
+		s.perfGated("mode", t0, err, sess.HostID)
 		var exitErr *sshx.ExitError
 		switch {
 		case err == nil:

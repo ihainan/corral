@@ -597,6 +597,9 @@ func (c *Claude) Prepend(other Parser) {
 	if c.meta.Effort == "" {
 		c.meta.Effort = o.meta.Effort
 	}
+	if c.meta.Version == "" {
+		c.meta.Version = o.meta.Version
+	}
 	if !c.branchSaid {
 		c.meta.Branch, c.branchSaid = o.meta.Branch, o.branchSaid
 	}
@@ -755,6 +758,7 @@ type claudeRow struct {
 	Operation        string          `json:"operation"` // (queue-operation rows)
 	Content          json.RawMessage `json:"content"`   // (system rows)
 	GitBranch        *string         `json:"gitBranch"` // (present and empty: not on a branch)
+	Version          string          `json:"version"`
 	PermissionMode   string          `json:"permissionMode"`
 	Effort           string          `json:"effort"` // (assistant rows: how hard it was asked to think)
 	// (api-request rows: what a request to the model asked for.)
@@ -876,6 +880,9 @@ func (c *Claude) line(b []byte) {
 			br = ""
 		}
 		c.meta.Branch, c.branchSaid = clip(br, maxMeta), true
+	}
+	if v := strings.TrimSpace(r.Version); v != "" {
+		c.meta.Version = clip(v, maxMeta)
 	}
 	switch r.Type {
 	case "user", "assistant", "attachment", "system":
@@ -1857,7 +1864,7 @@ func (c *Claude) assistant(r *claudeRow) {
 			}
 		case "tool_use", "server_tool_use":
 			t := &Tool{ID: clip(b.ID, maxID), Name: clip(b.Name, 128)}
-			t.Title, t.Detail, t.Old, t.New = toolInput(b.Name, b.Input)
+			t.Title, t.Detail, t.Old, t.New, t.detailCut = toolInput(b.Name, b.Input)
 			// (Another session written to by its address: by its name, as its
 			// message said it — not a socket's path.)
 			if b.Name == "SendMessage" && strings.HasPrefix(t.Title, "uds:") {
@@ -2375,7 +2382,9 @@ func (c *Claude) setGoing(t *Tool, account json.RawMessage, at, said string, cal
 		}
 	}
 	if kind == "cmd" {
-		r.Cmd = clip(clean(t.Detail), maxDetail)
+		var ccut bool
+		r.Cmd, ccut = cut(clean(t.Detail), maxDetail)
+		r.CmdCut = t.detailCut || ccut
 		if m := bgOutFile.FindStringSubmatch(said); m != nil {
 			r.Out = clip(clean(m[1]), maxDetail)
 		}
@@ -3031,11 +3040,13 @@ func inner(s string) string {
 }
 
 // toolInput picks what to show of a call's input: what it is for and what
-// it acts on.
-func toolInput(name string, raw json.RawMessage) (title, detail, old, new string) {
+// it acts on. detailCut reports whether the detail string was truncated at
+// maxDetail (used by Bash/Monitor to avoid synthetic command-text matching on
+// truncated commands).
+func toolInput(name string, raw json.RawMessage) (title, detail, old, new string, detailCut bool) {
 	var in map[string]any
 	if json.Unmarshal(raw, &in) != nil {
-		return "", "", "", ""
+		return "", "", "", "", false
 	}
 	str := func(k string) string {
 		v, _ := in[k].(string)
@@ -3044,7 +3055,8 @@ func toolInput(name string, raw json.RawMessage) (title, detail, old, new string
 	d := func(s string) string { s, _ = cut(clean(s), maxDetail); return s }
 	switch name {
 	case "Bash":
-		return d(str("description")), d(str("command")), "", ""
+		cmd, cut := cut(clean(str("command")), maxDetail)
+		return d(str("description")), cmd, "", "", cut
 	case "Read", "Write", "Edit", "MultiEdit", "NotebookEdit":
 		p := str("file_path")
 		if p == "" {
@@ -3052,9 +3064,9 @@ func toolInput(name string, raw json.RawMessage) (title, detail, old, new string
 		}
 		switch name {
 		case "Edit":
-			return "", d(p), d(str("old_string")), d(str("new_string"))
+			return "", d(p), d(str("old_string")), d(str("new_string")), false
 		case "Write":
-			return "", d(p), "", d(str("content"))
+			return "", d(p), "", d(str("content")), false
 		case "MultiEdit":
 			var olds, news []string
 			if edits, ok := in["edits"].([]any); ok {
@@ -3066,50 +3078,51 @@ func toolInput(name string, raw json.RawMessage) (title, detail, old, new string
 					}
 				}
 			}
-			return "", d(p), d(strings.Join(olds, "\n…\n")), d(strings.Join(news, "\n…\n"))
+			return "", d(p), d(strings.Join(olds, "\n…\n")), d(strings.Join(news, "\n…\n")), false
 		}
-		return "", d(p), "", ""
+		return "", d(p), "", "", false
 	case "Grep", "Glob":
 		s := str("pattern")
 		if p := str("path"); p != "" {
 			s += "  " + p
 		}
-		return "", d(s), "", ""
+		return "", d(s), "", "", false
 	case "WebFetch":
-		return "", d(str("url")), "", ""
+		return "", d(str("url")), "", "", false
 	case "WebSearch", "ToolSearch":
-		return "", d(str("query")), "", ""
+		return "", d(str("query")), "", "", false
 	case "Agent", "Task":
-		return d(str("description")), d(str("prompt")), "", ""
+		return d(str("description")), d(str("prompt")), "", "", false
 	case "Skill":
-		return "", d(str("skill")), "", ""
+		return "", d(str("skill")), "", "", false
 	case "Monitor":
-		return d(str("description")), d(str("command")), "", ""
+		cmd, cut := cut(clean(str("command")), maxDetail)
+		return d(str("description")), cmd, "", "", cut
 	case "TaskStop":
-		return "", d(str("task_id")), "", ""
+		return "", d(str("task_id")), "", "", false
 	case "Artifact":
 		// Which of the tool's doings it is (publishing, when it does not say).
 		act := str("action")
 		if act == "" {
 			act = "publish"
 		}
-		return "", d(strings.TrimSpace(act + " " + told(in, "title", "file_path", "url", "type_url", "intent"))), "", ""
+		return "", d(strings.TrimSpace(act + " " + told(in, "title", "file_path", "url", "type_url", "intent"))), "", "", false
 	case "ArtifactData":
-		return "", d(strings.TrimSpace(str("action") + " " + told(in, "collection", "doc_id", "url"))), "", ""
+		return "", d(strings.TrimSpace(str("action") + " " + told(in, "collection", "doc_id", "url"))), "", "", false
 	case "SendMessage":
-		return d(str("to")), d(told(in, "summary", "message", "content")), "", ""
+		return d(str("to")), d(told(in, "summary", "message", "content")), "", "", false
 	case "ScheduleWakeup":
-		return "", d(told(in, "reason", "prompt")), "", ""
+		return "", d(told(in, "reason", "prompt")), "", "", false
 	case "CronCreate", "CronDelete", "CronList":
-		return "", d(strings.TrimSpace(str("cron") + " " + told(in, "prompt", "id"))), "", ""
+		return "", d(strings.TrimSpace(str("cron") + " " + told(in, "prompt", "id"))), "", "", false
 	case "ListAgents", "advisor":
-		return "", "", "", "" // (nothing of its own to say: its line is the verb)
+		return "", "", "", "", false // (nothing of its own to say: its line is the verb)
 	case "TaskCreate", "TaskUpdate":
 		s := str("subject")
 		if name == "TaskUpdate" {
 			s = strings.TrimSpace("#" + str("taskId") + " " + str("status") + " " + s)
 		}
-		return "", d(s), "", ""
+		return "", d(s), "", "", false
 	case "TodoWrite":
 		var lines []string
 		if todos, ok := in["todos"].([]any); ok {
@@ -3127,7 +3140,7 @@ func toolInput(name string, raw json.RawMessage) (title, detail, old, new string
 				}
 			}
 		}
-		return "", d(strings.Join(lines, "\n")), "", ""
+		return "", d(strings.Join(lines, "\n")), "", "", false
 	case "AskUserQuestion":
 		var qs []string
 		if list, ok := in["questions"].([]any); ok {
@@ -3138,17 +3151,17 @@ func toolInput(name string, raw json.RawMessage) (title, detail, old, new string
 				}
 			}
 		}
-		return "", d(strings.Join(qs, "\n")), "", ""
+		return "", d(strings.Join(qs, "\n")), "", "", false
 	}
 	// An MCP server's tool: its own name (most of the whole one is the
 	// server's) and what it acts on. A browser's doing says "browser" on
 	// its line already, so its name keeps only the doing.
 	if _, tool, ok := mcpTool(name); ok {
 		tool = strings.TrimPrefix(tool, "browser_")
-		return "", d(strings.TrimSpace(tool + " " + anyText(in))), "", ""
+		return "", d(strings.TrimSpace(tool + " " + anyText(in))), "", "", false
 	}
 	// Another tool nothing here knows: what it acts on, if its input says.
-	return "", d(anyText(in)), "", ""
+	return "", d(anyText(in)), "", "", false
 }
 
 // mcpTool splits an MCP server's tool name (mcp__<server>__<tool>) into the

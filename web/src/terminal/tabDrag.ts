@@ -65,8 +65,10 @@ export function showFront(nav: HTMLElement | null) {
   const box = nav.getBoundingClientRect()
   const t = getComputedStyle(x).transform
   const left = r.left - (t && t !== 'none' ? new DOMMatrixReadOnly(t).m41 : 0) - box.left + nav.scrollLeft
-  if (left < nav.scrollLeft) nav.scrollLeft = left
-  else if (left + r.width > nav.scrollLeft + nav.clientWidth) nav.scrollLeft = left + r.width - nav.clientWidth
+  // Keep room for the active tab's outward bottom fillets on both sides.
+  const pad = 10
+  if (left - pad < nav.scrollLeft) nav.scrollLeft = Math.max(0, left - pad)
+  else if (left + r.width + pad > nav.scrollLeft + nav.clientWidth) nav.scrollLeft = left + r.width + pad - nav.clientWidth
 }
 
 export function useTabDrag(nav: React.RefObject<HTMLElement | null>, ids: string[], current: string, onMove: (id: string, to: number) => void) {

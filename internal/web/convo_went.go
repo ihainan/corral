@@ -214,7 +214,8 @@ func (s *Server) sentWentTo(ctx context.Context, sess *term.Session, key, sid, t
 	st.mu.Lock()
 	root, agent, reason, logSID, sub := st.log, st.agent, st.reason, st.sid, st.sub
 	st.mu.Unlock()
-	if root == "" || reason != "" || agent != "claude" || sub || logSID != sid || !strings.HasSuffix(root, "/"+sid+".jsonl") || !strings.Contains(root, "/.claude/projects/") {
+	_, claudeLogOK := claudeConfigDirFromLog(root)
+	if root == "" || reason != "" || agent != "claude" || sub || logSID != sid || !strings.HasSuffix(root, "/"+sid+".jsonl") || !claudeLogOK {
 		return nil
 	}
 	frag := wentFragment(text) // ("" for a short one: the person's rows all read)

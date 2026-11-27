@@ -73,7 +73,14 @@ func TestConvoEnvironReadsByRecord(t *testing.T) {
 	old := regexp.MustCompile(`tr ['\\]*\\0['\\]* ['\\]*\\n['\\]* <"[^"]*environ"`)
 	for name, script := range map[string]string{
 		"locate herdr": convoLocateCommand("herdr", "", ""),
+		"locate pids":  convoLocatePidsCommand(50, []int{100, 200}),
 		"locate tmux":  convoLocateCommand("tmux", "main", "%1"),
+		"fresh status": freshStatusCommand(100),
+		"line alive":   lineAliveCommand(100, 200),
+		"bg tail":      bgTailCommand([]string{"0b7c2a1e-1111-4222-8333-444455556666"}, 4096),
+		"cmd scan":     cmdScanCommand("w:0b7c2a1e-1111-4222-8333-444455556666"),
+		"fork find":    forkFindCommand("claude", "0b7c2a1e-1111-4222-8333-444455556666"),
+		"logs wrote":   logsWroteCommand([]string{"claude:0b7c2a1e-1111-4222-8333-444455556666"}),
 		"gated herdr":  convoGated("", "herdr", "", "w1:p1", "/s", 1, 1, "0b7c2a1e-1111-4222-8333-444455556666", "0", nil, 0),
 		"gated tmux":   convoGated("", "tmux", "main", "%1", "", 1, 1, "0b7c2a1e-1111-4222-8333-444455556666", "0", nil, 0),
 	} {

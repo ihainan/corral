@@ -8,8 +8,8 @@ import { api } from '../api'
 import { setPrefs, usePrefs } from '../prefs'
 import { openSettingsModal } from '../pages/Settings'
 import { dropPickInTab, OPEN_PICKER } from '../pages/agentTabs'
-import { asHeld, buildAgentGroups, dayStart, FOLDED, foldAt, isLiveBlocked, listOrder, pinned, type ConvoListRow, type OrderOpts, type RowCmds, type RowTask } from './agentOrder'
-import { stampAgeMs } from './sideState'
+import { asHeld, buildAgentGroups, dayStart, FOLDED, foldAt, hasBgCli, isLiveBlocked, listOrder, pinned, rowMatchesQuery, splitRowTasks, visibleCliAgents, type ConvoListRow, type OrderOpts, type RowCmds, type RowTask } from './agentOrder'
+import { agentStatusMark, conversationRunningItems, filterHostCmds, stampAgeMs } from './sideState'
 import { copyText, Dialog, DialogHead, isCoarse, Menu, MenuLayer, swallowNextClick, useToast, type MenuItem } from '../components/ui'
 import { saveFile } from '../saveFile'
 import { StatusItem, useWorkbench } from '../workbench'
@@ -150,6 +150,7 @@ const SIDE_MIN = 900 // (px) the view's width from which the list goes beside th
 // The list's width beside the thread (px): dragged by its edge, kept in the
 // browser; never past half the view.
 const SIDE_W_KEY = 'corral.convoSideWidth'
+const SIDE_CHANGE_EVENT = 'corral:convo-side'
 // (The agents left in their terminal view, this device: the last so many. UI 14.)
 const TERM_VIEWS_KEY = 'corral.termViews'
 const TERM_VIEWS_MAX = 100
@@ -358,10 +359,14 @@ export function ConversationView({
   // status bar (its slot, in this page's root) — not under the composer.
   const wbWide = useWorkbench()
   const [wbSlot, setWbSlot] = useState<Element | null>(null)
+  const [wbSideSlot, setWbSideSlot] = useState<Element | null>(null)
   useLayoutEffect(() => {
     const page = root.current?.closest('.term-root')
-    const slot = page?.classList.contains('wb-on') ? page.querySelector('.wb-status-slot') : null
+    const on = !!page?.classList.contains('wb-on')
+    const slot = on ? page!.querySelector('.wb-status-slot') : null
+    const sideSlot = on && side ? page!.querySelector('.wb-side-slot') : null
     setWbSlot((was) => (was === slot ? was : slot))
+    setWbSideSlot((was) => (was === sideSlot ? was : sideSlot))
   })
   const inWb = wbWide && !!wbSlot
   const wbWideNow = useRef(wbWide)
@@ -487,6 +492,7 @@ export function ConversationView({
     if (v === SIDE_W) local.remove(SIDE_W_KEY)
     else local.set(SIDE_W_KEY, String(v))
     if (sideEl.current) sideEl.current.style.width = v + 'px' // (as it is drawn: a drag sets it by hand)
+    window.dispatchEvent(new Event(SIDE_CHANGE_EVENT))
     return v
   }
   // (A drag sizes the list by its style, a frame at a time, and is told
@@ -503,20 +509,37 @@ export function ConversationView({
   const setFolded = (v: boolean) => {
     setFoldedState(v)
     local.set(SIDE_KEY, v ? '0' : '1')
+    window.dispatchEvent(new Event(SIDE_CHANGE_EVENT))
   }
+  // Keep sidebar width and folded state in sync across kept <Activity> tabs.
+  useEffect(() => {
+    const sync = () => {
+      const nextW = Number(local.get(SIDE_W_KEY)) || SIDE_W
+      setSideW((curW) => (curW === nextW ? curW : nextW))
+      const nextF = local.get(SIDE_KEY) === '0'
+      setFoldedState((curF) => (curF === nextF ? curF : nextF))
+    }
+    sync()
+    window.addEventListener(SIDE_CHANGE_EVENT, sync)
+    return () => window.removeEventListener(SIDE_CHANGE_EVENT, sync)
+  }, [])
   useLayoutEffect(() => {
     const el = root.current
     if (!el) return
+    // On the workbench, the sidebar sits outside .convo in .wb-agent-layout:
+    // measure the whole workbench layout for the primary view so wide/sideWidthMax/
+    // split thresholds stay stable and never oscillate as the sidebar opens/closes.
+    const box = side ? (el.closest('.wb-agent-layout') ?? el) : el
     const look = () => {
-      setWide(el.clientWidth >= SIDE_MIN)
-      setViewW(el.clientWidth)
-      setViewH(el.clientHeight)
+      setWide(box.clientWidth >= SIDE_MIN)
+      setViewW(box.clientWidth)
+      setViewH(box.clientHeight)
     }
     look()
     const ro = new ResizeObserver(look)
-    ro.observe(el)
+    ro.observe(box)
     return () => ro.disconnect()
-  }, [])
+  }, [!!side, wbSideSlot])
   const sideShown = !!side && wide && !folded
   const splitShown = !!splitPane && (splitIsCol || viewW === 0 || viewW >= SPLIT_MIN_W)
   const splitCompactCol = splitShown && splitIsCol && viewH > 0 && viewH < 760
@@ -542,20 +565,21 @@ export function ConversationView({
   // to, where that leaves it out of sight (gone to from elsewhere), is
   // brought in, no further than needed.
   useLayoutEffect(() => {
-    const el = sideEl.current
-    if (!sideShown || !el) return
-    el.scrollTop = sideScrolled
-    const row = el.querySelector<HTMLElement>('.convo-list-row[aria-current="true"]')
+    const sideBox = sideEl.current
+    if (!sideShown || !sideBox) return
+    const scroller = sideBox.querySelector<HTMLElement>('.convo-list-groups') ?? sideBox
+    scroller.scrollTop = sideScrolled
+    const row = sideBox.querySelector<HTMLElement>('.convo-list-row[aria-current="true"]')
     if (row) {
       const r = row.getBoundingClientRect()
-      const box = el.getBoundingClientRect()
+      const box = scroller.getBoundingClientRect()
       if (r.top < box.top || r.bottom > box.bottom) row.scrollIntoView({ block: 'nearest' })
     }
-    const keep = () => void (sideScrolled = el.scrollTop)
+    const keep = () => void (sideScrolled = scroller.scrollTop)
     keep()
-    el.addEventListener('scroll', keep, { passive: true })
-    return () => el.removeEventListener('scroll', keep)
-  }, [sideShown])
+    scroller.addEventListener('scroll', keep, { passive: true })
+    return () => scroller.removeEventListener('scroll', keep)
+  }, [sideShown, wbSideSlot])
   sideShownNow.current = sideShown
   const wideNow = useRef(wide)
   wideNow.current = wide
@@ -799,13 +823,19 @@ export function ConversationView({
     taskTaken(taskAsked.n)
     if (Date.now() - taskAsked.at > TASK_ASK_FOR) return
     const t = taskAsked.task
-    if (t.kind === 'agent') openSub({ agent: t.id, title: t.name || undefined })
+    if (t.kind === 'agent') openSub({ agent: t.id, title: t.name || undefined, cli: t.agent, since: t.since })
     else openCmd({ id: t.id, kind: 'cmd', what: t.name, cmd: t.cmd || t.name || undefined, out: t.out, ts: t.since ? new Date(t.since).toISOString() : undefined })
   }, [taskAsked, active, convo.status, convo.of, openSub, openCmd])
   // What it left running in the background, as its processes on the host
   // say (its turn over; not said while it asks something): the bar counts
   // them, the card lists them, and each opens as one of the log's would.
-  const hostCmds = agent?.cmds && agent.status !== 'blocked' ? agent.cmds : undefined
+  // Any task already promoted to a CLI subagent in runningItems is excluded
+  // from hostCmds so neither header counts nor SessionCard double-lists it.
+  const runningItems = useMemo(() => conversationRunningItems(convo.running, agent?.tasks), [convo.running, agent?.tasks])
+  const hostCmds = useMemo(
+    () => (agent?.cmds && agent.status !== 'blocked' ? filterHostCmds(agent.cmds, runningItems) : undefined),
+    [agent?.cmds, agent?.status, runningItems],
+  )
   const hostCmd = (id: string): ConvoRunning | undefined => {
     const c = hostCmds?.list.find((x) => x.task === id)
     return c && { id, kind: 'cmd', what: c.desc || c.title || '', cmd: c.title, out: c.out, ts: c.since ? new Date(c.since).toISOString() : undefined }
@@ -848,13 +878,13 @@ export function ConversationView({
   // (where they can be looked into) and commands — one after another from a
   // panel, whichever it is (11-14). By the log's ids only.
   const subsOk = !convo.bind?.agent || convo.bind.agent === 'claude' || convo.bind.agent === 'codex' || convo.bind.agent === 'agy'
-  const work = (convo.running ?? []).filter((r) => (r.kind === 'agent' && isSubId(r.id) && subsOk) || r.kind === 'cmd')
+  const work = runningItems.filter((r) => (r.kind === 'agent' && isSubId(r.id) && (subsOk || !!r.agent)) || r.kind === 'cmd')
   const workNav = (id: string): WorkNav | undefined => {
     const i = work.findIndex((r) => r.id === id)
     if (i < 0 || work.length < 2) return undefined
     const go = (j: number) => {
       const r = work[(j + work.length) % work.length]
-      if (r.kind === 'agent') openSub({ agent: r.id, title: r.what })
+      if (r.kind === 'agent') openSub({ agent: r.id, title: r.what, cli: r.agent, since: r.ts ? Date.parse(r.ts) || undefined : undefined })
       else openCmd(r)
     }
     return { i, n: work.length, prev: () => go(i - 1), next: () => go(i + 1) }
@@ -1549,6 +1579,7 @@ export function ConversationView({
       const inSide = !!sideEl.current?.contains(document.activeElement)
       setFoldedState((f) => {
         local.set(SIDE_KEY, f ? '1' : '0')
+        window.dispatchEvent(new Event(SIDE_CHANGE_EVENT))
         return !f
       })
       if (inSide) requestAnimationFrame(() => root.current?.querySelector<HTMLElement>('.convo-side-btn')?.focus())
@@ -1936,14 +1967,14 @@ export function ConversationView({
       setDockOpen(true)
     },
     onRunning: (id) => {
-      const r = convo.running?.find((x) => x.id === id) ?? hostCmd(id)
+      const r = runningItems.find((x) => x.id === id) ?? hostCmd(id)
       if (!r) return
-      if (r.kind === 'agent' && isSubId(r.id)) openSub({ agent: r.id, title: r.what })
+      if (r.kind === 'agent' && isSubId(r.id)) openSub({ agent: r.id, title: r.what, cli: r.agent, since: r.ts ? Date.parse(r.ts) || undefined : undefined })
       else openCmd(r)
     },
     onDraft,
   }
-  const sessionCardData = convo.of && convo.status === 'ready' ? cardData(convo, list, mode, effort, hostCmds) : null
+  const sessionCardData = convo.of && convo.status === 'ready' ? cardData(convo, list, mode, effort, hostCmds, runningItems) : null
   const hideDesktopLineage = !!(sideShown && !isTouchOnly)
   const curRowForLineage = rows.find((r) => r.current)
   const lineageParent = lineageBar
@@ -1995,6 +2026,69 @@ export function ConversationView({
           onSide={sideBind && !head ? () => setBtwShown(sideIdent) : undefined} // (on the workbench: in the header's menu)
         />
     ) : null
+  const sideNode = sideShown ? (
+    <>
+      <nav className="convo-side" aria-label={t('convo.agents')} style={{ width: sideWidth }} ref={sideEl}>
+        <AgentList rows={rows} menus query={sideQuery} onQuery={setSideQuery} search={searchAsked} onSearchLeft={() => setSearchAsked(0)} hint={!isTouchOnly} compact showNew />
+        {!isTouchOnly && (
+          <div className="convo-side-foot">
+            <button type="button" className="icon-btn convo-side-foot-ic convo-side-foot-settings" onClick={() => openSettingsModal('chat')} aria-label={t('nav.settings')} title={`${t('nav.settings')} (${mac ? '⌘,' : 'Ctrl+,'})`}>
+              <Settings size={14} strokeWidth={1.75} aria-hidden="true" />
+            </button>
+            <button type="button" className="icon-btn convo-side-foot-ic" onClick={() => setKeysShown('side')} aria-label={t('convo.side.shortcuts')} title={t('convo.side.shortcuts')}>
+              <Keyboard size={14} strokeWidth={1.75} aria-hidden="true" />
+            </button>
+          </div>
+        )}
+      </nav>
+      <div
+        className="convo-side-grip"
+        role="separator"
+        aria-orientation="vertical"
+        aria-label={t('convo.sideWidth')}
+        title={t('convo.sideWidth')}
+        aria-valuenow={sideWidth}
+        aria-valuemin={SIDE_W_MIN}
+        aria-valuemax={sideWidthMax(viewW || SIDE_MIN)}
+        tabIndex={0}
+        onPointerDown={(e) => {
+          if (e.button !== 0 || drag.current) return // (one pointer at a time)
+          e.preventDefault()
+          e.currentTarget.setPointerCapture(e.pointerId)
+          drag.current = { id: e.pointerId, x: e.clientX, w: sideWidth, to: sideWidth, frame: 0 }
+        }}
+        onPointerMove={(e) => {
+          const d = drag.current
+          if (!d || e.pointerId !== d.id) return
+          if (e.pointerType === 'mouse' && e.buttons === 0) return endDrag(true) // (let go where no word of it came: outside the window)
+          d.to = sideWidthOf(d.w + e.clientX - d.x, viewW || SIDE_MIN)
+          cancelAnimationFrame(d.frame)
+          d.frame = requestAnimationFrame(() => {
+            if (sideEl.current) sideEl.current.style.width = d.to + 'px'
+          })
+        }}
+        onPointerUp={(e) => {
+          if (drag.current?.id === e.pointerId) endDrag(true)
+        }}
+        onPointerCancel={(e) => {
+          if (drag.current?.id === e.pointerId) endDrag(false)
+        }}
+        onLostPointerCapture={(e) => {
+          if (drag.current?.id === e.pointerId) endDrag(true)
+        }}
+        onDoubleClick={() => keepSideW(SIDE_W)}
+        onKeyDown={(e) => {
+          const step = e.shiftKey ? 48 : 16
+          if (e.key === 'ArrowLeft') keepSideW(sideWidth - step)
+          else if (e.key === 'ArrowRight') keepSideW(sideWidth + step)
+          else if (e.key === 'Home') keepSideW(SIDE_W_MIN)
+          else if (e.key === 'End') keepSideW(SIDE_W_MAX)
+          else return
+          e.preventDefault()
+        }}
+      />
+    </>
+  ) : null
   return (
     <OpenAllOf.Provider value={allOpen}>
     <ForkAtOf.Provider value={forkAt}>
@@ -2004,70 +2098,9 @@ export function ConversationView({
     <CodeSpanOf.Provider value={codeSpan}>
     <FileLinkOf.Provider value={fileLink}>
     <div className="convo" role="region" aria-label={t('convo.title')} ref={root}>
+      {sideNode && wbSideSlot ? createPortal(sideNode, wbSideSlot) : null}
       <div className="convo-workspace">
-      {sideShown && (
-        <nav className="convo-side" aria-label={t('convo.agents')} style={{ width: sideWidth }} ref={sideEl}>
-          <AgentList rows={rows} menus query={sideQuery} onQuery={setSideQuery} search={searchAsked} onSearchLeft={() => setSearchAsked(0)} hint={!isTouchOnly} compact showNew />
-          {!isTouchOnly && (
-            <div className="convo-side-foot">
-              <button type="button" className="icon-btn convo-side-foot-ic convo-side-foot-settings" onClick={() => openSettingsModal('chat')} aria-label={t('nav.settings')} title={`${t('nav.settings')} (${mac ? '⌘,' : 'Ctrl+,'})`}>
-                <Settings size={14} strokeWidth={1.75} aria-hidden="true" />
-              </button>
-              <button type="button" className="icon-btn convo-side-foot-ic" onClick={() => setKeysShown('side')} aria-label={t('convo.side.shortcuts')} title={t('convo.side.shortcuts')}>
-                <Keyboard size={14} strokeWidth={1.75} aria-hidden="true" />
-              </button>
-            </div>
-          )}
-        </nav>
-      )}
-      {sideShown && (
-        <div
-          className="convo-side-grip"
-          role="separator"
-          aria-orientation="vertical"
-          aria-label={t('convo.sideWidth')}
-          title={t('convo.sideWidth')}
-          aria-valuenow={sideWidth}
-          aria-valuemin={SIDE_W_MIN}
-          aria-valuemax={sideWidthMax(viewW || SIDE_MIN)}
-          tabIndex={0}
-          onPointerDown={(e) => {
-            if (e.button !== 0 || drag.current) return // (one pointer at a time)
-            e.preventDefault()
-            e.currentTarget.setPointerCapture(e.pointerId)
-            drag.current = { id: e.pointerId, x: e.clientX, w: sideWidth, to: sideWidth, frame: 0 }
-          }}
-          onPointerMove={(e) => {
-            const d = drag.current
-            if (!d || e.pointerId !== d.id) return
-            if (e.pointerType === 'mouse' && e.buttons === 0) return endDrag(true) // (let go where no word of it came: outside the window)
-            d.to = sideWidthOf(d.w + e.clientX - d.x, viewW || SIDE_MIN)
-            cancelAnimationFrame(d.frame)
-            d.frame = requestAnimationFrame(() => {
-              if (sideEl.current) sideEl.current.style.width = d.to + 'px'
-            })
-          }}
-          onPointerUp={(e) => {
-            if (drag.current?.id === e.pointerId) endDrag(true)
-          }}
-          onPointerCancel={(e) => {
-            if (drag.current?.id === e.pointerId) endDrag(false)
-          }}
-          onLostPointerCapture={(e) => {
-            if (drag.current?.id === e.pointerId) endDrag(true)
-          }}
-          onDoubleClick={() => keepSideW(SIDE_W)}
-          onKeyDown={(e) => {
-            const step = e.shiftKey ? 48 : 16
-            if (e.key === 'ArrowLeft') keepSideW(sideWidth - step)
-            else if (e.key === 'ArrowRight') keepSideW(sideWidth + step)
-            else if (e.key === 'Home') keepSideW(SIDE_W_MIN)
-            else if (e.key === 'End') keepSideW(SIDE_W_MAX)
-            else return
-            e.preventDefault()
-          }}
-        />
-      )}
+      {sideNode && !wbSideSlot ? sideNode : null}
       <div className={'convo-panes' + (splitShown ? ' is-split' : '') + (splitShown && splitIsCol ? ' is-split-col' : '') + (splitCompactCol ? ' is-compact-col' : '')} ref={panesEl}>
       <div
         className={'convo-main' + (splitShown && splitPane?.focused === 'primary' ? ' is-focused' : '')}
@@ -2509,13 +2542,14 @@ export function ConversationView({
           </div>
         )}
         {/* (Last over the composer, which it sits on as one piece.) */}
-        {convo.status === 'ready' && convo.running && (
+        {convo.status === 'ready' && runningItems.length > 0 && (
           <RunningWork
             scanOf={active && (!convo.bind?.agent || convo.bind.agent === 'claude') ? convo.of : undefined}
-            items={convo.running}
+            items={runningItems}
             waiting={waitingOn}
             openCmd={openCmd}
-            openSub={!convo.bind?.agent || convo.bind.agent === 'claude' || convo.bind.agent === 'codex' || convo.bind.agent === 'agy' ? openSub : undefined}
+            openSub={openSub}
+            subsOk={subsOk}
           />
         )}
         <ComposerSlotOf.Provider value={inWb ? setModelSlot : null}>{composer}</ComposerSlotOf.Provider>
@@ -2628,11 +2662,11 @@ export function ConversationView({
         <ForkAtOf.Provider value={undefined}>
         <RewindAtOf.Provider value={undefined}>
         <SubPanel
-          key={subs[subs.length - 1].agent}
+          key={(subs[subs.length - 1].cli ?? '') + ':' + subs[subs.length - 1].agent}
           of={convo.of}
           sub={subs[subs.length - 1]}
           depth={subs.length}
-          live={(a) => !!convo.running?.some((r) => r.kind === 'agent' && r.id === a) || !!agent?.tasks?.some((x) => x.kind === 'agent' && x.id === a) /* (one whose sending is before what the view read of its log: as the side list has it — review of 11-25) */}
+          live={(a) => runningItems.some((r) => r.kind === 'agent' && r.id === a) || !!agent?.tasks?.some((x) => x.kind === 'agent' && x.id === a) /* (one whose sending is before what the view read of its log: as the side list has it — review of 11-25) */}
           nav={subs.length === 1 ? workNav(subs[0].agent) : undefined}
           onOpen={(s) => setSubs((cur) => [...(cur ?? []), s])}
           onBack={() => setSubs((cur) => (cur && cur.length > 1 ? cur.slice(0, -1) : null))}
@@ -2762,10 +2796,10 @@ function AskDock({ children }: { children: ReactNode }) {
 const scanNow = (a?: SubScanAgent) => (a?.tool ? (a.tool.done ? t('convo.live.thinking') : liveText(a.tool)) : '')
 const scanTokens = (a?: SubScanAgent) => (a?.tokens ? t('convo.bgTokens', { n: tokens(a.tokens) }) : '')
 
-function RunningWork({ scanOf, items, waiting, openSub, openCmd }: { scanOf?: string; items: ConvoRunning[]; waiting?: number; openSub?: (s: Sub) => void; openCmd?: (r: ConvoRunning) => void }) {
+function RunningWork({ scanOf, items, waiting, openSub, openCmd, subsOk = true, readOnlySubHint }: { scanOf?: string; items: ConvoRunning[]; waiting?: number; openSub?: (s: Sub) => void; openCmd?: (r: ConvoRunning) => void; subsOk?: boolean; readOnlySubHint?: string }) {
   const [open, setOpen] = useState(false)
-  // (Those its subagents sent off in turn, known only from their logs.)
-  const scan = useSubScan(scanOf, items.some((r) => r.kind === 'agent'), open)
+  // (Those its subagents sent off in turn, known only from their logs — native Claude subagents only.)
+  const scan = useSubScan(scanOf, items.some((r) => r.kind === 'agent' && !r.agent), open)
   const nested = scan.filter((a) => (a.depth ?? 1) >= 2)
   const scanned = new Map(scan.map((a) => [a.id, a]))
   const many = items.length > 1 || nested.length > 0
@@ -2776,17 +2810,22 @@ function RunningWork({ scanOf, items, waiting, openSub, openCmd }: { scanOf?: st
   const first = items[0]
   // One row: what it is (to open, where there is something to open), its
   // figures in one column at the end, what it does now under it (opened).
-  const what = (label: string, onOpen: (() => void) | undefined, hint: string) =>
+  const what = (label: string, onOpen: (() => void) | undefined, hint: string, staticHint?: string) =>
     onOpen ? (
       <button type="button" className="convo-running-what" title={hint} onClick={onOpen}>
         {label}
       </button>
     ) : (
-      <span className="convo-running-what" title={label}>{label}</span>
+      <span className="convo-running-what" title={staticHint || label}>{label}</span>
     )
   const openOf = (r: ConvoRunning) =>
-    r.kind === 'agent' && openSub && isSubId(r.id) ? () => openSub({ agent: r.id, title: r.what }) : r.kind === 'cmd' && (r.cmd || r.out) && openCmd ? () => openCmd(r) : undefined
+    r.kind === 'agent' && openSub && isSubId(r.id) && (subsOk || !!r.agent)
+      ? () => openSub({ agent: r.id, title: r.what, cli: r.agent, since: r.ts ? Date.parse(r.ts) || undefined : undefined })
+      : r.kind === 'cmd' && (r.cmd || r.out) && openCmd
+        ? () => openCmd(r)
+        : undefined
   const hintOf = (r: ConvoRunning) => t(r.kind === 'agent' ? 'sub.open' : 'convo.bgDetails')
+  const staticHintOf = (r: ConvoRunning) => (r.kind === 'agent' && !openSub ? readOnlySubHint : undefined)
   const labelOf = (r: ConvoRunning) => r.what || t(r.kind === 'agent' ? 'convo.bgAgent' : 'convo.bgCmd')
   const figures = (a: SubScanAgent | undefined, ts?: string) => [scanTokens(a), since(ts)].filter(Boolean).join(' · ')
   const toggle = many && (
@@ -2810,7 +2849,12 @@ function RunningWork({ scanOf, items, waiting, openSub, openCmd }: { scanOf?: st
         {sum}
         {!open && first && (
           <span className="convo-running-first">
-            {what(labelOf(first), openOf(first), hintOf(first))}
+            {first.kind === 'agent' && first.agent && (
+              <span className="convo-running-first-ic" aria-hidden="true">
+                <AgentIcon program={first.agent} size={14} bare />
+              </span>
+            )}
+            {what(labelOf(first), openOf(first), hintOf(first), staticHintOf(first))}
             {first.note && <span className="convo-running-note" title={first.note}>{first.note}</span>}
             <span className="convo-running-since">{since(first.ts)}</span>
           </span>
@@ -2824,10 +2868,16 @@ function RunningWork({ scanOf, items, waiting, openSub, openCmd }: { scanOf?: st
         <div className={'convo-running-fold' + (open ? ' is-open' : '')} inert={!open}>
         <div className="convo-running-list">
           {items.map((r) => {
-            const a = scanned.get(r.id)
+            const a = r.agent ? undefined : scanned.get(r.id)
+            const isCli = r.kind === 'agent' && !!r.agent
             return (
-              <div key={r.id} className="convo-running-row">
-                {what(labelOf(r), openOf(r), hintOf(r))}
+              <div key={r.id} className={'convo-running-row' + (isCli ? ' is-cli-agent' : '')} data-bg-cli={isCli ? r.agent : undefined}>
+                {isCli && (
+                  <span className="convo-running-cli-ic" aria-hidden="true">
+                    <AgentIcon program={r.agent} size={14} bare />
+                  </span>
+                )}
+                {what(labelOf(r), openOf(r), hintOf(r), staticHintOf(r))}
                 <span className="convo-running-meta">{figures(a, r.ts)}</span>
                 {r.note && <span className="convo-running-note" title={r.note}>{r.note}</span>}
                 {scanNow(a) && <span className="convo-running-now" title={scanNow(a)}>{scanNow(a)}</span>}
@@ -4904,7 +4954,7 @@ export function AgentList({ rows, menus, onPicked, placed, query: given, onQuery
   // (Placed: in their order then, ties too; new ones after.)
   const first = placed ? [...placed.keys()] : []
   const place = (r: ConvoListRow) => (first.includes(r.key) ? first.indexOf(r.key) : first.length)
-  const found = query.trim() ? rows.filter((r) => matchQuery(query, r.title, r.where, r.program, r.projectKey, r.sessionGroup)) : rows
+  const found = query.trim() ? rows.filter((r) => rowMatchesQuery(r, query, matchQuery)) : rows
   const foundKeys = new Set(found.map((r) => r.key))
   // Global approval protection: blocked agents filtered out by search remain 1 click away.
   const hiddenBlocked = query.trim() ? rows.filter((r) => isLiveBlocked(r) && !foundKeys.has(r.key)) : []
@@ -5076,16 +5126,55 @@ export function AgentList({ rows, menus, onPicked, placed, query: given, onQuery
             childMap.set(r.nestedParentKey, list)
           }
         }
+        const renderCliChild = (r: ConvoListRow, x: RowTask) => (
+          <div
+            key={'cli:' + x.id}
+            data-flip={'c:' + r.key + ':' + x.id}
+            className="convo-list-item is-nested is-child is-single is-bg-cli"
+            onMouseEnter={(e) => {
+              if (!rowMenu && !isTouchOnly) scheduleRowTip(r.key, e.currentTarget, x)
+            }}
+            onMouseLeave={clearRowTip}
+          >
+            <button
+              type="button"
+              className="convo-list-row is-working is-nested is-child is-bg-cli"
+              data-bg-cli={x.agent}
+              data-bg-cli-id={x.id}
+              title={isTouchOnly ? x.name || x.cmd || undefined : undefined}
+              onClick={() => {
+                clearRowTip()
+                onPicked?.()
+                askTask(r.key, x)
+                r.onPick()
+              }}
+            >
+              <AgentIcon program={x.agent} size={flat ? (isTouchOnly ? 16 : 14) : 18} bare dot={flat ? 'working' : undefined} />
+              <span className="convo-list-text">
+                <span className="convo-list-line">
+                  <span className="convo-list-title">{x.name || x.cmd || t('convo.bgTasks.agent')}</span>
+                  <span className="convo-list-when">
+                    {!flat && <span className="convo-list-sdot is-working" aria-hidden="true" />}
+                    {x.since && <span className="convo-list-when-t">{shortFor(now - x.since)}</span>}
+                  </span>
+                </span>
+                <span className="convo-list-status is-working">{t('convo.status.working')}</span>
+              </span>
+            </button>
+          </div>
+        )
         const renderRow = (r: ConvoListRow, sub?: { count: number; collapsed: boolean; dot: string; onToggle: () => void }) => {
           const isChild = r.nestDepth === 1
           const isNestedVisual = !!g.tree || isChild
+          const { cliAgents, bgTasks: otherTasks } = splitRowTasks(r.tasks)
+          const hasBgWork = !!r.cmds || cliAgents.length > 0
           // (At rest, nothing to say of it but when.)
           const said = r.status === 'blocked' || r.status === 'working' || r.status === 'done'
           const since = stamp(r, now)
           // (Its turn over, work of its left going — subagents, commands —: said in
           // words by its time, as its hollow dot alone did not say it; what goes on,
           // in its tooltip. As the dot: running, or commands, not while it waits.)
-          const bgSaid = r.bg === 'running' || (r.cmds && r.status !== 'blocked') ? 'bg' : r.bg === 'stale' ? 'stale' : ''
+          const bgSaid = r.bg === 'running' || (hasBgWork && r.status !== 'blocked') ? 'bg' : r.bg === 'stale' ? 'stale' : ''
           const hasMenu = !!(menus && r.menu)
           const hasSub = !!sub
           const parentRef = r.viaParentTitle
@@ -5096,19 +5185,13 @@ export function AgentList({ rows, menus, onPicked, placed, query: given, onQuery
           // (A child's model first: what tells a parent's helpers apart — workbench 11-23.)
           const childSub = isChild ? [r.model ? shortModelName(r.model) : '', r.where, parentRef ? '↳ ' + parentRef : ''].filter(Boolean).join(' · ') : ''
           const isSingleChild = isChild && !childSub
-          // (Its state by one mark before its time — waits, works, done, work left
-          // going — in the colour the tabs give it; no longer a dot on its icon's
-          // corner, which had a tile drawn under it to sit on: redesign 11-23.)
-          // (Done on an API error, not seen yet: in red, and why, as a third line — workbench 11-23.)
-          // (Before commands it left running: an error to see to over a dev server going on — review of 11-23.)
+          // (Its state by one mark — shared with the top agent tabs via agentStatusMark.)
           const failed = r.status === 'done' && !r.bg ? r.failed : undefined
-          const mark = failed ? 'failed' : r.bg === 'running' || r.cmds ? 'bg' : said ? r.status : ''
+          const mark = agentStatusMark(r)
           // (One line a row, with a mouse: its state the dot on its icon's corner, and
           // "Background" said in its hover card, not in the line — workbench 11-23, plan 2.)
           const bgWords = flat ? '' : bgSaid
-          // (Its dot there: work left going but not seen to — a grey ring of its own, not
-          // a done's green or nothing; what waits on the person first — review of 11-23.)
-          const iconDot = !flat ? '' : failed ? 'failed' : r.status === 'blocked' ? 'blocked' : r.bg === 'running' || r.cmds ? 'bg' : r.bg === 'stale' ? 'stale' : mark
+          const iconDot = flat ? mark : ''
           // (Words typed to it and not sent, it not in front: "Draft" where its time was, a pencil
           // before — as a chat app marks one; no more weight than its time had. Doc UI item 20, 11-26.)
           const drafted = !r.current && hasAgentDraft(r.key)
@@ -5251,7 +5334,7 @@ export function AgentList({ rows, menus, onPicked, placed, query: given, onQuery
                 {/* (Its status by its dot only, and its group: in words for a screen
                     reader, and shown where the system's colours take the dot's away.) */}
                 {/* (Commands it left running: at work in the background, as its group says — review batch4.) */}
-                {(said || r.bg || r.cmds) && <span className={'convo-list-status is-' + (r.cmds && r.status !== 'blocked' && !failed ? 'working' : r.status)}>{t(failed ? 'convo.status.failed' : r.bg === 'running' ? 'convo.status.bg' : r.bg === 'stale' ? 'convo.status.bgStale' : r.cmds && r.status !== 'blocked' ? 'convo.status.bg' : (`convo.status.${r.status}` as I18nKey))}</span>}
+                {(said || r.bg || hasBgWork) && <span className={'convo-list-status is-' + (hasBgWork && r.status !== 'blocked' && !failed ? 'working' : r.status)}>{t(failed ? 'convo.status.failed' : r.bg === 'running' ? 'convo.status.bg' : r.bg === 'stale' ? 'convo.status.bgStale' : hasBgWork && r.status !== 'blocked' ? 'convo.status.bg' : (`convo.status.${r.status}` as I18nKey))}</span>}
                 {r.status === 'blocked' && r.now && <span className="convo-list-now is-blocked">{r.now}</span>}
                 {failed && <span className="convo-list-now is-failed">{failedWhy(failed)}</span>}
               </span>
@@ -5291,10 +5374,13 @@ export function AgentList({ rows, menus, onPicked, placed, query: given, onQuery
             )}
             </div>
           )
-          return r.tasks ? (
+          const nestedCliList = isChild ? visibleCliAgents(r, query, false, matchQuery) : []
+          const nestedCli = nestedCliList.length > 0 ? <div className="convo-list-children is-nested-cli">{nestedCliList.map((x) => renderCliChild(r, x))}</div> : null
+          return otherTasks.length > 0 || nestedCli ? (
             <Fragment key={r.key}>
               {item}
-              {bgTasks(r, r.tasks, isChild)}
+              {nestedCli}
+              {otherTasks.length > 0 && bgTasks(r, otherTasks, isChild)}
             </Fragment>
           ) : (
             item
@@ -5379,12 +5465,15 @@ export function AgentList({ rows, menus, onPicked, placed, query: given, onQuery
               i++
             }
             const allKids = childMap.get(r.key) ?? kidsInList
+            const { cliAgents } = splitRowTasks(r.tasks)
+            const totalKids = kidsInList.length + cliAgents.length
             const isParentCollapsed = !query.trim() && parentFolded.includes(r.key)
             const visibleKids = isParentCollapsed ? kidsInList.filter((k) => k.current || isLiveBlocked(k)) : kidsInList
+            const visibleCli = visibleCliAgents(r, query, isParentCollapsed, matchQuery)
             const subDot = isParentCollapsed
               ? allKids.some(isLiveBlocked)
                 ? 'blocked'
-                : allKids.some((k) => k.status === 'working' || !!k.cmds)
+                : allKids.some((k) => k.status === 'working' || !!k.cmds || hasBgCli(k)) || cliAgents.length > 0
                   ? 'working'
                   : allKids.some((k) => k.status === 'done')
                     ? 'done'
@@ -5394,11 +5483,16 @@ export function AgentList({ rows, menus, onPicked, placed, query: given, onQuery
               <Fragment key={r.key}>
                 {renderRow(
                   r,
-                  kidsInList.length > 0
-                    ? { count: kidsInList.length, collapsed: isParentCollapsed, dot: subDot, onToggle: () => toggleParentFolded(r.key) }
+                  totalKids > 0
+                    ? { count: totalKids, collapsed: isParentCollapsed, dot: subDot, onToggle: () => toggleParentFolded(r.key) }
                     : undefined,
                 )}
-                {visibleKids.length > 0 && <div className="convo-list-children">{visibleKids.map((k) => renderRow(k))}</div>}
+                {(visibleCli.length > 0 || visibleKids.length > 0) && (
+                  <div className="convo-list-children">
+                    {visibleCli.map((x) => renderCliChild(r, x))}
+                    {visibleKids.map((k) => renderRow(k))}
+                  </div>
+                )}
               </Fragment>,
             )
           }
@@ -5481,17 +5575,20 @@ export function AgentList({ rows, menus, onPicked, placed, query: given, onQuery
         const left = rowTip.rect.right + 10 + cardW <= vw - 8 ? rowTip.rect.right + 10 : Math.max(8, rowTip.rect.left - cardW - 10)
         const top = Math.min(Math.max(8, rowTip.rect.top - 4), Math.max(8, vh - 200))
         const isCmd = x.kind === 'cmd'
-        const words = isCmd && x.cmd && x.cmd !== x.name ? x.cmd : ''
+        const isCli = x.kind === 'agent' && !!x.agent
+        const words = (isCmd || isCli) && x.cmd && x.cmd !== x.name ? x.cmd : ''
         const outName = x.out ? x.out.slice(x.out.lastIndexOf('/') + 1) : ''
         return (
           <div className="convo-row-tip is-task" role="tooltip" style={{ top, left }}>
             <div className="convo-row-tip-head">
-              <span className="convo-row-tip-taskic" aria-hidden="true">{isCmd ? <SquareTerminal size={14} /> : <Bot size={14} />}</span>
+              <span className="convo-row-tip-taskic" aria-hidden="true">
+                {isCli ? <AgentIcon program={x.agent} size={14} bare /> : isCmd ? <SquareTerminal size={14} /> : <Bot size={14} />}
+              </span>
               <div className="convo-row-tip-titles">
                 <div className={'convo-row-tip-title' + (isCmd && !words && x.name ? ' is-mono' : '')}>{x.name || t(isCmd ? 'convo.rowTip.bgCmd' : 'convo.bgTasks.agent')}</div>
                 <div className="convo-row-tip-state">
                   <span className={'convo-bgdot' + (x.live || isCmd ? ' is-live' : '')} aria-hidden="true" />
-                  <span>{isCmd ? t('convo.rowTip.bgCmd') : t('convo.bgTasks.agent')}</span>
+                  <span>{isCli ? t('convo.rowTip.bgCli', { cli: agentName(x.agent) }) : isCmd ? t('convo.rowTip.bgCmd') : t('convo.bgTasks.agent')}</span>
                   {x.since && <span className="convo-row-tip-time">{t('convo.bgCmdFor', { for: duration(Math.max(now - x.since, 0)) })}</span>}
                 </div>
               </div>
@@ -5511,30 +5608,22 @@ export function AgentList({ rows, menus, onPicked, placed, query: given, onQuery
         const tipRow = rows.find((r) => r.key === rowTip.key)
         if (!tipRow) return null
         const tipSince = stamp(tipRow, now)
+        const tipMark = agentStatusMark(tipRow)
         const tipStatusKey: I18nKey | null =
-          tipRow.status === 'blocked'
+          tipMark === 'blocked'
             ? 'convo.status.blocked'
-            : tipRow.status === 'working'
+            : tipMark === 'working'
               ? 'convo.status.working'
-              : tipRow.bg === 'running' || tipRow.cmds
+              : tipMark === 'bg'
                 ? 'convo.status.bg'
-                : tipRow.bg === 'stale'
+                : tipMark === 'stale'
                   ? 'convo.status.bgStale'
-                  : tipRow.status === 'done'
-                    ? 'convo.status.done'
-                    : null
-        const tipStatusTone =
-          tipRow.status === 'blocked'
-            ? 'blocked'
-            : tipRow.status === 'working'
-              ? 'working'
-              : tipRow.bg === 'running' || tipRow.cmds
-                ? 'bg'
-                : tipRow.bg === 'stale'
-                  ? 'stale'
-                  : tipRow.status === 'done'
-                    ? 'done'
-                    : ''
+                  : tipMark === 'failed'
+                    ? 'convo.status.failed'
+                    : tipMark === 'done'
+                      ? 'convo.status.done'
+                      : null
+        const tipStatusTone = tipMark
         const tipParent = tipRow.parentKey ? rows.find((p) => p.key === tipRow.parentKey)?.title : ''
         const cmds = tipRow.cmds?.list ?? []
         // (More of it, doc UI item 9, 11-24: what it is at — the step under way, or how its answer begins —, the
@@ -5659,7 +5748,7 @@ const KEY_SIDE = mac ? '⌘B' : 'Ctrl+B'
 // its tasks, its context (its window only where known: past the window, not
 // that one), its model, effort and mode as they are now (a switch's, before
 // the log says it).
-function cardData(convo: Convo, list: Item[], mode?: ModeSwitch, effort?: EffortSwitch, cmds?: RowCmds): CardData {
+function cardData(convo: Convo, list: Item[], mode?: ModeSwitch, effort?: EffortSwitch, cmds?: RowCmds, running?: ConvoRunning[]): CardData {
   const [sid, ofPane] = (convo.of ?? '').split(' ')
   const pane = ofPane || convo.bind?.pane || '' // (a tmux session's conversation: its own pane, not the focused one)
   const files = new Map<string, { path: string; add: number; del: number; key: string }>()
@@ -5682,7 +5771,7 @@ function cardData(convo: Convo, list: Item[], mode?: ModeSwitch, effort?: Effort
     sid,
     pane,
     edits: files.size ? { files: [...files.values()].reverse(), add, del } : null,
-    running: convo.running ?? [],
+    running: running ?? convo.running ?? [],
     cmds,
     tasks: convo.tasks?.length ? convo.tasks : null,
     ctx: used ? { used, window: meta.window && used <= meta.window ? meta.window : undefined } : null,
@@ -6420,8 +6509,12 @@ export const recapText = (s: string) => s.replace(/\s*\((?:disable|turn off)[^()
 // (The conversation's terminal, for a line that sends one there.)
 
 // A subagent sent off, whose own conversation can be shown: by its id.
-type Sub = { agent: string; title?: string }
+// When cli is set ('agy' | 'claude' | 'codex'), it is a recognized agent CLI
+// running inside a background command (read-only view, parsed in its own format;
+// nested subagents spawned inside it are displayed as non-clickable rows).
+type Sub = { agent: string; title?: string; cli?: string; since?: number }
 const OpenSub = createContext<((s: Sub) => void) | undefined>(undefined)
+const SubReadOnlyHint = createContext<string | undefined>(undefined)
 // The turn under way, as Claude Code's spinner line says it beside its seconds — "(9s · ↓ 1.2k tokens · thinking
 // with high effort)": the tokens written so far and how hard it thinks, for the line of the step under way (doc UI 30).
 const TurnLive = createContext<{ out?: number; effort?: string }>({})
@@ -6534,10 +6627,12 @@ const isSubId = (id: string) => /^[a-z0-9]{6,40}$/.test(id) || /^[0-9a-f]{8}-[0-
 // (back: to the one that sent it).
 function SubPanel({ of, sub, depth, live, nav, onOpen, onBack, onClose, active, copy }: { of: string; sub: Sub; depth: number; live: (agent: string) => boolean; nav?: WorkNav; onOpen: (s: Sub) => void; onBack: () => void; onClose: () => void; active: boolean; copy: (s: string) => void }) {
   const [sessionId, pane = ''] = of.split(' ')
+  const isCli = !!sub.cli
+  const cliNestedHint = isCli ? t('sub.cliNestedReadOnly') : undefined
   // (Of one sent off by the session's agent, as its running list says; of
   // one sent off by a subagent, while its log keeps growing.)
   const told = depth === 1 && live(sub.agent)
-  const c = useSubConvo(sessionId, pane, sub.agent, told, active, depth > 1)
+  const c = useSubConvo(sessionId, pane, sub.agent, told, active, depth > 1, sub.cli)
   const going = depth === 1 ? told : c.growing
   const panel = useRef<HTMLElement>(null)
   const [opened, setOpened] = useState<Record<string, boolean>>({})
@@ -6545,8 +6640,8 @@ function SubPanel({ of, sub, depth, live, nav, onOpen, onBack, onClose, active, 
   // What it handed back is its answer, shown as one, not a step among the steps.
   const { steps, report } = useMemo(() => subReport(c.entries), [c.entries])
   const list = useMemo(() => items(steps, going, going), [steps, going])
-  // (How it stands now, while it goes on: read off its log with the others': subscan.ts.)
-  const scanned = useSubScan(active ? of : undefined, going, true).find((a) => a.id === sub.agent)
+  // (How it stands now, while it goes on: read off its log with the others': subscan.ts — native Claude subagents only.)
+  const scanned = useSubScan(active && !isCli ? of : undefined, going, true).find((a) => a.id === sub.agent)
   useTick(going) // (its time said goes on)
   // While it goes on: shown at its latest, and kept there as it goes, unless
   // the person has scrolled up to read (then left where they are). 11-13:
@@ -6599,21 +6694,36 @@ function SubPanel({ of, sub, depth, live, nav, onOpen, onBack, onClose, active, 
     window.addEventListener('keydown', onKey, true)
     return () => window.removeEventListener('keydown', onKey, true)
   }, [onBack, onClose, active, depth])
+  const cliEyebrow = isCli ? t('sub.cliReadOnly', { cli: agentName(sub.cli) }) : ''
+  const cliSince = isCli && sub.since ? since(new Date(sub.since).toISOString()) : ''
   return (
-    <aside className="convo-panel convo-sub" aria-label={t('sub.title')} tabIndex={-1} ref={panel}>
+    <aside className={'convo-panel convo-sub' + (isCli ? ' is-cli' : '')} data-bg-cli={sub.cli || undefined} aria-label={t('sub.title')} tabIndex={-1} ref={panel}>
       <div className="convo-panel-head">
         {depth > 1 && (
           <button type="button" className="icon-btn" onClick={onBack} aria-label={t('common.back')} title={t('common.back')}>
             <ChevronRight size={16} className="is-back" />
           </button>
         )}
+        {isCli && (
+          <span className="convo-sub-head-ic" aria-hidden="true">
+            <AgentIcon program={sub.cli} size={18} bare />
+          </span>
+        )}
         {/* (As the changes panel's head: a small word for what it is, its name, how it goes.) */}
         <div className="convo-panel-headtext">
-          <span className="convo-panel-eyebrow">{nav ? t('convo.workOf', { what: t('sub.kind'), i: nav.i + 1, n: nav.n }) : t('sub.title')}</span>
+          <span className="convo-panel-eyebrow">{nav ? t('convo.workOf', { what: isCli ? cliEyebrow : t('sub.kind'), i: nav.i + 1, n: nav.n }) : isCli ? cliEyebrow : t('sub.title')}</span>
           <h2 className="convo-panel-title is-one" title={sub.title}>
             {sub.title || t('sub.title')}
           </h2>
-          {(going || report) && <span className="convo-panel-sub convo-sub-state">{going ? [t('sub.going'), since(scanned?.ts), scanTokens(scanned)].filter(Boolean).join(t('convo.sep')) : t('sub.handedBack')}</span>}
+          {(going || report || isCli) && (
+            <span className="convo-panel-sub convo-sub-state">
+              {going
+                ? [t('sub.going'), isCli ? cliSince : since(scanned?.ts), isCli ? '' : scanTokens(scanned)].filter(Boolean).join(t('convo.sep'))
+                : isCli
+                  ? t('sub.cliEnded')
+                  : t('sub.handedBack')}
+            </span>
+          )}
         </div>
         {nav && <WorkStep nav={nav} />}
         {/* (Read again every few seconds while it goes on: by hand, where a read failed or it has ended — not a phone's room for it.) */}
@@ -6639,7 +6749,8 @@ function SubPanel({ of, sub, depth, live, nav, onOpen, onBack, onClose, active, 
         )}
         {c.failed && <LoadErrorLine onRetry={c.read} />}
         {!c.failed && !c.loading && list.length === 0 && <p className="convo-older">{t('sub.empty')}</p>}
-        <OpenSub.Provider value={onOpen}>
+        <OpenSub.Provider value={isCli ? undefined : onOpen}>
+          <SubReadOnlyHint.Provider value={cliNestedHint}>
           <WordsAsWritten.Provider value={true}>
           {list.map((it) => (
             <ListItem key={itemKey(it)} it={it} copy={copy} open={it.kind === 'work' ? !!opened[it.key] : false} onToggle={toggle} onShow={noShow} />
@@ -6652,11 +6763,12 @@ function SubPanel({ of, sub, depth, live, nav, onOpen, onBack, onClose, active, 
               {report.cut && <p className="convo-older">{t('sub.reportCut')}</p>}
             </section>
           )}
+          </SubReadOnlyHint.Provider>
         </OpenSub.Provider>
       </div>
       {going && c.running.length > 0 && (
         <div className="convo-sub-foot">
-          <RunningWork items={c.running} openSub={onOpen} />
+          <RunningWork items={c.running} openSub={isCli ? undefined : onOpen} readOnlySubHint={cliNestedHint} />
         </div>
       )}
     </aside>
@@ -7410,6 +7522,7 @@ function Work({ it, open, onToggle, onCopy }: { it: Extract<Item, { kind: 'work'
   // name, each to be read; and with calls beside it the last of what it
   // thought, a line (at most one for a run, however long it thought).
   const openSub = useContext(OpenSub)
+  const subReadOnlyHint = useContext(SubReadOnlyHint)
   const sent = tools.filter((tl) => category(tl.name) === 'agent' && tl.title)
   const lastThought = tools.length
     ? it.steps.findLast((x): x is ConvoPart => !isNote(x) && x.kind === 'thinking' && !!x.text?.trim())
@@ -7508,7 +7621,7 @@ function Work({ it, open, onToggle, onCopy }: { it: Extract<Item, { kind: 'work'
                   {tl.title}
                 </button>
               ) : (
-                tl.title
+                <span title={tl.agent_id && subReadOnlyHint ? subReadOnlyHint : undefined}>{tl.title}</span>
               )}
             </li>
           ))}
@@ -7757,6 +7870,7 @@ const exitCode = (tool: ConvoTool) => (tool.error ? /^Exit code (\d{1,3})\b/.exe
 
 function ToolRow({ tool, onCopy, live }: { tool: ConvoTool; onCopy: (s: string) => void; live?: boolean }) {
   const openSub = useContext(OpenSub)
+  const subReadOnlyHint = useContext(SubReadOnlyHint)
   const openAll = useContext(OpenAllOf)
   const wantFull = openAll >= 2
   // (Opened or shown in full: kept by the call, so it is so when its
@@ -7847,11 +7961,13 @@ function ToolRow({ tool, onCopy, live }: { tool: ConvoTool; onCopy: (s: string) 
               <button type="button" className="md-code-copy" onClick={() => onCopy(d)}>{t('common.copy')}</button>
             </div>
           )}
-          {tool.agent_id && openSub && (
+          {tool.agent_id && openSub ? (
             <button type="button" className="link-btn convo-sub-open" onClick={() => openSub({ agent: tool.agent_id!, title: tool.title || firstLine(tool.detail ?? '') })}>
               {t('sub.open')}
             </button>
-          )}
+          ) : tool.agent_id && subReadOnlyHint ? (
+            <span className="convo-older" title={subReadOnlyHint}>{subReadOnlyHint}</span>
+          ) : null}
           {tool.asks && !tool.answers && (
             // (A question put to the person, its choices: Codex's, read only.)
             <dl className="convo-ask-answers">

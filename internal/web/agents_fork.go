@@ -179,7 +179,8 @@ for d in /proc/[0-9]*; do
 done
 printf '%s\n' "$homes" | grep -v '^$' | head -n 8 | while IFS= read -r h; do find "$h/sessions" -mindepth 4 -maxdepth 4 -type f -name ` + sshx.QuoteShell("rollout-*-"+id+".jsonl") + ` 2>/dev/null; done | head -n 2`
 	}
-	return `find "$HOME/.claude/projects" -mindepth 2 -maxdepth 2 -type f -name ` + sshx.QuoteShell(id+".jsonl") + ` 2>/dev/null | head -n 2`
+	return claudeConfigDirsSh + `claude_cfg_dirs
+printf '%s\n' "$cldirs" | grep -v '^$' | head -n 8 | while IFS= read -r h; do find "$h/projects" -mindepth 2 -maxdepth 2 -type f -name ` + sshx.QuoteShell(id+".jsonl") + ` 2>/dev/null; done | head -n 2`
 }
 
 // forkCutCommand: how many bytes of log src come before the first line

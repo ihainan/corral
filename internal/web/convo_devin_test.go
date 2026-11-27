@@ -526,10 +526,20 @@ func TestConvoLocateDevinProcesses(t *testing.T) {
 		t.Fatal(err)
 	}
 	by := map[int64]convoProc{}
+	self := int64(os.Getpid())
 	for _, p := range parseConvoLocate(string(out)).procs {
-		// (Only this test's: a real Devin on the host is found too.)
-		if p.agent == "devin" && strings.HasPrefix(p.log, home+"/") {
-			by[p.pid] = p
+		// (Only this test's: a real Devin on the host is found too, and so is
+		// another test binary's fake one when two runs share the machine; the
+		// log path alone does not tell them apart, this process among its
+		// ancestors does.)
+		if p.agent != "devin" || !strings.HasPrefix(p.log, home+"/") {
+			continue
+		}
+		for _, a := range p.anc {
+			if a.pid == self {
+				by[p.pid] = p
+				break
+			}
 		}
 	}
 	if p, ok := by[int64(tui)]; !ok || p.sid != "cuddly-dime" || !strings.HasSuffix(p.log, "/devin/cli/sessions.db") || p.herdrPane != "w1:p1" {

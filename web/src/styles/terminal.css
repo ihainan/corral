@@ -19,7 +19,48 @@ html.term-mode body { position: fixed; inset: 0; }
   --wb-warn: var(--term-warn-text); --wb-ok: var(--term-ok-text); --wb-danger: var(--term-danger-text);
   --wb-focus: inset 0 0 0 2px var(--term-accent-text); --wb-accent: var(--term-accent-text); --wb-accent-soft: var(--term-accent-soft);
 }
+.term-root, .term-vars { --sb-fg: var(--term-fg); }
+/* Shared slim scrollbars for terminal/agent scroll areas (sidebars, quick
+   switcher, conversation thread, side panels, popovers, dialogs). Matches
+   app.css; excludes xterm's own viewport and .convo-panelwin-screen. */
+@media (forced-colors: none) {
+  :where(.convo-side > .convo-list-groups, .convo-picker > .convo-list-groups, .agents-list, .agents-list.agents-phone > .convo-list-groups, .convo-scroll, .convo-panel-files, .convo-panel-body, .convo-tray-info, .gch, .convo-hunks, .convo-pre, .convo-tasks-list, .convo-dock-ask, .convo-ask-lead, .convo-ask-block, .convo-ask-plan, .convo-running-list, .convo-search-hits, .convo-runs-pop, .convo-models-scroll, .convo-notice-body, .convo-api-err-raw, .convo-task-full, .claude-card-text, .bg-out, .composer-complete, .new-tab-list, .new-agent-olds, .host-history-list, .sc-panel, .sc-page, .copy-text, .player-stage)::-webkit-scrollbar {
+    width: 8px; height: 8px;
+  }
+  :where(.convo-side > .convo-list-groups, .convo-picker > .convo-list-groups, .agents-list, .agents-list.agents-phone > .convo-list-groups, .convo-scroll, .convo-panel-files, .convo-panel-body, .convo-tray-info, .gch, .convo-hunks, .convo-pre, .convo-tasks-list, .convo-dock-ask, .convo-ask-lead, .convo-ask-block, .convo-ask-plan, .convo-running-list, .convo-search-hits, .convo-runs-pop, .convo-models-scroll, .convo-notice-body, .convo-api-err-raw, .convo-task-full, .claude-card-text, .bg-out, .composer-complete, .new-tab-list, .new-agent-olds, .host-history-list, .sc-panel, .sc-page, .copy-text, .player-stage)::-webkit-scrollbar-track,
+  :where(.convo-side > .convo-list-groups, .convo-picker > .convo-list-groups, .agents-list, .agents-list.agents-phone > .convo-list-groups, .convo-scroll, .convo-panel-files, .convo-panel-body, .convo-tray-info, .gch, .convo-hunks, .convo-pre, .convo-tasks-list, .convo-dock-ask, .convo-ask-lead, .convo-ask-block, .convo-ask-plan, .convo-running-list, .convo-search-hits, .convo-runs-pop, .convo-models-scroll, .convo-notice-body, .convo-api-err-raw, .convo-task-full, .claude-card-text, .bg-out, .composer-complete, .new-tab-list, .new-agent-olds, .host-history-list, .sc-panel, .sc-page, .copy-text, .player-stage)::-webkit-scrollbar-corner {
+    background: transparent;
+  }
+  :where(.convo-side > .convo-list-groups, .convo-picker > .convo-list-groups, .agents-list, .agents-list.agents-phone > .convo-list-groups, .convo-scroll, .convo-panel-files, .convo-panel-body, .convo-tray-info, .gch, .convo-hunks, .convo-pre, .convo-tasks-list, .convo-dock-ask, .convo-ask-lead, .convo-ask-block, .convo-ask-plan, .convo-running-list, .convo-search-hits, .convo-runs-pop, .convo-models-scroll, .convo-notice-body, .convo-api-err-raw, .convo-task-full, .claude-card-text, .bg-out, .composer-complete, .new-tab-list, .new-agent-olds, .host-history-list, .sc-panel, .sc-page, .copy-text, .player-stage)::-webkit-scrollbar-thumb {
+    min-height: 28px; border-radius: 999px; border: 2px solid transparent; background-clip: content-box;
+    background-color: color-mix(in srgb, var(--sb-fg, var(--fg)) 14%, transparent);
+  }
+  :where(.convo-side > .convo-list-groups, .convo-picker > .convo-list-groups, .agents-list, .agents-list.agents-phone > .convo-list-groups, .convo-scroll, .convo-panel-files, .convo-panel-body, .convo-tray-info, .gch, .convo-hunks, .convo-pre, .convo-tasks-list, .convo-dock-ask, .convo-ask-lead, .convo-ask-block, .convo-ask-plan, .convo-running-list, .convo-search-hits, .convo-runs-pop, .convo-models-scroll, .convo-notice-body, .convo-api-err-raw, .convo-task-full, .claude-card-text, .bg-out, .composer-complete, .new-tab-list, .new-agent-olds, .host-history-list, .sc-panel, .sc-page, .copy-text, .player-stage):hover::-webkit-scrollbar-thumb {
+    background-color: color-mix(in srgb, var(--sb-fg, var(--fg)) 26%, transparent);
+  }
+  :where(.convo-side > .convo-list-groups, .convo-picker > .convo-list-groups, .agents-list, .agents-list.agents-phone > .convo-list-groups, .convo-scroll, .convo-panel-files, .convo-panel-body, .convo-tray-info, .gch, .convo-hunks, .convo-pre, .convo-tasks-list, .convo-dock-ask, .convo-ask-lead, .convo-ask-block, .convo-ask-plan, .convo-running-list, .convo-search-hits, .convo-runs-pop, .convo-models-scroll, .convo-notice-body, .convo-api-err-raw, .convo-task-full, .claude-card-text, .bg-out, .composer-complete, .new-tab-list, .new-agent-olds, .host-history-list, .sc-panel, .sc-page, .copy-text, .player-stage)::-webkit-scrollbar-thumb:hover {
+    background-color: color-mix(in srgb, var(--sb-fg, var(--fg)) 42%, transparent);
+  }
+  :where(.convo-side > .convo-list-groups, .convo-picker > .convo-list-groups, .agents-list, .agents-list.agents-phone > .convo-list-groups, .convo-scroll, .convo-panel-files, .convo-panel-body, .convo-tray-info, .gch, .convo-hunks, .convo-pre, .convo-tasks-list, .convo-dock-ask, .convo-ask-lead, .convo-ask-block, .convo-ask-plan, .convo-running-list, .convo-search-hits, .convo-runs-pop, .convo-models-scroll, .convo-notice-body, .convo-api-err-raw, .convo-task-full, .claude-card-text, .bg-out, .composer-complete, .new-tab-list, .new-agent-olds, .host-history-list, .sc-panel, .sc-page, .copy-text, .player-stage)::-webkit-scrollbar-thumb:active {
+    background-color: color-mix(in srgb, var(--sb-fg, var(--fg)) 56%, transparent);
+  }
+  @supports not selector(::-webkit-scrollbar) {
+    :where(.convo-side > .convo-list-groups, .convo-picker > .convo-list-groups, .agents-list, .agents-list.agents-phone > .convo-list-groups, .convo-scroll, .convo-panel-files, .convo-panel-body, .convo-tray-info, .gch, .convo-hunks, .convo-pre, .convo-tasks-list, .convo-dock-ask, .convo-ask-lead, .convo-ask-block, .convo-ask-plan, .convo-running-list, .convo-search-hits, .convo-runs-pop, .convo-models-scroll, .convo-notice-body, .convo-api-err-raw, .convo-task-full, .claude-card-text, .bg-out, .composer-complete, .new-tab-list, .new-agent-olds, .host-history-list, .sc-panel, .sc-page, .copy-text, .player-stage) {
+      scrollbar-width: thin;
+      scrollbar-color: color-mix(in srgb, var(--sb-fg, var(--fg)) 16%, transparent) transparent;
+    }
+    :where(.convo-side > .convo-list-groups, .convo-picker > .convo-list-groups, .agents-list, .agents-list.agents-phone > .convo-list-groups, .convo-scroll, .convo-panel-files, .convo-panel-body, .convo-tray-info, .gch, .convo-hunks, .convo-pre, .convo-tasks-list, .convo-dock-ask, .convo-ask-lead, .convo-ask-block, .convo-ask-plan, .convo-running-list, .convo-search-hits, .convo-runs-pop, .convo-models-scroll, .convo-notice-body, .convo-api-err-raw, .convo-task-full, .claude-card-text, .bg-out, .composer-complete, .new-tab-list, .new-agent-olds, .host-history-list, .sc-panel, .sc-page, .copy-text, .player-stage):is(:hover, :focus-within) {
+      scrollbar-color: color-mix(in srgb, var(--sb-fg, var(--fg)) 34%, transparent) transparent;
+    }
+  }
+}
 .term-root.wb-on { padding: 0 0 var(--wb-status) var(--wb-rail); }
+/* (The workbench agents layout: sidebar full-height on the left beside the rail, tabs + conversation on the right.) */
+.wb-agent-layout { flex: 1; min-height: 0; min-width: 0; display: flex; position: relative; }
+.wb-side-slot { display: contents; }
+.wb-agent-main { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; position: relative; }
+.wb-agent-main > .term-bar { padding-left: 0; }
+.wb-agent-layout > .convo-side { padding-top: env(safe-area-inset-top, 0px); }
 /* (The status bar under them keeps the home indicator's strip (--wb-status): none kept again — review E, 11-24) */
 .term-root.wb-on .convo-dock, .term-root.wb-on .keybar { padding-bottom: 6px; }
 .term-root.wb-on .term-ended { padding-bottom: 8px; }
@@ -66,8 +107,18 @@ html.term-mode body { position: fixed; inset: 0; }
   padding: env(safe-area-inset-top, 0px) max(4px, env(safe-area-inset-right, 0px)) 0 max(4px, env(safe-area-inset-left, 0px));
   background: var(--term-bg); border-bottom: 1px solid var(--term-line);
 }
+.term-bar:has(.term-tabs) {
+  --tab-strip: color-mix(in srgb, var(--term-fg) 4%, var(--term-chrome));
+  --tab-hover: var(--term-hover);
+  background: var(--tab-strip); border-bottom: 0;
+}
+.term-root.light .term-bar:has(.term-tabs) { --tab-hover: color-mix(in srgb, var(--term-bg) 60%, transparent); }
 @media (pointer: fine) {
   .term-bar { height: calc(36px + env(safe-area-inset-top, 0px)); background: var(--term-chrome); }
+  .term-bar:has(.term-tabs) { height: calc(38px + env(safe-area-inset-top, 0px)); background: var(--tab-strip); }
+}
+@media (forced-colors: active) {
+  .term-bar:has(.term-tabs) { border-bottom: 1px solid CanvasText; }
 }
 /* A phone with its keyboard up, in a terminal: the top bar folds away, its
    rows go to the terminal (a TUI's input box needs them: Claude Code in ten
@@ -408,11 +459,13 @@ html.kb-open .keybar { padding-bottom: 6px; }
   user-select: text; -webkit-user-select: text; -webkit-touch-callout: default;
 }
 
-/* Session tabs (desktop): in the top bar, in place of the switcher */
+/* Session tabs (desktop): Chrome-style soft tabs in the top bar */
 .term-tabs {
-  display: flex; align-items: center; gap: 2px; min-width: 0; flex: 0 1 auto; overflow-x: auto; scrollbar-width: none;
-  margin-left: 4px; padding: 0 2px;
+  --tab-r: 10px;
+  display: flex; align-self: stretch; align-items: flex-end; gap: 0; min-width: 0; flex: 0 1 auto;
+  overflow-x: auto; scrollbar-width: none; margin-left: 4px; padding: 5px 10px 0;
 }
+.term-root.wb-on .term-tabs { margin-left: 0; }
 .term-tabs::-webkit-scrollbar { display: none; }
 /* Tabs past either end: that end fades (ux1101 T27). */
 .term-tabs.fade-r { -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 28px), transparent); mask-image: linear-gradient(to right, #000 calc(100% - 28px), transparent); }
@@ -427,59 +480,87 @@ html.kb-open .keybar { padding-bottom: 6px; }
 .term-tab-note-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* (A key or a shortcut reached by the keyboard: shown, inside it — the bar scrolls and clips what is outside — review.) */
 .term-root .kb-key:focus-visible, .term-root.light .kb-key:focus-visible, .term-root .sc-item:focus-visible, .term-root.light .sc-item:focus-visible { outline: none; box-shadow: inset 0 0 0 2px var(--term-accent-text); }
-/* The tabs sit on the bar's floor, as a browser's: the one in front is of a
-   piece with the page under it (its ground, a hairline on three sides, none
-   under it — it covers the bar's own line), the others text on the bar, a
-   hairline between them, all of one width that gives way as they grow many
-   (11-25: the floating pill read as a button, not a tab). */
-.term-tabs { align-self: stretch; align-items: flex-end; gap: 0; margin-bottom: -1px; padding: 4px 2px 0; }
+/* Chrome-style tabs: the front tab has rounded top corners and outward
+   concave bottom fillets merging seamlessly into the content area below
+   (same --term-bg, no divider); inactive tabs sit bare on the strip with
+   hairline dividers and float a soft rounded pill on hover. */
 .term-tab {
-  position: relative; display: flex; align-items: center; gap: 6px; flex: 0 1 200px; min-width: 72px; max-width: 200px; height: 100%; padding: 0 12px;
-  border: 0; border-radius: var(--r) var(--r) 0 0; background: none; color: var(--term-fg-2); font: 500 13px/1 var(--font-ui); cursor: pointer;
-  user-select: none; -webkit-user-select: none; -webkit-touch-callout: none;
+  position: relative; z-index: 0; display: flex; align-items: center; gap: 4px; flex: 0 1 200px; min-width: 112px; max-width: 220px; height: 100%; padding: 0 10px;
+  border: 0; border-radius: var(--tab-r) var(--tab-r) 0 0; background: none; color: var(--term-fg-2); font: 500 13px/1 var(--font-ui); cursor: pointer;
+  user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; transition: color 0.12s var(--ease);
 }
 .term-tabs:not(.agent-tabs) .term-tab { flex-basis: 220px; min-width: 120px; max-width: 240px; } /* (a host and a session's name, and its counts) */
-.term-tab + .term-tab::before { content: ''; position: absolute; left: 0; top: 50%; width: 1px; height: 14px; margin-top: -7px; background: var(--term-line); pointer-events: none; }
-.term-tab:hover::before, .term-tab:hover + .term-tab::before,
-.term-tab[aria-current="page"]::before, .term-tab[aria-current="page"] + .term-tab::before,
-.term-tab.held::before, .term-tab.held + .term-tab::before { opacity: 0; }
-.term-tab:hover { background: var(--term-hover); color: var(--term-fg); }
+/* Hairline divider between adjacent inactive tabs (scoped away from the active tab, whose ::before is its left bottom fillet). */
+.term-tab + .term-tab:not([aria-current="page"])::before {
+  content: ''; position: absolute; left: 0; top: 50%; width: 1px; height: 14px; margin-top: -7px;
+  background: color-mix(in srgb, var(--term-fg) 16%, transparent); pointer-events: none; transition: opacity 0.12s var(--ease);
+}
+.term-tab:not([aria-current="page"]):hover::before,
+.term-tab:hover + .term-tab:not([aria-current="page"])::before,
+.term-tab[aria-current="page"] + .term-tab:not([aria-current="page"])::before,
+.term-tab.held:not([aria-current="page"])::before,
+.term-tab.held + .term-tab:not([aria-current="page"])::before { opacity: 0; }
+/* Floating rounded hover background for inactive tabs. */
+.term-tab:not([aria-current="page"])::after {
+  content: ''; position: absolute; inset: 2px 3px 4px; z-index: 0; border-radius: var(--r);
+  background: transparent; pointer-events: none; transition: background-color 0.12s var(--ease);
+}
+.term-tab:not([aria-current="page"]):hover { color: var(--term-fg); }
+.term-tab:not([aria-current="page"]):hover::after { background: var(--tab-hover); }
 /* A session's tab: the button that goes to it, and its close beside it —
    the close's room always kept (the tab does not grow as it shows), shown
    on the tab in front, the one under the pointer, or reached by keys (11-14). */
 .term-tab.has-x { padding: 0 6px 0 0; cursor: default; }
-.term-tab-main { display: flex; align-items: center; gap: 6px; flex: 1 1 auto; min-width: 0; overflow: hidden; height: 100%; padding: 0 4px 0 12px; border: 0; border-radius: var(--r) var(--r) 0 0; background: none; color: inherit; font: inherit; cursor: pointer; }
+.term-tab-main {
+  position: relative; z-index: 1; display: flex; align-items: center; gap: 6px; flex: 1 1 auto; min-width: 0; overflow: hidden; height: 100%;
+  padding: 0 4px 0 10px; border: 0; border-radius: var(--tab-r) var(--tab-r) 0 0; background: none; color: inherit; font: inherit; cursor: pointer;
+}
 .term-tab-main:focus-visible, .term-tab-x:focus-visible { outline: none; box-shadow: inset 0 0 0 2px var(--term-accent-text); }
-.term-tab-x { flex: none; display: grid; place-items: center; width: 20px; height: 20px; padding: 0; border: 0; border-radius: var(--r-sm); background: none; color: var(--term-fg-3); cursor: pointer; opacity: 0; }
+.term-tab-x {
+  position: relative; z-index: 1; flex: none; display: grid; place-items: center; width: 20px; height: 20px; padding: 0;
+  border: 0; border-radius: 50%; background: none; color: var(--term-fg-3); cursor: pointer; opacity: 0;
+}
 .term-tab-x:hover { background: var(--term-key-active); color: var(--term-fg); }
-.term-tab:hover > .term-tab-x, .term-tab[aria-current='page'] > .term-tab-x, .term-tab-x:focus-visible,
-.term-tab:hover .term-tab-end > .term-tab-x, .term-tab[aria-current='page'] .term-tab-end > .term-tab-x { opacity: 1; }
-/* An agent's state and its close share one place: the state, till the
-   pointer is on it or it is in front (whose state the page says). */
-.term-tab-end { flex: none; display: grid; place-items: center; width: 20px; height: 20px; }
-.term-tab-end > * { grid-area: 1 / 1; }
-.term-tab:hover .term-tab-end > .term-tab-count, .term-tab[aria-current='page'] .term-tab-end > .term-tab-count, .term-tab-end:focus-within > .term-tab-count { visibility: hidden; }
+.term-tab:hover > .term-tab-x, .term-tab[aria-current='page'] > .term-tab-x, .term-tab-x:focus-visible { opacity: 1; }
 .term-tabs.dragging .term-tab-x { opacity: 0; }
-@media (hover: none) { .term-tab:not([aria-current='page']) > .term-tab-x, .term-tab:not([aria-current='page']) .term-tab-end > .term-tab-x { display: none; } .term-tab.has-x:not([aria-current='page']) { padding-right: 10px; } }
-/* A tab dragged to another place: it is lifted (over the others, which make
-   room for it as it passes), and keeps its own colour on them. */
+@media (hover: none) { .term-tab:not([aria-current='page']) > .term-tab-x { display: none; } .term-tab.has-x:not([aria-current='page']) { padding-right: 10px; } }
+/* A tab dragged to another place: lifted cleanly with rounded corners and no hanging fillets. */
 .term-tabs.dragging, .term-tabs.dragging .term-tab { cursor: grabbing; }
 .term-tabs.dragging .term-tab:not(.held) { transition: transform 0.15s ease; }
-.term-tabs.dragging .term-tab:not(.held):hover:not([aria-current="page"]) { background: none; color: var(--term-fg-2); }
-.term-tab.held { z-index: 2; color: var(--term-fg); box-shadow: 0 2px 8px rgb(0 0 0 / 0.28); }
-.term-tab.held:not([aria-current="page"]) { background: var(--term-hover); }
-/* The tab in front: the page's ground, its edges in the page's line. */
+.term-tabs.dragging .term-tab:not(.held):not([aria-current="page"]):hover { color: var(--term-fg-2); }
+.term-tabs.dragging .term-tab:not(.held):not([aria-current="page"]):hover::after { background: transparent; }
+.term-tab.held { z-index: 2; color: var(--term-fg); border-radius: var(--r); box-shadow: 0 4px 12px rgb(0 0 0 / 0.18); }
+.term-tab.held::before, .term-tab.held::after { opacity: 0; }
+.term-tab.held:not([aria-current="page"]) { background: var(--term-bg); }
+/* The tab in front: seamless --term-bg surface with outward bottom concave curves. */
 .term-tab[aria-current="page"],
 .term-tab[aria-current="page"]:hover {
   z-index: 1; background: var(--term-bg); color: var(--term-fg);
-  box-shadow: inset 1px 0 0 var(--term-line), inset -1px 0 0 var(--term-line), inset 0 1px 0 var(--term-line);
+}
+.term-tab[aria-current="page"]::before,
+.term-tab[aria-current="page"]::after {
+  content: ''; position: absolute; bottom: 0; width: var(--tab-r); height: var(--tab-r); pointer-events: none;
+}
+.term-tab[aria-current="page"]::before {
+  left: calc(var(--tab-r) * -1);
+  background: radial-gradient(circle at 0 0, transparent var(--tab-r), var(--term-bg) calc(var(--tab-r) + 0.5px));
+}
+.term-tab[aria-current="page"]::after {
+  right: calc(var(--tab-r) * -1);
+  background: radial-gradient(circle at 100% 0, transparent var(--tab-r), var(--term-bg) calc(var(--tab-r) + 0.5px));
+}
+@media (prefers-reduced-motion: reduce) {
+  .term-tab, .term-tab::before, .term-tab::after { transition: none; }
 }
 @media (pointer: fine) {
   .term-tab { font-size: var(--fs-sub); line-height: var(--lh-sub); }
 }
 /* (By a finger, or with the system's colours, which drop its ground and edges: told by its weight too, and there by a border.) */
 @media (pointer: coarse) { .term-tab[aria-current="page"] { font-weight: 600; } }
-@media (forced-colors: active) { .term-tab[aria-current="page"] { font-weight: 600; border: 1px solid CanvasText; border-bottom: 0; } }
+@media (forced-colors: active) {
+  .term-tab[aria-current="page"] { font-weight: 600; border: 1px solid CanvasText; border-bottom: 0; }
+  .term-tab[aria-current="page"]::before, .term-tab[aria-current="page"]::after { display: none; }
+}
 /* "101  herdr 2": the host quiet, the session's own name in the tab's colour,
    set apart by room alone (redesign 11-23: no "·" between them). */
 .term-tab-host { font-weight: 400; color: var(--term-fg-3); }
@@ -495,26 +576,34 @@ html.kb-open .keybar { padding-bottom: 6px; }
 .term-tab-host { flex: 0 0 auto; max-width: 100%; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .term-tab-which { flex: 0 1000 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .term-tab-title { flex: 0 100000 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--term-fg-3); font-weight: 400; }
-/* Agents waiting for you, and finished ones not looked at yet: an icon says
-   which, in colours read at 4.5:1 on the bar of any scheme. */
+/* Agents waiting for you, working, background running, failed, and finished:
+   one mark per state matching the sidebar's colours and hollow-ring style. */
 .term-tab-count { flex: none; display: inline-flex; align-items: center; gap: 4px; font: 600 12px/1 var(--font-ui); font-variant-numeric: tabular-nums; }
 /* One mark for every state, its colour saying which: as the agents' list has them. */
 .term-tab-sdot { flex: none; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+.term-tab-bg .term-tab-sdot, .term-tab-stale .term-tab-sdot { width: 7px; height: 7px; background: none; box-shadow: inset 0 0 0 1.5px currentColor; }
 /* (With the system's colours forced, one colour for every state: told apart by
-   shape instead — waiting filled, at work a ring, done a square.) */
+   shape instead — waiting filled circle, working/bg hollow ring, stale dashed ring,
+   done square, failed rotated diamond.) */
 @media (forced-colors: active) {
   .term-tab-sdot { forced-color-adjust: none; background: CanvasText; }
   .term-tab-busy .term-tab-sdot { background: none; box-shadow: inset 0 0 0 1.5px CanvasText; }
+  .term-tab-bg .term-tab-sdot { width: 7px; height: 7px; background: none; box-shadow: none; border: 1.5px solid CanvasText; }
+  .term-tab-stale .term-tab-sdot { width: 7px; height: 7px; background: none; box-shadow: none; border: 1.5px dashed CanvasText; }
   .term-tab-done .term-tab-sdot { border-radius: 0; }
+  .term-tab-failed .term-tab-sdot { border-radius: 0; transform: rotate(45deg); }
 }
 .term-tab-wait { color: var(--term-warn-text); }
 .term-tab-done { color: var(--term-ok-text); }
 .term-tab-busy { color: var(--term-accent-text); }
+.term-tab-failed { color: var(--term-danger-text); }
+.term-tab-bg { color: var(--term-accent-text); }
+.term-tab-stale { color: var(--term-fg-3); }
 .term-tab-dot { flex: none; width: 6px; height: 6px; border-radius: 50%; background: var(--term-fg-3); }
 .term-tab-dot.s-connecting, .term-tab-dot.s-reconnecting, .term-tab-dot.s-slow { background: var(--term-warn-text); }
 .term-tab-dot.s-offline, .term-tab-dot.s-full { background: var(--term-danger-text); }
-.term-tab-new { flex: none; width: 30px; height: 30px; color: var(--term-fg-2); }
-.term-tabs ~ .term-tab-new { margin-top: 4px; } /* (level with the tabs' words: they sit 4px down, on the bar's floor) */
+.term-tab-new { flex: none; width: 28px; height: 28px; border-radius: 50%; color: var(--term-fg-2); }
+.term-tabs ~ .term-tab-new { margin-top: 2px; } /* (level with the tabs' labels) */
 /* The way between the agents' page and the terminals' where no rail is (700 to
    760 wide): two icons, the page in front marked as a tab in front is. */
 .term-pages { flex: none; display: flex; align-items: center; gap: 2px; margin-left: 4px; padding-right: 6px; border-right: 1px solid var(--term-line); }
@@ -1371,6 +1460,10 @@ button.gch-ut:hover { background: var(--term-hover); }
 @container (max-width: 1300px) {
   .convo-panel:not(.convo-tray) { position: absolute; inset: 0 0 0 auto; z-index: 6; width: min(100%, 620px); box-shadow: -8px 0 28px rgba(0, 0, 0, 0.25); }
 }
+/* (In the workbench layout, .convo excludes the left sidebar, so 1000px of conversation width already leaves ~520px beside the panel.) */
+@container (min-width: 1000px) {
+  .wb-agent-main .convo-panel:not(.convo-tray) { position: static; inset: auto; z-index: auto; width: min(46%, 620px); box-shadow: none; }
+}
 /* The dock (dock.tsx): in the panels' slot, its width the person's (inline);
    over the thread, from the right, where the thread would keep too little
    (is-over, as the panels are at 1300 and under). Its edge a grip. */
@@ -1717,7 +1810,8 @@ p.convo-ask-desc { margin: 0 0 8px; font-size: var(--fs-ui); line-height: var(--
 @media (prefers-reduced-motion: reduce) { .convo-running-spin { animation: none; } }
 .convo-running-sum { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .convo-running.is-open .convo-running-sum { flex: 1 1 auto; }
-.convo-running-first { flex: 1 1 0; min-width: 0; display: flex; align-items: baseline; gap: 8px; font-weight: 400; color: var(--term-fg-3); }
+.convo-running-first { flex: 1 1 0; min-width: 0; display: flex; align-items: center; gap: 6px; font-weight: 400; color: var(--term-fg-3); }
+.convo-running-first-ic { flex: none; display: inline-flex; align-items: center; }
 .convo-running-first::before { content: '·'; flex: none; }
 .convo-running-first .convo-running-what { flex: 0 1 auto; color: var(--term-fg-3); font-weight: 400; }
 .convo-running-first .convo-running-note { flex: 1 1 0; }
@@ -1739,6 +1833,9 @@ p.convo-ask-desc { margin: 0 0 8px; font-size: var(--fs-ui); line-height: var(--
 .convo-running-label { margin: 8px 8px 4px 28px; color: var(--term-fg-3); font-size: var(--fs-note); line-height: var(--lh-note); }
 .convo-running-row { position: relative; display: grid; grid-template-columns: minmax(0, 1fr) auto; column-gap: 12px; min-width: 0; padding: 6px 8px 6px 28px; border-radius: var(--r); color: var(--term-fg-3); }
 .convo-running-row::before { content: ''; position: absolute; left: 11px; top: 13px; width: 6px; height: 6px; border-radius: 50%; background: var(--term-accent-text); opacity: 0.7; }
+.convo-running-row.is-cli-agent::before { display: none; }
+.convo-running-cli-ic { position: absolute; left: 8px; top: 8px; display: inline-flex; align-items: center; justify-content: center; }
+.convo-sub-head-ic { flex: none; display: inline-flex; align-items: center; }
 @media (hover: hover) { .convo-running-row:has(> button.convo-running-what):hover { background: color-mix(in srgb, var(--term-fg) 5%, transparent); } }
 .convo-running-what { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .convo-running-row > .convo-running-what { grid-column: 1; color: var(--term-fg); font-weight: 500; }
@@ -1762,6 +1859,7 @@ button.convo-running-what { padding: 0; border: 0; background: none; font: inher
   .convo-running-more { align-self: stretch; padding: 0 8px; }
   .convo-running-row { padding-top: 10px; padding-bottom: 10px; }
   .convo-running-row::before { top: 17px; }
+  .convo-running-cli-ic { top: 12px; }
 }
 
 /* What waits to be taken in, over the composer */
@@ -1800,7 +1898,7 @@ button.convo-queue-row.is-note:last-child { border-radius: 0 0 var(--r-lg) var(-
 .term-root.dark .convo-side { --term-side: var(--term-bg); --term-row-hover: rgba(255, 255, 255, 0.04); --term-row-current: rgba(255, 255, 255, 0.08); --row-lift: none; }
 /* (+ New agent and Search toolbar stay pinned at the top; only the agent list scrolls.) */
 .convo-side > * { flex-shrink: 0; }
-.convo-side > .convo-list-groups { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 2px 2px 4px 0; margin-right: -2px; }
+.convo-side > .convo-list-groups { flex: 1 1 auto; min-height: 0; overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; padding: 2px 4px 4px 0; margin-right: -8px; }
 .convo-side > .list-toolbar { margin-bottom: 6px; padding-bottom: 6px; border-bottom: 1px solid color-mix(in srgb, var(--term-line) 65%, transparent); }
 /* Its edge, dragged to size it: over the line between, taking no room */
 .convo-side-grip {
@@ -1896,6 +1994,7 @@ button.convo-queue-row.is-note:last-child { border-radius: 0 0 var(--r-lg) var(-
   display: flex; flex-direction: column; gap: 2px;
   margin: 0 0 2px 28px;
 }
+.convo-list-children.is-nested-cli { margin-left: 16px; }
 .convo-list-tree .convo-list-children { margin-left: 20px; }
 /* What an agent set going in the background, under its row (UI item 8, 11-25, as Orca hangs an
    agent's children): shut, a strip — their marks, how many, a chevron —; opened out, one line each
@@ -2060,11 +2159,14 @@ button.convo-queue-row.is-note:last-child { border-radius: 0 0 var(--r-lg) var(-
 .convo-list-sdot.is-failed { background: var(--term-danger-text); }
 .convo-list-row.is-failed .convo-list-when, .convo-list-now.is-failed { color: var(--term-danger-text); }
 .convo-list-sdot.is-bg { box-shadow: inset 0 0 0 1.5px var(--term-accent-text); }
+.convo-list-sdot.is-stale { box-shadow: inset 0 0 0 1.5px var(--term-fg-3); }
 @media (prefers-reduced-motion: reduce) { .convo-list-sdot.is-working { animation: none; } }
 @media (forced-colors: active) {
   .convo-list-sdot, .convo-list-sdot.is-blocked, .convo-list-sdot.is-done { forced-color-adjust: none; background: CanvasText; animation: none; }
   .convo-list-sdot.is-working, .convo-list-sdot.is-bg { background: none; box-shadow: inset 0 0 0 1.5px CanvasText; }
+  .convo-list-sdot.is-stale { background: none; border: 1.5px dashed CanvasText; }
   .convo-list-sdot.is-done { border-radius: 0; }
+  .convo-list-sdot.is-failed { border-radius: 0; transform: rotate(45deg); }
 }
 /* Its second line: where it is (the session's title, which tells alike names apart) and, at its end, when. One line. */
 /* (Its turn over, work of its left going: said by its time, in the dot's colour.) */
@@ -2112,6 +2214,8 @@ button.convo-queue-row.is-note:last-child { border-radius: 0 0 var(--r-lg) var(-
 .convo-row-tip-state.is-blocked { color: var(--term-warn-text); }
 .convo-row-tip-state.is-working, .convo-row-tip-state.is-bg { color: var(--term-accent-text); }
 .convo-row-tip-state.is-done { color: var(--term-ok-text); }
+.convo-row-tip-state.is-failed { color: var(--term-danger-text); }
+.convo-row-tip-state.is-bg .convo-row-tip-dot, .convo-row-tip-state.is-stale .convo-row-tip-dot { background: none; box-shadow: inset 0 0 0 1.5px currentColor; }
 /* A command's (or subagent's) card: its mark in a small square, not an agent's; its words a block of code. */
 .convo-row-tip.is-task { gap: 8px; }
 .convo-row-tip-taskic { flex: none; width: 24px; height: 24px; display: grid; place-items: center; border-radius: var(--r); background: color-mix(in srgb, var(--term-fg) 7%, transparent); color: var(--term-fg-2); }
@@ -2246,7 +2350,7 @@ button.convo-queue-row.is-note:last-child { border-radius: 0 0 var(--r-lg) var(-
   box-shadow: 0 12px 32px rgba(0, 0, 0, 0.22); font-family: var(--font-ui);
 }
 .convo-picker > * { flex-shrink: 0; }
-.convo-picker > .convo-list-groups { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
+.convo-picker > .convo-list-groups { flex: 1 1 auto; min-height: 0; overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; }
 .convo-picker-title { padding: 4px 4px 8px 10px; font-weight: 600; font-size: var(--fs-h3); line-height: var(--lh-h3); display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 /* The list over the conversation, with a keyboard to hand: a quick switcher, as the palette (11-23). Its search the
    head, the order and "new" as the side list's icons beside it, the side list's rows, its keys at the foot. */
@@ -2261,7 +2365,7 @@ button.convo-queue-row.is-note:last-child { border-radius: 0 0 var(--r-lg) var(-
 .convo-picker.is-keyed .list-new-btn { color: var(--term-accent-text); }
 .convo-picker.is-keyed .list-new-btn:hover { background: var(--term-accent-soft); }
 .convo-picker.is-keyed .list-new-btn:focus-visible, .convo-picker.is-keyed .list-order-btn:focus-visible { outline: 2px solid var(--term-accent-text); outline-offset: -2px; }
-.convo-picker.is-keyed > .convo-list-groups { padding: 6px; }
+.convo-picker.is-keyed > .convo-list-groups { padding: 6px 2px 6px 6px; }
 .convo-picker.is-keyed .convo-list-group { margin-bottom: 4px; gap: 2px; }
 .convo-picker.is-keyed .convo-list-head { padding: 8px 10px 4px; }
 .convo-picker.is-keyed .convo-list-row { align-items: center; padding: 6px 10px; gap: 10px; border-radius: var(--r); }
@@ -2327,7 +2431,7 @@ button.convo-queue-row.is-note:last-child { border-radius: 0 0 var(--r-lg) var(-
    agent and "waiting on me" side by side; then its search, its groups. */
 .agents-list.agents-phone { display: flex; flex-direction: column; overflow: hidden; padding: 8px max(12px, env(safe-area-inset-right, 0px)) 0 max(12px, env(safe-area-inset-left, 0px)); }
 .agents-list.agents-phone > * { flex-shrink: 0; }
-.agents-list.agents-phone > .convo-list-groups { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding-bottom: calc(16px + env(safe-area-inset-bottom, 0px)); }
+.agents-list.agents-phone > .convo-list-groups { flex: 1 1 auto; min-height: 0; overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; padding-bottom: calc(16px + env(safe-area-inset-bottom, 0px)); }
 /* (Framed as New agent beside it, one look for the row's buttons — redesign 11-23.) */
 /* "Waiting on me" in a phone list's toolbar: a small chip by the order and new buttons (11-24). */
 .agents-phone-mine { flex: none; height: 32px; padding: 0 10px; border: 0; border-radius: var(--r); background: color-mix(in srgb, var(--term-fg) 5%, transparent); color: var(--term-fg-2); font: inherit; font-size: var(--fs-sub); line-height: var(--lh-sub); white-space: nowrap; cursor: pointer; }
@@ -2598,6 +2702,8 @@ button.convo-queue-row.is-note:last-child { border-radius: 0 0 var(--r-lg) var(-
     height: 40px; box-sizing: border-box; margin: 0 -8px 4px; padding: 0 8px; gap: 4px;
     border-bottom: 1px solid var(--term-line);
   }
+  /* (Workbench full-height sidebar: align the search toolbar hairline with the 38px tab strip beside it.) */
+  .wb-agent-layout > .convo-side > .list-toolbar { height: 38px; }
   .convo-side .list-search {
     height: 28px; border-radius: var(--r-sm); padding: 0 4px 0 8px; gap: 6px;
     border-color: transparent; background: color-mix(in srgb, var(--term-fg) 5%, transparent);
@@ -3066,6 +3172,7 @@ html.kb-open .convo-runs-pop.is-sheet { padding-bottom: 16px; }
 .agent-icon-dot.is-failed { background: var(--term-danger-text); }
 /* Subagents: a line of 32, a step smaller, hung from the parent's icon by a hairline. */
 .convo-list-groups.is-flat .convo-list-children { margin: 0; gap: 0; }
+.convo-list-groups.is-flat .convo-list-children.is-nested-cli { margin-left: 16px; }
 .convo-list-groups.is-flat .convo-list-item.is-child::before { content: ''; position: absolute; left: 17px; top: 0; bottom: 0; width: 1px; background: var(--term-line-strong); }
 .convo-list-groups.is-flat .convo-list-item.is-child:last-child::before { bottom: auto; height: 16px; }
 .convo-list-groups.is-flat .convo-list-item.is-child::after { content: ''; position: absolute; left: 17px; top: 16px; width: 10px; height: 1px; background: var(--term-line-strong); }

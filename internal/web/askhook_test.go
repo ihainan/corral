@@ -542,3 +542,162 @@ func TestHookRecordNotForAnothersFile(t *testing.T) {
 		t.Fatalf("the person's file: %q %v", b, err)
 	}
 }
+
+func TestAgentStartCmdByClaudeVersion(t *testing.T) {
+	inline := sshx.QuoteShell(askhook.Inline())
+	cases := []struct {
+		version  string
+		wantHook bool
+	}{
+		{"", true},
+		{"2.1.252", true},
+		{"2.1.304 (Claude Code)", true},
+		{"2.1.315", true},
+		{"2.1.316", false},
+		{"2.1.316 (Claude Code)", false},
+		{"2.1.318", false},
+		{"2.1.330 (Claude Code)", false},
+		{"2.2.0", false},
+		{"2.1", true},
+		{"2.1.x", true},
+		{"2.1.316-rc1", true},
+	}
+	for _, c := range cases {
+		how := agentStart{claudeVersion: c.version}
+		herdrCmd := agentStartCmd("/s", "w1:p1", "claude-1", "claude", how)
+		hasHerdrHook := strings.Contains(herdrCmd, "'--settings' "+inline)
+		if hasHerdrHook != c.wantHook {
+			t.Errorf("herdr version=%q: hasHook=%v, want %v (%s)", c.version, hasHerdrHook, c.wantHook, herdrCmd)
+		}
+		tmuxCmd := agentTmuxCmd("claude-1", "/tmp", "claude", "", how)
+		hasTmuxHook := strings.Contains(tmuxCmd, "--settings")
+		if hasTmuxHook != c.wantHook {
+			t.Errorf("tmux version=%q: hasHook=%v, want %v (%s)", c.version, hasTmuxHook, c.wantHook, tmuxCmd)
+		}
+	}
+}
+
+func writeFakeClaude(t *testing.T, home, versionOut string) {
+	t.Helper()
+	binDir := filepath.Join(home, ".local", "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	script := "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then printf '%s\\n' " + sshx.QuoteShell(versionOut) + "; exit 0; fi\nexit 1\n"
+	if err := os.WriteFile(filepath.Join(binDir, "claude"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestAskHookReadVersions(t *testing.T) {
+	runIsolated := func(t *testing.T, home string) *askHookFileRead {
+		t.Helper()
+		cmd := exec.Command("sh", "-c", askHookRead)
+		// Isolate PATH so a globally installed claude on the test machine does not affect results.
+		cmd.Env = []string{"HOME=" + home, "PATH=/usr/bin:/bin"}
+		out, err := cmd.Output()
+		if err != nil {
+			t.Fatal(err)
+		}
+		f, err := parseAskHookRead(out)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return f
+	}
+
+	// 1. No claude binary and no running sessions -> version unknown -> Unnecessary is false.
+	homeNone := t.TempDir()
+	if info := askHookInfoOf(runIsolated(t, homeNone)); info.Unnecessary || info.claudeVersion != "" {
+		t.Fatalf("no claude: got unnecessary=%v ver=%q", info.Unnecessary, info.claudeVersion)
+	}
+
+	// 2. Installed claude 2.1.330 alone -> Unnecessary is true.
+	homeNew := t.TempDir()
+	writeFakeClaude(t, homeNew, "2.1.330 (Claude Code)")
+	if info := askHookInfoOf(runIsolated(t, homeNew)); !info.Unnecessary || info.claudeVersion != "2.1.330 (Claude Code)" {
+		t.Fatalf("new claude: got unnecessary=%v ver=%q", info.Unnecessary, info.claudeVersion)
+	}
+
+	// 3. Installed claude 2.1.315 -> Unnecessary is false.
+	homeOld := t.TempDir()
+	writeFakeClaude(t, homeOld, "2.1.315 (Claude Code)")
+	if info := askHookInfoOf(runIsolated(t, homeOld)); info.Unnecessary {
+		t.Fatalf("old claude: got unnecessary=true, want false")
+	}
+
+	// 4. Installed claude 2.1.330 + live running session on 2.1.304 -> mixed -> Unnecessary is false.
+	const sid = "11111111-2222-4333-8444-555555555555"
+	homeMixed := t.TempDir()
+	writeFakeClaude(t, homeMixed, "2.1.330 (Claude Code)")
+	sessDir := filepath.Join(homeMixed, ".claude", "sessions")
+	projDir := filepath.Join(homeMixed, ".claude", "projects", "-tmp-proj")
+	os.MkdirAll(sessDir, 0o755)
+	os.MkdirAll(projDir, 0o755)
+	os.WriteFile(filepath.Join(sessDir, fmt.Sprintf("%d.json", os.Getpid())), []byte(`{"sessionId":"`+sid+`","procStart":1}`), 0o600)
+	os.WriteFile(filepath.Join(projDir, sid+".jsonl"), []byte(`{"type":"user","version":"2.1.304","message":{"role":"user","content":"hi"}}`+"\n"), 0o600)
+	if info := askHookInfoOf(runIsolated(t, homeMixed)); info.Unnecessary {
+		t.Fatalf("mixed versions: got unnecessary=true, want false (sessions=%v)", info.sessionVersions)
+	}
+
+	// 5. Same live session upgraded to 2.1.316 (latest row) -> Unnecessary is true.
+	os.WriteFile(filepath.Join(projDir, sid+".jsonl"), []byte(
+		`{"type":"user","version":"2.1.304","message":{"role":"user","content":"hi"}}`+"\n"+
+			`{"type":"user","version":"2.1.316","message":{"role":"user","content":"next"}}`+"\n",
+	), 0o600)
+	if info := askHookInfoOf(runIsolated(t, homeMixed)); !info.Unnecessary {
+		t.Fatalf("all >= 2.1.316: got unnecessary=false, want true (sessions=%v)", info.sessionVersions)
+	}
+
+	// 6. Dead PID session with old 2.1.252 is ignored.
+	gone := exec.Command("true")
+	_ = gone.Run()
+	const deadSID = "22222222-3333-4444-8555-666666666666"
+	os.WriteFile(filepath.Join(sessDir, fmt.Sprintf("%d.json", gone.Process.Pid)), []byte(`{"sessionId":"`+deadSID+`","procStart":1}`), 0o600)
+	os.WriteFile(filepath.Join(projDir, deadSID+".jsonl"), []byte(`{"type":"user","version":"2.1.252","message":{"role":"user","content":"old"}}`+"\n"), 0o600)
+	if info := askHookInfoOf(runIsolated(t, homeMixed)); !info.Unnecessary {
+		t.Fatalf("dead old session should be ignored: got unnecessary=false (sessions=%v)", info.sessionVersions)
+	}
+}
+
+func TestAskHookEndpointUnnecessaryKeepsExistingAndDisables(t *testing.T) {
+	h := newHarness(t)
+	admin := h.admin()
+	home := t.TempDir()
+	writeFakeClaude(t, home, "2.1.330 (Claude Code)")
+	// Pre-existing settings.json with both ask hook and bell hook.
+	d := filepath.Join(home, ".claude")
+	os.MkdirAll(d, 0o700)
+	both, _, _ := askhook.Bell.Enable(askhook.Ask.Created())
+	f := filepath.Join(d, "settings.json")
+	os.WriteFile(f, both, 0o600)
+
+	srv := h.sshServer(home)
+	srv.HandleExec(testutil.ShellExec(home, func(cmd string) bool { return strings.Contains(cmd, ".claude") }))
+	hostID := h.hostFor(admin, srv.Addr.Port)
+	u := fmt.Sprintf("/api/hosts/%d/ask-hook", hostID)
+	mustStatus(t, admin.do("POST", "/api/sessions", map[string]any{"host_id": hostID}), 201, "open session")
+
+	// GET reports state=on and unnecessary=true, without deleting the user's file.
+	r := admin.do("GET", u+"?fresh=1", nil)
+	mustStatus(t, r, 200, "read")
+	j := r.json()
+	if j["state"] != "on" || j["unnecessary"] != true {
+		t.Fatalf("got %v, want state=on unnecessary=true", j)
+	}
+	if b, _ := os.ReadFile(f); !bytes.Equal(b, both) {
+		t.Fatalf("GET must not modify settings.json")
+	}
+
+	// Turning off uses the existing Disable logic and leaves the bell hook intact.
+	r = admin.do("POST", u, map[string]any{"on": false, "seen": j["seen"]})
+	mustStatus(t, r, 200, "disable")
+	j2 := r.json()
+	bell, _ := j2["bell"].(map[string]any)
+	if j2["state"] != "off" || j2["unnecessary"] != true || bell["state"] != "on" {
+		t.Fatalf("after disable: %v", j2)
+	}
+	if b, _ := os.ReadFile(f); !bytes.Equal(b, askhook.Bell.Created()) {
+		t.Fatalf("bell hook should remain intact: %s", b)
+	}
+}

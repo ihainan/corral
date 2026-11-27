@@ -143,8 +143,13 @@ type Running struct {
 	Note string `json:"note,omitempty"` // the latest it has said of itself, if any
 	// Of a command: the whole of it, and the file its output goes to (as
 	// Claude Code said when it set it going), to be looked at.
-	Cmd string `json:"cmd,omitempty"`
-	Out string `json:"out,omitempty"`
+	Cmd    string `json:"cmd,omitempty"`
+	CmdCut bool   `json:"cmd_cut,omitempty"` // true when Cmd was truncated/incomplete (disables synthetic CLI upgrade)
+	Out    string `json:"out,omitempty"`
+	// Of a background command recognized as a known agent CLI (agy, claude,
+	// codex): the CLI kind and the parent background task ID it came from.
+	Agent string `json:"agent,omitempty"`
+	Task  string `json:"task,omitempty"`
 
 	until time.Time // (a Monitor's: past this it has run out of time; zero: none)
 }
@@ -278,9 +283,10 @@ type Tool struct {
 	ReportCut bool   `json:"report_cut,omitempty"`
 	// Detail is what it acts on: the command, the file, the pattern, the
 	// address; for an edit, the text replaced (Old) and its replacement (New).
-	Detail string `json:"detail,omitempty"`
-	Old    string `json:"old,omitempty"`
-	New    string `json:"new,omitempty"`
+	Detail    string `json:"detail,omitempty"`
+	detailCut bool
+	Old       string `json:"old,omitempty"`
+	New       string `json:"new,omitempty"`
 
 	// Add and Del count the lines an edit added and removed: from what
 	// Claude Code reported of the edit made, else from its input.
@@ -440,6 +446,9 @@ type Meta struct {
 	// /effort, its status line's "·H"): low, medium, high, xhigh, max.
 	Effort string `json:"effort,omitempty"`
 	Branch string `json:"branch,omitempty"` // the git branch it ran on
+	// Version is the agent's version as the session log last said it (Claude
+	// Code's top-level "version" field, e.g. "2.1.330"); empty when unknown.
+	Version string `json:"version,omitempty"`
 	// Context is how many tokens the latest request sent: what the
 	// conversation fills of the model's window.
 	Context int64 `json:"context,omitempty"`

@@ -37,7 +37,7 @@ import { attach, ATTACH_LABEL, AttachStrip, PICTURE_PATH, takeOut, type Going } 
 import { answerable, asking, callOut, useConversation, type ConvoEntry } from '../terminal/conversation'
 import { ackBg, answeredHerdr, convoTitles, expectSession, paneWaits, waitingTitle, isAgy, isCodex, isDevin, isOpenCode, listAgents, paneName, paneTitle, readSessionsNow, readsLog, useRunningSessions, type AgentRow, type AgentStatus } from '../terminal/agents'
 import { normalizeProjectPath, reorderPinned, rowTasks, type RowCmds, type RowTask } from '../terminal/agentOrder'
-import { convoLastUserMs, mergeRowTasks, reconcileAgentStatus } from '../terminal/sideState'
+import { agentStatusMark, convoLastUserMs, keepTmuxBg, mergeRowTasks, readTmuxBg, reconcileAgentStatus, type AgentStatusMark, type TmuxBgCacheEntry } from '../terminal/sideState'
 import { conversationReadable, prefetchConversation } from '../terminal/conversation'
 import { holdTermMode, tmuxKey } from '../terminal/chatSend'
 import { camesAfter, containedInMessage, isCommand, pairSent, sameMessage, squeezed, type Submission } from '../terminal/sentSeen'
@@ -270,7 +270,7 @@ const labelOf = (e: Entry, said: string, hosts: number, named = true, sameWsPare
 function cmdsOf(r: AgentRow): RowCmds | undefined {
   const a = r.a
   if (r.lost || !a.bg_cmds || (a.status !== 'done' && a.status !== 'idle')) return undefined
-  return { n: a.bg_cmds, list: (a.bg_cmd_list ?? []).map((c) => ({ task: c.task, title: c.title, desc: c.desc, since: c.since, out: c.out })) }
+  return { n: a.bg_cmds, list: (a.bg_cmd_list ?? []).map((c) => ({ task: c.task, title: c.title, desc: c.desc, since: c.since, out: c.out })), tasks: a.bg_cmd_tasks }
 }
 
 // What it set going in the background, to hang under its row (UI item 8,
@@ -988,6 +988,10 @@ export function AgentsChat({ bar, active = true, onHead }: { bar?: ReactNode; ac
     const at = missingSince.current.get(k)
     return at !== undefined && Date.now() - at >= MISSING_MS
   }
+  const [frontLive, setFrontLive] = useState<{ key: string; status: string; mark: AgentStatusMark } | null>(null)
+  const onLiveMark = useCallback((v: { key: string; status: string; mark: AgentStatusMark } | null) => {
+    setFrontLive((was) => (was?.key === v?.key && was?.status === v?.status && was?.mark === v?.mark ? was : v))
+  }, [])
   const tabViews: TabView[] = tabs.map((x) => {
     const e = entries.find((en) => en.key === x.key)
     const r = e?.row
@@ -997,11 +1001,21 @@ export function AgentsChat({ bar, active = true, onHead }: { bar?: ReactNode; ac
       title = labelOf(e, named || dirName(r.a.cwd) || r.a.agent, hostCount(entries), !!named).title
     } else if (e) title = keptTitle(titles.current, e) || x.title || `${e.s.host_name} · ${sessionWhich(e.s, sessions ?? [])}` // (a tmux agent out of front: no title in the list, so as last shown)
     const inFront = x.id === front
+    const live = cur && x.key === cur.key && frontLive?.key === x.key ? frontLive : null
+    const status = live ? live.status : (r?.status ?? 'unknown')
+    const mark: AgentStatusMark = live
+      ? live.mark
+      : r
+        ? agentStatusMark({ status: r.status, bg: r.lost ? undefined : r.bg, cmds: cmdsOf(r), tasks: tasksOf(r), failed: failedOf(r, r.status), lost: r.lost })
+        : e
+          ? agentStatusMark({ status: 'unknown', cmds: tmuxBgOf(e).cmds, tasks: rowTasks(tmuxBgOf(e).agents, tmuxBgOf(e).cmds) })
+          : ''
     return {
       tab: x,
       title: title || t('nav.agents'),
       program: r?.a.agent ?? x.program,
-      status: r?.status ?? 'unknown',
+      status,
+      mark,
       ended: inFront ? ended : !e && !!sessions && !summariesMissing && longMissing(x.key), // (in front: as its page says, waited for as one shown)
       address: chatAddress(x),
     }
@@ -1175,6 +1189,7 @@ export function AgentsChat({ bar, active = true, onHead }: { bar?: ReactNode; ac
         onSplitClose={closeSplit}
         onNewSubagent={(p) => setNewAgent(p)}
         onHead={onHead}
+        onLiveMark={onLiveMark}
         toast={toast}
         composerEnter={prefs.composerEnter}
         sent={sentBy[k] ?? []}
@@ -1253,46 +1268,35 @@ export function AgentsChat({ bar, active = true, onHead }: { bar?: ReactNode; ac
 
   // (The workbench's rail and status bar: with the tabs, 760 and up.)
   const wbOn = wb && !!bar && !stack
-  return (
-    <div className={'term-root agents-chat ' + (scheme.dark ? 'dark' : 'light') + (active ? '' : ' inactive') + (stack ? ' is-stack is-' + screen : '') + (wbOn ? ' wb-on' : '')} inert={!active} aria-hidden={active ? undefined : true} style={chromeVars(scheme) as React.CSSProperties} ref={rootRef}>
-      {newAgent && sessions && (
-        <NewAgentDialog
-          sessions={sessions}
-          parent={typeof newAgent === 'object' ? newAgent : undefined}
-          onDone={started}
-          onOpen={(s, pane) => (setNewAgent(false), choose({ s, pane, key: agentKey(s, pane) }))}
-          onClose={() => setNewAgent(false)}
-        />
+  const headerBar = bar ? (
+    <header className="term-bar">
+      {/* (The way back to the hosts is the rail's, on the workbench.) */}
+      {!wbOn && (
+        <button type="button" className="icon-btn" onClick={() => navigate('/')} aria-label={t('term.backToHosts')} title={t('term.backToHosts')}>
+          <ChevronLeft size={20} />
+        </button>
       )}
-      {/* (A phone's conversation has its way back in its own bar.) */}
-      {/* (The tabs in the bar the terminals have, with its way back to the hosts.) */}
-      {bar ? (
-        <header className="term-bar">
-          {/* (The way back to the hosts is the rail's, on the workbench.) */}
-          {!wbOn && (
-            <button type="button" className="icon-btn" onClick={() => navigate('/')} aria-label={t('term.backToHosts')} title={t('term.backToHosts')}>
-              <ChevronLeft size={20} />
-            </button>
-          )}
-          {bar}
-          {!stack && <AgentTabBar views={tabViews} front={front} onGo={goTab} onClose={(x) => closeTabs(new Set([x.id]))} onCloseMany={(l) => closeTabs(new Set(l.map((x) => x.id)))} onMove={moveTab} onNew={newTab} newKey={standalone ? (isMac ? '⌘T' : 'Ctrl+Shift+T') : undefined} />}
-        </header>
-      ) : stack && screen === 'chat' && cur ? null : stack && screen === 'chat' ? (
-        // (A phone's conversation, none shown in it: back to the list, as from one.)
-        <header className="term-bar">
-          <button type="button" className="icon-btn" onClick={toList} aria-label={t('agents.backToList')} title={t('agents.backToList')}>
-            <ChevronLeft size={20} />
-          </button>
-          <span className="agents-chat-title">{t('nav.agents')}</span>
-        </header>
-      ) : (
-        <header className="term-bar">
-          <button type="button" className="icon-btn" onClick={() => navigate('/')} aria-label={t('common.back')} title={t('common.back')}>
-            <ChevronLeft size={20} />
-          </button>
-          <span className="agents-chat-title">{t('nav.agents')}</span>
-        </header>
-      )}
+      {bar}
+      {!stack && <AgentTabBar views={tabViews} front={front} onGo={goTab} onClose={(x) => closeTabs(new Set([x.id]))} onCloseMany={(l) => closeTabs(new Set(l.map((x) => x.id)))} onMove={moveTab} onNew={newTab} newKey={standalone ? (isMac ? '⌘T' : 'Ctrl+Shift+T') : undefined} />}
+    </header>
+  ) : stack && screen === 'chat' && cur ? null : stack && screen === 'chat' ? (
+    // (A phone's conversation, none shown in it: back to the list, as from one.)
+    <header className="term-bar">
+      <button type="button" className="icon-btn" onClick={toList} aria-label={t('agents.backToList')} title={t('agents.backToList')}>
+        <ChevronLeft size={20} />
+      </button>
+      <span className="agents-chat-title">{t('nav.agents')}</span>
+    </header>
+  ) : (
+    <header className="term-bar">
+      <button type="button" className="icon-btn" onClick={() => navigate('/')} aria-label={t('common.back')} title={t('common.back')}>
+        <ChevronLeft size={20} />
+      </button>
+      <span className="agents-chat-title">{t('nav.agents')}</span>
+    </header>
+  )
+  const banners = (
+    <>
       {/* (A list read before, not refreshed since: what it says may be past.) */}
       {failed && sessions !== null && (
         <p className="agents-chat-stale" role="status">
@@ -1331,16 +1335,48 @@ export function AgentsChat({ bar, active = true, onHead }: { bar?: ReactNode; ac
           )}
         </p>
       )}
-      <div className="term-body">
-        {[...next].map(([id, v]) => (
-          // (The tab in front shown as just made; the others as they were last, hidden: their effects — reading, timers,
-          // a live terminal — stopped by React, their state and drawing kept, nothing made again as the list changes.)
-          <Activity key={id} mode={id === drawnFront ? 'visible' : 'hidden'}>
-            <KeptView.Provider value={v.box}>{id === drawnFront ? body : v.el}</KeptView.Provider>
-          </Activity>
-        ))}
-        {!drawnFront && body}
-      </div>
+    </>
+  )
+  const termBody = (
+    <div className="term-body">
+      {[...next].map(([id, v]) => (
+        // (The tab in front shown as just made; the others as they were last, hidden: their effects — reading, timers,
+        // a live terminal — stopped by React, their state and drawing kept, nothing made again as the list changes.)
+        <Activity key={id} mode={id === drawnFront ? 'visible' : 'hidden'}>
+          <KeptView.Provider value={v.box}>{id === drawnFront ? body : v.el}</KeptView.Provider>
+        </Activity>
+      ))}
+      {!drawnFront && body}
+    </div>
+  )
+  return (
+    <div className={'term-root agents-chat ' + (scheme.dark ? 'dark' : 'light') + (active ? '' : ' inactive') + (stack ? ' is-stack is-' + screen : '') + (wbOn ? ' wb-on' : '')} inert={!active} aria-hidden={active ? undefined : true} style={chromeVars(scheme) as React.CSSProperties} ref={rootRef}>
+      {newAgent && sessions && (
+        <NewAgentDialog
+          sessions={sessions}
+          parent={typeof newAgent === 'object' ? newAgent : undefined}
+          onDone={started}
+          onOpen={(s, pane) => (setNewAgent(false), choose({ s, pane, key: agentKey(s, pane) }))}
+          onClose={() => setNewAgent(false)}
+        />
+      )}
+      {/* (On the workbench: the sidebar runs full-height on the left beside the rail, and the tab bar sits over the conversation area on the right.) */}
+      {wbOn ? (
+        <div className="wb-agent-layout">
+          <div className="wb-side-slot" />
+          <div className="wb-agent-main">
+            {headerBar}
+            {banners}
+            {termBody}
+          </div>
+        </div>
+      ) : (
+        <>
+          {headerBar}
+          {banners}
+          {termBody}
+        </>
+      )}
       {wbOn && <Rail active="agents" />}
       {wbOn && (
         <StatusBar>
@@ -1447,7 +1483,7 @@ const lookedAt = new Set<number>()
 // list once gone back to, the side list once another is shown.
 // (TMUX_CMDS_FRESH: how long that holds: the gateway looks once a minute.)
 const TMUX_CMDS_FRESH = 2 * 60 * 1000
-const tmuxCmds = new Map<string, { cmds: RowCmds; at: number }>()
+const tmuxCmds = new Map<string, TmuxBgCacheEntry>()
 // The host's home folder, by session (asked once: the files list of no
 // path answers with it), to make "~/…" whole. (Kept once had: the same
 // account's home does not move.)
@@ -1497,16 +1533,13 @@ function atHome(sid: string, p: string): Promise<string> {
   return h.then(join)
 }
 
-const tmuxCmdsOf = (e: Entry): RowCmds | undefined => {
-  if (e.row || e.pane) return undefined
-  const v = tmuxCmds.get(e.key)
-  return v && Date.now() - v.at < TMUX_CMDS_FRESH ? v.cmds : undefined
-}
+const tmuxBgOf = (e: Entry) => (e.row || e.pane ? {} : readTmuxBg(tmuxCmds, e.key, Date.now(), TMUX_CMDS_FRESH))
 
 // The conversation of one agent, and what is sent to it. Keyed by the
 // agent: nothing of another's (its draft, what was sent, a stop) carries over.
-function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysActive, isSecondary, primaryKey, splitPane, splitKey, splitDir, onSplitDirToggle, onSplitOpen, onSplitParentChild, onSplitClose, onSplitSwap, onSplitExpand, onNewSubagent, onHead, toast, composerEnter, sent, setSent, sending, setSending, draft: shownDraft, setDraftShown, used, lead, onClosed, onStarted, query, onQuery }: {
+function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysActive, isSecondary, primaryKey, splitPane, splitKey, splitDir, onSplitDirToggle, onSplitOpen, onSplitParentChild, onSplitClose, onSplitSwap, onSplitExpand, onNewSubagent, onHead, onLiveMark, toast, composerEnter, sent, setSent, sending, setSending, draft: shownDraft, setDraftShown, used, lead, onClosed, onStarted, query, onQuery }: {
   onHead?: (h: AgentsHead | null) => void
+  onLiveMark?: (m: { key: string; status: string; mark: AgentStatusMark } | null) => void
   cur: Entry
   entries: Entry[]
   all: SessionInfo[]
@@ -1662,7 +1695,8 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
       const dialog = st === 'waiting' && !asks
       const status = asks ? 'blocked' : st === 'busy' ? 'working' : st === 'idle' || dialog ? 'idle' : 'unknown'
       const cmds = st && st !== 'waiting' ? convo.bgCmds : undefined
-      return { title: convoTitle || convo.bind.title, status, dialog, cmds, tasks: mergeRowTasks(rowTasks(undefined, cmds), liveConvoRunning, { blocked: status === 'blocked' }), program: convo.bind.agent }
+      const bgAgents = st && st !== 'waiting' ? convo.bgAgents : undefined
+      return { title: convoTitle || convo.bind.title, status, dialog, cmds, tasks: mergeRowTasks(rowTasks(bgAgents, cmds), liveConvoRunning, { blocked: status === 'blocked' }), program: convo.bind.agent }
     }
     if (!row || !reconciled) return null
     // (A Codex's: its thread's name, as the gateway has it, before its log's
@@ -1671,12 +1705,29 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
     const title = ((isCodex(row.a.agent) || isAgy(row.a.agent)) && row.a.thread_title) || (convo.bind?.pane === row.a.pane_id && convoTitle) || paneName(row.a) || dirName(row.a.cwd)
     const tasks = mergeRowTasks(tasksOf(row), liveConvoRunning, { blocked: reconciled.sideStatus === 'blocked', lost: row.lost })
     return { where: row.ws === '~' ? '' : row.ws, title, status: reconciled.viewStatus, bg: reconciled.bg, dialog: reconciled.dialog, cmds: cmdsOf(row), tasks, other: readsLog(row.a.agent) ? undefined : row.a.agent, program: row.a.agent }
-  }, [herdr, row, reconciled, convo.bind, convo.agentStatus, convo.waitingFor, convo.bgCmds, convo.failing, convoTitle, convo.entries, liveConvoRunning])
+  }, [herdr, row, reconciled, convo.bind, convo.agentStatus, convo.waitingFor, convo.bgCmds, convo.bgAgents, convo.failing, convoTitle, convo.entries, liveConvoRunning])
   // (The tab of the agents' page says which conversation is in front.)
   useEffect(() => {
     onHead?.(agent ? { title: agent.title ?? '', program: agent.program, status: agent.bg && agent.status !== 'blocked' ? 'bg' : agent.status } : null)
     return () => onHead?.(null) // (none in front any more — the last closed, its session gone: the tab says so)
   }, [onHead, agent?.title, agent?.program, agent?.status, agent?.bg]) // eslint-disable-line react-hooks/exhaustive-deps
+  // (Report the reconciled front-agent status mark back to AgentsChat so the front tab always matches its sidebar row.)
+  const liveRowStatus = row ? (reconciled ? reconciled.sideStatus : row.status) : (agent?.status ?? 'unknown')
+  const liveRowMark: AgentStatusMark = row
+    ? agentStatusMark({
+        status: liveRowStatus,
+        bg: reconciled ? reconciled.bg : (row.lost ? undefined : row.bg),
+        cmds: cmdsOf(row),
+        tasks: tasksOf(row),
+        failed: failedOf(row, liveRowStatus as AgentStatus),
+        lost: row.lost,
+      })
+    : agentStatusMark({ status: liveRowStatus, cmds: agent?.cmds ?? tmuxBgOf(cur).cmds, tasks: agent?.tasks })
+  useEffect(() => {
+    if (!onLiveMark) return
+    onLiveMark({ key: cur.key, status: liveRowStatus, mark: liveRowMark })
+    return () => onLiveMark(null)
+  }, [onLiveMark, cur.key, liveRowStatus, liveRowMark])
   // A finished one looked at here is seen: the gateway keeps it, so it is
   // no longer "done" in any browser (herdr's own word goes only with its
   // pane focused in herdr). Not while the page is behind another.
@@ -1690,6 +1741,7 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
   // goes (reads that change nothing change no state). review483–486)
   const tmuxKeyNow = !herdr && !cur.pane ? cur.key : ''
   const tmuxCmdsNow = agent?.cmds
+  const tmuxAgentsNow = !herdr && convo.agentStatus !== 'waiting' ? convo.bgAgents : undefined
   const lookedSince = useRef(0)
   useEffect(() => {
     if (active) lookedSince.current = Date.now()
@@ -1701,12 +1753,11 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
     const keep = () => {
       const at = readAt()
       if (at < lookedSince.current) return // (none read since it was brought back)
-      if (tmuxCmdsNow) tmuxCmds.set(key, { cmds: tmuxCmdsNow, at })
-      else tmuxCmds.delete(key)
+      keepTmuxBg(tmuxCmds, key, tmuxCmdsNow, tmuxAgentsNow, at)
     }
     keep()
     return keep
-  }, [tmuxKeyNow, tmuxCmdsNow, convo.status, convo.okAt, convo.failing, active, readAt])
+  }, [tmuxKeyNow, tmuxCmdsNow, tmuxAgentsNow, convo.status, convo.okAt, convo.failing, active, readAt])
   // (Seen only once its conversation is in front and read afresh since it was
   // gone to — what was kept from before shows at once, and is no proof the
   // person sees what it did since; not while it fails to load — review B02.)
@@ -1884,9 +1935,9 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
       }
       const title = (current && agent?.title) || keptTitle(titles, e) || `${e.s.host_name} · ${sessionWhich(e.s, all)}`
       const tmuxStatus = current && agent ? agent.status : 'unknown'
-      const tmuxCmds = current ? agent?.cmds : tmuxCmdsOf(e)
-      const tmuxTasks = current ? mergeRowTasks(rowTasks(undefined, tmuxCmds), liveConvoRunning, { blocked: tmuxStatus === 'blocked' }) : rowTasks(undefined, tmuxCmds)
-      return { key: e.key, title, where: whereOf(e, hosts), program: current ? agent?.program : undefined, status: tmuxStatus, liveStatus: tmuxStatus, cmds: tmuxCmds, tasks: tmuxTasks, since: current && tmuxStatus === 'working' ? convoWorkingSince : undefined, current, inSplit: !isSecondary && !!splitKey && e.key === splitKey, pinned: pinAt(e.key), sessionGroup: sessionGroupOf(e, all), onPick: (how) => onPick(e, how), menu: () => rowMenu.current(e) }
+      const tmuxBg = current ? { cmds: agent?.cmds, agents: convo.bgAgents } : tmuxBgOf(e)
+      const tmuxTasks = current ? mergeRowTasks(rowTasks(tmuxBg.agents, tmuxBg.cmds), liveConvoRunning, { blocked: tmuxStatus === 'blocked' }) : rowTasks(tmuxBg.agents, tmuxBg.cmds)
+      return { key: e.key, title, where: whereOf(e, hosts), program: current ? agent?.program : undefined, status: tmuxStatus, liveStatus: tmuxStatus, cmds: tmuxBg.cmds, tasks: tmuxTasks, since: current && tmuxStatus === 'working' ? convoWorkingSince : undefined, current, inSplit: !isSecondary && !!splitKey && e.key === splitKey, pinned: pinAt(e.key), sessionGroup: sessionGroupOf(e, all), onPick: (how) => onPick(e, how), menu: () => rowMenu.current(e) }
     })
     return placedAs ? out.map((r) => (r.current ? { ...r, placeAs: placedAs } : r)) : out
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -3821,7 +3872,7 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
       ask={
         !readOnly && waits && replyTo ? (
           // (One a pane, and a process in it: nothing of another's carries over. Not tied to a terminal: no size to wait for.)
-          <InlineReply key={replyTo.key} target={replyTo} resizedAt={0} active={kActive} held={() => false} call={asked} pending={pendingCall} onAnswered={(yes) => {
+          <InlineReply key={replyTo.key} target={replyTo} resizedAt={0} active={kActive} held={() => false} call={asked} pending={pendingCall} agentVersion={convo.meta?.version} onAnswered={(yes) => {
             setAnswered(yes)
             // (Answered: not waiting in the list and the title either, at once — not at its next read. 11-14.)
             const pane = cur.pane
@@ -4153,7 +4204,8 @@ function PhoneList({ entries, all, titles, query, onQuery, onPick }: { entries: 
         return { key: e.key, ...labelOf(e, said, hosts, !!named, sameWsParent), now: r.lost || r.bg || r.status !== 'blocked' ? undefined : glanceOf(e.s.id, e.pane, r.status, r.a.since) || undefined, program: r.a.agent, status: r.status, liveStatus: r.status, lost: r.lost, lastStatus: r.lost && r.last && r.last !== 'unknown' ? r.last : undefined, lostAt: r.lost ? r.lostAt : undefined, bg: r.lost ? undefined : r.bg, failed: failedOf(r, r.status), model: r.lost ? undefined : r.a.model, glance: r.lost || r.bg ? undefined : () => glanceOf(e.s.id, e.pane, r.status, r.a.since), cmds: cmdsOf(r), tasks: tasksOf(r), since: r.lost ? r.a.since : r.bg ? r.a.bg_since : r.a.since, current: false, pinned: pinAt(e.key), projectKey: normalizeProjectPath(r.a.cwd), sessionGroup: sessionGroupOf(e, all), parentKey, lineageSource: r.lost ? undefined : r.a.lineage_source, onPick: () => onPick(e) }
       }
       const title = keptTitle(titles, e) || `${e.s.host_name} · ${sessionWhich(e.s, all)}`
-      return { key: e.key, title, where: whereOf(e, hosts), status: 'unknown', cmds: tmuxCmdsOf(e), tasks: rowTasks(undefined, tmuxCmdsOf(e)), current: false, pinned: pinAt(e.key), sessionGroup: sessionGroupOf(e, all), onPick: () => onPick(e) }
+      const tmuxBg = tmuxBgOf(e)
+      return { key: e.key, title, where: whereOf(e, hosts), status: 'unknown', cmds: tmuxBg.cmds, tasks: rowTasks(tmuxBg.agents, tmuxBg.cmds), current: false, pinned: pinAt(e.key), sessionGroup: sessionGroupOf(e, all), onPick: () => onPick(e) }
     })
   }, [entries, titles, all, pins, onPick])
   const shown = mine ? rows.filter((r) => r.status === 'blocked' || r.status === 'done') : rows

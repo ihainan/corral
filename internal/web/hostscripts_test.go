@@ -15,8 +15,19 @@ func TestHostScriptsParse(t *testing.T) {
 		t.Skip("no sh here")
 	}
 	cmds := map[string]string{
-		"locate herdr":  convoLocateCommand("herdr", "", ""),
-		"locate tmux":   convoLocateCommand("tmux", "main", "%1"),
+		"locate herdr":       convoLocateCommand("herdr", "", ""),
+		"locate pids":        convoLocatePidsCommand(50, []int{100, 200}),
+		"locate tmux":        convoLocateCommand("tmux", "main", "%1"),
+		"fresh status":       freshStatusCommand(123),
+		"line alive":         lineAliveCommand(123, 456),
+		"bg tail":            bgTailCommand([]string{"11111111-2222-4333-8444-555555555501"}, 4096),
+		"cmd scan":           cmdScanCommand("w:11111111-2222-4333-8444-555555555501"),
+		"fork find claude":   forkFindCommand("claude", "11111111-2222-4333-8444-555555555501"),
+		"logs wrote claude":  logsWroteCommand([]string{"claude:11111111-2222-4333-8444-555555555501"}) + "; " + hostNowCommand,
+		"gated herdr":        convoGatedCommand("free", "herdr", "", "w1:p1", "/tmp/herdr.sock", 100, 200, "11111111-2222-4333-8444-555555555501", 0, []string{"enter"}, 0),
+		"rewind check herdr": claudeRewindCheckSh("herdr", "w1:p1", "/tmp/herdr.sock", "", 100, 200, "11111111-2222-4333-8444-555555555501"),
+		"side question":      sideQuestionCommand(100, 200, "11111111-2222-4333-8444-555555555501", "claude-opus-5-5", "f00d"),
+		"tmux claude fork":   agentTmuxCmd("fork-1", "/tmp/work", "claude", "/tmp/my cfg/.claude-alt", agentStart{resume: "11111111-2222-4333-8444-555555555501"}),
 		"screen":        convoScreenCommand("herdr", "w1:p1", "/tmp/herdr.sock"),
 		"screen joined": convoScreenJoinedCommand("tmux", "%1", ""),
 		"tails":         convoTailsCommand([]string{"/home/u/.claude/projects/-w/a.jsonl"}),
@@ -26,15 +37,21 @@ func TestHostScriptsParse(t *testing.T) {
 		"devin read":         dvQueryCommand("/home/u/.local/share/devin/cli/sessions.db", "tail", "x-y", "200"),
 		"codex models cache": codexModelsCacheCommand(123),
 	}
+	shells := []string{sh}
+	if dash, err := exec.LookPath("dash"); err == nil && dash != sh {
+		shells = append(shells, dash)
+	}
 	for name, cmd := range cmds {
-		// (Read, not run: "sh -n", a script's quoting undone by the shell
-		// around it; a command line itself as it is.)
-		check := exec.Command(sh, "-n", "-c", cmd)
-		if rest, ok := strings.CutPrefix(cmd, "sh -c "); ok {
-			check = exec.Command(sh, "-c", "sh -n -c "+rest)
-		}
-		if out, err := check.CombinedOutput(); err != nil {
-			t.Errorf("%s: does not parse: %v %s", name, err, out)
+		for _, bin := range shells {
+			// (Read, not run: "sh -n", a script's quoting undone by the shell
+			// around it; a command line itself as it is.)
+			check := exec.Command(bin, "-n", "-c", cmd)
+			if rest, ok := strings.CutPrefix(cmd, "sh -c "); ok {
+				check = exec.Command(bin, "-c", bin+" -n -c "+rest)
+			}
+			if out, err := check.CombinedOutput(); err != nil {
+				t.Errorf("%s (%s): does not parse: %v %s", name, bin, err, out)
+			}
 		}
 	}
 }

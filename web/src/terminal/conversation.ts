@@ -188,7 +188,10 @@ export interface ConvoRunning {
   ts?: string
   note?: string // (the latest it has said of itself)
   cmd?: string // (a command: the whole of it)
+  cmd_cut?: boolean // (true when cmd is truncated/incomplete)
   out?: string // (a command: the file its output goes to, on the host)
+  agent?: string // (a background CLI subagent: 'agy' | 'claude' | 'codex')
+  task?: string // (the parent background command's task id it was promoted from)
 }
 
 // An item of the agent's task list.
@@ -204,6 +207,7 @@ export interface ConvoMeta {
   collab?: string // (Codex) its collaboration mode: default, plan
   effort?: string // how hard it is asked to think: low, medium, high, xhigh, max
   branch?: string
+  version?: string // the agent's version as the session log last said it (Claude Code's "version" field)
   forked?: boolean // a copy of another (Codex's): its log has only what came after; before, in the other's
   history_partial?: boolean // a rewind's rollout contains only the new messages
   context?: number // tokens the latest request sent
@@ -277,6 +281,8 @@ interface Answer {
   waiting_for?: string // (with waiting: "permission prompt", "input needed", "sandbox request", "worker request", "dialog open", "other")
   bg_cmds?: number // (tmux) a Claude Code at rest: the commands it left running in the background
   bg_cmd_list?: { task: string; title?: string; desc?: string; since?: number; out?: string }[]
+  bg_cmd_tasks?: string[]
+  bg_agent_list?: { id: string; what?: string; since?: number; agent?: string; task?: string; cmd?: string }[]
   quiet_ms?: number // (how long since its log last grew, by the gateway's clock)
   title?: string
   tasks?: ConvoTask[]
@@ -294,8 +300,8 @@ interface Answer {
 }
 
 // (tmux) What a Claude Code at rest left running, as the answer says it.
-const cmdsOf = (a: { bg_cmds?: number; bg_cmd_list?: { task: string; title?: string; desc?: string; since?: number; out?: string }[] }): RowCmds | undefined =>
-  a.bg_cmds ? { n: a.bg_cmds, list: (a.bg_cmd_list ?? []).map((c) => ({ task: c.task, title: c.title, desc: c.desc, since: c.since, out: c.out })) } : undefined
+const cmdsOf = (a: { bg_cmds?: number; bg_cmd_list?: { task: string; title?: string; desc?: string; since?: number; out?: string }[]; bg_cmd_tasks?: string[] }): RowCmds | undefined =>
+  a.bg_cmds ? { n: a.bg_cmds, list: (a.bg_cmd_list ?? []).map((c) => ({ task: c.task, title: c.title, desc: c.desc, since: c.since, out: c.out })), tasks: a.bg_cmd_tasks } : undefined
 
 export type ConvoStatus = 'loading' | 'ready' | 'none' | 'error'
 
@@ -318,6 +324,7 @@ export interface Convo {
   agentStatus?: 'busy' | 'idle' | 'waiting' // (tmux) as Claude Code's file for the process says
   waitingFor?: string // (with waiting) what for
   bgCmds?: RowCmds // (tmux) commands it left running in the background, at rest
+  bgAgents?: { id: string; what?: string; since?: number; agent?: string; task?: string; cmd?: string }[] // background CLI subagents from host scan
   // When its log last grew (ms, this page's clock: told as how long since,
   // so no clocks are compared); kept while it moves by less than a few
   // seconds, so a poll that brings nothing new changes nothing.
@@ -532,9 +539,10 @@ export function useConversation(sessionId: string, enabled: boolean, pane: strin
             const told = a.quiet_ms !== undefined ? now - a.quiet_ms : undefined
             const fresh = cmdsOf(a)
             const bgCmds = fresh && JSON.stringify(fresh) === JSON.stringify(c.bgCmds) ? c.bgCmds : fresh
+            const bgAgents = a.bg_agent_list?.length ? (JSON.stringify(a.bg_agent_list) === JSON.stringify(c.bgAgents) ? c.bgAgents : a.bg_agent_list) : undefined
             const quietAt = told !== undefined && c.quietAt !== undefined && Math.abs(told - c.quietAt) < 3000 ? c.quietAt : told
-            if (!entries && c.of === key && c.status === 'ready' && c.quietAt === quietAt && c.gen === a.gen && c.older === older && c.olderCut === olderCut && c.loadingOlder === loadingOlder && sameBind(c.bind, a.bind) && c.agentStatus === a.agent_status && c.waitingFor === a.waiting_for && c.bgCmds === bgCmds && c.title === a.title && c.tasks === tasks && c.meta === meta && c.queued === queued && c.running === running && !c.failing && c.defaultChanged === a.default_changed) return c
-            return { ...initial(key), status: 'ready', entries: entries ?? c.entries, older, olderCut, loadingOlder, gen: a.gen, bind: a.bind, agentStatus: a.agent_status, waitingFor: a.waiting_for, bgCmds, quietAt, title: a.title || undefined, tasks, meta, queued, running, failing: false, okAt: now, changedAt: entries ? now : c.changedAt, of: key, defaultChanged: a.default_changed }
+            if (!entries && c.of === key && c.status === 'ready' && c.quietAt === quietAt && c.gen === a.gen && c.older === older && c.olderCut === olderCut && c.loadingOlder === loadingOlder && sameBind(c.bind, a.bind) && c.agentStatus === a.agent_status && c.waitingFor === a.waiting_for && c.bgCmds === bgCmds && c.bgAgents === bgAgents && c.title === a.title && c.tasks === tasks && c.meta === meta && c.queued === queued && c.running === running && !c.failing && c.defaultChanged === a.default_changed) return c
+            return { ...initial(key), status: 'ready', entries: entries ?? c.entries, older, olderCut, loadingOlder, gen: a.gen, bind: a.bind, agentStatus: a.agent_status, waitingFor: a.waiting_for, bgCmds, bgAgents, quietAt, title: a.title || undefined, tasks, meta, queued, running, failing: false, okAt: now, changedAt: entries ? now : c.changedAt, of: key, defaultChanged: a.default_changed }
           })
           remember(key, gen, rev, byseq, a)
           if (a.entries.length > 0 && !fresh) next = ACTIVE
@@ -572,7 +580,7 @@ export function useConversation(sessionId: string, enabled: boolean, pane: strin
         else {
           const entries = [...byseq.values()].sort((x, y) => x.seq - y.seq)
           const older = !!k.older || entries.length === MAX
-          setConvo({ ...initial(key), status: 'ready', entries, older, olderCut: older && (!!k.older_cut || entries.length === MAX), gen, bind: k.bind, agentStatus: k.agent_status, waitingFor: k.waiting_for, bgCmds: cmdsOf(k), title: k.title || undefined, tasks: k.tasks?.length ? k.tasks : undefined, meta: k.meta, queued: k.queued?.length ? k.queued : undefined, running: k.running?.length ? k.running : undefined, failing: false, okAt: now, changedAt: now, of: key })
+          setConvo({ ...initial(key), status: 'ready', entries, older, olderCut: older && (!!k.older_cut || entries.length === MAX), gen, bind: k.bind, agentStatus: k.agent_status, waitingFor: k.waiting_for, bgCmds: cmdsOf(k), bgAgents: k.bg_agent_list?.length ? k.bg_agent_list : undefined, title: k.title || undefined, tasks: k.tasks?.length ? k.tasks : undefined, meta: k.meta, queued: k.queued?.length ? k.queued : undefined, running: k.running?.length ? k.running : undefined, failing: false, okAt: now, changedAt: now, of: key })
         }
       } else {
         gen = 0

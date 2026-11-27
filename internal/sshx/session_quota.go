@@ -224,16 +224,35 @@ func (l *sessionLedger) classInUse(c *ssh.Client, class SessionClass) int {
 //     released that satisfies the caller's class and interactive priority
 //     (a non-interactive waiter never steals InteractiveReserve), returning
 //     ErrBusy on timeout or ctx.Err() if ctx is cancelled first.
+func busyKindForClass(class SessionClass) string {
+	switch class {
+	case SessionAux:
+		return "exec"
+	case SessionSFTP:
+		return "sftp"
+	case SessionPane:
+		return "pane"
+	case SessionTerminal:
+		return "terminal"
+	default:
+		return "session"
+	}
+}
+
 func AcquireSession(ctx context.Context, c *ssh.Client, class SessionClass, interactive bool, await time.Duration) (func(), error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
+	}
+	busy := func() (func(), error) {
+		NotifyBusy(c, busyKindForClass(class))
+		return nil, ErrBusy
 	}
 	rel, waitCh, ok := defaultSessionLedger.tryTake(c, class, interactive)
 	if ok {
 		return rel, nil
 	}
 	if await <= 0 || waitCh == nil {
-		return nil, ErrBusy
+		return busy()
 	}
 	timer := time.NewTimer(await)
 	defer timer.Stop()
@@ -242,7 +261,7 @@ func AcquireSession(ctx context.Context, c *ssh.Client, class SessionClass, inte
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		case <-timer.C:
-			return nil, ErrBusy
+			return busy()
 		case <-waitCh:
 		}
 		if err := ctx.Err(); err != nil {
@@ -253,7 +272,7 @@ func AcquireSession(ctx context.Context, c *ssh.Client, class SessionClass, inte
 			return rel, nil
 		}
 		if waitCh == nil {
-			return nil, ErrBusy
+			return busy()
 		}
 	}
 }

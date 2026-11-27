@@ -387,7 +387,8 @@ func lineAliveCommand(pid, start int64) string {
 stat=$(tr '\n' ' ' <"/proc/$1/stat" 2>/dev/null) || exit 3
 rest=${stat##*) }
 [ "$(printf '%s' "$rest" | cut -d' ' -f20)" = "$2" ] || exit 3
-head -c 65536 "$HOME/.claude/sessions/$1.json" 2>/dev/null | tr -d '\n' | grep -o '"sessionId" *: *"[0-9a-f-]*"' | head -n 1 | sed 's/.*"\([0-9a-f-]*\)"$/\1/'
+` + claudeConfigDirSh + `claude_cfg_dir "/proc/$1"
+head -c 65536 "$clcfg/sessions/$1.json" 2>/dev/null | tr -d '\n' | grep -o '"sessionId" *: *"[0-9a-f-]*"' | head -n 1 | sed 's/.*"\([0-9a-f-]*\)"$/\1/'
 exit 0`
 	return "sh -c " + sshx.QuoteShell(script) + " corral " + strconv.FormatInt(pid, 10) + " " + strconv.FormatInt(start, 10)
 }
@@ -431,7 +432,9 @@ func (s *Server) lineProbeOf(ctx context.Context, sess *term.Session, p *store.S
 			// that pane — the gate's front(), exit 3 where it is not: another
 			// Claude Code started there, the first put aside, shows a box
 			// that is not this line's.)
+			t0 := time.Now()
 			out, err := lineExec(ctx, sess, running, convoGatedCommand("", p.Mode, p.TmuxName, p.Pane, p.Socket, p.PID, p.Start, p.SID, 0, []string{}, pickerLines), nil, 64<<10)
+			s.perfGated("model_line", t0, err, sess.HostID)
 			if err != nil {
 				return false
 			}
@@ -452,7 +455,9 @@ func (s *Server) lineProbeOf(ctx context.Context, sess *term.Session, p *store.S
 			}
 			// (And still that process in front once the screen was read: the
 			// read waits a moment, in which another's box may have come up.)
+			t1 := time.Now()
 			_, err = lineExec(ctx, sess, running, convoGatedCommand("", p.Mode, p.TmuxName, p.Pane, p.Socket, p.PID, p.Start, p.SID, 0, []string{}, 0), nil, 4096)
+			s.perfGated("model_line", t1, err, sess.HostID)
 			return err == nil
 		},
 	}
@@ -710,7 +715,9 @@ func (s *Server) convoModelLine(w http.ResponseWriter, ctx context.Context, sess
 				return shown, nil
 			},
 			typed: func(text string) error {
+				t0 := time.Now()
 				_, err := lineExec(ctx, sess, &running, convoGatedCommand("free", mode, sess.TmuxSession, pane, socket, pid, start, sid, len(text), nil, 0), strings.NewReader(text), 4096)
+				s.perfGated("model_line", t0, err, sess.HostID)
 				return err
 			},
 			dialog: func() (string, string, error) {
@@ -726,7 +733,9 @@ func (s *Server) convoModelLine(w http.ResponseWriter, ctx context.Context, sess
 				if mode == "herdr" {
 					k = modelKeys[key][0]
 				}
+				t0 := time.Now()
 				_, err := lineExec(ctx, sess, &running, convoGatedCommand("panel:"+digest, mode, sess.TmuxSession, pane, socket, pid, start, sid, 0, []string{k}, 0), nil, 4096)
+				s.perfGated("model_line", t0, err, sess.HostID)
 				return err
 			},
 			logFrom: func(off int64) ([]byte, error) { return s.logFrom(ctx, sess, log, off) },
