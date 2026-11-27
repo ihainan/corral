@@ -545,78 +545,172 @@ if [ "$others" = "0" ]; then
   rmdir "$SR" 2>/dev/null || true
   rmdir "$L" 2>/dev/null || true
 fi
+left_any=0
 if [ -e "$ST" ]; then
-  echo "result=partial"
+  left_any=1
   echo "left=$ST	failed to remove"
+fi
+if [ "$others" = "0" ] && [ -d "$L" ]; then
+  for rem in "$L/corrald" "$L/README.txt" "$L"/corrald-*; do
+    if [ -e "$rem" ] || [ -L "$rem" ]; then
+      left_any=1
+      echo "left=$rem	corrald file still exists after removal"
+    fi
+  done
+fi
+if [ "$left_any" = "1" ]; then
+  echo "result=partial"
   exit 1
 fi
 echo "result=removed"
 `, "L", libDir, "ST", stateDir, "SOCK", sockPath, "OP", opID)
 }
 
-// parseVersionDirRelease extracts the release number from a "corrald-<ver>-<rel>"
-// directory name (or relative symlink target "corrald-<ver>-<rel>/corrald").
-func parseVersionDirRelease(name string) (int64, bool) {
+// StartCandidate describes the single authoritative binary chosen by
+// SelectStartBinary to launch via `corrald serve`.
+type StartCandidate struct {
+	Path      string // absolute binary path on the host
+	Version   string // parsed version (e.g. "0.3.2") when known
+	Release   int64  // parsed release (> 0) when known
+	RelTarget string // relative target under libDir (e.g. "corrald-0.3.2-2000/corrald")
+}
+
+// StartSelectOptions configures SelectStartBinary.
+type StartSelectOptions struct {
+	// Rollback allows selecting a version lower than the shared symlink target
+	// (e.g. post-update rollback or explicit replace). Failed releases are
+	// still strictly excluded.
+	Rollback bool
+	// PreferredTarget (e.g. "corrald-0.3.1-1000/corrald") is preferred during
+	// Rollback when it exists in probe.Versions and is not in failedReleases.
+	PreferredTarget string
+}
+
+// parseVersionDirInfo extracts (version, release, relTarget) from a
+// "corrald-<ver>-<rel>" directory name or relative symlink target
+// "corrald-<ver>-<rel>/corrald".
+func parseVersionDirInfo(name string) (ver string, rel int64, relTarget string, ok bool) {
 	name = strings.TrimSpace(name)
 	name = strings.TrimSuffix(name, "/corrald")
 	if idx := strings.LastIndexByte(name, '/'); idx >= 0 {
 		name = name[idx+1:]
 	}
 	if !strings.HasPrefix(name, "corrald-") {
-		return 0, false
+		return "", 0, "", false
 	}
 	rest := strings.TrimPrefix(name, "corrald-")
 	idx := strings.LastIndexByte(rest, '-')
 	if idx <= 0 || idx+1 >= len(rest) {
-		return 0, false
+		return "", 0, "", false
 	}
+	ver = rest[:idx]
 	rel, err := strconv.ParseInt(rest[idx+1:], 10, 64)
-	if err != nil || rel <= 0 {
-		return 0, false
+	if err != nil || rel <= 0 || ver == "" {
+		return "", 0, "", false
 	}
-	return rel, true
+	return ver, rel, name + "/corrald", true
 }
 
-// SelectStartBinary picks the binary path to launch with `corrald serve`.
-// Normally this is probe.CurrentBin (the shared symlink). If the shared symlink
-// currently points to a release in failedReleases (e.g. after a post-update
-// crash-loop rollback on an NFS shared home where the shared symlink is never
-// lowered), it selects the highest non-failed installed version directory instead.
-func SelectStartBinary(probe *HostProbe, failedReleases []int64) string {
+// SelectStartBinary is the single authoritative selector for deciding which
+// corrald binary to start on a host (first start, auto-restart, retry,
+// cold-start update, and rollback).
+//
+// Invariants:
+//  1. Never selects any release present in failedReleases.
+//  2. In normal mode (!opts.Rollback), never selects a version lower than the
+//     current shared symlink target unless the symlink target itself is in
+//     failedReleases (e.g. NFS post-rollback where the symlink is never lowered).
+//  3. In rollback mode (opts.Rollback), selects opts.PreferredTarget if present
+//     on the host and not in failedReleases, otherwise the highest non-failed
+//     installed version directory.
+//  4. Returns ok=false if no eligible non-failed binary exists.
+func SelectStartBinary(probe *HostProbe, failedReleases []int64, opts StartSelectOptions) (StartCandidate, bool) {
 	if probe == nil {
-		return ""
+		return StartCandidate{}, false
 	}
-	isFailed := func(rel int64) bool {
-		if rel <= 0 {
-			return false
+	failed := make(map[int64]bool, len(failedReleases))
+	for _, fr := range failedReleases {
+		if fr > 0 {
+			failed[fr] = true
 		}
-		for _, fr := range failedReleases {
-			if fr == rel {
-				return true
+	}
+
+	var installed []StartCandidate
+	if probe.LibDir != "" {
+		for _, dir := range probe.Versions {
+			ver, rel, relTarget, ok := parseVersionDirInfo(dir)
+			if !ok {
+				continue
+			}
+			installed = append(installed, StartCandidate{
+				Path:      probe.LibDir + "/" + relTarget,
+				Version:   ver,
+				Release:   rel,
+				RelTarget: relTarget,
+			})
+		}
+	}
+
+	highestNonFailed := func(minRel int64) (StartCandidate, bool) {
+		var best StartCandidate
+		found := false
+		for _, c := range installed {
+			if failed[c.Release] || c.Release < minRel {
+				continue
+			}
+			if !found || c.Release > best.Release {
+				best = c
+				found = true
 			}
 		}
-		return false
+		return best, found
 	}
-	curRel, hasCur := parseVersionDirRelease(probe.CurrentTarget)
-	if !hasCur || !isFailed(curRel) {
-		return probe.CurrentBin
-	}
-	bestRel := int64(-1)
-	bestDir := ""
-	for _, dir := range probe.Versions {
-		rel, ok := parseVersionDirRelease(dir)
-		if !ok || isFailed(rel) {
-			continue
+
+	curVer, curRel, curRelTarget, hasCur := parseVersionDirInfo(probe.CurrentTarget)
+
+	if opts.Rollback {
+		if opts.PreferredTarget != "" {
+			if _, prefRel, prefRelTarget, ok := parseVersionDirInfo(opts.PreferredTarget); ok && !failed[prefRel] {
+				for _, c := range installed {
+					if c.RelTarget == prefRelTarget {
+						return c, true
+					}
+				}
+			}
 		}
-		if rel > bestRel {
-			bestRel = rel
-			bestDir = dir
+		if best, ok := highestNonFailed(1); ok {
+			return best, true
 		}
+		if probe.HasSymlink && !hasCur && probe.CurrentBin != "" {
+			return StartCandidate{Path: probe.CurrentBin}, true
+		}
+		return StartCandidate{}, false
 	}
-	if bestDir != "" && probe.LibDir != "" {
-		return probe.LibDir + "/" + bestDir + "/corrald"
+
+	// Normal mode: follow the shared symlink when it is not blacklisted.
+	if probe.HasSymlink && hasCur {
+		if !failed[curRel] {
+			return StartCandidate{
+				Path:      probe.CurrentBin,
+				Version:   curVer,
+				Release:   curRel,
+				RelTarget: curRelTarget,
+			}, true
+		}
+		// Shared symlink points to a blacklisted release: prefer any non-failed
+		// version >= curRel first, then fall back to the highest non-failed
+		// installed version (NFS post-rollback case).
+		if best, ok := highestNonFailed(curRel); ok {
+			return best, true
+		}
+		return highestNonFailed(1)
 	}
-	return probe.CurrentBin
+
+	if probe.HasSymlink && !hasCur && probe.CurrentBin != "" {
+		return StartCandidate{Path: probe.CurrentBin}, true
+	}
+
+	return highestNonFailed(1)
 }
 
 // FriendlyOSName maps uname -s output to user-facing OS names for failure text.

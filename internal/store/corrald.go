@@ -390,6 +390,413 @@ func (s *Store) CommitCorraldManifestIfOp(ctx context.Context, hostID int64, opI
 	return n > 0, nil
 }
 
+// ReleaseCorraldHostOp conditionally clears active_op_id = ” on hostID ONLY
+// when active_op_id still equals opID. When fallbackState is non-empty and the
+// row is still in 'updating' or 'installing', it restores state to fallbackState.
+// Safe to call from deferred failure/cancel/panic paths without ever clobbering
+// a superseding operation (e.g. withdrawal-first remove).
+func (s *Store) ReleaseCorraldHostOp(ctx context.Context, hostID int64, opID, fallbackState string) (bool, error) {
+	if opID == "" {
+		return false, nil
+	}
+	now := s.unix()
+	var (
+		res sql.Result
+		err error
+	)
+	if fallbackState != "" {
+		res, err = s.db.ExecContext(ctx, `
+			UPDATE corrald_hosts
+			SET active_op_id = '',
+			    state = CASE WHEN state IN ('updating', 'installing') THEN ? ELSE state END,
+			    updated_at = ?
+			WHERE host_id = ? AND active_op_id = ?`,
+			fallbackState, now, hostID, opID)
+	} else {
+		res, err = s.db.ExecContext(ctx, `
+			UPDATE corrald_hosts
+			SET active_op_id = '', updated_at = ?
+			WHERE host_id = ? AND active_op_id = ?`,
+			now, hostID, opID)
+	}
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
+}
+
+// InsertCorraldHostIfAbsent inserts ch only if no corrald_hosts row exists for
+// ch.HostID yet (used for peer adoption so concurrent installs are never overwritten).
+func (s *Store) InsertCorraldHostIfAbsent(ctx context.Context, ch *CorraldHost) (bool, error) {
+	now := s.unix()
+	ch.UpdatedAt = now
+	filesJSON, pausedJSON, failedJSON, err := marshalCorraldSlices(ch)
+	if err != nil {
+		return false, err
+	}
+	var consentBy any
+	if ch.ConsentBy != nil {
+		consentBy = *ch.ConsentBy
+	}
+	res, err := s.db.ExecContext(ctx, `
+		INSERT OR IGNORE INTO corrald_hosts (
+			host_id, state, consent_by, consent_at, bound_fingerprint, bound_username, bound_gateway,
+			manifest_json, version, release, machine_id, socket_path, files_json, paused_users_json, failed_releases_json,
+			active_op_id, updated_from_ver, updated_from_rel, updated_from_target, update_target_ver, update_target_rel,
+			update_ready_at, update_crash_count, last_ok_at, last_error, restart_count, updated_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		ch.HostID, ch.State, consentBy, ch.ConsentAt,
+		ch.BoundFingerprint, ch.BoundUsername, ch.BoundGateway,
+		ch.ManifestJSON, ch.Version, ch.Release,
+		ch.MachineID, ch.SocketPath, filesJSON, pausedJSON, failedJSON,
+		ch.ActiveOpID, ch.UpdatedFromVer, ch.UpdatedFromRel, ch.UpdatedFromTarget,
+		ch.UpdateTargetVer, ch.UpdateTargetRel, ch.UpdateReadyAt, ch.UpdateCrashCount,
+		ch.LastOKAt, ch.LastError, ch.RestartCount, now,
+	)
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
+}
+
+// ClaimCorraldHostForRemove atomically marks hostID as removing with opID
+// without overwriting any other columns from a stale snapshot.
+func (s *Store) ClaimCorraldHostForRemove(ctx context.Context, hostID int64, opID string) error {
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE corrald_hosts
+		SET state = 'removing', active_op_id = ?, last_error = '', updated_at = ?
+		WHERE host_id = ?`,
+		opID, s.unix(), hostID)
+	return err
+}
+
+// ClaimCorraldHostForRetry atomically claims active_op_id = opID for Retry
+// only when no other op is active and the host is not off/removing/remove_pending.
+func (s *Store) ClaimCorraldHostForRetry(ctx context.Context, hostID int64, opID, nextState string) (bool, error) {
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE corrald_hosts
+		SET state = ?, restart_count = 0, last_error = '', active_op_id = ?, updated_at = ?
+		WHERE host_id = ? AND active_op_id = '' AND state NOT IN ('off', 'removing', 'remove_pending')`,
+		nextState, opID, s.unix(), hostID)
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
+}
+
+// MarkCorraldRebindIfMismatch atomically transitions hostID to 'rebind' ONLY
+// when its stored binding still disagrees with (observedFP, observedUser,
+// observedGateway) and its current state is eligible. Always excludes
+// 'off', 'removing', 'remove_pending', 'rebind'. When includeInstalling is
+// false, also excludes 'installing'; when true, 'installing' rows are only
+// transitioned if a non-empty bound column disagrees with the observed identity.
+// Returns true iff the row was actually transitioned to 'rebind'.
+func (s *Store) MarkCorraldRebindIfMismatch(
+	ctx context.Context,
+	hostID int64,
+	observedFP, observedUser, observedGateway string,
+	includeInstalling bool,
+) (bool, error) {
+	now := s.unix()
+	var (
+		res sql.Result
+		err error
+	)
+	if includeInstalling {
+		res, err = s.db.ExecContext(ctx, `
+			UPDATE corrald_hosts
+			SET state = 'rebind', updated_at = ?
+			WHERE host_id = ?
+			  AND (
+			    (state = 'installing' AND (
+			      (bound_fingerprint != '' AND bound_fingerprint != ?)
+			      OR (bound_username != '' AND bound_username != ?)
+			      OR (bound_gateway != '' AND bound_gateway != ?)
+			    ))
+			    OR
+			    (state NOT IN ('off', 'removing', 'remove_pending', 'rebind', 'installing') AND (
+			      bound_fingerprint = '' OR bound_username = '' OR bound_gateway = ''
+			      OR bound_fingerprint != ? OR bound_username != ? OR bound_gateway != ?
+			    ))
+			  )`,
+			now, hostID,
+			observedFP, observedUser, observedGateway,
+			observedFP, observedUser, observedGateway,
+		)
+	} else {
+		res, err = s.db.ExecContext(ctx, `
+			UPDATE corrald_hosts
+			SET state = 'rebind', updated_at = ?
+			WHERE host_id = ?
+			  AND state NOT IN ('off', 'removing', 'remove_pending', 'rebind', 'installing')
+			  AND (
+			    bound_fingerprint = '' OR bound_username = '' OR bound_gateway = ''
+			    OR bound_fingerprint != ? OR bound_username != ? OR bound_gateway != ?
+			  )`,
+			now, hostID, observedFP, observedUser, observedGateway,
+		)
+	}
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
+}
+
+// TouchCorraldLastOK updates ONLY last_ok_at while the host is running.
+func (s *Store) TouchCorraldLastOK(ctx context.Context, hostID, lastOK int64) error {
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE corrald_hosts
+		SET last_ok_at = ?, updated_at = ?
+		WHERE host_id = ? AND state = 'running'`,
+		lastOK, s.unix(), hostID)
+	return err
+}
+
+// SetCorraldStateIfIdle updates ONLY state when active_op_id = ” and the
+// current state is one of allowedFrom.
+func (s *Store) SetCorraldStateIfIdle(ctx context.Context, hostID int64, nextState string, allowedFrom ...string) (bool, error) {
+	if len(allowedFrom) == 0 {
+		return false, nil
+	}
+	placeholders := make([]string, len(allowedFrom))
+	args := make([]any, 0, 3+len(allowedFrom))
+	args = append(args, nextState, s.unix(), hostID)
+	for i, st := range allowedFrom {
+		placeholders[i] = "?"
+		args = append(args, st)
+	}
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE corrald_hosts SET state = ?, updated_at = ?
+		 WHERE host_id = ? AND active_op_id = '' AND state IN (`+strings.Join(placeholders, ",")+`)`,
+		args...)
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
+}
+
+// ClearCorraldErrorForUpgradeIfIdle resets restart_count and last_error when
+// an idle error-state host is eligible for retry on a newer gateway release.
+func (s *Store) ClearCorraldErrorForUpgradeIfIdle(ctx context.Context, hostID int64) (bool, error) {
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE corrald_hosts
+		SET restart_count = 0, last_error = '', updated_at = ?
+		WHERE host_id = ? AND active_op_id = '' AND state = 'error'`,
+		s.unix(), hostID)
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
+}
+
+// SetCorraldErrorIfIdle marks an idle non-terminal host as error with lastError.
+func (s *Store) SetCorraldErrorIfIdle(ctx context.Context, hostID int64, lastError string) (bool, error) {
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE corrald_hosts
+		SET state = 'error', last_error = ?, updated_at = ?
+		WHERE host_id = ? AND active_op_id = ''
+		  AND state NOT IN ('off', 'removing', 'remove_pending', 'rebind', 'installing', 'updating')`,
+		lastError, s.unix(), hostID)
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
+}
+
+// SetCorraldIncompatibleIfIdle marks an idle host as incompatible without
+// clobbering concurrent operations or identity rebind.
+func (s *Store) SetCorraldIncompatibleIfIdle(ctx context.Context, hostID int64, version string, release int64, lastError string) (bool, error) {
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE corrald_hosts
+		SET state = 'incompatible',
+		    version = CASE WHEN ? != '' THEN ? ELSE version END,
+		    release = CASE WHEN ? > 0 THEN ? ELSE release END,
+		    last_error = CASE WHEN ? != '' THEN ? ELSE last_error END,
+		    updated_at = ?
+		WHERE host_id = ? AND active_op_id = ''
+		  AND state NOT IN ('off', 'removing', 'remove_pending', 'rebind', 'installing', 'updating')`,
+		version, version, release, release, lastError, lastError, s.unix(), hostID)
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
+}
+
+// RecordCorraldRestartAttemptIfLost updates state, restart_count, and optional
+// last_error after a failed automatic restart attempt while the host is still lost.
+func (s *Store) RecordCorraldRestartAttemptIfLost(ctx context.Context, hostID int64, nextState string, restartCount int, lastError string) (bool, error) {
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE corrald_hosts
+		SET state = ?,
+		    restart_count = ?,
+		    last_error = CASE WHEN ? != '' THEN ? ELSE last_error END,
+		    updated_at = ?
+		WHERE host_id = ? AND active_op_id = '' AND state = 'lost'`,
+		nextState, restartCount, lastError, lastError, s.unix(), hostID)
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
+}
+
+// UpdateCorraldRunningIfIdle conditionally updates runtime fields to 'running'
+// ONLY when no operation is active, the host is not in a terminal/rebind/op
+// state, and its bound identity still matches any non-empty boundFP/boundUser/
+// boundGW arguments. Never overwrites paused_users_json, failed_releases_json,
+// consent, or manifest_json.
+func (s *Store) UpdateCorraldRunningIfIdle(
+	ctx context.Context,
+	hostID int64,
+	boundFP, boundUser, boundGW string,
+	version string,
+	release int64,
+	socketPath, machineID string,
+	files []string,
+	lastOK int64,
+	clearNonUpdateErr bool,
+	forceLastError *string,
+) (bool, error) {
+	filesJSON := ""
+	if len(files) > 0 {
+		if b, err := json.Marshal(files); err == nil {
+			filesJSON = string(b)
+		}
+	}
+	now := s.unix()
+	var errExpr string
+	args := []any{
+		version, version,
+		release, release,
+		socketPath, socketPath,
+		machineID, machineID,
+		filesJSON, filesJSON,
+		lastOK,
+	}
+	if forceLastError != nil {
+		errExpr = "?"
+		args = append(args, *forceLastError)
+	} else if clearNonUpdateErr {
+		errExpr = `CASE WHEN last_error LIKE '%"code":"update_failed"%' THEN last_error ELSE '' END`
+	} else {
+		errExpr = "last_error"
+	}
+	args = append(args, now, hostID)
+
+	where := `WHERE host_id = ? AND active_op_id = '' AND state NOT IN ('off', 'removing', 'remove_pending', 'rebind', 'installing', 'updating')`
+	if boundFP != "" {
+		where += ` AND bound_fingerprint = ?`
+		args = append(args, boundFP)
+	}
+	if boundUser != "" {
+		where += ` AND bound_username = ?`
+		args = append(args, boundUser)
+	}
+	if boundGW != "" {
+		where += ` AND bound_gateway = ?`
+		args = append(args, boundGW)
+	}
+
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE corrald_hosts
+		SET state = 'running',
+		    version = CASE WHEN ? != '' THEN ? ELSE version END,
+		    release = CASE WHEN ? > 0 THEN ? ELSE release END,
+		    socket_path = CASE WHEN ? != '' THEN ? ELSE socket_path END,
+		    machine_id = CASE WHEN ? != '' THEN ? ELSE machine_id END,
+		    files_json = CASE WHEN ? != '' THEN ? ELSE files_json END,
+		    restart_count = 0,
+		    last_ok_at = ?,
+		    last_error = `+errExpr+`,
+		    updated_at = ?
+		`+where,
+		args...)
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
+}
+
+// UpdateCorraldHostForReconcile updates corrald_hosts ONLY if active_op_id is
+// empty or matches expectedOpID (handling both normal interrupted ops and a
+// crash between CreateCorraldOp and setting active_op_id, while never
+// clobbering a different concurrently-started operation). Always clears
+// active_op_id to empty.
+func (s *Store) UpdateCorraldHostForReconcile(ctx context.Context, ch *CorraldHost, expectedOpID string) (bool, error) {
+	now := s.unix()
+	ch.UpdatedAt = now
+	filesJSON, pausedJSON, failedJSON, err := marshalCorraldSlices(ch)
+	if err != nil {
+		return false, err
+	}
+	var consentBy any
+	if ch.ConsentBy != nil {
+		consentBy = *ch.ConsentBy
+	}
+	where := `WHERE host_id = ? AND active_op_id = ''`
+	args := []any{
+		ch.State, consentBy, ch.ConsentAt,
+		ch.BoundFingerprint, ch.BoundUsername, ch.BoundGateway,
+		ch.ManifestJSON, ch.Version, ch.Release,
+		ch.MachineID, ch.SocketPath, filesJSON, pausedJSON, failedJSON,
+		ch.UpdatedFromVer, ch.UpdatedFromRel, ch.UpdatedFromTarget,
+		ch.UpdateTargetVer, ch.UpdateTargetRel, ch.UpdateReadyAt, ch.UpdateCrashCount,
+		ch.LastOKAt, ch.LastError, ch.RestartCount, now,
+		ch.HostID,
+	}
+	if expectedOpID != "" {
+		where = `WHERE host_id = ? AND active_op_id IN ('', ?)`
+		args = append(args, expectedOpID)
+	}
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE corrald_hosts SET
+			state = ?,
+			consent_by = ?,
+			consent_at = ?,
+			bound_fingerprint = ?,
+			bound_username = ?,
+			bound_gateway = ?,
+			manifest_json = ?,
+			version = ?,
+			release = ?,
+			machine_id = ?,
+			socket_path = ?,
+			files_json = ?,
+			paused_users_json = ?,
+			failed_releases_json = ?,
+			active_op_id = '',
+			updated_from_ver = ?,
+			updated_from_rel = ?,
+			updated_from_target = ?,
+			update_target_ver = ?,
+			update_target_rel = ?,
+			update_ready_at = ?,
+			update_crash_count = ?,
+			last_ok_at = ?,
+			last_error = ?,
+			restart_count = ?,
+			updated_at = ?
+		`+where, args...)
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	if n > 0 {
+		ch.ActiveOpID = ""
+		return true, nil
+	}
+	return false, nil
+}
+
 // UpdateCorraldFingerprint updates bound_fingerprint on host key rotation, or marks
 // the host as rebind when keepAuth is false. Only acts if a corrald_hosts row exists
 // and is not off/removing/remove_pending.
@@ -764,9 +1171,18 @@ func (s *Store) ActiveCorraldOp(ctx context.Context, hostID int64) (*CorraldOp, 
 	return op, nil
 }
 
-// SetCorraldUserPaused adds or removes userID in paused_users_json for hostID.
+// SetCorraldUserPaused adds or removes userID in paused_users_json for hostID
+// using a targeted column update inside a transaction so concurrent state/op
+// transitions on the row are never overwritten.
 func (s *Store) SetCorraldUserPaused(ctx context.Context, hostID, userID int64, paused bool) (*CorraldHost, error) {
-	ch, err := s.CorraldHostByID(ctx, hostID)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	ch, err := scanCorraldHost(tx.QueryRowContext(ctx,
+		`SELECT `+corraldHostCols+` FROM corrald_hosts WHERE host_id = ?`, hostID))
 	if err != nil {
 		return nil, err
 	}
@@ -782,8 +1198,19 @@ func (s *Store) SetCorraldUserPaused(ctx context.Context, hostID, userID int64, 
 		}
 		ch.PausedUsers = next
 	}
-	if err := s.UpsertCorraldHost(ctx, ch); err != nil {
+	pausedJSON, err := json.Marshal(ch.PausedUsers)
+	if err != nil {
 		return nil, err
 	}
+	now := s.unix()
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE corrald_hosts SET paused_users_json = ?, updated_at = ? WHERE host_id = ?`,
+		string(pausedJSON), now, hostID); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	ch.UpdatedAt = now
 	return ch, nil
 }

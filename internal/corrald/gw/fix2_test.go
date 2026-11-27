@@ -220,14 +220,19 @@ func TestSelectStartBinarySkipsFailedRelease(t *testing.T) {
 	probe := &HostProbe{
 		LibDir:        "/home/alice/.local/lib/corral",
 		CurrentBin:    "/home/alice/.local/lib/corral/corrald",
+		HasSymlink:    true,
 		CurrentTarget: "corrald-0.3.2-2000/corrald",
 		Versions:      []string{"corrald-0.3.1-1000", "corrald-0.3.2-2000"},
 	}
-	if got := SelectStartBinary(probe, nil); got != probe.CurrentBin {
-		t.Fatalf("SelectStartBinary(no failed) = %q, want %q", got, probe.CurrentBin)
+	if got, ok := SelectStartBinary(probe, nil, StartSelectOptions{}); !ok || got.Path != probe.CurrentBin || got.Release != 2000 {
+		t.Fatalf("SelectStartBinary(no failed) = (%+v, %v), want path=%q rel=2000", got, ok, probe.CurrentBin)
 	}
-	if got := SelectStartBinary(probe, []int64{2000}); got != "/home/alice/.local/lib/corral/corrald-0.3.1-1000/corrald" {
-		t.Fatalf("SelectStartBinary(2000 failed) = %q, want 1000 binary", got)
+	if got, ok := SelectStartBinary(probe, []int64{2000}, StartSelectOptions{}); !ok || got.Path != "/home/alice/.local/lib/corral/corrald-0.3.1-1000/corrald" || got.Release != 1000 {
+		t.Fatalf("SelectStartBinary(2000 failed) = (%+v, %v), want 1000 binary", got, ok)
+	}
+	// When all installed releases are blacklisted, SelectStartBinary must refuse (ok=false).
+	if got, ok := SelectStartBinary(probe, []int64{1000, 2000}, StartSelectOptions{}); ok {
+		t.Fatalf("SelectStartBinary(all failed) = (%+v, true), want ok=false", got)
 	}
 }
 

@@ -253,6 +253,27 @@ func cmdInstall(args []string, build proto.BuildInfo, stdout io.Writer) int {
 
 	nowStr := time.Now().UTC().Format(time.RFC3339)
 
+	baseFiles := []string{
+		verDir,
+		dstBin,
+		layout.CurrentSymlink,
+		layout.ReadmePath,
+		layout.StateDir,
+		layout.InstallJSON,
+		layout.LockPath,
+		layout.OpLockPath,
+		layout.MetaJSON,
+		layout.ClientsJSON,
+		layout.LogPath,
+		layout.OpsDir,
+		layout.SocketPath,
+	}
+
+	// B-2: Always read any existing install.json and preserve its Files list so
+	// cold-start updates (install without --upgrade) never drop previously
+	// installed version directories from the uninstall manifest.
+	prevRec, _ := ReadInstallRecord(layout.InstallJSON)
+
 	var installRec *InstallRecord
 	var (
 		readmeVer   string
@@ -260,7 +281,7 @@ func cmdInstall(args []string, build proto.BuildInfo, stdout io.Writer) int {
 		forceReadme bool
 	)
 	if *upgrade {
-		installRec, _ = ReadInstallRecord(layout.InstallJSON)
+		installRec = prevRec
 		if installRec == nil {
 			installRec = &InstallRecord{
 				Version:         build.Version,
@@ -273,7 +294,7 @@ func cmdInstall(args []string, build proto.BuildInfo, stdout io.Writer) int {
 				MachineIDSource: layout.MachineIDSource,
 			}
 		}
-		installRec.Files = append(installRec.Files, verDir, dstBin, layout.CurrentSymlink, layout.ReadmePath, layout.StateDir, layout.InstallJSON)
+		installRec.Files = append(installRec.Files, baseFiles...)
 		if err := WriteInstallRecord(layout.InstallJSON, installRec); err != nil {
 			writeErr(stdout, "install_json_failed", err.Error())
 			return 1
@@ -309,21 +330,11 @@ func cmdInstall(args []string, build proto.BuildInfo, stdout io.Writer) int {
 		} else {
 			readmeVer, readmeRel = curVer, curRel
 		}
-		files := []string{
-			verDir,
-			dstBin,
-			layout.CurrentSymlink,
-			layout.ReadmePath,
-			layout.StateDir,
-			layout.InstallJSON,
-			layout.LockPath,
-			layout.OpLockPath,
-			layout.MetaJSON,
-			layout.ClientsJSON,
-			layout.LogPath,
-			layout.OpsDir,
-			layout.SocketPath,
+		files := make([]string, 0, len(baseFiles))
+		if prevRec != nil && len(prevRec.Files) > 0 {
+			files = append(files, prevRec.Files...)
 		}
+		files = append(files, baseFiles...)
 		installRec = &InstallRecord{
 			Version:         build.Version,
 			Release:         build.Release,
@@ -1654,6 +1665,13 @@ func cmdUninstall(args []string, stdout io.Writer) int {
 				addLeft(target, "path still exists after removal")
 			}
 		}
+		// B-2: Verify no corrald-owned files/version dirs remain in LibDir
+		// (even if omitted from an older install.json) before declaring removed.
+		if libDirExists {
+			for _, rem := range listPreservedSharedPaths(layout) {
+				addLeft(rem, "corrald file still exists in lib dir after removal")
+			}
+		}
 	}
 
 	if len(left) > 0 {
@@ -1670,16 +1688,62 @@ func cmdUninstall(args []string, stdout io.Writer) int {
 	// now-empty Corral-created directories (os.Remove only removes empty dirs).
 	// All lock acquirers verify path inode == locked fd inode after flock, so
 	// unlinking while held cannot create two mutually non-exclusive locks.
+	// B-2: Do NOT ignore non-empty removal failures on corrald-owned dirs.
 	if stateDirExists {
-		_ = os.Remove(layout.LockPath)
-		_ = os.Remove(layout.OpLockPath)
-		_ = os.Remove(layout.StateDir)
-		_ = os.Remove(layout.StateRoot)
-		_ = os.Remove(filepath.Dir(layout.StateRoot)) // ~/.local/state/corral
+		if err := os.Remove(layout.LockPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			addLeft(layout.LockPath, err.Error())
+		}
+		if err := os.Remove(layout.OpLockPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			addLeft(layout.OpLockPath, err.Error())
+		}
+		if err := os.Remove(layout.StateDir); err != nil && !errors.Is(err, os.ErrNotExist) {
+			if entries, rerr := os.ReadDir(layout.StateDir); rerr == nil && len(entries) > 0 {
+				for _, e := range entries {
+					addLeft(filepath.Join(layout.StateDir, e.Name()), "file still exists in state dir after removal")
+				}
+			} else {
+				addLeft(layout.StateDir, err.Error())
+			}
+		}
+		if err := os.Remove(layout.StateRoot); err != nil && !errors.Is(err, os.ErrNotExist) {
+			if isLast && lastCheckErr == nil {
+				if entries, rerr := os.ReadDir(layout.StateRoot); rerr == nil && len(entries) > 0 {
+					for _, e := range entries {
+						addLeft(filepath.Join(layout.StateRoot, e.Name()), "leftover entry in corrald state root")
+					}
+				} else {
+					addLeft(layout.StateRoot, err.Error())
+				}
+			}
+		}
+		_ = os.Remove(filepath.Dir(layout.StateRoot)) // ~/.local/state/corral (best-effort if empty)
 	}
 	if isLast && lastCheckErr == nil && installErr == nil && libDirExists {
-		_ = os.Remove(layout.SharedLockPath)
-		_ = os.Remove(layout.LibDir) // ~/.local/lib/corral
+		if err := os.Remove(layout.SharedLockPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			addLeft(layout.SharedLockPath, err.Error())
+		}
+		if err := os.Remove(layout.LibDir); err != nil && !errors.Is(err, os.ErrNotExist) {
+			// ~/.local/lib/corral may legitimately hold sibling tools (e.g.
+			// code-server-*) or user directories (corrald-backups). Report
+			// partial if any corrald-owned entry remains OR if rmdir failed
+			// for a reason other than non-empty sibling tools.
+			corraldLeft := listPreservedSharedPaths(layout)
+			for _, p := range corraldLeft {
+				addLeft(p, "corrald file still exists in lib dir after removal")
+			}
+			if len(corraldLeft) == 0 && !errors.Is(err, syscall.ENOTEMPTY) && !errors.Is(err, syscall.EEXIST) {
+				addLeft(layout.LibDir, err.Error())
+			}
+		}
+	}
+
+	if len(left) > 0 {
+		fmt.Fprintf(stdout, "result=partial\n")
+		fmt.Fprintf(stdout, "last_machine=%t\n", isLast)
+		for _, l := range left {
+			fmt.Fprintf(stdout, "left=%s\t%s\n", l.path, l.reason)
+		}
+		return 1
 	}
 
 	fmt.Fprintf(stdout, "result=removed\n")

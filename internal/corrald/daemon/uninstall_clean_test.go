@@ -221,3 +221,94 @@ func TestHandoffDropsInvalidatedTmuxPath(t *testing.T) {
 		t.Fatalf("unexpected v1 meta version %q", meta.Version)
 	}
 }
+
+// B-2: Cold-start update (V1 install -> V2 install without --upgrade) must merge
+// install.json so uninstall removes BOTH V1 and V2 leaving zero files (result=removed);
+// and if a leftover corrald file remains on disk, uninstall must report result=partial
+// with left= listing the remaining path instead of ignoring the non-empty dir error.
+func TestColdStartUpdatePreservesInstallManifestAndUninstallPartialOnLeftover(t *testing.T) {
+	bins := getTestBinaries(t)
+	const mid = "cafe01234567"
+	env := []string{"CORRALD_TEST_MACHINE_ID=" + mid}
+
+	t.Run("v1_cold_update_v2_then_uninstall_removes_everything", func(t *testing.T) {
+		home := t.TempDir()
+
+		// 1. Install V1.
+		stage1 := stageBinary(t, home, mid, "opCold1", bins.v1)
+		if out, code := runCLI(t, filepath.Join(stage1, "corrald"), home, env,
+			"install", "--stage", stage1, "--op", "opCold1", "--gateway", "gw.cold", "--by", "alice"); code != 0 {
+			t.Fatalf("install v1 failed: %s", out)
+		}
+
+		// 2. Cold-start update to V2 (install WITHOUT --upgrade).
+		stage2 := stageBinary(t, home, mid, "opCold2", bins.v2)
+		if out, code := runCLI(t, filepath.Join(stage2, "corrald"), home, env,
+			"install", "--stage", stage2, "--op", "opCold2", "--gateway", "gw.cold", "--by", "alice"); code != 0 {
+			t.Fatalf("cold-start install v2 failed: %s", out)
+		}
+
+		// Verify both version dirs exist before uninstall and install.json kept V1.
+		v1Dir := filepath.Join(home, ".local", "lib", "corral", "corrald-0.1.0-100")
+		v2Dir := filepath.Join(home, ".local", "lib", "corral", "corrald-0.2.0-200")
+		if _, err := os.Stat(v1Dir); err != nil {
+			t.Fatalf("expected v1 dir before uninstall: %v", err)
+		}
+		if _, err := os.Stat(v2Dir); err != nil {
+			t.Fatalf("expected v2 dir before uninstall: %v", err)
+		}
+
+		// 3. Uninstall: MUST delete V1, V2, symlink, README, locks, and empty dirs -> result=removed.
+		installedBin := filepath.Join(home, ".local", "lib", "corral", "corrald")
+		out, code := runCLI(t, installedBin, home, env, "uninstall", "--op", "opColdRm")
+		kv := parseKV(out)
+		if code != 0 || kv["result"] != "removed" {
+			t.Fatalf("expected clean result=removed after V1->V2 cold-start update, got code=%d:\n%s", code, out)
+		}
+
+		mustNotExist := []string{
+			v1Dir,
+			v2Dir,
+			filepath.Join(home, ".local", "lib", "corral"),
+			filepath.Join(home, ".local", "state", "corral", "corrald", mid),
+			filepath.Join(home, ".local", "state", "corral", "corrald"),
+			filepath.Join(home, ".local", "state", "corral"),
+		}
+		for _, p := range mustNotExist {
+			if _, err := os.Lstat(p); !os.IsNotExist(err) {
+				t.Errorf("expected %s to be completely removed, lstat err=%v", p, err)
+			}
+		}
+	})
+
+	t.Run("leftover_file_reports_partial_with_left_path", func(t *testing.T) {
+		home := t.TempDir()
+
+		stage1 := stageBinary(t, home, mid, "opLeft1", bins.v1)
+		if out, code := runCLI(t, filepath.Join(stage1, "corrald"), home, env,
+			"install", "--stage", stage1, "--op", "opLeft1", "--gateway", "gw.left", "--by", "alice"); code != 0 {
+			t.Fatalf("install v1 failed: %s", out)
+		}
+
+		// Artificially leave an untracked corrald version directory in LibDir
+		// (same symptom as a dropped old version dir) AND verify uninstall reports
+		// result=partial listing it instead of ignoring non-empty LibDir removal.
+		orphanDir := filepath.Join(home, ".local", "lib", "corral", "corrald-0.0.1-1")
+		if err := os.MkdirAll(orphanDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(orphanDir, "corrald"), []byte("orphan"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+
+		installedBin := filepath.Join(home, ".local", "lib", "corral", "corrald")
+		out, code := runCLI(t, installedBin, home, env, "uninstall", "--op", "opLeftRm")
+		kv := parseKV(out)
+		if code == 0 || kv["result"] != "partial" {
+			t.Fatalf("expected non-zero exit with result=partial when leftover corrald file exists, got code=%d:\n%s", code, out)
+		}
+		if !strings.Contains(out, "left="+orphanDir) {
+			t.Fatalf("expected left=%s in uninstall output, got:\n%s", orphanDir, out)
+		}
+	})
+}
