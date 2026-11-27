@@ -676,7 +676,8 @@ function TabBar(p: { tabs: SessionInfo[]; current: string; infos: Record<string,
             aria-current={s.id === p.current ? 'page' : undefined}
             title={tip}
             onPointerDown={j < 0 ? undefined : (e) => onPointerDown(e, s.id, j)}
-            // (The middle button closes it, as a browser's tab — asked first, as the close is.)
+            // (The middle button closes it, as a browser's tab — asked first, as the close is; mousedown prevents autoscroll.)
+            onMouseDown={(e) => e.button === 1 && s.host_name && e.preventDefault()}
             onAuxClick={(e) => e.button === 1 && s.host_name && (e.preventDefault(), p.onClose(s))}
             onContextMenu={
               s.host_name

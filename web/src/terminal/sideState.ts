@@ -187,3 +187,29 @@ export function stampAgeMs(since: number | undefined, now: number, maxFutureSkew
   if (age < -maxFutureSkewMs) return null
   return Math.max(0, age)
 }
+
+// Single source of truth for an agent's status mark, shared by the sidebar list
+// rows and the top agent tabs so both always show the exact same indicator.
+export type AgentStatusMark = '' | 'blocked' | 'working' | 'done' | 'failed' | 'bg' | 'stale'
+
+export interface AgentMarkInput {
+  status?: string
+  bg?: 'running' | 'stale' | 'checking'
+  cmds?: boolean | { n?: number }
+  failed?: string | boolean
+  lost?: boolean
+}
+
+export function agentStatusMark(input: AgentMarkInput): AgentStatusMark {
+  if (input.lost) return ''
+  const st = input.status ?? ''
+  if (st === 'done' && !input.bg && input.failed) return 'failed'
+  if (st === 'blocked') return 'blocked'
+  if (input.bg === 'running') return 'bg'
+  if (st === 'working') return 'working'
+  const hasCmds = typeof input.cmds === 'boolean' ? input.cmds : !!(input.cmds && (input.cmds.n === undefined || input.cmds.n > 0))
+  if (hasCmds) return 'bg'
+  if (input.bg === 'stale') return 'stale'
+  if (st === 'done') return 'done'
+  return ''
+}

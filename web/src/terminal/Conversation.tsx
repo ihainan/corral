@@ -9,7 +9,7 @@ import { setPrefs, usePrefs } from '../prefs'
 import { openSettingsModal } from '../pages/Settings'
 import { dropPickInTab, OPEN_PICKER } from '../pages/agentTabs'
 import { asHeld, buildAgentGroups, dayStart, FOLDED, foldAt, isLiveBlocked, listOrder, pinned, type ConvoListRow, type OrderOpts, type RowCmds, type RowTask } from './agentOrder'
-import { stampAgeMs } from './sideState'
+import { agentStatusMark, stampAgeMs } from './sideState'
 import { copyText, Dialog, DialogHead, isCoarse, Menu, MenuLayer, swallowNextClick, useToast, type MenuItem } from '../components/ui'
 import { saveFile } from '../saveFile'
 import { StatusItem, useWorkbench } from '../workbench'
@@ -150,6 +150,7 @@ const SIDE_MIN = 900 // (px) the view's width from which the list goes beside th
 // The list's width beside the thread (px): dragged by its edge, kept in the
 // browser; never past half the view.
 const SIDE_W_KEY = 'corral.convoSideWidth'
+const SIDE_CHANGE_EVENT = 'corral:convo-side'
 // (The agents left in their terminal view, this device: the last so many. UI 14.)
 const TERM_VIEWS_KEY = 'corral.termViews'
 const TERM_VIEWS_MAX = 100
@@ -358,10 +359,14 @@ export function ConversationView({
   // status bar (its slot, in this page's root) — not under the composer.
   const wbWide = useWorkbench()
   const [wbSlot, setWbSlot] = useState<Element | null>(null)
+  const [wbSideSlot, setWbSideSlot] = useState<Element | null>(null)
   useLayoutEffect(() => {
     const page = root.current?.closest('.term-root')
-    const slot = page?.classList.contains('wb-on') ? page.querySelector('.wb-status-slot') : null
+    const on = !!page?.classList.contains('wb-on')
+    const slot = on ? page!.querySelector('.wb-status-slot') : null
+    const sideSlot = on && side ? page!.querySelector('.wb-side-slot') : null
     setWbSlot((was) => (was === slot ? was : slot))
+    setWbSideSlot((was) => (was === sideSlot ? was : sideSlot))
   })
   const inWb = wbWide && !!wbSlot
   const wbWideNow = useRef(wbWide)
@@ -487,6 +492,7 @@ export function ConversationView({
     if (v === SIDE_W) local.remove(SIDE_W_KEY)
     else local.set(SIDE_W_KEY, String(v))
     if (sideEl.current) sideEl.current.style.width = v + 'px' // (as it is drawn: a drag sets it by hand)
+    window.dispatchEvent(new Event(SIDE_CHANGE_EVENT))
     return v
   }
   // (A drag sizes the list by its style, a frame at a time, and is told
@@ -503,20 +509,37 @@ export function ConversationView({
   const setFolded = (v: boolean) => {
     setFoldedState(v)
     local.set(SIDE_KEY, v ? '0' : '1')
+    window.dispatchEvent(new Event(SIDE_CHANGE_EVENT))
   }
+  // Keep sidebar width and folded state in sync across kept <Activity> tabs.
+  useEffect(() => {
+    const sync = () => {
+      const nextW = Number(local.get(SIDE_W_KEY)) || SIDE_W
+      setSideW((curW) => (curW === nextW ? curW : nextW))
+      const nextF = local.get(SIDE_KEY) === '0'
+      setFoldedState((curF) => (curF === nextF ? curF : nextF))
+    }
+    sync()
+    window.addEventListener(SIDE_CHANGE_EVENT, sync)
+    return () => window.removeEventListener(SIDE_CHANGE_EVENT, sync)
+  }, [])
   useLayoutEffect(() => {
     const el = root.current
     if (!el) return
+    // On the workbench, the sidebar sits outside .convo in .wb-agent-layout:
+    // measure the whole workbench layout for the primary view so wide/sideWidthMax/
+    // split thresholds stay stable and never oscillate as the sidebar opens/closes.
+    const box = side ? (el.closest('.wb-agent-layout') ?? el) : el
     const look = () => {
-      setWide(el.clientWidth >= SIDE_MIN)
-      setViewW(el.clientWidth)
-      setViewH(el.clientHeight)
+      setWide(box.clientWidth >= SIDE_MIN)
+      setViewW(box.clientWidth)
+      setViewH(box.clientHeight)
     }
     look()
     const ro = new ResizeObserver(look)
-    ro.observe(el)
+    ro.observe(box)
     return () => ro.disconnect()
-  }, [])
+  }, [!!side, wbSideSlot])
   const sideShown = !!side && wide && !folded
   const splitShown = !!splitPane && (splitIsCol || viewW === 0 || viewW >= SPLIT_MIN_W)
   const splitCompactCol = splitShown && splitIsCol && viewH > 0 && viewH < 760
@@ -542,20 +565,21 @@ export function ConversationView({
   // to, where that leaves it out of sight (gone to from elsewhere), is
   // brought in, no further than needed.
   useLayoutEffect(() => {
-    const el = sideEl.current
-    if (!sideShown || !el) return
-    el.scrollTop = sideScrolled
-    const row = el.querySelector<HTMLElement>('.convo-list-row[aria-current="true"]')
+    const sideBox = sideEl.current
+    if (!sideShown || !sideBox) return
+    const scroller = sideBox.querySelector<HTMLElement>('.convo-list-groups') ?? sideBox
+    scroller.scrollTop = sideScrolled
+    const row = sideBox.querySelector<HTMLElement>('.convo-list-row[aria-current="true"]')
     if (row) {
       const r = row.getBoundingClientRect()
-      const box = el.getBoundingClientRect()
+      const box = scroller.getBoundingClientRect()
       if (r.top < box.top || r.bottom > box.bottom) row.scrollIntoView({ block: 'nearest' })
     }
-    const keep = () => void (sideScrolled = el.scrollTop)
+    const keep = () => void (sideScrolled = scroller.scrollTop)
     keep()
-    el.addEventListener('scroll', keep, { passive: true })
-    return () => el.removeEventListener('scroll', keep)
-  }, [sideShown])
+    scroller.addEventListener('scroll', keep, { passive: true })
+    return () => scroller.removeEventListener('scroll', keep)
+  }, [sideShown, wbSideSlot])
   sideShownNow.current = sideShown
   const wideNow = useRef(wide)
   wideNow.current = wide
@@ -1549,6 +1573,7 @@ export function ConversationView({
       const inSide = !!sideEl.current?.contains(document.activeElement)
       setFoldedState((f) => {
         local.set(SIDE_KEY, f ? '1' : '0')
+        window.dispatchEvent(new Event(SIDE_CHANGE_EVENT))
         return !f
       })
       if (inSide) requestAnimationFrame(() => root.current?.querySelector<HTMLElement>('.convo-side-btn')?.focus())
@@ -1995,6 +2020,69 @@ export function ConversationView({
           onSide={sideBind && !head ? () => setBtwShown(sideIdent) : undefined} // (on the workbench: in the header's menu)
         />
     ) : null
+  const sideNode = sideShown ? (
+    <>
+      <nav className="convo-side" aria-label={t('convo.agents')} style={{ width: sideWidth }} ref={sideEl}>
+        <AgentList rows={rows} menus query={sideQuery} onQuery={setSideQuery} search={searchAsked} onSearchLeft={() => setSearchAsked(0)} hint={!isTouchOnly} compact showNew />
+        {!isTouchOnly && (
+          <div className="convo-side-foot">
+            <button type="button" className="icon-btn convo-side-foot-ic convo-side-foot-settings" onClick={() => openSettingsModal('chat')} aria-label={t('nav.settings')} title={`${t('nav.settings')} (${mac ? '⌘,' : 'Ctrl+,'})`}>
+              <Settings size={14} strokeWidth={1.75} aria-hidden="true" />
+            </button>
+            <button type="button" className="icon-btn convo-side-foot-ic" onClick={() => setKeysShown('side')} aria-label={t('convo.side.shortcuts')} title={t('convo.side.shortcuts')}>
+              <Keyboard size={14} strokeWidth={1.75} aria-hidden="true" />
+            </button>
+          </div>
+        )}
+      </nav>
+      <div
+        className="convo-side-grip"
+        role="separator"
+        aria-orientation="vertical"
+        aria-label={t('convo.sideWidth')}
+        title={t('convo.sideWidth')}
+        aria-valuenow={sideWidth}
+        aria-valuemin={SIDE_W_MIN}
+        aria-valuemax={sideWidthMax(viewW || SIDE_MIN)}
+        tabIndex={0}
+        onPointerDown={(e) => {
+          if (e.button !== 0 || drag.current) return // (one pointer at a time)
+          e.preventDefault()
+          e.currentTarget.setPointerCapture(e.pointerId)
+          drag.current = { id: e.pointerId, x: e.clientX, w: sideWidth, to: sideWidth, frame: 0 }
+        }}
+        onPointerMove={(e) => {
+          const d = drag.current
+          if (!d || e.pointerId !== d.id) return
+          if (e.pointerType === 'mouse' && e.buttons === 0) return endDrag(true) // (let go where no word of it came: outside the window)
+          d.to = sideWidthOf(d.w + e.clientX - d.x, viewW || SIDE_MIN)
+          cancelAnimationFrame(d.frame)
+          d.frame = requestAnimationFrame(() => {
+            if (sideEl.current) sideEl.current.style.width = d.to + 'px'
+          })
+        }}
+        onPointerUp={(e) => {
+          if (drag.current?.id === e.pointerId) endDrag(true)
+        }}
+        onPointerCancel={(e) => {
+          if (drag.current?.id === e.pointerId) endDrag(false)
+        }}
+        onLostPointerCapture={(e) => {
+          if (drag.current?.id === e.pointerId) endDrag(true)
+        }}
+        onDoubleClick={() => keepSideW(SIDE_W)}
+        onKeyDown={(e) => {
+          const step = e.shiftKey ? 48 : 16
+          if (e.key === 'ArrowLeft') keepSideW(sideWidth - step)
+          else if (e.key === 'ArrowRight') keepSideW(sideWidth + step)
+          else if (e.key === 'Home') keepSideW(SIDE_W_MIN)
+          else if (e.key === 'End') keepSideW(SIDE_W_MAX)
+          else return
+          e.preventDefault()
+        }}
+      />
+    </>
+  ) : null
   return (
     <OpenAllOf.Provider value={allOpen}>
     <ForkAtOf.Provider value={forkAt}>
@@ -2004,70 +2092,9 @@ export function ConversationView({
     <CodeSpanOf.Provider value={codeSpan}>
     <FileLinkOf.Provider value={fileLink}>
     <div className="convo" role="region" aria-label={t('convo.title')} ref={root}>
+      {sideNode && wbSideSlot ? createPortal(sideNode, wbSideSlot) : null}
       <div className="convo-workspace">
-      {sideShown && (
-        <nav className="convo-side" aria-label={t('convo.agents')} style={{ width: sideWidth }} ref={sideEl}>
-          <AgentList rows={rows} menus query={sideQuery} onQuery={setSideQuery} search={searchAsked} onSearchLeft={() => setSearchAsked(0)} hint={!isTouchOnly} compact showNew />
-          {!isTouchOnly && (
-            <div className="convo-side-foot">
-              <button type="button" className="icon-btn convo-side-foot-ic convo-side-foot-settings" onClick={() => openSettingsModal('chat')} aria-label={t('nav.settings')} title={`${t('nav.settings')} (${mac ? '⌘,' : 'Ctrl+,'})`}>
-                <Settings size={14} strokeWidth={1.75} aria-hidden="true" />
-              </button>
-              <button type="button" className="icon-btn convo-side-foot-ic" onClick={() => setKeysShown('side')} aria-label={t('convo.side.shortcuts')} title={t('convo.side.shortcuts')}>
-                <Keyboard size={14} strokeWidth={1.75} aria-hidden="true" />
-              </button>
-            </div>
-          )}
-        </nav>
-      )}
-      {sideShown && (
-        <div
-          className="convo-side-grip"
-          role="separator"
-          aria-orientation="vertical"
-          aria-label={t('convo.sideWidth')}
-          title={t('convo.sideWidth')}
-          aria-valuenow={sideWidth}
-          aria-valuemin={SIDE_W_MIN}
-          aria-valuemax={sideWidthMax(viewW || SIDE_MIN)}
-          tabIndex={0}
-          onPointerDown={(e) => {
-            if (e.button !== 0 || drag.current) return // (one pointer at a time)
-            e.preventDefault()
-            e.currentTarget.setPointerCapture(e.pointerId)
-            drag.current = { id: e.pointerId, x: e.clientX, w: sideWidth, to: sideWidth, frame: 0 }
-          }}
-          onPointerMove={(e) => {
-            const d = drag.current
-            if (!d || e.pointerId !== d.id) return
-            if (e.pointerType === 'mouse' && e.buttons === 0) return endDrag(true) // (let go where no word of it came: outside the window)
-            d.to = sideWidthOf(d.w + e.clientX - d.x, viewW || SIDE_MIN)
-            cancelAnimationFrame(d.frame)
-            d.frame = requestAnimationFrame(() => {
-              if (sideEl.current) sideEl.current.style.width = d.to + 'px'
-            })
-          }}
-          onPointerUp={(e) => {
-            if (drag.current?.id === e.pointerId) endDrag(true)
-          }}
-          onPointerCancel={(e) => {
-            if (drag.current?.id === e.pointerId) endDrag(false)
-          }}
-          onLostPointerCapture={(e) => {
-            if (drag.current?.id === e.pointerId) endDrag(true)
-          }}
-          onDoubleClick={() => keepSideW(SIDE_W)}
-          onKeyDown={(e) => {
-            const step = e.shiftKey ? 48 : 16
-            if (e.key === 'ArrowLeft') keepSideW(sideWidth - step)
-            else if (e.key === 'ArrowRight') keepSideW(sideWidth + step)
-            else if (e.key === 'Home') keepSideW(SIDE_W_MIN)
-            else if (e.key === 'End') keepSideW(SIDE_W_MAX)
-            else return
-            e.preventDefault()
-          }}
-        />
-      )}
+      {sideNode && !wbSideSlot ? sideNode : null}
       <div className={'convo-panes' + (splitShown ? ' is-split' : '') + (splitShown && splitIsCol ? ' is-split-col' : '') + (splitCompactCol ? ' is-compact-col' : '')} ref={panesEl}>
       <div
         className={'convo-main' + (splitShown && splitPane?.focused === 'primary' ? ' is-focused' : '')}
@@ -5096,19 +5123,13 @@ export function AgentList({ rows, menus, onPicked, placed, query: given, onQuery
           // (A child's model first: what tells a parent's helpers apart — workbench 11-23.)
           const childSub = isChild ? [r.model ? shortModelName(r.model) : '', r.where, parentRef ? '↳ ' + parentRef : ''].filter(Boolean).join(' · ') : ''
           const isSingleChild = isChild && !childSub
-          // (Its state by one mark before its time — waits, works, done, work left
-          // going — in the colour the tabs give it; no longer a dot on its icon's
-          // corner, which had a tile drawn under it to sit on: redesign 11-23.)
-          // (Done on an API error, not seen yet: in red, and why, as a third line — workbench 11-23.)
-          // (Before commands it left running: an error to see to over a dev server going on — review of 11-23.)
+          // (Its state by one mark — shared with the top agent tabs via agentStatusMark.)
           const failed = r.status === 'done' && !r.bg ? r.failed : undefined
-          const mark = failed ? 'failed' : r.bg === 'running' || r.cmds ? 'bg' : said ? r.status : ''
+          const mark = agentStatusMark(r)
           // (One line a row, with a mouse: its state the dot on its icon's corner, and
           // "Background" said in its hover card, not in the line — workbench 11-23, plan 2.)
           const bgWords = flat ? '' : bgSaid
-          // (Its dot there: work left going but not seen to — a grey ring of its own, not
-          // a done's green or nothing; what waits on the person first — review of 11-23.)
-          const iconDot = !flat ? '' : failed ? 'failed' : r.status === 'blocked' ? 'blocked' : r.bg === 'running' || r.cmds ? 'bg' : r.bg === 'stale' ? 'stale' : mark
+          const iconDot = flat ? mark : ''
           // (Words typed to it and not sent, it not in front: "Draft" where its time was, a pencil
           // before — as a chat app marks one; no more weight than its time had. Doc UI item 20, 11-26.)
           const drafted = !r.current && hasAgentDraft(r.key)
@@ -5511,30 +5532,22 @@ export function AgentList({ rows, menus, onPicked, placed, query: given, onQuery
         const tipRow = rows.find((r) => r.key === rowTip.key)
         if (!tipRow) return null
         const tipSince = stamp(tipRow, now)
+        const tipMark = agentStatusMark(tipRow)
         const tipStatusKey: I18nKey | null =
-          tipRow.status === 'blocked'
+          tipMark === 'blocked'
             ? 'convo.status.blocked'
-            : tipRow.status === 'working'
+            : tipMark === 'working'
               ? 'convo.status.working'
-              : tipRow.bg === 'running' || tipRow.cmds
+              : tipMark === 'bg'
                 ? 'convo.status.bg'
-                : tipRow.bg === 'stale'
+                : tipMark === 'stale'
                   ? 'convo.status.bgStale'
-                  : tipRow.status === 'done'
-                    ? 'convo.status.done'
-                    : null
-        const tipStatusTone =
-          tipRow.status === 'blocked'
-            ? 'blocked'
-            : tipRow.status === 'working'
-              ? 'working'
-              : tipRow.bg === 'running' || tipRow.cmds
-                ? 'bg'
-                : tipRow.bg === 'stale'
-                  ? 'stale'
-                  : tipRow.status === 'done'
-                    ? 'done'
-                    : ''
+                  : tipMark === 'failed'
+                    ? 'convo.status.failed'
+                    : tipMark === 'done'
+                      ? 'convo.status.done'
+                      : null
+        const tipStatusTone = tipMark
         const tipParent = tipRow.parentKey ? rows.find((p) => p.key === tipRow.parentKey)?.title : ''
         const cmds = tipRow.cmds?.list ?? []
         // (More of it, doc UI item 9, 11-24: what it is at — the step under way, or how its answer begins —, the
