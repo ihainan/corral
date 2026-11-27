@@ -465,9 +465,8 @@ func (s *Server) ocPaneTitle(sess *term.Session, pane, cwd string, l convoLocate
 // convoNotTold (another OpenCode of the user's runs in the same place, and
 // neither herdr nor a unique pane title disambiguates them).
 // l is what locating found of the host's processes.
-func (s *Server) ocSessionOf(ctx context.Context, sess *term.Session, p *convoProc, pane string, l convoLocated) (sid, why string) {
-	sid, why, _ = s.ocSessionOfInteractive(ctx, sess, p, pane, l, false)
-	return sid, why
+func (s *Server) ocSessionOf(ctx context.Context, sess *term.Session, p *convoProc, pane string, l convoLocated) (sid, why string, err error) {
+	return s.ocSessionOfInteractive(ctx, sess, p, pane, l, false)
 }
 
 func (s *Server) ocSessionOfInteractive(ctx context.Context, sess *term.Session, p *convoProc, pane string, l convoLocated, interactive bool) (sid, why string, err error) {

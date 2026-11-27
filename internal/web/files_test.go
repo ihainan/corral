@@ -879,6 +879,17 @@ func TestCodexTmuxNamedNowInteractiveAndBusy(t *testing.T) {
 		namedErr    error
 	)
 	testBeforeCodexTmuxNamed = func() {
+		// Wait explicitly until locate's deferred release() has returned its Aux
+		// slot to the ledger (7/9) before acquiring the last 2 slots, so locate
+		// cannot release a slot after we fill to 9/9.
+		deadline := time.Now().Add(2 * time.Second)
+		for sshx.SessionInUse(sess.Client()) != 7 {
+			if time.Now().After(deadline) {
+				t.Errorf("timed out waiting for locate slot release: inUse=%d, want 7", sshx.SessionInUse(sess.Client()))
+				return
+			}
+			time.Sleep(time.Millisecond)
+		}
 		for range 2 {
 			rel, aerr := sshx.AcquireSession(context.Background(), sess.Client(), sshx.SessionSFTP, true, 0)
 			if aerr != nil {
@@ -1337,5 +1348,233 @@ func TestOpenCodeModelSettingsRewindAndSentEnterBusyMapping(t *testing.T) {
 	}
 	if got := pressSlotWait("send"); got != 2*time.Second {
 		t.Fatalf("pressSlotWait(\"send\") = %v, want 2s", got)
+	}
+}
+
+// When an already-bound OpenCode conversation re-locates via a cached scan and
+// ocSessionOf hits sshx.ErrBusy, locateConvo must preserve the existing bind,
+// log, generation, and loaded history (never clearing p.log or resetting to
+// no_log) and apiConversation must return 429 ssh_channels_busy.
+func TestOpenCodePollBusyPreservesExistingBindAndHistory(t *testing.T) {
+	e := newFileEnv(t)
+	sess, err := e.h.terms.Get(e.h.userID(e.c), e.sess)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess.Persistence = "tmux"
+	sess.TmuxSession = "s1"
+
+	const (
+		ocSID  = "ses_1234567890abcdef"
+		ocPath = "/tmp/opencode/opencode.db"
+	)
+	// Pre-populate an already-bound OpenCode state with loaded history and an
+	// expired locate timestamp + relocFailed=true so apiConversation runs
+	// locateConvo synchronously.
+	origLocated := time.Now().Add(-time.Hour).Truncate(time.Second)
+	st := e.h.srv.convos.get(sess.ID + "\x00")
+	st.mu.Lock()
+	st.bind = &convoBind{PID: 2222, Start: 33333, Session: ocSID, Agent: "opencode", Pane: "%3"}
+	st.located = origLocated
+	st.pane = "%3"
+	st.adopt(ocSID, ocPath, "opencode", "")
+	st.parser.Feed([]byte(`{"k":"msg","id":"msg_12345678","role":"user","c":1700000000000}` + "\n" +
+		`{"k":"part","id":"prt_12345678","mid":"msg_12345678","type":"text","text":"keep my history"}` + "\n"))
+	origGen := st.gen
+	origRev := st.parser.Rev()
+	st.relocFailed.Store(true)
+	st.mu.Unlock()
+	st.done()
+	if origRev == 0 {
+		t.Fatal("expected seeded OpenCode history to advance parser Rev")
+	}
+
+	// Prime convoScans with a valid cached scan so locateConvo reaches
+	// ocSessionOf directly without running sshx.Output for the scan.
+	scanOut := strings.Join([]string{
+		"tmux=%3 999 /dev/pts/3 OC | my-chat",
+		"panetty=/dev/pts/3",
+		"pid=2222\nstart=33333\nprocstart=33333\nsid=" + convoNoSession + "\nfg=1\nagent=opencode\ncwd=/tmp/proj\nlog=" + ocPath + "\nTMUX=/tmp/tmux-1000/default,999,0\nTMUX_PANE=%3\ntty=/dev/pts/3",
+	}, "\x00")
+	scanKey := sess.ID + "\x00" + convoLocateCommand(sess.Persistence, sess.TmuxSession, "")
+	cached := &convoScan{done: make(chan struct{}), began: time.Now(), at: time.Now(), out: []byte(scanOut)}
+	close(cached.done)
+	e.h.srv.convoScans.mu.Lock()
+	if e.h.srv.convoScans.m == nil {
+		e.h.srv.convoScans.m = map[string]*convoScan{}
+	}
+	e.h.srv.convoScans.m[scanKey] = cached
+	e.h.srv.convoScans.mu.Unlock()
+
+	// Hold 7/9 slots so background ocSessionOf hits sshx.ErrBusy immediately.
+	var held []func()
+	t.Cleanup(func() {
+		for _, rel := range held {
+			rel()
+		}
+	})
+	for range sshx.MaxPanePerConn {
+		rel, err := sshx.AcquireSession(context.Background(), sess.Client(), sshx.SessionPane, true, 0)
+		if err != nil {
+			t.Fatalf("fill pane: %v", err)
+		}
+		held = append(held, rel)
+	}
+	for range 2 {
+		rel, err := sshx.AcquireSession(context.Background(), sess.Client(), sshx.SessionSFTP, true, 0)
+		if err != nil {
+			t.Fatalf("fill sftp: %v", err)
+		}
+		held = append(held, rel)
+	}
+
+	r := e.c.do("GET", "/api/sessions/"+e.sess+"/conversation?gen="+strconv.FormatInt(origGen, 10), nil)
+	if r.Status != http.StatusTooManyRequests || r.code() != "ssh_channels_busy" {
+		t.Fatalf("OpenCode poll when ocSessionOf hits ErrBusy: status=%d code=%q body=%s, want 429 ssh_channels_busy", r.Status, r.code(), r.Body)
+	}
+
+	st = e.h.srv.convos.get(sess.ID + "\x00")
+	st.mu.Lock()
+	defer func() {
+		st.mu.Unlock()
+		st.done()
+	}()
+	if st.sid != ocSID || st.log != ocPath || st.reason != "" || st.gen != origGen {
+		t.Fatalf("OpenCode state clobbered on ErrBusy: sid=%q log=%q reason=%q gen=%d, want %q/%q/\"\"/%d", st.sid, st.log, st.reason, st.gen, ocSID, ocPath, origGen)
+	}
+	if st.bind == nil || st.bind.Session != ocSID {
+		t.Fatalf("OpenCode bind lost on ErrBusy: %+v", st.bind)
+	}
+	if st.parser == nil || st.parser.Rev() != origRev {
+		t.Fatalf("OpenCode history lost on ErrBusy: rev=%v, want %d", st.parser, origRev)
+	}
+	if !st.located.Equal(origLocated) {
+		t.Fatalf("OpenCode st.located mutated on ErrBusy: got %v, want %v", st.located, origLocated)
+	}
+}
+
+// Background screen reads in convo_panel, convo_suggest, and convo_sent must
+// map sshx.ErrBusy to 429 ssh_channels_busy rather than 502 no_screen.
+func TestReadScreenBusyReturns429SSHChannelsBusy(t *testing.T) {
+	e := newFileEnv(t)
+	sess, err := e.h.terms.Get(e.h.userID(e.c), e.sess)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess.Persistence = "tmux"
+	sess.TmuxSession = "s1"
+
+	// Hold 7/9 slots so background reads (Interactive: false) fail immediately with ErrBusy.
+	var held []func()
+	t.Cleanup(func() {
+		for _, rel := range held {
+			rel()
+		}
+	})
+	for range sshx.MaxPanePerConn {
+		rel, err := sshx.AcquireSession(context.Background(), sess.Client(), sshx.SessionPane, true, 0)
+		if err != nil {
+			t.Fatalf("fill pane: %v", err)
+		}
+		held = append(held, rel)
+	}
+	for range 2 {
+		rel, err := sshx.AcquireSession(context.Background(), sess.Client(), sshx.SessionSFTP, true, 0)
+		if err != nil {
+			t.Fatalf("fill sftp: %v", err)
+		}
+		held = append(held, rel)
+	}
+
+	t.Run("convoPanelScreen", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		outcome, reason := "refused", ""
+		released := false
+		e.h.srv.convoPanelScreen(rec, context.Background(), sess, "claude", "%1", "", &outcome, &reason, func() { released = true })
+		if !released {
+			t.Fatal("release not called")
+		}
+		if rec.Code != http.StatusTooManyRequests || !strings.Contains(rec.Body.String(), `"ssh_channels_busy"`) || reason != "ssh_channels_busy" {
+			t.Fatalf("convoPanelScreen ErrBusy: status=%d reason=%q body=%s, want 429 ssh_channels_busy", rec.Code, reason, rec.Body.String())
+		}
+	})
+
+	t.Run("suggestion", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		outcome, reason := "refused", ""
+		released := false
+		e.h.srv.suggestion(rec, context.Background(), sess, "%1", "", "claude", &outcome, &reason, func() { released = true })
+		if !released {
+			t.Fatal("release not called")
+		}
+		if rec.Code != http.StatusTooManyRequests || !strings.Contains(rec.Body.String(), `"ssh_channels_busy"`) || reason != "ssh_channels_busy" {
+			t.Fatalf("suggestion ErrBusy: status=%d reason=%q body=%s, want 429 ssh_channels_busy", rec.Code, reason, rec.Body.String())
+		}
+	})
+
+	t.Run("sentMissing", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		outcome, reason := "refused", ""
+		released := false
+		e.h.srv.sentMissing(rec, context.Background(), sess, "%1", "", "claude", "hello", sess.ID+"\x00", "11111111-2222-3333-4444-555555555555", 1, false, &outcome, &reason, func() { released = true })
+		if !released {
+			t.Fatal("release not called")
+		}
+		if rec.Code != http.StatusTooManyRequests || !strings.Contains(rec.Body.String(), `"ssh_channels_busy"`) || reason != "ssh_channels_busy" {
+			t.Fatalf("sentMissing ErrBusy: status=%d reason=%q body=%s, want 429 ssh_channels_busy", rec.Code, reason, rec.Body.String())
+		}
+	})
+}
+
+// convoModelLine must map sshx.ErrBusy from readSettings or logSize to
+// 429 ssh_channels_busy (not 502 settings) while still calling both done and
+// release.
+func TestConvoModelLineBusyReturns429AndReleasesLocks(t *testing.T) {
+	e := newFileEnv(t)
+	sess, err := e.h.terms.Get(e.h.userID(e.c), e.sess)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess.Persistence = "tmux"
+	sess.TmuxSession = "s1"
+
+	// Fill all remaining 8 slots -> 9/9 full so readSettings hits ErrBusy.
+	var held []func()
+	t.Cleanup(func() {
+		for _, rel := range held {
+			rel()
+		}
+	})
+	for range sshx.MaxPanePerConn {
+		rel, err := sshx.AcquireSession(context.Background(), sess.Client(), sshx.SessionPane, true, 0)
+		if err != nil {
+			t.Fatalf("fill pane: %v", err)
+		}
+		held = append(held, rel)
+	}
+	for range sshx.MaxSFTPPerConn {
+		rel, err := sshx.AcquireSession(context.Background(), sess.Client(), sshx.SessionSFTP, true, 0)
+		if err != nil {
+			t.Fatalf("fill sftp: %v", err)
+		}
+		held = append(held, rel)
+	}
+
+	rec := httptest.NewRecorder()
+	outcome, reason := "refused", ""
+	doneCalled, releaseCalled := 0, 0
+	e.h.srv.convoModelLine(
+		rec, context.Background(), sess, "%1", "", 1234, 56789,
+		"11111111-2222-3333-4444-555555555555", "sonnet", "sonnet", "sonnet",
+		filepath.Join(e.root, "log.jsonl"), "v2:acct",
+		&outcome, &reason,
+		func() { releaseCalled++ }, func() { doneCalled++ },
+		"pk", "kk",
+	)
+	if doneCalled != 1 || releaseCalled != 1 {
+		t.Fatalf("lock callbacks: done=%d release=%d, want 1/1", doneCalled, releaseCalled)
+	}
+	if rec.Code != http.StatusTooManyRequests || !strings.Contains(rec.Body.String(), `"ssh_channels_busy"`) || reason != "ssh_channels_busy" {
+		t.Fatalf("convoModelLine ErrBusy: status=%d reason=%q body=%s, want 429 ssh_channels_busy", rec.Code, reason, rec.Body.String())
 	}
 }

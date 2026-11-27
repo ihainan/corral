@@ -2,6 +2,7 @@ package web
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -35,6 +36,11 @@ func (s *Server) suggestion(w http.ResponseWriter, ctx context.Context, sess *te
 	defer cancel()
 	res, err := sshx.Exec(ctx, sess.Client(), convoColorScreenCommand(sess.Persistence, pane, socket), 512<<10, sshx.ExecOptions{Release: release})
 	if err != nil {
+		if errors.Is(err, sshx.ErrBusy) {
+			*outcome, *reason = "refused", "ssh_channels_busy"
+			writeSSHChannelsBusy(w)
+			return
+		}
 		*outcome, *reason = "unknown", "no_screen"
 		writeError(w, http.StatusBadGateway, "no_screen", "the pane's screen could not be read")
 		return

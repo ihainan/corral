@@ -675,6 +675,11 @@ func (s *Server) convoModelLine(w http.ResponseWriter, ctx context.Context, sess
 	if err != nil || perr != nil {
 		done()
 		release()
+		if errors.Is(err, sshx.ErrBusy) {
+			*reason = "ssh_channels_busy"
+			writeSSHChannelsBusy(w)
+			return
+		}
 		*reason = "settings"
 		writeError(w, http.StatusBadGateway, "settings", "Claude Code's settings or its log could not be read: nothing done")
 		return

@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"net/http"
 	"regexp"
 	"strings"
@@ -66,6 +67,11 @@ func (s *Server) convoPanelScreen(w http.ResponseWriter, ctx context.Context, se
 		// nothing to note — it is no failure to read.)
 		if ctx.Err() != nil {
 			*outcome, *reason = "unknown", "cancelled"
+			return
+		}
+		if errors.Is(err, sshx.ErrBusy) {
+			*outcome, *reason = "refused", "ssh_channels_busy"
+			writeSSHChannelsBusy(w)
 			return
 		}
 		*outcome, *reason = "unknown", "no_screen"

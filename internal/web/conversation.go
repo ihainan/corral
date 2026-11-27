@@ -2436,6 +2436,7 @@ func (s *Server) locateScan(ctx context.Context, sess *term.Session, st *convoSt
 	// (The Codexes the daemons' conversations are of, seen running, whatever
 	// the pane runs.)
 	s.convoClaimed.seeAlive(l, aliveCodex(l), l.now())
+	prevLocated, prevPane := st.located, st.pane
 	st.located, st.pane = at, pane // (when the scan was made: one shared may be a little older)
 	sid, log, reason, agent := "", "", "", ""
 	guessed := false
@@ -2451,7 +2452,13 @@ func (s *Server) locateScan(ctx context.Context, sess *term.Session, st *convoSt
 		// (OpenCode: which of its database's sessions it is at.)
 		ocWhy := ""
 		if p != nil && p.agent == "opencode" {
-			if p.sid, ocWhy = s.ocSessionOf(ctx, sess, p, pane, l); p.sid == convoNoSession {
+			var ocErr error
+			p.sid, ocWhy, ocErr = s.ocSessionOf(ctx, sess, p, pane, l)
+			if errors.Is(ocErr, sshx.ErrBusy) {
+				st.located, st.pane = prevLocated, prevPane
+				return ocErr
+			}
+			if p.sid == convoNoSession {
 				p.log = ""
 			}
 		}
