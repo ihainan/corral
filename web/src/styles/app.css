@@ -1868,3 +1868,213 @@ details.adv > .form { margin-top: 16px; }
 .desk-users .desk-col-sessions { width: 80px; }
 .desk-users .desk-col-created { width: 140px; }
 .desk-users .desk-col-state { width: 20%; }
+
+/* Desktop-native Alert dialog (components/ui.tsx Alert) ---------------------- */
+.alert-overlay {
+  position: fixed; left: 0; right: 0; top: var(--vv-top, 0px); height: var(--vv-h, 100dvh); z-index: 300;
+  background: var(--overlay); display: grid; place-items: center; padding: 16px;
+  animation: fade 0.12s var(--ease); overscroll-behavior: contain;
+}
+.alert-box {
+  width: min(300px, calc(100vw - 32px)); max-height: calc(var(--vv-h, 100dvh) - 32px);
+  background: var(--surface); color: var(--fg); border-radius: var(--r-lg);
+  box-shadow: var(--shadow-pop); display: flex; flex-direction: column; overflow: hidden;
+  cursor: default;
+}
+.alert-scroll {
+  flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain;
+  padding: 20px 16px 4px; display: flex; flex-direction: column; align-items: center; text-align: center;
+  gap: 6px;
+}
+.alert-icon { width: 48px; height: 48px; display: block; flex: none; margin-bottom: 4px; }
+.alert-title {
+  margin: 0; font-size: var(--fs-sub); line-height: var(--lh-sub); font-weight: 600;
+  color: var(--fg); overflow-wrap: anywhere;
+}
+.alert-title:focus { outline: none; box-shadow: none; }
+.alert-body {
+  margin: 0; font-size: var(--fs-note); line-height: var(--lh-note); color: var(--fg);
+  overflow-wrap: anywhere;
+}
+.alert-sec {
+  margin: 0; font-size: var(--fs-note); line-height: var(--lh-note); color: var(--fg-2);
+  overflow-wrap: anywhere;
+}
+.alert-link {
+  border: 0; background: none; padding: 0; color: var(--accent-text); font: inherit;
+  cursor: pointer; text-decoration: none;
+}
+.alert-link:hover { text-decoration: underline; }
+.alert-actions {
+  flex: none; display: flex; gap: 8px; width: 100%; padding: 12px 16px 16px;
+}
+.alert-btn {
+  flex: 1 1 0; min-width: 0; min-height: 28px; padding: 4px 10px;
+  border: 0; border-radius: var(--r-sm); background: var(--bg-active); color: var(--fg);
+  font-size: var(--fs-sub); line-height: var(--lh-sub); font-weight: 500;
+  cursor: pointer; white-space: normal; overflow-wrap: anywhere; text-align: center;
+  transition: background-color 0.12s var(--ease), color 0.12s var(--ease);
+}
+.alert-btn:hover:not(:disabled) { background: var(--bg-hover); }
+.alert-btn:disabled { opacity: 0.5; cursor: default; }
+.alert-btn.is-primary { background: var(--accent); color: var(--accent-fg); }
+.alert-btn.is-primary:hover:not(:disabled) { background: var(--accent-hover); }
+.alert-btn.is-danger { color: var(--danger); }
+.alert-btn.is-danger:hover:not(:disabled) { background: var(--danger-soft); }
+.alert-checks {
+  align-self: stretch; text-align: left; display: flex; flex-direction: column; gap: 8px;
+  margin: 6px 0 2px;
+}
+.alert-checks label {
+  display: grid; grid-template-columns: 16px minmax(0, 1fr); gap: 8px; align-items: start;
+  font-size: var(--fs-note); line-height: var(--lh-note); color: var(--fg); cursor: pointer;
+}
+.alert-checks input[type='checkbox'] { width: 14px; height: 14px; margin: 2px 0 0; accent-color: var(--accent); }
+.alert-checks small { display: block; color: var(--fg-2); font-size: var(--fs-note); line-height: var(--lh-note); }
+.alert-bar {
+  align-self: stretch; height: 4px; border-radius: 999px; background: var(--bg-active);
+  overflow: hidden; margin: 6px 0 2px;
+}
+.alert-bar-fill {
+  display: block; height: 100%; background: var(--accent); border-radius: 999px;
+  transition: width 0.25s var(--ease);
+}
+.alert-cmd {
+  align-self: stretch; display: flex; align-items: center; gap: 6px; text-align: left;
+  background: var(--bg-subtle); border: 1px solid var(--line-strong); border-radius: var(--r-sm);
+  padding: 6px 8px; margin: 4px 0 2px; color: var(--fg);
+}
+.alert-cmd code {
+  flex: 1; min-width: 0; font-family: var(--font-mono); font-size: var(--fs-note);
+  line-height: var(--lh-note); overflow-wrap: anywhere;
+}
+.alert-cmd-copy {
+  flex: none; display: inline-grid; place-items: center; width: 24px; height: 24px;
+  border: 0; border-radius: var(--r-xs); background: transparent; color: var(--fg-3); cursor: pointer;
+}
+.alert-cmd-copy:hover { background: var(--bg-hover); color: var(--fg); }
+.alert-list {
+  align-self: stretch; list-style: none; margin: 4px 0; padding: 0; text-align: left;
+  display: flex; flex-direction: column; gap: 4px;
+  font-size: var(--fs-note); line-height: var(--lh-note); color: var(--fg-2);
+}
+.alert-list li { overflow-wrap: anywhere; }
+.alert-list code { font-family: var(--font-mono); font-size: var(--fs-note); line-height: var(--lh-note); color: var(--fg); }
+
+/* Top-right corner notifications (ToastProvider notice variant) -------------- */
+.toasts-corner {
+  position: fixed; top: calc(env(safe-area-inset-top, 0px) + 12px); right: calc(env(safe-area-inset-right, 0px) + 12px);
+  z-index: 320; width: min(320px, calc(100vw - 24px));
+  display: flex; flex-direction: column; gap: 8px; pointer-events: none;
+}
+.toast-note {
+  pointer-events: auto; display: grid; grid-template-columns: 28px minmax(0, 1fr) auto; gap: 10px;
+  align-items: center; padding: 10px 12px; border-radius: var(--r-lg);
+  background: color-mix(in srgb, var(--surface) 94%, transparent);
+  backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px);
+  box-shadow: var(--shadow-pop); color: var(--fg); animation: pop 0.16s var(--ease);
+}
+.toast-note-icon { width: 28px; height: 28px; display: block; flex: none; }
+.toast-note-text { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.toast-note-title {
+  font-size: var(--fs-sub); line-height: var(--lh-sub); font-weight: 600; color: var(--fg);
+  overflow-wrap: anywhere;
+}
+.toast-note-body {
+  font-size: var(--fs-note); line-height: var(--lh-note); color: var(--fg-2);
+  overflow-wrap: anywhere;
+}
+.toast-note-acts { display: flex; align-items: center; gap: 4px; flex: none; }
+.toast-note-btn {
+  height: 24px; padding: 0 10px; border: 0; border-radius: var(--r-xs);
+  background: var(--bg-active); color: var(--fg); font-size: var(--fs-note); line-height: var(--lh-note);
+  font-weight: 500; cursor: pointer; white-space: nowrap;
+}
+.toast-note-btn:hover { background: var(--bg-hover); }
+.toast-note-close {
+  display: inline-grid; place-items: center; width: 24px; height: 24px; border: 0;
+  border-radius: var(--r-xs); background: transparent; color: var(--fg-3); cursor: pointer;
+}
+.toast-note-close:hover { background: var(--bg-hover); color: var(--fg); }
+
+/* Host helper daemon section (HostEdit -> CorraldSection) -------------------- */
+.corrald-sec {
+  margin-top: 24px; padding-top: 16px; border-top: 1px solid var(--line);
+  display: flex; flex-direction: column; gap: 8px;
+}
+.corrald-sec h3 { margin: 0; font-size: var(--fs-h3); line-height: var(--lh-h3); font-weight: 600; }
+.corrald-group {
+  background: var(--bg-subtle); border: 1px solid var(--line-strong); border-radius: var(--r);
+  overflow: hidden;
+}
+.corrald-row {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px;
+  min-height: 40px; padding: 8px 12px; font-size: var(--fs-sub); line-height: var(--lh-sub);
+}
+.corrald-row + .corrald-row { border-top: 1px solid var(--line); }
+.corrald-row.is-stack { flex-direction: column; align-items: stretch; gap: 6px; }
+.corrald-k { flex: 1 1 160px; min-width: 0; color: var(--fg); }
+.corrald-k small {
+  display: block; font-size: var(--fs-note); line-height: var(--lh-note);
+  color: var(--fg-2); margin-top: 2px; overflow-wrap: anywhere;
+}
+.corrald-v {
+  color: var(--fg-2); text-align: right; font-variant-numeric: tabular-nums;
+  margin-left: auto; overflow-wrap: anywhere;
+}
+.corrald-status { display: inline-flex; align-items: center; gap: 6px; color: var(--fg); }
+.corrald-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; background: var(--fg-4); }
+.corrald-dot.is-ok { background: var(--ok); }
+.corrald-dot.is-warn { background: var(--warn); }
+.corrald-dot.is-danger { background: var(--danger); }
+.corrald-warn-ic { color: var(--warn); flex: none; display: inline-flex; align-self: flex-start; margin-top: 2px; }
+.corrald-acts { display: flex; flex-wrap: wrap; gap: 8px; margin-left: auto; }
+.corrald-btn {
+  min-height: 26px; padding: 2px 10px; border: 1px solid var(--line-strong); border-radius: var(--r-sm);
+  background: var(--surface); color: var(--fg); font-size: var(--fs-note); line-height: var(--lh-note);
+  font-weight: 500; cursor: pointer; white-space: normal; overflow-wrap: anywhere;
+  transition: background-color 0.12s var(--ease), color 0.12s var(--ease);
+}
+.corrald-btn:hover:not(:disabled) { background: var(--bg-hover); }
+.corrald-btn:disabled { opacity: 0.5; cursor: default; }
+.corrald-btn.is-primary { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); }
+.corrald-btn.is-primary:hover:not(:disabled) { background: var(--accent-hover); border-color: var(--accent-hover); }
+.corrald-btn.is-danger { color: var(--danger); }
+.corrald-btn.is-danger:hover:not(:disabled) { background: var(--danger-soft); }
+.corrald-foot { font-size: var(--fs-note); line-height: var(--lh-note); color: var(--fg-2); margin: 0; }
+.corrald-files { width: 100%; }
+.corrald-files summary {
+  cursor: pointer; color: var(--fg-2); font-size: var(--fs-note); line-height: var(--lh-note);
+  list-style: none; display: flex; align-items: center; justify-content: space-between;
+}
+.corrald-files summary::-webkit-details-marker { display: none; }
+.corrald-files-list {
+  list-style: none; margin: 6px 0 0; padding: 0; display: flex; flex-direction: column; gap: 2px;
+  font-family: var(--font-mono); font-size: var(--fs-note); line-height: var(--lh-note); color: var(--fg-2);
+}
+.corrald-files-list li { overflow-wrap: anywhere; }
+
+/* Corrald readme dialog ------------------------------------------------------ */
+.corrald-readme-dialog { max-width: 640px; }
+.corrald-readme-md { font-size: var(--fs-ui); line-height: var(--lh-ui); color: var(--fg); }
+.corrald-readme-md h1, .corrald-readme-md h2, .corrald-readme-md h3 {
+  font-size: var(--fs-h3); line-height: var(--lh-h3); font-weight: 600; margin: 16px 0 6px;
+}
+.corrald-readme-md h1:first-child, .corrald-readme-md h2:first-child, .corrald-readme-md h3:first-child { margin-top: 0; }
+.corrald-readme-md p, .corrald-readme-md ul, .corrald-readme-md ol { margin: 0 0 10px; }
+.corrald-readme-md ul, .corrald-readme-md ol { padding-left: 20px; }
+.corrald-readme-md li { margin: 2px 0; }
+.corrald-readme-md code {
+  font-family: var(--font-mono); font-size: var(--fs-note); line-height: var(--lh-note);
+  background: var(--bg-subtle); padding: 1px 4px; border-radius: var(--r-xs);
+}
+.corrald-readme-md pre {
+  margin: 0 0 10px; padding: 10px 12px; border-radius: var(--r);
+  background: var(--bg-subtle); border: 1px solid var(--line); overflow-x: auto;
+  font-family: var(--font-mono); font-size: var(--fs-note); line-height: var(--lh-note);
+}
+.corrald-readme-md pre code { background: none; padding: 0; }
+.corrald-readme-pre {
+  margin: 0; white-space: pre-wrap; overflow-wrap: anywhere;
+  font-family: var(--font-mono); font-size: var(--fs-note); line-height: var(--lh-note); color: var(--fg);
+}

@@ -274,7 +274,7 @@ export async function api<T>(method: string, path: string, body?: unknown, opts:
   }
   if (!res.ok) {
     if (res.status === 401 && path !== '/api/login') unauthorized(sentAt)
-    throw new ApiError(res.status, data?.error ?? 'internal', data?.message ?? '', data?.extra)
+    throw new ApiError(res.status, data?.error ?? data?.code ?? 'internal', data?.message ?? '', data?.extra)
   }
   return data as T
 }
@@ -305,7 +305,7 @@ export async function postFile<T = { path: string }>(url: string, file: Blob, on
       }
       if (xhr.status >= 200 && xhr.status < 300) return resolve(data)
       if (xhr.status === 401) unauthorized(sentAt)
-      reject(new ApiError(xhr.status, data?.error ?? 'internal', data?.message ?? '', data?.extra))
+      reject(new ApiError(xhr.status, data?.error ?? data?.code ?? 'internal', data?.message ?? '', data?.extra))
     }
     xhr.onerror = () => reject(new ApiError(0, 'network', t('error.network')))
     xhr.onabort = () => reject(new ApiError(0, 'aborted', ''))

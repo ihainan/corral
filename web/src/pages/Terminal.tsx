@@ -46,6 +46,7 @@ import { holdTermMode } from '../terminal/chatSend'
 import { useComposerFit } from '../terminal/autosize'
 import { useSession, VERSION_EVENT } from '../app'
 import { Rail, StatusBar, StatusItem, useWorkbench } from '../workbench'
+import { CorraldStatusBarItem } from '../components/CorraldStatusBarItem'
 import { geminiPath, shellPath } from '../terminal/paths'
 import { agentWho, BellFilter, ChimeCounter, chime, oscNotice } from '../terminal/chime'
 import { keyboardIsUp } from '../keyboard'
@@ -3000,6 +3001,7 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
             {info?.host_name ?? ''}
             {info?.persistence && info.persistence !== 'none' ? ' · ' + info.persistence : ''}
           </StatusItem>
+          {info?.host_id ? <CorraldStatusBarItem hostId={info.host_id} hostName={info.host_name} /> : null}
           {statusClass !== 's-open' && <span>{statusText}</span>}
         </StatusBar>
       )}

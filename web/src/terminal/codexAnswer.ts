@@ -3,6 +3,7 @@ import type { ReplyTarget } from './ReplyDialog'
 type Screen = { text: string; digest: string; cut?: boolean }
 import { codexCursor, codexQuestionKey } from './menu'
 import { ApiError } from '../api'
+import { isCorraldUnknownResult } from '../corraldLogic'
 
 // A Codex question (request_user_input) answered with the person's own
 // words: its cursor taken to a choice by the arrows (each step read back
@@ -27,7 +28,7 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 const qOf = codexQuestionKey
 
 // (Refused before anything was pressed: the gateway said so.)
-const refused = (e: unknown) => e instanceof ApiError && [400, 403, 404, 409, 429].includes(e.status)
+const refused = (e: unknown) => e instanceof ApiError && !isCorraldUnknownResult(e) && [400, 403, 404, 409, 429].includes(e.status)
 
 export async function codexAnswerWith(target: ReplyTarget, from: Screen, n: number, words: string, alive: () => boolean): Promise<void> {
   const q0 = qOf(from.text)
@@ -46,6 +47,7 @@ export async function codexAnswerWith(target: ReplyTarget, from: Screen, n: numb
     try {
       await target.reply({ digest: s.digest, keys, once: true })
     } catch (e) {
+      if (isCorraldUnknownResult(e)) throw e
       if (refused(e)) throw pressed ? new Unsure() : new NotAsShown()
       throw new Unsure()
     }
@@ -74,6 +76,7 @@ export async function codexAnswerWith(target: ReplyTarget, from: Screen, n: numb
   try {
     await target.reply({ digest: s.digest, text: words, once: true })
   } catch (e) {
+    if (isCorraldUnknownResult(e)) throw e
     if (refused(e)) throw pressed ? new Unsure() : new NotAsShown()
     throw new MaybeAnswered()
   }

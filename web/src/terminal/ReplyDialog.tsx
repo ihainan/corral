@@ -2,6 +2,7 @@ import { Fragment, useContext, useEffect, useLayoutEffect, useRef, useState, typ
 import { modalShown, useWhenGone } from '../shown'
 import { MessageCircleReply, RotateCw } from 'lucide-react'
 import { api, ApiError, errorText, type HerdrAgent } from '../api'
+import { isCorraldUnknownResult } from '../corraldLogic'
 import { t } from '../i18n'
 import { Dialog, isCoarse, LoadError, useToast } from '../components/ui'
 import { getReplyDraft, keepReplyDraft } from './drafts'
@@ -202,7 +203,9 @@ export function useReply(target: ReplyTarget, { onLoaded, resizedAt, onSent, qui
       if (live.current) onSent()
     } catch (e) {
       if (!live.current) return
-      if (e instanceof ApiError && (e.code === 'screen_changed' || e.code === 'already_answered')) {
+      if (isCorraldUnknownResult(e)) {
+        setError(t('corrald.unknownResult'))
+      } else if (e instanceof ApiError && (e.code === 'screen_changed' || e.code === 'already_answered')) {
         // (herdr's answer says the screen as it is now; the conversation's is read anew.)
         if (typeof e.extra.digest === 'string') setScreen(keepShown({ text: String(e.extra.text ?? ''), digest: e.extra.digest, cut: e.extra.cut === true }))
         else void load().then(() => live.current && setChanged(e.code === 'already_answered' ? 'answered' : 'changed'))
@@ -280,7 +283,11 @@ export function ReplyDialog({ sessionId, agent, onLoaded, onClose, resizedAt }: 
         onClose()
       })
       .catch((e) => {
-        setOwn({ busy: false, error: t(e instanceof CodexNotAsShown ? 'reply.changed' : e instanceof MaybeAnswered ? 'own.maybeSent' : 'own.codexMoved'), stuck: e instanceof CodexNotAsShown ? '' : q })
+        if (isCorraldUnknownResult(e)) {
+          setOwn({ busy: false, error: t('corrald.unknownResult'), stuck: q })
+        } else {
+          setOwn({ busy: false, error: t(e instanceof CodexNotAsShown ? 'reply.changed' : e instanceof MaybeAnswered ? 'own.maybeSent' : 'own.codexMoved'), stuck: e instanceof CodexNotAsShown ? '' : q })
+        }
         void load()
       })
   }
@@ -647,7 +654,10 @@ export function InlineReply({ target, onLoaded, resizedAt, active = true, held, 
         setSent(on)
       })
       .catch((e) => {
-        if (e instanceof NotAsShown) setAmendError(t('reply.changed'))
+        if (isCorraldUnknownResult(e)) {
+          setAmendStuck(on)
+          setAmendError(t('corrald.unknownResult'))
+        } else if (e instanceof NotAsShown) setAmendError(t('reply.changed'))
         else {
           setAmendStuck(on)
           setAmendError(t(e instanceof Filled ? 'own.filled' : e instanceof MaybeSent ? 'own.maybeSent' : 'own.filled'))
@@ -674,7 +684,10 @@ export function InlineReply({ target, onLoaded, resizedAt, active = true, held, 
         setSent(on)
       })
       .catch((e) => {
-        if (e instanceof CodexNotAsShown) setAmendError(t('reply.changed'))
+        if (isCorraldUnknownResult(e)) {
+          setCodexStuck(asked)
+          setAmendError(t('corrald.unknownResult'))
+        } else if (e instanceof CodexNotAsShown) setAmendError(t('reply.changed'))
         else {
           setCodexStuck(asked)
           setAmendError(t(e instanceof MaybeAnswered ? 'own.maybeSent' : 'own.codexMoved'))
