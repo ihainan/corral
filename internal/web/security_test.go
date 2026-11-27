@@ -444,7 +444,7 @@ func TestRemoteExecCallSitesAreReviewed(t *testing.T) {
 		"web/convo_rewind.go: res, err := sshx.Exec(ctx, sess.Client(), cmd, limit, sshx.ExecOptions{Interactive: true, AwaitSlot: await, Release: inflight.Done})":                                                                                                                     true, // fixed Claude Code rewind scripts: convoLocateCommand, tmux pane_pid/capture-pane checks, and identity-gated send-keys with validated pane/pid/start/session and fixed allowlisted keys (esc, up, down, enter, ctrl+c), all quoted
 		"term/session.go: s.rec.Output(buf[:n])": true, // the session recorder, not a process
 		"corrald/daemon/cli.go: proc, err := os.StartProcess(exe, argv, &os.ProcAttr{":            true, // corrald serve detaching: re-executes its own binary (os.Executable) with fixed serve arguments; runs on the user's host, never anything from a request
-		"corrald/daemon/handoff.go: proc, err := os.StartProcess(resolvedPath, argv, &os.ProcAttr{": true, // hot update: executes the new corrald only after the path is checked to be under ~/.local/lib/corral/, owned by the user, mode 0700 and matching the sha256 the gateway sent
+		"corrald/daemon/handoff.go: proc, err := os.StartProcess(\"/proc/self/fd/6\", argv, &os.ProcAttr{": true, // hot update: executes the pinned open FD (fd 6) of the new corrald only after LibDir/parent dir ownership & 0700 checks, O_NOFOLLOW open, fstat owner/0700 checks, release match, and SHA-256 verification on that open FD
 	}
 	re := regexp.MustCompile(`\.(Start|Run|Output|CombinedOutput|Exec|StartProcess)\(|SendRequest\("exec"`)
 	root, _ := filepath.Abs("..")

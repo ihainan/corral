@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 )
 
 // ErrLocked is returned when another corrald instance already holds the flock.
@@ -24,11 +25,21 @@ type FileLock struct {
 	file *os.File
 }
 
-// AcquireLock opens path (0600) and acquires a non-blocking exclusive flock.
+// AcquireLock opens path (0600, refusing symlinks) and acquires a non-blocking
+// exclusive flock.
 func AcquireLock(path string) (*FileLock, error) {
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|syscall.O_NOFOLLOW, 0o600)
 	if err != nil {
 		return nil, err
+	}
+	info, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		_ = f.Close()
+		return nil, fmt.Errorf("lock path %s is not a regular file", path)
 	}
 	for {
 		err = syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
@@ -45,6 +56,29 @@ func AcquireLock(path string) (*FileLock, error) {
 		return nil, fmt.Errorf("flock %s: %w", path, err)
 	}
 	return &FileLock{file: f}, nil
+}
+
+// AcquireLockWait acquires an exclusive flock on path, retrying up to timeout
+// if currently held. Used to serialize short lifecycle transitions (install,
+// serve startup, uninstall, shared NFS cleanup).
+func AcquireLockWait(path string, timeout time.Duration) (*FileLock, error) {
+	if timeout <= 0 {
+		timeout = 15 * time.Second
+	}
+	deadline := time.Now().Add(timeout)
+	for {
+		lock, err := AcquireLock(path)
+		if err == nil {
+			return lock, nil
+		}
+		if !errors.Is(err, ErrLocked) {
+			return nil, err
+		}
+		if time.Now().After(deadline) {
+			return nil, fmt.Errorf("timed out waiting for lock %s: %w", path, ErrLocked)
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
 }
 
 // AdoptLock wraps an inherited file descriptor that already holds the flock
@@ -197,10 +231,21 @@ func RandomHex(n int) string {
 
 // WriteFileAtomic writes data to a temporary file in the same directory as
 // path, fsyncs it, chmods it to perm, and atomically renames it into place.
+// It refuses to write if the parent directory or an existing target is a symlink.
 func WriteFileAtomic(path string, data []byte, perm os.FileMode) error {
 	dir := filepath.Dir(path)
+	if dinfo, err := os.Lstat(dir); err != nil {
+		return err
+	} else if dinfo.Mode()&os.ModeSymlink != 0 || !dinfo.IsDir() {
+		return fmt.Errorf("parent directory %s is not a real directory", dir)
+	}
+	if info, err := os.Lstat(path); err == nil {
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("refusing to write over symlink %s", path)
+		}
+	}
 	tmp := filepath.Join(dir, fmt.Sprintf(".%s.tmp.%d.%s", filepath.Base(path), os.Getpid(), RandomHex(4)))
-	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_EXCL|os.O_WRONLY, perm)
+	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_EXCL|os.O_WRONLY|syscall.O_NOFOLLOW, perm)
 	if err != nil {
 		return err
 	}

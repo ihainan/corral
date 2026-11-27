@@ -12,12 +12,7 @@ import (
 )
 
 // Test-build-only hooks (compiled only with -tags corrald_test, never included
-// in production corrald binaries). Allows real-binary integration tests to:
-//   - inject a custom machine ID (for NFS multi-host tests)
-//   - shorten idle exit and old-version GC timeouts
-//   - emit synthetic events through the EventBus (test.emit)
-//   - exercise idempotent write operations and in-flight drain (test.write)
-//   - simulate a broken replacement binary that exits before READY
+// in production corrald binaries).
 
 func defaultPathOptions() PathOptions {
 	opts := PathOptions{}
@@ -44,10 +39,29 @@ func applyTestServerConfig(cfg *ServerConfig) {
 			cfg.ReadyTimeout = d
 		}
 	}
+	if v := os.Getenv("CORRALD_TEST_DRAIN_TIMEOUT"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			cfg.DrainTimeout = d
+		}
+	}
+	if v := os.Getenv("CORRALD_TEST_POST_HANDOFF_WRITE_CAP"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			cfg.PostHandoffWriteCap = d
+		}
+	}
+	if v := os.Getenv("CORRALD_TEST_POST_HANDOFF_EXIT"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			cfg.PostHandoffExit = d
+		}
+	}
 }
 
 func shouldFailBeforeReady(handoff bool) bool {
 	return handoff && os.Getenv("CORRALD_TEST_FAIL_READY") == "1"
+}
+
+func shouldFailCutover() bool {
+	return os.Getenv("CORRALD_TEST_FAIL_CUTOVER") == "1"
 }
 
 func registerTestMethods(s *Server) {
@@ -83,6 +97,8 @@ func registerTestMethods(s *Server) {
 		}
 		return s.Ops().Execute(p.OpID, func() (json.RawMessage, *proto.RPCError) {
 			if p.DelayMS > 0 {
+				// Deliberately sleep without honoring ctx to test hard exit cap
+				// and timed-out write handoff behavior.
 				time.Sleep(time.Duration(p.DelayMS) * time.Millisecond)
 			}
 			b, _ := json.Marshal(map[string]any{

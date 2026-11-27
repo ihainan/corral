@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestFrameRoundTrip(t *testing.T) {
@@ -356,5 +357,26 @@ func TestRenderReadmeContainsRequiredDetails(t *testing.T) {
 		if !strings.Contains(txt, want) {
 			t.Errorf("README missing %q", want)
 		}
+	}
+}
+
+func TestOpIDGenerateAndParse(t *testing.T) {
+	now := time.Date(2026, 11, 27, 10, 0, 0, 123000000, time.UTC)
+	id := NewOpID(now)
+	ts, err := ParseOpID(id)
+	if err != nil {
+		t.Fatalf("ParseOpID(%q): %v", id, err)
+	}
+	if !ts.Equal(now) {
+		t.Fatalf("parsed timestamp %v, want %v", ts, now)
+	}
+
+	for _, bad := range []string{"", "no-dash", "abc-12345678", "0-12345678", "-5-12345678", "1700000000000-ab", "1700000000000-bad/char"} {
+		if _, err := ParseOpID(bad); err == nil {
+			t.Errorf("ParseOpID(%q) unexpectedly succeeded", bad)
+		}
+	}
+	if OpDedupWindow != 30*time.Minute {
+		t.Fatalf("unexpected OpDedupWindow: %v", OpDedupWindow)
 	}
 }

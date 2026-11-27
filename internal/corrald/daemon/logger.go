@@ -1,3 +1,5 @@
+//go:build linux
+
 package daemon
 
 import (
@@ -7,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"syscall"
 )
 
 // DefaultMaxLogBytes is the 5 MiB per-file log size cap from spec section 3.
@@ -15,7 +18,8 @@ import (
 const DefaultMaxLogBytes int64 = 5 << 20
 
 // RotatingWriter is a thread-safe file writer that rotates path -> path+".1"
-// once writing would exceed maxBytes.
+// once writing would exceed maxBytes. It refuses symlinks on the log path and
+// its parent directory.
 type RotatingWriter struct {
 	mu       sync.Mutex
 	path     string
@@ -24,13 +28,39 @@ type RotatingWriter struct {
 	size     int64
 }
 
-// OpenRotatingWriter opens or creates path with mode 0600 and configures
-// single-backup rotation at maxBytes.
+// OpenLogFileNoFollow opens path for append-only logging while rejecting
+// symlinks (via O_NOFOLLOW) and non-regular files.
+func OpenLogFileNoFollow(path string) (*os.File, error) {
+	dir := filepath.Dir(path)
+	if info, err := os.Lstat(dir); err != nil {
+		return nil, fmt.Errorf("stat log dir %s: %w", dir, err)
+	} else if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return nil, fmt.Errorf("log dir %s is not a real directory", dir)
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY|syscall.O_NOFOLLOW, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	info, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		_ = f.Close()
+		return nil, fmt.Errorf("log path %s is not a regular file", path)
+	}
+	return f, nil
+}
+
+// OpenRotatingWriter opens or creates path with mode 0600 (refusing symlinks)
+// and configures single-backup rotation at maxBytes.
 func OpenRotatingWriter(path string, maxBytes int64) (*RotatingWriter, error) {
 	if maxBytes <= 0 {
 		maxBytes = DefaultMaxLogBytes
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
 	}
 	w := &RotatingWriter{
@@ -44,7 +74,7 @@ func OpenRotatingWriter(path string, maxBytes int64) (*RotatingWriter, error) {
 }
 
 func (w *RotatingWriter) openLocked() error {
-	f, err := os.OpenFile(w.path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	f, err := OpenLogFileNoFollow(w.path)
 	if err != nil {
 		return err
 	}
@@ -82,6 +112,11 @@ func (w *RotatingWriter) rotateLocked() error {
 	if w.file != nil {
 		_ = w.file.Close()
 		w.file = nil
+	}
+	if info, err := os.Lstat(w.path); err == nil {
+		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+			return fmt.Errorf("refusing to rotate non-regular log path %s", w.path)
+		}
 	}
 	backup := w.path + ".1"
 	_ = os.Remove(backup)

@@ -3,8 +3,10 @@ package daemon
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -17,18 +19,45 @@ type clientKey struct {
 }
 
 // ClientRegistry maintains registered gateway/user pairs and persists them to
-// ~/.local/state/corral/corrald/<mid>/clients.json.
+// ~/.local/state/corral/corrald/<mid>/clients.json. Field lengths and total
+// entries are bounded so daemon.hello responses always fit well below the
+// 4 MiB frame cap.
 type ClientRegistry struct {
 	mu      sync.Mutex
 	path    string
+	maxSize int
 	clients map[clientKey]proto.ClientInfo
 }
 
+// ValidateClientFields enforces protocol bounds on gateway/user/host_id strings.
+func ValidateClientFields(gateway, gatewayVersion, corralUser, hostID string) error {
+	if len(gateway) > proto.MaxGatewayLen {
+		return fmt.Errorf("gateway exceeds %d bytes", proto.MaxGatewayLen)
+	}
+	if len(gatewayVersion) > proto.MaxGatewayVersionLen {
+		return fmt.Errorf("gateway_version exceeds %d bytes", proto.MaxGatewayVersionLen)
+	}
+	if len(corralUser) > proto.MaxCorralUserLen {
+		return fmt.Errorf("corral_user exceeds %d bytes", proto.MaxCorralUserLen)
+	}
+	if len(hostID) > proto.MaxHostIDLen {
+		return fmt.Errorf("host_id exceeds %d bytes", proto.MaxHostIDLen)
+	}
+	for _, s := range []string{gateway, gatewayVersion, corralUser, hostID} {
+		if strings.ContainsAny(s, "\x00\r\n") {
+			return errors.New("client identity contains control characters")
+		}
+	}
+	return nil
+}
+
 // OpenClientRegistry loads existing clients from path (if present) and returns
-// a registry that persists subsequent mutations atomically.
+// a registry that persists subsequent mutations atomically. Oversized or
+// excessive legacy entries are sanitized on load.
 func OpenClientRegistry(path string) (*ClientRegistry, error) {
 	r := &ClientRegistry{
 		path:    path,
+		maxSize: proto.MaxRegisteredClients,
 		clients: make(map[clientKey]proto.ClientInfo),
 	}
 	if path == "" {
@@ -46,16 +75,21 @@ func OpenClientRegistry(path string) (*ClientRegistry, error) {
 		return nil, err
 	}
 	for _, c := range list {
+		c = sanitizeClientInfo(c)
 		if c.Gateway == "" && c.CorralUser == "" {
 			continue
 		}
 		r.clients[clientKey{gateway: c.Gateway, corralUser: c.CorralUser}] = c
 	}
+	r.evictExcessLocked()
 	return r, nil
 }
 
 // Touch records or updates a client entry and persists the registry to disk.
 func (r *ClientRegistry) Touch(gateway, corralUser, hostID string) ([]proto.ClientInfo, error) {
+	if err := ValidateClientFields(gateway, "", corralUser, hostID); err != nil {
+		return nil, err
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if gateway != "" || corralUser != "" {
@@ -65,6 +99,7 @@ func (r *ClientRegistry) Touch(gateway, corralUser, hostID string) ([]proto.Clie
 			HostID:     hostID,
 			LastSeen:   time.Now().UTC().Format(time.RFC3339),
 		}
+		r.evictExcessLocked()
 	}
 	list := r.listLocked()
 	if err := r.saveLocked(list); err != nil {
@@ -103,6 +138,7 @@ func (r *ClientRegistry) Restore(clients []proto.ClientInfo) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for _, c := range clients {
+		c = sanitizeClientInfo(c)
 		if c.Gateway == "" && c.CorralUser == "" {
 			continue
 		}
@@ -111,7 +147,53 @@ func (r *ClientRegistry) Restore(clients []proto.ClientInfo) error {
 			r.clients[k] = c
 		}
 	}
+	r.evictExcessLocked()
 	return r.saveLocked(r.listLocked())
+}
+
+func (r *ClientRegistry) evictExcessLocked() {
+	if r.maxSize <= 0 || len(r.clients) <= r.maxSize {
+		return
+	}
+	type pair struct {
+		key      clientKey
+		lastSeen string
+	}
+	all := make([]pair, 0, len(r.clients))
+	for k, v := range r.clients {
+		all = append(all, pair{key: k, lastSeen: v.LastSeen})
+	}
+	sort.Slice(all, func(i, j int) bool {
+		if all[i].lastSeen != all[j].lastSeen {
+			return all[i].lastSeen < all[j].lastSeen
+		}
+		if all[i].key.gateway != all[j].key.gateway {
+			return all[i].key.gateway < all[j].key.gateway
+		}
+		return all[i].key.corralUser < all[j].key.corralUser
+	})
+	excess := len(all) - r.maxSize
+	for i := 0; i < excess; i++ {
+		delete(r.clients, all[i].key)
+	}
+}
+
+func sanitizeClientInfo(c proto.ClientInfo) proto.ClientInfo {
+	c.Gateway = clampString(c.Gateway, proto.MaxGatewayLen)
+	c.CorralUser = clampString(c.CorralUser, proto.MaxCorralUserLen)
+	c.HostID = clampString(c.HostID, proto.MaxHostIDLen)
+	c.LastSeen = clampString(c.LastSeen, 64)
+	return c
+}
+
+func clampString(s string, max int) string {
+	s = strings.ReplaceAll(s, "\x00", "")
+	s = strings.ReplaceAll(s, "\r", "")
+	s = strings.ReplaceAll(s, "\n", "")
+	if len(s) > max {
+		return s[:max]
+	}
+	return s
 }
 
 func (r *ClientRegistry) listLocked() []proto.ClientInfo {

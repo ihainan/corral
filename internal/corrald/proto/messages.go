@@ -36,13 +36,26 @@ const (
 	ErrResyncRequired    = "resync_required"
 	ErrHandoffInProgress = "handoff_in_progress"
 	ErrHandoffFailed     = "handoff_failed"
+	ErrNotNewer          = "not_newer"
 	ErrInProgress        = "in_progress"
+	ErrOpExpired         = "op_expired"
+	ErrOpUnknown         = "op_unknown"
 	ErrInvalidParams     = "invalid_params"
 	ErrMethodNotFound    = "method_not_found"
 	ErrInternal          = "internal_error"
 	ErrRemoving          = "removing"
 	ErrUnauthorized      = "unauthorized"
 	ErrNotSupported      = "not_supported"
+)
+
+// Limits on daemon.hello identity fields and persisted client registry size
+// so hello responses always remain well below MaxFrameSize.
+const (
+	MaxGatewayLen        = 256
+	MaxGatewayVersionLen = 64
+	MaxCorralUserLen     = 128
+	MaxHostIDLen         = 128
+	MaxRegisteredClients = 64
 )
 
 // Daemon operational states reported in daemon.hello and status output.

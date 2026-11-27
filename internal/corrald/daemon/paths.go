@@ -19,7 +19,11 @@ import (
 // falling back to a private per-user directory under /tmp.
 const MaxSocketPath = 99
 
-var hex12RE = regexp.MustCompile(`^[0-9a-f]{12}$`)
+var (
+	hex12RE       = regexp.MustCompile(`^[0-9a-f]{12}$`)
+	versionPartRE = regexp.MustCompile(`^[0-9A-Za-z._+-]{1,128}$`)
+	digitsRE      = regexp.MustCompile(`^[0-9]+$`)
+)
 
 // MachineIDSource names where the host's machine identifier was obtained.
 const (
@@ -39,11 +43,13 @@ type Layout struct {
 	LibDir         string // ~/.local/lib/corral
 	CurrentSymlink string // ~/.local/lib/corral/corrald
 	ReadmePath     string // ~/.local/lib/corral/README.txt
+	SharedLockPath string // ~/.local/lib/corral/.corrald-shared.lock
 
 	StateRoot     string // ~/.local/state/corral/corrald
 	StateDir      string // ~/.local/state/corral/corrald/<mid>
 	InstallJSON   string // .../<mid>/install.json
 	LockPath      string // .../<mid>/corrald.lock
+	OpLockPath    string // .../<mid>/op.lock
 	MetaJSON      string // .../<mid>/meta.json
 	ClientsJSON   string // .../<mid>/clients.json
 	LogPath       string // .../<mid>/corrald.log
@@ -175,10 +181,12 @@ func ResolveLayout(opts PathOptions) (*Layout, error) {
 		LibDir:           libDir,
 		CurrentSymlink:   filepath.Join(libDir, "corrald"),
 		ReadmePath:       filepath.Join(libDir, "README.txt"),
+		SharedLockPath:   filepath.Join(libDir, ".corrald-shared.lock"),
 		StateRoot:        stateRoot,
 		StateDir:         stateDir,
 		InstallJSON:      filepath.Join(stateDir, "install.json"),
 		LockPath:         filepath.Join(stateDir, "corrald.lock"),
+		OpLockPath:       filepath.Join(stateDir, "op.lock"),
 		MetaJSON:         filepath.Join(stateDir, "meta.json"),
 		ClientsJSON:      filepath.Join(stateDir, "clients.json"),
 		LogPath:          filepath.Join(stateDir, "corrald.log"),
@@ -228,11 +236,75 @@ func (l *Layout) StageDir(opID string) (string, error) {
 }
 
 func validateVersionToken(version string) error {
-	if version == "" || len(version) > 128 {
+	if !versionPartRE.MatchString(version) || strings.Contains(version, "..") {
 		return fmt.Errorf("invalid version %q", version)
 	}
-	if strings.ContainsAny(version, "/\\\x00 \t\n\r") || strings.Contains(version, "..") {
-		return fmt.Errorf("invalid version %q", version)
+	return nil
+}
+
+// ParseVersionDirName strictly validates a corrald version directory basename
+// of the form "corrald-<Version>-<Release>" where Release is a non-negative
+// decimal integer and Version is a valid version token. Unrelated directories
+// such as "corrald-backups" return ok=false.
+func ParseVersionDirName(name string) (version string, release int64, ok bool) {
+	if !strings.HasPrefix(name, "corrald-") {
+		return "", 0, false
+	}
+	rest := strings.TrimPrefix(name, "corrald-")
+	idx := strings.LastIndexByte(rest, '-')
+	if idx <= 0 || idx+1 >= len(rest) {
+		return "", 0, false
+	}
+	ver := rest[:idx]
+	relStr := rest[idx+1:]
+	if err := validateVersionToken(ver); err != nil {
+		return "", 0, false
+	}
+	if !digitsRE.MatchString(relStr) {
+		return "", 0, false
+	}
+	var rel int64
+	for i := 0; i < len(relStr); i++ {
+		d := int64(relStr[i] - '0')
+		if rel > (1<<62)/10 {
+			return "", 0, false
+		}
+		rel = rel*10 + d
+	}
+	return ver, rel, true
+}
+
+// EnsureLibDir creates ~/.local/lib/corral if absent and verifies it is a real
+// directory (not a symlink) owned by l.UID and not group/other writable.
+func (l *Layout) EnsureLibDir() error {
+	if err := os.MkdirAll(l.LibDir, 0o755); err != nil {
+		return err
+	}
+	return CheckNonWritableDir(l.LibDir, l.UID)
+}
+
+// CheckNonWritableDir verifies dir is a real directory (not a symlink), owned
+// by expectedUID, and not group- or world-writable (perm & 0022 == 0).
+func CheckNonWritableDir(dir string, expectedUID uint32) error {
+	info, err := os.Lstat(dir)
+	if err != nil {
+		return fmt.Errorf("lstat %s: %w", dir, err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("directory %s is a symlink", dir)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("path %s is not a directory", dir)
+	}
+	st, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return fmt.Errorf("stat metadata unavailable for %s", dir)
+	}
+	if st.Uid != expectedUID {
+		return fmt.Errorf("directory %s is owned by uid %d, expected %d", dir, st.Uid, expectedUID)
+	}
+	if info.Mode().Perm()&0o022 != 0 {
+		return fmt.Errorf("directory %s is group/other writable (%04o)", dir, info.Mode().Perm())
 	}
 	return nil
 }

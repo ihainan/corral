@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"encoding/json"
+	"errors"
 	"sync"
 
 	"github.com/ihainan/corral/internal/corrald/proto"
@@ -9,6 +10,11 @@ import (
 
 // DefaultEventRingSize is the bounded replay buffer capacity from spec §5.
 const DefaultEventRingSize = 1000
+
+// ErrBusFrozen is returned by EventBus.Emit once the bus has been frozen for a
+// hot-update snapshot, preventing the old daemon from allocating sequence
+// numbers under the same epoch concurrently with the replacement daemon.
+var ErrBusFrozen = errors.New("event bus frozen for handoff")
 
 // EventSubscriber receives live events pushed by EventBus. Deliver must not
 // block indefinitely; returning false signals the subscriber has been detached.
@@ -26,6 +32,7 @@ type EventBus struct {
 	capacity int
 	ring     []proto.Event
 	subs     map[EventSubscriber]struct{}
+	frozen   bool
 }
 
 // NewEventBus creates a fresh EventBus with a new random epoch.
@@ -56,7 +63,8 @@ func (b *EventBus) CurrentSeq() uint64 {
 }
 
 // Emit appends a new event to the ring buffer and delivers it to all active
-// subscribers in sequence order.
+// subscribers in sequence order. If the bus is frozen for handoff, Emit
+// returns ErrBusFrozen without advancing seq.
 func (b *EventBus) Emit(eventName string, data any) (proto.Event, error) {
 	var raw json.RawMessage
 	switch v := data.(type) {
@@ -74,6 +82,10 @@ func (b *EventBus) Emit(eventName string, data any) (proto.Event, error) {
 	}
 
 	b.mu.Lock()
+	if b.frozen {
+		b.mu.Unlock()
+		return proto.Event{}, ErrBusFrozen
+	}
 	b.seq++
 	ev := proto.Event{
 		Event: eventName,
@@ -164,8 +176,26 @@ func (b *EventBus) Resume(
 	return len(missed), b.seq, nil
 }
 
+// FreezeAndSnapshot atomically freezes future Emit calls and captures the
+// epoch, sequence number, and ring buffer for hot-update handoff.
+func (b *EventBus) FreezeAndSnapshot() (epoch string, seq uint64, events []proto.Event) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.frozen = true
+	cp := make([]proto.Event, len(b.ring))
+	copy(cp, b.ring)
+	return b.epoch, b.seq, cp
+}
+
+// Unfreeze re-enables Emit calls after a failed handoff rollback.
+func (b *EventBus) Unfreeze() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.frozen = false
+}
+
 // Snapshot returns the epoch, current sequence number, and a copy of the ring
-// buffer for hot-update handoff.
+// buffer without freezing the bus.
 func (b *EventBus) Snapshot() (epoch string, seq uint64, events []proto.Event) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
