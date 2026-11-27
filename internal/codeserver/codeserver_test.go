@@ -664,24 +664,31 @@ func groupAlive(g int) bool {
 	return false
 }
 
-// holdLock holds the host lock from another process until the returned
-// function is called.
+// holdLock holds the host lock until the returned function is called. Using
+// flock(2) on an O_CLOEXEC descriptor avoids spawning a child process whose
+// inherited descriptor can linger after SIGKILL and race with the next check.
 func holdLock(t *testing.T, home string) func() {
-	st := filepath.Join(home, ".local/state/corral")
-	os.MkdirAll(st, 0o700)
-	c := exec.Command("flock", filepath.Join(st, ".lock"), "sleep", "60")
-	c.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-	if err := c.Start(); err != nil {
+	t.Helper()
+	if _, err := exec.LookPath("flock"); err != nil {
 		t.Skip("needs flock")
 	}
-	done := make(chan error, 1)
-	go func() { done <- c.Wait() }()
-	time.Sleep(200 * time.Millisecond)
+	st := filepath.Join(home, ".local/state/corral")
+	if err := os.MkdirAll(st, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.OpenFile(filepath.Join(st, ".lock"), os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+		f.Close()
+		t.Fatal(err)
+	}
 	var once sync.Once
 	release := func() {
 		once.Do(func() {
-			syscall.Kill(-c.Process.Pid, syscall.SIGKILL)
-			<-done
+			_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+			_ = f.Close()
 		})
 	}
 	t.Cleanup(release)
@@ -762,6 +769,41 @@ func TestCancelNeedsProof(t *testing.T) {
 	needSh(t)
 	CancelWaitSeconds = 1
 	t.Cleanup(func() { CancelWaitSeconds = 20 })
+	// Simulate an unrelated concurrent run holding the same-named lock under a
+	// different HOME via flock; it must not affect this test's lock check.
+	if _, err := exec.LookPath("flock"); err == nil {
+		otherSt := filepath.Join(t.TempDir(), ".local/state/corral")
+		if err := os.MkdirAll(otherSt, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		otherLock := filepath.Join(otherSt, ".lock")
+		ext := exec.Command("flock", otherLock, "sleep", "60")
+		ext.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+		if err := ext.Start(); err != nil {
+			t.Fatal(err)
+		}
+		extDone := make(chan error, 1)
+		go func() { extDone <- ext.Wait() }()
+		t.Cleanup(func() {
+			_ = syscall.Kill(-ext.Process.Pid, syscall.SIGKILL)
+			<-extDone
+		})
+		for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+			if f, err := os.OpenFile(otherLock, os.O_RDONLY, 0); err == nil {
+				lerr := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+				if lerr == nil {
+					_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+				}
+				_ = f.Close()
+				if lerr == syscall.EWOULDBLOCK {
+					break
+				}
+			}
+			if time.Now().After(deadline) {
+				t.Fatal("external flock process never acquired its lock")
+			}
+		}
+	}
 	home := t.TempDir()
 	st := filepath.Join(home, ".local/state/corral")
 	id := op()

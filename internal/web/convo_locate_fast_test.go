@@ -894,6 +894,58 @@ func TestFastLocateErrorFallsBackToFull(t *testing.T) {
 	}
 }
 
+// isolateClaudeCfgProc points claude_cfg_dirs's /proc/[0-9]* loop at procDir
+// so tests are isolated from real Claude/Node processes or concurrent test runs
+// under the same user without changing production scripts.
+func isolateClaudeCfgProc(t *testing.T, cmd, procDir string) string {
+	t.Helper()
+	const want = "for _p in /proc/[0-9]*; do"
+	if !strings.Contains(cmd, want) {
+		t.Fatalf("expected claude_cfg_dirs /proc scan in command: %s", cmd)
+	}
+	if strings.ContainsAny(procDir, "'\"$`\\\n") {
+		t.Fatalf("unsupported characters in procDir %q", procDir)
+	}
+	return strings.ReplaceAll(cmd, want, `for _p in "`+procDir+`"/[0-9]*; do`)
+}
+
+// spawnFakeExternalClaude launches a background process whose /proc/<pid>/comm
+// is "claude" with CLAUDE_CONFIG_DIR=cfgDir, simulating an unrelated Claude
+// Code process running under the same user on the host.
+func spawnFakeExternalClaude(t *testing.T, cfgDir string) {
+	t.Helper()
+	sleepBin, err := exec.LookPath("sleep")
+	if err != nil {
+		t.Fatalf("look up sleep: %v", err)
+	}
+	fakeBin := filepath.Join(t.TempDir(), "claude")
+	if err := os.Symlink(sleepBin, fakeBin); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(fakeBin, "60")
+	cmd.Env = []string{"PATH=/usr/bin:/bin", "CLAUDE_CONFIG_DIR=" + cfgDir}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+	})
+	if _, err := os.Stat("/proc/self/stat"); err != nil {
+		return
+	}
+	pid := strconv.Itoa(cmd.Process.Pid)
+	for i := 0; i < 50; i++ {
+		comm, _ := os.ReadFile("/proc/" + pid + "/comm")
+		env, _ := os.ReadFile("/proc/" + pid + "/environ")
+		if strings.TrimSpace(string(comm)) == "claude" && strings.Contains(string(env), "CLAUDE_CONFIG_DIR="+cfgDir) {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("fake external claude (pid %s) did not expose comm/environ", pid)
+}
+
 // Review Items 5 & 6:
 // - Physical deduplication (pwd -P) when $HOME/.claude is a symlink to the same
 //   directory as CLAUDE_CONFIG_DIR so forkFindCommand returns 1 path (not 2).
@@ -905,6 +957,23 @@ func TestClaudeConfigDirsPhysicalDedupAndFork(t *testing.T) {
 		t.Skip("no sh")
 	}
 	base := t.TempDir()
+	fakeProc := t.TempDir()
+	sidC := "33333333-3333-4333-8333-333333333333"
+	// Run an unrelated fake claude process under the same user whose
+	// CLAUDE_CONFIG_DIR contains decoy logs for every SID in this test; without
+	// /proc isolation, claude_cfg_dirs would discover it and duplicate results.
+	decoyCfg := filepath.Join(base, "external-claude")
+	decoyProj := filepath.Join(decoyCfg, "projects", "-external")
+	if err := os.MkdirAll(decoyProj, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, sid := range []string{sidA, sidB, sidC} {
+		if err := os.WriteFile(filepath.Join(decoyProj, sid+".jsonl"), []byte(`{"type":"user","cwd":"/ext","message":{"role":"user","content":"ext"}}`+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	spawnFakeExternalClaude(t, decoyCfg)
+
 	realCfg := filepath.Join(base, "real data", "claude-dir")
 	projDir := filepath.Join(realCfg, "projects", "-work")
 	if err := os.MkdirAll(projDir, 0o755); err != nil {
@@ -930,7 +999,7 @@ func TestClaudeConfigDirsPhysicalDedupAndFork(t *testing.T) {
 		if err != nil {
 			continue
 		}
-		c := exec.Command(p, "-c", forkFindCommand("claude", sidA))
+		c := exec.Command(p, "-c", isolateClaudeCfgProc(t, forkFindCommand("claude", sidA), fakeProc))
 		c.Env = []string{"HOME=" + home, "CLAUDE_CONFIG_DIR=" + realCfg, "PATH=/usr/bin:/bin"}
 		out, err := c.Output()
 		if err != nil {
@@ -982,6 +1051,9 @@ func TestClaudeConfigDirsPhysicalDedupAndFork(t *testing.T) {
 			return sshExecReply(`{"result":{"ok":true}}`+"\n", 0)
 		}
 		if strings.Contains(cmd, "claude_cfg_dirs") || strings.Contains(cmd, "mktemp") || strings.Contains(cmd, "wc -l") {
+			if strings.Contains(cmd, "claude_cfg_dirs") {
+				cmd = isolateClaudeCfgProc(t, cmd, fakeProc)
+			}
 			c := exec.Command(sh, "-c", cmd)
 			c.Env = []string{"HOME=" + forkHome, "CLAUDE_CONFIG_DIR=" + customForkCfg, "PATH=/usr/bin:/bin"}
 			out, err := c.CombinedOutput()
@@ -1019,7 +1091,6 @@ func TestClaudeConfigDirsPhysicalDedupAndFork(t *testing.T) {
 	// realCfg, and even when the remote environment has another account's
 	// CLAUDE_CONFIG_DIR set) MUST still explicitly pass the default dir's
 	// physical path to workspace.create and to agentTmuxCmd!
-	sidC := "33333333-3333-4333-8333-333333333333"
 	defForkHome := filepath.Join(base, "defhome")
 	defRealDir := filepath.Join(base, "real default claude")
 	defProj := filepath.Join(defRealDir, "projects", "-projwork")
@@ -1043,6 +1114,9 @@ func TestClaudeConfigDirsPhysicalDedupAndFork(t *testing.T) {
 			return sshExecReply(`{"result":{"ok":true}}`+"\n", 0)
 		}
 		if strings.Contains(cmd, "claude_cfg_dirs") || strings.Contains(cmd, "mktemp") || strings.Contains(cmd, "wc -l") {
+			if strings.Contains(cmd, "claude_cfg_dirs") {
+				cmd = isolateClaudeCfgProc(t, cmd, fakeProc)
+			}
 			c := exec.Command(sh, "-c", cmd)
 			// Remote environment has another account's CLAUDE_CONFIG_DIR!
 			c.Env = []string{"HOME=" + defForkHome, "CLAUDE_CONFIG_DIR=" + otherCfg, "PATH=/usr/bin:/bin"}
@@ -1094,6 +1168,7 @@ func TestBgTailBatchMissingLastAndReadError(t *testing.T) {
 		t.Skip("no sh")
 	}
 	home := t.TempDir()
+	fakeProc := t.TempDir()
 	proj := filepath.Join(home, ".claude", "projects", "-work")
 	if err := os.MkdirAll(proj, 0o755); err != nil {
 		t.Fatal(err)
@@ -1104,13 +1179,39 @@ func TestBgTailBatchMissingLastAndReadError(t *testing.T) {
 	}
 	sidMissing := "99999999-9999-4999-8999-999999999999"
 
+	// Run unrelated fake claude processes under the same user: one with decoy
+	// copies of sidA/sidB (would cause ambiguity) and one with an unreadable
+	// CLAUDE_CONFIG_DIR (would set cldirs_incomplete=1). Neither may interfere.
+	decoyCfg := filepath.Join(t.TempDir(), "external-claude")
+	decoyProj := filepath.Join(decoyCfg, "projects", "-external")
+	if err := os.MkdirAll(decoyProj, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, sid := range []string{sidA, sidB} {
+		if err := os.WriteFile(filepath.Join(decoyProj, sid+".jsonl"), []byte(`{"type":"system","subtype":"turn_duration","uuid":"u-ext","pendingBackgroundAgentCount":9}`+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	spawnFakeExternalClaude(t, decoyCfg)
+	if os.Geteuid() != 0 {
+		lockedDecoy := filepath.Join(t.TempDir(), "external-locked-claude")
+		if err := os.MkdirAll(lockedDecoy, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(lockedDecoy, 0o000); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(lockedDecoy, 0o755) })
+		spawnFakeExternalClaude(t, lockedDecoy)
+	}
+
 	for _, bin := range []string{sh, "dash"} {
 		p, err := exec.LookPath(bin)
 		if err != nil {
 			continue
 		}
 		// Unpinned batch where LAST SID has no log -> must exit 0 and return sidA!
-		c := exec.Command(p, "-c", bgTailCommand([]string{sidA, sidMissing}, 4096))
+		c := exec.Command(p, "-c", isolateClaudeCfgProc(t, bgTailCommand([]string{sidA, sidMissing}, 4096), fakeProc))
 		c.Env = []string{"HOME=" + home, "PATH=/usr/bin:/bin"}
 		out, err := c.Output()
 		if err != nil {
@@ -1157,7 +1258,7 @@ func TestBgTailBatchMissingLastAndReadError(t *testing.T) {
 			t.Fatal(err)
 		}
 		t.Cleanup(func() { _ = os.Chmod(unreadable, 0o600) })
-		c := exec.Command(sh, "-c", bgTailCommand([]string{sidA, sidB}, 4096))
+		c := exec.Command(sh, "-c", isolateClaudeCfgProc(t, bgTailCommand([]string{sidA, sidB}, 4096), fakeProc))
 		c.Env = []string{"HOME=" + home, "PATH=/usr/bin:/bin"}
 		out, err := c.Output()
 		if err != nil {
