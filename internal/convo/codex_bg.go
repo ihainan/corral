@@ -32,20 +32,25 @@ type codexProc struct {
 	over bool   // told ended by the host before it had a step (EndedOnHost): its step, when made, is done
 }
 
+type codexScriptCmd struct {
+	cmd string
+	cut bool
+}
+
 // scriptRan notes the commands a code-mode call's script runs (as read out
 // of it), in order.
 func (c *Codex) scriptRan(id string, ts []*Tool) {
-	var cmds []string
+	var cmds []codexScriptCmd
 	for _, t := range ts {
 		if t.Name == "Bash" {
-			cmds = append(cmds, t.Detail)
+			cmds = append(cmds, codexScriptCmd{cmd: t.Detail, cut: t.detailCut})
 		}
 	}
 	if id == "" || len(cmds) == 0 {
 		return
 	}
 	if c.scriptCmds == nil || len(c.scriptCmds) >= maxScriptCalls {
-		c.scriptCmds = map[string][]string{}
+		c.scriptCmds = map[string][]codexScriptCmd{}
 	}
 	c.scriptCmds[id] = cmds
 }
@@ -109,18 +114,21 @@ func (c *Codex) procsGoing(r *codexRow, id string, sids []string) {
 	// (Named by its command only where the script ran one, and left one
 	// process: of several, the order they came back in is no word on which
 	// is which — their ends tell it.)
-	var cmds []string
+	var cmds []codexScriptCmd
 	for _, cm := range c.scriptCmds[id] {
-		cmds = append(cmds, strings.Split(cm, "\n")...)
+		parts := strings.Split(cm.cmd, "\n")
+		for _, part := range parts {
+			cmds = append(cmds, codexScriptCmd{cmd: part, cut: cm.cut || len(parts) > 1})
+		}
 	}
 	for _, sid := range sids {
 		if c.procs[sid] != nil || c.endedJustNow(sid, r.Timestamp) {
 			continue // (going already; or its end told already, just now — a session id
 			// comes again later for another process: that one is set going)
 		}
-		cmd := ""
+		cmd, cmdCut := "", true
 		if len(sids) == 1 && len(cmds) == 1 {
-			cmd = cmds[0]
+			cmd, cmdCut = cmds[0].cmd, cmds[0].cut
 		}
 		step := clip("proc:"+sid+"@"+r.Timestamp, maxID) // (its id again later is another process's)
 		if c.procs == nil {
@@ -139,13 +147,14 @@ func (c *Codex) procsGoing(r *codexRow, id string, sids []string) {
 			c.mark(step, p.t)
 		}
 		c.procs[sid] = p
-		c.setGoing(step, "cmd", cmd, r.Timestamp) // ("": the page says "a command in the background")
+		c.setGoingCmd(step, "cmd", cmd, cmd, r.Timestamp, cmdCut) // ("": the page says "a command in the background")
 	}
 }
 
 // step: the step of a process a script left running, running.
 func (p *codexProc) step() *Tool {
-	return &Tool{ID: p.id, Name: "Bash", Detail: clip(clean(p.cmd), maxDetail), Done: p.over}
+	detail, dcut := cut(clean(p.cmd), maxDetail)
+	return &Tool{ID: p.id, Name: "Bash", Detail: detail, detailCut: dcut, Done: p.over}
 }
 
 // stepsInPlace: commands are told of on their own in this conversation now

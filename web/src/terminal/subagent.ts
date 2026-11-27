@@ -27,14 +27,13 @@ const EVERY = 3000
 const GROWING = 30000 // (unknown whether it goes on: read on while it grew this lately)
 const BATCH = 20 // (reads in a row while there is more; then the next round)
 
-export function useSubConvo(sessionId: string, pane: string, agent: string, live: boolean, active: boolean, nested: boolean, cli?: string, cliParent?: string, cliChain?: string[]): SubConvo {
+export function useSubConvo(sessionId: string, pane: string, agent: string, live: boolean, active: boolean, nested: boolean, cli?: string): SubConvo {
   const [shown, setShown] = useState({ entries: [] as ConvoEntry[], running: [] as ConvoRunning[], older: false, olderCut: false, loading: true, failed: false, grewAt: 0 })
   const liveNow = useRef(live)
   liveNow.current = live
   const activeNow = useRef(active)
   activeNow.current = active
   const pollerRef = useRef<{ run: (older: boolean) => Promise<void>; stop: () => void } | null>(null)
-  const cliChainKey = cliChain?.length ? cliChain.join(',') : ''
 
   useEffect(() => {
     const poller = createSubConvoPoller<ConvoEntry, ConvoRunning>({
@@ -42,8 +41,6 @@ export function useSubConvo(sessionId: string, pane: string, agent: string, live
       pane,
       agent,
       cli,
-      cliParent,
-      cliChain: cliChainKey ? cliChainKey.split(',') : undefined,
       nested,
       live: () => liveNow.current,
       active: () => activeNow.current,
@@ -64,7 +61,7 @@ export function useSubConvo(sessionId: string, pane: string, agent: string, live
       if (pollerRef.current === poller) pollerRef.current = null
       document.removeEventListener('visibilitychange', onSeen)
     }
-  }, [sessionId, pane, agent, nested, cli, cliParent, cliChainKey])
+  }, [sessionId, pane, agent, nested, cli])
 
   const read = useCallback(() => {
     void pollerRef.current?.run(false)

@@ -639,6 +639,10 @@ func cmdScanCommandWithBudgets(totalBudget, cliBudget int, watched ...string) st
 	}
 	script := `LC_ALL=C
 _sc_rem=` + strconv.Itoa(totalBudget) + `
+_sc_bcut=0
+_sc_mark_budget() {
+  [ "$_sc_bcut" = 1 ] || { _sc_bcut=1; printf 'budget\n'; }
+}
 _sc_emit() {
   _sc_l=$((${#1} + 1))
   if [ "$_sc_l" -le "$_sc_rem" ]; then
@@ -647,6 +651,14 @@ _sc_emit() {
     return 0
   fi
   return 1
+}
+_sc_find_sub() {
+  if find "$1" -maxdepth 0 -printf '' >/dev/null 2>&1; then
+    find "$1" -maxdepth 1 -name 'agent-*.jsonl' -mmin -360 -printf '%T@\t%p\n' 2>/dev/null |
+      sort -rn | cut -f2-
+  else
+    find "$1" -maxdepth 1 -name 'agent-*.jsonl' -mmin -360 2>/dev/null
+  fi
 }
 btime=$(sed -n 's/^btime \([0-9]*\)$/\1/p' /proc/stat 2>/dev/null); hz=$(getconf CLK_TCK 2>/dev/null)
 _sc_emit "$(printf 'clock\t%s\t%s' "$btime" "$hz")" || true
@@ -719,17 +731,17 @@ _bt_emitted=0
 _bt_tab=$(printf '\t')
 _bt_nl=$(printf '\nx'); _bt_nl=${_bt_nl%x}
 scan_cmd_tree() {
-  [ "$_bt_budget" -gt 0 ] && [ "$_bt_emitted" -lt ` + strconv.Itoa(cliScanMaxLines) + ` ] || return 0
+  [ "$_sc_bcut" = 0 ] || return 0
   _bt_root=$1
   _bt_q=" $_bt_root "
   _bt_vis=" "
   _bt_cnt=0
   _bt_depth=0
-  while [ -n "$_bt_q" ] && [ "$_bt_cnt" -lt 64 ] && [ "$_bt_depth" -lt 16 ] && [ "$_bt_budget" -gt 0 ] && [ "$_bt_emitted" -lt ` + strconv.Itoa(cliScanMaxLines) + ` ]; do
+  while [ -n "$_bt_q" ] && [ "$_bt_cnt" -lt 64 ] && [ "$_bt_depth" -lt 16 ] && [ "$_sc_bcut" = 0 ]; do
     _bt_depth=$((_bt_depth + 1))
     _bt_next=
     for _bt_p in $_bt_q; do
-      [ "$_bt_budget" -gt 0 ] && [ "$_bt_emitted" -lt ` + strconv.Itoa(cliScanMaxLines) + ` ] || break
+      [ "$_sc_bcut" = 0 ] || break
       case $_bt_vis in *" $_bt_p "*) continue;; esac
       _bt_vis="$_bt_vis$_bt_p "
       _bt_cnt=$((_bt_cnt + 1))
@@ -775,11 +787,12 @@ scan_cmd_tree() {
         if [ -n "$_bt_sid" ] && [ -n "$_bt_log" ]; then
           _bt_line=$(printf 'cli\t%s\t%s\t%s\t%s\t%s\t%s\t%s' "$_bt_root" "$_bt_p" "$_bt_comm" "$_bt_eclean" "$_bt_sid" "$_bt_log" "$_bt_argv")
           _bt_len=$((${#_bt_line} + 1))
-          if [ "$_bt_len" -le "$_bt_budget" ] && _sc_emit "$_bt_line"; then
+          if [ "$_bt_emitted" -lt ` + strconv.Itoa(cliScanMaxLines) + ` ] && [ "$_bt_len" -le "$_bt_budget" ] && _sc_emit "$_bt_line"; then
             _bt_budget=$((_bt_budget - _bt_len))
             _bt_emitted=$((_bt_emitted + 1))
           else
             _bt_budget=0
+            _sc_mark_budget
           fi
           _bt_found=1
         fi
@@ -845,11 +858,12 @@ for k in $kids; do
   st=$(sed 's/^.*) //' "/proc/$k/stat" 2>/dev/null | cut -d' ' -f20)
   case $l in
   codex:*|agy:*) t=$(tr '\0\n\t' '   ' <"/proc/$k/cmdline" 2>/dev/null | sed 's/^[^ ]*sh -l\{0,1\}c //' | head -c ` + strconv.Itoa(maxBgCmdMatchBytes+1) + `);; # (a shell's command; else the program itself, run as it is; +1 byte detects >4 KiB cut)
+  monitor:*) t=$(tr '\0\n\t' '   ' <"/proc/$k/cmdline" 2>/dev/null | awk -v "m=&& eval '" '` + cmdEvalAwk + `' | head -c ` + strconv.Itoa(maxBgCmdMatchBytes+1) + `);;
   *) t=$(tr '\0\n\t' '   ' <"/proc/$k/cmdline" 2>/dev/null | awk -v "m=&& eval '" '` + cmdEvalAwk + `' | head -c 400);;
   esac
   _sc_line=$(printf 'cmd\t%s\t%s\t%s\t%s' "$k" "$st" "$(printf '%s' "$l" | tr '\t\n' '  ')" "$t")
   if ! _sc_emit "$_sc_line"; then
-    echo budget
+    _sc_mark_budget
     break
   fi
   _sc_cmd_pids="$_sc_cmd_pids $k"
@@ -908,18 +922,23 @@ for p in $pairs; do
     break
   done
 done
-# Priority 2: native background subagents — bounded streaming (never buffer
-# unbounded find output in a shell variable; drop description before dropping lines),
-# followed in the same consumer shell by Priority 3 (CLI lines) so _sc_rem carries over.
+# Priority 2: native background subagents — bounded newest-first streaming
+# (never buffer find output in a shell variable; drop description before
+# marking budget cut; mark budget cut if any required sub/cli line is dropped
+# or any candidate cap is hit), followed in the same consumer shell by
+# Priority 3 (CLI lines) so _sc_rem and _sc_bcut carry over.
 {
   for a in "$@"; do
     s=${a#?:}
     for d in "$HOME"/.claude/projects/*/"$s"/subagents; do
       [ -d "$d" ] || continue
-      find "$d" -maxdepth 1 -name 'agent-*.jsonl' -mmin -360 2>/dev/null |
+      _sc_find_sub "$d" |
         awk -v s="$s" -v maxn=` + strconv.Itoa(subCandPerSession) + ` -v maxb=` + strconv.Itoa(subCandBytesPerSession) + ` '{
           b += length($0) + 1
-          if (NR > maxn || b > maxb) exit
+          if (NR > maxn || b > maxb) {
+            print "CAP\t"
+            exit
+          }
           print s "\t" $0
         }'
       break
@@ -931,11 +950,15 @@ done
   _sc_tot_c=0
   _sc_tot_b=0
   while IFS="$_bt_tab" read -r s j; do
+    if [ "$_sc_bcut" = 1 ]; then break; fi
+    if [ "$s" = CAP ]; then _sc_mark_budget; break; fi
     [ -n "$j" ] || continue
     _sc_tot_c=$((_sc_tot_c + 1))
     _sc_tot_b=$((_sc_tot_b + ${#j} + 1))
-    [ "$_sc_tot_c" -le ` + strconv.Itoa(subCandTotalMax) + ` ] && [ "$_sc_tot_b" -le ` + strconv.Itoa(subCandTotalBytes) + ` ] || break
-    [ "$_sc_rem" -gt 64 ] || break
+    if [ "$_sc_tot_c" -gt ` + strconv.Itoa(subCandTotalMax) + ` ] || [ "$_sc_tot_b" -gt ` + strconv.Itoa(subCandTotalBytes) + ` ]; then
+      _sc_mark_budget
+      break
+    fi
     if [ "$s" != "$_sc_cur_s" ]; then _sc_cur_s=$s; _sc_cur_i=0; fi
     [ "$_sc_cur_i" -lt ` + strconv.Itoa(subsScanned) + ` ] || continue
     m=${j%.jsonl}.meta.json
@@ -950,15 +973,20 @@ done
     w=$(printf '%s' "$meta" | grep -oE '"description":"([^"\\]|\\.)*"' | head -n 1 | head -c 600)
     _sc_line=$(printf 'sub\t%s\t%s\t%s\t%s\t{%s}' "$s" "$id" "$t" "$v" "$w")
     if ! _sc_emit "$_sc_line"; then
+      # Omitting description text alone still counts as complete; only mark
+      # budget cut if even the description-less sub line cannot be emitted.
       _sc_line=$(printf 'sub\t%s\t%s\t%s\t%s\t{}' "$s" "$id" "$t" "$v")
-      _sc_emit "$_sc_line" || break
+      if ! _sc_emit "$_sc_line"; then
+        _sc_mark_budget
+        break
+      fi
     fi
   done
   exec <&-
   # Priority 3 (lowest): CLI subagent discovery lines within min(cliBudget, _sc_rem).
   if [ "$_bt_budget" -gt "$_sc_rem" ]; then _bt_budget=$_sc_rem; fi
   for _sc_k in $_sc_cmd_pids; do
-    [ "$_bt_budget" -gt 0 ] && [ "$_bt_emitted" -lt ` + strconv.Itoa(cliScanMaxLines) + ` ] || break
+    [ "$_sc_bcut" = 0 ] || break
     scan_cmd_tree "$_sc_k"
   done
 }
@@ -1488,11 +1516,13 @@ func bgCLILogValid(agent, log, sid string) bool {
 }
 
 // splitBgCmds partitions background commands into plain commands (no resolved
-// agent CLI) and promoted CLI subagents (one per resolved CLI session).
+// agent CLI, or synthetic task whose command exceeded maxBgCmdMatchBytes so it
+// cannot be safely matched without risking duplicate plain+CLI display) and
+// promoted CLI subagents (one per resolved CLI session).
 func splitBgCmds(cmds []bgCmd) (plain []bgCmd, cliAgents []bgAgent) {
 	seen := map[string]bool{}
 	for _, c := range cmds {
-		if len(c.clis) == 0 {
+		if len(c.clis) == 0 || (isSyntheticBgTask(c.Task) && (c.matchCut || (c.matchCmd == "" && c.Title == ""))) {
 			plain = append(plain, c)
 			continue
 		}
@@ -1541,23 +1571,19 @@ func normBgCmdText(s string) string {
 }
 
 func exactBgCmdMatch(r convo.Running, grp []bgAgent) bool {
-	if grp[0].matchCut {
+	if grp[0].matchCut || r.CmdCut {
 		return false
 	}
 	cmdText := normBgCmdText(grp[0].matchCmd)
 	if cmdText == "" {
 		cmdText = normBgCmdText(grp[0].Cmd)
 	}
-	if cmdText == "" {
-		cmdText = normBgCmdText(grp[0].What)
-	}
 	if cmdText == "" || len(cmdText) > maxBgCmdMatchBytes {
 		return false
 	}
+	// Require the log-side full command (r.Cmd); never fall back to the 300-byte
+	// truncated display summary r.What.
 	rText := normBgCmdText(r.Cmd)
-	if rText == "" {
-		rText = normBgCmdText(r.What)
-	}
 	if rText == "" || len(rText) > maxBgCmdMatchBytes {
 		return false
 	}

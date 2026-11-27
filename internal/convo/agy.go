@@ -339,7 +339,7 @@ func (c *Agy) applyGeneric(e *Entry, t *Tool, r agyRow) {
 			if what == "" {
 				what = firstNonEmpty(t.Title, t.Detail)
 			}
-			c.setGoing(id, "cmd", what, t.Detail, logPath, r.CreatedAt)
+			c.setGoing(id, "cmd", what, t.Detail, t.detailCut, logPath, r.CreatedAt)
 		}
 	}
 	// Background task cancelled/killed via manage_task.
@@ -481,7 +481,7 @@ func (c *Agy) errorMessage(r agyRow) {
 	})
 }
 
-func (c *Agy) setGoing(id, kind, what, cmd, outPath, at string) {
+func (c *Agy) setGoing(id, kind, what, cmd string, cmdCut bool, outPath, at string) {
 	if id == "" || c.ranOut[id] {
 		delete(c.ranOut, id)
 		return
@@ -492,13 +492,15 @@ func (c *Agy) setGoing(id, kind, what, cmd, outPath, at string) {
 	if c.running == nil {
 		c.running = map[string]Running{}
 	}
+	keptCmd, cutCmd := cut(clean(cmd), maxDetail)
 	c.running[id] = Running{
-		ID:   clip(id, maxID),
-		What: clip(clean(firstLineOf(what)), maxTitle),
-		Kind: kind,
-		Time: clip(at, 64),
-		Cmd:  clip(clean(cmd), maxDetail),
-		Out:  clip(outPath, maxImagePath),
+		ID:     clip(id, maxID),
+		What:   clip(clean(firstLineOf(what)), maxTitle),
+		Kind:   kind,
+		Time:   clip(at, 64),
+		Cmd:    keptCmd,
+		CmdCut: cmdCut || cutCmd,
+		Out:    clip(outPath, maxImagePath),
 	}
 	c.runOrder = append(c.runOrder, id)
 }
@@ -672,7 +674,7 @@ func agyBuildTool(id string, tc agyToolCall) *Tool {
 	switch name {
 	case "Bash":
 		t.Title = d(str("toolSummary", "description"))
-		t.Detail = d(str("CommandLine", "command"))
+		t.Detail, t.detailCut = cut(clean(str("CommandLine", "command")), maxDetail)
 	case "Read":
 		t.Detail = d(str("Path", "AbsolutePath", "file_path", "path"))
 	case "Write":
@@ -913,144 +915,6 @@ func agyParseSubagentID(body string) string {
 		return ""
 	}
 	return strings.ToLower(m[1])
-}
-
-// AgyEntriesSpawnedSubagent reports whether any parsed entry of an Antigravity
-// CLI parent session contains an invoke_subagent (Agent) tool call whose result
-// returned subID.
-func AgyEntriesSpawnedSubagent(entries []Entry, subID string) bool {
-	if subID == "" {
-		return false
-	}
-	for _, e := range entries {
-		for _, p := range e.Parts {
-			if p.Kind == KindTool && p.Tool != nil && p.Tool.Name == "Agent" && strings.EqualFold(p.Tool.AgentID, subID) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-// AgySubagentFinder scans an Antigravity CLI parent transcript_full.jsonl
-// stream for an invoke_subagent tool call paired (FIFO) with a GENERIC result
-// carrying the target subagent conversation UUID.
-//
-// Fail-closed: any oversized line (> maxAgyOwnershipLine) or line whose JSON
-// or type cannot be reliably parsed clears the pending queue and marks the
-// verification failed so a misaligned queue can never falsely verify a later
-// tool result.
-type AgySubagentFinder struct {
-	target  string
-	pending []bool
-	buf     []byte
-	found   bool
-	failed  bool
-}
-
-const maxAgyOwnershipLine = 4 << 20
-
-// NewAgySubagentFinder returns a streaming finder for subID in an agy parent log.
-func NewAgySubagentFinder(subID string) *AgySubagentFinder {
-	return &AgySubagentFinder{target: strings.ToLower(strings.TrimSpace(subID))}
-}
-
-// Found reports whether target was matched as a spawned subagent.
-func (f *AgySubagentFinder) Found() bool { return f.found && !f.failed }
-
-// Feed ingests the next chunk of transcript_full.jsonl bytes and returns true
-// as soon as the target subagent ownership is confirmed.
-func (f *AgySubagentFinder) Feed(chunk []byte) bool {
-	if f.found || f.failed || f.target == "" {
-		return f.Found()
-	}
-	for len(chunk) > 0 {
-		nl := bytes.IndexByte(chunk, '\n')
-		var seg []byte
-		eol := false
-		if nl >= 0 {
-			seg = chunk[:nl]
-			chunk = chunk[nl+1:]
-			eol = true
-		} else {
-			seg = chunk
-			chunk = nil
-		}
-		if len(f.buf)+len(seg) > maxAgyOwnershipLine {
-			// Oversized line cannot be reliably parsed: fail closed.
-			f.failClosed()
-			return false
-		}
-		f.buf = append(f.buf, seg...)
-		if eol {
-			f.processLine(f.buf)
-			f.buf = f.buf[:0]
-			if f.found || f.failed {
-				return f.Found()
-			}
-		}
-	}
-	return f.Found()
-}
-
-// Finish processes any trailing unterminated line and returns Found().
-func (f *AgySubagentFinder) Finish() bool {
-	if !f.found && !f.failed && len(f.buf) > 0 {
-		f.processLine(f.buf)
-		f.buf = f.buf[:0]
-	}
-	return f.Found()
-}
-
-func (f *AgySubagentFinder) failClosed() {
-	f.pending = nil
-	f.buf = f.buf[:0]
-	f.found = false
-	f.failed = true
-}
-
-func (f *AgySubagentFinder) processLine(raw []byte) {
-	raw = bytes.TrimSpace(raw)
-	if len(raw) == 0 {
-		return
-	}
-	var r struct {
-		Type      string        `json:"type"`
-		Content   string        `json:"content"`
-		ToolCalls []agyToolCall `json:"tool_calls"`
-	}
-	if json.Unmarshal(raw, &r) != nil || r.Type == "" {
-		// Unparseable JSON or missing type could hide a GENERIC/PLANNER_RESPONSE
-		// boundary and misalign pending tool calls: fail closed.
-		f.failClosed()
-		return
-	}
-	switch r.Type {
-	case "USER_INPUT", "ERROR_MESSAGE":
-		f.pending = nil
-	case "PLANNER_RESPONSE":
-		if len(r.ToolCalls) > 0 {
-			f.pending = f.pending[:0]
-			for _, tc := range r.ToolCalls {
-				if len(f.pending) >= maxAgyPending {
-					break
-				}
-				f.pending = append(f.pending, tc.Name == "invoke_subagent")
-			}
-		}
-	case "GENERIC":
-		if len(f.pending) == 0 {
-			return
-		}
-		isSub := f.pending[0]
-		f.pending = f.pending[1:]
-		if isSub {
-			body := agyStripTimestamps(r.Content)
-			if strings.EqualFold(agyParseSubagentID(body), f.target) {
-				f.found = true
-			}
-		}
-	}
 }
 
 // agyStripTimestamps drops leading "Created At: ..." and "Completed At: ..."

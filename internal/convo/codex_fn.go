@@ -62,7 +62,8 @@ func codexFn(ns, name, args string) (tools []*Tool, tasks []Task) {
 				return ts, nil
 			}
 		}
-		return []*Tool{{Name: "Bash", Title: clip(strings.TrimSpace(str("justification")), maxTitle), Detail: clip(clean(cmd), maxDetail)}}, nil
+		detail, dcut := cut(clean(cmd), maxDetail)
+		return []*Tool{{Name: "Bash", Title: clip(strings.TrimSpace(str("justification")), maxTitle), Detail: detail, detailCut: dcut}}, nil
 	case "write_stdin":
 		return []*Tool{stdinTool(a["session_id"], str("chars"))}, nil
 	case "sleep":

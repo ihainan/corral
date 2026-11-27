@@ -371,9 +371,8 @@ export function readTmuxBg(
 }
 
 // subagentRequestUrl builds the read-only subagent conversation URL, carrying
-// optional cli ('agy' | 'claude' | 'codex'), cli_parent (the scan-verified root
-// CLI session), and cli_chain (intermediate descendant IDs down to the direct
-// parent when drilling deeper than depth 2).
+// optional cli ('agy' | 'claude' | 'codex') for a first-level background CLI
+// subagent session.
 export function subagentRequestUrl(
   sessionId: string,
   pane: string,
@@ -382,13 +381,9 @@ export function subagentRequestUrl(
   rev: number,
   older: boolean,
   cli?: string,
-  cliParent?: string,
-  cliChain?: string[],
 ): string {
   const q = new URLSearchParams({ pane, agent, gen: String(gen), rev: String(rev), older: older ? '1' : '0' })
   if (cli) q.set('cli', cli)
-  if (cli && cliParent) q.set('cli_parent', cliParent)
-  if (cli && cliParent && cliChain?.length) q.set('cli_chain', cliChain.join(','))
   return `/api/sessions/${sessionId}/conversation/subagent?` + q.toString()
 }
 
@@ -424,8 +419,6 @@ export interface SubPollerDeps<E extends { seq: number }, R> {
   pane: string
   agent: string
   cli?: string
-  cliParent?: string
-  cliChain?: string[]
   nested: boolean
   live: () => boolean
   active: () => boolean
@@ -483,7 +476,7 @@ export function createSubConvoPoller<E extends { seq: number }, R>(deps: SubPoll
     let more = false
     try {
       for (let n = 0; n < batch; n++) {
-        const url = subagentRequestUrl(deps.sessionId, deps.pane, deps.agent, gen, rev, older && n === 0, deps.cli, deps.cliParent, deps.cliChain)
+        const url = subagentRequestUrl(deps.sessionId, deps.pane, deps.agent, gen, rev, older && n === 0, deps.cli)
         const r = await deps.fetchPage(url, ctl.signal)
         if (stopped || ctl.signal.aborted) return
         if (r.reset || r.gen !== gen) byseq = new Map()

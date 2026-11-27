@@ -329,8 +329,9 @@ function makeRow(partial) {
   assert.equal(visibleCliAgents(parent, '', true, matchQuery).length, 0)
 }
 
-// 8. Frontend review #2 & #6: subagentRequestUrl carries cli and cli_parent
-// query params, and shouldContinueSubPoll stops polling when depth-1 CLI ends.
+// 8. Frontend review #2 & Round 4 scope cut: subagentRequestUrl carries cli
+// for first-level CLI subagents and NEVER emits cli_parent or cli_chain;
+// shouldContinueSubPoll stops polling when depth-1 CLI ends.
 {
   const nativeUrl = subagentRequestUrl('s1', 'w1:p1', 'a1b2c3d4', 0, 0, false)
   assert.equal(nativeUrl, '/api/sessions/s1/conversation/subagent?pane=w1%3Ap1&agent=a1b2c3d4&gen=0&rev=0&older=0')
@@ -338,42 +339,12 @@ function makeRow(partial) {
   const cliUrl = subagentRequestUrl('s1', 'w1:p1', '11111111-2222-4333-8444-555555555501', 2, 5, false, 'agy')
   assert.ok(cliUrl.includes('cli=agy'))
   assert.ok(!cliUrl.includes('cli_parent='))
-
-  const nestedCliUrl = subagentRequestUrl(
-    's1',
-    'w1:p1',
-    'a987654321',
-    0,
-    0,
-    true,
-    'claude',
-    '22222222-3333-4444-8555-666666666601',
-  )
-  assert.ok(nestedCliUrl.includes('cli=claude'))
-  assert.ok(nestedCliUrl.includes('cli_parent=22222222-3333-4444-8555-666666666601'))
-  assert.ok(!nestedCliUrl.includes('cli_chain='))
-  assert.ok(nestedCliUrl.includes('older=1'))
-
-  // Round 3 #6: grandchild subagent carries cli_parent (root) AND cli_chain (direct parent chain).
-  const grandchildUrl = subagentRequestUrl(
-    's1',
-    'w1:p1',
-    '01a1dd7f-4856-7042-8ad2-f46c56372e03',
-    0,
-    0,
-    false,
-    'codex',
-    '01a1dd7f-4856-7042-8ad2-f46c56372e01',
-    ['01a1dd7f-4856-7042-8ad2-f46c56372e02'],
-  )
-  assert.ok(grandchildUrl.includes('cli=codex'))
-  assert.ok(grandchildUrl.includes('cli_parent=01a1dd7f-4856-7042-8ad2-f46c56372e01'))
-  assert.ok(grandchildUrl.includes('cli_chain=01a1dd7f-4856-7042-8ad2-f46c56372e02'))
+  assert.ok(!cliUrl.includes('cli_chain='))
 
   // Polling stops for depth-1 CLI subagent as soon as live flips to false.
   assert.equal(shouldContinueSubPoll(true, false, 0, 1000), true)
   assert.equal(shouldContinueSubPoll(false, false, 999, 1000), false)
-  // Nested subagent polls only while its log grew within growingMs.
+  // Native nested subagent polls only while its log grew within growingMs.
   assert.equal(shouldContinueSubPoll(false, true, 1000, 10_000, 30_000), true)
   assert.equal(shouldContinueSubPoll(false, true, 1000, 40_000, 30_000), false)
 }
@@ -381,7 +352,7 @@ function makeRow(partial) {
 // 9. Round 3 #7: Real behavioral lifecycle tests for createSubConvoPoller with
 // fake timers and stubbed async fetchPage — verifying polling while live, no
 // further timers after CLI ends, timer cancellation & in-flight abort on panel
-// close/unmount, and nested cli_chain polling expiry.
+// close/unmount, and native nested subagent polling expiry.
 {
   const makeFakeTimers = () => {
     let nextId = 1
@@ -536,7 +507,7 @@ function makeRow(partial) {
     assert.ok(timers.cleared.length >= 1)
   }
 
-  // 9d. Nested Codex grandchild carries cli_chain and stops polling once quiet > growingMs.
+  // 9d. Native nested subagent (no cli_parent / cli_chain) stops polling once quiet > growingMs.
   {
     const timers = makeFakeTimers()
     let clock = 10_000
@@ -545,10 +516,7 @@ function makeRow(partial) {
     const poller = createSubConvoPoller({
       sessionId: 's1',
       pane: 'w1:p1',
-      agent: '01a1dd7f-4856-7042-8ad2-f46c56372e03',
-      cli: 'codex',
-      cliParent: '01a1dd7f-4856-7042-8ad2-f46c56372e01',
-      cliChain: ['01a1dd7f-4856-7042-8ad2-f46c56372e02'],
+      agent: 'a987654321',
       nested: true,
       live: () => false,
       active: () => true,
@@ -569,27 +537,57 @@ function makeRow(partial) {
       clearTimer: timers.clearTimer,
     })
     await poller.run(false)
-    assert.ok(urls[0].includes('cli_chain=01a1dd7f-4856-7042-8ad2-f46c56372e02'))
-    assert.equal(timers.active.size, 1, 'nested subagent polls while recently grown')
+    assert.ok(!urls[0].includes('cli_parent=') && !urls[0].includes('cli_chain='))
+    assert.equal(timers.active.size, 1, 'native nested subagent polls while recently grown')
     clock += 31_000
     timers.fireNext()
     await new Promise((r) => setImmediate(r))
     assert.equal(urls.length, 2)
-    assert.equal(timers.active.size, 0, 'nested subagent stops polling after growingMs without new entries')
+    assert.equal(timers.active.size, 0, 'native nested subagent stops polling after growingMs without new entries')
   }
 }
 
-// 10. Read-only SubPanel wiring check (ForkAtOf/RewindAtOf disabled around SubPanel).
+// 10. Round 4 #3 & #4: When an oversized (>4 KiB) Codex command is not upgraded
+// (kept in host plain cmds, absent from bg_agent_list), conversationRunningItems
+// and mergeRowTasks show 0 CLI duplicates alongside the plain command.
+{
+  const hugeTitle = `agy -p '${'q'.repeat(68)}…`
+  const hugeCmd = `agy -p '${'q'.repeat(4200)}'`
+  const hostTasks = rowTasks([], { n: 1, list: [{ task: 'codex-8597', title: hugeTitle, since: 1700000000000 }] })
+  const convoRunning = [{ id: 'call_huge_1', kind: 'cmd', what: hugeTitle, cmd: hugeCmd }]
+  const runningItems = conversationRunningItems(convoRunning, hostTasks)
+  assert.deepEqual(
+    runningItems.map((x) => [x.kind, x.agent ?? '', x.id]),
+    [['cmd', '', 'call_huge_1']],
+  )
+  const merged = mergeRowTasks(hostTasks, convoRunning)
+  assert.equal(splitRowTasks(merged).cliAgents.length, 0)
+}
+
+// 11. Read-only SubPanel wiring check:
+// - ForkAtOf/RewindAtOf disabled around SubPanel
+// - Inside a CLI SubPanel, OpenSub is disabled and nested subagents show read-only hint
+// - No cli_parent / cli_chain references remain in frontend subagent plumbing
+// - Both zh and en i18n entries exist for sub.cliNestedReadOnly
 {
   const subTs = readFileSync(fileURLToPath(new URL('../src/terminal/subagent.ts', import.meta.url)), 'utf8')
-  assert.ok(subTs.includes('createSubConvoPoller<'), 'subagent.ts must delegate polling lifecycle to createSubConvoPoller')
-
+  const sideTs = readFileSync(fileURLToPath(new URL('../src/terminal/sideState.ts', import.meta.url)), 'utf8')
   const convoTsx = readFileSync(fileURLToPath(new URL('../src/terminal/Conversation.tsx', import.meta.url)), 'utf8')
+  const i18nTs = readFileSync(fileURLToPath(new URL('../src/i18n.ts', import.meta.url)), 'utf8')
+
+  assert.ok(subTs.includes('createSubConvoPoller<'), 'subagent.ts must delegate polling lifecycle to createSubConvoPoller')
+  for (const [name, src] of [['subagent.ts', subTs], ['sideState.ts', sideTs], ['Conversation.tsx', convoTsx]]) {
+    assert.ok(!src.includes('cli_parent'), `${name} must not reference cli_parent`)
+    assert.ok(!src.includes('cli_chain'), `${name} must not reference cli_chain`)
+  }
   const subPanelIdx = convoTsx.indexOf('<SubPanel')
   assert.ok(subPanelIdx > 0)
   const surrounding = convoTsx.slice(Math.max(0, subPanelIdx - 300), subPanelIdx)
   assert.ok(surrounding.includes('<ForkAtOf.Provider value={undefined}>'), 'SubPanel must disable ForkAtOf')
   assert.ok(surrounding.includes('<RewindAtOf.Provider value={undefined}>'), 'SubPanel must disable RewindAtOf')
+  assert.ok(convoTsx.includes('isCli ? undefined : onOpen'), 'CLI SubPanel must disable opening nested subagents')
+  assert.ok(convoTsx.includes("t('sub.cliNestedReadOnly')"), 'CLI SubPanel must pass sub.cliNestedReadOnly tooltip hint')
+  assert.equal(i18nTs.match(/'sub\.cliNestedReadOnly':/g)?.length, 2, 'i18n.ts must define sub.cliNestedReadOnly in both zh and en')
 }
 
 console.log('test-bg-cli: ok')

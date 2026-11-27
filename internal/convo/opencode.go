@@ -687,7 +687,7 @@ func (c *OpenCode) tool(p ocPartData, at int64) *Tool {
 	}
 	b, _ := json.Marshal(in)
 	t := &Tool{ID: clip(p.CallID, maxID), Name: name}
-	t.Title, t.Detail, t.Old, t.New = toolInput(name, b)
+	t.Title, t.Detail, t.Old, t.New, t.detailCut = toolInput(name, b)
 	switch name {
 	case "Edit", "MultiEdit", "Write":
 		t.Add, t.Del = editLines(name, b)

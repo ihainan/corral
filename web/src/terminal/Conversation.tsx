@@ -2635,7 +2635,7 @@ export function ConversationView({
         <ForkAtOf.Provider value={undefined}>
         <RewindAtOf.Provider value={undefined}>
         <SubPanel
-          key={(subs[subs.length - 1].cli ?? '') + ':' + (subs[subs.length - 1].cliParent ?? '') + ':' + (subs[subs.length - 1].cliChain?.join(',') ?? '') + ':' + subs[subs.length - 1].agent}
+          key={(subs[subs.length - 1].cli ?? '') + ':' + subs[subs.length - 1].agent}
           of={convo.of}
           sub={subs[subs.length - 1]}
           depth={subs.length}
@@ -2769,7 +2769,7 @@ function AskDock({ children }: { children: ReactNode }) {
 const scanNow = (a?: SubScanAgent) => (a?.tool ? (a.tool.done ? t('convo.live.thinking') : liveText(a.tool)) : '')
 const scanTokens = (a?: SubScanAgent) => (a?.tokens ? t('convo.bgTokens', { n: tokens(a.tokens) }) : '')
 
-function RunningWork({ scanOf, items, waiting, openSub, openCmd, subsOk = true }: { scanOf?: string; items: ConvoRunning[]; waiting?: number; openSub?: (s: Sub) => void; openCmd?: (r: ConvoRunning) => void; subsOk?: boolean }) {
+function RunningWork({ scanOf, items, waiting, openSub, openCmd, subsOk = true, readOnlySubHint }: { scanOf?: string; items: ConvoRunning[]; waiting?: number; openSub?: (s: Sub) => void; openCmd?: (r: ConvoRunning) => void; subsOk?: boolean; readOnlySubHint?: string }) {
   const [open, setOpen] = useState(false)
   // (Those its subagents sent off in turn, known only from their logs — native Claude subagents only.)
   const scan = useSubScan(scanOf, items.some((r) => r.kind === 'agent' && !r.agent), open)
@@ -2783,13 +2783,13 @@ function RunningWork({ scanOf, items, waiting, openSub, openCmd, subsOk = true }
   const first = items[0]
   // One row: what it is (to open, where there is something to open), its
   // figures in one column at the end, what it does now under it (opened).
-  const what = (label: string, onOpen: (() => void) | undefined, hint: string) =>
+  const what = (label: string, onOpen: (() => void) | undefined, hint: string, staticHint?: string) =>
     onOpen ? (
       <button type="button" className="convo-running-what" title={hint} onClick={onOpen}>
         {label}
       </button>
     ) : (
-      <span className="convo-running-what" title={label}>{label}</span>
+      <span className="convo-running-what" title={staticHint || label}>{label}</span>
     )
   const openOf = (r: ConvoRunning) =>
     r.kind === 'agent' && openSub && isSubId(r.id) && (subsOk || !!r.agent)
@@ -2798,6 +2798,7 @@ function RunningWork({ scanOf, items, waiting, openSub, openCmd, subsOk = true }
         ? () => openCmd(r)
         : undefined
   const hintOf = (r: ConvoRunning) => t(r.kind === 'agent' ? 'sub.open' : 'convo.bgDetails')
+  const staticHintOf = (r: ConvoRunning) => (r.kind === 'agent' && !openSub ? readOnlySubHint : undefined)
   const labelOf = (r: ConvoRunning) => r.what || t(r.kind === 'agent' ? 'convo.bgAgent' : 'convo.bgCmd')
   const figures = (a: SubScanAgent | undefined, ts?: string) => [scanTokens(a), since(ts)].filter(Boolean).join(' · ')
   const toggle = many && (
@@ -2826,7 +2827,7 @@ function RunningWork({ scanOf, items, waiting, openSub, openCmd, subsOk = true }
                 <AgentIcon program={first.agent} size={14} bare />
               </span>
             )}
-            {what(labelOf(first), openOf(first), hintOf(first))}
+            {what(labelOf(first), openOf(first), hintOf(first), staticHintOf(first))}
             {first.note && <span className="convo-running-note" title={first.note}>{first.note}</span>}
             <span className="convo-running-since">{since(first.ts)}</span>
           </span>
@@ -2849,7 +2850,7 @@ function RunningWork({ scanOf, items, waiting, openSub, openCmd, subsOk = true }
                     <AgentIcon program={r.agent} size={14} bare />
                   </span>
                 )}
-                {what(labelOf(r), openOf(r), hintOf(r))}
+                {what(labelOf(r), openOf(r), hintOf(r), staticHintOf(r))}
                 <span className="convo-running-meta">{figures(a, r.ts)}</span>
                 {r.note && <span className="convo-running-note" title={r.note}>{r.note}</span>}
                 {scanNow(a) && <span className="convo-running-now" title={scanNow(a)}>{scanNow(a)}</span>}
@@ -6496,11 +6497,11 @@ export const recapText = (s: string) => s.replace(/\s*\((?:disable|turn off)[^()
 
 // A subagent sent off, whose own conversation can be shown: by its id.
 // When cli is set ('agy' | 'claude' | 'codex'), it is a recognized agent CLI
-// running inside a background command (read-only view, parsed in its own format);
-// cliParent identifies that CLI's root session and cliChain holds any
-// intermediate ancestor IDs down to the direct parent when drilling deeper.
-type Sub = { agent: string; title?: string; cli?: string; cliParent?: string; cliChain?: string[]; since?: number }
+// running inside a background command (read-only view, parsed in its own format;
+// nested subagents spawned inside it are displayed as non-clickable rows).
+type Sub = { agent: string; title?: string; cli?: string; since?: number }
 const OpenSub = createContext<((s: Sub) => void) | undefined>(undefined)
+const SubReadOnlyHint = createContext<string | undefined>(undefined)
 // The turn under way, as Claude Code's spinner line says it beside its seconds — "(9s · ↓ 1.2k tokens · thinking
 // with high effort)": the tokens written so far and how hard it thinks, for the line of the step under way (doc UI 30).
 const TurnLive = createContext<{ out?: number; effort?: string }>({})
@@ -6614,21 +6615,11 @@ const isSubId = (id: string) => /^[a-z0-9]{6,40}$/.test(id) || /^[0-9a-f]{8}-[0-
 function SubPanel({ of, sub, depth, live, nav, onOpen, onBack, onClose, active, copy }: { of: string; sub: Sub; depth: number; live: (agent: string) => boolean; nav?: WorkNav; onOpen: (s: Sub) => void; onBack: () => void; onClose: () => void; active: boolean; copy: (s: string) => void }) {
   const [sessionId, pane = ''] = of.split(' ')
   const isCli = !!sub.cli
-  // Nested native subagents spawned inside a background CLI carry its cli,
-  // root session ID (cliParent), and any intermediate ancestor IDs (cliChain)
-  // so the backend verifies ownership hop-by-hop from the scan-verified CLI root.
-  const openChild = useCallback(
-    (s: Sub) => {
-      if (!isCli) return onOpen(s)
-      if (!sub.cliParent) return onOpen({ ...s, cli: sub.cli, cliParent: sub.agent, cliChain: undefined })
-      return onOpen({ ...s, cli: sub.cli, cliParent: sub.cliParent, cliChain: [...(sub.cliChain ?? []), sub.agent] })
-    },
-    [isCli, sub.cli, sub.cliParent, sub.cliChain, sub.agent, onOpen],
-  )
+  const cliNestedHint = isCli ? t('sub.cliNestedReadOnly') : undefined
   // (Of one sent off by the session's agent, as its running list says; of
   // one sent off by a subagent, while its log keeps growing.)
   const told = depth === 1 && live(sub.agent)
-  const c = useSubConvo(sessionId, pane, sub.agent, told, active, depth > 1, sub.cli, sub.cliParent, sub.cliChain)
+  const c = useSubConvo(sessionId, pane, sub.agent, told, active, depth > 1, sub.cli)
   const going = depth === 1 ? told : c.growing
   const panel = useRef<HTMLElement>(null)
   const [opened, setOpened] = useState<Record<string, boolean>>({})
@@ -6745,7 +6736,8 @@ function SubPanel({ of, sub, depth, live, nav, onOpen, onBack, onClose, active, 
         )}
         {c.failed && <LoadErrorLine onRetry={c.read} />}
         {!c.failed && !c.loading && list.length === 0 && <p className="convo-older">{t('sub.empty')}</p>}
-        <OpenSub.Provider value={openChild}>
+        <OpenSub.Provider value={isCli ? undefined : onOpen}>
+          <SubReadOnlyHint.Provider value={cliNestedHint}>
           <WordsAsWritten.Provider value={true}>
           {list.map((it) => (
             <ListItem key={itemKey(it)} it={it} copy={copy} open={it.kind === 'work' ? !!opened[it.key] : false} onToggle={toggle} onShow={noShow} />
@@ -6758,11 +6750,12 @@ function SubPanel({ of, sub, depth, live, nav, onOpen, onBack, onClose, active, 
               {report.cut && <p className="convo-older">{t('sub.reportCut')}</p>}
             </section>
           )}
+          </SubReadOnlyHint.Provider>
         </OpenSub.Provider>
       </div>
       {going && c.running.length > 0 && (
         <div className="convo-sub-foot">
-          <RunningWork items={c.running} openSub={openChild} />
+          <RunningWork items={c.running} openSub={isCli ? undefined : onOpen} readOnlySubHint={cliNestedHint} />
         </div>
       )}
     </aside>
@@ -7516,6 +7509,7 @@ function Work({ it, open, onToggle, onCopy }: { it: Extract<Item, { kind: 'work'
   // name, each to be read; and with calls beside it the last of what it
   // thought, a line (at most one for a run, however long it thought).
   const openSub = useContext(OpenSub)
+  const subReadOnlyHint = useContext(SubReadOnlyHint)
   const sent = tools.filter((tl) => category(tl.name) === 'agent' && tl.title)
   const lastThought = tools.length
     ? it.steps.findLast((x): x is ConvoPart => !isNote(x) && x.kind === 'thinking' && !!x.text?.trim())
@@ -7614,7 +7608,7 @@ function Work({ it, open, onToggle, onCopy }: { it: Extract<Item, { kind: 'work'
                   {tl.title}
                 </button>
               ) : (
-                tl.title
+                <span title={tl.agent_id && subReadOnlyHint ? subReadOnlyHint : undefined}>{tl.title}</span>
               )}
             </li>
           ))}
@@ -7863,6 +7857,7 @@ const exitCode = (tool: ConvoTool) => (tool.error ? /^Exit code (\d{1,3})\b/.exe
 
 function ToolRow({ tool, onCopy, live }: { tool: ConvoTool; onCopy: (s: string) => void; live?: boolean }) {
   const openSub = useContext(OpenSub)
+  const subReadOnlyHint = useContext(SubReadOnlyHint)
   const openAll = useContext(OpenAllOf)
   const wantFull = openAll >= 2
   // (Opened or shown in full: kept by the call, so it is so when its
@@ -7953,11 +7948,13 @@ function ToolRow({ tool, onCopy, live }: { tool: ConvoTool; onCopy: (s: string) 
               <button type="button" className="md-code-copy" onClick={() => onCopy(d)}>{t('common.copy')}</button>
             </div>
           )}
-          {tool.agent_id && openSub && (
+          {tool.agent_id && openSub ? (
             <button type="button" className="link-btn convo-sub-open" onClick={() => openSub({ agent: tool.agent_id!, title: tool.title || firstLine(tool.detail ?? '') })}>
               {t('sub.open')}
             </button>
-          )}
+          ) : tool.agent_id && subReadOnlyHint ? (
+            <span className="convo-older" title={subReadOnlyHint}>{subReadOnlyHint}</span>
+          ) : null}
           {tool.asks && !tool.answers && (
             // (A question put to the person, its choices: Codex's, read only.)
             <dl className="convo-ask-answers">
