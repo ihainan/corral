@@ -23,6 +23,8 @@ import (
 	"github.com/ihainan/corral/internal/config"
 	"github.com/ihainan/corral/internal/netguard"
 	"github.com/ihainan/corral/internal/notify"
+	"github.com/ihainan/corral/internal/perf"
+	"github.com/ihainan/corral/internal/sshx"
 	"github.com/ihainan/corral/internal/store"
 	"github.com/ihainan/corral/internal/term"
 	"github.com/ihainan/corral/internal/vault"
@@ -112,6 +114,7 @@ type Server struct {
 	stopCtx context.Context // the stop's deadline, once it began (see BeginShutdown)
 
 	restores restorer // sessions open before the restart, being opened again (restore.go)
+	perf     *perf.Tracker
 }
 
 type liveSocket struct {
@@ -139,7 +142,7 @@ func New(d Deps) *Server {
 	s := &Server{cfg: d.Config, store: d.Store, auth: d.Auth, vault: d.Vault, guard: d.Guard, terms: d.Terms,
 		log: d.Log, mux: http.NewServeMux(), static: d.Static, socks: map[int64]map[*liveSocket]struct{}{},
 		pending: map[int64]map[*liveSocket]struct{}{}, herdrSocks: herdrSockets{path: map[string]string{}},
-		notifier: d.Notifier, vis: visibility{seen: map[string]map[*liveSocket]bool{}}, fwd: newForwarder(), files: newSFTPPool(), code: codeServers{jobs: map[[2]int64]*codeJob{}}}
+		notifier: d.Notifier, vis: visibility{seen: map[string]map[*liveSocket]bool{}}, fwd: newForwarder(), files: newSFTPPool(), code: codeServers{jobs: map[[2]int64]*codeJob{}}, perf: perf.New(perf.Options{})}
 	s.restores.ctx, s.restores.stop = context.WithCancel(context.Background())
 	s.auth.SetLocalLogin(s.cfg.LocalLogin)
 	if s.cfg.OIDC != nil {
@@ -156,6 +159,7 @@ func New(d Deps) *Server {
 	s.terms.OnAlert = s.onTerminalAlert
 	prevEnd := s.terms.OnEnd
 	s.terms.OnEnd = func(sess *term.Session, state string, d time.Duration) {
+		sshx.SetBusyObserver(sess.Client(), nil)
 		s.tabEnded(sess)
 		if prevEnd != nil {
 			prevEnd(sess, state, d)
@@ -348,6 +352,7 @@ func (s *Server) registerRoutes() {
 	s.handle("POST /api/admin/users", AdminOnly, s.apiAdminCreateUser)
 	s.handle("POST /api/admin/invites", AdminOnly, s.apiAdminCreateInvite)
 	s.handle("GET /api/admin/audit", AdminOnly, s.apiAdminAudit)
+	s.handle("GET /api/admin/perf", AdminOnly, s.apiAdminPerf)
 
 	s.mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("ok\n")) })
 	s.mux.Handle("/api/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

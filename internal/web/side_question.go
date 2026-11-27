@@ -322,19 +322,23 @@ func (s *Server) apiConversationSide(w http.ResponseWriter, r *http.Request) {
 		tmuxTarget = b.Pane
 	}
 	lctx, lcancel := context.WithTimeout(ctx, 15*time.Second)
+	tLoc := time.Now()
 	lr, err := sshx.Exec(lctx, sess.Client(), convoLocateCommand(sess.Persistence, sess.TmuxSession, tmuxTarget), convoLocateMax, sshx.ExecOptions{AwaitSlot: 2 * time.Second})
 	lcancel()
 	switch {
 	case errors.Is(err, sshx.ErrBusy):
+		s.perfLocate("locate.full", tLoc, err, 0, sess.HostID)
 		reason = "busy"
 		writeError(w, http.StatusTooManyRequests, "busy", "the host is still answering earlier requests")
 		return
 	case err != nil:
+		s.perfLocate("locate.full", tLoc, err, 0, sess.HostID)
 		reason = "host_error"
 		writeError(w, http.StatusBadGateway, "host_error", "the host did not answer")
 		return
 	}
 	l := parseConvoLocate(string(lr.Out))
+	s.perfLocate("locate.full", tLoc, nil, len(l.procs), sess.HostID)
 	socket := s.herdrSocks.get(sess.ID)
 	front := pickConvoProc(l.procs, sess.Persistence, b.Pane, socket, l.tmuxPID, l.paneTTY, s.herdrSocks.sid(sess.ID, b.Pane))
 	if front == nil || front.agent != "claude" || front.pid != b.PID || front.start != b.Start || front.sid != b.Session {

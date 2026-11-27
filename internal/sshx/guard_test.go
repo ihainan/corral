@@ -553,3 +553,68 @@ func TestWatchAndAuxConcurrentAcquireRelease(t *testing.T) {
 		t.Fatalf("slots leaked: aux=%d watch=%d", auxInUse(c), watchInUse(c))
 	}
 }
+
+func TestBusyObserverCalledOnErrBusy(t *testing.T) {
+	c := &ssh.Client{}
+	defer SetBusyObserver(c, nil)
+
+	var mu sync.Mutex
+	var got []string
+	SetBusyObserver(c, func(kind string) {
+		mu.Lock()
+		got = append(got, kind)
+		mu.Unlock()
+	})
+
+	// Fill all Aux slots so Exec and DialVia(Aux) hit ErrBusy.
+	var releases []func()
+	for range MaxAuxPerConn {
+		rel, ok := takeAux(c)
+		if !ok {
+			t.Fatal("failed to take aux slot")
+		}
+		releases = append(releases, rel)
+	}
+	// Fill all Watch slots so DialVia(Watch) hits ErrBusy.
+	for range MaxWatchPerConn {
+		rel, ok := takeWatch(c)
+		if !ok {
+			t.Fatal("failed to take watch slot")
+		}
+		releases = append(releases, rel)
+	}
+	defer func() {
+		for _, r := range releases {
+			r()
+		}
+	}()
+
+	ctx := context.Background()
+	if _, err := Output(ctx, c, "true", 1024); !errors.Is(err, ErrBusy) {
+		t.Fatalf("Output: got %v, want ErrBusy", err)
+	}
+	if _, err := DialVia(ctx, c, "unix", "/run/aux.sock", DialOptions{Aux: true}); !errors.Is(err, ErrBusy) {
+		t.Fatalf("DialVia(Aux): got %v, want ErrBusy", err)
+	}
+	if _, err := DialVia(ctx, c, "unix", "/run/watch.sock", DialOptions{Watch: true}); !errors.Is(err, ErrBusy) {
+		t.Fatalf("DialVia(Watch): got %v, want ErrBusy", err)
+	}
+
+	// Clearing observer must stop further notifications.
+	SetBusyObserver(c, nil)
+	if _, err := Output(ctx, c, "true", 1024); !errors.Is(err, ErrBusy) {
+		t.Fatalf("Output after clear: got %v, want ErrBusy", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	want := []string{"exec", "dial_aux", "dial_watch"}
+	if len(got) != len(want) {
+		t.Fatalf("observer kinds = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("observer kinds[%d] = %q, want %q (all=%v)", i, got[i], want[i], got)
+		}
+	}
+}

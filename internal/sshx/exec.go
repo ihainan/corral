@@ -76,6 +76,7 @@ func Exec(ctx context.Context, c *ssh.Client, cmd string, limit int, opt ExecOpt
 	}
 	if !ok {
 		extra()
+		NotifyBusy(c, "exec")
 		return ExecResult{}, ErrBusy
 	}
 	release := oneShot(func() { aux(); extra() })

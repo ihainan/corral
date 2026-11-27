@@ -837,7 +837,13 @@ func (s *Server) runAgySlashSwitch(
 
 	// Send the slash command through the standard afree:<digest> gate.
 	cmd := convoGatedCommand("afree:"+digest, sess.Persistence, sess.TmuxSession, pane, socket, pid, start, sid, len(slashCmd), nil, 0)
+	t0 := time.Now()
 	_, err = sshx.Exec(ctx, sess.Client(), cmd, sendOut, sshx.ExecOptions{Stdin: strings.NewReader(slashCmd), AwaitSlot: pressSlotWait("model")})
+	if resModel != "" {
+		s.perfGated("model", t0, err, sess.HostID)
+	} else {
+		s.perfGated("effort", t0, err, sess.HostID)
+	}
 	var exitErr *sshx.ExitError
 	switch {
 	case err == nil:

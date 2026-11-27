@@ -1398,12 +1398,15 @@ func (s *Server) apiConversationRewind(w http.ResponseWriter, r *http.Request) {
 	if sess.Persistence == "tmux" {
 		tmuxTarget = b.Pane
 	}
+	tLoc := time.Now()
 	locOut, lerr := claudeRewindExec(ctx, sess, &running, convoLocateCommand(sess.Persistence, sess.TmuxSession, tmuxTarget), convoLocateMax, 3*time.Second)
 	if lerr != nil {
+		s.perfLocate("locate.full", tLoc, lerr, 0, sess.HostID)
 		fail(asRewindErr(lerr))
 		return
 	}
 	located := parseConvoLocate(string(locOut))
+	s.perfLocate("locate.full", tLoc, nil, len(located.procs), sess.HostID)
 	front := pickConvoProc(located.procs, sess.Persistence, b.Pane, socket, located.tmuxPID, located.paneTTY, liveHerdrSID)
 	switch {
 	case front == nil || front.pid != b.PID || front.start != b.Start:

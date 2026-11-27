@@ -287,8 +287,10 @@ func (s *Server) openSession(ctx context.Context, w http.ResponseWriter, r *http
 		writeError(w, http.StatusUnauthorized, "unauthorized", "please sign in")
 		return
 	}
+	s.observeSSHBusy(client, h.ID)
 	sess, err := s.terms.Start(ctx, res, u.ID, h.ID, h.Name, client, opts)
 	if err != nil {
+		sshx.SetBusyObserver(client, nil)
 		if errors.Is(err, term.ErrClosing) {
 			writeError(w, http.StatusServiceUnavailable, "restarting", "the gateway is restarting; try again in a moment")
 			return
@@ -1014,6 +1016,7 @@ func openSFTPWith[T any](c *ssh.Client, mk func(r io.Reader, w io.WriteCloser, c
 	var zero T
 	releaseChan, ok := takeSFTPChan(c)
 	if !ok {
+		sshx.NotifyBusy(c, "sftp")
 		return zero, nil, sshx.ErrBusy
 	}
 	type result struct {
