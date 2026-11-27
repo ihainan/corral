@@ -85,7 +85,9 @@ type bgProber struct {
 	models map[string]paneModel
 	wake   chan struct{}
 	poke   func() // (the watcher's last summary goes again)
-	read   func(ctx context.Context, sessions []string, tail int) (map[string]bgRecord, error)
+	read func(ctx context.Context, sessions []string, tail int) (map[string]bgRecord, error)
+	// logOf resolves the confirmed full Claude log path for (pane, sid), if known.
+	logOf func(pane, sid string) string
 	// back: told of a pane whose subagents a look of the prober's own found
 	// back, no turn's end told meanwhile (two changes in one snapshot): the
 	// "finished" held back goes.
@@ -94,11 +96,12 @@ type bgProber struct {
 
 // bgRecord is a log's last turn record: its uuid, and the subagents out.
 type bgRecord struct {
-	uuid   string
-	n      int
-	said   string // (the agent's last words before the record: lastSaidIn)
-	failed string // (the API error the turn ended on: failedIn)
-	model  string // (the model its last answer was of: modelIn)
+	uuid    string
+	n       int
+	said    string // (the agent's last words before the record: lastSaidIn)
+	failed  string // (the API error the turn ended on: failedIn)
+	model   string // (the model its last answer was of: modelIn)
+	readErr bool   // (an existing log failed to read on the host; distinct from missing)
 }
 
 type paneModel struct{ session, model string }
@@ -196,6 +199,12 @@ func (p *bgProber) setPoke(f func()) {
 	p.mu.Unlock()
 }
 
+func (p *bgProber) setLogOf(f func(pane, sid string) string) {
+	p.mu.Lock()
+	p.logOf = f
+	p.mu.Unlock()
+}
+
 // decorate tells sum's agents what they left running.
 func (p *bgProber) decorate(sum *herdrSummary) {
 	p.mu.Lock()
@@ -262,16 +271,32 @@ func (p *bgProber) once(ctx context.Context) {
 	}
 	for pane, b := range p.panes {
 		if (b.state == bgChecking || b.state == bgRunning) && !b.due.After(now) && b.far == far {
-			if !seen[b.session] && len(sessions) < bgBatch {
-				seen[b.session] = true
-				sessions = append(sessions, b.session)
-			}
-			if seen[b.session] {
-				due[pane] = b
-			}
+			due[pane] = b
 		}
 	}
+	logOf := p.logOf
 	p.mu.Unlock()
+	if len(due) == 0 {
+		return
+	}
+	dueKey := make(map[string]string, len(due))
+	for pane, b := range due {
+		key := b.session
+		if logOf != nil {
+			if k := claudeWatchKey(b.session, logOf(pane, b.session)); k != "" {
+				key = k
+			}
+		}
+		if !seen[key] {
+			if len(sessions) >= bgBatch {
+				delete(due, pane)
+				continue
+			}
+			seen[key] = true
+			sessions = append(sessions, key)
+		}
+		dueKey[pane] = key
+	}
 	if len(sessions) == 0 {
 		return
 	}
@@ -290,8 +315,9 @@ func (p *bgProber) once(ctx context.Context) {
 		if p.panes[pane] != b {
 			continue // (worked again, or another session, meanwhile: what was read is of before)
 		}
-		r, ok := got[b.session]
-		if err == nil && ok && r.model != "" {
+		key := dueKey[pane]
+		r, ok := got[key]
+		if err == nil && ok && !r.readErr && r.model != "" {
 			if m := p.models[pane]; m.session != b.session || m.model != r.model {
 				p.models[pane] = paneModel{b.session, r.model}
 				changed = true
@@ -307,10 +333,10 @@ func (p *bgProber) once(ctx context.Context) {
 				}
 			}
 		}
-		was, have := p.taken[b.session]
+		was, have := p.taken[key]
 		switch {
-		case err != nil || !ok || r.uuid == "":
-			if err == nil && ok {
+		case err != nil || !ok || r.readErr || r.uuid == "":
+			if err == nil && ok && !r.readErr {
 				b.far = true // (none near the end: further back next)
 			}
 			if b.state == bgRunning {
@@ -337,7 +363,7 @@ func (p *bgProber) once(ctx context.Context) {
 		case b.state == bgRunning && have && r.uuid == was:
 			b.due = now.Add(bgRecheck)
 		default:
-			p.taken[b.session] = r.uuid
+			p.taken[key] = r.uuid
 			state := bgNone
 			if r.n > 0 {
 				state = bgRunning
@@ -359,7 +385,8 @@ func (p *bgProber) once(ctx context.Context) {
 			live[b.session] = true
 		}
 		for s := range p.taken {
-			if !live[s] && len(p.taken) > maxBgTaken {
+			sid, _, _ := strings.Cut(s, "=")
+			if !live[sid] && len(p.taken) > maxBgTaken {
 				delete(p.taken, s)
 			}
 		}
@@ -424,12 +451,12 @@ func (s *Server) locatedEverywhere(sess *term.Session, pane, sid string, at time
 	}
 }
 
-// bgTailCommand prints, for each Claude Code session id given (validated,
-// optionally suffixed with "=<configDir>" when locate already confirmed the
-// session's CLAUDE_CONFIG_DIR), a line "@@corral-bg <id>" and the end of its
-// log. When pinned to a configDir, only that directory is searched; otherwise
-// all discovered Claude config dirs are checked and the newest log by mtime
-// wins. Fixed script; the ids are its arguments.
+// bgTailCommand prints, for each Claude Code session key given (validated
+// "<sid>" or "<sid>=<confirmedLogPath>"), either "@@corral-bg <key>" followed
+// by the end of its log (and "@@corral-bg-err <key>" if tail fails on an
+// existing log), or "@@corral-bg-missing <key>" when the log is absent or
+// ambiguous across multiple unpinned sources. Always exits 0 so a missing log
+// on the last item never discards earlier records in the batch.
 func bgTailCommand(sessions []string, tail int) string {
 	script := claudeConfigDirsSh + `n=$1; shift
 _cldirs_loaded=0
@@ -438,55 +465,78 @@ for arg in "$@"; do
   *=*) s=${arg%%=*}; _pin=${arg#*=} ;;
   *) s=$arg; _pin= ;;
   esac
-  printf '\n@@corral-bg %s\n' "$s"
-  _best=
+  _log=
   if [ -n "$_pin" ]; then
-    for f in "$_pin"/projects/*/"$s".jsonl; do
-      [ -f "$f" ] || continue
-      if [ -z "$_best" ] || [ "$f" -nt "$_best" ]; then _best=$f; fi
-    done
+    [ -f "$_pin" ] && _log=$_pin
   else
     if [ "$_cldirs_loaded" = 0 ]; then claude_cfg_dirs; _cldirs_loaded=1; fi
+    _found=0
     while IFS= read -r _cd; do
       [ -n "$_cd" ] || continue
       for f in "$_cd"/projects/*/"$s".jsonl; do
         [ -f "$f" ] || continue
-        if [ -z "$_best" ] || [ "$f" -nt "$_best" ]; then _best=$f; fi
+        _found=$((_found + 1))
+        if [ "$_found" -eq 1 ]; then
+          _log=$f
+        else
+          _log=
+          break
+        fi
       done
+      [ "$_found" -le 1 ] || break
     done <<CORRAL_CLDIRS
 $cldirs
 CORRAL_CLDIRS
   fi
-  [ -n "$_best" ] && tail -c "$n" "$_best"
-done`
+  if [ -n "$_log" ]; then
+    printf '\n@@corral-bg %s\n' "$arg"
+    if ! tail -c "$n" "$_log"; then
+      printf '\n@@corral-bg-err %s\n' "$arg"
+    fi
+  else
+    printf '\n@@corral-bg-missing %s\n' "$arg"
+  fi
+done
+exit 0`
 	cmd := "sh -c " + sshx.QuoteShell(script) + " corral " + strconv.Itoa(tail)
 	for _, raw := range sessions {
-		sid, dir, hasDir := strings.Cut(raw, "=")
-		if !convoUUID.MatchString(sid) {
-			continue
+		if key, _, _, ok := parseClaudeWatchKey(raw); ok {
+			cmd += " " + sshx.QuoteShell(key)
 		}
-		if hasDir {
-			if clean, ok := cleanRemotePath(dir); ok && !strings.ContainsAny(clean, "\n\r\x01\x00") {
-				cmd += " " + sshx.QuoteShell(sid+"="+clean)
-				continue
-			}
-		}
-		cmd += " " + sshx.QuoteShell(sid)
 	}
 	return cmd
 }
 
 // parseBgTails reads what bgTailCommand printed: each log's last turn
-// record (none where the end read has none).
+// record (none where the end read has none). Missing/ambiguous entries are
+// omitted; genuine read errors on an existing file are recorded with
+// readErr=true (discarding any partial output).
 func parseBgTails(out []byte) map[string]bgRecord {
 	got := map[string]bgRecord{}
-	for _, part := range bytes.Split(out, []byte("\n@@corral-bg "))[1:] {
+	for _, part := range bytes.Split(out, []byte("\n@@corral-bg"))[1:] {
 		nl := bytes.IndexByte(part, '\n')
 		if nl < 0 {
 			continue
 		}
-		sid := string(part[:nl])
-		if !convoUUID.MatchString(sid) {
+		hdr := string(part[:nl])
+		if rest, ok := strings.CutPrefix(hdr, "-missing "); ok {
+			if key, _, _, valid := parseClaudeWatchKey(rest); valid {
+				delete(got, key)
+			}
+			continue
+		}
+		if rest, ok := strings.CutPrefix(hdr, "-err "); ok {
+			if key, _, _, valid := parseClaudeWatchKey(rest); valid {
+				got[key] = bgRecord{readErr: true}
+			}
+			continue
+		}
+		rest, ok := strings.CutPrefix(hdr, " ")
+		if !ok {
+			continue
+		}
+		key, _, _, valid := parseClaudeWatchKey(rest)
+		if !valid {
 			continue
 		}
 		lines := bytes.Split(part[nl+1:], []byte("\n"))
@@ -531,7 +581,7 @@ func parseBgTails(out []byte) map[string]bgRecord {
 			rec.n = max(rec.n-len(back), 0)
 		}
 		rec.model = modelIn(lines)
-		got[sid] = rec
+		got[key] = rec
 	}
 	return got
 }

@@ -312,14 +312,37 @@ func TestClaudeConfigDirParsingAndPaths(t *testing.T) {
 			t.Errorf("claudeConfigDirFromLog(%q) = (%q, %v), want (%q, %v)", tc.log, got, ok, tc.want, tc.ok)
 		}
 	}
-	if got := claudeCustomConfigDir("/home/u/.claude/projects/-w/"+sidA+".jsonl", "/home/u", "/data/claude"); got != "" {
-		t.Errorf("default logical dir should return empty, got %q", got)
+	// claudeForkConfigDir always returns the source log's config dir (preferring
+	// its physical path), including for default ~/.claude.
+	if got := claudeForkConfigDir("/home/u/.claude/projects/-w/"+sidA+".jsonl", "/home/u/.claude"); got != "/home/u/.claude" {
+		t.Errorf("default logical dir = %q, want /home/u/.claude", got)
 	}
-	if got := claudeCustomConfigDir("/data/claude/projects/-w/"+sidA+".jsonl", "/home/u", "/data/claude"); got != "" {
-		t.Errorf("symlink target of default dir should return empty, got %q", got)
+	if got := claudeForkConfigDir("/home/u/.claude/projects/-w/"+sidA+".jsonl", "/data/claude"); got != "/data/claude" {
+		t.Errorf("symlinked default dir = %q, want physical /data/claude", got)
 	}
-	if got := claudeCustomConfigDir("/opt/my cfg/.claude-alt/projects/-w/"+sidA+".jsonl", "/home/u", "/data/claude"); got != "/opt/my cfg/.claude-alt" {
+	if got := claudeForkConfigDir("/opt/my cfg/.claude-alt/projects/-w/"+sidA+".jsonl", ""); got != "/opt/my cfg/.claude-alt" {
 		t.Errorf("custom dir = %q, want /opt/my cfg/.claude-alt", got)
+	}
+	if got := claudeForkConfigDir("/x/.codex/sessions/rollout.jsonl", "/x/.codex"); got != "" {
+		t.Errorf("non-claude log = %q, want empty", got)
+	}
+
+	// claudeWatchKey & parseClaudeWatchKey.
+	validLog := "/opt/my cfg/.claude-alt/projects/-w/" + sidA + ".jsonl"
+	if got := claudeWatchKey(strings.ToUpper(sidA), validLog); got != sidA+"="+validLog {
+		t.Errorf("claudeWatchKey = %q, want %q", got, sidA+"="+validLog)
+	}
+	if got := claudeWatchKey(sidA, "/opt/cfg/projects/-w/"+sidB+".jsonl"); got != sidA {
+		t.Errorf("mismatched sid log should fall back to bare sid, got %q", got)
+	}
+	if k, s, lp, ok := parseClaudeWatchKey(sidA + "=" + validLog); !ok || k != sidA+"="+validLog || s != sidA || lp != validLog {
+		t.Errorf("parseClaudeWatchKey valid = (%q, %q, %q, %v)", k, s, lp, ok)
+	}
+	if _, _, _, ok := parseClaudeWatchKey(sidA + "=/opt/cfg/projects/-w/" + sidB + ".jsonl"); ok {
+		t.Error("parseClaudeWatchKey accepted mismatched sid log")
+	}
+	if _, _, _, ok := parseClaudeWatchKey(sidA + "=/opt/cfg\tbad/projects/-w/" + sidA + ".jsonl"); ok {
+		t.Error("parseClaudeWatchKey accepted tab in log path")
 	}
 }
 
@@ -544,41 +567,210 @@ func TestFastLocateSiblingAgentFallsBack(t *testing.T) {
 	}
 }
 
-// Review Item 2: convoClaimed.seeAlive must still be refreshed periodically on
-// hosts with active Codex claims so a newer Codex cannot steal an exited Codex's
-// old session while only Claude/Agy panes are hitting the fast path.
+// Review Item 2 + Round 2 P1: convoClaimed.seeAliveOn must be isolated per
+// remote host and SSH identity, and OpenCode-only scans must not suppress
+// Codex liveness refresh.
 func TestConvoClaimsAliveRefreshOnFastHit(t *testing.T) {
 	var claims convoClaims
+	const (
+		hostA = "1\x0010\x001|host-a|22|alice|key|1\x00alice@10.0.0.1:22"
+		hostB = "1\x0020\x001|host-b|22|bob|key|2\x00bob@10.0.0.2:22"
+	)
 	now := time.Now()
-	if claims.needsAliveRefresh(now, convoLocateTTL) {
+	if claims.needsAliveRefresh(hostA, now, convoLocateTTL) {
 		t.Fatal("empty claims must not trigger refresh")
 	}
 	claims.contest(sidB) // contested-only (pid==0) is not an active owner
-	if claims.needsAliveRefresh(now, convoLocateTTL) {
+	if claims.needsAliveRefresh(hostA, now, convoLocateTTL) {
 		t.Fatal("contested-only claim must not trigger refresh")
 	}
 
 	codexA := procID{pid: 100, start: 1000}
 	codexB := procID{pid: 200, start: 2000}
 	logA := "/home/u/.codex/sessions/2026/11/27/rollout-2026-11-27T01-00-00-" + sidA + ".jsonl"
-	if !claims.take(sidA, codexA, 1000, map[procID]bool{codexA: true}, 1000, false) {
+	if !claims.takeOn(hostA, sidA, codexA, 1000, map[procID]bool{codexA: true}, 1000, false) {
 		t.Fatal("codexA should claim sidA")
 	}
-	if !claims.needsAliveRefresh(now, convoLocateTTL) {
-		t.Fatal("active claim with no seeAlive yet must need refresh")
+	if !claims.needsAliveRefresh(hostA, now, convoLocateTTL) {
+		t.Fatal("active claim on hostA with no seeAliveOn yet must need refresh")
 	}
-	// Simulate periodic full-scan seeAlive while codexA and codexB coexist (codexB started at 2000).
-	claims.seeAlive(convoLocated{cands: []convoCand{{log: logA}}}, map[procID]bool{codexA: true}, 5000)
-	if claims.needsAliveRefresh(time.Now(), convoLocateTTL) {
-		t.Fatal("right after seeAlive, refresh should not be due yet")
+	// Host B has no Codex claims of its own -> does not need refresh.
+	if claims.needsAliveRefresh(hostB, now, convoLocateTTL) {
+		t.Fatal("hostB with no claims must not need refresh")
 	}
-	if !claims.needsAliveRefresh(time.Now().Add(convoLocateTTL+time.Second), convoLocateTTL) {
-		t.Fatal("after TTL elapses, active claim must need refresh again")
+	// Host B scanning continuously MUST NOT refresh hostA's lastAlive or seen!
+	claims.seeAliveOn(hostB, convoLocated{cands: []convoCand{{log: logA}}}, map[procID]bool{codexA: true}, 5000)
+	if !claims.needsAliveRefresh(hostA, time.Now(), convoLocateTTL) {
+		t.Fatal("hostB seeAliveOn suppressed hostA refresh")
+	}
+	// Host B holding a refresh lock MUST NOT block hostA from starting a refresh.
+	const sidHostB = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+	if !claims.takeOn(hostB, sidHostB, codexB, 2000, map[procID]bool{codexB: true}, 2000, false) {
+		t.Fatal("codexB should claim sidHostB on hostB")
+	}
+	afterTTL := time.Now().Add(convoLocateTTL + time.Second)
+	if !claims.beginAliveRefresh(hostB, afterTTL, convoLocateTTL) {
+		t.Fatal("hostB should begin refresh once TTL elapsed")
+	}
+	if !claims.beginAliveRefresh(hostA, afterTTL, convoLocateTTL) {
+		t.Fatal("hostB refreshing blocked hostA from beginning refresh")
+	}
+	claims.endAliveRefresh(hostB)
+	claims.endAliveRefresh(hostA)
+
+	// Simulate periodic full-scan seeAliveOn for hostA while codexA and codexB coexist.
+	claims.seeAliveOn(hostA, convoLocated{cands: []convoCand{{log: logA}}}, map[procID]bool{codexA: true}, 5000)
+	if claims.needsAliveRefresh(hostA, time.Now(), convoLocateTTL) {
+		t.Fatal("right after seeAliveOn(hostA), refresh should not be due yet")
+	}
+	if !claims.needsAliveRefresh(hostA, time.Now().Add(convoLocateTTL+time.Second), convoLocateTTL) {
+		t.Fatal("after TTL elapses, active claim on hostA must need refresh again")
 	}
 	// After codexA exits, codexB (started at 2000 <= seen 5000) must be blocked from claiming sidA.
-	if claims.take(sidA, codexB, 2000, map[procID]bool{codexB: true}, 9000, false) {
-		t.Fatal("codexB stole codexA's session despite seeAlive refresh")
+	if claims.takeOn(hostA, sidA, codexB, 2000, map[procID]bool{codexB: true}, 9000, false) {
+		t.Fatal("codexB stole codexA's session despite seeAliveOn refresh")
 	}
+}
+
+// Round 2 P1 (end-to-end): While Host B continuously runs full scans and Host A
+// runs OpenCode-only scans, a fast-path hit on Host A still triggers Host A's
+// Codex claim liveness refresh on schedule.
+func TestConvoClaimsPerHostRefreshIsolation(t *testing.T) {
+	h := newHarness(t)
+	admin := h.admin()
+
+	hdA := newFakeHerdr(t)
+	hdA.setSnapshot(
+		[]any{
+			map[string]any{"pane_id": "w1:p1", "tab_id": "t1", "workspace_id": "w1", "agent": "claude", "agent_status": "idle", "cwd": "/work"},
+			map[string]any{"pane_id": "w1:p2", "tab_id": "t1", "workspace_id": "w1", "agent": "opencode", "agent_status": "idle", "cwd": "/work"},
+		},
+		[]any{
+			map[string]any{"pane_id": "w1:p1", "tab_id": "t1", "workspace_id": "w1", "agent": "claude", "agent_status": "idle", "cwd": "/work"},
+			map[string]any{"pane_id": "w1:p2", "tab_id": "t1", "workspace_id": "w1", "agent": "opencode", "agent_status": "idle", "cwd": "/work"},
+		},
+	)
+	hdA.procInfo = map[string]herdr.PaneProcessInfoResult{
+		"w1:p1": {PaneID: "w1:p1", ShellPID: 50, ForegroundProcesses: []herdr.ProcessEntry{{PID: 100, Name: "claude"}}},
+	}
+	hdB := newFakeHerdr(t)
+	hdB.setSnapshot(
+		[]any{map[string]any{"pane_id": "w1:p1", "tab_id": "t1", "workspace_id": "w1", "agent": "claude", "agent_status": "idle", "cwd": "/work"}},
+		[]any{map[string]any{"pane_id": "w1:p1", "tab_id": "t1", "workspace_id": "w1", "agent": "claude", "agent_status": "idle", "cwd": "/work"}},
+	)
+
+	claudeOutA := convoRec(
+		"pid=100", "start=500", "fg=1", "procstart=500", "sid="+sidA,
+		"log=/home/u/.claude/projects/-w/"+sidA+".jsonl",
+		"anc=50:zsh,40:herdr,", "agent=claude",
+		"HERDR_PANE_ID=w1:p1", "HERDR_SOCKET_PATH="+hdA.path,
+	)
+	ocOutA := convoRec(
+		"pid=150", "start=600", "fg=1", "procstart=600", "sid="+convoNoSession,
+		"log=/home/u/.local/share/opencode/opencode.db",
+		"anc=51:zsh,40:herdr,", "agent=opencode",
+		"HERDR_PANE_ID=w1:p2", "HERDR_SOCKET_PATH="+hdA.path,
+	)
+	codexLogA := "/home/u/.codex/sessions/2026/11/27/rollout-2026-11-27T01-00-00-" + sidB + ".jsonl"
+	fullOutA := claudeOutA + convoRec(
+		"pid=300", "start=700", "fg=1", "procstart=700", "sid=", "log=", "cwd=/work",
+		"anc=52:zsh,40:herdr,", "agent=codex",
+		"HERDR_PANE_ID=w1:p3", "HERDR_SOCKET_PATH="+hdA.path,
+	) + fmt.Sprintf("cand\t%s\t/work\t1000\t9000\nclock\t1000\t100\n", codexLogA)
+	fullOutB := convoRec(
+		"pid=400", "start=800", "fg=1", "procstart=800", "sid="+sidA,
+		"log=/home/u/.claude/projects/-w/"+sidA+".jsonl",
+		"anc=60:zsh,41:herdr,", "agent=claude",
+		"HERDR_PANE_ID=w1:p1", "HERDR_SOCKET_PATH="+hdB.path,
+	)
+
+	var fullCallsA, ocCallsA, fullCallsB atomic.Int32
+	sessIDA := herdrExecEnv(t, h, admin, hdA, t.TempDir(), func(cmd string) func(ssh.Channel) {
+		if strings.Contains(cmd, "'tree:50:100'") {
+			return sshExecReply(claudeOutA, 0)
+		}
+		if strings.HasSuffix(cmd, ` corral 'herdr' '' '' '' 'opencode'`) {
+			ocCallsA.Add(1)
+			return sshExecReply(ocOutA, 0)
+		}
+		if strings.HasSuffix(cmd, ` corral 'herdr' '' '' '' ''`) {
+			fullCallsA.Add(1)
+			return sshExecReply(fullOutA, 0)
+		}
+		return nil
+	})
+	sessIDB := herdrExecEnv(t, h, admin, hdB, t.TempDir(), func(cmd string) func(ssh.Channel) {
+		if strings.HasSuffix(cmd, ` corral 'herdr' '' '' '' ''`) {
+			fullCallsB.Add(1)
+			return sshExecReply(fullOutB, 0)
+		}
+		return nil
+	})
+	sessA, err := h.terms.Get(1, sessIDA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessB, err := h.terms.Get(1, sessIDB)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	hostA := convoClaimHostKey(sessA)
+	hostB := convoClaimHostKey(sessB)
+	if hostA == hostB {
+		t.Fatalf("distinct hosts produced identical convoClaimHostKey: %q", hostA)
+	}
+
+	// Claim a Codex conversation on Host A (lastAlive not set yet).
+	codexProcA := procID{pid: 300, start: 700}
+	if !h.srv.convoClaimed.takeOn(hostA, sidB, codexProcA, 1000, map[procID]bool{codexProcA: true}, 1000, false) {
+		t.Fatal("failed to claim codex on host A")
+	}
+
+	// 1. Host B runs a full scan continuously -> updates Host B's lastAlive ONLY.
+	stB := &convoState{}
+	if err := h.srv.locateScan(context.Background(), sessB, stB, "w1:p1", false, nil); err != nil {
+		t.Fatalf("host B full scan failed: %v", err)
+	}
+	if fullCallsB.Load() != 1 {
+		t.Fatalf("host B fullCalls = %d, want 1", fullCallsB.Load())
+	}
+	if !h.srv.convoClaimed.needsAliveRefresh(hostA, time.Now(), convoLocateTTL) {
+		t.Fatal("host B full scan cleared host A's needsAliveRefresh")
+	}
+
+	// 2. Host A hits the fast path on Claude pane w1:p1 -> MUST trigger Host A's
+	// background full scan refresh even though Host B just ran a full scan!
+	stA := &convoState{}
+	if err := h.srv.locateScan(context.Background(), sessA, stA, "w1:p1", true, nil); err != nil {
+		t.Fatalf("host A fast locate failed: %v", err)
+	}
+	eventually(t, "host A fast hit did not trigger host A Codex claim refresh", func() bool {
+		return fullCallsA.Load() >= 1 && !h.srv.convoClaimed.needsAliveRefresh(hostA, time.Now(), convoLocateTTL)
+	})
+
+	// 3. Age Host A's lastAlive past TTL, then run an OpenCode-only scan on Host A.
+	// OpenCode-only scan must NOT satisfy Host A's lastAlive by itself; it must
+	// trigger a full scan refresh on Host A instead.
+	prevFullA := fullCallsA.Load()
+	h.srv.convoClaimed.mu.Lock()
+	h.srv.convoClaimed.hosts[hostA].lastAlive = time.Now().Add(-2 * convoLocateTTL)
+	h.srv.convoClaimed.mu.Unlock()
+	// Expire convoScans cache so refresh runs a fresh full scan.
+	h.srv.convoScans.mu.Lock()
+	h.srv.convoScans.m = nil
+	h.srv.convoScans.mu.Unlock()
+
+	stOC := &convoState{}
+	if err := h.srv.locateScan(context.Background(), sessA, stOC, "w1:p2", true, nil); err != nil {
+		t.Fatalf("host A opencode scan failed: %v", err)
+	}
+	if ocCallsA.Load() < 1 {
+		t.Fatalf("expected opencode-only scan on host A, got %d", ocCallsA.Load())
+	}
+	eventually(t, "opencode-only scan on host A did not trigger Codex full refresh", func() bool {
+		return fullCallsA.Load() > prevFullA
+	})
 }
 
 func sshExecReply(out string, code uint32) func(ssh.Channel) {
@@ -840,13 +1032,186 @@ func TestClaudeConfigDirsPhysicalDedupAndFork(t *testing.T) {
 	if !foundCreate {
 		t.Fatalf("workspace.create not called: sent=%#v", hd.sent)
 	}
+
+	// Round 2 P2-5: Forking from DEFAULT ~/.claude (even when symlinked to
+	// realCfg, and even when the remote environment has another account's
+	// CLAUDE_CONFIG_DIR set) MUST still explicitly pass the default dir's
+	// physical path to workspace.create and to agentTmuxCmd!
+	sidC := "33333333-3333-4333-8333-333333333333"
+	defForkHome := filepath.Join(base, "defhome")
+	defRealDir := filepath.Join(base, "real default claude")
+	defProj := filepath.Join(defRealDir, "projects", "-projwork")
+	otherCfg := filepath.Join(base, "other-account-claude")
+	for _, d := range []string{defForkHome, defProj, otherCfg} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink(defRealDir, filepath.Join(defForkHome, ".claude")); err != nil {
+		t.Fatal(err)
+	}
+	defForkLog := filepath.Join(defProj, sidC+".jsonl")
+	if err := os.WriteFile(defForkLog, []byte(`{"type":"user","uuid":"aaaaaaaa-0000-4000-8000-000000000002","sessionId":"`+sidC+`","cwd":`+strconv.Quote(workDir)+`,"message":{"role":"user","content":"from default"}}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	hdDef := newFakeHerdr(t)
+	sessIDDef := herdrExecEnv(t, h, admin, hdDef, defForkHome, func(cmd string) func(ssh.Channel) {
+		if strings.Contains(cmd, "herdr agent start") {
+			return sshExecReply(`{"result":{"ok":true}}`+"\n", 0)
+		}
+		if strings.Contains(cmd, "claude_cfg_dirs") || strings.Contains(cmd, "mktemp") || strings.Contains(cmd, "wc -l") {
+			c := exec.Command(sh, "-c", cmd)
+			// Remote environment has another account's CLAUDE_CONFIG_DIR!
+			c.Env = []string{"HOME=" + defForkHome, "CLAUDE_CONFIG_DIR=" + otherCfg, "PATH=/usr/bin:/bin"}
+			out, err := c.CombinedOutput()
+			var code uint32
+			if err != nil {
+				code = 1
+			}
+			return sshExecReply(string(out), code)
+		}
+		return nil
+	})
+	respDef := admin.do("POST", "/api/sessions/"+sessIDDef+"/agents", map[string]any{
+		"kind": "claude", "fork": true, "resume": sidC, "key": "k-default-fork-1234",
+	})
+	if respDef.Status != 200 {
+		t.Fatalf("herdr default-dir fork failed: status=%d body=%s", respDef.Status, respDef.Body)
+	}
+	hdDef.mu.Lock()
+	defer hdDef.mu.Unlock()
+	foundDefCreate := false
+	for _, s := range hdDef.sent {
+		if s["method"] == "workspace.create" {
+			foundDefCreate = true
+			envMap, _ := s["env"].(map[string]any)
+			if envMap == nil || envMap["CLAUDE_CONFIG_DIR"] != defRealDir {
+				t.Fatalf("default-dir fork workspace.create env = %#v, want physical CLAUDE_CONFIG_DIR=%q", envMap, defRealDir)
+			}
+		}
+	}
+	if !foundDefCreate {
+		t.Fatalf("default-dir fork workspace.create not called: sent=%#v", hdDef.sent)
+	}
+
+	// tmux path for default ~/.claude fork: explicitly exports physical path.
+	defTmuxCmd := agentTmuxCmd("fork-claude-def", workDir, "claude", defRealDir, agentStart{resume: sidC})
+	wantDefPrefix := sshx.QuoteShell(`exec "${SHELL:-/bin/sh}" -lc ` + sshx.QuoteShell("CLAUDE_CONFIG_DIR="+sshx.QuoteShell(defRealDir)+" exec 'claude'"))
+	if !strings.Contains(defTmuxCmd, strings.TrimSuffix(wantDefPrefix, `'\'''`)) {
+		t.Fatalf("default-dir tmux fork command missing explicit physical CLAUDE_CONFIG_DIR:\n got: %s", defTmuxCmd)
+	}
 }
 
-// Review Item 7: bgTailCommand & cmdScanCommand must:
-// 1. Read ONLY the pinned config dir when "<sid>=<cfgDir>" is passed.
-// 2. When unpinned and two dirs contain logs for the same session ID, pick the
-//    NEWEST by mtime rather than stopping at an older copy in $HOME/.claude.
-func TestBgTailAndCmdScanPinnedAndNewest(t *testing.T) {
+// Round 2 P2-2: Missing log on the LAST session in a batch must exit 0 and
+// return all earlier records intact; genuine read errors on an existing file
+// are reported separately via readErr without breaking the rest of the batch.
+func TestBgTailBatchMissingLastAndReadError(t *testing.T) {
+	sh, err := exec.LookPath("sh")
+	if err != nil {
+		t.Skip("no sh")
+	}
+	home := t.TempDir()
+	proj := filepath.Join(home, ".claude", "projects", "-work")
+	if err := os.MkdirAll(proj, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	logA := filepath.Join(proj, sidA+".jsonl")
+	if err := os.WriteFile(logA, []byte(`{"type":"system","subtype":"turn_duration","uuid":"u-first","pendingBackgroundAgentCount":2}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sidMissing := "99999999-9999-4999-8999-999999999999"
+
+	for _, bin := range []string{sh, "dash"} {
+		p, err := exec.LookPath(bin)
+		if err != nil {
+			continue
+		}
+		// Unpinned batch where LAST SID has no log -> must exit 0 and return sidA!
+		c := exec.Command(p, "-c", bgTailCommand([]string{sidA, sidMissing}, 4096))
+		c.Env = []string{"HOME=" + home, "PATH=/usr/bin:/bin"}
+		out, err := c.Output()
+		if err != nil {
+			t.Fatalf("%s bgTailCommand with missing last sid failed: %v (out=%q)", bin, err, string(out))
+		}
+		got := parseBgTails(out)
+		if r, ok := got[sidA]; !ok || r.uuid != "u-first" || r.n != 2 || r.readErr {
+			t.Fatalf("%s first record lost when last missing: got=%+v (raw=%q)", bin, got, string(out))
+		}
+		if _, ok := got[sidMissing]; ok {
+			t.Fatalf("%s missing last sid should be absent from parsed map, got=%+v", bin, got[sidMissing])
+		}
+
+		// Pinned batch where LAST pinned log does not exist -> must exit 0 and return first!
+		missingPin := sidMissing + "=" + filepath.Join(proj, sidMissing+".jsonl")
+		presentPin := sidA + "=" + logA
+		c2 := exec.Command(p, "-c", bgTailCommand([]string{presentPin, missingPin}, 4096))
+		c2.Env = []string{"HOME=" + home, "PATH=/usr/bin:/bin"}
+		out2, err := c2.Output()
+		if err != nil {
+			t.Fatalf("%s pinned bgTailCommand with missing last failed: %v", bin, err)
+		}
+		got2 := parseBgTails(out2)
+		if r, ok := got2[presentPin]; !ok || r.uuid != "u-first" || r.n != 2 {
+			t.Fatalf("%s pinned first record lost when last missing: got=%+v", bin, got2)
+		}
+		if _, ok := got2[missingPin]; ok {
+			t.Fatalf("%s missing pinned record should be absent, got=%+v", bin, got2[missingPin])
+		}
+	}
+
+	// Genuine read error expressed separately from missing (and discards partial lines).
+	errOut := strings.Join([]string{
+		"",
+		"@@corral-bg " + sidA,
+		`{"type":"system","subtype":"turn_duration","uuid":"u-ok","pendingBackgroundAgentCount":1}`,
+		"",
+		"@@corral-bg " + sidB,
+		`{"type":"system","subtype":"turn_duration","uuid":"u-partial","pendingBackgroundAgentCount":9}`,
+		"",
+		"@@corral-bg-err " + sidB,
+		"",
+		"@@corral-bg-missing " + sidMissing,
+		"",
+	}, "\n")
+	parsed := parseBgTails([]byte(errOut))
+	if r, ok := parsed[sidA]; !ok || r.uuid != "u-ok" || r.n != 1 || r.readErr {
+		t.Fatalf("sidA after err/missing = (%+v, %v)", r, ok)
+	}
+	if r, ok := parsed[sidB]; !ok || !r.readErr || r.uuid != "" || r.n != 0 {
+		t.Fatalf("sidB readErr must clear partial record and set readErr=true, got (%+v, %v)", r, ok)
+	}
+	if _, ok := parsed[sidMissing]; ok {
+		t.Fatalf("sidMissing must be omitted, got %+v", parsed[sidMissing])
+	}
+
+	// Live chmod-000 read error test (when running non-root).
+	if os.Geteuid() != 0 {
+		unreadable := filepath.Join(proj, sidB+".jsonl")
+		if err := os.WriteFile(unreadable, []byte(`{"type":"system","subtype":"turn_duration","uuid":"secret"}`+"\n"), 0o000); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(unreadable, 0o600) })
+		c := exec.Command(sh, "-c", bgTailCommand([]string{sidA, sidB}, 4096))
+		c.Env = []string{"HOME=" + home, "PATH=/usr/bin:/bin"}
+		out, err := c.Output()
+		if err != nil {
+			t.Fatalf("bgTailCommand with unreadable file exited non-zero: %v", err)
+		}
+		live := parseBgTails(out)
+		if r, ok := live[sidA]; !ok || r.uuid != "u-first" {
+			t.Fatalf("sidA lost when sidB unreadable: %+v", live)
+		}
+		if r, ok := live[sidB]; !ok || !r.readErr {
+			t.Fatalf("sidB unreadable should set readErr=true, got (%+v, %v) raw=%q", r, ok, string(out))
+		}
+	}
+}
+
+// Round 2 P2-3: Confirmed full log path pinning, strict subagents derivation
+// from that log path only (never cross-project/cross-dir), and refusal to guess
+// by mtime when multiple unpinned sources exist.
+func TestBgTailAndCmdScanPinnedAndAmbiguous(t *testing.T) {
 	sh, err := exec.LookPath("sh")
 	if err != nil {
 		t.Skip("no sh")
@@ -854,22 +1219,26 @@ func TestBgTailAndCmdScanPinnedAndNewest(t *testing.T) {
 	home := t.TempDir()
 	defCfg := filepath.Join(home, ".claude")
 	newCfg := filepath.Join(home, "my cfg", ".claude-new")
-	defProj := filepath.Join(defCfg, "projects", "-work")
-	newProj := filepath.Join(newCfg, "projects", "-work")
+	defProj := filepath.Join(defCfg, "projects", "-work-a")
+	defProj2 := filepath.Join(defCfg, "projects", "-work-b")
+	newProj := filepath.Join(newCfg, "projects", "-work-c")
 	defSubs := filepath.Join(defProj, sidA, "subagents")
 	newSubs := filepath.Join(newProj, sidA, "subagents")
-	for _, d := range []string{defSubs, newSubs} {
+	for _, d := range []string{defSubs, defProj2, newSubs} {
 		if err := os.MkdirAll(d, 0o755); err != nil {
 			t.Fatal(err)
 		}
 	}
 	defLog := filepath.Join(defProj, sidA+".jsonl")
+	defLogNoSubs := filepath.Join(defProj2, sidA+".jsonl")
 	newLog := filepath.Join(newProj, sidA+".jsonl")
 	os.WriteFile(defLog, []byte(`{"type":"system","subtype":"turn_duration","uuid":"old-uuid","pendingBackgroundAgentCount":1}`+"\n"), 0o644)
+	os.WriteFile(defLogNoSubs, []byte(`{"type":"system","subtype":"turn_duration","uuid":"nosubs-uuid","pendingBackgroundAgentCount":0}`+"\n"), 0o644)
 	os.WriteFile(newLog, []byte(`{"type":"system","subtype":"turn_duration","uuid":"new-uuid","pendingBackgroundAgentCount":3}`+"\n"), 0o644)
 	oldTime := time.Now().Add(-10 * time.Minute)
 	newTime := time.Now().Add(-1 * time.Minute)
 	os.Chtimes(defLog, oldTime, oldTime)
+	os.Chtimes(defLogNoSubs, oldTime, oldTime)
 	os.Chtimes(newLog, newTime, newTime)
 
 	os.WriteFile(filepath.Join(defSubs, "agent-oldsub.jsonl"), []byte(`{"version":"2.1.305"}`+"\n"), 0o644)
@@ -887,39 +1256,178 @@ func TestBgTailAndCmdScanPinnedAndNewest(t *testing.T) {
 		return out
 	}
 
-	// Unpinned bgTailCommand picks the NEWEST log (newCfg) even though defCfg is also present.
-	bgNewest := parseBgTails(run(bgTailCommand([]string{sidA}, 4096)))
-	if r := bgNewest[sidA]; r.uuid != "new-uuid" || r.n != 3 {
-		t.Fatalf("unpinned bgTailCommand = %+v, want new-uuid n=3", r)
-	}
-	// Pinned bgTailCommand reads strictly from defCfg even though newCfg is newer.
-	bgPinned := parseBgTails(run(bgTailCommand([]string{sidA + "=" + defCfg}, 4096)))
-	if r := bgPinned[sidA]; r.uuid != "old-uuid" || r.n != 1 {
-		t.Fatalf("pinned bgTailCommand = %+v, want old-uuid n=1", r)
+	// 1. Unpinned bgTailCommand with multiple matches across projects/dirs must
+	// refuse to guess by mtime (emit missing, return empty).
+	bgAmbig := parseBgTails(run(bgTailCommand([]string{sidA}, 4096)))
+	if _, ok := bgAmbig[sidA]; ok {
+		t.Fatalf("unpinned ambiguous bgTailCommand guessed a log: %+v", bgAmbig)
 	}
 
-	// Unpinned cmdScanCommand picks subagents beside the NEWEST session log (newCfg).
-	subsNewest := parseBgSubScan(string(run(cmdScanCommand("w:" + sidA))))
-	if len(subsNewest[sidA]) != 1 || subsNewest[sidA][0].ID != "newsub" || subsNewest[sidA][0].What != "from custom" {
-		t.Fatalf("unpinned cmdScanCommand subs = %+v, want newsub", subsNewest)
-	}
-	// Pinned cmdScanCommand reads subagents strictly from defCfg.
-	subsPinned := parseBgSubScan(string(run(cmdScanCommand("w:" + sidA + "=" + defCfg))))
-	if len(subsPinned[sidA]) != 1 || subsPinned[sidA][0].ID != "oldsub" || subsPinned[sidA][0].What != "from default" {
-		t.Fatalf("pinned cmdScanCommand subs = %+v, want oldsub", subsPinned)
+	// 2. Unpinned cmdScanCommand with multiple matches must refuse to guess by mtime.
+	subsAmbig := parseBgSubScan(string(run(cmdScanCommand("w:" + sidA))))
+	if len(subsAmbig) != 0 {
+		t.Fatalf("unpinned ambiguous cmdScanCommand guessed subagents: %+v", subsAmbig)
 	}
 
-	// Pure helpers attachBgClaudeDirs / attachCmdClaudeDirs + herdrSockets claudeCfg store.
+	// 3. Two panes running the SAME sidA pinned to DIFFERENT full logs in the
+	// same batch: both bgTailCommand and cmdScanCommand return each log's own
+	// data independently without overwriting each other!
+	pinDef := sidA + "=" + defLog
+	pinNew := sidA + "=" + newLog
+	pinNoSubs := sidA + "=" + defLogNoSubs
+
+	bgBoth := parseBgTails(run(bgTailCommand([]string{pinDef, pinNew, pinNoSubs}, 4096)))
+	if r := bgBoth[pinDef]; r.uuid != "old-uuid" || r.n != 1 {
+		t.Fatalf("pinned defLog = %+v, want old-uuid n=1", r)
+	}
+	if r := bgBoth[pinNew]; r.uuid != "new-uuid" || r.n != 3 {
+		t.Fatalf("pinned newLog = %+v, want new-uuid n=3", r)
+	}
+	if r := bgBoth[pinNoSubs]; r.uuid != "nosubs-uuid" || r.n != 0 {
+		t.Fatalf("pinned defLogNoSubs = %+v, want nosubs-uuid n=0", r)
+	}
+
+	// 4. Strict subagents derivation: defLogNoSubs has NO sibling subagents dir,
+	// so cmdScanCommand MUST NOT fall back to defSubs or newSubs!
+	subsAll := parseBgSubScan(string(run(cmdScanCommand("w:"+pinDef, "s:"+pinNew, "s:"+pinNoSubs))))
+	if len(subsAll[pinDef]) != 1 || subsAll[pinDef][0].ID != "oldsub" {
+		t.Fatalf("pinned defLog subs = %+v, want oldsub", subsAll[pinDef])
+	}
+	if len(subsAll[pinNew]) != 1 || subsAll[pinNew][0].ID != "newsub" {
+		t.Fatalf("pinned newLog subs = %+v, want newsub", subsAll[pinNew])
+	}
+	if len(subsAll[pinNoSubs]) != 0 {
+		t.Fatalf("pinned log without subagents pulled another dir's subagents: %+v", subsAll[pinNoSubs])
+	}
+
+	// 5. End-to-end bgProber & cmdProber with two panes running the SAME sidA
+	// from different confirmed logs!
 	hs := herdrSockets{path: map[string]string{"s1": "/run/h.sock"}}
-	hs.setClaudeCfg("s1", sidA, newCfg)
-	if got := hs.claudeCfgOf("s1", strings.ToUpper(sidA)); got != newCfg {
-		t.Fatalf("claudeCfgOf = %q, want %q", got, newCfg)
+	now := time.Now()
+	hs.setClaudeLog("s1", "w1:p1", "term1", 101, 1001, sidA, defLog, now)
+	hs.setClaudeLog("s1", "w1:p2", "term2", 102, 1002, sidA, newLog, now)
+
+	bg := newBgProber(func(_ context.Context, keys []string, tail int) (map[string]bgRecord, error) {
+		return parseBgTails(run(bgTailCommand(keys, tail))), nil
+	})
+	bg.setLogOf(func(pane, sid string) string { return hs.claudeLogOf("s1", pane, sid) })
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	go bg.run(ctx)
+	bg.consider("w1:p1", "claude", herdr.StatusDone, sidA, 1)
+	bg.consider("w1:p2", "claude", herdr.StatusDone, sidA, 1)
+	if st1 := bg.await(ctx, "w1:p1", 1); st1 != bgRunning {
+		t.Fatalf("pane 1 bg state = %s, want running", st1)
 	}
-	if got := attachBgClaudeDirs([]string{sidA, sidB}, func(s string) string { return hs.claudeCfgOf("s1", s) }); !slices.Equal(got, []string{sidA + "=" + newCfg, sidB}) {
-		t.Fatalf("attachBgClaudeDirs = %v", got)
+	if st2 := bg.await(ctx, "w1:p2", 1); st2 != bgRunning {
+		t.Fatalf("pane 2 bg state = %s, want running", st2)
 	}
-	if got := attachCmdClaudeDirs([]string{"w:" + sidA, "s:" + sidB}, func(s string) string { return hs.claudeCfgOf("s1", s) }); !slices.Equal(got, []string{"w:" + sidA + "=" + newCfg, "s:" + sidB}) {
-		t.Fatalf("attachCmdClaudeDirs = %v", got)
+	if _, n1 := bgState(bg, "w1:p1"); n1 != 1 {
+		t.Fatalf("pane 1 bg n = %d, want 1", n1)
+	}
+	if _, n2 := bgState(bg, "w1:p2"); n2 != 3 {
+		t.Fatalf("pane 2 bg n = %d, want 3", n2)
+	}
+
+	cmds := newCmdSubProber(func(_ context.Context, watched []string) (map[string][]bgCmd, map[string][]bgAgent, map[string]map[string]bool, bool, error) {
+		out := string(run(cmdScanCommand(watched...)))
+		return map[string][]bgCmd{}, parseBgSubScan(out), parseBgIDs(out), true, nil
+	})
+	cmds.setLogOf(func(pane, sid string) string { return hs.claudeLogOf("s1", pane, sid) })
+	cmds.every = 50 * time.Millisecond
+	cmds.soonBy = 10 * time.Millisecond
+	go cmds.run(ctx)
+	cmds.consider("w1:p1", "claude", herdr.StatusWorking, sidA)
+	cmds.consider("w1:p2", "claude", herdr.StatusWorking, sidA)
+	eventually(t, "cmdProber did not decorate both panes with distinct subagents", func() bool {
+		sum := herdrSummary{Workspaces: []herdrWorkspace{{Agents: []herdrAgent{
+			{PaneID: "w1:p1", Agent: "claude", Status: herdr.StatusWorking, Session: sidA},
+			{PaneID: "w1:p2", Agent: "claude", Status: herdr.StatusWorking, Session: sidA},
+		}}}}
+		cmds.decorate(&sum)
+		a1, a2 := sum.Workspaces[0].Agents[0], sum.Workspaces[0].Agents[1]
+		return len(a1.BgAgentList) == 1 && a1.BgAgentList[0].ID == "oldsub" &&
+			len(a2.BgAgentList) == 1 && a2.BgAgentList[0].ID == "newsub"
+	})
+}
+
+// Round 2 P3: Pane log cache must clean up on pane close / session switch /
+// agent change, and evict oldest inactive entries when reaching 256 so active
+// sessions and newly located panes retain their confirmed log paths.
+func TestHerdrClaudeLogCacheLifecycleAndEviction(t *testing.T) {
+	hs := herdrSockets{path: map[string]string{"s1": "/run/h.sock"}}
+	t0 := time.Now()
+	log1 := "/cfg1/projects/-w/" + sidA + ".jsonl"
+	log2 := "/cfg2/projects/-w/" + sidB + ".jsonl"
+
+	// 1. Cleanup on pane close, session switch, terminal change, and status gone.
+	hs.setClaudeLog("s1", "w1:p1", "term1", 10, 100, sidA, log1, t0)
+	hs.setClaudeLog("s1", "w1:p2", "term2", 11, 101, sidA, log1, t0)
+	hs.setClaudeLog("s1", "w1:p3", "term3", 12, 102, sidA, log1, t0)
+	hs.setClaudeLog("s1", "w1:p4", "term4", 13, 103, sidA, log1, t0)
+
+	hs.setSids("s1", &herdr.Snapshot{
+		Panes: []herdr.Pane{
+			{ID: "w1:p1", TerminalID: "term1", Agent: "claude", AgentStatus: herdr.StatusIdle, AgentSession: &herdr.AgentSessionInfo{Value: sidA, Source: "herdr:claude", Agent: "claude"}}, // still active, unchanged
+			{ID: "w1:p2", TerminalID: "term2", Agent: "claude", AgentStatus: herdr.StatusIdle, AgentSession: &herdr.AgentSessionInfo{Value: sidB, Source: "herdr:claude", Agent: "claude"}}, // switched session
+			{ID: "w1:p3", TerminalID: "term3-new", Agent: "claude", AgentStatus: herdr.StatusIdle},                                                                                            // terminal replaced
+			// w1:p4 omitted -> closed!
+		},
+	})
+	if got := hs.claudeLogOf("s1", "w1:p1", sidA); got != log1 {
+		t.Fatalf("active pane w1:p1 lost pinned log: %q", got)
+	}
+	if got := hs.claudeLogOf("s1", "w1:p2", sidA); got != "" {
+		t.Fatalf("pane w1:p2 switched session but kept old log: %q", got)
+	}
+	if got := hs.claudeLogOf("s1", "w1:p3", sidA); got != "" {
+		t.Fatalf("pane w1:p3 changed terminal_id but kept old log: %q", got)
+	}
+	if got := hs.claudeLogOf("s1", "w1:p4", sidA); got != "" {
+		t.Fatalf("closed pane w1:p4 kept old log: %q", got)
+	}
+
+	// Transition to StatusGone clears entry.
+	hs.pruneClaudePane("s1", "w1:p1", "claude", herdr.StatusGone, sidA)
+	if got := hs.claudeLogOf("s1", "w1:p1", sidA); got != "" {
+		t.Fatalf("gone pane w1:p1 kept old log: %q", got)
+	}
+
+	// 2. Bounded capacity (256): oldest inactive entries are evicted first,
+	// active panes are preserved, and new panes beyond 256 still get pinned!
+	hs2 := herdrSockets{path: map[string]string{"s1": "/run/h.sock"}}
+	activePane := "w0:p0"
+	hs2.setClaudeLog("s1", activePane, "t0", 1, 1, sidA, log1, t0)
+	// Fill remaining 255 slots with other panes (w1:p1 .. w1:p255).
+	for i := 1; i < maxClaudePaneLogs; i++ {
+		p := fmt.Sprintf("w1:p%d", i)
+		hs2.setClaudeLog("s1", p, fmt.Sprintf("t%d", i), int64(i+1), int64(i+1), sidA, log1, t0)
+	}
+	// Mark activePane as live in the snapshot (the oldest entry, seq=1!), while
+	// leaving w1:p1..w1:p255 out of livePanes (simulate snapshot without them yet,
+	// or set livePanes directly via snapshot keeping activePane + w1:p2..w1:p255).
+	hs2.mu.Lock()
+	hs2.livePanes = map[string]map[string]bool{"s1": {activePane: true}}
+	hs2.mu.Unlock()
+
+	// Insert a 257th pane: MUST NOT be dropped; must evict oldest INACTIVE
+	// pane (w1:p1), while PRESERVING activePane (even though activePane had seq=1)!
+	newPane := "w2:pnew"
+	hs2.setClaudeLog("s1", newPane, "tnew", 999, 999, sidB, log2, t0.Add(time.Second))
+	if got := hs2.claudeLogOf("s1", newPane, sidB); got != log2 {
+		t.Fatalf("new pane beyond 256 lost pinning: got %q, want %q", got, log2)
+	}
+	if got := hs2.claudeLogOf("s1", activePane, sidA); got != log1 {
+		t.Fatalf("active pane was evicted instead of inactive oldest pane: got %q", got)
+	}
+	if got := hs2.claudeLogOf("s1", "w1:p1", sidA); got != "" {
+		t.Fatalf("oldest inactive pane w1:p1 should have been evicted, still got %q", got)
+	}
+	hs2.mu.Lock()
+	n := len(hs2.claudeLogs["s1"])
+	hs2.mu.Unlock()
+	if n != maxClaudePaneLogs {
+		t.Fatalf("cache size = %d, want %d", n, maxClaudePaneLogs)
 	}
 }
 

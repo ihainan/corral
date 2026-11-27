@@ -186,22 +186,72 @@ func claudeConfigDirFromLog(log string) (string, bool) {
 	return cfgDir, true
 }
 
-// claudeCustomConfigDir returns the custom CLAUDE_CONFIG_DIR extracted from
-// log when it differs from the account's default "~/.claude" (checking both
-// logical "<home>/.claude" and its resolved physical target defReal, if any).
-// Returns "" when log is in the default directory or not a valid Claude log.
-func claudeCustomConfigDir(log, home, defReal string) string {
+// claudeForkConfigDir returns the CLAUDE_CONFIG_DIR to pass explicitly when
+// forking a Claude Code session whose source log is at log. Always returns the
+// source directory (preferring its resolved physical path realCfg when valid),
+// including for the default "~/.claude", so an inherited CLAUDE_CONFIG_DIR in
+// the target tmux or herdr environment cannot redirect resume elsewhere.
+func claudeForkConfigDir(log, realCfg string) string {
 	cfgDir, ok := claudeConfigDirFromLog(log)
 	if !ok {
 		return ""
 	}
-	if strings.HasPrefix(home, "/") && cfgDir == path.Clean(home+"/.claude") {
-		return ""
-	}
-	if strings.HasPrefix(defReal, "/") && cfgDir == path.Clean(defReal) {
-		return ""
+	if clean, ok := cleanRemotePath(realCfg); ok {
+		return clean
 	}
 	return cfgDir
+}
+
+// claudeWatchKey builds the background probe key for a Claude session:
+// "<sid>=<confirmedLogPath>" when logPath is a validated absolute Claude log
+// path for sid, or "<sid>" otherwise.
+func claudeWatchKey(sid, logPath string) string {
+	if !convoUUID.MatchString(sid) {
+		return ""
+	}
+	sid = strings.ToLower(sid)
+	if logPath != "" {
+		if clean, ok := validClaudeLogForSID(logPath, sid); ok {
+			return sid + "=" + clean
+		}
+	}
+	return sid
+}
+
+// validClaudeLogForSID checks that logPath is a clean absolute remote Claude
+// session log path "<cfgDir>/projects/<proj>/<sid>.jsonl" matching sid.
+func validClaudeLogForSID(logPath, sid string) (string, bool) {
+	if !convoUUID.MatchString(sid) {
+		return "", false
+	}
+	clean, ok := cleanRemotePath(logPath)
+	if !ok || strings.ContainsAny(clean, "\t\n\r\x01\x00") {
+		return "", false
+	}
+	if _, ok := claudeConfigDirFromLog(clean); !ok {
+		return "", false
+	}
+	if !strings.EqualFold(path.Base(clean), sid+".jsonl") {
+		return "", false
+	}
+	return clean, true
+}
+
+// parseClaudeWatchKey parses and validates "<sid>" or "<sid>=<logPath>".
+func parseClaudeWatchKey(raw string) (key, sid, logPath string, ok bool) {
+	s, lp, hasLog := strings.Cut(raw, "=")
+	if !convoUUID.MatchString(s) {
+		return "", "", "", false
+	}
+	sid = strings.ToLower(s)
+	if !hasLog {
+		return sid, sid, "", true
+	}
+	clean, ok := validClaudeLogForSID(lp, sid)
+	if !ok {
+		return "", "", "", false
+	}
+	return sid + "=" + clean, sid, clean, true
 }
 
 // isOpenCodeProc reports whether a pane.process_info entry looks like OpenCode.

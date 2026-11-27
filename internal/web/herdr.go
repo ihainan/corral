@@ -418,9 +418,26 @@ type herdrSockets struct {
 	server map[string]watchedServer
 	// lineage: terminal session → parent-child lineage tracker for its herdr server.
 	lineage map[string]*lineageTracker
-	// claudeCfg: terminal session → Claude session UUID → confirmed CLAUDE_CONFIG_DIR
-	// (from locate), so background log/subagent probes read that exact directory.
-	claudeCfg map[string]map[string]string
+	// claudeLogs: terminal session → herdr pane → confirmed full Claude log
+	// path (and pane/process identity) from locate, so background log and
+	// subagent probes read that exact file without cross-dir guessing.
+	claudeLogs map[string]map[string]claudePaneLog
+	// livePanes: terminal session → pane IDs present in the latest snapshot,
+	// used to prune closed panes and preserve active panes during eviction.
+	livePanes map[string]map[string]bool
+	claudeSeq uint64
+}
+
+const maxClaudePaneLogs = 256
+
+type claudePaneLog struct {
+	termID string
+	pid    int64
+	start  int64
+	sid    string
+	log    string
+	at     time.Time
+	seq    uint64
 }
 
 type watchedServer struct {
@@ -658,17 +675,34 @@ func (h *herdrSockets) set(id, path string) {
 		delete(h.inView, id)
 		delete(h.server, id)
 		delete(h.lineage, id)
-		delete(h.claudeCfg, id)
+		delete(h.claudeLogs, id)
+		delete(h.livePanes, id)
 	} else {
 		h.path[id] = path
 	}
 }
 
-// setSids keeps the agent session ids of a snapshot's panes.
+// setSids keeps the agent session ids of a snapshot's panes, tracks live panes,
+// and prunes confirmed Claude log entries for panes that closed, changed
+// terminal/agent, exited, or switched session.
 func (h *herdrSockets) setSids(id string, snap *herdr.Snapshot) {
 	m := map[string]string{}
+	live := map[string]bool{}
+	paneAgent := map[string]string{}
+	paneStatus := map[string]string{}
+	paneTerm := map[string]string{}
 	for _, list := range [][]herdr.Pane{snap.Panes, snap.Agents} {
 		for _, p := range list {
+			live[p.ID] = true
+			if p.Agent != "" {
+				paneAgent[p.ID] = p.Agent
+			}
+			if p.AgentStatus != "" {
+				paneStatus[p.ID] = p.AgentStatus
+			}
+			if p.TerminalID != "" {
+				paneTerm[p.ID] = p.TerminalID
+			}
 			if v := agentSession(p); v != "" {
 				m[p.ID] = v
 			}
@@ -683,6 +717,29 @@ func (h *herdrSockets) setSids(id string, snap *herdr.Snapshot) {
 		h.sids = map[string]map[string]string{}
 	}
 	h.sids[id] = m
+	if h.livePanes == nil {
+		h.livePanes = map[string]map[string]bool{}
+	}
+	h.livePanes[id] = live
+	if cl := h.claudeLogs[id]; len(cl) > 0 {
+		for pane, e := range cl {
+			if !live[pane] || paneStatus[pane] == herdr.StatusGone {
+				delete(cl, pane)
+				continue
+			}
+			if ag := paneAgent[pane]; ag != "" && !strings.Contains(strings.ToLower(ag), "claude") {
+				delete(cl, pane)
+				continue
+			}
+			if tid := paneTerm[pane]; e.termID != "" && tid != "" && tid != e.termID {
+				delete(cl, pane)
+				continue
+			}
+			if curSid := m[pane]; curSid != "" && !strings.EqualFold(curSid, e.sid) {
+				delete(cl, pane)
+			}
+		}
+	}
 }
 
 // setView keeps which panes a snapshot says herdr shows: those of its
@@ -737,8 +794,12 @@ func (h *herdrSockets) sid(id, pane string) string {
 	return h.sids[id][pane]
 }
 
-func (h *herdrSockets) setClaudeCfg(id, sid, cfgDir string) {
-	if !convoUUID.MatchString(sid) || cfgDir == "" {
+func (h *herdrSockets) setClaudeLog(id, pane, termID string, pid, start int64, sid, logPath string, at time.Time) {
+	if pane == "" {
+		return
+	}
+	clean, ok := validClaudeLogForSID(logPath, sid)
+	if !ok {
 		return
 	}
 	sid = strings.ToLower(sid)
@@ -747,73 +808,146 @@ func (h *herdrSockets) setClaudeCfg(id, sid, cfgDir string) {
 	if _, ok := h.path[id]; !ok {
 		return
 	}
-	if h.claudeCfg == nil {
-		h.claudeCfg = map[string]map[string]string{}
+	if h.claudeLogs == nil {
+		h.claudeLogs = map[string]map[string]claudePaneLog{}
 	}
-	m := h.claudeCfg[id]
+	m := h.claudeLogs[id]
 	if m == nil {
-		m = map[string]string{}
-		h.claudeCfg[id] = m
+		m = map[string]claudePaneLog{}
+		h.claudeLogs[id] = m
 	}
-	if _, had := m[sid]; !had && len(m) >= 256 {
-		return
+	if was, had := m[pane]; had {
+		if !at.IsZero() && !was.at.IsZero() && at.Before(was.at) {
+			return
+		}
+	} else if len(m) >= maxClaudePaneLogs {
+		// Evict the oldest entry, preferring panes no longer active in the
+		// latest snapshot so active sessions retain their pinned log paths.
+		live := h.livePanes[id]
+		var victim string
+		var victimSeq uint64
+		for k, e := range m {
+			if live != nil && live[k] {
+				continue
+			}
+			if victim == "" || e.seq < victimSeq {
+				victim, victimSeq = k, e.seq
+			}
+		}
+		if victim == "" {
+			for k, e := range m {
+				if victim == "" || e.seq < victimSeq {
+					victim, victimSeq = k, e.seq
+				}
+			}
+		}
+		if victim != "" {
+			delete(m, victim)
+		}
 	}
-	m[sid] = cfgDir
+	h.claudeSeq++
+	m[pane] = claudePaneLog{termID: termID, pid: pid, start: start, sid: sid, log: clean, at: at, seq: h.claudeSeq}
 }
 
-func (h *herdrSockets) claudeCfgOf(id, sid string) string {
+func (h *herdrSockets) clearClaudeLog(id, pane string, at time.Time) {
+	if pane == "" {
+		return
+	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	return h.claudeCfg[id][strings.ToLower(sid)]
-}
-
-func (s *Server) noteClaudeCfgEverywhere(sess *term.Session, sid, log string) {
-	cfgDir, ok := claudeConfigDirFromLog(log)
-	if !ok || !convoUUID.MatchString(sid) {
+	m := h.claudeLogs[id]
+	if m == nil {
 		return
 	}
-	s.herdrSocks.setClaudeCfg(sess.ID, sid, cfgDir)
+	if was, had := m[pane]; had && (at.IsZero() || was.at.IsZero() || !at.Before(was.at)) {
+		delete(m, pane)
+	}
+}
+
+func (h *herdrSockets) pruneClaudePane(id, pane, agent, status, sid string) {
+	if pane == "" {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	m := h.claudeLogs[id]
+	if m == nil {
+		return
+	}
+	e, ok := m[pane]
+	if !ok {
+		return
+	}
+	if status == herdr.StatusGone ||
+		(agent != "" && !strings.Contains(strings.ToLower(agent), "claude")) ||
+		(sid != "" && !strings.EqualFold(sid, e.sid)) {
+		delete(m, pane)
+	}
+}
+
+func (h *herdrSockets) claudeLogOf(id, pane, sid string) string {
+	if pane == "" || !convoUUID.MatchString(sid) {
+		return ""
+	}
+	sid = strings.ToLower(sid)
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	m := h.claudeLogs[id]
+	if m == nil {
+		return ""
+	}
+	e, ok := m[pane]
+	if !ok || e.sid != sid {
+		return ""
+	}
+	h.claudeSeq++
+	e.seq = h.claudeSeq
+	m[pane] = e
+	return e.log
+}
+
+func (s *Server) noteClaudeLogEverywhere(sess *term.Session, pane, termID string, pid, start int64, sid, logPath string, at time.Time) {
+	if pane == "" {
+		return
+	}
+	if _, ok := validClaudeLogForSID(logPath, sid); !ok {
+		return
+	}
+	note := func(id string) {
+		tid := termID
+		if tid == "" {
+			if hp, ok := s.herdrSocks.paneDetail(id, pane); ok {
+				tid = hp.TerminalID
+			}
+		}
+		s.herdrSocks.setClaudeLog(id, pane, tid, pid, start, sid, logPath, at)
+	}
+	note(sess.ID)
 	socket := s.herdrSocks.get(sess.ID)
 	if socket == "" {
 		return
 	}
 	for _, o := range s.terms.Running(sess.OwnerID, sess.HostID) {
 		if o.ID != sess.ID && s.herdrSocks.get(o.ID) == socket {
-			s.herdrSocks.setClaudeCfg(o.ID, sid, cfgDir)
+			note(o.ID)
 		}
 	}
 }
 
-func attachBgClaudeDirs(sids []string, cfgOf func(string) string) []string {
-	if cfgOf == nil {
-		return sids
+func (s *Server) clearClaudeLogEverywhere(sess *term.Session, pane string, at time.Time) {
+	if pane == "" {
+		return
 	}
-	out := make([]string, len(sids))
-	for i, sid := range sids {
-		if d := cfgOf(sid); d != "" {
-			out[i] = sid + "=" + d
-		} else {
-			out[i] = sid
+	s.herdrSocks.clearClaudeLog(sess.ID, pane, at)
+	socket := s.herdrSocks.get(sess.ID)
+	if socket == "" {
+		return
+	}
+	for _, o := range s.terms.Running(sess.OwnerID, sess.HostID) {
+		if o.ID != sess.ID && s.herdrSocks.get(o.ID) == socket {
+			s.herdrSocks.clearClaudeLog(o.ID, pane, at)
 		}
 	}
-	return out
-}
-
-func attachCmdClaudeDirs(watched []string, cfgOf func(string) string) []string {
-	if cfgOf == nil {
-		return watched
-	}
-	out := make([]string, len(watched))
-	for i, w := range watched {
-		if (strings.HasPrefix(w, "w:") || strings.HasPrefix(w, "s:")) && len(w) > 2 {
-			if d := cfgOf(w[2:]); d != "" {
-				out[i] = w + "=" + d
-				continue
-			}
-		}
-		out[i] = w
-	}
-	return out
 }
 
 func (h *herdrSockets) get(id string) string {
@@ -886,13 +1020,13 @@ func (s *Server) watchHerdr(sess *term.Session, h *store.Host) {
 	})
 	s.herdrSocks.setRounds(sess.ID, rounds)
 	bg := newBgProber(func(ctx context.Context, sids []string, tail int) (map[string]bgRecord, error) {
-		sids = attachBgClaudeDirs(sids, func(sid string) string { return s.herdrSocks.claudeCfgOf(sess.ID, sid) })
-		out, err := sshx.Output(ctx, sess.Client(), bgTailCommand(sids, tail), len(sids)*(tail+256))
+		out, err := sshx.Output(ctx, sess.Client(), bgTailCommand(sids, tail), len(sids)*(tail+2048))
 		if err != nil {
 			return nil, err
 		}
 		return parseBgTails(out), nil
 	})
+	bg.setLogOf(func(pane, sid string) string { return s.herdrSocks.claudeLogOf(sess.ID, pane, sid) })
 	s.herdrSocks.setBg(sess.ID, bg)
 	chimes := newChimeCounts()
 	s.herdrSocks.setChimes(sess.ID, chimes)
@@ -900,7 +1034,6 @@ func (s *Server) watchHerdr(sess *term.Session, h *store.Host) {
 	s.herdrSocks.setLineage(sess.ID, lineage)
 	go bg.run(ctx)
 	cmds := newCmdSubProber(func(ctx context.Context, watched []string) (map[string][]bgCmd, map[string][]bgAgent, map[string]map[string]bool, bool, error) {
-		watched = attachCmdClaudeDirs(watched, func(sid string) string { return s.herdrSocks.claudeCfgOf(sess.ID, sid) })
 		out, err := sshx.Output(ctx, sess.Client(), cmdScanCommand(watched...), cmdScanMax)
 		if err != nil {
 			return nil, nil, nil, false, err
@@ -908,6 +1041,7 @@ func (s *Server) watchHerdr(sess *term.Session, h *store.Host) {
 		got, whole := parseCmdScan(string(out))
 		return got, parseBgSubScan(string(out)), parseBgIDs(string(out)), whole, nil
 	})
+	cmds.setLogOf(func(pane, sid string) string { return s.herdrSocks.claudeLogOf(sess.ID, pane, sid) })
 	s.herdrSocks.setCmds(sess.ID, cmds)
 	go cmds.run(ctx)
 	titles := newCodexTitler(func(ctx context.Context) (map[string]string, error) {
@@ -957,23 +1091,30 @@ func (s *Server) watchHerdr(sess *term.Session, h *store.Host) {
 				at = map[string]int64{}
 				found := parseConvoLocate(string(out))
 				began := time.UnixMilli(got)
+				panesSeen := map[string]bool{}
 				for _, p := range found.procs {
 					// (Of this herdr server: another on the host names
 					// its panes as this one does.)
 					if p.herdrSocket != socket || !herdrPane.MatchString(p.herdrPane) {
 						continue
 					}
+					panesSeen[p.herdrPane] = true
 					if (p.agent == "claude" || p.agent == "agy") && convoUUID.MatchString(p.sid) {
 						s.locatedEverywhere(sess, p.herdrPane, p.sid, began)
 					}
 					if p.log != "" {
-						if p.agent == "claude" {
-							s.noteClaudeCfgEverywhere(sess, p.sid, p.log)
-						}
 						lineage.notePaneLog(p.herdrPane, p.agent, p.sid, p.log)
 					}
 					if w := procWrote(p, found.cands); w > at[p.herdrPane] {
 						at[p.herdrPane] = w
+					}
+				}
+				for pane := range panesSeen {
+					picked := pickConvoProc(found.procs, "herdr", pane, socket, "", "", s.herdrSocks.sid(sess.ID, pane))
+					if picked != nil && picked.agent == "claude" && picked.log != "" {
+						s.noteClaudeLogEverywhere(sess, pane, "", picked.pid, picked.start, picked.sid, picked.log, began)
+					} else {
+						s.clearClaudeLogEverywhere(sess, pane, began)
 					}
 				}
 				pctx, pcancel := context.WithTimeout(ctx, 15*time.Second)
@@ -1077,6 +1218,7 @@ func (s *Server) watchHerdr(sess *term.Session, h *store.Host) {
 			}
 			times.changed(tr.Pane.ID, tr.To)
 			rounds.changed(tr.Pane.ID, tr.To, agentSession(tr.Pane))
+			s.herdrSocks.pruneClaudePane(sess.ID, tr.Pane.ID, tr.Pane.Agent, tr.To, agentSession(tr.Pane))
 			r, _ := rounds.current(tr.Pane.ID)
 			sid := s.bgSession(sess, tr.Pane.ID, r.session)
 			bg.consider(tr.Pane.ID, tr.Pane.Agent, tr.To, sid, r.n)

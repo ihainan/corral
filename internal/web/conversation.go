@@ -1548,11 +1548,15 @@ func onlyItsByTime(p *convoProc, c *convoCand, l convoLocated) bool {
 // Codex there started. Then nothing is shown rather than another's. One
 // already found to be this Codex's (its screen showed it) is of it still.
 func (s *Server) daemonLog(p *convoProc, l convoLocated) (took, refused bool) {
+	return s.daemonLogFor("", p, l)
+}
+
+func (s *Server) daemonLogFor(hostKey string, p *convoProc, l convoLocated) (took, refused bool) {
 	if p == nil || p.agent != "codex" || p.log != "" || p.cwd == "" || p.started <= 0 {
 		return false, false
 	}
 	alive := aliveCodex(l)
-	s.convoClaimed.seeAlive(l, alive, l.now())
+	s.convoClaimed.seeAliveOn(hostKey, l, alive, l.now())
 	var best *convoCand
 	var bestSID string
 	resumed := false // (best is the one it was started at: not claimed by this — review fork3-6)
@@ -1605,7 +1609,7 @@ func (s *Server) daemonLog(p *convoProc, l convoLocated) (took, refused bool) {
 		p.log, p.sid = best.log, bestSID
 		return true, refused
 	}
-	if !s.convoClaimed.take(bestSID, p.id(), p.started, alive, l.now(), false) {
+	if !s.convoClaimed.takeOn(hostKey, bestSID, p.id(), p.started, alive, l.now(), false) {
 		return false, true // (there is one, but it is another Codex's)
 	}
 	p.log, p.sid = best.log, bestSID
@@ -1620,12 +1624,36 @@ func (s *Server) daemonLog(p *convoProc, l convoLocated) (took, refused bool) {
 // is forgotten rather than any of it being opened up again — nothing more
 // is taken then.
 type convoClaims struct {
-	mu         sync.Mutex
-	by         map[string]convoClaim
-	in         []string // (in the order they were claimed)
-	full       bool     // it has been full: nothing is taken any more
+	mu    sync.Mutex
+	by    map[string]convoClaim
+	in    []string // (in the order they were claimed)
+	full  bool     // it has been full: nothing is taken any more
+	hosts map[string]*convoHostAlive
+}
+
+// convoHostAlive tracks Codex claim liveness refresh state per remote host
+// and SSH identity so activity on host B never suppresses refreshes on host A.
+type convoHostAlive struct {
 	lastAlive  time.Time
-	refreshing atomic.Bool
+	refreshing bool
+}
+
+// convoClaimHostKey identifies the remote host and SSH account/identity of sess.
+func convoClaimHostKey(sess *term.Session) string {
+	if sess == nil {
+		return ""
+	}
+	user, addr := "", ""
+	if c := sess.Client(); c != nil {
+		user = c.User()
+		if ra := c.RemoteAddr(); ra != nil {
+			addr = ra.String()
+		}
+	}
+	if sess.OwnerID == 0 && sess.HostID == 0 && sess.HostConfig == "" && user == "" && addr == "" {
+		return "sess:" + sess.ID
+	}
+	return strconv.FormatInt(sess.OwnerID, 10) + "\x00" + strconv.FormatInt(sess.HostID, 10) + "\x00" + sess.HostConfig + "\x00" + user + "@" + addr
 }
 
 // convoClaim: the Codex a conversation was found to be of (pid 0: of none
@@ -1633,13 +1661,17 @@ type convoClaims struct {
 // running (by the host's clock).
 type convoClaim struct {
 	pid, start int64
-	seen       int64 // unix milliseconds
-	disputed   bool  // it was of none once, either of two: its screen showed whose
+	seen       int64  // unix milliseconds
+	disputed   bool   // it was of none once, either of two: its screen showed whose
+	host       string // convoClaimHostKey of the host that claimed it
 }
 
 func (c convoClaim) of() procID { return procID{c.pid, c.start} }
 
-const maxConvoClaims = 4096
+const (
+	maxConvoClaims     = 4096
+	maxConvoClaimHosts = 1024
+)
 
 // aliveCodex: the Codexes running now.
 func aliveCodex(l convoLocated) map[procID]bool {
@@ -1677,10 +1709,14 @@ func (c *convoClaims) ownedByAnother(sid string, p procID, alive map[procID]bool
 // of, if there, is seen again (now: the host's clock). Looking and taking
 // are one, so that two readings cannot take the same one.
 func (c *convoClaims) take(sid string, p procID, started int64, alive map[procID]bool, now int64, shown bool) bool {
+	return c.takeOn("", sid, p, started, alive, now, shown)
+}
+
+func (c *convoClaims) takeOn(hostKey, sid string, p procID, started int64, alive map[procID]bool, now int64, shown bool) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	was, ok := c.by[sid]
-	if ok && was.pid != 0 && alive[was.of()] {
+	if ok && was.pid != 0 && alive[was.of()] && (was.host == "" || hostKey == "" || was.host == hostKey) {
 		was.seen = max(was.seen, now) // (a scan read before another may come in after it)
 		c.by[sid] = was
 	}
@@ -1689,6 +1725,9 @@ func (c *convoClaims) take(sid string, p procID, started int64, alive map[procID
 		return false
 	case ok && was.pid != 0 && was.of() == p:
 		was.seen = max(was.seen, now)
+		if was.host == "" && hostKey != "" {
+			was.host = hostKey
+		}
 		c.by[sid] = was
 		return true
 	case ok && was.pid == 0 && !shown:
@@ -1698,7 +1737,7 @@ func (c *convoClaims) take(sid string, p procID, started int64, alive map[procID
 	case ok && was.pid != 0 && started <= was.seen:
 		return false // (it was there beside the one it is of)
 	}
-	return c.set(sid, convoClaim{pid: p.pid, start: p.start, seen: now, disputed: ok && (was.pid == 0 || was.disputed)})
+	return c.set(sid, convoClaim{pid: p.pid, start: p.start, seen: now, disputed: ok && (was.pid == 0 || was.disputed), host: hostKey})
 }
 
 // contested: it could be either of two (and is of none yet, or was once).
@@ -1709,44 +1748,110 @@ func (c *convoClaims) contested(sid string) bool {
 	return ok && (was.pid == 0 || was.disputed)
 }
 
+func (c *convoClaims) hostStateLocked(hostKey string) *convoHostAlive {
+	if c.hosts == nil {
+		c.hosts = map[string]*convoHostAlive{}
+	}
+	st, ok := c.hosts[hostKey]
+	if !ok {
+		if len(c.hosts) >= maxConvoClaimHosts {
+			var oldestKey string
+			var oldestAt time.Time
+			for k, v := range c.hosts {
+				if v.refreshing {
+					continue
+				}
+				if oldestKey == "" || v.lastAlive.Before(oldestAt) {
+					oldestKey, oldestAt = k, v.lastAlive
+				}
+			}
+			if oldestKey != "" {
+				delete(c.hosts, oldestKey)
+			}
+		}
+		st = &convoHostAlive{}
+		c.hosts[hostKey] = st
+	}
+	return st
+}
+
 // seeAlive: the Codexes a conversation the host's daemons hold is of, seen
 // running now (now: the host's clock), whichever is read.
 func (c *convoClaims) seeAlive(l convoLocated, alive map[procID]bool, now int64) {
+	c.seeAliveOn("", l, alive, now)
+}
+
+// seeAliveOn updates liveness for claims belonging to hostKey and records
+// hostKey's lastAlive timestamp. Must only be called for full scans covering
+// hostKey's Codex processes (never OpenCode-only or single-pane fast scans).
+func (c *convoClaims) seeAliveOn(hostKey string, l convoLocated, alive map[procID]bool, now int64) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.lastAlive = time.Now()
+	c.hostStateLocked(hostKey).lastAlive = time.Now()
 	for i := range l.cands {
-		if was, ok := c.by[convoSessionOf(l.cands[i].log)]; ok && was.pid != 0 && alive[was.of()] && was.seen < now {
+		sid := convoSessionOf(l.cands[i].log)
+		if was, ok := c.by[sid]; ok && was.pid != 0 && alive[was.of()] && was.seen < now && (was.host == "" || hostKey == "" || was.host == hostKey) {
 			was.seen = now
-			c.by[convoSessionOf(l.cands[i].log)] = was
+			c.by[sid] = was
 		}
 	}
 }
 
-// needsAliveRefresh reports whether convoClaims holds at least one active
-// Codex claim whose liveness has not been refreshed within ttl.
-func (c *convoClaims) needsAliveRefresh(now time.Time, ttl time.Duration) bool {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+func (c *convoClaims) needsAliveRefreshLocked(hostKey string, now time.Time, ttl time.Duration) bool {
 	has := false
 	for _, cl := range c.by {
-		if cl.pid != 0 {
+		if cl.pid != 0 && (cl.host == hostKey || cl.host == "") {
 			has = true
 			break
 		}
 	}
-	return has && (c.lastAlive.IsZero() || now.Sub(c.lastAlive) >= ttl)
+	if !has {
+		return false
+	}
+	st := c.hosts[hostKey]
+	return st == nil || st.lastAlive.IsZero() || now.Sub(st.lastAlive) >= ttl
 }
 
-// refreshCodexClaims runs a deduplicated background full scan via convoScans
-// so fast-path hits on Claude/Agy panes do not starve convoClaimed.seeAlive
-// for Codexes running elsewhere on the same host.
+// needsAliveRefresh reports whether convoClaims holds at least one active
+// Codex claim for hostKey whose liveness has not been refreshed within ttl.
+func (c *convoClaims) needsAliveRefresh(hostKey string, now time.Time, ttl time.Duration) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.needsAliveRefreshLocked(hostKey, now, ttl)
+}
+
+func (c *convoClaims) beginAliveRefresh(hostKey string, now time.Time, ttl time.Duration) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.needsAliveRefreshLocked(hostKey, now, ttl) {
+		return false
+	}
+	st := c.hostStateLocked(hostKey)
+	if st.refreshing {
+		return false
+	}
+	st.refreshing = true
+	return true
+}
+
+func (c *convoClaims) endAliveRefresh(hostKey string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if st := c.hosts[hostKey]; st != nil {
+		st.refreshing = false
+	}
+}
+
+// refreshCodexClaims runs a per-host deduplicated background full scan via
+// convoScans so fast-path hits on Claude/Agy panes (or OpenCode-only scans) do
+// not starve convoClaimed.seeAliveOn for Codexes running on the same host.
 func (s *Server) refreshCodexClaims(sess *term.Session) {
-	if !s.convoClaimed.refreshing.CompareAndSwap(false, true) {
+	hostKey := convoClaimHostKey(sess)
+	if !s.convoClaimed.beginAliveRefresh(hostKey, time.Now(), convoLocateTTL) {
 		return
 	}
 	go func() {
-		defer s.convoClaimed.refreshing.Store(false)
+		defer s.convoClaimed.endAliveRefresh(hostKey)
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		defer cancel()
 		out, _, _, err := s.convoScans.run(ctx, sess, convoLocateCommand(sess.Persistence, sess.TmuxSession, ""), time.Time{})
@@ -1754,7 +1859,10 @@ func (s *Server) refreshCodexClaims(sess *term.Session) {
 			return
 		}
 		l := parseConvoLocate(string(out))
-		s.convoClaimed.seeAlive(l, aliveCodex(l), l.now())
+		if l.noProc {
+			return
+		}
+		s.convoClaimed.seeAliveOn(hostKey, l, aliveCodex(l), l.now())
 	}()
 }
 
@@ -2647,8 +2755,9 @@ func (s *Server) locateScan(ctx context.Context, sess *term.Session, st *convoSt
 	} else if hasHP && sess.Persistence == "herdr" && pane != "" && socket != "" && isOpenCodeAgent(hp.Agent) {
 		ocOnly = true
 	}
+	hostKey := convoClaimHostKey(sess)
 	if fastHit {
-		if !l.noProc && s.convoClaimed.needsAliveRefresh(time.Now(), convoLocateTTL) {
+		if !l.noProc && s.convoClaimed.needsAliveRefresh(hostKey, time.Now(), convoLocateTTL) {
 			s.refreshCodexClaims(sess)
 		}
 	} else {
@@ -2671,14 +2780,21 @@ func (s *Server) locateScan(ctx context.Context, sess *term.Session, st *convoSt
 		}
 		l = parseConvoLocate(string(out))
 		if ocOnly && !l.noProc && !ocPaneOwn(l.procs, pane, socket) {
+			ocOnly = false
 			if out, at, looked, err = s.convoScans.run(ctx, sess, convoLocateCommand(sess.Persistence, sess.TmuxSession, ""), after); err != nil {
 				return err
 			}
 			l = parseConvoLocate(string(out))
 		}
-		// (The Codexes the daemons' conversations are of, seen running, whatever
-		// the pane runs.)
-		s.convoClaimed.seeAlive(l, aliveCodex(l), l.now())
+		// (Only a full scan covering this host's Codexes may refresh its
+		// Codex claim liveness; OpenCode-only scans skip Codexes.)
+		if ocOnly {
+			if !l.noProc && s.convoClaimed.needsAliveRefresh(hostKey, time.Now(), convoLocateTTL) {
+				s.refreshCodexClaims(sess)
+			}
+		} else if !l.noProc {
+			s.convoClaimed.seeAliveOn(hostKey, l, aliveCodex(l), l.now())
+		}
 	}
 	st.located, st.pane = at, pane // (when the scan was made: one shared may be a little older)
 	sid, log, reason, agent := "", "", "", ""
@@ -2705,7 +2821,7 @@ func (s *Server) locateScan(ctx context.Context, sess *term.Session, st *convoSt
 		}
 		var refused bool
 		held := p != nil && p.agent == "codex" && p.log == "" // (its log, if any, its daemon's)
-		guessed, refused = s.daemonLog(p, l)
+		guessed, refused = s.daemonLogFor(hostKey, p, l)
 		// What the pane shows has the last word on which conversation it
 		// is at: a Codex that has begun another (/new), or resumed one,
 		// shows that one's words, as does one of two Codexes there that
@@ -2734,7 +2850,7 @@ func (s *Server) locateScan(ctx context.Context, sess *term.Session, st *convoSt
 					if sid != "" && sid != st.screenSID {
 						if c := candAt(l, log, p.cwd); c == nil || on < s.screenEnoughFor(p, c, sid, l) {
 							st.screenWeak = true
-						} else if s.convoClaimed.take(sid, p.id(), p.started, aliveCodex(l), l.now(), true) {
+						} else if s.convoClaimed.takeOn(hostKey, sid, p.id(), p.started, aliveCodex(l), l.now(), true) {
 							st.screenLog, st.screenSID = log, sid
 						} else {
 							st.screenNo = true
@@ -2746,7 +2862,7 @@ func (s *Server) locateScan(ctx context.Context, sess *term.Session, st *convoSt
 			if st.screenSID != "" && candAt(l, st.screenLog, p.cwd) == nil {
 				st.screenSID, st.screenLog = "", ""
 			}
-			if st.screenSID != "" && st.screenSID != p.sid && !st.screenNo && !s.convoClaimed.take(st.screenSID, p.id(), p.started, aliveCodex(l), l.now(), true) {
+			if st.screenSID != "" && st.screenSID != p.sid && !st.screenNo && !s.convoClaimed.takeOn(hostKey, st.screenSID, p.id(), p.started, aliveCodex(l), l.now(), true) {
 				st.screenNo = true
 			}
 			switch {
@@ -2833,12 +2949,16 @@ func (s *Server) locateScan(ctx context.Context, sess *term.Session, st *convoSt
 	// alone, it is shown, weak — no word on where keys go.)
 	st.weak = st.guessed && !(st.screenSID != "" && st.screenSID == sid)
 	st.adopt(sid, log, agent, reason)
-	if sess.Persistence == "herdr" && pane != "" && log != "" && !st.sub {
-		if agent == "claude" {
-			s.noteClaudeCfgEverywhere(sess, sid, log)
+	if sess.Persistence == "herdr" && pane != "" && !st.sub {
+		if agent == "claude" && log != "" && st.bind != nil {
+			s.noteClaudeLogEverywhere(sess, pane, st.bind.TerminalID, st.bind.PID, st.bind.Start, sid, log, looked)
+		} else {
+			s.clearClaudeLogEverywhere(sess, pane, looked)
 		}
-		if lt := s.herdrSocks.lineageOf(sess.ID); lt != nil {
-			lt.notePaneLog(pane, agent, sid, log)
+		if log != "" {
+			if lt := s.herdrSocks.lineageOf(sess.ID); lt != nil {
+				lt.notePaneLog(pane, agent, sid, log)
+			}
 		}
 	}
 	return nil

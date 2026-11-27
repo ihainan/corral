@@ -214,22 +214,26 @@ func (s *Server) newAgent(ctx context.Context, w http.ResponseWriter, sess *term
 		}
 	}
 	// The folder: the home's when under ~/, a folder that is there.
-	var sftpHome, defClaudeReal string
+	// When forking a Claude session, always resolve and pass the source log's
+	// physical CLAUDE_CONFIG_DIR (including default ~/.claude) so an inherited
+	// CLAUDE_CONFIG_DIR in the target shell/herdr cannot redirect resume.
+	var claudeCfgDir string
 	err := s.withSFTP(ctx, sess, convoReadLimit, func(c *sftplite.Client) error {
-		if strings.HasPrefix(dir, "~") || (kind == "claude" && src != "") {
+		if strings.HasPrefix(dir, "~") {
 			home, err := c.RealPath(".")
 			if err != nil {
 				return err
 			}
-			sftpHome = home
-			if strings.HasPrefix(dir, "~") {
-				dir = path.Join(home, strings.TrimPrefix(dir, "~"))
-			}
-			if kind == "claude" && src != "" {
-				if rp, rerr := c.RealPath(path.Join(home, ".claude")); rerr == nil {
-					defClaudeReal = rp
+			dir = path.Join(home, strings.TrimPrefix(dir, "~"))
+		}
+		if kind == "claude" && src != "" {
+			realCfg := ""
+			if cfgDir, ok := claudeConfigDirFromLog(src); ok {
+				if rp, rerr := c.RealPath(cfgDir); rerr == nil {
+					realCfg = rp
 				}
 			}
+			claudeCfgDir = claudeForkConfigDir(src, realCfg)
 		}
 		fi, err := c.Stat(dir)
 		if err != nil {
@@ -240,10 +244,6 @@ func (s *Server) newAgent(ctx context.Context, w http.ResponseWriter, sess *term
 		}
 		return nil
 	})
-	claudeCfgDir := ""
-	if kind == "claude" && src != "" {
-		claudeCfgDir = claudeCustomConfigDir(src, sftpHome, defClaudeReal)
-	}
 	if errors.Is(err, fs.ErrNotExist) || errors.Is(err, errNotDir) {
 		writeError(w, http.StatusBadRequest, "bad_folder", "no such folder")
 		return
