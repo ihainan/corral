@@ -326,3 +326,31 @@ type AgentChangedEventData struct {
 	RemovedPIDs []int    `json:"removed_pids,omitempty"`
 	ChangedLogs []string `json:"changed_logs,omitempty"`
 }
+
+// PaneSendParams are the parameters for pane.send, mirroring convoGated's
+// arguments plus a protocol-formatted op_id for epoch-scoped deduplication.
+// Text is base64-encoded in JSON ([]byte) so arbitrary input bytes survive
+// wire framing verbatim.
+type PaneSendParams struct {
+	OpID    string   `json:"op_id"`
+	Mode    string   `json:"mode"`
+	Session string   `json:"session,omitempty"`
+	Pane    string   `json:"pane"`
+	Socket  string   `json:"socket,omitempty"`
+	PID     int64    `json:"pid"`
+	Start   int64    `json:"start"`
+	SID     string   `json:"sid"`
+	LenSpec string   `json:"len_spec"`
+	Keys    []string `json:"keys,omitempty"`
+	Read    int      `json:"read,omitempty"`
+	Gate    string   `json:"gate,omitempty"`
+	Text    []byte   `json:"text,omitempty"`
+}
+
+// PaneSendResult is returned by pane.send.
+// Exit matches convoGated's shell exit codes (0-19) and Out holds the exact
+// stdout bytes (base64-encoded in JSON).
+type PaneSendResult struct {
+	Exit int    `json:"exit"`
+	Out  []byte `json:"out,omitempty"`
+}

@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ihainan/corral/internal/corrald/gw"
 	"github.com/ihainan/corral/internal/sshx"
 	"github.com/ihainan/corral/internal/term"
 )
@@ -246,6 +247,9 @@ func codexModelFlow(do, undo codexIO, model, effort string) (opts []modelOpt, er
 	// has drawn what it did — not a second Escape on a picker it was still
 	// closing, which would land after it — review501.)
 	out := func(e error) ([]modelOpt, error) {
+		if errors.Is(e, gw.ErrUnknownResult) {
+			return nil, e
+		}
 		scr, d, err := undo.look()
 		for i := 0; i < 2 && err == nil && codexPickerOpen(scr); i++ {
 			if undo.press([]string{"esc"}, "", d) != nil {

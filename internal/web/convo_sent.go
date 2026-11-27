@@ -12,6 +12,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/ihainan/corral/internal/corrald/gw"
 	"github.com/ihainan/corral/internal/sshx"
 	"github.com/ihainan/corral/internal/term"
 )
@@ -171,13 +172,28 @@ func (s *Server) sentEnter(w http.ResponseWriter, ctx context.Context, sess *ter
 	// Terminal keypress after verifying the input box: intentionally AwaitSlot: 0
 	// so a busy connection refuses immediately instead of sending Enter after the
 	// user may have edited the input box.
-	t0 := time.Now()
-	_, err = sshx.Exec(ctx, sess.Client(), convoGatedCommand(freeGate, sess.Persistence, sess.TmuxSession, pane, socket, pid, start, sid, 0, enter, sendLines), sendOut,
-		sshx.ExecOptions{Stdin: strings.NewReader(""), Release: held.Done, Interactive: true})
-	s.perfGated("sent_enter", t0, err, sess.HostID)
+	_, err = s.runGated(ctx, sess, gatedReq{
+		Gate:    freeGate,
+		Mode:    sess.Persistence,
+		Session: sess.TmuxSession,
+		Pane:    pane,
+		Socket:  socket,
+		PID:     pid,
+		Start:   start,
+		SID:     sid,
+		Keys:    enter,
+		Read:    sendLines,
+		MaxOut:  sendOut,
+		Release: held.Done,
+		What:    "sent_enter",
+	})
 	var exitErr *sshx.ExitError
 	switch {
 	case err == nil:
+	case errors.Is(err, gw.ErrUnknownResult):
+		*outcome, *reason = "unknown", "corrald_unknown_result"
+		writeCorraldUnknownResult(w)
+		return
 	case errors.Is(err, sshx.ErrBusy):
 		*outcome, *reason = "refused", "ssh_channels_busy" // (nothing pressed)
 		writeSSHChannelsBusy(w)

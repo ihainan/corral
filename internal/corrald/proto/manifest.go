@@ -21,6 +21,7 @@ const (
 	ReadAgentLogsDevin    = "agent-logs:devin"
 	ReadAgentLogsAgy      = "agent-logs:agy"
 	ReadPaneScreenTmux    = "pane-screen:tmux"
+	ReadPaneScreenHerdr   = "pane-screen:herdr"
 
 	// Declared environment variable reads. Only these variables are inspected
 	// from target /proc/<pid>/environ (and /proc/self/environ where needed);
@@ -82,6 +83,7 @@ func DefaultManifest() Manifest {
 			ReadAgentLogsDevin,
 			ReadAgentLogsAgy,
 			ReadPaneScreenTmux,
+			ReadPaneScreenHerdr,
 			ReadEnvClaudeConfigDir,
 			ReadEnvCodexHome,
 			ReadEnvHerdrPaneID,
@@ -121,6 +123,16 @@ func DefaultManifest() Manifest {
 func IsDeclaredRead(category string) bool {
 	for _, r := range DefaultManifest().Reads {
 		if r == category {
+			return true
+		}
+	}
+	return false
+}
+
+// IsDeclaredAction reports whether category is present in DefaultManifest().Actions.
+func IsDeclaredAction(category string) bool {
+	for _, a := range DefaultManifest().Actions {
+		if a == category {
 			return true
 		}
 	}

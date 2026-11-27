@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ihainan/corral/internal/corrald/gw"
 	"github.com/ihainan/corral/internal/sftplite"
 	"github.com/ihainan/corral/internal/sshx"
 	"github.com/ihainan/corral/internal/term"
@@ -555,6 +556,9 @@ func modelLineFlow(io lineIO, log *lineLog, off *int64, want string, greyed ...f
 					return "", lineMaybe, errUnsure
 				}
 			} else if err := io.pressOn(digest, "yes"); err != nil {
+				if errors.Is(err, gw.ErrUnknownResult) {
+					return "", lineMaybe, err
+				}
 				// (Not pressed: the screen is another by now. Its question, if it
 				// still stands, left; what its log says by now, taken.)
 				if leave() {

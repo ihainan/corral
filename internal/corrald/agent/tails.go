@@ -91,6 +91,7 @@ type PathValidator struct {
 	fullBucket     *authBucket
 	opencodeBucket *authBucket
 	treeBuckets    map[string]*authBucket
+	herdrBuckets   map[string]map[string]struct{}
 	xdgDataHome    string
 	selfClaudeDir  string
 }
@@ -107,9 +108,10 @@ func NewPathValidator(home string, uid uint32, _ string) *PathValidator {
 		cleanHome = filepath.Clean(home)
 	}
 	return &PathValidator{
-		home:        cleanHome,
-		uid:         uid,
-		treeBuckets: make(map[string]*authBucket),
+		home:         cleanHome,
+		uid:          uid,
+		treeBuckets:  make(map[string]*authBucket),
+		herdrBuckets: make(map[string]map[string]struct{}),
 	}
 }
 
@@ -190,6 +192,71 @@ func (v *PathValidator) KnownLogs() []string {
 	out := make([]string, 0, len(seen))
 	for p := range seen {
 		out = append(out, p)
+	}
+	return out
+}
+
+// UpdateHerdrSockets records literal herdr Unix socket paths discovered during
+// locate for the given scope ("full", "opencode", "tree:<shell>", or "restored").
+func (v *PathValidator) UpdateHerdrSockets(scope string, sockets []string) {
+	if scope == "" {
+		scope = LocateScopeFull
+	}
+	set := make(map[string]struct{}, len(sockets))
+	for _, s := range sockets {
+		if len(set) >= maxTrackedDirs {
+			break
+		}
+		if !isCleanAbsPath(s) {
+			continue
+		}
+		set[s] = struct{}{}
+	}
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if strings.HasPrefix(scope, "tree:") {
+		if _, exists := v.herdrBuckets[scope]; !exists && len(v.herdrBuckets) >= maxTreeAuthBuckets+3 {
+			for k := range v.herdrBuckets {
+				if strings.HasPrefix(k, "tree:") {
+					delete(v.herdrBuckets, k)
+					break
+				}
+			}
+		}
+	}
+	v.herdrBuckets[scope] = set
+}
+
+// HasHerdrSocket reports whether sock is a clean absolute path that appeared in
+// an active locate bucket's discovered HERDR_SOCKET_PATH set.
+func (v *PathValidator) HasHerdrSocket(sock string) bool {
+	if !isCleanAbsPath(sock) {
+		return false
+	}
+	v.mu.RLock()
+	defer v.mu.RUnlock()
+	for _, set := range v.herdrBuckets {
+		if _, ok := set[sock]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+// KnownHerdrSockets returns a deduplicated snapshot of currently tracked
+// located herdr socket paths across all scopes.
+func (v *PathValidator) KnownHerdrSockets() []string {
+	v.mu.RLock()
+	defer v.mu.RUnlock()
+	seen := make(map[string]struct{})
+	for _, set := range v.herdrBuckets {
+		for s := range set {
+			seen[s] = struct{}{}
+		}
+	}
+	out := make([]string, 0, len(seen))
+	for s := range seen {
+		out = append(out, s)
 	}
 	return out
 }

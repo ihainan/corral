@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ihainan/corral/internal/corrald/gw"
 	"github.com/ihainan/corral/internal/sshx"
 	"github.com/ihainan/corral/internal/term"
 )
@@ -870,17 +871,31 @@ func (s *Server) runAgySlashSwitch(
 	}
 
 	// Send the slash command through the standard afree:<digest> gate.
-	cmd := convoGatedCommand("afree:"+digest, sess.Persistence, sess.TmuxSession, pane, socket, pid, start, sid, len(slashCmd), nil, 0)
-	t0 := time.Now()
-	_, err = sshx.Exec(ctx, sess.Client(), cmd, sendOut, sshx.ExecOptions{Stdin: strings.NewReader(slashCmd), Interactive: true, AwaitSlot: pressSlotWait("model")})
+	perfWhat := "effort"
 	if resModel != "" {
-		s.perfGated("model", t0, err, sess.HostID)
-	} else {
-		s.perfGated("effort", t0, err, sess.HostID)
+		perfWhat = "model"
 	}
+	_, err = s.runGated(ctx, sess, gatedReq{
+		Gate:      "afree:" + digest,
+		Mode:      sess.Persistence,
+		Session:   sess.TmuxSession,
+		Pane:      pane,
+		Socket:    socket,
+		PID:       pid,
+		Start:     start,
+		SID:       sid,
+		Text:      slashCmd,
+		MaxOut:    sendOut,
+		AwaitSlot: pressSlotWait("model"),
+		What:      perfWhat,
+	})
 	var exitErr *sshx.ExitError
 	switch {
 	case err == nil:
+	case errors.Is(err, gw.ErrUnknownResult):
+		*outcome, *reason = "unknown", "corrald_unknown_result"
+		writeCorraldUnknownResult(w)
+		return
 	case errors.Is(err, sshx.ErrBusy):
 		*reason = "ssh_channels_busy"
 		writeSSHChannelsBusy(w)

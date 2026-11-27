@@ -432,9 +432,21 @@ func (s *Server) lineProbeOf(ctx context.Context, sess *term.Session, p *store.S
 			// that pane — the gate's front(), exit 3 where it is not: another
 			// Claude Code started there, the first put aside, shows a box
 			// that is not this line's.)
-			t0 := time.Now()
-			out, err := lineExec(ctx, sess, running, convoGatedCommand("", p.Mode, p.TmuxName, p.Pane, p.Socket, p.PID, p.Start, p.SID, 0, []string{}, pickerLines), nil, 64<<10)
-			s.perfGated("model_line", t0, err, sess.HostID)
+			running.Add(1)
+			out, err := s.runGated(ctx, sess, gatedReq{
+				Mode:    p.Mode,
+				Session: p.TmuxName,
+				Pane:    p.Pane,
+				Socket:  p.Socket,
+				PID:     p.PID,
+				Start:   p.Start,
+				SID:     p.SID,
+				Keys:    []string{},
+				Read:    pickerLines,
+				MaxOut:  64 << 10,
+				Release: running.Done,
+				What:    "model_line",
+			})
 			if err != nil {
 				return false
 			}
@@ -455,9 +467,20 @@ func (s *Server) lineProbeOf(ctx context.Context, sess *term.Session, p *store.S
 			}
 			// (And still that process in front once the screen was read: the
 			// read waits a moment, in which another's box may have come up.)
-			t1 := time.Now()
-			_, err = lineExec(ctx, sess, running, convoGatedCommand("", p.Mode, p.TmuxName, p.Pane, p.Socket, p.PID, p.Start, p.SID, 0, []string{}, 0), nil, 4096)
-			s.perfGated("model_line", t1, err, sess.HostID)
+			running.Add(1)
+			_, err = s.runGated(ctx, sess, gatedReq{
+				Mode:    p.Mode,
+				Session: p.TmuxName,
+				Pane:    p.Pane,
+				Socket:  p.Socket,
+				PID:     p.PID,
+				Start:   p.Start,
+				SID:     p.SID,
+				Keys:    []string{},
+				MaxOut:  4096,
+				Release: running.Done,
+				What:    "model_line",
+			})
 			return err == nil
 		},
 	}
@@ -715,9 +738,21 @@ func (s *Server) convoModelLine(w http.ResponseWriter, ctx context.Context, sess
 				return shown, nil
 			},
 			typed: func(text string) error {
-				t0 := time.Now()
-				_, err := lineExec(ctx, sess, &running, convoGatedCommand("free", mode, sess.TmuxSession, pane, socket, pid, start, sid, len(text), nil, 0), strings.NewReader(text), 4096)
-				s.perfGated("model_line", t0, err, sess.HostID)
+				running.Add(1)
+				_, err := s.runGated(ctx, sess, gatedReq{
+					Gate:    "free",
+					Mode:    mode,
+					Session: sess.TmuxSession,
+					Pane:    pane,
+					Socket:  socket,
+					PID:     pid,
+					Start:   start,
+					SID:     sid,
+					Text:    text,
+					MaxOut:  4096,
+					Release: running.Done,
+					What:    "model_line",
+				})
 				return err
 			},
 			dialog: func() (string, string, error) {
@@ -733,9 +768,21 @@ func (s *Server) convoModelLine(w http.ResponseWriter, ctx context.Context, sess
 				if mode == "herdr" {
 					k = modelKeys[key][0]
 				}
-				t0 := time.Now()
-				_, err := lineExec(ctx, sess, &running, convoGatedCommand("panel:"+digest, mode, sess.TmuxSession, pane, socket, pid, start, sid, 0, []string{k}, 0), nil, 4096)
-				s.perfGated("model_line", t0, err, sess.HostID)
+				running.Add(1)
+				_, err := s.runGated(ctx, sess, gatedReq{
+					Gate:    "panel:" + digest,
+					Mode:    mode,
+					Session: sess.TmuxSession,
+					Pane:    pane,
+					Socket:  socket,
+					PID:     pid,
+					Start:   start,
+					SID:     sid,
+					Keys:    []string{k},
+					MaxOut:  4096,
+					Release: running.Done,
+					What:    "model_line",
+				})
 				return err
 			},
 			logFrom: func(off int64) ([]byte, error) { return s.logFrom(ctx, sess, log, off) },

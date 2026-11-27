@@ -20,13 +20,14 @@ type connWatchState struct {
 	stopCh chan struct{}
 }
 
-// Service wires Locator, PathValidator, Tails, MessageTails, and Watcher into
-// a corrald daemon.Server.
+// Service wires Locator, PathValidator, Tails, MessageTails, Watcher, and
+// PaneSender into a corrald daemon.Server.
 type Service struct {
 	srv     *daemon.Server
 	locator *Locator
 	val     *PathValidator
 	watcher *Watcher
+	sender  *PaneSender
 
 	watchMu    sync.Mutex
 	watchConns map[*daemon.Conn]*connWatchState
@@ -80,11 +81,22 @@ func Register(srv *daemon.Server, opts ServiceOptions) (*Service, error) {
 		}
 	}
 
+	userOnHerdrSockets := locOpts.OnHerdrSockets
+	locOpts.OnHerdrSockets = func(scope string, sockets []string) {
+		val.UpdateHerdrSockets(scope, sockets)
+		if userOnHerdrSockets != nil {
+			userOnHerdrSockets(scope, sockets)
+		}
+	}
+
 	loc, err := NewLocator(locOpts)
 	if err != nil {
 		return nil, err
 	}
 	val.SetEnvDirs(loc.selfClaudeConfigDir(), loc.xdgDataHome())
+
+	herdrExec := NewHerdrExecutor(valUID, loc.rd, val)
+	sender := NewPaneSender(loc, val, loc.tmux, herdrExec)
 
 	watcher := NewWatcher(WatchWatcherOptions{
 		Locator:      loc,
@@ -99,6 +111,7 @@ func Register(srv *daemon.Server, opts ServiceOptions) (*Service, error) {
 		locator:    loc,
 		val:        val,
 		watcher:    watcher,
+		sender:     sender,
 		watchConns: make(map[*daemon.Conn]*connWatchState),
 	}
 
@@ -107,10 +120,13 @@ func Register(srv *daemon.Server, opts ServiceOptions) (*Service, error) {
 	srv.Register(proto.MethodConvoMessageTails, daemon.MethodOptions{}, svc.handleMessageTails)
 	srv.Register(proto.MethodAgentWatch, daemon.MethodOptions{}, svc.handleWatch)
 	srv.Register(proto.MethodAgentUnwatch, daemon.MethodOptions{}, svc.handleUnwatch)
+	srv.Register(proto.MethodPaneSend, daemon.MethodOptions{Mutating: true, Idempotent: true}, svc.handlePaneSend)
 
 	srv.RegisterHealthCheck("locate", svc.healthLocate)
 	srv.RegisterHealthCheck("tails", svc.healthTails)
 	srv.RegisterHealthCheck("watch", svc.healthWatch)
+	srv.RegisterHealthCheck("pane.send", svc.healthPaneSend)
+	srv.RegisterHealthCheck("pane.answer", svc.healthPaneSend)
 	srv.RegisterStateProvider("agent", svc)
 	srv.RegisterCloser(svc.close)
 
@@ -138,6 +154,26 @@ func (s *Service) Validator() *PathValidator { return s.val }
 
 // Watcher returns the service's underlying Watcher.
 func (s *Service) Watcher() *Watcher { return s.watcher }
+
+// Sender returns the service's underlying PaneSender.
+func (s *Service) Sender() *PaneSender { return s.sender }
+
+func (s *Service) handlePaneSend(ctx context.Context, _ *daemon.Conn, raw json.RawMessage) (any, *proto.RPCError) {
+	var p proto.PaneSendParams
+	if len(raw) == 0 {
+		return nil, &proto.RPCError{Code: proto.ErrInvalidParams, Message: "missing params"}
+	}
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return nil, &proto.RPCError{Code: proto.ErrInvalidParams, Message: err.Error()}
+	}
+	if p.Mode != "tmux" && p.Mode != "herdr" {
+		return nil, &proto.RPCError{Code: proto.ErrInvalidParams, Message: "invalid mode"}
+	}
+	if p.Pane == "" {
+		return nil, &proto.RPCError{Code: proto.ErrInvalidParams, Message: "missing pane"}
+	}
+	return s.sender.Send(ctx, p), nil
+}
 
 func (s *Service) handleLocate(ctx context.Context, _ *daemon.Conn, raw json.RawMessage) (any, *proto.RPCError) {
 	var p proto.AgentLocateParams
@@ -334,15 +370,24 @@ func (s *Service) healthWatch(_ context.Context) string {
 	return s.watcher.Health()
 }
 
-type agentSnapshot struct {
-	KnownLogs []string `json:"known_logs,omitempty"`
+func (s *Service) healthPaneSend(_ context.Context) string {
+	if !s.locator.rd.isReadableFile(proto.ReadProc, filepath.Join(s.locator.procRoot, "self", "stat")) {
+		return "noproc"
+	}
+	return "ok"
 }
 
-// Snapshot implements daemon.StateProvider so known located log paths survive
-// hot-update handoff cleanly.
+type agentSnapshot struct {
+	KnownLogs         []string `json:"known_logs,omitempty"`
+	KnownHerdrSockets []string `json:"known_herdr_sockets,omitempty"`
+}
+
+// Snapshot implements daemon.StateProvider so known located log paths and herdr
+// sockets survive hot-update handoff cleanly.
 func (s *Service) Snapshot() (json.RawMessage, error) {
 	return json.Marshal(agentSnapshot{
-		KnownLogs: s.val.KnownLogs(),
+		KnownLogs:         s.val.KnownLogs(),
+		KnownHerdrSockets: s.val.KnownHerdrSockets(),
 	})
 }
 
@@ -362,5 +407,14 @@ func (s *Service) Restore(data json.RawMessage) error {
 		}
 	}
 	s.val.UpdateDiscovered(LocateScopeFull, clean, nil, nil)
+	var cleanSocks []string
+	for _, sock := range snap.KnownHerdrSockets {
+		if isCleanAbsPath(sock) && !strings.ContainsAny(sock, "\x00\n") {
+			cleanSocks = append(cleanSocks, sock)
+		}
+	}
+	if len(cleanSocks) > 0 {
+		s.val.UpdateHerdrSockets("restored", cleanSocks)
+	}
 	return nil
 }

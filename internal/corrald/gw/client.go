@@ -452,3 +452,15 @@ func (c *Client) MessageTails(ctx context.Context, logs []string) ([]byte, error
 	}
 	return res.Out, nil
 }
+
+// PaneSend invokes the mutating, op_id-idempotent pane.send RPC on corrald.
+// If the connection fails or times out after the request write begins,
+// ErrUnknownResult is returned so the caller returns 409 corrald_unknown_result
+// and never falls back to SSH.
+func (c *Client) PaneSend(ctx context.Context, params proto.PaneSendParams) (*proto.PaneSendResult, error) {
+	var res proto.PaneSendResult
+	if err := c.CallMutating(ctx, proto.MethodPaneSend, params, &res); err != nil {
+		return nil, err
+	}
+	return &res, nil
+}

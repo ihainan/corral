@@ -12,6 +12,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/ihainan/corral/internal/corrald/gw"
 	"github.com/ihainan/corral/internal/sshx"
 	"github.com/ihainan/corral/internal/term"
 )
@@ -490,15 +491,28 @@ func (s *Server) cardPress(w http.ResponseWriter, ctx context.Context, sess *ter
 	held.Add(1)
 	// Terminal keypress after verifying the card on screen: intentionally AwaitSlot: 0
 	// so a busy connection refuses immediately rather than queuing a keystroke.
-	t0 := time.Now()
-	_, err = sshx.Exec(ctx, sess.Client(), convoGatedCommand("card:"+c.digest, sess.Persistence, sess.TmuxSession, pane, socket, pid, start, sid, 0, replyPress(sess.Persistence, []string{key}), 0), sendOut,
-		sshx.ExecOptions{Stdin: strings.NewReader(""), Release: held.Done, Interactive: true})
-	s.perfGated("card", t0, err, sess.HostID)
+	_, err = s.runGated(ctx, sess, gatedReq{
+		Gate:    "card:" + c.digest,
+		Mode:    sess.Persistence,
+		Session: sess.TmuxSession,
+		Pane:    pane,
+		Socket:  socket,
+		PID:     pid,
+		Start:   start,
+		SID:     sid,
+		Keys:    replyPress(sess.Persistence, []string{key}),
+		MaxOut:  sendOut,
+		Release: held.Done,
+		What:    "card",
+	})
 	var exitErr *sshx.ExitError
 	switch {
 	case err == nil:
 		*outcome = "pressed"
 		writeJSON(w, http.StatusOK, map[string]any{"pressed": true})
+	case errors.Is(err, gw.ErrUnknownResult):
+		*outcome, *reason = "unknown", "corrald_unknown_result"
+		writeCorraldUnknownResult(w)
 	case errors.Is(err, sshx.ErrBusy):
 		unmark()
 		*outcome, *reason = "refused", "ssh_channels_busy"

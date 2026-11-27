@@ -33,6 +33,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/ihainan/corral/internal/convo"
+	"github.com/ihainan/corral/internal/corrald/gw"
 	"github.com/ihainan/corral/internal/corrald/proto"
 	"github.com/ihainan/corral/internal/sftplite"
 	"github.com/ihainan/corral/internal/sshx"
@@ -5574,41 +5575,76 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 			prevDone()
 		}
 	}
-	cmd := convoGatedCommand(gate, sess.Persistence, sess.TmuxSession, b.Pane, socket, b.PID, b.Start, b.Session, len(text), press, modeLines(what))
+	lenSpec := strconv.Itoa(len(text))
+	if press != nil {
+		lenSpec = "keys"
+	}
 	if what == "send" && front.agent == "claude" && !inBox && hasPicturePath(text) {
-		cmd = convoGatedPicCommand(gate, sess.Persistence, sess.TmuxSession, b.Pane, socket, b.PID, b.Start, b.Session, len(text), modeLines(what))
+		lenSpec = strconv.Itoa(len(text)) + "@"
+		press = nil
 	}
 	if what == "reply" && b.Fill {
-		cmd = convoGatedFillCommand(gate, sess.Persistence, sess.TmuxSession, b.Pane, socket, b.PID, b.Start, b.Session, len(text), modeLines(what))
+		lenSpec = strconv.Itoa(len(text)) + "-"
+		press = nil
 	}
 	if what == "send" && front.agent == "agy" && b.Immediate {
 		// (Antigravity CLI 1.4.0+: Alt+M submits using the opposite of Queued
 		// Messages — Send Immediately while in default Queue mode.)
-		cmd = convoGatedImmediateCommand(gate, sess.Persistence, sess.TmuxSession, b.Pane, socket, b.PID, b.Start, b.Session, len(text), modeLines(what))
+		lenSpec = strconv.Itoa(len(text)) + "!"
+		press = nil
 	}
 	if what == "send" && front.agent == "codex" {
 		// (Its pictures' paths each pasted on its own: Codex takes them for pictures — plans/4-codex-images.md.)
 		parts := codexPasteParts(text)
 		if parts != nil {
-			cmd = convoGatedPasteCommand(gate, sess.Persistence, sess.TmuxSession, b.Pane, socket, b.PID, b.Start, b.Session, parts, modeLines(what))
+			ns := make([]string, len(parts))
+			for i, x := range parts {
+				ns[i] = strconv.Itoa(x)
+			}
+			lenSpec = strings.Join(ns, "+")
+			press = nil
 		}
 		if b.Queue {
 			// (Queued after its turn: Tab, not Enter — Enter while it works goes into it.)
-			cmd = convoGatedQueueCommand(gate, sess.Persistence, sess.TmuxSession, b.Pane, socket, b.PID, b.Start, b.Session, len(text), parts, modeLines(what))
+			base := strconv.Itoa(len(text))
+			if parts != nil {
+				base = lenSpec
+			}
+			lenSpec = base + "~"
+			press = nil
 		}
 	}
 	in := text
 	if inBox {
 		in = "" // (Enter only: nothing pasted)
 	}
-	tGated := time.Now()
-	res, err := sshx.Exec(ctx, sess.Client(), cmd, sendOut,
-		sshx.ExecOptions{Stdin: strings.NewReader(in), Release: done, Interactive: true, AwaitSlot: pressSlotWait(what)})
-	s.perfGated(what, tGated, err, sess.HostID)
+	outBytes, err := s.runGated(ctx, sess, gatedReq{
+		Gate:      gate,
+		Mode:      sess.Persistence,
+		Session:   sess.TmuxSession,
+		Pane:      b.Pane,
+		Socket:    socket,
+		PID:       b.PID,
+		Start:     b.Start,
+		SID:       b.Session,
+		LenSpec:   lenSpec,
+		Keys:      press,
+		Read:      modeLines(what),
+		Text:      in,
+		MaxOut:    sendOut,
+		Release:   done,
+		AwaitSlot: pressSlotWait(what),
+		What:      what,
+	})
 	var exitErr *sshx.ExitError
 	switch {
 	case err == nil:
 		outcome = "typed"
+	case errors.Is(err, gw.ErrUnknownResult):
+		outcome = "unknown"
+		reason = "corrald_unknown_result"
+		writeCorraldUnknownResult(w)
+		return
 	case errors.Is(err, sshx.ErrBusy):
 		reason = "ssh_channels_busy" // (not started: nothing was typed)
 	case errors.As(err, &exitErr) && exitErr.Status == 3:
@@ -5677,7 +5713,7 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 	}
 	switch {
 	case outcome == "typed" && what == "mode":
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "mode": screenMode(string(res.Out))})
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "mode": screenMode(string(outBytes))})
 	case outcome == "typed" && what == "panel":
 		// (The screen the key left, in the same answer: a far-off host's round trip
 		// again for it would be most of what a key takes, and the panel's turn is

@@ -30,6 +30,7 @@ func TestManifestReadsSyncWithAgentCode(t *testing.T) {
 		t.Fatalf("parse manifest.go: %v", err)
 	}
 	readConstVal := map[string]string{}
+	actionConstVal := map[string]string{}
 	for _, decl := range manifestFile.Decls {
 		gd, ok := decl.(*ast.GenDecl)
 		if !ok || gd.Tok != token.CONST {
@@ -41,7 +42,12 @@ func TestManifestReadsSyncWithAgentCode(t *testing.T) {
 				continue
 			}
 			for i, name := range vs.Names {
-				if !strings.HasPrefix(name.Name, "Read") || i >= len(vs.Values) {
+				if i >= len(vs.Values) {
+					continue
+				}
+				isRead := strings.HasPrefix(name.Name, "Read")
+				isAction := strings.HasPrefix(name.Name, "Action")
+				if !isRead && !isAction {
 					continue
 				}
 				bl, ok := vs.Values[i].(*ast.BasicLit)
@@ -52,12 +58,19 @@ func TestManifestReadsSyncWithAgentCode(t *testing.T) {
 				if err != nil {
 					t.Fatalf("unquote %s: %v", name.Name, err)
 				}
-				readConstVal[name.Name] = val
+				if isRead {
+					readConstVal[name.Name] = val
+				} else {
+					actionConstVal[name.Name] = val
+				}
 			}
 		}
 	}
 	if len(readConstVal) == 0 {
 		t.Fatal("no Read* constants found in manifest.go")
+	}
+	if len(actionConstVal) == 0 {
+		t.Fatal("no Action* constants found in manifest.go")
 	}
 
 	// Scan production Go files in internal/corrald/agent.
@@ -71,6 +84,7 @@ func TestManifestReadsSyncWithAgentCode(t *testing.T) {
 	}
 
 	usedValues := map[string]bool{}
+	usedActions := map[string]bool{}
 	rawReadExempt := map[string]bool{
 		"capread.go":   true,
 		"tmux_exec.go": true,
@@ -102,12 +116,21 @@ func TestManifestReadsSyncWithAgentCode(t *testing.T) {
 		ast.Inspect(f, func(n ast.Node) bool {
 			switch node := n.(type) {
 			case *ast.SelectorExpr:
-				if id, ok := node.X.(*ast.Ident); ok && id.Name == "proto" && strings.HasPrefix(node.Sel.Name, "Read") {
-					val, ok := readConstVal[node.Sel.Name]
-					if !ok {
-						t.Errorf("%s references unknown proto constant proto.%s", e.Name(), node.Sel.Name)
-					} else {
-						usedValues[val] = true
+				if id, ok := node.X.(*ast.Ident); ok && id.Name == "proto" {
+					if strings.HasPrefix(node.Sel.Name, "Read") {
+						val, ok := readConstVal[node.Sel.Name]
+						if !ok {
+							t.Errorf("%s references unknown proto constant proto.%s", e.Name(), node.Sel.Name)
+						} else {
+							usedValues[val] = true
+						}
+					} else if strings.HasPrefix(node.Sel.Name, "Action") {
+						val, ok := actionConstVal[node.Sel.Name]
+						if !ok {
+							t.Errorf("%s references unknown proto constant proto.%s", e.Name(), node.Sel.Name)
+						} else {
+							usedActions[val] = true
+						}
 					}
 				}
 			case *ast.CallExpr:
@@ -165,5 +188,34 @@ func TestManifestReadsSyncWithAgentCode(t *testing.T) {
 	sort.Strings(unused)
 	if len(unused) > 0 {
 		t.Errorf("capabilities declared in DefaultManifest().Reads but unused in internal/corrald/agent: %v", unused)
+	}
+
+	// Verify DefaultManifest().Actions stays in sync with proto.Action* usage.
+	declaredActions := map[string]bool{}
+	for _, a := range manifest.Actions {
+		if declaredActions[a] {
+			t.Errorf("duplicate action capability in DefaultManifest().Actions: %q", a)
+		}
+		declaredActions[a] = true
+	}
+	var undeclaredActions []string
+	for u := range usedActions {
+		if !declaredActions[u] {
+			undeclaredActions = append(undeclaredActions, u)
+		}
+	}
+	sort.Strings(undeclaredActions)
+	if len(undeclaredActions) > 0 {
+		t.Errorf("action capabilities used in internal/corrald/agent but missing from DefaultManifest().Actions: %v", undeclaredActions)
+	}
+	var unusedActions []string
+	for d := range declaredActions {
+		if !usedActions[d] {
+			unusedActions = append(unusedActions, d)
+		}
+	}
+	sort.Strings(unusedActions)
+	if len(unusedActions) > 0 {
+		t.Errorf("action capabilities declared in DefaultManifest().Actions but unused in internal/corrald/agent: %v", unusedActions)
 	}
 }

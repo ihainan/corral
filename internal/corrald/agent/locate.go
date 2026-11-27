@@ -38,6 +38,7 @@ type LocatorOptions struct {
 	XDGDataHome     *string // override for /proc/self/environ XDG_DATA_HOME
 	Now             func() time.Time
 	OnDiscovered    func(scope string, logs []string, claudeCfgDirs []string, codexHomes []string)
+	OnHerdrSockets  func(scope string, sockets []string)
 }
 
 // Locator implements the host-side agent discovery logic matching Corral's
@@ -54,6 +55,7 @@ type Locator struct {
 	xdgDataHomeOverride     *string
 	nowFn                   func() time.Time
 	onDiscovered            func(scope string, logs []string, claudeCfgDirs []string, codexHomes []string)
+	onHerdrSockets          func(scope string, sockets []string)
 }
 
 // NewLocator creates a Locator with the supplied options.
@@ -93,6 +95,7 @@ func NewLocator(opts LocatorOptions) (*Locator, error) {
 		xdgDataHomeOverride:     opts.XDGDataHome,
 		nowFn:                   nowFn,
 		onDiscovered:            opts.OnDiscovered,
+		onHerdrSockets:          opts.OnHerdrSockets,
 	}, nil
 }
 
@@ -122,7 +125,9 @@ func (l *Locator) LocateWith(ctx context.Context, mode, tmuxName, tmuxPane, time
 	var discoveredLogs []string
 	var discoveredClaudeDirs []string
 	var discoveredCodexHomes []string
+	var discoveredHerdrSockets []string
 	seenLogs := map[string]struct{}{}
+	seenHerdrSockets := map[string]struct{}{}
 	recordLog := func(p string) {
 		if p == "" {
 			return
@@ -130,6 +135,15 @@ func (l *Locator) LocateWith(ctx context.Context, mode, tmuxName, tmuxPane, time
 		if _, dup := seenLogs[p]; !dup {
 			seenLogs[p] = struct{}{}
 			discoveredLogs = append(discoveredLogs, p)
+		}
+	}
+	recordHerdrSocket := func(s string) {
+		if s == "" || strings.ContainsRune(s, '\x01') {
+			return
+		}
+		if _, dup := seenHerdrSockets[s]; !dup {
+			seenHerdrSockets[s] = struct{}{}
+			discoveredHerdrSockets = append(discoveredHerdrSockets, s)
 		}
 	}
 
@@ -170,6 +184,11 @@ func (l *Locator) LocateWith(ctx context.Context, mode, tmuxName, tmuxPane, time
 
 	emitRec := func(pid, start, fg, procStart, sid, logPath, agentKind, via string) {
 		env := l.readRecEnv(pid)
+		for _, line := range strings.Split(env, "\n") {
+			if val, ok := strings.CutPrefix(line, "HERDR_SOCKET_PATH="); ok && val != "" {
+				recordHerdrSocket(val)
+			}
+		}
 		tty := l.linkOf(filepath.Join(l.procRoot, pid, "fd", "0"), 200)
 		anc := l.buildAncestors(pid)
 		cwd := l.linkOf(filepath.Join(l.procRoot, pid, "cwd"), 1024)
@@ -538,9 +557,14 @@ func (l *Locator) LocateWith(ctx context.Context, mode, tmuxName, tmuxPane, time
 		emitRec(pid, st.start, st.fg, st.start, sid, logPath, "devin", "")
 	}
 
-	if l.onDiscovered != nil {
+	if l.onDiscovered != nil || l.onHerdrSockets != nil {
 		if scope, ok := locateScopeForOnly(only); ok {
-			l.onDiscovered(scope, discoveredLogs, discoveredClaudeDirs, discoveredCodexHomes)
+			if l.onDiscovered != nil {
+				l.onDiscovered(scope, discoveredLogs, discoveredClaudeDirs, discoveredCodexHomes)
+			}
+			if l.onHerdrSockets != nil {
+				l.onHerdrSockets(scope, discoveredHerdrSockets)
+			}
 		}
 	}
 	return out.Bytes()

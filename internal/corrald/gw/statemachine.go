@@ -564,11 +564,15 @@ func CapAllowedByScope(consented, running proto.Manifest, capName string) bool {
 				return false
 			}
 		case "pane.send", proto.ActionPaneInput:
-			if item == "actions:"+proto.ActionPaneInput {
+			if item == "actions:"+proto.ActionPaneInput ||
+				strings.HasPrefix(item, "reads:pane-screen:") ||
+				item == "reads:"+proto.ReadProc {
 				return false
 			}
 		case "pane.answer", proto.ActionAnswerCard:
-			if item == "actions:"+proto.ActionAnswerCard {
+			if item == "actions:"+proto.ActionAnswerCard ||
+				strings.HasPrefix(item, "reads:pane-screen:") ||
+				item == "reads:"+proto.ReadProc {
 				return false
 			}
 		}

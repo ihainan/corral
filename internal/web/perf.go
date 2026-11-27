@@ -8,6 +8,7 @@ import (
 
 	"golang.org/x/crypto/ssh"
 
+	"github.com/ihainan/corral/internal/corrald/gw"
 	"github.com/ihainan/corral/internal/perf"
 	"github.com/ihainan/corral/internal/sshx"
 )
@@ -36,10 +37,14 @@ func (s *Server) perfObserve(op string, start time.Time, outcome string, hostID 
 }
 
 func (s *Server) perfGated(what string, start time.Time, err error, hostID int64) {
+	s.perfGatedVia(what, "ssh", start, err, hostID)
+}
+
+func (s *Server) perfGatedVia(what, via string, start time.Time, err error, hostID int64) {
 	if s == nil || s.perf == nil {
 		return
 	}
-	s.perf.Observe("gated."+what, time.Since(start), gatedOutcome(err, what), hostID, "")
+	s.perf.Observe("gated."+what, time.Since(start), gatedOutcome(err, what), hostID, via)
 }
 
 func (s *Server) perfLocate(op string, start time.Time, err error, procs int, hostID int64) {
@@ -72,6 +77,9 @@ func gatedOutcome(err error, what string) string {
 	}
 	if errors.Is(err, sshx.ErrBusy) {
 		return "channel_busy"
+	}
+	if errors.Is(err, gw.ErrUnknownResult) {
+		return "corrald_unknown_result"
 	}
 	var exitErr *sshx.ExitError
 	if errors.As(err, &exitErr) {

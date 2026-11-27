@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ihainan/corral/internal/corrald/gw"
 	"github.com/ihainan/corral/internal/sshx"
 	"github.com/ihainan/corral/internal/term"
 )
@@ -144,14 +145,29 @@ func (s *Server) convoModeTo(w http.ResponseWriter, ctx context.Context, sess *t
 		// (Not while it waits: Shift+Tab is a question's then. Exit 9.)
 		// Terminal keypress after checking screen mode: intentionally AwaitSlot: 0
 		// so a busy connection refuses immediately rather than pressing against a stale screen.
-		t0 := time.Now()
-		res, err := sshx.Exec(ctx, sess.Client(), convoGatedCommand(gate, sess.Persistence, sess.TmuxSession, pane, socket, pid, start, sid, 0, press, convoModeLines), 16<<10,
-			sshx.ExecOptions{Stdin: strings.NewReader(""), Release: ended.Done, Interactive: true})
-		s.perfGated("mode", t0, err, sess.HostID)
+		outBytes, err := s.runGated(ctx, sess, gatedReq{
+			Gate:    gate,
+			Mode:    sess.Persistence,
+			Session: sess.TmuxSession,
+			Pane:    pane,
+			Socket:  socket,
+			PID:     pid,
+			Start:   start,
+			SID:     sid,
+			Keys:    press,
+			Read:    convoModeLines,
+			MaxOut:  16 << 10,
+			Release: ended.Done,
+			What:    "mode",
+		})
 		var exitErr *sshx.ExitError
 		switch {
 		case err == nil:
 			*outcome = "typed"
+		case errors.Is(err, gw.ErrUnknownResult):
+			*outcome, *reason = "unknown", "corrald_unknown_result"
+			writeCorraldUnknownResult(w)
+			return
 		case i > 0:
 			// (Some pressed already: where it is now is not known.)
 			*outcome, *reason = "unknown", "stopped"
@@ -189,7 +205,7 @@ func (s *Server) convoModeTo(w http.ResponseWriter, ctx context.Context, sess *t
 			writeError(w, http.StatusBadGateway, "unknown", "it is not known whether the key arrived")
 			return
 		}
-		now = modeOnScreenOf(agent, string(res.Out))
+		now = modeOnScreenOf(agent, string(outBytes))
 		// (A Codex's: one press goes to its other mode, its footer drawn a while
 		// after — longer in 0.169 —: read again for it before taking it for
 		// missing, or pressing again, back where it began.)

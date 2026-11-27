@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ihainan/corral/internal/corrald/gw"
 	"github.com/ihainan/corral/internal/sshx"
 	"github.com/ihainan/corral/internal/term"
 )
@@ -141,6 +142,9 @@ func effortFlow(step, leave modelStep, target string, greyed ...func() string) (
 		return "", errNoEffort
 	}
 	out := func(e error) (string, error) {
+		if errors.Is(e, gw.ErrUnknownResult) {
+			return "", e
+		}
 		for i := 0; i < 2; i++ {
 			if scr, err := leave([]string{"esc"}, "", effortLines); err != nil || !effortShows(scr) {
 				break
@@ -250,14 +254,26 @@ func (s *Server) convoEffort(w http.ResponseWriter, ctx context.Context, sess *t
 		running.Add(1)
 		// Terminal keypress in the effort picker: intentionally AwaitSlot: 0 so a
 		// busy connection refuses immediately rather than pressing against a stale picker state.
-		t0 := time.Now()
-		res, err := sshx.Exec(ctx, sess.Client(), convoGatedCommand(gate, sess.Persistence, sess.TmuxSession, pane, socket, pid, start, sid, len(text), press, read), 64<<10,
-			sshx.ExecOptions{Stdin: strings.NewReader(text), Release: running.Done, Interactive: true})
-		s.perfGated("effort", t0, err, sess.HostID)
+		outBytes, err := s.runGated(ctx, sess, gatedReq{
+			Gate:    gate,
+			Mode:    sess.Persistence,
+			Session: sess.TmuxSession,
+			Pane:    pane,
+			Socket:  socket,
+			PID:     pid,
+			Start:   start,
+			SID:     sid,
+			Keys:    press,
+			Read:    read,
+			Text:    text,
+			MaxOut:  64 << 10,
+			Release: running.Done,
+			What:    "effort",
+		})
 		if err == nil && (len(press) > 0 || text != "") {
 			typed = true
 		}
-		return string(res.Out), err
+		return string(outBytes), err
 	}
 	step := func(keys []string, text string, read int) (string, error) { return run(ctx, keys, text, read) }
 	// (Leaving the slider after a failure: once a step given up has ended,
@@ -274,6 +290,9 @@ func (s *Server) convoEffort(w http.ResponseWriter, ctx context.Context, sess *t
 	case err == nil:
 		*outcome = "typed"
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "effort": took})
+	case errors.Is(err, gw.ErrUnknownResult):
+		*outcome, *reason = "unknown", "corrald_unknown_result"
+		writeCorraldUnknownResult(w)
 	case errors.Is(err, sshx.ErrBusy):
 		*outcome, *reason = "refused", "ssh_channels_busy"
 		writeSSHChannelsBusy(w)

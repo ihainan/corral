@@ -8,18 +8,15 @@
 package herdr
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net"
-	"strconv"
-	"sync/atomic"
 	"time"
 
 	"golang.org/x/crypto/ssh"
 
+	"github.com/ihainan/corral/internal/herdr/wire"
 	"github.com/ihainan/corral/internal/sshx"
 )
 
@@ -142,9 +139,7 @@ const (
 // an error, so callers open short-lived clients for requests and a dedicated one
 // for the event stream.
 type Client struct {
-	conn net.Conn
-	r    *bufio.Reader
-	seq  atomic.Int64
+	w *wire.Conn
 }
 
 // dialTimeout bounds opening the socket channel.
@@ -177,53 +172,17 @@ func dial(ctx context.Context, c *ssh.Client, socketPath string, opt sshx.DialOp
 	if err != nil {
 		return nil, fmt.Errorf("cannot reach herdr socket: %w", err)
 	}
-	return &Client{conn: conn, r: bufio.NewReaderSize(conn, 64<<10)}, nil
+	return &Client{w: wire.NewConn(conn)}, nil
 }
 
-func (c *Client) Close() error { return c.conn.Close() }
-
-type request struct {
-	ID     string `json:"id"`
-	Method string `json:"method"`
-	Params any    `json:"params"`
-}
-
-type response struct {
-	ID     string          `json:"id"`
-	Result json.RawMessage `json:"result"`
-	Error  *struct {
-		Code    string `json:"code"`
-		Message string `json:"message"`
-	} `json:"error"`
-}
+func (c *Client) Close() error { return c.w.Close() }
 
 // APIError is an error reported by herdr itself (for example an unknown method
 // on an older herdr), as opposed to a transport failure.
-type APIError struct{ Code, Message string }
-
-func (e *APIError) Error() string { return "herdr: " + e.Code + ": " + e.Message }
-
-const maxLine = 4 << 20
+type APIError = wire.APIError
 
 // callTimeout bounds one request/response exchange.
-var callTimeout = 10 * time.Second
-
-func (c *Client) readLine() ([]byte, error) {
-	var buf []byte
-	for {
-		chunk, isPrefix, err := c.r.ReadLine()
-		if err != nil {
-			return nil, err
-		}
-		buf = append(buf, chunk...)
-		if len(buf) > maxLine {
-			return nil, errors.New("herdr: response too large")
-		}
-		if !isPrefix {
-			return buf, nil
-		}
-	}
-}
+var callTimeout = wire.DefaultCallTimeout
 
 // Call sends one request and waits for its response, for at most
 // callTimeout or until ctx ends. SSH channels have no deadlines, so giving up
@@ -235,49 +194,7 @@ func (c *Client) Call(ctx context.Context, method string, params any, out any) e
 // CallWithin is Call with its own bound on the exchange (one that waits on
 // herdr itself, an agent starting, is longer).
 func (c *Client) CallWithin(ctx context.Context, within time.Duration, method string, params any, out any) error {
-	if params == nil {
-		params = struct{}{}
-	}
-	id := strconv.FormatInt(c.seq.Add(1), 10)
-	b, err := json.Marshal(request{ID: id, Method: method, Params: params})
-	if err != nil {
-		return err
-	}
-	ctx, cancel := context.WithTimeout(ctx, within)
-	defer cancel()
-	stop := context.AfterFunc(ctx, func() { c.conn.Close() })
-	defer stop()
-	err = c.exchange(id, b, out)
-	if err != nil && ctx.Err() != nil {
-		return fmt.Errorf("herdr: %s: %w", method, ctx.Err())
-	}
-	return err
-}
-
-func (c *Client) exchange(id string, req []byte, out any) error {
-	if _, err := c.conn.Write(append(req, '\n')); err != nil {
-		return err
-	}
-	for {
-		line, err := c.readLine()
-		if err != nil {
-			return err
-		}
-		var r response
-		if err := json.Unmarshal(line, &r); err != nil {
-			return fmt.Errorf("herdr: bad response: %w", err)
-		}
-		if r.ID != id {
-			continue // an event or a stale reply
-		}
-		if r.Error != nil {
-			return &APIError{Code: r.Error.Code, Message: r.Error.Message}
-		}
-		if out != nil {
-			return json.Unmarshal(r.Result, out)
-		}
-		return nil
-	}
+	return c.w.CallWithin(ctx, within, method, params, out)
 }
 
 func (c *Client) Snapshot(ctx context.Context) (*Snapshot, error) {
@@ -293,53 +210,34 @@ func (c *Client) Snapshot(ctx context.Context) (*Snapshot, error) {
 // ReadPane returns the visible text of a pane (ANSI stripped), used to confirm
 // a prompt is still on screen before answering it.
 func (c *Client) ReadPane(ctx context.Context, paneID string, lines int) (string, error) {
-	return c.ReadPaneSource(ctx, paneID, "visible", lines)
+	return c.w.ReadPane(ctx, paneID, lines)
 }
 
 // ReadPaneSource is ReadPane from another of herdr's sources ("recent",
 // "recent_unwrapped": the lines it wrapped joined). One a herdr does not
 // have is refused, and the connection closed: asked last on it.
 func (c *Client) ReadPaneSource(ctx context.Context, paneID, source string, lines int) (string, error) {
-	var res struct {
-		Read struct {
-			Text string `json:"text"`
-		} `json:"read"`
-	}
-	params := map[string]any{"pane_id": paneID, "source": source, "strip_ansi": true}
-	if lines > 0 {
-		params["lines"] = lines
-	}
-	if err := c.Call(ctx, "pane.read", params, &res); err != nil {
-		return "", err
-	}
-	return res.Read.Text, nil
+	return c.w.ReadPaneSource(ctx, paneID, source, lines)
 }
 
 // ReadPaneANSI returns the pane's text with ANSI colour escape sequences intact
 // (format: "ansi"), directly over the herdr Unix socket without spawning a shell.
 func (c *Client) ReadPaneANSI(ctx context.Context, paneID, source string, lines int) (string, error) {
-	var res struct {
-		Read struct {
-			Text string `json:"text"`
-		} `json:"read"`
-	}
-	params := map[string]any{"pane_id": paneID, "source": source, "format": "ansi"}
-	if lines > 0 {
-		params["lines"] = lines
-	}
-	if err := c.Call(ctx, "pane.read", params, &res); err != nil {
-		return "", err
-	}
-	return res.Read.Text, nil
+	return c.w.ReadPaneANSI(ctx, paneID, source, lines)
 }
 
 func (c *Client) SendKeys(ctx context.Context, paneID string, keys []string) error {
-	return c.Call(ctx, "pane.send_keys", map[string]any{"pane_id": paneID, "keys": keys}, nil)
+	return c.w.SendKeys(ctx, paneID, keys)
+}
+
+// SendText types literal text into a pane via pane.send_text.
+func (c *Client) SendText(ctx context.Context, paneID, text string) error {
+	return c.w.SendText(ctx, paneID, text)
 }
 
 // SendInput types text into a pane, then presses keys, in one request.
 func (c *Client) SendInput(ctx context.Context, paneID, text string, keys []string) error {
-	return c.Call(ctx, "pane.send_input", map[string]any{"pane_id": paneID, "text": text, "keys": keys}, nil)
+	return c.w.SendInput(ctx, paneID, text, keys)
 }
 
 // ZoomPane zooms a pane (focusing it) or ends the zoom, mode "on" or
@@ -642,16 +540,5 @@ func (c *Client) StartSubscribe(ctx context.Context, subs []map[string]any) erro
 
 // ReadEvents reads raw event lines after StartSubscribe succeeded.
 func (c *Client) ReadEvents(ctx context.Context, fn func(event json.RawMessage)) error {
-	stop := context.AfterFunc(ctx, func() { c.conn.Close() })
-	defer stop()
-	for {
-		line, err := c.readLine()
-		if err != nil {
-			if ctx.Err() != nil {
-				return ctx.Err()
-			}
-			return err
-		}
-		fn(json.RawMessage(line))
-	}
+	return c.w.ReadEvents(ctx, fn)
 }

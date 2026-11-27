@@ -43,6 +43,12 @@ func assertDeclaredRead(cap string) {
 	}
 }
 
+func assertDeclaredAction(cap string) {
+	if !proto.IsDeclaredAction(cap) {
+		panic(fmt.Sprintf("corrald/agent: undeclared action capability %q", cap))
+	}
+}
+
 func (r *capReader) readFile(cap, path string) ([]byte, error) {
 	assertDeclaredRead(cap)
 	return os.ReadFile(path)
@@ -90,6 +96,11 @@ func readTailFromFile(f *os.File, maxBytes int64) ([]byte, error) {
 func (r *capReader) stat(cap, path string) (os.FileInfo, error) {
 	assertDeclaredRead(cap)
 	return os.Stat(path)
+}
+
+func (r *capReader) lstat(cap, path string) (os.FileInfo, error) {
+	assertDeclaredRead(cap)
+	return os.Lstat(path)
 }
 
 func (r *capReader) isRegularFile(cap, path string) bool {
