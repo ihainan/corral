@@ -1988,3 +1988,32 @@ func TestPeerMessageShown(t *testing.T) {
 		t.Fatalf("answered: to %q", to)
 	}
 }
+
+func TestClaudeMetaVersion(t *testing.T) {
+	c := NewClaude()
+	c.Feed([]byte(`{"type":"user","uuid":"u1","version":"2.1.304","message":{"role":"user","content":"hi"}}` + "\n"))
+	if got := c.Meta().Version; got != "2.1.304" {
+		t.Fatalf("initial version = %q, want 2.1.304", got)
+	}
+	// Newer row (e.g. after resuming on an upgraded Claude Code) supersedes older version.
+	c.Feed([]byte(`{"type":"assistant","uuid":"a1","version":"2.1.330","message":{"role":"assistant","content":[{"type":"text","text":"ok"}]}}` + "\n"))
+	if got := c.Meta().Version; got != "2.1.330" {
+		t.Fatalf("updated version = %q, want 2.1.330", got)
+	}
+
+	// Prepend keeps newer part's version when present.
+	older := NewClaude()
+	older.Feed([]byte(`{"type":"user","uuid":"u0","version":"2.1.284","message":{"role":"user","content":"earlier"}}` + "\n"))
+	c.Prepend(older)
+	if got := c.Meta().Version; got != "2.1.330" {
+		t.Fatalf("after prepend with newer version = %q, want 2.1.330", got)
+	}
+
+	// Prepend fills in version when the later part had none.
+	later := NewClaude()
+	later.Feed([]byte(`{"type":"ai-title","aiTitle":"Test"}` + "\n"))
+	later.Prepend(older)
+	if got := later.Meta().Version; got != "2.1.284" {
+		t.Fatalf("after prepend without newer version = %q, want 2.1.284", got)
+	}
+}

@@ -194,6 +194,7 @@ type agentStart struct {
 	parentPane     string // (optional herdr parent pane for corral_spawn lineage)
 	placement      string // ("workspace" or "split")
 	key            string // (idempotency key, reused as spawn evidence_key)
+	claudeVersion  string // host's Claude Code version (empty: unknown -> keep inline ask hook)
 }
 
 func (s *Server) newAgent(ctx context.Context, w http.ResponseWriter, sess *term.Session, socket, dir, kind, label string, how agentStart) {
@@ -261,6 +262,9 @@ func (s *Server) newAgent(ctx context.Context, w http.ResponseWriter, sess *term
 				s.dropForkCopy(sess, src, id)
 			}
 		}()
+	}
+	if kind == "claude" {
+		how.claudeVersion = s.claudeVersionForStart(ctx, sess)
 	}
 	// From a tmux session (no herdr): the agent in a tmux session of its own,
 	// named after it, in the folder; the page opens a terminal on it.
@@ -434,11 +438,12 @@ func agentStartCmd(socket, pane, name, kind string, how agentStart) string {
 }
 
 // agentArgs: what an agent of kind is started with, after its program's
-// name: Claude Code the question hook inline; a session taken up or copied;
+// name: Claude Code the question hook inline (only when its version is below
+// askhook.NoHookMinVersion or unknown); a session taken up or copied;
 // a worktree of its own (worktreeFlag).
 func agentArgs(kind string, how agentStart) []string {
 	var args []string
-	if kind == "claude" {
+	if kind == "claude" && askhook.NeedsHook(how.claudeVersion) {
 		args = append(args, "--settings", askhook.Inline())
 	}
 	switch {

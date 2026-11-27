@@ -1950,6 +1950,34 @@ func (c *convoStates) peek(id string) *convoState {
 	return c.m[id]
 }
 
+// claudeVersions returns the Claude Code versions observed in active
+// conversation states whose session id is in sessIDs.
+func (c *convoStates) claudeVersions(sessIDs map[string]bool) []string {
+	if len(sessIDs) == 0 {
+		return nil
+	}
+	c.mu.Lock()
+	var states []*convoState
+	for k, st := range c.m {
+		sid, _, _ := strings.Cut(k, "\x00")
+		if sessIDs[sid] && !st.idle() {
+			states = append(states, st)
+		}
+	}
+	c.mu.Unlock()
+	var versions []string
+	for _, st := range states {
+		st.mu.Lock()
+		if st.agent == "claude" && st.parser != nil {
+			if v := strings.TrimSpace(st.parser.Meta().Version); v != "" {
+				versions = append(versions, v)
+			}
+		}
+		st.mu.Unlock()
+	}
+	return versions
+}
+
 func (st *convoState) idle() bool {
 	return time.Since(time.Unix(0, st.used.Load())) > convoIdle
 }

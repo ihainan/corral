@@ -18,6 +18,7 @@ import (
 	"github.com/ihainan/corral/internal/askhook"
 	"github.com/ihainan/corral/internal/sshx"
 	"github.com/ihainan/corral/internal/store"
+	"github.com/ihainan/corral/internal/term"
 )
 
 // Claude Code's question hook in a host's own settings (internal/askhook):
@@ -44,7 +45,9 @@ const askHookTTL = 5 * time.Minute
 
 // What the host's file is, as read by askHookRead's script:
 // kind=none|file|link|other, links=<hard links>, sum=1 (a sha256 tool
-// there), settings=<base64>, managed=<base64> (the system's managed settings).
+// there), settings=<base64>, managed=<base64> (the system's managed settings),
+// claude_version=<first line of `claude --version`>, and zero or more
+// session_version=<version> read from live Claude Code sessions' logs.
 const askHookRead = `f="$HOME/.claude/settings.json"
 if [ -L "$f" ]; then echo kind=link
 elif [ ! -e "$f" ]; then echo kind=none
@@ -53,6 +56,34 @@ else echo kind=other; fi
 if command -v sha256sum >/dev/null 2>&1 || command -v shasum >/dev/null 2>&1; then echo sum=1; fi
 for m in /etc/claude-code/managed-settings.json "/Library/Application Support/ClaudeCode/managed-settings.json"; do
   if [ -f "$m" ] && [ -r "$m" ]; then printf 'managed='; base64 < "$m" | tr -d '\n'; echo; break; fi
+done
+PATH="$HOME/.local/bin:$HOME/bin:$HOME/.claude/local:$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
+if command -v claude >/dev/null 2>&1; then
+  to=""; command -v timeout >/dev/null 2>&1 && to="timeout 5" # (a claude that hangs must not hold the settings read)
+  if cv=$(DISABLE_TELEMETRY=1 DISABLE_ERROR_REPORTING=1 DISABLE_AUTOUPDATER=1 CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 $to claude --version </dev/null 2>/dev/null); then
+    cv=$(printf '%s\n' "$cv" | head -n 1 | tr -d '\r')
+    [ -n "$cv" ] && printf 'claude_version=%s\n' "$cv"
+  fi
+fi
+n=0
+for sf in "$HOME"/.claude/sessions/*.json; do
+  [ -f "$sf" ] || continue
+  sp=${sf##*/}; sp=${sp%.json}
+  case $sp in ''|*[!0-9]*) continue;; esac
+  kill -0 "$sp" 2>/dev/null || continue
+  [ "$n" -lt 32 ] || break
+  n=$((n + 1))
+  sid=$(head -c 65536 "$sf" 2>/dev/null | tr -d '\n' | grep -o '"sessionId" *: *"[0-9a-fA-F-]*"' | head -n 1 | sed 's/.*"\([^"]*\)"$/\1/')
+  [ -n "$sid" ] || continue
+  for jl in "$HOME"/.claude/projects/*/"$sid".jsonl; do
+    [ -f "$jl" ] || continue
+    sv=$(tail -c 65536 "$jl" 2>/dev/null | grep -oE '[{,]"version":"[0-9.]*"' | tail -n 1 | cut -d'"' -f4)
+    if [ -z "$sv" ]; then
+      sv=$(head -c 65536 "$jl" 2>/dev/null | grep -oE '[{,]"version":"[0-9.]*"' | head -n 1 | cut -d'"' -f4)
+    fi
+    [ -n "$sv" ] && printf 'session_version=%s\n' "$sv"
+    break
+  done
 done
 true`
 
@@ -133,9 +164,17 @@ type askHookInfo struct {
 	Seen     string        `json:"seen"`    // the file as read (sha256, or "none"): a change is refused when it is no longer so
 	Snippet  string        `json:"snippet"` // what goes into hooks.PreToolUse, for the confirmation (and to add by hand)
 	Declined bool          `json:"declined"`
+	// Unnecessary: every Claude Code version detected on this host is at least
+	// askhook.NoHookMinVersion, so the question hook is no longer needed.
+	Unnecessary bool `json:"unnecessary,omitempty"`
 	// Bell: the same of the bell hook (askhook.Bell), kept in the same file
 	// and changed on its own ({hook: "bell"}).
 	Bell *askHookBell `json:"bell,omitempty"`
+
+	// Host-detected versions (not serialized; cached for start-time inline
+	// hook decisions and combined with live convo versions).
+	claudeVersion   string
+	sessionVersions []string
 }
 
 type askHookBell struct {
@@ -148,6 +187,8 @@ type askHookFileRead struct {
 	kind, settings, managed []byte
 	links                   string
 	sum                     bool
+	claudeVersion           string
+	sessionVersions         []string
 }
 
 type askHooks struct {
@@ -257,6 +298,12 @@ func parseAskHookRead(out []byte) (*askHookFileRead, error) {
 			f.links = v
 		case "sum":
 			f.sum = v == "1"
+		case "claude_version":
+			f.claudeVersion = v
+		case "session_version":
+			if v != "" {
+				f.sessionVersions = append(f.sessionVersions, v)
+			}
 		case "settings", "managed":
 			b, err := base64.StdEncoding.DecodeString(v)
 			if err != nil {
@@ -309,7 +356,74 @@ func askHookInfoOf(f *askHookFileRead) askHookInfo {
 			info.Bell.State, info.Bell.Why = st, why
 		}
 	}
+	info.claudeVersion = f.claudeVersion
+	info.sessionVersions = f.sessionVersions
+	info.Unnecessary = askhook.HostHookUnnecessary(hostVersions(f.claudeVersion, f.sessionVersions, nil))
 	return info
+}
+
+func hostVersions(claudeVersion string, sessionVersions, convoVersions []string) []string {
+	var out []string
+	if strings.TrimSpace(claudeVersion) != "" {
+		out = append(out, claudeVersion)
+	}
+	for _, v := range sessionVersions {
+		if strings.TrimSpace(v) != "" {
+			out = append(out, v)
+		}
+	}
+	for _, v := range convoVersions {
+		if strings.TrimSpace(v) != "" {
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
+func (s *Server) hostConvoClaudeVersions(h *store.Host) []string {
+	cfg := hostConfig(h)
+	sessIDs := map[string]bool{}
+	for _, sess := range s.terms.Running(h.OwnerID, h.ID) {
+		if sess.HostConfig == cfg {
+			sessIDs[sess.ID] = true
+		}
+	}
+	return s.convos.claudeVersions(sessIDs)
+}
+
+func (s *Server) finalizeAskHookInfo(h *store.Host, info *askHookInfo) {
+	info.Unnecessary = askhook.HostHookUnnecessary(hostVersions(info.claudeVersion, info.sessionVersions, s.hostConvoClaudeVersions(h)))
+}
+
+// claudeVersionForStart returns the installed Claude Code version on sess's
+// host, reusing the askHook cache (or reading once via askHookRead). Empty
+// means unknown; callers keep the inline hook as a safe fallback.
+func (s *Server) claudeVersionForStart(ctx context.Context, sess *term.Session) string {
+	if sess == nil {
+		return ""
+	}
+	h, err := s.store.Host(ctx, sess.OwnerID, sess.HostID)
+	if err != nil {
+		return ""
+	}
+	key := [2]int64{h.OwnerID, h.ID}
+	if info, ok := s.askHook.cached(key, h.ConnVersion); ok {
+		return info.claudeVersion
+	}
+	c := sess.Client()
+	if c == nil {
+		return ""
+	}
+	gen := s.askHook.generation(key)
+	rctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	f, err := readAskHookFile(rctx, c)
+	if err != nil {
+		return ""
+	}
+	info := askHookInfoOf(f)
+	s.askHook.keep(key, h.ConnVersion, gen, info)
+	return info.claudeVersion
 }
 
 // askHookSnippet: the hook as it reads in the file (under "hooks").
@@ -343,6 +457,7 @@ func (s *Server) askHookState(ctx context.Context, h *store.Host, fresh bool) (a
 		return askHookInfo{}, http.StatusNotFound, "not_found", "no such host"
 	}
 	if info, ok := s.askHook.cached(key, h.ConnVersion); ok && !fresh {
+		s.finalizeAskHookInfo(h, &info)
 		info.Declined = declined
 		return info, 0, "", ""
 	}
@@ -362,6 +477,7 @@ func (s *Server) askHookState(ctx context.Context, h *store.Host, fresh bool) (a
 	}
 	info := askHookInfoOf(f)
 	s.askHook.keep(key, h.ConnVersion, gen, info)
+	s.finalizeAskHookInfo(h, &info)
 	info.Declined = declined
 	return info, 0, "", ""
 }
@@ -424,6 +540,7 @@ func (s *Server) apiSetAskHook(w http.ResponseWriter, r *http.Request) {
 	}
 	gen := s.askHook.generation(key)
 	info := askHookInfoOf(f)
+	s.finalizeAskHookInfo(h, &info)
 	audit := func(outcome string) {
 		s.audit(r, "host.ask_hook", hostTarget(h), map[string]any{"on": on, "hook": name, "file": askHookFile, "outcome": outcome})
 	}
@@ -550,6 +667,7 @@ func (s *Server) answerAskHook(w http.ResponseWriter, ctx context.Context, h *st
 	}
 	info := askHookInfoOf(f)
 	s.askHook.keep(key, h.ConnVersion, gen, info)
+	s.finalizeAskHookInfo(h, &info)
 	info.Declined, _ = s.store.AskHookDeclined(ctx, h.OwnerID, h.ID)
 	writeJSON(w, http.StatusOK, info)
 }

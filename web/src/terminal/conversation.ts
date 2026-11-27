@@ -204,6 +204,7 @@ export interface ConvoMeta {
   collab?: string // (Codex) its collaboration mode: default, plan
   effort?: string // how hard it is asked to think: low, medium, high, xhigh, max
   branch?: string
+  version?: string // the agent's version as the session log last said it (Claude Code's "version" field)
   forked?: boolean // a copy of another (Codex's): its log has only what came after; before, in the other's
   history_partial?: boolean // a rewind's rollout contains only the new messages
   context?: number // tokens the latest request sent

@@ -440,6 +440,9 @@ type Meta struct {
 	// /effort, its status line's "·H"): low, medium, high, xhigh, max.
 	Effort string `json:"effort,omitempty"`
 	Branch string `json:"branch,omitempty"` // the git branch it ran on
+	// Version is the agent's version as the session log last said it (Claude
+	// Code's top-level "version" field, e.g. "2.1.330"); empty when unknown.
+	Version string `json:"version,omitempty"`
 	// Context is how many tokens the latest request sent: what the
 	// conversation fills of the model's window.
 	Context int64 `json:"context,omitempty"`
