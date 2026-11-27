@@ -1810,7 +1810,8 @@ p.convo-ask-desc { margin: 0 0 8px; font-size: var(--fs-ui); line-height: var(--
 @media (prefers-reduced-motion: reduce) { .convo-running-spin { animation: none; } }
 .convo-running-sum { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .convo-running.is-open .convo-running-sum { flex: 1 1 auto; }
-.convo-running-first { flex: 1 1 0; min-width: 0; display: flex; align-items: baseline; gap: 8px; font-weight: 400; color: var(--term-fg-3); }
+.convo-running-first { flex: 1 1 0; min-width: 0; display: flex; align-items: center; gap: 6px; font-weight: 400; color: var(--term-fg-3); }
+.convo-running-first-ic { flex: none; display: inline-flex; align-items: center; }
 .convo-running-first::before { content: '·'; flex: none; }
 .convo-running-first .convo-running-what { flex: 0 1 auto; color: var(--term-fg-3); font-weight: 400; }
 .convo-running-first .convo-running-note { flex: 1 1 0; }
@@ -1832,6 +1833,9 @@ p.convo-ask-desc { margin: 0 0 8px; font-size: var(--fs-ui); line-height: var(--
 .convo-running-label { margin: 8px 8px 4px 28px; color: var(--term-fg-3); font-size: var(--fs-note); line-height: var(--lh-note); }
 .convo-running-row { position: relative; display: grid; grid-template-columns: minmax(0, 1fr) auto; column-gap: 12px; min-width: 0; padding: 6px 8px 6px 28px; border-radius: var(--r); color: var(--term-fg-3); }
 .convo-running-row::before { content: ''; position: absolute; left: 11px; top: 13px; width: 6px; height: 6px; border-radius: 50%; background: var(--term-accent-text); opacity: 0.7; }
+.convo-running-row.is-cli-agent::before { display: none; }
+.convo-running-cli-ic { position: absolute; left: 8px; top: 8px; display: inline-flex; align-items: center; justify-content: center; }
+.convo-sub-head-ic { flex: none; display: inline-flex; align-items: center; }
 @media (hover: hover) { .convo-running-row:has(> button.convo-running-what):hover { background: color-mix(in srgb, var(--term-fg) 5%, transparent); } }
 .convo-running-what { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .convo-running-row > .convo-running-what { grid-column: 1; color: var(--term-fg); font-weight: 500; }
@@ -1855,6 +1859,7 @@ button.convo-running-what { padding: 0; border: 0; background: none; font: inher
   .convo-running-more { align-self: stretch; padding: 0 8px; }
   .convo-running-row { padding-top: 10px; padding-bottom: 10px; }
   .convo-running-row::before { top: 17px; }
+  .convo-running-cli-ic { top: 12px; }
 }
 
 /* What waits to be taken in, over the composer */
@@ -1989,6 +1994,7 @@ button.convo-queue-row.is-note:last-child { border-radius: 0 0 var(--r-lg) var(-
   display: flex; flex-direction: column; gap: 2px;
   margin: 0 0 2px 28px;
 }
+.convo-list-children.is-nested-cli { margin-left: 16px; }
 .convo-list-tree .convo-list-children { margin-left: 20px; }
 /* What an agent set going in the background, under its row (UI item 8, 11-25, as Orca hangs an
    agent's children): shut, a strip — their marks, how many, a chevron —; opened out, one line each
@@ -3166,6 +3172,7 @@ html.kb-open .convo-runs-pop.is-sheet { padding-bottom: 16px; }
 .agent-icon-dot.is-failed { background: var(--term-danger-text); }
 /* Subagents: a line of 32, a step smaller, hung from the parent's icon by a hairline. */
 .convo-list-groups.is-flat .convo-list-children { margin: 0; gap: 0; }
+.convo-list-groups.is-flat .convo-list-children.is-nested-cli { margin-left: 16px; }
 .convo-list-groups.is-flat .convo-list-item.is-child::before { content: ''; position: absolute; left: 17px; top: 0; bottom: 0; width: 1px; background: var(--term-line-strong); }
 .convo-list-groups.is-flat .convo-list-item.is-child:last-child::before { bottom: auto; height: 16px; }
 .convo-list-groups.is-flat .convo-list-item.is-child::after { content: ''; position: absolute; left: 17px; top: 16px; width: 10px; height: 1px; background: var(--term-line-strong); }

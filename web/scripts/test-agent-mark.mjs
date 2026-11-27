@@ -31,6 +31,12 @@ assert.equal(agentStatusMark({ status: 'idle', cmds: { n: 1 } }), 'bg')
 assert.equal(agentStatusMark({ status: 'done', cmds: { n: 2 } }), 'bg')
 assert.equal(agentStatusMark({ status: 'unknown', cmds: true }), 'bg')
 assert.equal(agentStatusMark({ status: 'idle', cmds: { n: 0 } }), '')
+// An agent CLI run as a background command (UI item 50) counts as background work too;
+// a plain command task without an agent CLI does not, and working still wins over it.
+assert.equal(agentStatusMark({ status: 'done', tasks: [{ kind: 'agent', agent: 'agy' }] }), 'bg')
+assert.equal(agentStatusMark({ status: 'unknown', tasks: [{ kind: 'agent', agent: 'claude' }] }), 'bg')
+assert.equal(agentStatusMark({ status: 'done', tasks: [{ kind: 'agent' }] }), 'done')
+assert.equal(agentStatusMark({ status: 'working', tasks: [{ kind: 'agent', agent: 'codex' }] }), 'working')
 assert.equal(agentStatusMark({ status: 'idle', cmds: false }), '')
 
 // 3. Stale background work produces 'stale' instead of 'done' or empty.
