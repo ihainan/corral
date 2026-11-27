@@ -7,12 +7,13 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
-	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 )
 
@@ -309,116 +310,249 @@ func (l *Layout) TombstoneExists() bool {
 	return err == nil
 }
 
-// ValidateTmuxBinary verifies that candidatePath is an absolute path named
-// "tmux" resolving to a regular executable file owned by root (uid 0) or
-// expectedUID, whose file and containing directories are not world-writable
-// (and whose parent directories are owned by root or expectedUID).
-func ValidateTmuxBinary(candidatePath string, expectedUID uint32) (string, error) {
+const maxTrustedSymlinkHops = 16
+
+var (
+	testTrustedTmuxRootMu sync.RWMutex
+	testTrustedTmuxRoot   string
+)
+
+// SetTrustedTmuxCheckRootForTest sets the starting directory from which
+// OpenTrustedTmuxBinary and ValidateTmuxBinary check ancestor permissions and
+// ownership (defaulting to "/" in production). It is strictly restricted to
+// `go test` binaries (panicking if called outside `go test`) so production
+// code always validates the complete chain from "/".
+func SetTrustedTmuxCheckRootForTest(root string) func() {
+	if flag.Lookup("test.v") == nil {
+		panic("daemon.SetTrustedTmuxCheckRootForTest called outside go test")
+	}
+	clean := "/"
+	if root != "" {
+		if !filepath.IsAbs(root) || strings.ContainsAny(root, "\x00\n") {
+			panic(fmt.Sprintf("invalid trusted tmux check root %q", root))
+		}
+		clean = filepath.Clean(root)
+	}
+	testTrustedTmuxRootMu.Lock()
+	prev := testTrustedTmuxRoot
+	testTrustedTmuxRoot = clean
+	testTrustedTmuxRootMu.Unlock()
+	return func() {
+		testTrustedTmuxRootMu.Lock()
+		testTrustedTmuxRoot = prev
+		testTrustedTmuxRootMu.Unlock()
+	}
+}
+
+func effectiveTrustedTmuxRoot() string {
+	// Production binaries do not link the testing package so test.v is never
+	// registered; always check from "/".
+	if flag.Lookup("test.v") == nil {
+		return "/"
+	}
+	testTrustedTmuxRootMu.RLock()
+	r := testTrustedTmuxRoot
+	testTrustedTmuxRootMu.RUnlock()
+	if r == "" {
+		return "/"
+	}
+	return r
+}
+
+// OpenTrustedTmuxBinary verifies that candidatePath is an absolute path named
+// "tmux" and opens the final regular executable file descriptor with O_NOFOLLOW
+// after validating every ancestor directory from "/" down to the file (both
+// along the candidate path up to any symlink and along the entire resolved real
+// path). Every directory, symlink, and final executable must be owned by root
+// (uid 0) or expectedUID — unmapped overflowuid owners are strictly rejected —
+// and every directory and the final file must not be group- or world-writable
+// (mode & 0022 == 0). The caller must close the returned *os.File.
+func OpenTrustedTmuxBinary(candidatePath string, expectedUID uint32) (*os.File, string, error) {
+	return openTrustedTmuxBinaryFrom(effectiveTrustedTmuxRoot(), candidatePath, expectedUID)
+}
+
+func openTrustedTmuxBinaryFrom(checkRoot, candidatePath string, expectedUID uint32) (*os.File, string, error) {
 	if candidatePath == "" || !filepath.IsAbs(candidatePath) || strings.ContainsAny(candidatePath, "\x00\n") {
-		return "", fmt.Errorf("tmux path must be a clean absolute path: %q", candidatePath)
+		return nil, "", fmt.Errorf("tmux path must be a clean absolute path: %q", candidatePath)
 	}
-	clean := filepath.Clean(candidatePath)
-	if filepath.Base(clean) != "tmux" {
-		return "", fmt.Errorf("tmux path basename must be \"tmux\": %q", candidatePath)
+	if checkRoot == "" {
+		checkRoot = "/"
+	} else {
+		checkRoot = filepath.Clean(checkRoot)
 	}
-	if err := checkTrustedBinaryDir(filepath.Dir(clean), expectedUID); err != nil {
-		return "", fmt.Errorf("tmux dir %s: %w", filepath.Dir(clean), err)
-	}
-
-	resolved, err := filepath.EvalSymlinks(clean)
-	if err != nil {
-		return "", fmt.Errorf("resolve tmux binary: %w", err)
-	}
-	if filepath.Base(resolved) != "tmux" {
-		return "", fmt.Errorf("resolved tmux target must be named \"tmux\": %q", resolved)
-	}
-	if err := checkTrustedBinaryDir(filepath.Dir(resolved), expectedUID); err != nil {
-		return "", fmt.Errorf("resolved tmux dir %s: %w", filepath.Dir(resolved), err)
+	cur := filepath.Clean(candidatePath)
+	if filepath.Base(cur) != "tmux" {
+		return nil, "", fmt.Errorf("tmux path basename must be \"tmux\": %q", candidatePath)
 	}
 
-	info, err := os.Stat(resolved)
+	hops := 0
+	for {
+		walkRoot := "/"
+		relPath := strings.TrimPrefix(cur, "/")
+		if checkRoot != "/" && strings.HasPrefix(cur, checkRoot+"/") {
+			walkRoot = checkRoot
+			relPath = strings.TrimPrefix(cur, checkRoot+"/")
+		}
+
+		openRootFlags := syscall.O_RDONLY | syscall.O_DIRECTORY | syscall.O_CLOEXEC
+		if walkRoot != "/" {
+			openRootFlags |= syscall.O_NOFOLLOW
+		}
+		dirFD, err := syscall.Open(walkRoot, openRootFlags, 0)
+		if err != nil {
+			return nil, "", fmt.Errorf("open %s: %w", walkRoot, err)
+		}
+		if err := checkTrustedFD(dirFD, walkRoot, true, expectedUID); err != nil {
+			_ = syscall.Close(dirFD)
+			return nil, "", err
+		}
+
+		parts := strings.Split(relPath, "/")
+		curPrefix := walkRoot
+		if walkRoot == "/" {
+			curPrefix = ""
+		}
+		restarted := false
+
+		for i, seg := range parts {
+			if seg == "" || seg == "." || seg == ".." {
+				_ = syscall.Close(dirFD)
+				return nil, "", fmt.Errorf("invalid path segment in %q", cur)
+			}
+			isLeaf := i == len(parts)-1
+			segPath := curPrefix + "/" + seg
+
+			if !isLeaf {
+				nextFD, err := syscall.Openat(dirFD, seg, syscall.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
+				_ = syscall.Close(dirFD)
+				if err == nil {
+					if err := checkTrustedFD(nextFD, segPath, true, expectedUID); err != nil {
+						_ = syscall.Close(nextFD)
+						return nil, "", err
+					}
+					dirFD = nextFD
+					curPrefix = segPath
+					continue
+				}
+				if !errors.Is(err, syscall.ELOOP) {
+					return nil, "", fmt.Errorf("open tmux ancestor %s: %w", segPath, err)
+				}
+				if err := checkTrustedSymlink(segPath, expectedUID); err != nil {
+					return nil, "", err
+				}
+				hops++
+				if hops > maxTrustedSymlinkHops {
+					return nil, "", fmt.Errorf("tmux path %q exceeds symlink hop limit", candidatePath)
+				}
+				target, err := os.Readlink(segPath)
+				if err != nil {
+					return nil, "", fmt.Errorf("readlink %s: %w", segPath, err)
+				}
+				resolvedSeg := target
+				if !filepath.IsAbs(target) {
+					resolvedSeg = filepath.Join(filepath.Dir(segPath), target)
+				}
+				nextParts := append([]string{resolvedSeg}, parts[i+1:]...)
+				cur = filepath.Clean(filepath.Join(nextParts...))
+				if filepath.Base(cur) != "tmux" {
+					return nil, "", fmt.Errorf("resolved tmux target must be named \"tmux\": %q", cur)
+				}
+				restarted = true
+				break
+			}
+
+			fileFD, err := syscall.Openat(dirFD, seg, syscall.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC|syscall.O_NONBLOCK, 0)
+			_ = syscall.Close(dirFD)
+			if err == nil {
+				if err := checkTrustedFD(fileFD, segPath, false, expectedUID); err != nil {
+					_ = syscall.Close(fileFD)
+					return nil, "", err
+				}
+				return os.NewFile(uintptr(fileFD), segPath), segPath, nil
+			}
+			if !errors.Is(err, syscall.ELOOP) {
+				return nil, "", fmt.Errorf("open tmux binary %s: %w", segPath, err)
+			}
+			if err := checkTrustedSymlink(segPath, expectedUID); err != nil {
+				return nil, "", err
+			}
+			hops++
+			if hops > maxTrustedSymlinkHops {
+				return nil, "", fmt.Errorf("tmux path %q exceeds symlink hop limit", candidatePath)
+			}
+			target, err := os.Readlink(segPath)
+			if err != nil {
+				return nil, "", fmt.Errorf("readlink %s: %w", segPath, err)
+			}
+			next := target
+			if !filepath.IsAbs(target) {
+				next = filepath.Join(filepath.Dir(segPath), target)
+			}
+			cur = filepath.Clean(next)
+			if filepath.Base(cur) != "tmux" {
+				return nil, "", fmt.Errorf("resolved tmux target must be named \"tmux\": %q", cur)
+			}
+			restarted = true
+			break
+		}
+
+		if !restarted {
+			return nil, "", fmt.Errorf("failed to resolve tmux path %q", candidatePath)
+		}
+	}
+}
+
+// ValidateTmuxBinary verifies candidatePath with OpenTrustedTmuxBinary and
+// returns its resolved real path.
+func ValidateTmuxBinary(candidatePath string, expectedUID uint32) (string, error) {
+	f, resolved, err := OpenTrustedTmuxBinary(candidatePath, expectedUID)
 	if err != nil {
-		return "", fmt.Errorf("stat tmux binary: %w", err)
+		return "", err
 	}
-	if !info.Mode().IsRegular() {
-		return "", fmt.Errorf("tmux path %s is not a regular file", resolved)
-	}
-	if info.Mode()&0o111 == 0 {
-		return "", fmt.Errorf("tmux binary %s is not executable", resolved)
-	}
-	if info.Mode()&0o002 != 0 {
-		return "", fmt.Errorf("tmux binary %s is world-writable", resolved)
-	}
-	st, ok := info.Sys().(*syscall.Stat_t)
-	if !ok {
-		return "", fmt.Errorf("stat metadata unavailable for %s", resolved)
-	}
-	if !isTrustedBinaryOwner(st.Uid, expectedUID) {
-		return "", fmt.Errorf("tmux binary %s owned by uid %d (want 0 or %d)", resolved, st.Uid, expectedUID)
-	}
+	_ = f.Close()
 	return resolved, nil
 }
 
-func isTrustedBinaryOwner(uid, expectedUID uint32) bool {
-	if uid == 0 || uid == expectedUID {
-		return true
+func checkTrustedFD(fd int, path string, wantDir bool, expectedUID uint32) error {
+	var st syscall.Stat_t
+	if err := syscall.Fstat(fd, &st); err != nil {
+		return fmt.Errorf("fstat %s: %w", path, err)
 	}
-	// Inside an unprivileged Linux user namespace where uid 0 is unmapped in
-	// /proc/self/uid_map, host root-owned system directories and binaries (such
-	// as /usr/bin/tmux) appear with the kernel overflow UID (typically 65534).
-	// On a normal host (where uid 0 is mapped), overflowuid/nobody is rejected.
-	if !rootUIDMapped() && uid == kernelOverflowUID() {
-		return true
+	if st.Uid != 0 && st.Uid != expectedUID {
+		return fmt.Errorf("%s owned by uid %d (want 0 or %d)", path, st.Uid, expectedUID)
 	}
-	return false
+	if st.Mode&0o022 != 0 {
+		return fmt.Errorf("%s is writable by group or others (mode %04o)", path, st.Mode&0o7777)
+	}
+	if wantDir {
+		if st.Mode&syscall.S_IFMT != syscall.S_IFDIR {
+			return fmt.Errorf("%s is not a directory", path)
+		}
+		return nil
+	}
+	if st.Mode&syscall.S_IFMT != syscall.S_IFREG {
+		return fmt.Errorf("tmux path %s is not a regular file", path)
+	}
+	if st.Mode&0o111 == 0 {
+		return fmt.Errorf("tmux binary %s is not executable", path)
+	}
+	return nil
 }
 
-func rootUIDMapped() bool {
-	b, err := os.ReadFile("/proc/self/uid_map")
+func checkTrustedSymlink(path string, expectedUID uint32) error {
+	info, err := os.Lstat(path)
 	if err != nil {
-		return true
+		return fmt.Errorf("lstat symlink %s: %w", path, err)
 	}
-	for _, line := range strings.Split(string(b), "\n") {
-		f := strings.Fields(line)
-		if len(f) < 3 {
-			continue
-		}
-		inside, err1 := strconv.ParseUint(f[0], 10, 64)
-		length, err2 := strconv.ParseUint(f[2], 10, 64)
-		if err1 == nil && err2 == nil && inside == 0 && length > 0 {
-			return true
-		}
-	}
-	return false
-}
-
-func kernelOverflowUID() uint32 {
-	b, err := os.ReadFile("/proc/sys/kernel/overflowuid")
-	if err == nil {
-		if n, err := strconv.ParseUint(strings.TrimSpace(string(b)), 10, 32); err == nil {
-			return uint32(n)
-		}
-	}
-	return 65534
-}
-
-func checkTrustedBinaryDir(dir string, expectedUID uint32) error {
-	info, err := os.Stat(dir)
-	if err != nil {
-		return err
-	}
-	if !info.IsDir() {
-		return errors.New("not a directory")
-	}
-	if info.Mode()&0o002 != 0 {
-		return errors.New("directory is writable by others")
+	if info.Mode()&os.ModeSymlink == 0 {
+		return fmt.Errorf("%s changed from symlink during resolution", path)
 	}
 	st, ok := info.Sys().(*syscall.Stat_t)
 	if !ok {
-		return errors.New("stat metadata unavailable")
+		return fmt.Errorf("stat metadata unavailable for symlink %s", path)
 	}
-	if !isTrustedBinaryOwner(st.Uid, expectedUID) {
-		return fmt.Errorf("directory owned by uid %d (want 0 or %d)", st.Uid, expectedUID)
+	if st.Uid != 0 && st.Uid != expectedUID {
+		return fmt.Errorf("symlink %s owned by uid %d (want 0 or %d)", path, st.Uid, expectedUID)
 	}
 	return nil
 }

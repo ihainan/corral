@@ -127,6 +127,15 @@ func TestHostCodeStaticConstraints(t *testing.T) {
 						if !allowedStartProcess[site] {
 							t.Errorf("unreviewed os.StartProcess call site: %s", site)
 						}
+					case "daemon.SetTrustedTmuxCheckRootForTest":
+						t.Errorf("%s:%s calls test-only %s in production host code", relPath, fnName, qual)
+					}
+					return true
+				})
+				ast.Inspect(fn.Body, func(n ast.Node) bool {
+					ident, ok := n.(*ast.Ident)
+					if ok && ident.Name == "SetTrustedTmuxCheckRootForTest" && fnName != "SetTrustedTmuxCheckRootForTest" {
+						t.Errorf("%s:%s references test-only SetTrustedTmuxCheckRootForTest in production host code", relPath, fnName)
 					}
 					return true
 				})

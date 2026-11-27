@@ -73,7 +73,7 @@ func TestPathValidatorRejectsDisallowedPaths(t *testing.T) {
 	}
 
 	val := NewPathValidator(home, uid, "/proc")
-	val.UpdateDiscovered(true, []string{locatedCustom}, nil, nil)
+	val.UpdateDiscovered(LocateScopeFull, []string{locatedCustom}, nil, nil)
 
 	// Allowed cases must succeed.
 	for _, tc := range []struct {
@@ -150,7 +150,7 @@ func TestPathValidatorRejectsDisallowedPaths(t *testing.T) {
 
 	// Mismatched UID check on a file inside declared dir.
 	wrongUIDVal := NewPathValidator(home, uid+1, "/proc")
-	wrongUIDVal.UpdateDiscovered(true, []string{validClaude}, nil, nil)
+	wrongUIDVal.UpdateDiscovered(LocateScopeFull, []string{validClaude}, nil, nil)
 	if f, _, ok := wrongUIDVal.OpenChecked(validClaude); ok {
 		_ = f.Close()
 		t.Fatal("validator with mismatched UID accepted file owned by different UID")
@@ -183,7 +183,7 @@ func TestLocateSymlinkDoesNotPoisonAuthorization(t *testing.T) {
 	}
 
 	val := NewPathValidator(home, uid, "/proc")
-	val.UpdateDiscovered(true, []string{symLog}, nil, nil)
+	val.UpdateDiscovered(LocateScopeFull, []string{symLog}, nil, nil)
 
 	// Requesting the symlink target directly must be rejected!
 	if f, _, ok := val.OpenChecked(privKey); ok {
@@ -274,11 +274,23 @@ func TestOpenNoFollowRejectsParentSymlinkSwapRace(t *testing.T) {
 	}
 }
 
-// Review #4: full locate UpdateDiscovered(replace=true) evicts previous locate
-// entries and custom config directories so old paths cannot be read later.
-func TestUpdateDiscoveredReplaceEvictsStaleLogs(t *testing.T) {
+// Review #4 (Round 1) & #5 (Round 3): locate authorization buckets are scoped
+// by locate kind ("full", "opencode", and per-shell "tree:<shell>"); each
+// locate replaces only its own scope, and "tree:*" buckets evict LRU beyond 64.
+func TestUpdateDiscoveredScopedBucketsAndLRUEviction(t *testing.T) {
 	home := t.TempDir()
 	uid := uint32(os.Geteuid())
+
+	mkFile := func(rel string) string {
+		p := filepath.Join(t.TempDir(), rel)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte("ok\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
 
 	cfgA := filepath.Join(t.TempDir(), "claude-a")
 	cfgB := filepath.Join(t.TempDir(), "claude-b")
@@ -292,20 +304,86 @@ func TestUpdateDiscoveredReplaceEvictsStaleLogs(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	ocDB1 := mkFile("oc1/opencode/opencode.db")
+	ocDB2 := mkFile("oc2/opencode/opencode.db")
+	treeLog1 := mkFile("tree1/session.jsonl")
+	treeLog2 := mkFile("tree2/session.jsonl")
 
 	val := NewPathValidator(home, uid, "/proc")
-	val.UpdateDiscovered(true, []string{logA}, []string{cfgA}, nil)
-	if _, ok := val.ValidatePath(logA); !ok {
-		t.Fatal("logA should be authorized after first full locate")
+	val.UpdateDiscovered(LocateScopeFull, []string{logA}, []string{cfgA}, nil)
+	val.UpdateDiscovered(LocateScopeOpenCode, []string{ocDB1}, nil, nil)
+	val.UpdateDiscovered("tree:1001", []string{treeLog1}, nil, nil)
+
+	for _, p := range []string{logA, ocDB1, treeLog1} {
+		if _, ok := val.ValidatePath(p); !ok {
+			t.Fatalf("%s should be authorized across independent scopes", p)
+		}
 	}
 
-	// Next full locate no longer sees logA or cfgA.
-	val.UpdateDiscovered(true, []string{logB}, []string{cfgB}, nil)
-	if _, ok := val.ValidatePath(logA); ok {
-		t.Fatal("stale logA remained authorized after replacement full locate")
+	// Replacing opencode scope evicts ocDB1 without touching full or tree:1001.
+	val.UpdateDiscovered(LocateScopeOpenCode, []string{ocDB2}, nil, nil)
+	if _, ok := val.ValidatePath(ocDB1); ok {
+		t.Fatal("stale ocDB1 remained authorized after opencode scope replacement")
 	}
-	if _, ok := val.ValidatePath(logB); !ok {
-		t.Fatal("logB should be authorized after replacement full locate")
+	for _, p := range []string{logA, ocDB2, treeLog1} {
+		if _, ok := val.ValidatePath(p); !ok {
+			t.Fatalf("%s unexpectedly lost authorization after opencode scope update", p)
+		}
+	}
+
+	// Replacing full scope evicts logA/cfgA without touching opencode or tree:1001.
+	val.UpdateDiscovered(LocateScopeFull, []string{logB}, []string{cfgB}, nil)
+	if _, ok := val.ValidatePath(logA); ok {
+		t.Fatal("stale logA remained authorized after full scope replacement")
+	}
+	for _, p := range []string{logB, ocDB2, treeLog1} {
+		if _, ok := val.ValidatePath(p); !ok {
+			t.Fatalf("%s unexpectedly lost authorization after full scope update", p)
+		}
+	}
+
+	// Replacing tree:1001 evicts treeLog1 without touching full or opencode.
+	val.UpdateDiscovered("tree:1001", []string{treeLog2}, nil, nil)
+	if _, ok := val.ValidatePath(treeLog1); ok {
+		t.Fatal("stale treeLog1 remained authorized after tree:1001 replacement")
+	}
+	if _, ok := val.ValidatePath(treeLog2); !ok {
+		t.Fatal("treeLog2 should be authorized")
+	}
+
+	// Verify tree:* LRU cap (maxTreeAuthBuckets = 64):
+	// Insert 64 distinct tree scopes (2000..2063), touch tree:2001 via read,
+	// then insert tree:2064 -> tree:2000 (oldest unused) is evicted while
+	// tree:2001 (refreshed) and tree:2064 (newest) remain authorized!
+	val2 := NewPathValidator(home, uid, "/proc")
+	treeRoot := t.TempDir()
+	treeLogs := make([]string, maxTreeAuthBuckets+6)
+	for i := range treeLogs {
+		p := filepath.Join(treeRoot, fmt.Sprintf("t%d.jsonl", i))
+		if err := os.WriteFile(p, []byte("ok\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		treeLogs[i] = p
+	}
+	for i := 0; i < maxTreeAuthBuckets; i++ {
+		val2.UpdateDiscovered(fmt.Sprintf("tree:%d", 2000+i), []string{treeLogs[i]}, nil, nil)
+	}
+	// Refresh tree:2001 via OpenChecked so tree:2000 is strictly the LRU entry.
+	if f, _, ok := val2.OpenChecked(treeLogs[1]); !ok {
+		t.Fatal("tree:2001 should be openable before eviction")
+	} else {
+		_ = f.Close()
+	}
+	// Add 1 more tree scope beyond the cap -> evicts tree:2000, keeps tree:2001.
+	val2.UpdateDiscovered(fmt.Sprintf("tree:%d", 2000+maxTreeAuthBuckets), []string{treeLogs[maxTreeAuthBuckets]}, nil, nil)
+	if _, ok := val2.ValidatePath(treeLogs[0]); ok {
+		t.Fatal("LRU tree:2000 was not evicted after exceeding maxTreeAuthBuckets")
+	}
+	if _, ok := val2.ValidatePath(treeLogs[1]); !ok {
+		t.Fatal("recently-used tree:2001 was wrongly evicted")
+	}
+	if _, ok := val2.ValidatePath(treeLogs[maxTreeAuthBuckets]); !ok {
+		t.Fatal("newly inserted tree bucket was not authorized")
 	}
 }
 
@@ -421,23 +499,48 @@ func TestTmuxExecutorAllowlistAndIsolatedServer(t *testing.T) {
 		t.Fatal("TmuxExecutor unexpectedly executed non-tmux binary /bin/sh")
 	}
 
-	// 2. Real isolated tmux server test via custom-dir symlink (simulating Nix profile, Review #15).
+	// 2. Real isolated tmux server test via safe-path copy + symlink executed
+	// strictly through its already-opened verified FD (Round 3 #1, #2, #3).
 	tmuxBin, err := exec.LookPath("tmux")
 	if err != nil {
 		t.Skip("tmux not installed on host")
 	}
 
-	// Put symlink named "tmux" inside a safe custom directory (0755) not in fixed paths.
-	customBinDir := filepath.Join(t.TempDir(), "nix-profile", "bin")
-	if err := os.MkdirAll(customBinDir, 0o755); err != nil {
+	// Create a controlled 0755 root inside t.TempDir() and inject it as the
+	// test-only safe-path check root so this test never depends on permissions
+	// of uncontrolled host directories above t.TempDir() (e.g. /home/user/tmp
+	// with mode 0775 under umask 002).
+	safeRoot := filepath.Join(t.TempDir(), "trusted-root")
+	if err := os.MkdirAll(safeRoot, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	_ = os.Chmod(safeRoot, 0o755)
+	restoreRoot := daemon.SetTrustedTmuxCheckRootForTest(safeRoot)
+	t.Cleanup(restoreRoot)
+
+	realBinDir := filepath.Join(safeRoot, "real", "bin")
+	customBinDir := filepath.Join(safeRoot, "nix-profile", "bin")
+	for _, d := range []string{realBinDir, customBinDir} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tmuxBytes, err := os.ReadFile(tmuxBin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	copiedTmux := filepath.Join(realBinDir, "tmux")
+	if err := os.WriteFile(copiedTmux, tmuxBytes, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	_ = os.Chmod(copiedTmux, 0o755)
+
 	customTmux := filepath.Join(customBinDir, "tmux")
-	if err := os.Symlink(tmuxBin, customTmux); err != nil {
+	if err := os.Symlink(copiedTmux, customTmux); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := daemon.ValidateTmuxBinary(customTmux, uint32(os.Geteuid())); err != nil {
-		t.Fatalf("ValidateTmuxBinary rejected valid custom-dir tmux symlink: %v", err)
+		t.Fatalf("ValidateTmuxBinary rejected valid safe-path tmux symlink: %v", err)
 	}
 
 	tmuxTmp, err := os.MkdirTemp("/tmp", "corrald-tmux-*")
@@ -507,5 +610,37 @@ func TestTmuxExecutorAllowlistAndIsolatedServer(t *testing.T) {
 	}
 	if recs[1] != wantPaneTTYRec {
 		t.Errorf("panetty record:\ngot:  %q\nwant: %q", recs[1], wantPaneTTYRec)
+	}
+
+	// 3. Round 3 #3: when tmux fails safe-path validation (e.g. group-writable
+	// binary or unmapped overflowuid owner in user namespace), tmux locate
+	// cleanly returns empty `tmux=` so the gateway falls back to SSH.
+	badTmuxDir := filepath.Join(safeRoot, "bad-gw-bin")
+	_ = os.MkdirAll(badTmuxDir, 0o755)
+	_ = os.Chmod(badTmuxDir, 0o775)
+	badTmux := filepath.Join(badTmuxDir, "tmux")
+	_ = os.WriteFile(badTmux, tmuxBytes, 0o755)
+	_ = os.Chmod(badTmux, 0o755)
+
+	untrustedTx := NewTmuxExecutorWithPath(t.TempDir(), badTmux, uint32(os.Geteuid()))
+	untrustedTx.socketName = sockName
+	locUntrusted, err := NewLocator(LocatorOptions{
+		Home:            t.TempDir(),
+		Tmux:            untrustedTx,
+		ListPIDs:        func() ([]string, error) { return nil, nil },
+		ClaudeConfigDir: &emptyStr,
+		XDGDataHome:     &emptyStr,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	outUntrusted := locUntrusted.Locate(context.Background(), proto.AgentLocateParams{
+		Mode:     "tmux",
+		TmuxName: "corraltest",
+		TmuxPane: paneID,
+	})
+	untrustedRecs := strings.Split(string(outUntrusted), "\x00")
+	if len(untrustedRecs) < 3 || untrustedRecs[0] != "tmux=" || untrustedRecs[1] != "panetty=" {
+		t.Fatalf("untrusted tmux should degrade cleanly to empty tmux=/panetty=, got %q", outUntrusted)
 	}
 }

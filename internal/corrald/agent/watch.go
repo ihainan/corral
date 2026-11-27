@@ -58,15 +58,21 @@ type watchSub struct {
 	logs map[string]struct{}
 }
 
-// procEntry records identity and executable metadata of an owned process so
-// Watcher detects both (pid, starttime) reuse and in-place exec transitions
-// (e.g. a shell exec'ing into codex or claude).
+// procEntry records identity, executable metadata, agent classification, and
+// active log signature of an owned process so Watcher detects (pid, starttime)
+// reuse, in-place exec transitions (including agent-to-agent exec), and log
+// set changes on an existing agent PID.
 type procEntry struct {
 	start       string
 	comm        string
 	exe         string
 	cmdlineHash [32]byte
-	isAgent     bool
+	agentKind   string
+	logSig      string
+}
+
+func (e procEntry) isAgent() bool {
+	return e.agentKind != ""
 }
 
 // Watcher monitors agent log file growth (via Linux inotify, with automatic
@@ -613,8 +619,10 @@ func (w *Watcher) readInotifyLoop(ctx context.Context, f *os.File, out chan<- []
 				continue
 			}
 			if mask&(syscall.IN_DELETE_SELF|syscall.IN_MOVE_SELF|syscall.IN_IGNORED) != 0 {
-				// Evict stale watch mapping immediately so reconcileWatches
-				// re-binds a newly rotated/recreated file at the same path.
+				// Evict stale watch mapping immediately, emit a change hint
+				// right away so writes to a rotated/recreated file before
+				// reconcileWatches completes are never missed, and schedule a
+				// watch re-bind.
 				w.mu.Lock()
 				delete(w.wdToPath, wd)
 				if w.pathToWD[path] == wd {
@@ -625,6 +633,7 @@ func (w *Watcher) readInotifyLoop(ctx context.Context, f *os.File, out chan<- []
 				if mask&syscall.IN_IGNORED == 0 {
 					_, _ = syscall.InotifyRmWatch(rawFD, uint32(wd))
 				}
+				changedSet[path] = struct{}{}
 				w.NotifyDiscovered()
 				continue
 			}
@@ -687,7 +696,7 @@ func (w *Watcher) listPIDNames() ([]string, error) {
 }
 
 // seedProcesses builds the initial owned-process table keyed by PID with
-// (starttime, comm, exe, cmdlineHash, isAgent).
+// (starttime, comm, exe, cmdlineHash, agentKind, logSig).
 func (w *Watcher) seedProcesses() {
 	names, err := w.listPIDNames()
 	if err != nil {
@@ -708,9 +717,9 @@ func (w *Watcher) seedProcesses() {
 	}
 }
 
-// pollProcesses compares the current owned process set by (pid, starttime) and
-// re-classifies existing PIDs whose comm, exe, or cmdline changed (e.g. a
-// shell executing `exec codex` or rapid PID reuse between ticks).
+// pollProcesses compares the current owned process set by (pid, starttime),
+// re-classifies existing PIDs whose comm, exe, or cmdline changed (including
+// agent-to-agent exec), and detects active log set changes on known agents.
 func (w *Watcher) pollProcesses() (added, removed []int) {
 	names, err := w.listPIDNames()
 	if err != nil {
@@ -737,25 +746,25 @@ func (w *Watcher) pollProcesses() (added, removed []int) {
 				continue
 			}
 			nextOwned[pid] = ent
-			if ent.isAgent {
+			if ent.isAgent() {
 				added = append(added, pid)
 			}
 			continue
 		}
 
 		// Existing owned PID: check starttime, comm, exe, and (for node/bun or
-		// agents) cmdline to catch both PID reuse and in-place exec().
+		// known agents) cmdline to catch PID reuse and in-place exec().
 		pidDir := filepath.Join(w.loc.procRoot, name)
 		st, ok := w.loc.readProcStat(name)
 		if !ok {
-			if prev.isAgent {
+			if prev.isAgent() {
 				removed = append(removed, pid)
 			}
 			continue
 		}
 		comm, ok := w.loc.readCommRaw(name)
 		if !ok {
-			if prev.isAgent {
+			if prev.isAgent() {
 				removed = append(removed, pid)
 			}
 			continue
@@ -764,16 +773,21 @@ func (w *Watcher) pollProcesses() (added, removed []int) {
 
 		startChanged := st.start != prev.start
 		execChanged := comm != prev.comm || exe != prev.exe
-		var cmdHash [32]byte
-		needCmdCheck := comm == "node" || comm == "bun" || prev.comm == "node" || prev.comm == "bun"
+		needCmdCheck := comm == "node" || comm == "bun" || prev.comm == "node" || prev.comm == "bun" || prev.isAgent()
 		if needCmdCheck && !startChanged && !execChanged {
-			cmdHash = w.readCmdlineHash(pidDir)
-			if cmdHash != prev.cmdlineHash {
+			if w.readCmdlineHash(pidDir) != prev.cmdlineHash {
 				execChanged = true
 			}
 		}
 
 		if !startChanged && !execChanged {
+			if prev.isAgent() {
+				logSig := w.agentLogSignature(name, pidDir, prev.agentKind)
+				if logSig != prev.logSig {
+					prev.logSig = logSig
+					added = append(added, pid)
+				}
+			}
 			nextOwned[pid] = prev
 			continue
 		}
@@ -781,30 +795,33 @@ func (w *Watcher) pollProcesses() (added, removed []int) {
 		// Re-classify on PID reuse or exec transition.
 		ent, ok := w.inspectOwnedPID(name)
 		if !ok {
-			if prev.isAgent {
+			if prev.isAgent() {
 				removed = append(removed, pid)
 			}
 			continue
 		}
 		nextOwned[pid] = ent
 		if startChanged {
-			if prev.isAgent {
+			if prev.isAgent() {
 				removed = append(removed, pid)
 			}
-			if ent.isAgent {
+			if ent.isAgent() {
 				added = append(added, pid)
 			}
 		} else {
-			if prev.isAgent && !ent.isAgent {
+			if prev.isAgent() && !ent.isAgent() {
 				removed = append(removed, pid)
-			} else if !prev.isAgent && ent.isAgent {
+			} else if !prev.isAgent() && ent.isAgent() {
+				added = append(added, pid)
+			} else if prev.isAgent() && ent.isAgent() && (prev.agentKind != ent.agentKind || prev.logSig != ent.logSig) {
+				removed = append(removed, pid)
 				added = append(added, pid)
 			}
 		}
 	}
 
 	for pid, prev := range w.ownedProcs {
-		if _, alive := curPIDs[pid]; !alive && prev.isAgent {
+		if _, alive := curPIDs[pid]; !alive && prev.isAgent() {
 			removed = append(removed, pid)
 		}
 	}
@@ -819,6 +836,51 @@ func (w *Watcher) readCmdlineHash(pidDir string) [32]byte {
 		return [32]byte{}
 	}
 	return sha256.Sum256(raw)
+}
+
+func (w *Watcher) agentLogSignature(pid, pidDir, kind string) string {
+	switch kind {
+	case "claude":
+		clcfg := w.loc.claudeConfigDir(pidDir)
+		cf := clcfg + "/sessions/" + pid + ".json"
+		if _, sid, _, status := w.loc.parseClaudeSession(pid, cf); status == 1 {
+			return sid + "\x00" + w.loc.resolveClaudeLog(pid, clcfg, sid)
+		}
+		return ""
+	case "codex":
+		if w.loc.codexSub(pid) == "app-server" {
+			cxhome := w.loc.codexHome(pidDir)
+			var rollouts []string
+			for _, link := range w.loc.listFDLinks(pidDir) {
+				if link != "" && !strings.ContainsRune(link, '\n') && matchesCodexSessionRollout(link, cxhome) {
+					rollouts = append(rollouts, link)
+				}
+			}
+			sort.Strings(rollouts)
+			return strings.Join(rollouts, "\x00")
+		}
+		fds := w.loc.codexFds(pidDir, w.loc.nowFn().Unix())
+		if fds.cxlog == "" && fds.cxpend == "" {
+			return ""
+		}
+		return fds.cxlog + "\x00" + fds.cxpend
+	case "opencode":
+		return w.loc.ocDB(pidDir)
+	case "agy":
+		sid, logPath := w.loc.agyFds(pidDir)
+		if sid == "" && logPath == "" {
+			return ""
+		}
+		return sid + "\x00" + logPath
+	case "devin":
+		sid, db := w.loc.dvFds(pidDir)
+		if sid == "" && db == "" {
+			return ""
+		}
+		return sid + "\x00" + db
+	default:
+		return ""
+	}
 }
 
 func (w *Watcher) inspectOwnedPID(pid string) (procEntry, bool) {
@@ -837,27 +899,37 @@ func (w *Watcher) inspectOwnedPID(pid string) (procEntry, bool) {
 	exe, _ := w.rd.readLink(proto.ReadProc, filepath.Join(pidDir, "exe"))
 
 	var cmdHash [32]byte
-	isAgent := false
+	var cmdHashed bool
+	agentKind := ""
 	switch {
 	case comm == "codex" || comm == "opencode" || comm == "agy" || comm == "devin" || comm == "claude":
-		isAgent = true
+		agentKind = comm
 	case comm == "node" || comm == "bun":
 		if raw, err := w.rd.readFile(proto.ReadProc, filepath.Join(pidDir, "cmdline")); err == nil {
 			cmdHash = sha256.Sum256(raw)
+			cmdHashed = true
 			if bytes.Contains(raw, []byte("claude")) {
-				isAgent = true
+				agentKind = "claude"
 			}
 		}
 	case isVersionComm(comm):
 		if strings.Contains(exe, "/claude/") {
-			isAgent = true
+			agentKind = "claude"
 		}
 	default:
 		clcfg := w.loc.claudeConfigDir(pidDir)
 		cf := clcfg + "/sessions/" + pid + ".json"
 		if _, _, _, status := w.loc.parseClaudeSession(pid, cf); status == 1 {
-			isAgent = true
+			agentKind = "claude"
 		}
+	}
+
+	logSig := ""
+	if agentKind != "" {
+		if !cmdHashed {
+			cmdHash = w.readCmdlineHash(pidDir)
+		}
+		logSig = w.agentLogSignature(pid, pidDir, agentKind)
 	}
 
 	return procEntry{
@@ -865,6 +937,7 @@ func (w *Watcher) inspectOwnedPID(pid string) (procEntry, bool) {
 		comm:        comm,
 		exe:         exe,
 		cmdlineHash: cmdHash,
-		isAgent:     isAgent,
+		agentKind:   agentKind,
+		logSig:      logSig,
 	}, true
 }

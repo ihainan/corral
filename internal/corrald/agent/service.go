@@ -14,6 +14,12 @@ import (
 	"github.com/ihainan/corral/internal/corrald/proto"
 )
 
+type connWatchState struct {
+	mu     sync.Mutex
+	active bool
+	stopCh chan struct{}
+}
+
 // Service wires Locator, PathValidator, Tails, MessageTails, and Watcher into
 // a corrald daemon.Server.
 type Service struct {
@@ -23,7 +29,7 @@ type Service struct {
 	watcher *Watcher
 
 	watchMu    sync.Mutex
-	watchConns map[*daemon.Conn]chan struct{}
+	watchConns map[*daemon.Conn]*connWatchState
 }
 
 // ServiceOptions overrides default host paths or watcher parameters (mainly for
@@ -64,13 +70,13 @@ func Register(srv *daemon.Server, opts ServiceOptions) (*Service, error) {
 
 	var svc *Service
 	userOnDiscovered := locOpts.OnDiscovered
-	locOpts.OnDiscovered = func(replace bool, logs, claudeDirs, codexHomes []string) {
-		val.UpdateDiscovered(replace, logs, claudeDirs, codexHomes)
+	locOpts.OnDiscovered = func(scope string, logs, claudeDirs, codexHomes []string) {
+		val.UpdateDiscovered(scope, logs, claudeDirs, codexHomes)
 		if svc != nil && svc.watcher != nil {
 			svc.watcher.NotifyDiscovered()
 		}
 		if userOnDiscovered != nil {
-			userOnDiscovered(replace, logs, claudeDirs, codexHomes)
+			userOnDiscovered(scope, logs, claudeDirs, codexHomes)
 		}
 	}
 
@@ -93,7 +99,7 @@ func Register(srv *daemon.Server, opts ServiceOptions) (*Service, error) {
 		locator:    loc,
 		val:        val,
 		watcher:    watcher,
-		watchConns: make(map[*daemon.Conn]chan struct{}),
+		watchConns: make(map[*daemon.Conn]*connWatchState),
 	}
 
 	srv.Register(proto.MethodAgentLocate, daemon.MethodOptions{}, svc.handleLocate)
@@ -113,11 +119,14 @@ func Register(srv *daemon.Server, opts ServiceOptions) (*Service, error) {
 
 func (s *Service) close() {
 	s.watchMu.Lock()
-	for c, stopCh := range s.watchConns {
-		close(stopCh)
-		delete(s.watchConns, c)
+	conns := make([]*daemon.Conn, 0, len(s.watchConns))
+	for c := range s.watchConns {
+		conns = append(conns, c)
 	}
 	s.watchMu.Unlock()
+	for _, c := range conns {
+		s.detachWatchConn(c)
+	}
 	s.watcher.Stop()
 }
 
@@ -163,17 +172,60 @@ func (s *Service) handleMessageTails(_ context.Context, _ *daemon.Conn, raw json
 	return proto.ConvoTailsResult{Out: out}, nil
 }
 
-func (s *Service) detachWatchConn(c *daemon.Conn) WatchStatus {
-	if c != nil {
+// lockConnState acquires the per-connection watch mutex for c while preserving
+// strict lock order (cs.mu before s.watchMu). When create is true, a state
+// record is created if absent; when false, returns nil if c is not registered.
+func (s *Service) lockConnState(c *daemon.Conn, create bool) *connWatchState {
+	for {
 		s.watchMu.Lock()
-		if stopCh, ok := s.watchConns[c]; ok {
-			close(stopCh)
-			delete(s.watchConns, c)
+		cs := s.watchConns[c]
+		if cs == nil {
+			if !create {
+				s.watchMu.Unlock()
+				return nil
+			}
+			cs = &connWatchState{}
+			s.watchConns[c] = cs
 		}
 		s.watchMu.Unlock()
-		s.srv.Bus().Unsubscribe(c)
+
+		cs.mu.Lock()
+		s.watchMu.Lock()
+		still := s.watchConns[c] == cs
+		s.watchMu.Unlock()
+		if still {
+			return cs
+		}
+		cs.mu.Unlock()
 	}
-	return s.watcher.Unsubscribe(c)
+}
+
+func (s *Service) detachWatchConnLocked(c *daemon.Conn, cs *connWatchState) WatchStatus {
+	if cs.active && cs.stopCh != nil {
+		close(cs.stopCh)
+		cs.stopCh = nil
+		cs.active = false
+	}
+	s.srv.Bus().Unsubscribe(c)
+	st := s.watcher.Unsubscribe(c)
+	s.watchMu.Lock()
+	if s.watchConns[c] == cs {
+		delete(s.watchConns, c)
+	}
+	s.watchMu.Unlock()
+	return st
+}
+
+func (s *Service) detachWatchConn(c *daemon.Conn) WatchStatus {
+	if c == nil {
+		return s.watcher.Unsubscribe(nil)
+	}
+	cs := s.lockConnState(c, false)
+	if cs == nil {
+		return s.watcher.Status()
+	}
+	defer cs.mu.Unlock()
+	return s.detachWatchConnLocked(c, cs)
 }
 
 func (s *Service) handleWatch(_ context.Context, c *daemon.Conn, raw json.RawMessage) (any, *proto.RPCError) {
@@ -195,25 +247,54 @@ func (s *Service) handleWatch(_ context.Context, c *daemon.Conn, raw json.RawMes
 		}, nil
 	}
 
+	if c == nil {
+		seq := s.srv.Bus().Subscribe(nil)
+		st := s.watcher.Subscribe(nil, p.Logs)
+		return proto.AgentWatchResult{
+			Watching:     st.Watching,
+			Mode:         st.Mode,
+			WatchedFiles: st.WatchedFiles,
+			MaxFiles:     st.MaxFiles,
+			Epoch:        s.srv.Bus().Epoch(),
+			Seq:          seq,
+		}, nil
+	}
+
+	// Serialize all watch/unwatch/disconnect transitions on this connection in
+	// one critical section so EventBus and Watcher can never diverge.
+	cs := s.lockConnState(c, true)
+	defer cs.mu.Unlock()
+
+	select {
+	case <-c.Done():
+		st := s.detachWatchConnLocked(c, cs)
+		return proto.AgentWatchResult{
+			Watching:     st.Watching,
+			Mode:         st.Mode,
+			WatchedFiles: st.WatchedFiles,
+			MaxFiles:     st.MaxFiles,
+			Epoch:        s.srv.Bus().Epoch(),
+			Seq:          s.srv.Bus().CurrentSeq(),
+		}, nil
+	default:
+	}
+
 	seq := s.srv.Bus().Subscribe(c)
 	st := s.watcher.Subscribe(c, p.Logs)
 
 	// Maintain at most one disconnect-watcher goroutine per connection; it
 	// exits immediately when unwatch/stop is called or when the connection closes.
-	if c != nil {
-		s.watchMu.Lock()
-		if _, exists := s.watchConns[c]; !exists {
-			stopCh := make(chan struct{})
-			s.watchConns[c] = stopCh
-			go func(conn *daemon.Conn, stop <-chan struct{}) {
-				select {
-				case <-conn.Done():
-					s.detachWatchConn(conn)
-				case <-stop:
-				}
-			}(c, stopCh)
-		}
-		s.watchMu.Unlock()
+	if !cs.active {
+		stopCh := make(chan struct{})
+		cs.active = true
+		cs.stopCh = stopCh
+		go func(conn *daemon.Conn, stop <-chan struct{}) {
+			select {
+			case <-conn.Done():
+				s.detachWatchConn(conn)
+			case <-stop:
+			}
+		}(c, stopCh)
 	}
 
 	return proto.AgentWatchResult{
@@ -280,6 +361,6 @@ func (s *Service) Restore(data json.RawMessage) error {
 			clean = append(clean, p)
 		}
 	}
-	s.val.UpdateDiscovered(true, clean, nil, nil)
+	s.val.UpdateDiscovered(LocateScopeFull, clean, nil, nil)
 	return nil
 }

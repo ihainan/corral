@@ -16,6 +16,13 @@ import (
 	"github.com/ihainan/corral/internal/corrald/proto"
 )
 
+const (
+	// LocateScopeFull identifies a full host scan (only == "").
+	LocateScopeFull = "full"
+	// LocateScopeOpenCode identifies an opencode-only scan (only == "opencode").
+	LocateScopeOpenCode = "opencode"
+)
+
 // LocatorOptions configures a Locator instance. Zero values default to the
 // current user's host environment (/proc, os.UserHomeDir, os.Geteuid).
 type LocatorOptions struct {
@@ -30,7 +37,7 @@ type LocatorOptions struct {
 	ClaudeConfigDir *string // override for /proc/self/environ CLAUDE_CONFIG_DIR
 	XDGDataHome     *string // override for /proc/self/environ XDG_DATA_HOME
 	Now             func() time.Time
-	OnDiscovered    func(replace bool, logs []string, claudeCfgDirs []string, codexHomes []string)
+	OnDiscovered    func(scope string, logs []string, claudeCfgDirs []string, codexHomes []string)
 }
 
 // Locator implements the host-side agent discovery logic matching Corral's
@@ -46,7 +53,7 @@ type Locator struct {
 	claudeConfigDirOverride *string
 	xdgDataHomeOverride     *string
 	nowFn                   func() time.Time
-	onDiscovered            func(replace bool, logs []string, claudeCfgDirs []string, codexHomes []string)
+	onDiscovered            func(scope string, logs []string, claudeCfgDirs []string, codexHomes []string)
 }
 
 // NewLocator creates a Locator with the supplied options.
@@ -532,11 +539,29 @@ func (l *Locator) LocateWith(ctx context.Context, mode, tmuxName, tmuxPane, time
 	}
 
 	if l.onDiscovered != nil {
-		// Replace tracked authorization state on full scans (only == "") so
-		// exited sessions and old config directories do not accumulate.
-		l.onDiscovered(only == "", discoveredLogs, discoveredClaudeDirs, discoveredCodexHomes)
+		if scope, ok := locateScopeForOnly(only); ok {
+			l.onDiscovered(scope, discoveredLogs, discoveredClaudeDirs, discoveredCodexHomes)
+		}
 	}
 	return out.Bytes()
+}
+
+func locateScopeForOnly(only string) (string, bool) {
+	switch {
+	case only == "":
+		return LocateScopeFull, true
+	case only == "opencode":
+		return LocateScopeOpenCode, true
+	case strings.HasPrefix(only, "tree:"):
+		rest := strings.TrimPrefix(only, "tree:")
+		shellPID, _, _ := strings.Cut(rest, ":")
+		if isAllDigits(shellPID) {
+			return "tree:" + shellPID, true
+		}
+		return "", false
+	default:
+		return "", false
+	}
 }
 
 // listClaudeSessionFiles lists <cfgDir>/sessions/*.json using literal

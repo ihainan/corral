@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -152,19 +153,93 @@ func waitForFile(t *testing.T, path string) string {
 	return ""
 }
 
-func filterToTestDescendants(l convoLocated, selfPID int64, home string) convoLocated {
+// diffPIDScope enumerates only test-owned root PIDs and their live descendants
+// so Go agent.Locator never scans unrelated host processes or noise agents.
+type diffPIDScope struct {
+	mu    sync.RWMutex
+	roots map[int]bool
+}
+
+func newDiffPIDScope() *diffPIDScope {
+	return &diffPIDScope{roots: make(map[int]bool)}
+}
+
+func (s *diffPIDScope) add(pids ...int) {
+	s.mu.Lock()
+	for _, p := range pids {
+		if p > 0 {
+			s.roots[p] = true
+		}
+	}
+	s.mu.Unlock()
+}
+
+func (s *diffPIDScope) snapshotSet() map[int64]bool {
+	s.mu.RLock()
+	roots := make([]int, 0, len(s.roots))
+	for p := range s.roots {
+		roots = append(roots, p)
+	}
+	s.mu.RUnlock()
+
+	kids := map[int][]int{}
+	entries, _ := os.ReadDir("/proc")
+	alive := map[int]bool{}
+	for _, e := range entries {
+		pid, err := strconv.Atoi(e.Name())
+		if err != nil || pid <= 0 {
+			continue
+		}
+		alive[pid] = true
+		b, err := os.ReadFile("/proc/" + e.Name() + "/stat")
+		if err != nil {
+			continue
+		}
+		if j := strings.LastIndex(string(b), ") "); j >= 0 {
+			if f := strings.Fields(string(b)[j+2:]); len(f) > 1 {
+				if ppid, err := strconv.Atoi(f[1]); err == nil && ppid > 0 {
+					kids[ppid] = append(kids[ppid], pid)
+				}
+			}
+		}
+	}
+
+	out := make(map[int64]bool, len(roots)*2)
+	q := make([]int, 0, len(roots)*2)
+	for _, r := range roots {
+		if alive[r] && !out[int64(r)] {
+			out[int64(r)] = true
+			q = append(q, r)
+		}
+	}
+	for head := 0; head < len(q); head++ {
+		cur := q[head]
+		for _, ch := range kids[cur] {
+			if !out[int64(ch)] {
+				out[int64(ch)] = true
+				q = append(q, ch)
+			}
+		}
+	}
+	return out
+}
+
+func (s *diffPIDScope) list() ([]string, error) {
+	set := s.snapshotSet()
+	out := make([]string, 0, len(set))
+	for p := range set {
+		out = append(out, strconv.FormatInt(p, 10))
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+func filterToPIDSet(l convoLocated, allowedPIDs map[int64]bool, home string) convoLocated {
 	out := l
 	out.procs = nil
 	testPIDs := map[int64]bool{}
 	for _, p := range l.procs {
-		isMine := false
-		for _, a := range p.anc {
-			if a.pid == selfPID {
-				isMine = true
-				break
-			}
-		}
-		if isMine {
+		if allowedPIDs[p.pid] {
 			out.procs = append(out.procs, p)
 			testPIDs[p.pid] = true
 		}
@@ -197,7 +272,7 @@ func filterToTestDescendants(l convoLocated, selfPID int64, home string) convoLo
 	return out
 }
 
-func compareLocated(t *testing.T, label string, shRaw, goRaw []byte, selfPID int64, home string) (convoLocated, convoLocated) {
+func compareLocated(t *testing.T, label string, shRaw, goRaw []byte, allowedPIDs map[int64]bool, home string) (convoLocated, convoLocated) {
 	t.Helper()
 	shLoc := parseConvoLocate(string(shRaw))
 	goLoc := parseConvoLocate(string(goRaw))
@@ -213,8 +288,21 @@ func compareLocated(t *testing.T, label string, shRaw, goRaw []byte, selfPID int
 		t.Fatalf("%s: hostNow diverged by %dms (sh=%d, go=%d)", label, diffNow, shLoc.hostNow, goLoc.hostNow)
 	}
 
-	shF := filterToTestDescendants(shLoc, selfPID, home)
-	goF := filterToTestDescendants(goLoc, selfPID, home)
+	// Assert Go Locator (which uses ListPIDs injection) returned ZERO PIDs
+	// outside allowedPIDs (no real host processes and no noise agents leaked).
+	for _, p := range goLoc.procs {
+		if !allowedPIDs[p.pid] {
+			t.Fatalf("%s: isolated Go Locator leaked out-of-scope PID %d (%+v)", label, p.pid, p)
+		}
+	}
+	for _, c := range goLoc.cands {
+		if !strings.HasPrefix(c.log, home+"/") {
+			t.Fatalf("%s: isolated Go Locator leaked out-of-scope cand %q", label, c.log)
+		}
+	}
+
+	shF := filterToPIDSet(shLoc, allowedPIDs, home)
+	goF := filterToPIDSet(goLoc, allowedPIDs, home)
 
 	if !reflect.DeepEqual(shF, goF) {
 		t.Fatalf("%s: parseConvoLocate mismatch!\n--- SH (%d procs, %d cands) ---\n%+v\n--- GO (%d procs, %d cands) ---\n%+v",
@@ -280,7 +368,8 @@ func TestCorraldAgentDifferentialAgainstShellScripts(t *testing.T) {
 	agyBin := makeBin("agy", false)
 	devinBin := makeBin("devin", false)
 
-	spawn := func(bin, dir string, env []string, args ...string) (int, string) {
+	pidScope := newDiffPIDScope()
+	spawnRaw := func(bin, dir string, env []string, args ...string) (int, string) {
 		readyFile := filepath.Join(t.TempDir(), "ready")
 		c := exec.Command(bin, args...)
 		c.Dir = dir
@@ -296,6 +385,11 @@ func TestCorraldAgentDifferentialAgainstShellScripts(t *testing.T) {
 		})
 		waitForFile(t, readyFile)
 		return pid, waitForProcStart(t, pid)
+	}
+	spawn := func(bin, dir string, env []string, args ...string) (int, string) {
+		pid, st := spawnRaw(bin, dir, env, args...)
+		pidScope.add(pid)
+		return pid, st
 	}
 
 	// --- 1. Claude Code scenarios ---
@@ -557,7 +651,7 @@ base_url = "https://codex-gw.example.net/v1"
 		sid := fmt.Sprintf("81818181-8181-4818-8818-%012d", i+1)
 		logFile := filepath.Join(noiseClaudeProj, sid+".jsonl")
 		_ = os.WriteFile(logFile, []byte(`{"type":"user"}`+"\n"), 0o600)
-		npid, nstart := spawn(claudeBin, noiseHome, []string{
+		npid, nstart := spawnRaw(claudeBin, noiseHome, []string{
 			"CLAUDE_CONFIG_DIR=" + noiseClaudeCfg,
 			fmt.Sprintf("HERDR_PANE_ID=noise:c%d", i),
 		})
@@ -568,7 +662,7 @@ base_url = "https://codex-gw.example.net/v1"
 		sid := fmt.Sprintf("82828282-8282-4828-8828-%012d", i+1)
 		logFile := filepath.Join(noiseCodexSess, "rollout-2026-11-27T01-00-00-"+sid+".jsonl")
 		_ = os.WriteFile(logFile, []byte(`{"type":"session_meta","payload":{"cwd":"/tmp/noise"}}`+"\n"), 0o600)
-		_, _ = spawn(codexBin, noiseHome, []string{
+		_, _ = spawnRaw(codexBin, noiseHome, []string{
 			"CODEX_HOME=" + noiseCodexHome,
 			"FAKE_OPEN_FILES=" + logFile,
 			fmt.Sprintf("HERDR_PANE_ID=noise:x%d", i),
@@ -576,9 +670,12 @@ base_url = "https://codex-gw.example.net/v1"
 	}
 
 	// --- Run side-by-side comparisons across all modes! ---
+	// Inject ListPIDs so Go agent.Locator only enumerates test-scoped PIDs
+	// (never scanning unrelated host processes or the 20 noise agents above).
 	emptyStr := ""
 	loc, err := agent.NewLocator(agent.LocatorOptions{
 		Home:            home,
+		ListPIDs:        pidScope.list,
 		ClaudeConfigDir: &emptyStr,
 		XDGDataHome:     &emptyStr,
 	})
@@ -596,12 +693,10 @@ base_url = "https://codex-gw.example.net/v1"
 		return out
 	}
 
-	selfPID := int64(os.Getpid())
-
 	// Mode 1: Full locate (convoLocateCommand).
 	shFull := runSh(convoLocateCommand("herdr", "", ""))
 	goFull := loc.Locate(context.Background(), proto.AgentLocateParams{Mode: "herdr"})
-	_, gotFull := compareLocated(t, "full-herdr", shFull, goFull, selfPID, home)
+	_, gotFull := compareLocated(t, "full-herdr", shFull, goFull, pidScope.snapshotSet(), home)
 
 	// Sanity assertions so a vacuously-empty bug cannot pass.
 	byPID := map[int64]convoProc{}
@@ -681,7 +776,7 @@ base_url = "https://codex-gw.example.net/v1"
 	// Mode 2: OpenCode-only scan (convoLocateOpenCodeCommand).
 	shOC := runSh(convoLocateOpenCodeCommand("herdr", ""))
 	goOC := loc.Locate(context.Background(), proto.AgentLocateParams{Mode: "herdr", Only: "opencode"})
-	_, gotOC := compareLocated(t, "opencode-only", shOC, goOC, selfPID, home)
+	_, gotOC := compareLocated(t, "opencode-only", shOC, goOC, pidScope.snapshotSet(), home)
 	ocByPID := map[int64]convoProc{}
 	for _, p := range gotOC.procs {
 		ocByPID[p.pid] = p
@@ -702,7 +797,7 @@ base_url = "https://codex-gw.example.net/v1"
 	// Mode 3: Times mode (convoLocateTimesCommand).
 	shTimes := runSh(convoLocateTimesCommand("herdr", ""))
 	goTimes := loc.Locate(context.Background(), proto.AgentLocateParams{Mode: "herdr", Times: true})
-	_, gotTimes := compareLocated(t, "times", shTimes, goTimes, selfPID, home)
+	_, gotTimes := compareLocated(t, "times", shTimes, goTimes, pidScope.snapshotSet(), home)
 	for _, p := range gotTimes.procs {
 		if p.pid == int64(cl1PID) {
 			if !p.wroteTold || p.wrote <= 0 || p.ep != "" || p.auth != "" || p.ac != "" {
@@ -716,13 +811,14 @@ base_url = "https://codex-gw.example.net/v1"
 		{"HERDR_PANE_ID=w9:p1", "HERDR_SOCKET_PATH=/tmp/herdr.sock"},
 		{"HERDR_PANE_ID=w9:p1", "HERDR_SOCKET_PATH=/tmp/herdr.sock"},
 	})
+	pidScope.add(shellPID)
 	_ = os.WriteFile(filepath.Join(defaultClaudeSess, strconv.Itoa(treePIDs[0])+".json"),
 		[]byte(fmt.Sprintf(`{"pid":%d,"sessionId":"%s","procStart":"%s"}`, treePIDs[0], clSID6, treeStarts[0])), 0o600)
 
 	// 4a. Single candidate hit.
 	shTree1 := runSh(convoLocatePidsCommand(shellPID, []int{treePIDs[0]}))
 	goTree1 := loc.Locate(context.Background(), proto.AgentLocateParams{Mode: "herdr", ShellPID: shellPID, PIDs: []int{treePIDs[0]}})
-	_, gotTree1 := compareLocated(t, "tree-single", shTree1, goTree1, selfPID, home)
+	_, gotTree1 := compareLocated(t, "tree-single", shTree1, goTree1, pidScope.snapshotSet(), home)
 	if gotTree1.fastIncomplete || len(gotTree1.procs) != 1 || gotTree1.procs[0].pid != int64(treePIDs[0]) {
 		t.Fatalf("tree-single unexpected: %+v", gotTree1)
 	}
@@ -732,7 +828,7 @@ base_url = "https://codex-gw.example.net/v1"
 		[]byte(fmt.Sprintf(`{"pid":%d,"sessionId":"%s","procStart":"%s"}`, treePIDs[1], clSID6, treeStarts[1])), 0o600)
 	shTree2 := runSh(convoLocatePidsCommand(shellPID, []int{treePIDs[0]}))
 	goTree2 := loc.Locate(context.Background(), proto.AgentLocateParams{Mode: "herdr", ShellPID: shellPID, PIDs: []int{treePIDs[0]}})
-	_, gotTree2 := compareLocated(t, "tree-two-siblings", shTree2, goTree2, selfPID, home)
+	_, gotTree2 := compareLocated(t, "tree-two-siblings", shTree2, goTree2, pidScope.snapshotSet(), home)
 	if !gotTree2.fastIncomplete {
 		t.Fatalf("tree-two-siblings expected fastIncomplete=true")
 	}
@@ -740,7 +836,7 @@ base_url = "https://codex-gw.example.net/v1"
 	// 4c. Stale fgPID outside subtree -> fastIncomplete=true.
 	shTree3 := runSh(convoLocatePidsCommand(shellPID, []int{9999999}))
 	goTree3 := loc.Locate(context.Background(), proto.AgentLocateParams{Mode: "herdr", ShellPID: shellPID, PIDs: []int{9999999}})
-	_, gotTree3 := compareLocated(t, "tree-stale-fg", shTree3, goTree3, selfPID, home)
+	_, gotTree3 := compareLocated(t, "tree-stale-fg", shTree3, goTree3, pidScope.snapshotSet(), home)
 	if !gotTree3.fastIncomplete {
 		t.Fatalf("tree-stale-fg expected fastIncomplete=true")
 	}
@@ -748,7 +844,7 @@ base_url = "https://codex-gw.example.net/v1"
 	// 4d. Non-herdr root -> fastIncomplete=true.
 	shTree4 := runSh(convoLocatePidsCommand(os.Getpid(), []int{os.Getpid()}))
 	goTree4 := loc.Locate(context.Background(), proto.AgentLocateParams{Mode: "herdr", ShellPID: os.Getpid(), PIDs: []int{os.Getpid()}})
-	_, gotTree4 := compareLocated(t, "tree-non-herdr", shTree4, goTree4, selfPID, home)
+	_, gotTree4 := compareLocated(t, "tree-non-herdr", shTree4, goTree4, pidScope.snapshotSet(), home)
 	if !gotTree4.fastIncomplete {
 		t.Fatalf("tree-non-herdr expected fastIncomplete=true")
 	}
@@ -901,9 +997,18 @@ func TestCorraldLocatePerformance50Agents(t *testing.T) {
 			[]byte(fmt.Sprintf(`{"pid":%d,"sessionId":"%s","procStart":"%s"}`, pid, sid, st)), 0o600)
 	}
 
+	wantPIDs := make(map[int64]bool, nProcs)
+	perfPIDStrings := make([]string, 0, nProcs)
+	for _, c := range cmds {
+		pid := c.Process.Pid
+		wantPIDs[int64(pid)] = true
+		perfPIDStrings = append(perfPIDStrings, strconv.Itoa(pid))
+	}
+
 	emptyStr := ""
 	loc, err := agent.NewLocator(agent.LocatorOptions{
 		Home:            home,
+		ListPIDs:        func() ([]string, error) { return perfPIDStrings, nil },
 		ClaudeConfigDir: &emptyStr,
 		XDGDataHome:     &emptyStr,
 	})
@@ -924,25 +1029,9 @@ func TestCorraldLocatePerformance50Agents(t *testing.T) {
 	goOut := loc.Locate(context.Background(), proto.AgentLocateParams{Mode: "herdr"})
 	goElapsed := time.Since(goStart)
 
-	selfPID := int64(os.Getpid())
-	shLoc, goLoc := compareLocated(t, "perf-50-agents", shOut, goOut, selfPID, home)
-	wantPIDs := make(map[int64]bool, nProcs)
-	for _, c := range cmds {
-		wantPIDs[int64(c.Process.Pid)] = true
-	}
-	foundSh, foundGo := 0, 0
-	for _, p := range shLoc.procs {
-		if wantPIDs[p.pid] {
-			foundSh++
-		}
-	}
-	for _, p := range goLoc.procs {
-		if wantPIDs[p.pid] {
-			foundGo++
-		}
-	}
-	if foundSh != nProcs || foundGo != nProcs {
-		t.Fatalf("expected %d spawned procs, got sh=%d go=%d", nProcs, foundSh, foundGo)
+	shLoc, goLoc := compareLocated(t, "perf-50-agents", shOut, goOut, wantPIDs, home)
+	if len(shLoc.procs) != nProcs || len(goLoc.procs) != nProcs {
+		t.Fatalf("expected %d spawned procs, got sh=%d go=%d", nProcs, len(shLoc.procs), len(goLoc.procs))
 	}
 
 	speedup := float64(shElapsed) / float64(goElapsed)

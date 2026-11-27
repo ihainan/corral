@@ -402,7 +402,7 @@ func TestRPCMethodsAndWatchInotifyAndFallback(t *testing.T) {
 	})
 
 	// 6. StateProvider Snapshot/Restore preserves known located logs.
-	svc.Validator().UpdateDiscovered(true, []string{logPath}, nil, nil)
+	svc.Validator().UpdateDiscovered(LocateScopeFull, []string{logPath}, nil, nil)
 	snap, err := svc.Snapshot()
 	if err != nil {
 		t.Fatal(err)
@@ -999,7 +999,7 @@ func TestAgentTestsIsolatedFrom20HostNoiseAgents(t *testing.T) {
 		Home:            t.TempDir(),
 		ClaudeConfigDir: &emptyStr,
 		XDGDataHome:     &emptyStr,
-		OnDiscovered: func(_ bool, logs, _, _ []string) {
+		OnDiscovered: func(_ string, logs, _, _ []string) {
 			unscopedLogs = logs
 		},
 	})
@@ -1089,4 +1089,253 @@ func TestAgentTestsIsolatedFrom20HostNoiseAgents(t *testing.T) {
 
 func timevalDuration(tv syscall.Timeval) time.Duration {
 	return time.Duration(tv.Sec)*time.Second + time.Duration(tv.Usec)*time.Microsecond
+}
+
+// Round 3 #4: concurrent agent.watch and agent.unwatch calls on the SAME
+// connection must serialize atomically so EventBus and Watcher never diverge.
+func TestWatchUnwatchSameConnSerialized(t *testing.T) {
+	home := t.TempDir()
+	projDir := filepath.Join(home, ".claude", "projects", "-r4")
+	if err := os.MkdirAll(projDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(projDir, "44444444-4444-4444-8444-444444444444.jsonl")
+	if err := os.WriteFile(logPath, []byte("seed\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, svc, sock, _ := startTestDaemonWithAgent(t, home, ServiceOptions{
+		MaxWatches:   DefaultMaxInotifyWatches,
+		PollInterval: 2 * time.Second,
+	})
+
+	// Race watch + unwatch concurrently on the same connection over pipelined RPC.
+	cl := dialRPCTestClient(t, sock)
+	var wr proto.AgentWatchResult
+	cl.call(t, proto.MethodAgentWatch, proto.AgentWatchParams{Logs: []string{logPath}}, &wr)
+
+	// Extract the server-side *daemon.Conn from watchConns to directly stress
+	// concurrent handleWatch / handleUnwatch calls on the exact same *daemon.Conn.
+	svc.watchMu.Lock()
+	var serverConn *daemon.Conn
+	for c := range svc.watchConns {
+		serverConn = c
+		break
+	}
+	svc.watchMu.Unlock()
+	if serverConn == nil {
+		t.Fatal("serverConn not registered in watchConns")
+	}
+
+	rawWatch, _ := json.Marshal(proto.AgentWatchParams{Logs: []string{logPath}})
+	for iter := 0; iter < 50; iter++ {
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			_, _ = svc.handleWatch(context.Background(), serverConn, rawWatch)
+		}()
+		go func() {
+			defer wg.Done()
+			_, _ = svc.handleUnwatch(context.Background(), serverConn, nil)
+		}()
+		wg.Wait()
+
+		// After every concurrent race, EventBus subscription and Watcher state
+		// MUST agree: either both subscribed or both unsubscribed!
+		svc.watchMu.Lock()
+		_, inMap := svc.watchConns[serverConn]
+		svc.watchMu.Unlock()
+		st := svc.Watcher().Status()
+		if inMap != st.Watching {
+			t.Fatalf("iter %d: Bus/watchConns (%v) diverged from Watcher.Watching (%v)", iter, inMap, st.Watching)
+		}
+	}
+
+	// End cleanly with unwatch and confirm no stale subscription remains.
+	_, _ = svc.handleUnwatch(context.Background(), serverConn, nil)
+	if st := svc.Watcher().Status(); st.Watching {
+		t.Fatalf("expected watcher idle after final unwatch, got %+v", st)
+	}
+	f, err := os.OpenFile(logPath, os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = f.WriteString("should-not-deliver\n")
+	_ = f.Close()
+	cl.assertNoEvent(t, 150*time.Millisecond)
+}
+
+// Round 3 #6: when a watched log is rotated (rename + immediate create/write)
+// before reconcileWatches finishes, Watcher must immediately emit a change hint
+// for that log path even without any subsequent append.
+func TestWatchRotationEmitsImmediateHintBeforeRebind(t *testing.T) {
+	home := t.TempDir()
+	projDir := filepath.Join(home, ".claude", "projects", "-rot-immediate")
+	if err := os.MkdirAll(projDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(projDir, "66666666-6666-4666-8666-666666666666.jsonl")
+	if err := os.WriteFile(logPath, []byte("gen1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Use a long PollInterval so stat polling cannot mask a missed inotify hint.
+	_, _, sock, _ := startTestDaemonWithAgent(t, home, ServiceOptions{
+		MaxWatches:   DefaultMaxInotifyWatches,
+		PollInterval: 30 * time.Second,
+	})
+	cl := dialRPCTestClient(t, sock)
+	var wr proto.AgentWatchResult
+	cl.call(t, proto.MethodAgentWatch, proto.AgentWatchParams{Logs: []string{logPath}}, &wr)
+	time.Sleep(80 * time.Millisecond)
+
+	// Rotate atomically and write new content IMMEDIATELY with NO later append.
+	if err := os.Rename(logPath, logPath+".old"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(logPath, []byte("gen2-first-write-only\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cl.readEvent(t, 2*time.Second, func(e proto.Event) bool {
+		if e.Event != proto.EventAgentChanged {
+			return false
+		}
+		var d proto.AgentChangedEventData
+		_ = json.Unmarshal(e.Data, &d)
+		for _, p := range d.ChangedLogs {
+			if p == logPath {
+				return true
+			}
+		}
+		return false
+	})
+}
+
+// Round 3 #7: when an existing agent PID is re-classified to a different agent
+// kind (e.g. claude exec'ing into codex with the same PID & starttime) OR its
+// active log set changes, Watcher must treat it as changed and emit hints.
+func TestWatchDetectsAgentToAgentExecAndLogChange(t *testing.T) {
+	shPath, err := exec.LookPath("sh")
+	if err != nil {
+		t.Skip("no sh")
+	}
+	sleepPath, err := exec.LookPath("sleep")
+	if err != nil {
+		t.Skip("no sleep")
+	}
+
+	fakeBinDir := t.TempDir()
+	fakeClaudeSh := filepath.Join(fakeBinDir, "claude")
+	fakeCodex := filepath.Join(fakeBinDir, "codex")
+	if err := os.Symlink(shPath, fakeClaudeSh); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(sleepPath, fakeCodex); err != nil {
+		t.Fatal(err)
+	}
+
+	home := t.TempDir()
+	readyFile := filepath.Join(t.TempDir(), "claude-ready")
+	triggerFile := filepath.Join(t.TempDir(), "exec-codex")
+	// Starts with /proc/<pid>/comm == "claude", then execs into "codex" on the
+	// exact same PID and starttime.
+	script := fmt.Sprintf("echo ok > %q; while [ ! -f %q ]; do sleep 0.02; done; exec %q 60", readyFile, triggerFile, fakeCodex)
+	cmd := exec.Command(fakeClaudeSh, "-c", script)
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	pid := cmd.Process.Pid
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+	})
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(readyFile); err == nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	_, _, sock, reg := startTestDaemonWithAgent(t, home, ServiceOptions{
+		PollInterval: 60 * time.Millisecond,
+	})
+	reg.add(pid)
+	cl := dialRPCTestClient(t, sock)
+	var wr proto.AgentWatchResult
+	cl.call(t, proto.MethodAgentWatch, proto.AgentWatchParams{}, &wr)
+	// Let seedProcesses observe pid while it is classified as "claude".
+	time.Sleep(150 * time.Millisecond)
+
+	// Trigger in-place exec from claude -> codex.
+	if err := os.WriteFile(triggerFile, []byte("go"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cl.readEvent(t, 3*time.Second, func(e proto.Event) bool {
+		if e.Event != proto.EventAgentChanged {
+			return false
+		}
+		var d proto.AgentChangedEventData
+		_ = json.Unmarshal(e.Data, &d)
+		sawAdd, sawRem := false, false
+		for _, p := range d.AddedPIDs {
+			if p == pid {
+				sawAdd = true
+			}
+		}
+		for _, p := range d.RemovedPIDs {
+			if p == pid {
+				sawRem = true
+			}
+		}
+		return sawAdd && sawRem
+	})
+
+	// Part B: same PID, same agentKind ("claude"), same starttime/comm/exe,
+	// but active session/log changes -> pollProcesses reports the PID change.
+	fakeProc := t.TempDir()
+	pidDir := filepath.Join(fakeProc, "5151")
+	sessDir := filepath.Join(home, ".claude", "sessions")
+	projDir := filepath.Join(home, ".claude", "projects", "-p")
+	for _, d := range []string{pidDir, sessDir, projDir} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	statLine := "5151 (claude) S 1 5151 5151 0 5151 0 0 0 0 0 0 0 0 0 20 0 1 0 12345 0 0\n"
+	_ = os.WriteFile(filepath.Join(pidDir, "stat"), []byte(statLine), 0o600)
+	_ = os.WriteFile(filepath.Join(pidDir, "comm"), []byte("claude\n"), 0o600)
+	_ = os.WriteFile(filepath.Join(pidDir, "environ"), []byte("HOME="+home+"\x00"), 0o600)
+
+	const (
+		sidA = "11111111-1111-4111-8111-111111111111"
+		sidB = "22222222-2222-4222-8222-222222222222"
+	)
+	_ = os.WriteFile(filepath.Join(projDir, sidA+".jsonl"), []byte("a\n"), 0o600)
+	_ = os.WriteFile(filepath.Join(projDir, sidB+".jsonl"), []byte("b\n"), 0o600)
+	_ = os.WriteFile(filepath.Join(sessDir, "5151.json"), []byte(`{"pid":5151,"sessionId":"`+sidA+`","procStart":"12345"}`), 0o600)
+
+	emptyStr := ""
+	loc, err := NewLocator(LocatorOptions{
+		Home:            home,
+		ProcRoot:        fakeProc,
+		ClaudeConfigDir: &emptyStr,
+		XDGDataHome:     &emptyStr,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	val := NewPathValidator(home, uint32(os.Geteuid()), fakeProc)
+	w := NewWatcher(WatchWatcherOptions{Locator: loc, Validator: val})
+	w.seedProcesses()
+
+	// Switch session file to sidB without changing PID/starttime/comm/exe.
+	_ = os.WriteFile(filepath.Join(sessDir, "5151.json"), []byte(`{"pid":5151,"sessionId":"`+sidB+`","procStart":"12345"}`), 0o600)
+	added, _ := w.pollProcesses()
+	if len(added) != 1 || added[0] != 5151 {
+		t.Fatalf("expected log-set change on PID 5151 to emit added=[5151], got added=%v", added)
+	}
 }

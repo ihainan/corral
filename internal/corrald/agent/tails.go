@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 
 	"github.com/ihainan/corral/internal/corrald/proto"
@@ -23,27 +24,75 @@ const (
 
 	// Upper bounds for tracked locate authorization entries so long-lived
 	// daemons never accumulate unbounded state.
-	maxTrackedLogs = 4096
-	maxTrackedDirs = 256
+	maxTrackedLogs     = 4096
+	maxTrackedDirs     = 256
+	maxTreeAuthBuckets = 64
 )
 
 var messageTailTypeRe = regexp.MustCompile(`"type"[ ]*:[ ]*"(message|user_message|agent_message|item_completed|custom_tool_call|function_call|task_started|task_complete|thread_rolled_back)"`)
 
+type authBucket struct {
+	knownLogs     map[string]string // literal clean path string -> capability category
+	claudeCfgDirs map[string]struct{}
+	codexHomes    map[string]struct{}
+	lastUsed      atomic.Uint64
+}
+
+func newAuthBucket(logs, claudeDirs, codexHomes []string, seq uint64) *authBucket {
+	b := &authBucket{
+		knownLogs:     make(map[string]string, len(logs)),
+		claudeCfgDirs: make(map[string]struct{}, len(claudeDirs)),
+		codexHomes:    make(map[string]struct{}, len(codexHomes)),
+	}
+	b.lastUsed.Store(seq)
+	for _, p := range logs {
+		if len(b.knownLogs) >= maxTrackedLogs {
+			break
+		}
+		if !isCleanAbsPath(p) {
+			continue
+		}
+		b.knownLogs[p] = inferLogCap(p)
+	}
+	for _, d := range claudeDirs {
+		if len(b.claudeCfgDirs) >= maxTrackedDirs {
+			break
+		}
+		if !isCleanAbsPath(d) {
+			continue
+		}
+		b.claudeCfgDirs[d] = struct{}{}
+	}
+	for _, d := range codexHomes {
+		if len(b.codexHomes) >= maxTrackedDirs {
+			break
+		}
+		if !isCleanAbsPath(d) {
+			continue
+		}
+		b.codexHomes[d] = struct{}{}
+	}
+	return b
+}
+
 // PathValidator restricts log file reads to regular files owned by the daemon's
-// UID whose literal path string either appeared in the most recent locate
-// result or resides under a declared reads agent log root directory, opened
-// strictly via openat(O_NOFOLLOW|O_DIRECTORY) across every path component so
-// symlinks can neither poison authorization nor race parent directory checks.
+// UID whose literal path string either appeared in an active scoped locate
+// bucket (full, opencode, or per-shell tree:<shell>) or resides under a
+// declared reads agent log root directory, opened strictly via
+// openat(O_NOFOLLOW|O_DIRECTORY) across every path component so symlinks can
+// neither poison authorization nor race parent directory checks.
 type PathValidator struct {
 	home string
 	uid  uint32
 
-	mu            sync.RWMutex
-	knownLogs     map[string]string // literal clean path string -> capability category
-	claudeCfgDirs map[string]struct{}
-	codexHomes    map[string]struct{}
-	xdgDataHome   string
-	selfClaudeDir string
+	useSeq atomic.Uint64
+
+	mu             sync.RWMutex
+	fullBucket     *authBucket
+	opencodeBucket *authBucket
+	treeBuckets    map[string]*authBucket
+	xdgDataHome    string
+	selfClaudeDir  string
 }
 
 type allowedRoot struct {
@@ -58,11 +107,9 @@ func NewPathValidator(home string, uid uint32, _ string) *PathValidator {
 		cleanHome = filepath.Clean(home)
 	}
 	return &PathValidator{
-		home:          cleanHome,
-		uid:           uid,
-		knownLogs:     make(map[string]string),
-		claudeCfgDirs: make(map[string]struct{}),
-		codexHomes:    make(map[string]struct{}),
+		home:        cleanHome,
+		uid:         uid,
+		treeBuckets: make(map[string]*authBucket),
 	}
 }
 
@@ -83,55 +130,65 @@ func (v *PathValidator) SetEnvDirs(claudeCfgDir, xdgDataHome string) {
 	}
 }
 
-// UpdateDiscovered records literal path strings seen during a locate scan.
-// It NEVER resolves symlinks or adds symlink targets to the authorization set.
-// When replace is true (full scan), previous locate-derived entries are
-// replaced so exited sessions and old config directories do not accumulate.
-func (v *PathValidator) UpdateDiscovered(replace bool, logs, claudeDirs, codexHomes []string) {
+// UpdateDiscovered replaces the authorization bucket for scope ("full",
+// "opencode", or "tree:<shell>") with the literal path strings seen during
+// that locate scan. It NEVER resolves symlinks or adds symlink targets to the
+// authorization set. Distinct "tree:*" scopes are capped at maxTreeAuthBuckets
+// with LRU eviction.
+func (v *PathValidator) UpdateDiscovered(scope string, logs, claudeDirs, codexHomes []string) {
+	seq := v.useSeq.Add(1)
+	b := newAuthBucket(logs, claudeDirs, codexHomes, seq)
+
 	v.mu.Lock()
 	defer v.mu.Unlock()
 
-	if replace {
-		v.knownLogs = make(map[string]string, len(logs))
-		v.claudeCfgDirs = make(map[string]struct{}, len(claudeDirs))
-		v.codexHomes = make(map[string]struct{}, len(codexHomes))
-	}
-
-	for _, p := range logs {
-		if len(v.knownLogs) >= maxTrackedLogs {
-			break
+	switch {
+	case scope == "" || scope == LocateScopeFull:
+		v.fullBucket = b
+	case scope == LocateScopeOpenCode:
+		v.opencodeBucket = b
+	case strings.HasPrefix(scope, "tree:"):
+		if _, exists := v.treeBuckets[scope]; !exists && len(v.treeBuckets) >= maxTreeAuthBuckets {
+			var oldestKey string
+			var oldestSeq uint64
+			first := true
+			for k, tb := range v.treeBuckets {
+				u := tb.lastUsed.Load()
+				if first || u < oldestSeq {
+					oldestKey = k
+					oldestSeq = u
+					first = false
+				}
+			}
+			if !first {
+				delete(v.treeBuckets, oldestKey)
+			}
 		}
-		if !isCleanAbsPath(p) {
-			continue
-		}
-		v.knownLogs[p] = inferLogCap(p)
-	}
-	for _, d := range claudeDirs {
-		if len(v.claudeCfgDirs) >= maxTrackedDirs {
-			break
-		}
-		if !isCleanAbsPath(d) {
-			continue
-		}
-		v.claudeCfgDirs[d] = struct{}{}
-	}
-	for _, d := range codexHomes {
-		if len(v.codexHomes) >= maxTrackedDirs {
-			break
-		}
-		if !isCleanAbsPath(d) {
-			continue
-		}
-		v.codexHomes[d] = struct{}{}
+		v.treeBuckets[scope] = b
 	}
 }
 
-// KnownLogs returns a snapshot of currently tracked literal located log paths.
+// KnownLogs returns a deduplicated snapshot of currently tracked literal
+// located log paths across all active locate buckets.
 func (v *PathValidator) KnownLogs() []string {
 	v.mu.RLock()
 	defer v.mu.RUnlock()
-	out := make([]string, 0, len(v.knownLogs))
-	for p := range v.knownLogs {
+	seen := make(map[string]struct{})
+	addBucket := func(b *authBucket) {
+		if b == nil {
+			return
+		}
+		for p := range b.knownLogs {
+			seen[p] = struct{}{}
+		}
+	}
+	addBucket(v.fullBucket)
+	addBucket(v.opencodeBucket)
+	for _, b := range v.treeBuckets {
+		addBucket(b)
+	}
+	out := make([]string, 0, len(seen))
+	for p := range seen {
 		out = append(out, p)
 	}
 	return out
@@ -160,7 +217,7 @@ func inferLogCap(p string) string {
 }
 
 func (v *PathValidator) allowedRootsLocked() []allowedRoot {
-	roots := make([]allowedRoot, 0, 8+len(v.claudeCfgDirs)+len(v.codexHomes))
+	roots := make([]allowedRoot, 0, 16)
 	if v.home != "" {
 		roots = append(roots,
 			allowedRoot{dir: filepath.Join(v.home, ".claude", "projects"), cap: proto.ReadAgentLogsClaude},
@@ -179,11 +236,21 @@ func (v *PathValidator) allowedRootsLocked() []allowedRoot {
 			allowedRoot{dir: filepath.Join(v.xdgDataHome, "devin", "cli"), cap: proto.ReadAgentLogsDevin},
 		)
 	}
-	for d := range v.claudeCfgDirs {
-		roots = append(roots, allowedRoot{dir: filepath.Join(d, "projects"), cap: proto.ReadAgentLogsClaude})
+	addBucketDirs := func(b *authBucket) {
+		if b == nil {
+			return
+		}
+		for d := range b.claudeCfgDirs {
+			roots = append(roots, allowedRoot{dir: filepath.Join(d, "projects"), cap: proto.ReadAgentLogsClaude})
+		}
+		for d := range b.codexHomes {
+			roots = append(roots, allowedRoot{dir: filepath.Join(d, "sessions"), cap: proto.ReadAgentLogsCodex})
+		}
 	}
-	for d := range v.codexHomes {
-		roots = append(roots, allowedRoot{dir: filepath.Join(d, "sessions"), cap: proto.ReadAgentLogsCodex})
+	addBucketDirs(v.fullBucket)
+	addBucketDirs(v.opencodeBucket)
+	for _, b := range v.treeBuckets {
+		addBucketDirs(b)
 	}
 	return roots
 }
@@ -191,8 +258,21 @@ func (v *PathValidator) allowedRootsLocked() []allowedRoot {
 // authorizePathLocked determines whether literal path string p is authorized
 // without ever consulting EvalSymlinks. Returns (capability, ok).
 func (v *PathValidator) authorizePathLocked(p string) (string, bool) {
-	if capCat, ok := v.knownLogs[p]; ok {
-		return capCat, true
+	if v.fullBucket != nil {
+		if capCat, ok := v.fullBucket.knownLogs[p]; ok {
+			return capCat, true
+		}
+	}
+	if v.opencodeBucket != nil {
+		if capCat, ok := v.opencodeBucket.knownLogs[p]; ok {
+			return capCat, true
+		}
+	}
+	for _, b := range v.treeBuckets {
+		if capCat, ok := b.knownLogs[p]; ok {
+			b.lastUsed.Store(v.useSeq.Add(1))
+			return capCat, true
+		}
 	}
 	for _, root := range v.allowedRootsLocked() {
 		if isStrictSubpath(root.dir, p) {

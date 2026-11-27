@@ -96,10 +96,11 @@ func (e *TmuxExecutor) QueryPaneTTY(ctx context.Context, paneID string) ([]byte,
 	return e.run(ctx, args)
 }
 
-func (e *TmuxExecutor) resolveBinary() (string, error) {
+func (e *TmuxExecutor) openTrustedBinary() (*os.File, error) {
 	uid := e.uid
 	if e.binaryPath != "" {
-		return daemon.ValidateTmuxBinary(e.binaryPath, uid)
+		f, _, err := daemon.OpenTrustedTmuxBinary(e.binaryPath, uid)
+		return f, err
 	}
 	searchDirs := []string{
 		filepath.Join(e.home, ".local", "bin"),
@@ -116,11 +117,11 @@ func (e *TmuxExecutor) resolveBinary() (string, error) {
 			continue
 		}
 		cand := filepath.Join(dir, "tmux")
-		if resolved, err := daemon.ValidateTmuxBinary(cand, uid); err == nil {
-			return resolved, nil
+		if f, _, err := daemon.OpenTrustedTmuxBinary(cand, uid); err == nil {
+			return f, nil
 		}
 	}
-	return "", errors.New("tmux binary not found in standard paths")
+	return nil, errors.New("trusted tmux binary not found in standard paths")
 }
 
 // validateTmuxArgs enforces that the ENTIRE argument slice matches one of the
@@ -163,14 +164,19 @@ func validateTmuxArgs(args []string) error {
 }
 
 // run is the sole reviewed os/exec call site in host-side corrald code.
+// It executes the already-opened and verified tmux file descriptor via
+// /proc/self/fd/3 (ExtraFiles[0]), eliminating the TOCTOU window between
+// safe-path validation and exec.
 func (e *TmuxExecutor) run(ctx context.Context, args []string) ([]byte, error) {
 	if err := validateTmuxArgs(args); err != nil {
 		return nil, err
 	}
-	bin, err := e.resolveBinary()
+	binFile, err := e.openTrustedBinary()
 	if err != nil {
 		return nil, err
 	}
+	defer binFile.Close()
+
 	timeout := e.timeout
 	if timeout <= 0 {
 		timeout = defaultTmuxTimeout
@@ -178,7 +184,9 @@ func (e *TmuxExecutor) run(ctx context.Context, args []string) ([]byte, error) {
 	runCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(runCtx, bin, args...)
+	cmd := exec.CommandContext(runCtx, "/proc/self/fd/3", args...)
+	cmd.Args[0] = "tmux"
+	cmd.ExtraFiles = []*os.File{binFile}
 	var stdout bytes.Buffer
 	cmd.Stdout = &limitedWriter{w: &stdout, max: maxTmuxOutputBytes}
 	cmd.Stderr = io.Discard
