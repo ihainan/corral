@@ -1273,6 +1273,20 @@ func (m *Manager) StartUpdate(ctx context.Context, userID, hostID int64, corralU
 		return nil, ErrManifestChanged
 	}
 
+	// Never start a release already marked failed on this host (crash
+	// rollback, failed handoff), even when a user confirms an update from a
+	// page that still shows the old prompt: that release only comes back
+	// with a newer gateway release.
+	failed := ch.FailedReleases
+	if sc := m.sharedConnForHost(hostID, fp, sshUser); sc != nil {
+		sc.mu.Lock()
+		failed = mergeReleaseLists(failed, sc.failedReleases)
+		sc.mu.Unlock()
+	}
+	if slices.Contains(failed, dist.Release) {
+		return nil, ErrInvalidState
+	}
+
 	tr := Transition(toSnapshot(ch), Event{Kind: EvUpdateStart})
 	if !tr.Allowed {
 		return nil, ErrInvalidState
