@@ -1339,3 +1339,75 @@ func TestWatchDetectsAgentToAgentExecAndLogChange(t *testing.T) {
 		t.Fatalf("expected log-set change on PID 5151 to emit added=[5151], got added=%v", added)
 	}
 }
+
+// Round 4 #2: when a watched log is deleted, the delete hint is emitted,
+// reconcileWatches runs while the file is still absent (simulating a gateway
+// seeing ENOENT), and THEN a new file is created and completely written before
+// rebinding (with no subsequent append), rebinding MUST emit a second change
+// hint for the new file before adopting its size as the new baseline.
+func TestWatchRotationHintAfterDeleteGapBeforeRebind(t *testing.T) {
+	home := t.TempDir()
+	projDir := filepath.Join(home, ".claude", "projects", "-rot-gap")
+	if err := os.MkdirAll(projDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(projDir, "77777777-7777-4777-8777-777777777777.jsonl")
+	if err := os.WriteFile(logPath, []byte("gen1-initial\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, sock, _ := startTestDaemonWithAgent(t, home, ServiceOptions{
+		MaxWatches:   DefaultMaxInotifyWatches,
+		PollInterval: 60 * time.Millisecond,
+	})
+	cl := dialRPCTestClient(t, sock)
+	var wr proto.AgentWatchResult
+	cl.call(t, proto.MethodAgentWatch, proto.AgentWatchParams{Logs: []string{logPath}}, &wr)
+	time.Sleep(80 * time.Millisecond)
+
+	isTargetLogEvent := func(e proto.Event) bool {
+		if e.Event != proto.EventAgentChanged {
+			return false
+		}
+		var d proto.AgentChangedEventData
+		_ = json.Unmarshal(e.Data, &d)
+		for _, p := range d.ChangedLogs {
+			if p == logPath {
+				return true
+			}
+		}
+		return false
+	}
+
+	// 1. Delete the file without recreating it yet.
+	if err := os.Remove(logPath); err != nil {
+		t.Fatal(err)
+	}
+	// Consume hint #1 (immediate delete hint).
+	cl.readEvent(t, 2*time.Second, isTargetLogEvent)
+
+	// 2. Wait across multiple poll ticks while logPath does not exist so
+	// reconcileWatches observes the missing file (gateway would see ENOENT).
+	time.Sleep(200 * time.Millisecond)
+
+	// 3. Create the new file and finish writing its content in one shot with
+	// NO further appends afterward.
+	if err := os.WriteFile(logPath, []byte("gen2-complete-before-rebind\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// 4. Rebinding must detect the new file and immediately emit hint #2!
+	cl.readEvent(t, 2*time.Second, isTargetLogEvent)
+
+	// 5. After adopting the new baseline, no spurious extra hints should fire.
+	cl.assertNoEvent(t, 200*time.Millisecond)
+
+	// 6. A subsequent append to the newly bound file still triggers hint #3.
+	f, err := os.OpenFile(logPath, os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = f.WriteString("gen2-later-append\n")
+	_ = f.Close()
+	cl.readEvent(t, 2*time.Second, isTargetLogEvent)
+}

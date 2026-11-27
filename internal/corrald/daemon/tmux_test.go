@@ -304,3 +304,79 @@ func TestOpenTrustedTmuxBinaryRejectsGroupWritableAncestor0775(t *testing.T) {
 	}
 	_ = f4.Close()
 }
+
+// Round 4 #1: openat(O_DIRECTORY|O_NOFOLLOW) on Linux returns ENOTDIR (not
+// ELOOP) for a directory symlink such as ~/.nix-profile. Verify that:
+//   - a trusted intermediate directory symlink (including chained links) is accepted,
+//   - a directory symlink whose resolved target chain has a 0775 ancestor is rejected,
+//   - a regular file used as an intermediate path component is rejected.
+func TestOpenTrustedTmuxBinaryDirectorySymlink(t *testing.T) {
+	uid := uint32(os.Geteuid())
+	safeRoot := makeSafeTestRoot(t)
+
+	// 1. Trusted Nix-style profile directory symlink chain:
+	//    safeRoot/home/.nix-profile -> ../profiles/profile-1-link -> ../nix/store/tmux-3.5a
+	storeBinDir := filepath.Join(safeRoot, "nix", "store", "tmux-3.5a", "bin")
+	profileDir := filepath.Join(safeRoot, "profiles")
+	homeDir := filepath.Join(safeRoot, "home")
+	for _, d := range []string{storeBinDir, profileDir, homeDir} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		_ = os.Chmod(d, 0o755)
+	}
+	realTmux := filepath.Join(storeBinDir, "tmux")
+	if err := os.WriteFile(realTmux, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	_ = os.Chmod(realTmux, 0o755)
+
+	profileLink := filepath.Join(profileDir, "profile-1-link")
+	if err := os.Symlink(filepath.Join(safeRoot, "nix", "store", "tmux-3.5a"), profileLink); err != nil {
+		t.Fatal(err)
+	}
+	nixProfile := filepath.Join(homeDir, ".nix-profile")
+	if err := os.Symlink(filepath.Join("..", "profiles", "profile-1-link"), nixProfile); err != nil {
+		t.Fatal(err)
+	}
+
+	viaDirSymlink := filepath.Join(nixProfile, "bin", "tmux")
+	f, resolved, err := OpenTrustedTmuxBinary(viaDirSymlink, uid)
+	if err != nil || f == nil || resolved != realTmux {
+		t.Fatalf("OpenTrustedTmuxBinary(%s) = (%v, %q, %v), want (non-nil, %q, nil)", viaDirSymlink, f, resolved, err, realTmux)
+	}
+	_ = f.Close()
+
+	// 2. Trusted directory symlink pointing into an untrusted (0775) target chain -> rejected.
+	badStore := filepath.Join(safeRoot, "bad-store")
+	badTargetBin := filepath.Join(badStore, "tmux-3.5a", "bin")
+	if err := os.MkdirAll(badTargetBin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	badTmux := filepath.Join(badTargetBin, "tmux")
+	if err := os.WriteFile(badTmux, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	_ = os.Chmod(badTmux, 0o755)
+	_ = os.Chmod(badStore, 0o775)
+
+	badProfile := filepath.Join(homeDir, ".bad-nix-profile")
+	if err := os.Symlink(filepath.Join(badStore, "tmux-3.5a"), badProfile); err != nil {
+		t.Fatal(err)
+	}
+	viaBadDirSymlink := filepath.Join(badProfile, "bin", "tmux")
+	if fBad, _, err := OpenTrustedTmuxBinary(viaBadDirSymlink, uid); err == nil {
+		_ = fBad.Close()
+		t.Fatalf("OpenTrustedTmuxBinary(%s) unexpectedly accepted directory symlink into 0775 target chain", viaBadDirSymlink)
+	}
+
+	// 3. Regular file used as an intermediate directory component -> rejected.
+	notADir := filepath.Join(homeDir, "not-a-dir")
+	if err := os.WriteFile(notADir, []byte("file"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if fFile, _, err := OpenTrustedTmuxBinary(filepath.Join(notADir, "tmux"), uid); err == nil {
+		_ = fFile.Close()
+		t.Fatal("OpenTrustedTmuxBinary accepted path with regular file as parent component")
+	}
+}

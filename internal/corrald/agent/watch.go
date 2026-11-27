@@ -75,6 +75,25 @@ func (e procEntry) isAgent() bool {
 	return e.agentKind != ""
 }
 
+type fileTrackState struct {
+	exists bool
+	dev    uint64
+	ino    uint64
+	size   int64
+}
+
+func fileTrackFromInfo(info os.FileInfo) fileTrackState {
+	st := fileTrackState{
+		exists: true,
+		size:   info.Size(),
+	}
+	if sys, ok := info.Sys().(*syscall.Stat_t); ok && sys != nil {
+		st.dev = uint64(sys.Dev)
+		st.ino = uint64(sys.Ino)
+	}
+	return st
+}
+
 // Watcher monitors agent log file growth (via Linux inotify, with automatic
 // 1-second stat polling fallback when the watched file count exceeds
 // MaxWatches or inotify returns an error) and agent process set changes.
@@ -106,7 +125,7 @@ type Watcher struct {
 	inotifyFile *os.File
 	wdToPath    map[int32]string
 	pathToWD    map[string]int32
-	fileSizes   map[string]int64
+	fileStates  map[string]fileTrackState
 
 	// Process tracking state (accessed only by the single active run goroutine).
 	ownedProcs map[int]procEntry
@@ -140,7 +159,7 @@ func NewWatcher(opts WatchWatcherOptions) *Watcher {
 		inotifyFD:    -1,
 		wdToPath:     make(map[int32]string),
 		pathToWD:     make(map[string]int32),
-		fileSizes:    make(map[string]int64),
+		fileStates:   make(map[string]fileTrackState),
 		ownedProcs:   make(map[int]procEntry),
 	}
 }
@@ -226,7 +245,7 @@ func (w *Watcher) Subscribe(sub any, logs []string) WatchStatus {
 		w.running = true
 		w.wdToPath = make(map[int32]string)
 		w.pathToWD = make(map[string]int32)
-		w.fileSizes = make(map[string]int64)
+		w.fileStates = make(map[string]fileTrackState)
 		w.ownedProcs = make(map[int]procEntry)
 
 		targets := w.collectTargetLogsLocked()
@@ -372,14 +391,15 @@ func (w *Watcher) run(ctx context.Context, done chan struct{}) {
 	ticker := time.NewTicker(w.pollInterval)
 	defer ticker.Stop()
 
-	syncWatches := func() {
+	syncWatches := func() []string {
 		wasFile := w.inotifyFile
-		w.reconcileWatches()
+		rebound := w.reconcileWatches()
 		if wasFile != nil && w.inotifyFile == nil {
 			stopReader()
 		} else if wasFile == nil && w.inotifyFile != nil {
 			startReader()
 		}
+		return rebound
 	}
 
 	for {
@@ -387,7 +407,9 @@ func (w *Watcher) run(ctx context.Context, done chan struct{}) {
 		case <-ctx.Done():
 			return
 		case <-w.syncCh:
-			syncWatches()
+			if rebound := syncWatches(); len(rebound) > 0 {
+				w.emitChanged(nil, nil, rebound)
+			}
 		case changed := <-inotifyCh:
 			if len(changed) > 0 {
 				w.emitChanged(nil, nil, changed)
@@ -401,13 +423,38 @@ func (w *Watcher) run(ctx context.Context, done chan struct{}) {
 			// Reconcile if processes changed OR if any target log was rotated/
 			// unlinked and is currently missing an active inotify watch.
 			if len(added) > 0 || len(removed) > 0 || w.needsWatchRebind() {
-				syncWatches()
+				rebound := syncWatches()
+				changedLogs = mergeUniqueStrings(changedLogs, rebound)
 			}
 			if len(added) > 0 || len(removed) > 0 || len(changedLogs) > 0 {
 				w.emitChanged(added, removed, changedLogs)
 			}
 		}
 	}
+}
+
+func mergeUniqueStrings(a, b []string) []string {
+	if len(b) == 0 {
+		return a
+	}
+	if len(a) == 0 {
+		return b
+	}
+	seen := make(map[string]struct{}, len(a)+len(b))
+	out := make([]string, 0, len(a)+len(b))
+	for _, s := range a {
+		if _, ok := seen[s]; !ok {
+			seen[s] = struct{}{}
+			out = append(out, s)
+		}
+	}
+	for _, s := range b {
+		if _, ok := seen[s]; !ok {
+			seen[s] = struct{}{}
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 func (w *Watcher) needsWatchRebind() bool {
@@ -470,20 +517,26 @@ func (w *Watcher) closeInotify() {
 	w.mu.Unlock()
 }
 
-func (w *Watcher) reconcileWatches() {
+// reconcileWatches synchronizes inotify/poll watches with the current target
+// log set. Whenever a tracked target path rebinds to a new file (inode changed
+// or previously absent/deleted), it returns that path so the caller immediately
+// emits a change hint and adopts the new file's current size as baseline.
+func (w *Watcher) reconcileWatches() []string {
 	w.mu.Lock()
 	targets := w.collectTargetLogsLocked()
 	w.mu.Unlock()
 
+	allTargetSet := make(map[string]struct{}, len(targets))
 	validTargets := make([]string, 0, len(targets))
-	initialSizes := make(map[string]int64, len(targets))
+	curStates := make(map[string]fileTrackState, len(targets))
 	for _, p := range targets {
+		allTargetSet[p] = struct{}{}
 		f, _, ok := w.val.OpenChecked(p)
 		if !ok {
 			continue
 		}
 		if info, err := f.Stat(); err == nil {
-			initialSizes[p] = info.Size()
+			curStates[p] = fileTrackFromInfo(info)
 			validTargets = append(validTargets, p)
 		}
 		_ = f.Close()
@@ -494,15 +547,37 @@ func (w *Watcher) reconcileWatches() {
 		targetSet[p] = struct{}{}
 	}
 
+	var reboundChanged []string
+	var replacedPaths []string
+
 	w.mu.Lock()
-	for p, sz := range initialSizes {
-		if _, exists := w.fileSizes[p]; !exists {
-			w.fileSizes[p] = sz
+	for _, p := range targets {
+		cur, existsNow := curStates[p]
+		prev, tracked := w.fileStates[p]
+		if !existsNow {
+			// Record missing target so when the file is created/recreated
+			// later, rebinding recognizes it as a new file and emits a hint.
+			w.fileStates[p] = fileTrackState{exists: false}
+			continue
+		}
+		if !tracked {
+			// First observation of a pre-existing target path: establish baseline.
+			w.fileStates[p] = cur
+			continue
+		}
+		if !prev.exists || prev.dev != cur.dev || prev.ino != cur.ino {
+			// Rebound to a new file (previously absent/rotated or different inode):
+			// emit an immediate change hint and reset baseline to current size.
+			reboundChanged = append(reboundChanged, p)
+			if prev.exists && (prev.dev != cur.dev || prev.ino != cur.ino) {
+				replacedPaths = append(replacedPaths, p)
+			}
+			w.fileStates[p] = cur
 		}
 	}
-	for p := range w.fileSizes {
-		if _, ok := targetSet[p]; !ok {
-			delete(w.fileSizes, p)
+	for p := range w.fileStates {
+		if _, ok := allTargetSet[p]; !ok {
+			delete(w.fileStates, p)
 		}
 	}
 	w.mu.Unlock()
@@ -514,7 +589,7 @@ func (w *Watcher) reconcileWatches() {
 		w.fallbackReason = "limit"
 		w.watchedCount = len(validTargets)
 		w.mu.Unlock()
-		return
+		return reboundChanged
 	}
 
 	if err := w.openInotify(); err != nil {
@@ -524,7 +599,12 @@ func (w *Watcher) reconcileWatches() {
 		w.fallbackReason = "inotify_error"
 		w.watchedCount = len(validTargets)
 		w.mu.Unlock()
-		return
+		return reboundChanged
+	}
+
+	replacedSet := make(map[string]struct{}, len(replacedPaths))
+	for _, p := range replacedPaths {
+		replacedSet[p] = struct{}{}
 	}
 
 	w.mu.Lock()
@@ -533,7 +613,9 @@ func (w *Watcher) reconcileWatches() {
 		wd   int32
 	}
 	for p, wd := range w.pathToWD {
-		if _, ok := targetSet[p]; !ok {
+		_, stillValid := targetSet[p]
+		_, inodeChanged := replacedSet[p]
+		if !stillValid || inodeChanged {
 			toRemove = append(toRemove, struct {
 				path string
 				wd   int32
@@ -565,7 +647,7 @@ func (w *Watcher) reconcileWatches() {
 				w.fallbackReason = "inotify_error"
 				w.watchedCount = len(validTargets)
 				w.mu.Unlock()
-				return
+				return reboundChanged
 			}
 			continue
 		}
@@ -580,6 +662,7 @@ func (w *Watcher) reconcileWatches() {
 	w.fallbackReason = ""
 	w.watchedCount = len(w.pathToWD)
 	w.mu.Unlock()
+	return reboundChanged
 }
 
 func (w *Watcher) readInotifyLoop(ctx context.Context, f *os.File, out chan<- []string) {
@@ -619,16 +702,16 @@ func (w *Watcher) readInotifyLoop(ctx context.Context, f *os.File, out chan<- []
 				continue
 			}
 			if mask&(syscall.IN_DELETE_SELF|syscall.IN_MOVE_SELF|syscall.IN_IGNORED) != 0 {
-				// Evict stale watch mapping immediately, emit a change hint
-				// right away so writes to a rotated/recreated file before
-				// reconcileWatches completes are never missed, and schedule a
-				// watch re-bind.
+				// Evict stale watch mapping immediately, mark the path absent
+				// so reconcileWatches emits a hint again once a new file is
+				// bound at this path, emit an immediate hint right away, and
+				// schedule a watch re-bind.
 				w.mu.Lock()
 				delete(w.wdToPath, wd)
 				if w.pathToWD[path] == wd {
 					delete(w.pathToWD, path)
 				}
-				delete(w.fileSizes, path)
+				w.fileStates[path] = fileTrackState{exists: false}
 				w.mu.Unlock()
 				if mask&syscall.IN_IGNORED == 0 {
 					_, _ = syscall.InotifyRmWatch(rawFD, uint32(wd))
@@ -661,20 +744,31 @@ func (w *Watcher) checkFileGrew(path string) bool {
 	capCat := inferLogCap(path)
 	info, err := w.rd.stat(capCat, path)
 	if err != nil {
+		w.mu.Lock()
+		if _, tracked := w.fileStates[path]; tracked {
+			w.fileStates[path] = fileTrackState{exists: false}
+		}
+		w.mu.Unlock()
 		return false
 	}
-	sz := info.Size()
+	cur := fileTrackFromInfo(info)
 	w.mu.Lock()
-	prev, had := w.fileSizes[path]
-	w.fileSizes[path] = sz
+	prev, had := w.fileStates[path]
+	w.fileStates[path] = cur
 	w.mu.Unlock()
-	return !had || sz > prev
+	if !had {
+		return true
+	}
+	if !prev.exists || prev.dev != cur.dev || prev.ino != cur.ino {
+		return true
+	}
+	return cur.size > prev.size
 }
 
 func (w *Watcher) pollFileGrowth() []string {
 	w.mu.Lock()
-	paths := make([]string, 0, len(w.fileSizes))
-	for p := range w.fileSizes {
+	paths := make([]string, 0, len(w.fileStates))
+	for p := range w.fileStates {
 		paths = append(paths, p)
 	}
 	w.mu.Unlock()

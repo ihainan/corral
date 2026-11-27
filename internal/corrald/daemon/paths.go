@@ -434,11 +434,18 @@ func openTrustedTmuxBinaryFrom(checkRoot, candidatePath string, expectedUID uint
 					curPrefix = segPath
 					continue
 				}
-				if !errors.Is(err, syscall.ELOOP) {
+				if !errors.Is(err, syscall.ELOOP) && !errors.Is(err, syscall.ENOTDIR) {
 					return nil, "", fmt.Errorf("open tmux ancestor %s: %w", segPath, err)
 				}
-				if err := checkTrustedSymlink(segPath, expectedUID); err != nil {
-					return nil, "", err
+				// On Linux, openat(O_DIRECTORY|O_NOFOLLOW) returns ENOTDIR (not
+				// ELOOP) when seg is a symlink to a directory, as well as when
+				// seg is a non-directory regular file. Verify via lstat that it
+				// is actually a trusted symlink before following it.
+				if symErr := checkTrustedSymlink(segPath, expectedUID); symErr != nil {
+					if errors.Is(symErr, errNotSymlink) {
+						return nil, "", fmt.Errorf("open tmux ancestor %s: %w", segPath, err)
+					}
+					return nil, "", symErr
 				}
 				hops++
 				if hops > maxTrustedSymlinkHops {
@@ -539,13 +546,15 @@ func checkTrustedFD(fd int, path string, wantDir bool, expectedUID uint32) error
 	return nil
 }
 
+var errNotSymlink = errors.New("not a symlink")
+
 func checkTrustedSymlink(path string, expectedUID uint32) error {
 	info, err := os.Lstat(path)
 	if err != nil {
 		return fmt.Errorf("lstat symlink %s: %w", path, err)
 	}
 	if info.Mode()&os.ModeSymlink == 0 {
-		return fmt.Errorf("%s changed from symlink during resolution", path)
+		return fmt.Errorf("%s: %w", path, errNotSymlink)
 	}
 	st, ok := info.Sys().(*syscall.Stat_t)
 	if !ok {
