@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"regexp"
 	"strconv"
 	"strings"
@@ -465,24 +466,25 @@ func (s *Server) ocPaneTitle(sess *term.Session, pane, cwd string, l convoLocate
 // neither herdr nor a unique pane title disambiguates them).
 // l is what locating found of the host's processes.
 func (s *Server) ocSessionOf(ctx context.Context, sess *term.Session, p *convoProc, pane string, l convoLocated) (sid, why string) {
-	return s.ocSessionOfInteractive(ctx, sess, p, pane, l, false)
+	sid, why, _ = s.ocSessionOfInteractive(ctx, sess, p, pane, l, false)
+	return sid, why
 }
 
-func (s *Server) ocSessionOfInteractive(ctx context.Context, sess *term.Session, p *convoProc, pane string, l convoLocated, interactive bool) (sid, why string) {
+func (s *Server) ocSessionOfInteractive(ctx context.Context, sess *term.Session, p *convoProc, pane string, l convoLocated, interactive bool) (sid, why string, err error) {
 	// (OpenCode 2's: herdr is told by its background service, as the pane
 	// that began it — another's session, maybe: not taken.)
 	if sess.Persistence == "herdr" && !p.ocService {
 		if v := s.herdrSocks.sid(sess.ID, pane); ocSessionID.MatchString(v) {
-			return v, ""
+			return v, "", nil
 		}
 	}
 	if p.cwd == "" || strings.ContainsAny(p.cwd, "\n\x00") {
-		return convoNoSession, ""
+		return convoNoSession, "", nil
 	}
 	// (Its database not told — of several servers, which it talks to not
 	// seen —: none of its sessions is, nor that of another where it runs.)
 	if p.log == "" {
-		return convoNoSession, convoNotTold
+		return convoNoSession, convoNotTold, nil
 	}
 	key := strconv.FormatInt(sess.HostID, 10) + "\x00" + p.cwd
 	contested := false
@@ -503,25 +505,28 @@ func (s *Server) ocSessionOfInteractive(ctx context.Context, sess *term.Session,
 		await = 2 * time.Second
 	}
 	if title, ok := s.ocPaneTitle(sess, pane, p.cwd, l); ok {
-		res, err := sshx.Exec(ctx, sess.Client(), ocQueryCommand(p.log, "find_title", p.cwd, title), 4096, sshx.ExecOptions{Interactive: interactive, AwaitSlot: await})
+		res, qerr := sshx.Exec(ctx, sess.Client(), ocQueryCommand(p.log, "find_title", p.cwd, title), 4096, sshx.ExecOptions{Interactive: interactive, AwaitSlot: await})
 		out := res.Out
-		if err == nil {
+		if errors.Is(qerr, sshx.ErrBusy) {
+			return convoNoSession, "", qerr
+		}
+		if qerr == nil {
 			var r struct {
 				K  string `json:"k"`
 				ID string `json:"id"`
 			}
 			if json.Unmarshal(bytes.TrimSpace(out), &r) == nil {
 				if r.K == "nopy" {
-					return convoNoSession, convoNoReader
+					return convoNoSession, convoNoReader, nil
 				}
 				if r.K == "sid" && ocSessionID.MatchString(r.ID) {
-					return r.ID, ""
+					return r.ID, "", nil
 				}
 			}
 		}
 	}
 	if contested {
-		return convoNoSession, convoNotTold
+		return convoNoSession, convoNotTold, nil
 	}
 	since := p.started - 2000 // (the host's clock, read twice)
 	if p.started <= 0 {
@@ -532,10 +537,10 @@ func (s *Server) ocSessionOfInteractive(ctx context.Context, sess *term.Session,
 	// is read off the host.)
 	ended, justEnded, seen := s.ocContested.note(key, false)
 	since = max(since, ended)
-	res, err := sshx.Exec(ctx, sess.Client(), ocQueryCommand(p.log, "find", p.cwd, strconv.FormatInt(since, 10)), 4096, sshx.ExecOptions{Interactive: interactive, AwaitSlot: await})
+	res, qerr := sshx.Exec(ctx, sess.Client(), ocQueryCommand(p.log, "find", p.cwd, strconv.FormatInt(since, 10)), 4096, sshx.ExecOptions{Interactive: interactive, AwaitSlot: await})
 	out := res.Out
-	if err != nil {
-		return convoNoSession, ""
+	if qerr != nil {
+		return convoNoSession, "", qerr
 	}
 	var r struct {
 		K   string `json:"k"`
@@ -544,18 +549,18 @@ func (s *Server) ocSessionOfInteractive(ctx context.Context, sess *term.Session,
 	}
 	switch {
 	case json.Unmarshal(bytes.TrimSpace(out), &r) != nil:
-		return convoNoSession, ""
+		return convoNoSession, "", nil
 	case r.K == "nopy":
-		return convoNoSession, convoNoReader
+		return convoNoSession, convoNoReader, nil
 	case justEnded:
 		if r.Now > 0 {
 			s.ocContested.ended(key, r.Now, seen)
 		}
-		return convoNoSession, ""
+		return convoNoSession, "", nil
 	case r.K != "sid" || !ocSessionID.MatchString(r.ID):
-		return convoNoSession, ""
+		return convoNoSession, "", nil
 	}
-	return r.ID, ""
+	return r.ID, "", nil
 }
 
 // ocContests: the folders where two OpenCodes of a user ran at once (by
@@ -607,11 +612,15 @@ func (c *ocContests) ended(key string, at, seen int64) {
 // readOpenCode reads what is new of the session st is of: at first its last
 // ocTail messages, then the rows written since the last look.
 func (s *Server) readOpenCode(sess *term.Session, st *convoState) error {
+	return s.readOpenCodeWith(sess, st, false)
+}
+
+func (s *Server) readOpenCodeWith(sess *term.Session, st *convoState, interactive bool) error {
 	if !ocSessionID.MatchString(st.sid) {
 		return nil
 	}
 	if st.size < 0 {
-		return s.ocRead(sess, st, "tail", strconv.Itoa(ocTail))
+		return s.ocRead(sess, st, "tail", interactive, strconv.Itoa(ocTail))
 	}
 	args := []string{strconv.FormatInt(st.ocCursor, 10), strconv.Itoa(st.ocCursorK), st.ocCursorID}
 	// (With the first message read and how many of those read are made
@@ -621,7 +630,7 @@ func (s *Server) readOpenCode(sess *term.Session, st *convoState) error {
 			args = append(args, strconv.FormatInt(fc, 10), fid, strconv.Itoa(oc.KnownBefore(st.ocCursor)))
 		}
 	}
-	return s.ocRead(sess, st, "since", args...)
+	return s.ocRead(sess, st, "since", interactive, args...)
 }
 
 // readOlderOpenCode reads in the messages before the first read.
@@ -634,7 +643,7 @@ func (s *Server) readOlderOpenCode(sess *term.Session, st *convoState) error {
 	if !ok || !ocMessageID.MatchString(fid) {
 		return nil
 	}
-	return s.ocRead(sess, st, "older", strconv.FormatInt(fc, 10), fid, strconv.Itoa(ocTail))
+	return s.ocRead(sess, st, "older", true, strconv.FormatInt(fc, 10), fid, strconv.Itoa(ocTail))
 }
 
 // ocMessageID: an OpenCode message's id; ocRowID: a message's or a part's.
@@ -643,10 +652,10 @@ var (
 	ocRowID     = regexp.MustCompile(`^(msg|prt)_[A-Za-z0-9]{8,64}$`)
 )
 
-func (s *Server) ocRead(sess *term.Session, st *convoState, mode string, args ...string) error {
+func (s *Server) ocRead(sess *term.Session, st *convoState, mode string, interactive bool, args ...string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), convoReadLimit)
 	defer cancel()
-	interactive := mode == "older"
+	interactive = interactive || mode == "older"
 	var await time.Duration
 	if interactive {
 		await = 2 * time.Second

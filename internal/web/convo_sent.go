@@ -163,8 +163,11 @@ func (s *Server) sentEnter(w http.ResponseWriter, ctx context.Context, sess *ter
 	} else if agent == "agy" {
 		freeGate = "amode" // (agy's input box present: Enter goes there, never into a prompt)
 	}
+	// Terminal keypress after verifying the input box: intentionally AwaitSlot: 0
+	// so a busy connection refuses immediately instead of sending Enter after the
+	// user may have edited the input box.
 	_, err = sshx.Exec(ctx, sess.Client(), convoGatedCommand(freeGate, sess.Persistence, sess.TmuxSession, pane, socket, pid, start, sid, 0, enter, sendLines), sendOut,
-		sshx.ExecOptions{Stdin: strings.NewReader(""), Release: held.Done, Interactive: true, AwaitSlot: 2 * time.Second})
+		sshx.ExecOptions{Stdin: strings.NewReader(""), Release: held.Done, Interactive: true})
 	var exitErr *sshx.ExitError
 	switch {
 	case err == nil:

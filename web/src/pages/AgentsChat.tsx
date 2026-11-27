@@ -1,6 +1,7 @@
 import { useTaskAsked } from '../terminal/bgTaskOpen'
 import { useCallback, Activity, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState, type ReactNode } from 'react'
 import { ArrowDown, ArrowLeftRight, ArrowUp, ArrowUpDown, ArrowUpToLine, ChevronLeft, CircleStop, Code2, Columns2, Copy, Eye, FoldVertical, GitBranch, GitFork, Globe, History, Languages, ListPlus, Maximize2, MessageSquarePlus, Paperclip, Pencil, Pin, PinOff, Plus, Power, Rows2, Square, SquareSlash, SquareTerminal, Link2, TextCursorInput, Unlink, X, Zap } from 'lucide-react'
+import { isBusyErrorCode, NOTHING_PRESSED } from '../terminal/busyCode'
 import { api, ApiError, authGen, errorText, onAuthChange, uploadFile, type SessionInfo } from '../api'
 import { useSession } from '../app'
 import { t, type I18nKey } from '../i18n'
@@ -96,7 +97,7 @@ function seenIfNone(v: { sid: string; pane: string; round: number; session: stri
           return
         } catch (e) {
           // (The host busy with what was asked before: a little later, a few times.)
-          if (!(e instanceof ApiError && e.code === 'busy') || tries >= NONE_CHECK_TRIES) throw e
+          if (!(e instanceof ApiError && isBusyErrorCode(e.code)) || tries >= NONE_CHECK_TRIES) throw e
           await new Promise((r) => setTimeout(r, NONE_CHECK_AGAIN_MS))
         }
       }
@@ -158,8 +159,6 @@ const COMPACT_UNTIL = 240000
 // another agent and back does not look all over again.
 type SuggestAsk = { left: number; text: string; seq: number; busy: boolean; views: Set<{ told: () => void; next: () => void }> }
 const suggestAsks = new Map<string, SuggestAsk>()
-// Refusals of a switch made before any key was pressed (see convoPress, convoModeTo).
-const NOTHING_PRESSED = ['bad_request', 'unauthorized', 'unsupported', 'busy', 'host_error', 'agent_changed', 'not_in_front', 'refused', 'no_screen', 'not_found', 'forbidden', 'subagent_view', 'other_view', 'no_input', 'box_draft', 'screen_changed']
 const MODE_MS = 50000 // (to a mode picked: several presses, each read back; the gateway gives up at 45 s)
 const MODEL_MS = 50000 // (the picker, step by step: see convo_model.go)
 const MODEL_CACHE_MS = 10 * 60 * 1000 // (keep fetched model lists across agent switches for instant opens)

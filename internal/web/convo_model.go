@@ -734,6 +734,11 @@ func (s *Server) convoModel(w http.ResponseWriter, ctx context.Context, sess *te
 		account, aerr := settingsAccount(ctx, sess)
 		if aerr != nil {
 			release()
+			if errors.Is(aerr, sshx.ErrBusy) {
+				*reason = "ssh_channels_busy"
+				writeSSHChannelsBusy(w)
+				return
+			}
 			*reason = "settings"
 			writeError(w, http.StatusBadGateway, "settings", "Claude Code's settings could not be read: nothing done")
 			return
@@ -957,8 +962,10 @@ func (s *Server) convoModel(w http.ResponseWriter, ctx context.Context, sess *te
 			gate = "cscreen:" + at // (Codex's: pressed only on the screen it was decided on)
 		}
 		running.Add(1)
+		// Terminal keypress in the model picker: intentionally AwaitSlot: 0 so a
+		// busy connection refuses immediately rather than pressing against a stale picker state.
 		res, err := sshx.Exec(ctx, sess.Client(), convoGatedCommand(gate, sess.Persistence, sess.TmuxSession, pane, socket, pid, start, sid, len(text), press, read), 64<<10,
-			sshx.ExecOptions{Stdin: strings.NewReader(text), Release: running.Done, Interactive: true, AwaitSlot: 2 * time.Second})
+			sshx.ExecOptions{Stdin: strings.NewReader(text), Release: running.Done, Interactive: true})
 		if err == nil && (len(press) > 0 || text != "") {
 			typed = true
 		}

@@ -7,6 +7,7 @@ import (
 	"io"
 	"mime/multipart"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"os"
 	"os/exec"
@@ -778,24 +779,23 @@ func TestCodexTmuxNamedNowInteractiveAndBusy(t *testing.T) {
 	sess.TmuxSession = "s1"
 
 	var (
-		mu       sync.Mutex
-		onLocate func()
+		mu             sync.Mutex
+		sendExecCalled bool
 	)
 	srv.HandleExec(func(cmd string) func(ch ssh.Channel) {
 		isLocate := strings.Contains(cmd, "panetty=") || (strings.Contains(cmd, "/proc/") && !strings.Contains(cmd, "python3"))
 		isCodexPanes := strings.Contains(cmd, "python3") && strings.Contains(cmd, "codex")
 		if !isLocate && !isCodexPanes {
+			if strings.Contains(cmd, "send-keys") || strings.Contains(cmd, "capture-pane") {
+				mu.Lock()
+				sendExecCalled = true
+				mu.Unlock()
+			}
 			return nil
 		}
 		return func(ch ssh.Channel) {
 			defer ch.Close()
 			if isLocate {
-				mu.Lock()
-				fn := onLocate
-				mu.Unlock()
-				if fn != nil {
-					fn()
-				}
 				// Minimal parseConvoLocate output for a daemon-backed tmux Codex in %3.
 				rec := strings.Join([]string{
 					"tmux=%3 999 /dev/pts/3 my-thread | proj",
@@ -867,43 +867,42 @@ func TestCodexTmuxNamedNowInteractiveAndBusy(t *testing.T) {
 	if ok || !errors.Is(err, sshx.ErrBusy) {
 		t.Fatalf("interactive codexTmuxNamedNow at 9/9: ok=%v err=%v, want false/sshx.ErrBusy", ok, err)
 	}
-	// Release 1 of the 2 extra slots so convoLocateCommand can run at 8/9 -> 9/9,
-	// then grab the remaining slot right as locate returns so codexTmuxNamedNow
-	// inside convoPress hits 9/9 sshx.ErrBusy.
-	extra[1]()
-	var grabRel func()
-	mu.Lock()
-	onLocate = func() {
-		// Queue a waiter for the final slot BEFORE locate exits so it takes the
-		// 9th slot deterministically the instant locate releases its Aux slot,
-		// ensuring codexTmuxNamedNow inside convoPress hits 9/9 sshx.ErrBusy.
-		started := make(chan struct{})
-		go func() {
-			close(started)
-			if rel, aerr := sshx.AcquireSession(context.Background(), sess.Client(), sshx.SessionSFTP, true, 2*time.Second); aerr == nil {
-				mu.Lock()
-				grabRel = rel
-				mu.Unlock()
-			}
-		}()
-		<-started
-		time.Sleep(25 * time.Millisecond)
+	// Release the 2 extra slots so convoLocateCommand succeeds deterministically
+	// at 7/9 -> 8/9 -> 7/9, then fill to 9/9 inside testBeforeCodexTmuxNamed so
+	// busy is guaranteed to occur specifically in codexTmuxNamedNow.
+	for _, rel := range extra {
+		rel()
 	}
-	mu.Unlock()
-	t.Cleanup(func() {
-		extra[0]()
-		mu.Lock()
-		if grabRel != nil {
-			grabRel()
+	var (
+		hookHeld    []func()
+		namedCalled bool
+		namedErr    error
+	)
+	testBeforeCodexTmuxNamed = func() {
+		for range 2 {
+			rel, aerr := sshx.AcquireSession(context.Background(), sess.Client(), sshx.SessionSFTP, true, 0)
+			if aerr != nil {
+				t.Errorf("hook fill to 9/9 failed: %v", aerr)
+				return
+			}
+			hookHeld = append(hookHeld, rel)
 		}
-		mu.Unlock()
+		if got := sshx.SessionInUse(sess.Client()); got != 9 {
+			t.Errorf("ledger count entering codexTmuxNamedNow = %d, want 9", got)
+		}
+	}
+	testAfterCodexTmuxNamed = func(_ bool, err error) {
+		namedCalled = true
+		namedErr = err
+	}
+	t.Cleanup(func() {
+		testBeforeCodexTmuxNamed = nil
+		testAfterCodexTmuxNamed = nil
+		for _, rel := range hookHeld {
+			rel()
+		}
 	})
 
-	// Make sure the slot grab happens cleanly: fill 1 slot right before calling send
-	// is tricky because locate needs 1 slot first. Wait briefly inside locate?
-	// Even cleaner: acquire the 9th slot via SessionSFTP while locate holds Aux?
-	// No, 8+1(Aux)=9 so SFTP waits and immediately takes the 9th slot the instant
-	// locate releases Aux, before codexTmuxNamedNow acquires Aux!
 	resp := admin.do("POST", "/api/sessions/"+sessID+"/conversation/send", map[string]any{
 		"pane":    "%3",
 		"pid":     1234,
@@ -911,6 +910,15 @@ func TestCodexTmuxNamedNowInteractiveAndBusy(t *testing.T) {
 		"session": threadID,
 		"text":    "hello",
 	})
+	if !namedCalled || !errors.Is(namedErr, sshx.ErrBusy) {
+		t.Fatalf("codexTmuxNamedNow hook: called=%v err=%v, want true / sshx.ErrBusy", namedCalled, namedErr)
+	}
+	mu.Lock()
+	sentAfter := sendExecCalled
+	mu.Unlock()
+	if sentAfter {
+		t.Fatal("send/screen command ran after codexTmuxNamedNow ErrBusy")
+	}
 	if resp.Status != http.StatusTooManyRequests || resp.code() != "ssh_channels_busy" {
 		t.Fatalf("convoPress when codexTmuxNamedNow hits ErrBusy: status=%d code=%q body=%s, want 429 ssh_channels_busy", resp.Status, resp.code(), resp.Body)
 	}
@@ -978,4 +986,356 @@ func TestInteractiveEndpointsReturn429SSHChannelsBusyWhenFull(t *testing.T) {
 		}(ep.name, ep.path)
 	}
 	wg.Wait()
+}
+
+// When an interactive caller joins a background shared-SFTP open that fails
+// with sshx.ErrBusy, sftpPool hands off atomically under the pool lock to an
+// interactive open so an intervening background poll cannot hijack the retry.
+func TestSharedSFTPInteractiveRetryNotHijackedByBackgroundPoll(t *testing.T) {
+	e := newFileEnv(t)
+	sess, err := e.h.terms.Get(e.h.userID(e.c), e.sess)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Hold 4 Pane + 2 SFTP on top of 1 Terminal = 7/9 used; only the 2
+	// InteractiveReserve slots remain (shared SFTP is not open yet).
+	var held []func()
+	t.Cleanup(func() {
+		for _, rel := range held {
+			rel()
+		}
+	})
+	for range sshx.MaxPanePerConn {
+		rel, err := sshx.AcquireSession(context.Background(), sess.Client(), sshx.SessionPane, true, 0)
+		if err != nil {
+			t.Fatalf("fill pane: %v", err)
+		}
+		held = append(held, rel)
+	}
+	for range 2 {
+		rel, err := sshx.AcquireSession(context.Background(), sess.Client(), sshx.SessionSFTP, true, 0)
+		if err != nil {
+			t.Fatalf("fill sftp: %v", err)
+		}
+		held = append(held, rel)
+	}
+
+	bgEntered := make(chan struct{})
+	bgRelease := make(chan struct{})
+	interactiveEntered := make(chan struct{})
+	var (
+		mu       sync.Mutex
+		openSeq  []bool
+		bg2Fired bool
+	)
+	bg2Done := make(chan error, 1)
+
+	testBeforeSFTPOpen = func(interactive bool) {
+		mu.Lock()
+		openSeq = append(openSeq, interactive)
+		mu.Unlock()
+		if !interactive {
+			close(bgEntered)
+			<-bgRelease
+			return
+		}
+		// Fire a competing background poll right as the interactive handoff
+		// opens; it must join the interactive handoff rather than starting
+		// another background open.
+		mu.Lock()
+		fire := !bg2Fired
+		bg2Fired = true
+		mu.Unlock()
+		if fire {
+			close(interactiveEntered)
+			go func() {
+				bg2Done <- e.h.srv.withSFTPBackground(context.Background(), sess, fileOpTimeout, func(c *sftplite.Client) error {
+					_, err := c.RealPath(".")
+					return err
+				})
+			}()
+			time.Sleep(15 * time.Millisecond)
+		}
+	}
+	t.Cleanup(func() { testBeforeSFTPOpen = nil })
+
+	// 1) Start background open #1 (blocked inside hook).
+	bg1Done := make(chan error, 1)
+	go func() {
+		bg1Done <- e.h.srv.withSFTPBackground(context.Background(), sess, fileOpTimeout, func(c *sftplite.Client) error {
+			_, err := c.RealPath(".")
+			return err
+		})
+	}()
+	<-bgEntered
+
+	// 2) Interactive caller joins background open #1.
+	interDone := make(chan error, 1)
+	go func() {
+		interDone <- e.h.srv.withSFTP(context.Background(), sess, fileOpTimeout, func(c *sftplite.Client) error {
+			_, err := c.RealPath(".")
+			return err
+		})
+	}()
+	// Wait until the interactive caller has registered on the shared entry.
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		e.h.srv.files.mu.Lock()
+		c := e.h.srv.files.m[sess.ID]
+		ready := c != nil && c.interactiveWaiters == 1
+		e.h.srv.files.mu.Unlock()
+		if ready {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for interactive caller to join background open")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	// 3) Unblock background open #1; it fails with ErrBusy and hands off in-lock.
+	close(bgRelease)
+
+	if err := <-bg1Done; !errors.Is(err, sshx.ErrBusy) {
+		t.Fatalf("background open #1: got %v, want sshx.ErrBusy", err)
+	}
+	<-interactiveEntered
+	if err := <-interDone; err != nil {
+		t.Fatalf("interactive caller after handoff: got %v, want nil", err)
+	}
+	if err := <-bg2Done; err != nil {
+		t.Fatalf("competing background poll #2 joining handoff: got %v, want nil", err)
+	}
+
+	mu.Lock()
+	seq := append([]bool(nil), openSeq...)
+	mu.Unlock()
+	if len(seq) != 2 || seq[0] != false || seq[1] != true {
+		t.Fatalf("open sequence = %v, want [false true] (no second background open)", seq)
+	}
+	if got := sshx.SessionInUse(sess.Client()); got != 8 {
+		t.Fatalf("ledger count after interactive SFTP handoff = %d, want 8", got)
+	}
+}
+
+// GET /api/sessions/{id}/conversation?older=1 must keep interactive priority
+// for its pre-read readConvo call too so a closed shared SFTP channel can open
+// into InteractiveReserve instead of failing immediately as a background read.
+func TestConversationOlderPreReadUsesInteractivePriority(t *testing.T) {
+	e := newFileEnv(t)
+	sess, err := e.h.terms.Get(e.h.userID(e.c), e.sess)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess.Persistence = "tmux"
+	sess.TmuxSession = "s1"
+
+	const sid = "11111111-2222-3333-4444-555555555555"
+	logFile := filepath.Join(e.root, sid+".jsonl")
+	line := `{"type":"user","uuid":"u1","timestamp":"2026-11-27T00:00:00Z","message":{"role":"user","content":"hello"}}` + "\n"
+	if err := os.WriteFile(logFile, []byte(line), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Pre-populate a fresh located state (so apiConversation goes straight to
+	// readConvoWith + readOlder without running locateConvo) while shared SFTP
+	// is still closed.
+	st := e.h.srv.convos.get(sess.ID + "\x00")
+	st.mu.Lock()
+	st.bind = &convoBind{PID: 1234, Start: 56789, Session: sid, Agent: "claude", Pane: "%1"}
+	st.located = time.Now()
+	st.adopt(sid, logFile, "claude", "")
+	gen := st.gen
+	st.mu.Unlock()
+	st.done()
+
+	// Hold 4 Pane + 2 SFTP on top of 1 Terminal = 7/9 used; only the 2
+	// InteractiveReserve slots remain.
+	var held []func()
+	t.Cleanup(func() {
+		for _, rel := range held {
+			rel()
+		}
+	})
+	for range sshx.MaxPanePerConn {
+		rel, err := sshx.AcquireSession(context.Background(), sess.Client(), sshx.SessionPane, true, 0)
+		if err != nil {
+			t.Fatalf("fill pane: %v", err)
+		}
+		held = append(held, rel)
+	}
+	for range 2 {
+		rel, err := sshx.AcquireSession(context.Background(), sess.Client(), sshx.SessionSFTP, true, 0)
+		if err != nil {
+			t.Fatalf("fill sftp: %v", err)
+		}
+		held = append(held, rel)
+	}
+
+	// 1) Normal background poll (older=0) MUST fail with 429 ssh_channels_busy
+	// and leave the ledger at 7/9.
+	bgResp := e.c.do("GET", "/api/sessions/"+e.sess+"/conversation?gen="+strconv.FormatInt(gen, 10), nil)
+	if bgResp.Status != http.StatusTooManyRequests || bgResp.code() != "ssh_channels_busy" {
+		t.Fatalf("background poll at 7/9: status=%d code=%q body=%s, want 429 ssh_channels_busy", bgResp.Status, bgResp.code(), bgResp.Body)
+	}
+	if got := sshx.SessionInUse(sess.Client()); got != 7 {
+		t.Fatalf("background poll opened SFTP into reserve: count=%d, want 7", got)
+	}
+
+	// 2) User clicking "load older" (older=1) MUST keep interactive priority on
+	// the pre-read readConvoWith call and succeed with 200 OK (7 -> 8).
+	olderResp := e.c.do("GET", "/api/sessions/"+e.sess+"/conversation?older=1&gen="+strconv.FormatInt(gen, 10), nil)
+	if olderResp.Status != http.StatusOK {
+		t.Fatalf("older=1 at 7/9: status=%d body=%s, want 200", olderResp.Status, olderResp.Body)
+	}
+	if got := sshx.SessionInUse(sess.Client()); got != 8 {
+		t.Fatalf("after older=1 SFTP open: count=%d, want 8", got)
+	}
+}
+
+// Background codexStillFresh (e.g. suggest) must use non-interactive priority
+// with zero wait, while interactive codexStillFresh (e.g. send) draws from
+// InteractiveReserve.
+func TestCodexStillFreshBackgroundVsInteractive(t *testing.T) {
+	h := newHarness(t)
+	admin := h.admin()
+	root := t.TempDir()
+	srv := h.sshServer(root)
+
+	r := admin.do("POST", "/api/sessions", map[string]any{"host_id": h.hostFor(admin, srv.Addr.Port)})
+	mustStatus(t, r, 201, "open session")
+	sessID := r.json()["id"].(string)
+	sess, err := h.terms.Get(h.userID(admin), sessID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess.Persistence = "tmux"
+	sess.TmuxSession = "s1"
+
+	freshRecord := strings.Join([]string{
+		"%3", "1234", "56789", "1700000000000", "/tmp/proj",
+		"", "", "", "", "",
+		"1", "1", "db", "0", "", "0", "proj",
+	}, "\x1f")
+	srv.HandleExec(func(cmd string) func(ch ssh.Channel) {
+		if !strings.Contains(cmd, "python3") {
+			return nil
+		}
+		return func(ch ssh.Channel) {
+			defer ch.Close()
+			_, _ = io.WriteString(ch, freshRecord)
+			_, _ = ch.SendRequest("exit-status", false, ssh.Marshal(&struct{ Status uint32 }{0}))
+		}
+	})
+
+	// Fill 7/9 (4 Pane + 2 SFTP + 1 Terminal); only InteractiveReserve remains.
+	var held []func()
+	t.Cleanup(func() {
+		for _, rel := range held {
+			rel()
+		}
+	})
+	for range sshx.MaxPanePerConn {
+		rel, err := sshx.AcquireSession(context.Background(), sess.Client(), sshx.SessionPane, true, 0)
+		if err != nil {
+			t.Fatalf("fill pane: %v", err)
+		}
+		held = append(held, rel)
+	}
+	for range 2 {
+		rel, err := sshx.AcquireSession(context.Background(), sess.Client(), sshx.SessionSFTP, true, 0)
+		if err != nil {
+			t.Fatalf("fill sftp: %v", err)
+		}
+		held = append(held, rel)
+	}
+
+	// Background fresh check MUST fail immediately with ErrBusy (no 2s wait).
+	start := time.Now()
+	ok, err := h.srv.codexStillFresh(context.Background(), sess, "", "%3", 1234, 56789, false)
+	if ok || !errors.Is(err, sshx.ErrBusy) {
+		t.Fatalf("background codexStillFresh at 7/9: ok=%v err=%v, want false/sshx.ErrBusy", ok, err)
+	}
+	if d := time.Since(start); d > 200*time.Millisecond {
+		t.Fatalf("background codexStillFresh waited %v, want immediate refusal", d)
+	}
+
+	// Interactive fresh check MUST succeed into InteractiveReserve.
+	ok, err = h.srv.codexStillFresh(context.Background(), sess, "", "%3", 1234, 56789, true)
+	if err != nil || !ok {
+		t.Fatalf("interactive codexStillFresh at 7/9: ok=%v err=%v, want true/nil", ok, err)
+	}
+}
+
+// OpenCode session confirmation, Claude model settingsAccount, rewind asRewindErr,
+// and sentEnter keypress must preserve/map sshx.ErrBusy to 429 ssh_channels_busy
+// (and sentEnter keypress must refuse immediately without queuing).
+func TestOpenCodeModelSettingsRewindAndSentEnterBusyMapping(t *testing.T) {
+	e := newFileEnv(t)
+	sess, err := e.h.terms.Get(e.h.userID(e.c), e.sess)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess.Persistence = "tmux"
+	sess.TmuxSession = "s1"
+
+	// Fill all remaining 8 slots -> 9/9 full.
+	var held []func()
+	t.Cleanup(func() {
+		for _, rel := range held {
+			rel()
+		}
+	})
+	for range sshx.MaxPanePerConn {
+		rel, err := sshx.AcquireSession(context.Background(), sess.Client(), sshx.SessionPane, true, 0)
+		if err != nil {
+			t.Fatalf("fill pane: %v", err)
+		}
+		held = append(held, rel)
+	}
+	for range sshx.MaxSFTPPerConn {
+		rel, err := sshx.AcquireSession(context.Background(), sess.Client(), sshx.SessionSFTP, true, 0)
+		if err != nil {
+			t.Fatalf("fill sftp: %v", err)
+		}
+		held = append(held, rel)
+	}
+
+	// 1) OpenCode confirmation preserves sshx.ErrBusy instead of converting to convoNoSession.
+	ocProc := &convoProc{pid: 2222, start: 33333, agent: "opencode", cwd: "/tmp/proj", log: "/tmp/opencode.db"}
+	sid, why, ocErr := e.h.srv.ocSessionOfInteractive(context.Background(), sess, ocProc, "%1", convoLocated{procs: []convoProc{*ocProc}}, false)
+	if sid != convoNoSession || why != "" || !errors.Is(ocErr, sshx.ErrBusy) {
+		t.Fatalf("ocSessionOfInteractive at 9/9: sid=%q why=%q err=%v, want convoNoSession / \"\" / sshx.ErrBusy", sid, why, ocErr)
+	}
+
+	// 2) Claude convoModel maps settingsAccount sshx.ErrBusy -> 429 ssh_channels_busy (not 502 settings).
+	settingsAccounts.Delete(sess.ID)
+	rec := httptest.NewRecorder()
+	outcome, reason := "refused", ""
+	released := make(chan struct{})
+	e.h.srv.convoModel(rec, context.Background(), sess, "%1", "", 1234, 56789, "11111111-2222-3333-4444-555555555555", "", &outcome, &reason, func() { close(released) }, false, "", "", "", "", false)
+	<-released
+	if rec.Code != http.StatusTooManyRequests || !strings.Contains(rec.Body.String(), `"ssh_channels_busy"`) {
+		t.Fatalf("convoModel settingsAccount ErrBusy: status=%d body=%s, want 429 ssh_channels_busy", rec.Code, rec.Body.String())
+	}
+
+	// 3) Rewind asRewindErr maps sshx.ErrBusy -> 429 ssh_channels_busy.
+	re := asRewindErr(sshx.ErrBusy)
+	if re == nil || re.status != http.StatusTooManyRequests || re.code != "ssh_channels_busy" {
+		t.Fatalf("asRewindErr(ErrBusy) = %+v, want 429 ssh_channels_busy", re)
+	}
+
+	// 4) sentEnter keypress refuses immediately with 429 ssh_channels_busy
+	// without queuing behind a slot (check via convo_mode / convo_sent keypress).
+	// Verify pressSlotWait keeps baseline 0 for "screen" and background looks.
+	if got := pressSlotWait("screen"); got != 0 {
+		t.Fatalf("pressSlotWait(\"screen\") = %v, want 0", got)
+	}
+	if got := pressSlotWait("suggest"); got != 0 {
+		t.Fatalf("pressSlotWait(\"suggest\") = %v, want 0", got)
+	}
+	if got := pressSlotWait("send"); got != 2*time.Second {
+		t.Fatalf("pressSlotWait(\"send\") = %v, want 2s", got)
+	}
 }

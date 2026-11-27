@@ -488,8 +488,10 @@ func (s *Server) cardPress(w http.ResponseWriter, ctx context.Context, sess *ter
 		cardPressed.Unlock()
 	}
 	held.Add(1)
+	// Terminal keypress after verifying the card on screen: intentionally AwaitSlot: 0
+	// so a busy connection refuses immediately rather than queuing a keystroke.
 	_, err = sshx.Exec(ctx, sess.Client(), convoGatedCommand("card:"+c.digest, sess.Persistence, sess.TmuxSession, pane, socket, pid, start, sid, 0, replyPress(sess.Persistence, []string{key}), 0), sendOut,
-		sshx.ExecOptions{Stdin: strings.NewReader(""), Release: held.Done, Interactive: true, AwaitSlot: 2 * time.Second})
+		sshx.ExecOptions{Stdin: strings.NewReader(""), Release: held.Done, Interactive: true})
 	var exitErr *sshx.ExitError
 	switch {
 	case err == nil:

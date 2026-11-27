@@ -1,5 +1,6 @@
 import { Fragment, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useWhenGone } from '../shown'
+import { shouldIgnorePanelPollError } from './busyCode'
 import { api, ApiError, errorText } from '../api'
 import { t, type I18nKey } from '../i18n'
 import { isCoarse } from '../components/ui'
@@ -192,8 +193,8 @@ export function PanelWindow({ sid, active, keys, press, onSettled, toast, live, 
       setLost(false)
       setScreen({ text: r.text, digest: (isLive.current ? r.look : r.digest) ?? r.digest })
     } catch (e) {
-      // (Given up for a key, or another of its presses under way: no failure to read.)
-      if (look.signal.aborted || (e instanceof ApiError && e.code === 'busy')) return
+      // (Given up for a key, or another of its presses / SSH channel cap busy: no failure to read.)
+      if (shouldIgnorePanelPollError(look.signal.aborted, e instanceof ApiError ? e.code : undefined)) return
       a.fails++
       if (a.alive && a.fails >= FAILS) {
         setLoaded(true)

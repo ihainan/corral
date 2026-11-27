@@ -837,12 +837,24 @@ func (s *Server) codexTmuxNamedWith(ctx context.Context, sess *term.Session, p *
 	return c, true, nil
 }
 
+// Test-only hooks for deterministic sequencing around codexTmuxNamedNow (nil in production).
+var (
+	testBeforeCodexTmuxNamed func()
+	testAfterCodexTmuxNamed  func(ok bool, err error)
+)
+
 // codexTmuxNamedNow: codexTmuxNamed for a press: front's log and session
 // set to what its name tells, where it does. Preserves errors (such as
 // sshx.ErrBusy) so the caller can return 429 ssh_channels_busy rather than
 // misreporting agent_changed.
 func (s *Server) codexTmuxNamedNow(ctx context.Context, sess *term.Session, front *convoProc, l convoLocated, interactive bool) (bool, error) {
+	if hook := testBeforeCodexTmuxNamed; hook != nil {
+		hook()
+	}
 	c, ok, err := s.codexTmuxNamedWith(ctx, sess, front, l, interactive)
+	if hook := testAfterCodexTmuxNamed; hook != nil {
+		hook(ok, err)
+	}
 	if err != nil {
 		return false, err
 	}

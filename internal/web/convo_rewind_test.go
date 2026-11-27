@@ -1594,7 +1594,7 @@ func TestClaudeRewindCommitNotStartedCleansUp(t *testing.T) {
 			err  error
 			code string
 		}{
-			{"ErrBusy before dispatch", sshx.ExecResult{Started: false}, sshx.ErrBusy, "busy"},
+			{"ErrBusy before dispatch", sshx.ExecResult{Started: false}, sshx.ErrBusy, "ssh_channels_busy"},
 			{"refused exec before start", sshx.ExecResult{Started: false}, errors.New("refused"), "host_error"},
 			{"sh exit 126 (E2BIG)", sshx.ExecResult{Ended: true, Started: true}, &sshxExitStub{126}, "host_error"},
 			{"sh exit 127 (not found)", sshx.ExecResult{Ended: true, Started: true}, &sshxExitStub{127}, "host_error"},

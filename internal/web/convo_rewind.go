@@ -72,7 +72,7 @@ func asRewindErr(err error) *rewindError {
 		return re
 	}
 	if errors.Is(err, sshx.ErrBusy) {
-		return rwErr(http.StatusTooManyRequests, "busy", "the host is still answering earlier requests")
+		return rwErr(http.StatusTooManyRequests, "ssh_channels_busy", "too many active SSH channels on this connection; close a panel or try again shortly")
 	}
 	return rwErr(http.StatusBadGateway, "host_error", err.Error())
 }

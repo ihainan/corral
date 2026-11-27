@@ -353,13 +353,17 @@ func (s *Server) devinSessionOf(sess *term.Session, p *convoProc, pane string) {
 // readDevin reads what is new of the session st is of: at first its last
 // dvTail rows, then those after the tip last read.
 func (s *Server) readDevin(sess *term.Session, st *convoState) error {
+	return s.readDevinWith(sess, st, false)
+}
+
+func (s *Server) readDevinWith(sess *term.Session, st *convoState, interactive bool) error {
 	if !devinSessionID.MatchString(st.sid) {
 		return nil
 	}
 	if st.size < 0 {
-		return s.dvRead(sess, st, "tail", strconv.Itoa(dvTail))
+		return s.dvRead(sess, st, "tail", interactive, strconv.Itoa(dvTail))
 	}
-	return s.dvRead(sess, st, "since", strconv.FormatInt(st.dvTip, 10), strconv.Itoa(dvTail))
+	return s.dvRead(sess, st, "since", interactive, strconv.FormatInt(st.dvTip, 10), strconv.Itoa(dvTail))
 }
 
 // readOlderDevin reads in the rows before the first read.
@@ -368,13 +372,13 @@ func (s *Server) readOlderDevin(sess *term.Session, st *convoState) error {
 	if !st.older || !ok || dv.Trimmed() || !devinSessionID.MatchString(st.sid) || dv.Floor() <= 0 {
 		return nil
 	}
-	return s.dvRead(sess, st, "older", strconv.FormatInt(dv.Floor(), 10), strconv.Itoa(dvTail))
+	return s.dvRead(sess, st, "older", true, strconv.FormatInt(dv.Floor(), 10), strconv.Itoa(dvTail))
 }
 
-func (s *Server) dvRead(sess *term.Session, st *convoState, mode string, args ...string) error {
+func (s *Server) dvRead(sess *term.Session, st *convoState, mode string, interactive bool, args ...string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), convoReadLimit)
 	defer cancel()
-	interactive := mode == "older"
+	interactive = interactive || mode == "older"
 	var await time.Duration
 	if interactive {
 		await = 2 * time.Second

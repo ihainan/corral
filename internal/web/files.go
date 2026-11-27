@@ -74,16 +74,22 @@ type sftpPool struct {
 }
 
 type sharedSFTP struct {
-	ready       chan struct{}    // closed once opening has finished
-	gone        chan struct{}    // closed when the channel is given up
-	client      *sftplite.Client // set before ready closes; nil if opening failed
-	close       func()
-	err         error
-	users       int
-	idle        *time.Timer
-	dead        bool
-	interactive bool // true if this open attempt had interactive priority
+	ready              chan struct{}    // closed once opening has finished
+	gone               chan struct{}    // closed when the channel is given up
+	client             *sftplite.Client // set before ready closes; nil if opening failed
+	close              func()
+	err                error
+	users              int
+	idle               *time.Timer
+	dead               bool
+	interactive        bool        // true if this open attempt had interactive priority
+	interactiveWaiters int         // live interactive callers waiting on this non-interactive open
+	retry              *sharedSFTP // in-lock interactive handoff created when a background open hits ErrBusy
 }
+
+// testBeforeSFTPOpen is a test-only hook invoked inside sftpPool.open before
+// calling openSFTPLite (nil in production).
+var testBeforeSFTPOpen func(interactive bool)
 
 func newSFTPPool() *sftpPool { return &sftpPool{m: map[string]*sharedSFTP{}} }
 
@@ -92,20 +98,33 @@ func newSFTPPool() *sftpPool { return &sftpPool{m: map[string]*sharedSFTP{}} }
 // open may draw from InteractiveReserve and wait up to sftpSlotWait (background
 // opens use non-interactive priority and return ErrBusy immediately).
 func (p *sftpPool) get(ctx context.Context, sess *term.Session, interactive bool) (*sharedSFTP, error) {
-	retried := false
+	var handoff *sharedSFTP
 	for {
 		p.mu.Lock()
-		c := p.m[sess.ID]
-		if c == nil || c.dead {
-			c = &sharedSFTP{ready: make(chan struct{}), gone: make(chan struct{}), interactive: interactive}
-			p.m[sess.ID] = c
-			go p.open(sess, c, interactive)
+		var c *sharedSFTP
+		if handoff != nil {
+			// Follow the exact interactive open scheduled under the pool lock
+			// when the previous background open failed with ErrBusy, so no
+			// intervening background poller can hijack the retry.
+			c = handoff
+			handoff = nil
+		} else {
+			c = p.m[sess.ID]
+			if c == nil || c.dead {
+				c = &sharedSFTP{ready: make(chan struct{}), gone: make(chan struct{}), interactive: interactive}
+				p.m[sess.ID] = c
+				go p.open(sess, c, interactive)
+			}
 		}
 		if c.users >= maxSharedUsers {
 			p.mu.Unlock()
 			return nil, errFilesBusy
 		}
 		c.users++
+		countedInteractive := interactive && !c.interactive
+		if countedInteractive {
+			c.interactiveWaiters++
+		}
 		if c.idle != nil {
 			c.idle.Stop()
 			c.idle = nil
@@ -114,24 +133,36 @@ func (p *sftpPool) get(ctx context.Context, sess *term.Session, interactive bool
 		select {
 		case <-c.ready:
 		case <-ctx.Done():
-			p.put(sess.ID, c, false)
+			p.putWaiter(sess.ID, c, false, countedInteractive)
 			return nil, ctx.Err()
 		}
 		if c.err != nil {
-			p.put(sess.ID, c, false)
-			if interactive && !c.interactive && !retried && errors.Is(c.err, sshx.ErrBusy) {
-				// A concurrent background open failed because it could not draw
-				// from InteractiveReserve; retry once with interactive priority.
-				retried = true
+			next := c.retry
+			p.putWaiter(sess.ID, c, false, countedInteractive)
+			if countedInteractive && next != nil {
+				handoff = next
 				continue
 			}
 			return nil, c.err
+		}
+		p.mu.Lock()
+		if countedInteractive {
+			c.interactiveWaiters--
+		}
+		dead := c.dead
+		p.mu.Unlock()
+		if dead {
+			p.put(sess.ID, c, false)
+			return nil, errSFTPUnavailable
 		}
 		return c, nil
 	}
 }
 
 func (p *sftpPool) open(sess *term.Session, c *sharedSFTP, interactive bool) {
+	if hook := testBeforeSFTPOpen; hook != nil {
+		hook(interactive)
+	}
 	var await time.Duration
 	if interactive {
 		await = sftpSlotWait
@@ -140,11 +171,36 @@ func (p *sftpPool) open(sess *term.Session, c *sharedSFTP, interactive bool) {
 	p.mu.Lock()
 	if err != nil {
 		c.err = fmt.Errorf("%w: %w", errSFTPUnavailable, err)
-		p.killLocked(sess.ID, c)
+		if !interactive && !c.dead && c.interactiveWaiters > 0 && errors.Is(err, sshx.ErrBusy) && p.m[sess.ID] == c {
+			// Hand off atomically under the pool lock to an interactive open
+			// so a concurrent background poll cannot slip in and claim the slot
+			// before the waiting interactive caller retries.
+			next := &sharedSFTP{ready: make(chan struct{}), gone: make(chan struct{}), interactive: true}
+			c.retry = next
+			c.dead = true
+			close(c.gone)
+			p.m[sess.ID] = next
+			go p.open(sess, next, true)
+		} else {
+			p.killLocked(sess.ID, c)
+		}
 	} else {
 		c.client, c.close = client, closeFn
 		if c.dead { // given up while opening (the session ended, or shutdown)
 			closeFn()
+		} else if c.users == 0 {
+			// A handoff open may finish before its waiting interactive caller
+			// attaches (or after all callers cancelled); arm the idle timer so
+			// it cannot leak if nobody attaches.
+			var t *time.Timer
+			t = time.AfterFunc(sftpIdle, func() {
+				p.mu.Lock()
+				if c.users == 0 && c.idle == t {
+					p.killLocked(sess.ID, c)
+				}
+				p.mu.Unlock()
+			})
+			c.idle = t
 		}
 	}
 	p.mu.Unlock()
@@ -162,8 +218,15 @@ func (p *sftpPool) open(sess *term.Session, c *sharedSFTP, interactive bool) {
 
 // put ends one use; broken gives the channel up for everyone.
 func (p *sftpPool) put(id string, c *sharedSFTP, broken bool) {
+	p.putWaiter(id, c, broken, false)
+}
+
+func (p *sftpPool) putWaiter(id string, c *sharedSFTP, broken, decInteractive bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if decInteractive {
+		c.interactiveWaiters--
+	}
 	c.users--
 	if broken {
 		p.killLocked(id, c)

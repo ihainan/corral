@@ -370,9 +370,11 @@ if [ -L "$f" ]; then f=$(readlink -f "$f") && [ -n "$f" ] || exit 5; fi
 stat -c %Y "$f" 2>/dev/null || stat -f %m "$f"`
 
 // lineExec runs one of the line's fixed commands on the host.
+// Includes terminal keypresses (/model line and panel keys), so intentionally
+// AwaitSlot: 0 (immediate refusal rather than queuing a keystroke behind a slot).
 func lineExec(ctx context.Context, sess *term.Session, running *sync.WaitGroup, cmd string, stdin io.Reader, limit int) ([]byte, error) {
 	running.Add(1)
-	res, err := sshx.Exec(ctx, sess.Client(), cmd, limit, sshx.ExecOptions{Stdin: stdin, Release: running.Done, Interactive: true, AwaitSlot: 2 * time.Second})
+	res, err := sshx.Exec(ctx, sess.Client(), cmd, limit, sshx.ExecOptions{Stdin: stdin, Release: running.Done, Interactive: true})
 	return res.Out, err
 }
 

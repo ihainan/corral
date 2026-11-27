@@ -2138,7 +2138,7 @@ func (s *Server) apiConversation(w http.ResponseWriter, r *http.Request) {
 		}
 		if err != nil {
 			if errors.Is(err, sshx.ErrBusy) {
-				writeError(w, http.StatusTooManyRequests, "busy", "the host is still answering earlier requests")
+				writeSSHChannelsBusy(w)
 			} else {
 				writeError(w, http.StatusBadGateway, "host_error", "the host did not answer")
 			}
@@ -2173,7 +2173,7 @@ func (s *Server) apiConversation(w http.ResponseWriter, r *http.Request) {
 	if st.parser != nil {
 		prevRev = st.parser.Rev()
 	}
-	more, err := s.readConvo(sess, st)
+	more, err := s.readConvoWith(sess, st, older)
 	if err == nil && older && gen == st.gen {
 		err = s.readOlder(sess, st)
 	}
@@ -2639,10 +2639,10 @@ func (s *Server) readConvo(sess *term.Session, st *convoState) (more bool, err e
 
 func (s *Server) readConvoWith(sess *term.Session, st *convoState, interactive bool) (more bool, err error) {
 	if st.agent == "opencode" {
-		return false, s.readOpenCode(sess, st)
+		return false, s.readOpenCodeWith(sess, st, interactive)
 	}
 	if st.agent == "devin" {
-		return false, s.readDevin(sess, st)
+		return false, s.readDevinWith(sess, st, interactive)
 	}
 	err = s.withSFTPPriority(context.Background(), sess, interactive, convoReadLimit, func(c *sftplite.Client) error {
 		if sess.Persistence == "tmux" && st.agent == "claude" && !st.sub {
@@ -4444,9 +4444,9 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 				writeError(w, http.StatusTooManyRequests, "busy", "its conversation is being read: try again in a moment")
 				return
 			case why == "fresh" && b.Session == convoNoSession:
-				freshOK, freshErr := s.codexStillFresh(ctx, sess, socket, b.Pane, front.pid, front.start)
+				freshOK, freshErr := s.codexStillFresh(ctx, sess, socket, b.Pane, front.pid, front.start, pressInteractive(what))
 				if errors.Is(freshErr, sshx.ErrBusy) {
-					reason = "busy"
+					reason = "ssh_channels_busy"
 					writeSSHChannelsBusy(w)
 					return
 				}
@@ -4458,7 +4458,7 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 				} else if sess.Persistence == "tmux" {
 					namedOK, namedErr := s.codexTmuxNamedNow(ctx, sess, front, l, pressInteractive(what))
 					if errors.Is(namedErr, sshx.ErrBusy) {
-						reason = "busy"
+						reason = "ssh_channels_busy"
 						writeSSHChannelsBusy(w)
 						return
 					}
@@ -4473,7 +4473,7 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 				// now: as a herdr pane's codexFront — codexTmuxNamed.)
 				namedOK, namedErr := s.codexTmuxNamedNow(ctx, sess, front, l, pressInteractive(what))
 				if errors.Is(namedErr, sshx.ErrBusy) {
-					reason = "busy"
+					reason = "ssh_channels_busy"
 					writeSSHChannelsBusy(w)
 					return
 				}
@@ -4490,7 +4490,14 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 		// another since it was read; one that cannot be told is not typed to).
 		if front != nil && front.agent == "opencode" {
 			var why string
-			if front.sid, why = s.ocSessionOfInteractive(ctx, sess, front, b.Pane, l, pressInteractive(what)); why != "" {
+			var ocErr error
+			front.sid, why, ocErr = s.ocSessionOfInteractive(ctx, sess, front, b.Pane, l, pressInteractive(what))
+			if errors.Is(ocErr, sshx.ErrBusy) {
+				reason = "ssh_channels_busy"
+				writeSSHChannelsBusy(w)
+				return
+			}
+			if why != "" {
 				front.sid = ""
 			}
 		}
@@ -5244,7 +5251,7 @@ func (s *Server) subagentAnswer(w http.ResponseWriter, r *http.Request, sess *te
 		st.olderLog, st.olderChecked, st.hops, st.olderSeen, st.chainStart = "", false, 0, nil, false
 		st.long, st.strip = nil, b64Strip{}
 	}
-	more, err := s.readConvo(sess, st)
+	more, err := s.readConvoWith(sess, st, older)
 	if err == nil && older && gen == st.gen {
 		err = s.readOlder(sess, st)
 	}
@@ -5720,7 +5727,9 @@ func pressInteractive(what string) bool {
 // when a next message is likeliest, 11-15) — rather than be refused at
 // once. Its own looks (a suggestion, a screen) do not wait: they come again.
 func pressSlotWait(what string) time.Duration {
-	if !pressInteractive(what) {
+	// Keep baseline pressSlotWait behavior: background looks and "screen"
+	// refuse immediately (0s), while baseline interactive actions wait 2s.
+	if !pressInteractive(what) || what == "screen" {
 		return 0
 	}
 	return 2 * time.Second
@@ -5729,14 +5738,14 @@ func pressSlotWait(what string) time.Duration {
 // codexStillFresh: pane's Codex (pid, start) has begun no conversation yet,
 // as a look begun now finds it (Codex's own word, Fresh: of a herdr
 // server's panes, or the user's tmux server's).
-func (s *Server) codexStillFresh(ctx context.Context, sess *term.Session, socket, pane string, pid, start int64) (bool, error) {
+func (s *Server) codexStillFresh(ctx context.Context, sess *term.Session, socket, pane string, pid, start int64, interactive bool) (bool, error) {
 	switch {
 	case sess.Persistence == "tmux":
 		socket = "tmux" // (codexPanesCommand: the user's tmux server)
 	case sess.Persistence != "herdr" || socket == "":
 		return false, nil
 	}
-	panes, err := s.codexPanes.runInteractive(ctx, sess, socket, pane, true)
+	panes, err := s.codexPanes.runInteractive(ctx, sess, socket, pane, interactive)
 	if err != nil {
 		return false, err
 	}
