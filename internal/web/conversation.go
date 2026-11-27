@@ -1793,6 +1793,7 @@ type convoState struct {
 	noReaderAt time.Time // (OpenCode, Devin) when reading found no python3
 	dvTip        int64  // (Devin) the node its line was at when last read: what is after it is read next
 	sub          bool   // a subagent's own log (see apiConversationSubagent)
+	sidechain    bool   // true for Claude Code's subagents/agent-*.jsonl (sidechain rows); false for standalone CLI sessions
 	rewindTarget string // active pending rewind target message ID overlaid for this state's gen
 	runningSig   string // last Running() id signature observed (nudges cmdProber on change)
 }
@@ -1800,7 +1801,7 @@ type convoState struct {
 // newParser: a parser for the log read, a subagent's own as such (its
 // side-chain rows its own); every reader made anew is made by it.
 func (st *convoState) newParser() convo.Parser {
-	if st.sub && st.agent == "claude" { // (a Codex subagent's log is a Codex log as any)
+	if st.sub && st.sidechain && st.agent == "claude" { // (a Codex subagent's log or standalone claude -p log is a normal log)
 		return convo.NewClaudeSub()
 	}
 	return convo.New(st.agent)
@@ -2019,8 +2020,9 @@ type convoAnswer struct {
 	// BgCmds (tmux, where herdr's summary does not say): for a Claude Code
 	// at rest, how many commands it left running in the background, and the
 	// first of them (see convo_tmux_cmds.go).
-	BgCmds    int     `json:"bg_cmds,omitempty"`
-	BgCmdList []bgCmd `json:"bg_cmd_list,omitempty"`
+	BgCmds      int       `json:"bg_cmds,omitempty"`
+	BgCmdList   []bgCmd   `json:"bg_cmd_list,omitempty"`
+	BgAgentList []bgAgent `json:"bg_agent_list,omitempty"`
 	// Title is the session's own (Claude Code's, or the person's);
 	// Tasks the agent's task list as the log has it.
 	Title string       `json:"title,omitempty"`
@@ -2211,9 +2213,17 @@ func (s *Server) apiConversation(w http.ResponseWriter, r *http.Request) {
 	if w, ok := strings.CutPrefix(st.status, "waiting:"); ok {
 		ans.AgentStatus, ans.WaitingFor = "waiting", w
 	}
-	cmds := s.tmuxCmdsTell(sess, st)
+	cmds, cliAgents := s.tmuxCmdsTell(sess, st)
 	if len(cmds) > 0 {
 		ans.BgCmds, ans.BgCmdList = len(cmds), cmds[:min(len(cmds), maxCmdsShown)]
+	}
+	if sess.Persistence == "herdr" && pane != "" && !st.sub && st.bind != nil {
+		if p := s.herdrSocks.cmdsOf(sess.ID); p != nil {
+			cliAgents = p.cliAgentsOf(pane, st.bind.Session)
+		}
+	}
+	if len(cliAgents) > 0 {
+		ans.BgAgentList = cliAgents[:min(len(cliAgents), maxCmdsShown)]
 	}
 	s.codexRunningOnHost(sess, st) // (before its entries are taken: steps it ends are among them)
 	s.agyRunningOnHost(sess, st)
@@ -2245,7 +2255,7 @@ func (s *Server) apiConversation(w http.ResponseWriter, r *http.Request) {
 	if st.agent == "agy" && len(ans.Queued) == 0 && len(st.agyQueued) > 0 && (st.status == "busy" || st.status == "") {
 		ans.Queued = st.agyQueued
 	}
-	ans.Running = st.parser.Running()
+	ans.Running = upgradeRunningWithCLIs(st.parser.Running(), cliAgents)
 	if sess.Persistence == "herdr" && pane != "" && !st.sub {
 		sig := runningSigOf(ans.Running)
 		if sig != st.runningSig {
@@ -5023,8 +5033,8 @@ func (s *Server) apiConversationSubagent(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	q := r.URL.Query()
-	pane, agent := q.Get("pane"), q.Get("agent")
-	if (pane != "" && !herdrPane.MatchString(pane)) || !convo.SubagentID(agent) && !convo.CodexAgentID(agent) {
+	pane, agent, cli := q.Get("pane"), q.Get("agent"), q.Get("cli")
+	if (pane != "" && !herdrPane.MatchString(pane)) || (!convo.SubagentID(agent) && !convo.CodexAgentID(agent)) {
 		writeError(w, http.StatusBadRequest, "bad_request", "bad pane or subagent")
 		return
 	}
@@ -5032,6 +5042,55 @@ func (s *Server) apiConversationSubagent(w http.ResponseWriter, r *http.Request)
 	rev, _ := strconv.Atoi(q.Get("rev"))
 	older := q.Get("older") == "1"
 	w.Header().Set("Cache-Control", "no-store")
+	// A recognized agent CLI running inside a background command (agy, claude,
+	// codex): its log path comes strictly from the host process scan (cmdProber),
+	// never from client input, and is read in read-only mode with its own CLI parser.
+	if cli != "" {
+		if (cli != "agy" && cli != "claude" && cli != "codex") || !convoUUID.MatchString(agent) {
+			writeError(w, http.StatusBadRequest, "bad_request", "bad cli subagent")
+			return
+		}
+		sid := strings.ToLower(agent)
+		stKey := sess.ID + "\x00cli\x00" + cli + "\x00" + sid
+		var file string
+		var p *cmdProber
+		switch sess.Persistence {
+		case "herdr":
+			p = s.herdrSocks.cmdsOf(sess.ID)
+		case "tmux":
+			p = s.tmuxCmdsOf(sess)
+		}
+		if p != nil {
+			file, _ = p.cliLog(cli, sid)
+		}
+		if file == "" {
+			if st := s.subConvos.peek(stKey); st != nil {
+				st.mu.Lock()
+				cand := st.log
+				st.mu.Unlock()
+				if bgCLILogValid(cli, cand, sid) {
+					file = cand
+				}
+			}
+		}
+		if file == "" || !bgCLILogValid(cli, file, sid) {
+			writeError(w, http.StatusNotFound, "not_found", "not a background agent's log")
+			return
+		}
+		err := s.withSFTP(r.Context(), sess, convoReadLimit, func(c *sftplite.Client) error {
+			return checkBgCLILog(c, cli, file, sid)
+		})
+		if errors.Is(err, errSubagentFile) {
+			writeError(w, http.StatusForbidden, "not_allowed", "not a subagent's log")
+			return
+		}
+		if err != nil {
+			writeFileError(w, err)
+			return
+		}
+		s.subagentAnswer(w, r, sess, stKey, cli, file, sid, gen, rev, older, false)
+		return
+	}
 	// (The conversation's own reading, as it stands: whose log it is.)
 	key := sess.ID + "\x00"
 	if sess.Persistence == "herdr" {
@@ -5085,7 +5144,7 @@ func (s *Server) apiConversationSubagent(w http.ResponseWriter, r *http.Request)
 			writeFileError(w, err)
 			return
 		}
-		s.subagentAnswer(w, r, sess, key+"\x00"+root+"\x00"+agent, "agy", file, agent, gen, rev, older)
+		s.subagentAnswer(w, r, sess, key+"\x00"+root+"\x00"+agent, "agy", file, agent, gen, rev, older, false)
 		return
 	}
 	// A Codex's subagent: its own log, beside the session's (codexSubagentLog).
@@ -5129,7 +5188,7 @@ func (s *Server) apiConversationSubagent(w http.ResponseWriter, r *http.Request)
 			writeFileError(w, err)
 			return
 		}
-		s.subagentAnswer(w, r, sess, stKey, "codex", file, agent, gen, rev, older)
+		s.subagentAnswer(w, r, sess, stKey, "codex", file, agent, gen, rev, older, false)
 		return
 	}
 	if !convo.SubagentID(agent) {
@@ -5165,18 +5224,60 @@ func (s *Server) apiConversationSubagent(w http.ResponseWriter, r *http.Request)
 		writeFileError(w, err)
 		return
 	}
-	s.subagentAnswer(w, r, sess, key+"\x00"+root+"\x00"+agent, "claude", file, agent, gen, rev, older)
+	s.subagentAnswer(w, r, sess, key+"\x00"+root+"\x00"+agent, "claude", file, agent, gen, rev, older, true)
 }
 
-// subagentAnswer reads a subagent's log (file, of kind's: claude, codex)
+// checkBgCLILog verifies that a background CLI subagent's session log and its
+// immediate expected directories are non-symlink directories / regular file.
+func checkBgCLILog(c *sftplite.Client, cli, file, sid string) error {
+	if !bgCLILogValid(cli, file, sid) {
+		return errSubagentFile
+	}
+	var checks []string
+	switch cli {
+	case "agy":
+		bi := strings.LastIndex(file, "/brain/")
+		if bi < 0 {
+			return errSubagentFile
+		}
+		brain := file[:bi] + "/brain"
+		subDir := brain + "/" + sid
+		sysDir := subDir + "/.system_generated"
+		logsDir := sysDir + "/logs"
+		checks = []string{brain, subDir, sysDir, logsDir, file}
+	case "claude":
+		projDir := path.Dir(file)
+		projectsDir := path.Dir(projDir)
+		checks = []string{projectsDir, projDir, file}
+	case "codex":
+		dayDir := path.Dir(file)
+		monthDir := path.Dir(dayDir)
+		yearDir := path.Dir(monthDir)
+		checks = []string{yearDir, monthDir, dayDir, file}
+	default:
+		return errSubagentFile
+	}
+	for _, p := range checks {
+		fi, err := c.Lstat(p)
+		if err != nil {
+			return err
+		}
+		if fi.Mode()&fs.ModeSymlink != 0 || (p == file && !fi.Mode().IsRegular()) || (p != file && !fi.IsDir()) {
+			return errSubagentFile
+		}
+	}
+	return nil
+}
+
+// subagentAnswer reads a subagent's log (file, of kind's: claude, codex, agy)
 // as the conversation's is read, a part at a time, and answers with it.
-func (s *Server) subagentAnswer(w http.ResponseWriter, r *http.Request, sess *term.Session, stKey, kind, file, agent string, gen int64, rev int, older bool) {
+func (s *Server) subagentAnswer(w http.ResponseWriter, r *http.Request, sess *term.Session, stKey, kind, file, agent string, gen int64, rev int, older, sidechain bool) {
 	st := s.subConvos.get(stKey)
 	defer st.done()
 	st.mu.Lock()
 	defer st.mu.Unlock()
-	if st.log != file {
-		st.sub, st.agent, st.log, st.sid = true, kind, file, agent
+	if st.log != file || st.sidechain != sidechain {
+		st.sub, st.sidechain, st.agent, st.log, st.sid = true, sidechain, kind, file, agent
 		st.gen = convoGens.Add(1)
 		st.parser = st.newParser()
 		st.offset, st.size, st.mtime, st.older, st.skipping, st.from = 0, -1, time.Time{}, false, false, 0

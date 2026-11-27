@@ -24,10 +24,18 @@ import (
 // bgAgent is a subagent at work in the background: its id (what its log is
 // named by, for its conversation to be read), what it was sent for, and when
 // (unix ms: when its meta was written, as it was sent).
+// When Agent is non-empty ("agy", "claude", "codex"), this entry represents a
+// recognized agent CLI running inside a background command (Task is the parent
+// background command's task ID, Cmd its shell command line, and log its
+// server-side verified session log path).
 type bgAgent struct {
 	ID    string `json:"id"`
 	What  string `json:"what,omitempty"`
 	Since int64  `json:"since,omitempty"`
+	Agent string `json:"agent,omitempty"`
+	Task  string `json:"task,omitempty"`
+	Cmd   string `json:"cmd,omitempty"`
+	log   string
 }
 
 const maxSubsShown = 8 // listed per agent

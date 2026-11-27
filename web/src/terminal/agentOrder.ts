@@ -70,6 +70,9 @@ export interface RowCmds {
 // subagent sent off (live: at work) or a command; what it is (a subagent's
 // description, a command's words), since when (unix ms), and, of a command,
 // where its output goes.
+// When kind === 'agent' and agent is set ('agy' | 'claude' | 'codex'), this
+// task is a recognized agent CLI running inside a background command (task is
+// the parent command's task id).
 export interface RowTask {
   kind: 'agent' | 'cmd'
   id: string
@@ -78,16 +81,62 @@ export interface RowTask {
   since?: number
   out?: string
   live?: boolean
+  agent?: string
+  task?: string
+}
+
+export interface BgAgentLike {
+  id: string
+  what?: string
+  since?: number
+  agent?: string
+  task?: string
+  cmd?: string
 }
 
 // rowTasks: those of an agent's subagents and commands, the subagents first.
-export function rowTasks(agents?: { id: string; what?: string; since?: number }[], cmds?: RowCmds): RowTask[] | undefined {
-  const l: RowTask[] = [
-    ...(agents ?? []).map((a): RowTask => ({ kind: 'agent', id: a.id, name: a.what || '', since: a.since, live: true })),
-    ...(cmds?.list ?? []).filter((c) => c.task).map((c): RowTask => ({ kind: 'cmd', id: c.task!, name: c.desc || c.title || '', cmd: c.title || undefined, since: c.since, out: c.out })),
-  ]
+export function rowTasks(agents?: BgAgentLike[], cmds?: RowCmds): RowTask[] | undefined {
+  const seenAgent = new Set<string>()
+  const agentList: RowTask[] = []
+  for (const a of agents ?? []) {
+    if (!a.id) continue
+    const k = (a.agent ?? '') + '\0' + a.id
+    if (seenAgent.has(k)) continue
+    seenAgent.add(k)
+    agentList.push({
+      kind: 'agent',
+      id: a.id,
+      name: a.what || a.cmd || '',
+      cmd: a.cmd || undefined,
+      since: a.since,
+      live: true,
+      agent: a.agent || undefined,
+      task: a.task || undefined,
+    })
+  }
+  const ownedTasks = new Set(agentList.filter((a) => a.agent && a.task).map((a) => a.task!))
+  const cmdList = (cmds?.list ?? [])
+    .filter((c) => c.task && !ownedTasks.has(c.task))
+    .map((c): RowTask => ({ kind: 'cmd', id: c.task!, name: c.desc || c.title || '', cmd: c.title || undefined, since: c.since, out: c.out }))
+  const l: RowTask[] = [...agentList, ...cmdList]
   return l.length ? l : undefined
 }
+
+// splitRowTasks separates recognized background CLI subagents (hung as child
+// rows with their CLI program icon under the parent) from plain background
+// commands and native Task subagents (shown in the "N in the background" pill).
+export function splitRowTasks(tasks?: RowTask[]): { cliAgents: RowTask[]; bgTasks: RowTask[] } {
+  const cliAgents: RowTask[] = []
+  const bgTasks: RowTask[] = []
+  for (const x of tasks ?? []) {
+    if (x.kind === 'agent' && x.agent) cliAgents.push(x)
+    else bgTasks.push(x)
+  }
+  return { cliAgents, bgTasks }
+}
+
+// hasBgCli reports whether a row has recognized background CLI subagents running.
+export const hasBgCli = (r: Pick<ConvoListRow, 'tasks'>): boolean => !!r.tasks?.some((x) => x.kind === 'agent' && !!x.agent)
 
 export interface AgentGroup {
   id: string
@@ -133,7 +182,7 @@ function groupCounts(rows: ConvoListRow[]) {
 // (A turn over with commands it left running in the background — a build, a
 // server — counts as at work, as the person asked (11-04): even a server
 // that runs on keeps it there, and not "done, not looked at".)
-const working = (r: ConvoListRow) => !isLiveBlocked(r) && (groupStatus(r) === 'working' || !!r.cmds)
+const working = (r: ConvoListRow) => !isLiveBlocked(r) && (groupStatus(r) === 'working' || !!r.cmds || hasBgCli(r))
 const forYou = (r: ConvoListRow) => isLiveBlocked(r) || ((isStaleBlocked(r) || isDone(r)) && !working(r))
 // (Those pinned first, whatever their status; in no other group.)
 export const pinned = (r: ConvoListRow) => r.pinned !== undefined

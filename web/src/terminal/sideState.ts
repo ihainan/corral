@@ -33,8 +33,11 @@ export interface RunningTaskLike {
   what: string
   kind: string // 'cmd' | 'agent'
   ts?: string
+  note?: string
   cmd?: string
   out?: string
+  agent?: string
+  task?: string
 }
 
 export interface EntryLike {
@@ -125,20 +128,46 @@ export function mergeRowTasks(
     if (x.kind === 'agent') agents.push({ ...x })
     else cmds.push({ ...x })
   }
+  // Track background command task IDs already promoted to CLI subagents so a
+  // raw cmd entry from the conversation log never duplicates a promoted CLI row.
+  const promotedTasks = new Set<string>()
+  for (const a of agents) {
+    if (a.agent && a.task) promotedTasks.add(a.task)
+  }
+  for (const r of convoRunning ?? []) {
+    if (r.kind === 'agent' && r.agent && r.task) promotedTasks.add(r.task)
+  }
+  // Drop any plain cmd from herdrTasks whose task is now promoted by convoRunning.
+  for (let i = cmds.length - 1; i >= 0; i--) {
+    if (promotedTasks.has(cmds[i].id)) cmds.splice(i, 1)
+  }
   for (const r of convoRunning ?? []) {
     if (!r.id) continue
     const parsed = r.ts ? Date.parse(r.ts) : NaN
     const since = Number.isFinite(parsed) && parsed > 0 ? parsed : undefined
     if (r.kind === 'agent') {
-      const hit = agents.find((x) => x.id === r.id)
+      const hit = agents.find((x) => x.id === r.id && (x.agent ?? '') === (r.agent ?? '')) ?? agents.find((x) => x.id === r.id)
       if (hit) {
         if (!hit.name && r.what) hit.name = r.what
         if (!hit.since && since) hit.since = since
+        if (!hit.agent && r.agent) hit.agent = r.agent
+        if (!hit.task && r.task) hit.task = r.task
+        if (!hit.cmd && r.cmd) hit.cmd = r.cmd
         hit.live = true
       } else {
-        agents.push({ kind: 'agent', id: r.id, name: r.what || '', since, live: true })
+        agents.push({
+          kind: 'agent',
+          id: r.id,
+          name: r.what || r.cmd || '',
+          cmd: r.cmd || undefined,
+          since,
+          live: true,
+          agent: r.agent || undefined,
+          task: r.task || undefined,
+        })
       }
     } else {
+      if (promotedTasks.has(r.id)) continue
       const hit =
         cmds.find((x) => x.id === r.id) ??
         cmds.find((x) => isSyntheticHostCmd(x.id) && (sameCmdText(x.cmd || x.name, r.cmd || r.what) || sameCmdText(x.name, r.what)))
@@ -162,6 +191,72 @@ export function mergeRowTasks(
   }
   const out = [...agents, ...cmds]
   return out.length ? out : undefined
+}
+
+// conversationRunningItems builds the unified list of running background items
+// for the conversation page's "background tasks" bar and session card:
+// - Upgrades/suppresses any plain cmd in convoRunning whose task ID is owned by
+//   a promoted CLI subagent in agentTasks.
+// - Appends promoted CLI subagents from agentTasks that are not already in
+//   convoRunning (e.g. when the parent agent is done/idle and its log moved on).
+// - Keeps subagents (including CLI subagents) before plain commands.
+export function conversationRunningItems(
+  convoRunning: RunningTaskLike[] | undefined,
+  agentTasks: RowTask[] | undefined,
+): RunningTaskLike[] {
+  const cliFromTasks = (agentTasks ?? []).filter((x) => x.kind === 'agent' && !!x.agent)
+  const promotedByTask = new Map<string, RowTask[]>()
+  for (const x of cliFromTasks) {
+    if (!x.task) continue
+    const list = promotedByTask.get(x.task) ?? []
+    list.push(x)
+    promotedByTask.set(x.task, list)
+  }
+  const seenAgent = new Set<string>()
+  const agents: RunningTaskLike[] = []
+  const cmds: RunningTaskLike[] = []
+  for (const r of convoRunning ?? []) {
+    if (!r.id) continue
+    if (r.kind === 'agent') {
+      seenAgent.add(r.id)
+      agents.push(r)
+      continue
+    }
+    const promoted = promotedByTask.get(r.id)
+    if (promoted && promoted.length > 0) {
+      for (const x of promoted) {
+        if (seenAgent.has(x.id)) continue
+        seenAgent.add(x.id)
+        agents.push({
+          id: x.id,
+          kind: 'agent',
+          what: r.what || x.name || r.cmd || '',
+          ts: r.ts || (x.since ? new Date(x.since).toISOString() : undefined),
+          cmd: r.cmd || x.cmd,
+          out: r.out || x.out,
+          agent: x.agent,
+          task: r.id,
+        })
+      }
+      continue
+    }
+    cmds.push(r)
+  }
+  for (const x of cliFromTasks) {
+    if (seenAgent.has(x.id)) continue
+    seenAgent.add(x.id)
+    agents.push({
+      id: x.id,
+      kind: 'agent',
+      what: x.name || x.cmd || '',
+      ts: x.since ? new Date(x.since).toISOString() : undefined,
+      cmd: x.cmd,
+      out: x.out,
+      agent: x.agent,
+      task: x.task,
+    })
+  }
+  return [...agents, ...cmds]
 }
 
 // convoLastUserMs returns the unix-ms timestamp of the latest non-mid, non-gone

@@ -35,7 +35,7 @@ const EVERY = 3000
 const GROWING = 30000 // (unknown whether it goes on: read on while it grew this lately)
 const BATCH = 20 // (reads in a row while there is more; then the next round)
 
-export function useSubConvo(sessionId: string, pane: string, agent: string, live: boolean, active: boolean, nested: boolean): SubConvo {
+export function useSubConvo(sessionId: string, pane: string, agent: string, live: boolean, active: boolean, nested: boolean, cli?: string): SubConvo {
   const [shown, setShown] = useState({ entries: [] as ConvoEntry[], running: [] as ConvoRunning[], older: false, olderCut: false, loading: true, failed: false, grewAt: 0 })
   // (ctl: the read under way, if any; one called off is none.)
   const at = useRef({ gen: 0, rev: 0, byseq: new Map<number, ConvoEntry>(), again: false, grewAt: 0, ctl: null as AbortController | null })
@@ -62,6 +62,7 @@ export function useSubConvo(sessionId: string, pane: string, agent: string, live
       try {
         for (let n = 0; n < BATCH; n++) {
           const q = new URLSearchParams({ pane, agent, gen: String(a.gen), rev: String(a.rev), older: older && n === 0 ? '1' : '0' })
+          if (cli) q.set('cli', cli)
           const r = await api<Answer>('GET', `/api/sessions/${sessionId}/conversation/subagent?` + q.toString(), undefined, { signal: ctl.signal })
           if (ctl.signal.aborted) return
           if (r.reset || r.gen !== a.gen) a.byseq = new Map()
@@ -86,7 +87,7 @@ export function useSubConvo(sessionId: string, pane: string, agent: string, live
         }
       }
     },
-    [sessionId, pane, agent],
+    [sessionId, pane, agent, cli],
   )
   useEffect(() => {
     const a = at.current

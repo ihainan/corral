@@ -145,6 +145,10 @@ type Running struct {
 	// Claude Code said when it set it going), to be looked at.
 	Cmd string `json:"cmd,omitempty"`
 	Out string `json:"out,omitempty"`
+	// Of a background command recognized as a known agent CLI (agy, claude,
+	// codex): the CLI kind and the parent background task ID it came from.
+	Agent string `json:"agent,omitempty"`
+	Task  string `json:"task,omitempty"`
 
 	until time.Time // (a Monitor's: past this it has run out of time; zero: none)
 }

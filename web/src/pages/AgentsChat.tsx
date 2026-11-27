@@ -1663,7 +1663,8 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
       const dialog = st === 'waiting' && !asks
       const status = asks ? 'blocked' : st === 'busy' ? 'working' : st === 'idle' || dialog ? 'idle' : 'unknown'
       const cmds = st && st !== 'waiting' ? convo.bgCmds : undefined
-      return { title: convoTitle || convo.bind.title, status, dialog, cmds, tasks: mergeRowTasks(rowTasks(undefined, cmds), liveConvoRunning, { blocked: status === 'blocked' }), program: convo.bind.agent }
+      const bgAgents = st && st !== 'waiting' ? convo.bgAgents : undefined
+      return { title: convoTitle || convo.bind.title, status, dialog, cmds, tasks: mergeRowTasks(rowTasks(bgAgents, cmds), liveConvoRunning, { blocked: status === 'blocked' }), program: convo.bind.agent }
     }
     if (!row || !reconciled) return null
     // (A Codex's: its thread's name, as the gateway has it, before its log's
@@ -1672,7 +1673,7 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
     const title = ((isCodex(row.a.agent) || isAgy(row.a.agent)) && row.a.thread_title) || (convo.bind?.pane === row.a.pane_id && convoTitle) || paneName(row.a) || dirName(row.a.cwd)
     const tasks = mergeRowTasks(tasksOf(row), liveConvoRunning, { blocked: reconciled.sideStatus === 'blocked', lost: row.lost })
     return { where: row.ws === '~' ? '' : row.ws, title, status: reconciled.viewStatus, bg: reconciled.bg, dialog: reconciled.dialog, cmds: cmdsOf(row), tasks, other: readsLog(row.a.agent) ? undefined : row.a.agent, program: row.a.agent }
-  }, [herdr, row, reconciled, convo.bind, convo.agentStatus, convo.waitingFor, convo.bgCmds, convo.failing, convoTitle, convo.entries, liveConvoRunning])
+  }, [herdr, row, reconciled, convo.bind, convo.agentStatus, convo.waitingFor, convo.bgCmds, convo.bgAgents, convo.failing, convoTitle, convo.entries, liveConvoRunning])
   // (The tab of the agents' page says which conversation is in front.)
   useEffect(() => {
     onHead?.(agent ? { title: agent.title ?? '', program: agent.program, status: agent.bg && agent.status !== 'blocked' ? 'bg' : agent.status } : null)
@@ -1886,7 +1887,7 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
       const title = (current && agent?.title) || keptTitle(titles, e) || `${e.s.host_name} · ${sessionWhich(e.s, all)}`
       const tmuxStatus = current && agent ? agent.status : 'unknown'
       const tmuxCmds = current ? agent?.cmds : tmuxCmdsOf(e)
-      const tmuxTasks = current ? mergeRowTasks(rowTasks(undefined, tmuxCmds), liveConvoRunning, { blocked: tmuxStatus === 'blocked' }) : rowTasks(undefined, tmuxCmds)
+      const tmuxTasks = current ? mergeRowTasks(rowTasks(convo.bgAgents, tmuxCmds), liveConvoRunning, { blocked: tmuxStatus === 'blocked' }) : rowTasks(undefined, tmuxCmds)
       return { key: e.key, title, where: whereOf(e, hosts), program: current ? agent?.program : undefined, status: tmuxStatus, liveStatus: tmuxStatus, cmds: tmuxCmds, tasks: tmuxTasks, since: current && tmuxStatus === 'working' ? convoWorkingSince : undefined, current, inSplit: !isSecondary && !!splitKey && e.key === splitKey, pinned: pinAt(e.key), sessionGroup: sessionGroupOf(e, all), onPick: (how) => onPick(e, how), menu: () => rowMenu.current(e) }
     })
     return placedAs ? out.map((r) => (r.current ? { ...r, placeAs: placedAs } : r)) : out
