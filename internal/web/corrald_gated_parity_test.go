@@ -845,6 +845,15 @@ func TestConvoGatedTmuxParityClaude(t *testing.T) {
 		h.setScreen(claudeQuestionScreen, "")
 		_ = os.WriteFile(filepath.Join(h.stateDir, "flicker"), []byte("1"), 0o600)
 		t.Cleanup(func() { _ = os.Remove(filepath.Join(h.stateDir, "flicker")) })
+		// (The fake redraws on its own tick: start only once the pane shows a
+		// flicker frame, or a run on a loaded machine sees the old, matching
+		// screen and exits 0.)
+		for deadline := time.Now().Add(5 * time.Second); !bytes.Contains(h.capture(false), []byte("frame-")); {
+			if time.Now().After(deadline) {
+				t.Fatal("flicker frame never reached the pane")
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
 	}, "reply:"+qDig, h.session, h.paneID, h.agentPID, h.agentStart, sid, "keys", []string{"1"}, 0, "", 10)
 	_ = os.Remove(filepath.Join(h.stateDir, "flicker"))
 
