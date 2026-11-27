@@ -25,10 +25,29 @@ const DefaultEventCoalesceWindow = 150 * time.Millisecond
 // actively streaming conversations on the same host).
 const DefaultUnmatchedLogQuietThreshold = 2 * time.Second
 
+// DefaultFallbackWakeTTL is how long an unmatched log path or unmatched added
+// PID is remembered per (user, host) so repeated activity from another agent
+// on the same host only wakes no-log or quiet bindings once.
+const DefaultFallbackWakeTTL = 10 * time.Minute
+
 const (
-	maxWatchedHostsPerConn = 512
-	eventSubSendBuf        = 64
+	maxWatchedHostsPerConn     = 512
+	eventSubSendBuf            = 64
+	maxFallbackWakeLogsPerHost = 256
+	maxFallbackWakePIDsPerHost = 256
+	maxFallbackWakeScopes      = 2048
 )
+
+type userHostKey struct {
+	userID int64
+	hostID int64
+}
+
+type hostWakeSeen struct {
+	logs     map[string]time.Time
+	pids     map[int]time.Time
+	lastUsed time.Time
+}
 
 type convoBindKey struct {
 	sessionID string
@@ -123,27 +142,32 @@ func (sub *eventSub) watchedHostList() []int64 {
 }
 
 type eventHub struct {
-	s              *Server
-	coalesceWindow time.Duration
-	quietThreshold time.Duration
+	s               *Server
+	coalesceWindow  time.Duration
+	quietThreshold  time.Duration
+	fallbackWakeTTL time.Duration
 
-	mu       sync.Mutex
-	closed   bool
-	subs     map[*eventSub]struct{}
-	byUser   map[int64]map[*eventSub]struct{}
-	bindings map[convoBindKey]*convoHintBinding
-	coalesce map[coalesceKey]*coalesceEntry
+	mu            sync.Mutex
+	closed        bool
+	subs          map[*eventSub]struct{}
+	byUser        map[int64]map[*eventSub]struct{}
+	bindings      map[convoBindKey]*convoHintBinding
+	coalesce      map[coalesceKey]*coalesceEntry
+	wakeSeen      map[userHostKey]*hostWakeSeen
+	onDeliverHint func(key coalesceKey) // test hook, nil in production
 }
 
 func newEventHub(s *Server) *eventHub {
 	return &eventHub{
-		s:              s,
-		coalesceWindow: DefaultEventCoalesceWindow,
-		quietThreshold: DefaultUnmatchedLogQuietThreshold,
-		subs:           make(map[*eventSub]struct{}),
-		byUser:         make(map[int64]map[*eventSub]struct{}),
-		bindings:       make(map[convoBindKey]*convoHintBinding),
-		coalesce:       make(map[coalesceKey]*coalesceEntry),
+		s:               s,
+		coalesceWindow:  DefaultEventCoalesceWindow,
+		quietThreshold:  DefaultUnmatchedLogQuietThreshold,
+		fallbackWakeTTL: DefaultFallbackWakeTTL,
+		subs:            make(map[*eventSub]struct{}),
+		byUser:          make(map[int64]map[*eventSub]struct{}),
+		bindings:        make(map[convoBindKey]*convoHintBinding),
+		coalesce:        make(map[coalesceKey]*coalesceEntry),
+		wakeSeen:        make(map[userHostKey]*hostWakeSeen),
 	}
 }
 
@@ -159,6 +183,7 @@ func (h *eventHub) Close() {
 		}
 		delete(h.coalesce, k)
 	}
+	clear(h.wakeSeen)
 	h.mu.Unlock()
 }
 
@@ -177,6 +202,162 @@ func (h *eventHub) SetUnmatchedLogQuietThreshold(d time.Duration) {
 	}
 	h.mu.Lock()
 	h.quietThreshold = d
+	h.mu.Unlock()
+}
+
+func (h *eventHub) SetFallbackWakeTTL(d time.Duration) {
+	if h == nil || d <= 0 {
+		return
+	}
+	h.mu.Lock()
+	h.fallbackWakeTTL = d
+	h.mu.Unlock()
+}
+
+func (h *eventHub) SetOnDeliverHintForTest(fn func(key coalesceKey)) {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	h.onDeliverHint = fn
+	h.mu.Unlock()
+}
+
+func (h *eventHub) wakeScopeLocked(uid, hid int64, now time.Time, ttl time.Duration) *hostWakeSeen {
+	k := userHostKey{userID: uid, hostID: hid}
+	if sc := h.wakeSeen[k]; sc != nil {
+		sc.lastUsed = now
+		return sc
+	}
+	if len(h.wakeSeen) >= maxFallbackWakeScopes {
+		for sk, sc := range h.wakeSeen {
+			if now.Sub(sc.lastUsed) >= ttl {
+				delete(h.wakeSeen, sk)
+			}
+		}
+	}
+	if len(h.wakeSeen) >= maxFallbackWakeScopes {
+		var oldestKey userHostKey
+		var oldestTime time.Time
+		first := true
+		for sk, sc := range h.wakeSeen {
+			if first || sc.lastUsed.Before(oldestTime) {
+				oldestKey = sk
+				oldestTime = sc.lastUsed
+				first = false
+			}
+		}
+		if !first {
+			delete(h.wakeSeen, oldestKey)
+		}
+	}
+	sc := &hostWakeSeen{
+		logs:     make(map[string]time.Time),
+		pids:     make(map[int]time.Time),
+		lastUsed: now,
+	}
+	h.wakeSeen[k] = sc
+	return sc
+}
+
+// markFreshUnmatchedWakes records unmatched log paths and PIDs for (uid, hid)
+// and reports whether at least one of them has not yet triggered a fallback
+// wake within fallbackWakeTTL.
+func (h *eventHub) markFreshUnmatchedWakes(uid, hid int64, logs []string, pids []int, now time.Time) bool {
+	if len(logs) == 0 && len(pids) == 0 {
+		return false
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.closed {
+		return false
+	}
+	ttl := h.fallbackWakeTTL
+	if ttl <= 0 {
+		ttl = DefaultFallbackWakeTTL
+	}
+	sc := h.wakeScopeLocked(uid, hid, now, ttl)
+	fresh := false
+
+	for _, logPath := range logs {
+		if logPath == "" {
+			continue
+		}
+		if seenAt, ok := sc.logs[logPath]; ok && now.Sub(seenAt) < ttl {
+			continue
+		}
+		if len(sc.logs) >= maxFallbackWakeLogsPerHost {
+			for p, t := range sc.logs {
+				if now.Sub(t) >= ttl {
+					delete(sc.logs, p)
+				}
+			}
+		}
+		if len(sc.logs) >= maxFallbackWakeLogsPerHost {
+			var oldestPath string
+			var oldestAt time.Time
+			first := true
+			for p, t := range sc.logs {
+				if first || t.Before(oldestAt) {
+					oldestPath = p
+					oldestAt = t
+					first = false
+				}
+			}
+			if !first {
+				delete(sc.logs, oldestPath)
+			}
+		}
+		sc.logs[logPath] = now
+		fresh = true
+	}
+
+	for _, pid := range pids {
+		if pid <= 0 {
+			continue
+		}
+		if seenAt, ok := sc.pids[pid]; ok && now.Sub(seenAt) < ttl {
+			continue
+		}
+		if len(sc.pids) >= maxFallbackWakePIDsPerHost {
+			for p, t := range sc.pids {
+				if now.Sub(t) >= ttl {
+					delete(sc.pids, p)
+				}
+			}
+		}
+		if len(sc.pids) >= maxFallbackWakePIDsPerHost {
+			var oldestPID int
+			var oldestAt time.Time
+			first := true
+			for p, t := range sc.pids {
+				if first || t.Before(oldestAt) {
+					oldestPID = p
+					oldestAt = t
+					first = false
+				}
+			}
+			if !first {
+				delete(sc.pids, oldestPID)
+			}
+		}
+		sc.pids[pid] = now
+		fresh = true
+	}
+
+	return fresh
+}
+
+func (h *eventHub) forgetWakePIDs(uid, hid int64, pids []int) {
+	if len(pids) == 0 {
+		return
+	}
+	h.mu.Lock()
+	if sc := h.wakeSeen[userHostKey{userID: uid, hostID: hid}]; sc != nil {
+		for _, pid := range pids {
+			delete(sc.pids, pid)
+		}
+	}
 	h.mu.Unlock()
 }
 
@@ -427,19 +608,20 @@ func (h *eventHub) HandleAgentChanged(hostIDs []int64, ev proto.AgentChangedEven
 
 	matchedKeys := make(map[convoBindKey]struct{})
 	relocKeys := make(map[convoBindKey]struct{})
+	pendingHints := make(map[coalesceKey]struct{})
 
 	for hid, users := range usersByHost {
 		for uid := range users {
 			needAgents := false
-			hasUnmatchedLog := false
-			convoTargets := make(map[coalesceKey]struct{})
+			var unmatchedLogs []string
+			var unmatchedAddedPIDs []int
 			directMatched := make(map[convoBindKey]struct{})
 
 			for _, logPath := range ev.ChangedLogs {
 				matched := false
 				for _, b := range liveBindings {
 					if b.ownerID == uid && b.hostID == hid && b.log != "" && b.log == logPath {
-						convoTargets[coalesceKey{
+						pendingHints[coalesceKey{
 							kind:      "convo",
 							userID:    uid,
 							hostID:    hid,
@@ -454,17 +636,41 @@ func (h *eventHub) HandleAgentChanged(hostIDs []int64, ev proto.AgentChangedEven
 				}
 				if !matched {
 					needAgents = true
-					hasUnmatchedLog = true
+					if logPath != "" {
+						unmatchedLogs = append(unmatchedLogs, logPath)
+					}
 				}
 			}
 
-			// When an unmatched log changes or a new/changed agent PID appears
-			// on this host (e.g. a brand-new conversation's first log write or
-			// a /clear / /resume log switch), also notify this user's bindings
-			// on the same host that either have no log yet or whose bound log
-			// has been quiet for at least quietThreshold — without disturbing
-			// other actively streaming conversations on the same host.
-			if hasUnmatchedLog || len(ev.AddedPIDs) > 0 {
+			for _, pid := range ev.AddedPIDs {
+				matched := false
+				for _, b := range liveBindings {
+					if b.ownerID == uid && b.hostID == hid && b.pid > 0 && b.pid == pid {
+						pendingHints[coalesceKey{
+							kind:      "convo",
+							userID:    uid,
+							hostID:    hid,
+							sessionID: b.sessionID,
+							pane:      b.bindPane,
+						}] = struct{}{}
+						bk := convoBindKey{sessionID: b.sessionID, pane: b.pane}
+						directMatched[bk] = struct{}{}
+						relocKeys[bk] = struct{}{}
+						matched = true
+					}
+				}
+				if !matched && pid > 0 {
+					unmatchedAddedPIDs = append(unmatchedAddedPIDs, pid)
+				}
+				needAgents = true
+			}
+
+			// Each unmatched log path or unmatched added PID only wakes this
+			// user's no-log or quiet (>= quietThreshold) bindings on this host
+			// the FIRST time it appears within fallbackWakeTTL, preventing
+			// other busy agents on the same host from causing a relocation
+			// storm while still waking immediately for brand-new logs/PIDs.
+			if h.markFreshUnmatchedWakes(uid, hid, unmatchedLogs, unmatchedAddedPIDs, now) {
 				for _, b := range liveBindings {
 					if b.ownerID != uid || b.hostID != hid {
 						continue
@@ -474,7 +680,7 @@ func (h *eventHub) HandleAgentChanged(hostIDs []int64, ev proto.AgentChangedEven
 						continue
 					}
 					if b.log == "" || b.lastLogChange.IsZero() || now.Sub(b.lastLogChange) >= quietThreshold {
-						convoTargets[coalesceKey{
+						pendingHints[coalesceKey{
 							kind:      "convo",
 							userID:    uid,
 							hostID:    hid,
@@ -486,26 +692,13 @@ func (h *eventHub) HandleAgentChanged(hostIDs []int64, ev proto.AgentChangedEven
 				}
 			}
 
-			for _, pid := range ev.AddedPIDs {
-				for _, b := range liveBindings {
-					if b.ownerID == uid && b.hostID == hid && b.pid > 0 && b.pid == pid {
-						convoTargets[coalesceKey{
-							kind:      "convo",
-							userID:    uid,
-							hostID:    hid,
-							sessionID: b.sessionID,
-							pane:      b.bindPane,
-						}] = struct{}{}
-						relocKeys[convoBindKey{sessionID: b.sessionID, pane: b.pane}] = struct{}{}
-					}
-				}
-				needAgents = true
+			if len(ev.RemovedPIDs) > 0 {
+				h.forgetWakePIDs(uid, hid, ev.RemovedPIDs)
 			}
-
 			for _, pid := range ev.RemovedPIDs {
 				for _, b := range liveBindings {
 					if b.ownerID == uid && b.hostID == hid && b.pid > 0 && b.pid == pid {
-						convoTargets[coalesceKey{
+						pendingHints[coalesceKey{
 							kind:      "convo",
 							userID:    uid,
 							hostID:    hid,
@@ -518,15 +711,12 @@ func (h *eventHub) HandleAgentChanged(hostIDs []int64, ev proto.AgentChangedEven
 				needAgents = true
 			}
 
-			for ck := range convoTargets {
-				h.enqueueHint(ck)
-			}
 			if needAgents {
-				h.enqueueHint(coalesceKey{
+				pendingHints[coalesceKey{
 					kind:   "agents",
 					userID: uid,
 					hostID: hid,
-				})
+				}] = struct{}{}
 			}
 		}
 	}
@@ -541,9 +731,9 @@ func (h *eventHub) HandleAgentChanged(hostIDs []int64, ev proto.AgentChangedEven
 		h.mu.Unlock()
 	}
 
-	// Mark convo states whose pane likely created or switched logs so the
-	// browser's immediate push-triggered GET runs locateConvo right away
-	// instead of waiting for convoLocateTTL (10s).
+	// Mark convo states BEFORE emitting any convo hints so a browser's
+	// immediate push-triggered GET is guaranteed to observe relocAfter and run
+	// locateConvo right away instead of racing with hint delivery.
 	if len(relocKeys) > 0 && h.s != nil {
 		ts := now.UnixNano()
 		for bk := range relocKeys {
@@ -556,6 +746,10 @@ func (h *eventHub) HandleAgentChanged(hostIDs []int64, ev proto.AgentChangedEven
 				}
 			}
 		}
+	}
+
+	for ck := range pendingHints {
+		h.enqueueHint(ck)
 	}
 }
 
@@ -682,6 +876,7 @@ func (h *eventHub) deliverHint(key coalesceKey) {
 		h.mu.Unlock()
 		return
 	}
+	onDeliver := h.onDeliverHint
 	var subs []*eventSub
 	for sub := range h.byUser[key.userID] {
 		if sub.watchesHost(key.hostID) {
@@ -689,6 +884,10 @@ func (h *eventHub) deliverHint(key coalesceKey) {
 		}
 	}
 	h.mu.Unlock()
+
+	if onDeliver != nil {
+		onDeliver(key)
+	}
 
 	sent := 0
 	for _, sub := range subs {

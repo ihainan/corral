@@ -825,3 +825,211 @@ drained:
 		t.Fatalf("active pane must NOT receive convo or relocAfter on unrelated added_pids (got=%+v reloc=%d)", gotPanes, stActive.relocAfter.Load())
 	}
 }
+
+// Regression fix3 #1: Another busy agent on the same host writing 100 times to
+// an unmatched log (or repeating an unmatched added_pid) must wake a watched
+// quiet binding and set relocAfter ONLY ONCE, while a brand-new log path or
+// PID still wakes it once so first replies remain instant.
+func TestEventsUnmatchedLogAndPIDNoWakeStorm(t *testing.T) {
+	h := newHarness(t)
+	h.srv.events.SetCoalesceWindow(5 * time.Millisecond)
+	h.srv.events.SetUnmatchedLogQuietThreshold(2 * time.Second)
+	h.srv.events.SetFallbackWakeTTL(10 * time.Minute)
+
+	admin := h.admin()
+	alice := h.member(admin, "alice")
+	srv := h.sshServer(t.TempDir())
+	hostID, sessID := createAndPinHost(t, alice, srv, "nostorm-box")
+	aliceID := int64(alice.do("GET", "/api/me", nil).json()["id"].(float64))
+
+	stQuiet := h.srv.convos.get(sessID + "\x00w1:p_quiet")
+	stQuiet.done()
+	h.srv.events.RecordBindingWithActivity(aliceID, hostID, sessID, "w1:p_quiet", "w1:p_quiet", 70001, "/tmp/my-quiet-convo.jsonl", time.Now().Add(-5*time.Second))
+
+	ws, _, err := dialEventsWS(t, h, alice, h.cfg.Origin())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ws.CloseNow()
+	rd := startPushReader(ws)
+	_ = rd.next(t, 2*time.Second) // initial cover
+	sendWatchHosts(t, ws, []int64{hostID})
+	time.Sleep(40 * time.Millisecond)
+
+	// 1. Another agent writes 100 times to its own unmatched log file.
+	//    The 1st write wakes w1:p_quiet once and marks relocAfter; after the
+	//    simulated GET clears relocAfter, writes 2..100 must NEVER wake
+	//    w1:p_quiet or set relocAfter again (only agents hints continue).
+	convoCount := 0
+	agentsCount := 0
+	drainHints := func(wait time.Duration) {
+		end := time.Now().Add(wait)
+		for time.Now().Before(end) {
+			select {
+			case m := <-rd.ch:
+				switch m.T {
+				case "convo":
+					if m.Session == sessID && m.Pane == "w1:p_quiet" {
+						convoCount++
+					}
+				case "agents":
+					if m.Host == hostID {
+						agentsCount++
+					}
+				}
+			case <-time.After(5 * time.Millisecond):
+			}
+		}
+	}
+
+	for i := 0; i < 100; i++ {
+		h.srv.events.HandleAgentChanged([]int64{hostID}, proto.AgentChangedEventData{
+			ChangedLogs: []string{"/tmp/other-busy-agent.jsonl"},
+		})
+		if i == 0 {
+			// Wait for the single initial wake, verify relocAfter was set, then
+			// clear relocAfter as a completed src=push GET would.
+			drainHints(40 * time.Millisecond)
+			if convoCount != 1 {
+				t.Fatalf("expected exactly 1 initial convo wake on first unmatched log, got %d", convoCount)
+			}
+			if stQuiet.relocAfter.Swap(0) == 0 {
+				t.Fatal("expected relocAfter set on first unmatched log wake")
+			}
+		} else if i%10 == 0 {
+			// Periodically sleep past the 5ms coalesce window so coalescing
+			// alone cannot mask repeated wakes.
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	drainHints(60 * time.Millisecond)
+
+	if convoCount != 1 {
+		t.Fatalf("expected quiet binding woken exactly ONCE across 100 writes of other agent's log, got %d", convoCount)
+	}
+	if stQuiet.relocAfter.Load() != 0 {
+		t.Fatalf("expected relocAfter to remain 0 across repeated writes of already-seen unmatched log, got %d", stQuiet.relocAfter.Load())
+	}
+	if agentsCount < 2 {
+		t.Fatalf("expected agents hints to keep firing for unmatched log activity, got %d", agentsCount)
+	}
+
+	// 2. A brand-new log path appears on the host -> MUST still wake once!
+	h.srv.events.HandleAgentChanged([]int64{hostID}, proto.AgentChangedEventData{
+		ChangedLogs: []string{"/tmp/brand-new-first-reply.jsonl"},
+	})
+	drainHints(50 * time.Millisecond)
+	if convoCount != 2 {
+		t.Fatalf("expected brand-new unmatched log to wake quiet binding once (total=2), got %d", convoCount)
+	}
+	if stQuiet.relocAfter.Swap(0) == 0 {
+		t.Fatal("expected relocAfter set when brand-new unmatched log appeared")
+	}
+
+	// 3. Another agent's unmatched PID appears 20 times in added_pids -> wakes ONLY once.
+	convoBeforePID := convoCount
+	for i := 0; i < 20; i++ {
+		h.srv.events.HandleAgentChanged([]int64{hostID}, proto.AgentChangedEventData{
+			AddedPIDs: []int{88001},
+		})
+		if i == 0 {
+			drainHints(40 * time.Millisecond)
+			if convoCount != convoBeforePID+1 {
+				t.Fatalf("expected 1 wake on first appearance of unmatched PID 88001, got %d", convoCount-convoBeforePID)
+			}
+			if stQuiet.relocAfter.Swap(0) == 0 {
+				t.Fatal("expected relocAfter set on first appearance of unmatched PID 88001")
+			}
+		} else if i%4 == 0 {
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	drainHints(60 * time.Millisecond)
+	if convoCount != convoBeforePID+1 {
+		t.Fatalf("expected repeated unmatched PID 88001 to wake only once, got %d wakes", convoCount-convoBeforePID)
+	}
+	if stQuiet.relocAfter.Load() != 0 {
+		t.Fatalf("expected relocAfter to remain 0 for repeated unmatched PID 88001, got %d", stQuiet.relocAfter.Load())
+	}
+
+	// A brand-new unmatched PID still wakes once.
+	h.srv.events.HandleAgentChanged([]int64{hostID}, proto.AgentChangedEventData{
+		AddedPIDs: []int{88002},
+	})
+	drainHints(50 * time.Millisecond)
+	if convoCount != convoBeforePID+2 || stQuiet.relocAfter.Load() == 0 {
+		t.Fatalf("expected brand-new unmatched PID 88002 to wake once with relocAfter (wakes=%d reloc=%d)", convoCount-convoBeforePID, stQuiet.relocAfter.Load())
+	}
+}
+
+// Regression fix3 #2: st.relocAfter MUST already be written BEFORE the convo
+// hint is delivered, so any browser GET triggered by the hint is guaranteed to
+// observe relocAfter and run locateConvo immediately.
+func TestEventsRelocAfterSetBeforeConvoHintDelivered(t *testing.T) {
+	h := newHarness(t)
+	h.srv.events.SetCoalesceWindow(5 * time.Millisecond)
+	h.srv.events.SetUnmatchedLogQuietThreshold(2 * time.Second)
+
+	admin := h.admin()
+	alice := h.member(admin, "alice")
+	srv := h.sshServer(t.TempDir())
+	hostID, sessID := createAndPinHost(t, alice, srv, "order-box")
+	aliceID := int64(alice.do("GET", "/api/me", nil).json()["id"].(float64))
+
+	st := h.srv.convos.get(sessID + "\x00w1:p_order")
+	st.done()
+	h.srv.events.RecordBindingWithActivity(aliceID, hostID, sessID, "w1:p_order", "w1:p_order", 71001, "", time.Time{})
+
+	ws, _, err := dialEventsWS(t, h, alice, h.cfg.Origin())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ws.CloseNow()
+	rd := startPushReader(ws)
+	_ = rd.next(t, 2*time.Second) // initial cover
+	sendWatchHosts(t, ws, []int64{hostID})
+	time.Sleep(40 * time.Millisecond)
+
+	cases := []struct {
+		name string
+		ev   proto.AgentChangedEventData
+	}{
+		{name: "unmatched_log", ev: proto.AgentChangedEventData{ChangedLogs: []string{"/tmp/order-new-log.jsonl"}}},
+		{name: "added_pid_match", ev: proto.AgentChangedEventData{AddedPIDs: []int{71001}}},
+		{name: "removed_pid_match", ev: proto.AgentChangedEventData{RemovedPIDs: []int{71001}}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			st.relocAfter.Store(0)
+			delivered := false
+			relocAtDelivery := int64(0)
+			h.srv.events.SetOnDeliverHintForTest(func(key coalesceKey) {
+				if key.kind == "convo" && key.sessionID == sessID && key.pane == "w1:p_order" {
+					delivered = true
+					relocAtDelivery = st.relocAfter.Load()
+				}
+			})
+			defer h.srv.events.SetOnDeliverHintForTest(nil)
+
+			h.srv.events.HandleAgentChanged([]int64{hostID}, tc.ev)
+
+			// Wait for the convo hint to arrive over WS as well.
+			deadline := time.Now().Add(2 * time.Second)
+			for {
+				m := rd.next(t, time.Until(deadline))
+				if m.T == "convo" && m.Session == sessID && m.Pane == "w1:p_order" {
+					break
+				}
+			}
+			if !delivered {
+				t.Fatal("expected deliverHint callback to fire for convo hint")
+			}
+			if relocAtDelivery == 0 {
+				t.Fatalf("%s: st.relocAfter was 0 when convo hint was delivered (must be set BEFORE emitting hint)", tc.name)
+			}
+			// Wait past the 5ms coalesce window before the next subtest.
+			time.Sleep(15 * time.Millisecond)
+		})
+	}
+}
