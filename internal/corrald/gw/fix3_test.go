@@ -470,6 +470,24 @@ func TestScopeConfirmFailureCancelPanicReleasesActiveOpID(t *testing.T) {
 		}
 	})
 
+	t.Run("consent_records_running_version", func(t *testing.T) {
+		// The daemon this host's account already runs (0.3.2, release 2000,
+		// updated through another host or gateway): consenting records its
+		// version and release on this host, not just its manifest.
+		st, mgr, uid, hid, grownHash, callCtx, cancel := setup(t, nil)
+		defer cancel()
+		if _, err := mgr.StartUpdate(callCtx, uid, hid, "alice", grownHash, false); err != nil {
+			t.Fatalf("StartUpdate: %v", err)
+		}
+		ch, err := st.CorraldHost(context.Background(), uid, hid)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ch.Version != "0.3.2" || ch.Release != 2000 {
+			t.Fatalf("host row after consent: version %q release %d, want 0.3.2 / 2000", ch.Version, ch.Release)
+		}
+	})
+
 	t.Run("panic_after_claim_releases_op", func(t *testing.T) {
 		st, mgr, uid, hid, grownHash, callCtx, cancel := setup(t, func(context.CancelFunc) {
 			panic("injected panic after claim")

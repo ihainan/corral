@@ -1252,7 +1252,7 @@ func (m *Manager) StartUpdate(ctx context.Context, userID, hostID int64, corralU
 						m.cfg.AfterScopeClaim(hostID, opID)
 					}
 					mb, _ := proto.MarshalManifest(liveHello.Manifest)
-					committed, err := m.store.CommitCorraldManifestAndOp(ctx, hostID, op, string(mb))
+					committed, err := m.store.CommitCorraldManifestAndOp(ctx, hostID, op, string(mb), liveHello.Version, liveHello.Release)
 					if err != nil {
 						return nil, err
 					}

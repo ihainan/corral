@@ -475,7 +475,10 @@ func (s *Store) finalizeCorraldOpWithHost(ctx context.Context, op *CorraldOp, ch
 // active_op_id = ” (when active_op_id still equals op.ID and state is not
 // off/removing/remove_pending), and marks op done (or cancelled if superseded)
 // in a single transaction.
-func (s *Store) CommitCorraldManifestAndOp(ctx context.Context, hostID int64, op *CorraldOp, manifestJSON string) (bool, error) {
+// CommitCorraldManifestAndOp records consent to the manifest of the daemon
+// already running (installed for another host on the same account, or by a
+// newer gateway), with that daemon's version and release, and finalizes op.
+func (s *Store) CommitCorraldManifestAndOp(ctx context.Context, hostID int64, op *CorraldOp, manifestJSON, version string, release int64) (bool, error) {
 	now := s.unix()
 	op.UpdatedAt = now
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -486,9 +489,9 @@ func (s *Store) CommitCorraldManifestAndOp(ctx context.Context, hostID int64, op
 
 	res, err := tx.ExecContext(ctx, `
 		UPDATE corrald_hosts
-		SET manifest_json = ?, active_op_id = '', updated_at = ?
+		SET manifest_json = ?, version = ?, release = ?, active_op_id = '', updated_at = ?
 		WHERE host_id = ? AND active_op_id = ? AND state NOT IN ('off', 'removing', 'remove_pending')`,
-		manifestJSON, now, hostID, op.ID)
+		manifestJSON, version, release, now, hostID, op.ID)
 	if err != nil {
 		return false, err
 	}
