@@ -15,6 +15,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unsafe"
 )
 
 // ErrLocked is returned when another corrald instance already holds the flock.
@@ -335,4 +336,14 @@ func AtomicSymlink(target, linkPath string) error {
 		return err
 	}
 	return nil
+}
+
+// SetProcessName sets this process's name (/proc/self/comm, what ps, top and
+// pgrep show) to name. A hot update starts the new release through
+// /proc/self/fd/N, which would otherwise leave the process named "N" and
+// hide it from anyone looking for corrald on the host.
+func SetProcessName(name string) {
+	b := make([]byte, 16)
+	copy(b[:15], name)
+	_, _, _ = syscall.RawSyscall(syscall.SYS_PRCTL, syscall.PR_SET_NAME, uintptr(unsafe.Pointer(&b[0])), 0)
 }

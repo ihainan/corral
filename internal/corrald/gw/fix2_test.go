@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -65,6 +66,16 @@ func TestScopeConfirmCannotOverwriteConcurrentRemove(t *testing.T) {
 	baseHash, _ := proto.ManifestSHA256(baseManifest)
 
 	// Host is ALREADY in removing state with an active remove op (simulating concurrent StartRemove).
+	if err := st.CreateCorraldOp(ctx, &store.CorraldOp{
+		ID:        "rem-op-1",
+		HostID:    h.ID,
+		Kind:      OpRemove,
+		State:     OpRunning,
+		Step:      "mark",
+		CreatedBy: u.ID,
+	}, false); err != nil {
+		t.Fatal(err)
+	}
 	if err := st.UpsertCorraldHost(ctx, &store.CorraldHost{
 		HostID:           h.ID,
 		State:            StateRemoving,
@@ -220,14 +231,19 @@ func TestSelectStartBinarySkipsFailedRelease(t *testing.T) {
 	probe := &HostProbe{
 		LibDir:        "/home/alice/.local/lib/corral",
 		CurrentBin:    "/home/alice/.local/lib/corral/corrald",
+		HasSymlink:    true,
 		CurrentTarget: "corrald-0.3.2-2000/corrald",
 		Versions:      []string{"corrald-0.3.1-1000", "corrald-0.3.2-2000"},
 	}
-	if got := SelectStartBinary(probe, nil); got != probe.CurrentBin {
-		t.Fatalf("SelectStartBinary(no failed) = %q, want %q", got, probe.CurrentBin)
+	if got, ok := SelectStartBinary(probe, nil, StartSelectOptions{}); !ok || got.Path != "/home/alice/.local/lib/corral/corrald-0.3.2-2000/corrald" || got.Release != 2000 {
+		t.Fatalf("SelectStartBinary(no failed) = (%+v, %v), want concrete versioned path for rel=2000 (never shared symlink)", got, ok)
 	}
-	if got := SelectStartBinary(probe, []int64{2000}); got != "/home/alice/.local/lib/corral/corrald-0.3.1-1000/corrald" {
-		t.Fatalf("SelectStartBinary(2000 failed) = %q, want 1000 binary", got)
+	if got, ok := SelectStartBinary(probe, []int64{2000}, StartSelectOptions{}); !ok || got.Path != "/home/alice/.local/lib/corral/corrald-0.3.1-1000/corrald" || got.Release != 1000 {
+		t.Fatalf("SelectStartBinary(2000 failed) = (%+v, %v), want 1000 binary", got, ok)
+	}
+	// When all installed releases are blacklisted, SelectStartBinary must refuse (ok=false).
+	if got, ok := SelectStartBinary(probe, []int64{1000, 2000}, StartSelectOptions{}); ok {
+		t.Fatalf("SelectStartBinary(all failed) = (%+v, true), want ok=false", got)
 	}
 }
 
@@ -370,7 +386,7 @@ func TestHandoffBusyReconnectAndFailureBlacklistPolicy(t *testing.T) {
 		_ = os.MkdirAll(stateDir, 0o700)
 		_ = os.MkdirAll(filepath.Join(home, ".local", "lib", "corral"), 0o755)
 		probe := &HostProbe{
-			OS: "Linux", Machine: "x86_64", Arch: "amd64", UID: "1000",
+			OS: "Linux", Machine: "x86_64", Arch: "amd64", UID: strconv.Itoa(os.Getuid()),
 			Home: home, HomeWritable: true, FreeKB: 100000, MachineID: "0123456789ab",
 			LibDir:     filepath.Join(home, ".local", "lib", "corral"),
 			CurrentBin: filepath.Join(home, ".local", "lib", "corral", "corrald"),
