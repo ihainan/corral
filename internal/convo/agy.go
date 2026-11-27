@@ -935,13 +935,17 @@ func AgyEntriesSpawnedSubagent(entries []Entry, subID string) bool {
 // AgySubagentFinder scans an Antigravity CLI parent transcript_full.jsonl
 // stream for an invoke_subagent tool call paired (FIFO) with a GENERIC result
 // carrying the target subagent conversation UUID.
+//
+// Fail-closed: any oversized line (> maxAgyOwnershipLine) or line whose JSON
+// or type cannot be reliably parsed clears the pending queue and marks the
+// verification failed so a misaligned queue can never falsely verify a later
+// tool result.
 type AgySubagentFinder struct {
-	target   string
-	pending  []bool
-	buf      []byte
-	skipping bool
-	head     []byte
-	found    bool
+	target  string
+	pending []bool
+	buf     []byte
+	found   bool
+	failed  bool
 }
 
 const maxAgyOwnershipLine = 4 << 20
@@ -952,13 +956,13 @@ func NewAgySubagentFinder(subID string) *AgySubagentFinder {
 }
 
 // Found reports whether target was matched as a spawned subagent.
-func (f *AgySubagentFinder) Found() bool { return f.found }
+func (f *AgySubagentFinder) Found() bool { return f.found && !f.failed }
 
 // Feed ingests the next chunk of transcript_full.jsonl bytes and returns true
 // as soon as the target subagent ownership is confirmed.
 func (f *AgySubagentFinder) Feed(chunk []byte) bool {
-	if f.found || f.target == "" {
-		return f.found
+	if f.found || f.failed || f.target == "" {
+		return f.Found()
 	}
 	for len(chunk) > 0 {
 		nl := bytes.IndexByte(chunk, '\n')
@@ -972,63 +976,37 @@ func (f *AgySubagentFinder) Feed(chunk []byte) bool {
 			seg = chunk
 			chunk = nil
 		}
-		if f.skipping {
-			if len(f.head) < 1024 {
-				need := min(1024-len(f.head), len(seg))
-				f.head = append(f.head, seg[:need]...)
-			}
-			if eol {
-				f.handleOversized(f.head)
-				f.head = f.head[:0]
-				f.skipping = false
-			}
-			continue
-		}
 		if len(f.buf)+len(seg) > maxAgyOwnershipLine {
-			f.head = append(f.head[:0], f.buf[:min(len(f.buf), 1024)]...)
-			if len(f.head) < 1024 {
-				need := min(1024-len(f.head), len(seg))
-				f.head = append(f.head, seg[:need]...)
-			}
-			f.buf = f.buf[:0]
-			if eol {
-				f.handleOversized(f.head)
-				f.head = f.head[:0]
-			} else {
-				f.skipping = true
-			}
-			continue
+			// Oversized line cannot be reliably parsed: fail closed.
+			f.failClosed()
+			return false
 		}
 		f.buf = append(f.buf, seg...)
 		if eol {
 			f.processLine(f.buf)
 			f.buf = f.buf[:0]
-			if f.found {
-				return true
+			if f.found || f.failed {
+				return f.Found()
 			}
 		}
 	}
-	return f.found
+	return f.Found()
 }
 
 // Finish processes any trailing unterminated line and returns Found().
 func (f *AgySubagentFinder) Finish() bool {
-	if !f.found && !f.skipping && len(f.buf) > 0 {
+	if !f.found && !f.failed && len(f.buf) > 0 {
 		f.processLine(f.buf)
 		f.buf = f.buf[:0]
 	}
-	return f.found
+	return f.Found()
 }
 
-func (f *AgySubagentFinder) handleOversized(head []byte) {
-	switch {
-	case bytes.Contains(head, []byte(`"type":"USER_INPUT"`)), bytes.Contains(head, []byte(`"type":"ERROR_MESSAGE"`)):
-		f.pending = nil
-	case bytes.Contains(head, []byte(`"type":"GENERIC"`)):
-		if len(f.pending) > 0 {
-			f.pending = f.pending[1:]
-		}
-	}
+func (f *AgySubagentFinder) failClosed() {
+	f.pending = nil
+	f.buf = f.buf[:0]
+	f.found = false
+	f.failed = true
 }
 
 func (f *AgySubagentFinder) processLine(raw []byte) {
@@ -1041,7 +1019,10 @@ func (f *AgySubagentFinder) processLine(raw []byte) {
 		Content   string        `json:"content"`
 		ToolCalls []agyToolCall `json:"tool_calls"`
 	}
-	if json.Unmarshal(raw, &r) != nil {
+	if json.Unmarshal(raw, &r) != nil || r.Type == "" {
+		// Unparseable JSON or missing type could hide a GENERIC/PLANNER_RESPONSE
+		// boundary and misalign pending tool calls: fail closed.
+		f.failClosed()
 		return
 	}
 	switch r.Type {

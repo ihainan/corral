@@ -821,7 +821,10 @@ func (s *Server) watchHerdr(sess *term.Session, h *store.Host) {
 		if err != nil {
 			return nil, nil, nil, false, err
 		}
-		got, whole := parseCmdScan(string(out))
+		got, whole, budgetCut := parseCmdScanDetail(string(out))
+		if budgetCut {
+			return nil, nil, nil, false, errScanBudget
+		}
 		return got, parseBgSubScan(string(out)), parseBgIDs(string(out)), whole, nil
 	})
 	s.herdrSocks.setCmds(sess.ID, cmds)

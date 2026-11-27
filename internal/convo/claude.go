@@ -3515,6 +3515,151 @@ func SubagentID(id string) bool {
 	return true
 }
 
+// ClaudeEntriesSpawnedSubagent reports whether any parsed entry of a Claude
+// Code parent log contains an Agent or Task tool call whose result returned
+// subID.
+func ClaudeEntriesSpawnedSubagent(entries []Entry, subID string) bool {
+	if !SubagentID(subID) {
+		return false
+	}
+	for _, e := range entries {
+		for _, p := range e.Parts {
+			if p.Kind == KindTool && p.Tool != nil && (p.Tool.Name == "Agent" || p.Tool.Name == "Task") && p.Tool.AgentID == subID {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// ClaudeSubagentFinder streams a Claude Code parent JSONL log and verifies
+// whether it contains an Agent/Task tool_use paired by tool_use_id with a
+// tool_result whose toolUseResult.agentId matches target.
+type ClaudeSubagentFinder struct {
+	target     string
+	sub        bool // true when scanning a subagent log (allows isSidechain rows)
+	agentCalls map[string]bool
+	buf        []byte
+	skipping   bool
+	found      bool
+}
+
+const (
+	maxClaudeOwnershipLine  = 4 << 20
+	maxClaudeOwnershipCalls = 4096
+)
+
+// NewClaudeSubagentFinder returns a streaming finder for subID in a Claude log.
+func NewClaudeSubagentFinder(subID string, sub bool) *ClaudeSubagentFinder {
+	return &ClaudeSubagentFinder{
+		target:     subID,
+		sub:        sub,
+		agentCalls: map[string]bool{},
+	}
+}
+
+// Found reports whether target was matched as a spawned Agent/Task subagent.
+func (f *ClaudeSubagentFinder) Found() bool { return f.found }
+
+// Feed ingests the next chunk of JSONL bytes and returns true as soon as
+// ownership is confirmed.
+func (f *ClaudeSubagentFinder) Feed(chunk []byte) bool {
+	if f.found || !SubagentID(f.target) {
+		return f.found
+	}
+	for len(chunk) > 0 {
+		nl := bytes.IndexByte(chunk, '\n')
+		var seg []byte
+		eol := false
+		if nl >= 0 {
+			seg = chunk[:nl]
+			chunk = chunk[nl+1:]
+			eol = true
+		} else {
+			seg = chunk
+			chunk = nil
+		}
+		if f.skipping {
+			if eol {
+				f.skipping = false
+			}
+			continue
+		}
+		if len(f.buf)+len(seg) > maxClaudeOwnershipLine {
+			f.buf = f.buf[:0]
+			if !eol {
+				f.skipping = true
+			}
+			continue
+		}
+		f.buf = append(f.buf, seg...)
+		if eol {
+			f.processLine(f.buf)
+			f.buf = f.buf[:0]
+			if f.found {
+				return true
+			}
+		}
+	}
+	return f.found
+}
+
+// Finish processes any trailing unterminated line and returns Found().
+func (f *ClaudeSubagentFinder) Finish() bool {
+	if !f.found && !f.skipping && len(f.buf) > 0 {
+		f.processLine(f.buf)
+		f.buf = f.buf[:0]
+	}
+	return f.found
+}
+
+func (f *ClaudeSubagentFinder) processLine(raw []byte) {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 {
+		return
+	}
+	var r struct {
+		Type          string          `json:"type"`
+		IsSidechain   bool            `json:"isSidechain"`
+		ToolUseResult json.RawMessage `json:"toolUseResult"`
+		Message       struct {
+			Content json.RawMessage `json:"content"`
+		} `json:"message"`
+	}
+	if json.Unmarshal(raw, &r) != nil || (r.IsSidechain && !f.sub) {
+		return
+	}
+	if r.Type != "assistant" && r.Type != "user" {
+		return
+	}
+	var blocks []struct {
+		Type      string `json:"type"`
+		ID        string `json:"id"`
+		Name      string `json:"name"`
+		ToolUseID string `json:"tool_use_id"`
+	}
+	if len(r.Message.Content) == 0 || r.Message.Content[0] != '[' || json.Unmarshal(r.Message.Content, &blocks) != nil {
+		return
+	}
+	if r.Type == "assistant" {
+		for _, b := range blocks {
+			if b.Type == "tool_use" && (b.Name == "Agent" || b.Name == "Task") && b.ID != "" && len(f.agentCalls) < maxClaudeOwnershipCalls {
+				f.agentCalls[b.ID] = true
+			}
+		}
+		return
+	}
+	if subagentOf(r.ToolUseResult) != f.target {
+		return
+	}
+	for _, b := range blocks {
+		if b.Type == "tool_result" && b.ToolUseID != "" && f.agentCalls[b.ToolUseID] {
+			f.found = true
+			return
+		}
+	}
+}
+
 // asksOf: the questions of an AskUserQuestion's input, within bounds.
 func asksOf(input json.RawMessage) []Ask {
 	var in struct {

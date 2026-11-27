@@ -5310,10 +5310,6 @@ func (s *Server) serveBgCLISubagent(w http.ResponseWriter, r *http.Request, sess
 	var hops []string
 	if cliChain != "" {
 		parts := strings.Split(cliChain, ",")
-		if len(parts) > maxCLIChainDepth {
-			writeError(w, http.StatusBadRequest, "bad_request", "bad cli chain")
-			return
-		}
 		for _, p := range parts {
 			if p == "" || (!convo.SubagentID(p) && !convo.CodexAgentID(p)) {
 				writeError(w, http.StatusBadRequest, "bad_request", "bad cli chain")
@@ -5323,6 +5319,11 @@ func (s *Server) serveBgCLISubagent(w http.ResponseWriter, r *http.Request, sess
 		}
 	}
 	hops = append(hops, agent)
+	// Cap total chain depth (intermediate ancestors + target agent <= maxCLIChainDepth).
+	if len(hops) > maxCLIChainDepth {
+		writeError(w, http.StatusBadRequest, "bad_request", "bad cli chain")
+		return
+	}
 	seen := map[string]bool{strings.ToLower(rootSID): true}
 	for _, h := range hops {
 		hl := strings.ToLower(h)
@@ -5458,28 +5459,64 @@ func (s *Server) serveBgCLISubagent(w http.ResponseWriter, r *http.Request, sess
 		}
 		home := strings.TrimSuffix(rootFile, ".jsonl")
 		dir := home + "/subagents"
-		err := s.withSFTP(r.Context(), sess, convoReadLimit, func(c *sftplite.Client) error {
-			for _, d := range []string{home, dir} {
-				fi, err := c.Lstat(d)
-				if err != nil {
-					return err
-				}
-				if fi.Mode()&fs.ModeSymlink != 0 || !fi.IsDir() {
-					return errSubagentFile
+		curKey, curLog, curSub := rootKey, rootFile, false
+		var err error
+		for i, hop := range hops {
+			hopLog := dir + "/agent-" + hop + ".jsonl"
+			hopKey := curKey + "\x00" + curLog + "\x00" + hop
+			cached := false
+			if st := s.subConvos.peek(hopKey); st != nil {
+				st.mu.Lock()
+				cached = st.log == hopLog
+				st.mu.Unlock()
+			}
+			inMemOwned := cached
+			if !inMemOwned {
+				if parentSt := s.subConvos.peek(curKey); parentSt != nil {
+					parentSt.mu.Lock()
+					if parentSt.log == curLog && parentSt.parser != nil {
+						inMemOwned = convo.ClaudeEntriesSpawnedSubagent(parentSt.parser.Since(0), hop)
+					}
+					parentSt.mu.Unlock()
 				}
 			}
-			for _, h := range hops {
-				f := dir + "/agent-" + h + ".jsonl"
-				fi, err := c.Lstat(f)
-				if err != nil {
-					return err
+			checkDirs := i == 0
+			err = s.withSFTP(r.Context(), sess, convoReadLimit, func(c *sftplite.Client) error {
+				if checkDirs {
+					for _, d := range []string{home, dir} {
+						fi, lerr := c.Lstat(d)
+						if lerr != nil {
+							return lerr
+						}
+						if fi.Mode()&fs.ModeSymlink != 0 || !fi.IsDir() {
+							return errSubagentFile
+						}
+					}
+				}
+				fi, lerr := c.Lstat(hopLog)
+				if lerr != nil {
+					return lerr
 				}
 				if fi.Mode()&fs.ModeSymlink != 0 || !fi.Mode().IsRegular() {
 					return errSubagentFile
 				}
+				if inMemOwned {
+					return nil
+				}
+				owned, oerr := claudeParentLogHasSubagent(c, curLog, hop, curSub)
+				if oerr != nil {
+					return oerr
+				}
+				if !owned {
+					return errSubagentFile
+				}
+				return nil
+			})
+			if err != nil {
+				break
 			}
-			return nil
-		})
+			curKey, curLog, curSub = hopKey, hopLog, true
+		}
 		if errors.Is(err, errSubagentFile) {
 			writeError(w, http.StatusForbidden, "not_allowed", "not a subagent's log")
 			return
@@ -5488,11 +5525,35 @@ func (s *Server) serveBgCLISubagent(w http.ResponseWriter, r *http.Request, sess
 			writeFileError(w, err)
 			return
 		}
-		file := dir + "/agent-" + agent + ".jsonl"
-		s.subagentAnswer(w, r, sess, rootKey+"\x00"+rootFile+"\x00"+agent, "claude", file, agent, gen, rev, older, true)
+		s.subagentAnswer(w, r, sess, curKey, "claude", curLog, agent, gen, rev, older, true)
 		return
 	}
 	writeError(w, http.StatusBadRequest, "bad_request", "bad cli subagent")
+}
+
+// claudeParentLogHasSubagent streams a Claude Code parent JSONL log over SFTP
+// (bounded by maxAgyOwnershipScan) and reports whether an Agent/Task tool call
+// in that log produced a tool_result with toolUseResult.agentId == subID.
+func claudeParentLogHasSubagent(c *sftplite.Client, parentLog, subID string, sub bool) (bool, error) {
+	finder := convo.NewClaudeSubagentFinder(subID, sub)
+	var off int64
+	for off < maxAgyOwnershipScan {
+		chunk, err := c.ReadRange(parentLog, off, agyOwnershipChunk)
+		if err != nil {
+			return false, err
+		}
+		if len(chunk) == 0 {
+			break
+		}
+		if finder.Feed(chunk) {
+			return true, nil
+		}
+		off += int64(len(chunk))
+		if len(chunk) < agyOwnershipChunk {
+			break
+		}
+	}
+	return finder.Finish(), nil
 }
 
 // agyParentLogHasSubagent streams an agy parent session's transcript_full.jsonl

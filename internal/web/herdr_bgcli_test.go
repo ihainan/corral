@@ -627,6 +627,63 @@ func TestUpgradeRunningWithCLIsStrictExactAndUnique(t *testing.T) {
 	if ambigSynth[0].Kind != "cmd" {
 		t.Fatalf("ambiguous synthetic candidates should not upgrade: %+v", ambigSynth)
 	}
+
+	// 4. Round 3 P2-3: Long commands (> 80 chars, <= 4 KiB) keep their display
+	// Title truncated at 80 chars, yet upgrade 1-to-1 via their full matchCmd.
+	const parentThread = "01a1dd7f-4856-7042-8ad2-f46c56372e85"
+	longCmd := "agy -p 'Run comprehensive security audit across authentication and session token rotation pipeline' --model gemini-4-neon-high --output-format json"
+	if len(longCmd) <= 80 {
+		t.Fatalf("test command must exceed 80 chars, got %d", len(longCmd))
+	}
+	agyLog := "/home/u/.gemini/antigravity-cli/brain/" + agySID1 + "/.system_generated/logs/transcript_full.jsonl"
+	argv := strings.Join([]string{"agy", "-p", "audit"}, "\x01") + "\x01"
+	scanOut := strings.Join([]string{
+		"clock\t1700000000\t100",
+		"cmd\t8597\t4000\tcodex:" + parentThread + "\t" + longCmd,
+		"cli\t8597\t8598\tagy\t/home/u/.local/bin/agy\t" + agySID1 + "\t" + agyLog + "\t" + argv,
+	}, "\n") + "\n"
+	parsed, whole, budgetCut := parseCmdScanDetail(scanOut)
+	if !whole || budgetCut || len(parsed[parentThread]) != 1 {
+		t.Fatalf("parseCmdScanDetail = whole:%v budgetCut:%v len:%d", whole, budgetCut, len(parsed[parentThread]))
+	}
+	if len([]rune(parsed[parentThread][0].Title)) > 80 {
+		t.Fatalf("display Title was not truncated to 80 runes: %q", parsed[parentThread][0].Title)
+	}
+	_, longCLIs := splitBgCmds(parsed[parentThread])
+	if len(longCLIs) != 1 || longCLIs[0].Cmd != parsed[parentThread][0].Title {
+		t.Fatalf("splitBgCmds longCLIs = %+v", longCLIs)
+	}
+	upgradedLong := upgradeRunningWithCLIs(
+		[]convo.Running{
+			{ID: "call_long_1", Kind: "cmd", What: longCmd, Cmd: longCmd},
+			{ID: "call_other_2", Kind: "cmd", What: "sleep 30", Cmd: "sleep 30"},
+		},
+		longCLIs,
+	)
+	if len(upgradedLong) != 2 || upgradedLong[0].Kind != "agent" || upgradedLong[0].Agent != "agy" || upgradedLong[0].ID != agySID1 || upgradedLong[0].Task != "codex-8597" {
+		t.Fatalf("long >80-char command failed to upgrade 1-to-1: %+v", upgradedLong)
+	}
+	if upgradedLong[1].Kind != "cmd" || upgradedLong[1].ID != "call_other_2" {
+		t.Fatalf("unrelated command wrongly upgraded: %+v", upgradedLong[1])
+	}
+
+	// 5. Commands exceeding maxBgCmdMatchBytes (> 4 KiB) must NOT participate in
+	// synthetic upgrade matching.
+	hugeCmd := "agy -p '" + strings.Repeat("z", maxBgCmdMatchBytes+32) + "'"
+	hugeScan := strings.Join([]string{
+		"clock\t1700000000\t100",
+		"cmd\t8599\t4100\tcodex:" + parentThread + "\t" + hugeCmd,
+		"cli\t8599\t8600\tagy\t/home/u/.local/bin/agy\t" + agySID2 + "\t/home/u/.gemini/antigravity-cli/brain/" + agySID2 + "/.system_generated/logs/transcript_full.jsonl\t" + argv,
+	}, "\n") + "\n"
+	parsedHuge, _, _ := parseCmdScanDetail(hugeScan)
+	_, hugeCLIs := splitBgCmds(parsedHuge[parentThread])
+	upgradedHuge := upgradeRunningWithCLIs(
+		[]convo.Running{{ID: "call_huge", Kind: "cmd", What: hugeCmd, Cmd: hugeCmd}},
+		hugeCLIs,
+	)
+	if upgradedHuge[0].Kind != "cmd" {
+		t.Fatalf(">4 KiB command should not participate in synthetic upgrade: %+v", upgradedHuge)
+	}
 }
 
 // Round 3 review #2 & #5:
@@ -638,12 +695,22 @@ func TestCmdProberOverflowKeepsPrevious(t *testing.T) {
 	const agySID = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeee99"
 	agyLog := "/home/u/.gemini/antigravity-cli/brain/" + agySID + "/.system_generated/logs/transcript_full.jsonl"
 
-	var overflow atomic.Bool
+	var mode atomic.Int32 // 0=ok, 1=ErrOutputTooLarge, 2=errScanBudget ("budget"), 3=incomplete ("more")
 	scans := make(chan struct{}, 8)
 	p := newCmdSubProber(func(context.Context, []string) (map[string][]bgCmd, map[string][]bgAgent, map[string]map[string]bool, bool, error) {
 		defer func() { scans <- struct{}{} }()
-		if overflow.Load() {
+		switch mode.Load() {
+		case 1:
 			return nil, nil, nil, false, sshx.ErrOutputTooLarge
+		case 2:
+			_, _, budgetCut := parseCmdScanDetail("clock\t1700000000\t100\nbudget\n")
+			if !budgetCut {
+				return nil, nil, nil, false, errors.New("expected budgetCut=true")
+			}
+			return nil, nil, nil, false, errScanBudget
+		case 3:
+			got, whole, _ := parseCmdScanDetail("clock\t1700000000\t100\nmore\n")
+			return got, nil, nil, whole, nil
 		}
 		cmds := make([]bgCmd, 0, 10)
 		for i := 1; i <= 9; i++ {
@@ -694,17 +761,31 @@ func TestCmdProberOverflowKeepsPrevious(t *testing.T) {
 		t.Fatalf("before overflow: BgAgentList=%+v, want 2 (1 native + 1 cli)", before.BgAgentList)
 	}
 
-	// Simulate scan output exceeding cmdScanMax (ErrOutputTooLarge).
-	overflow.Store(true)
+	// 1. Simulate scan output exceeding cmdScanMax (ErrOutputTooLarge): keep previous.
+	mode.Store(1)
 	<-scans
 	time.Sleep(20 * time.Millisecond)
-
 	after := readSummary()
-	if after.BgCmds != 9 || len(after.BgCmdList) != maxCmdsShown || len(after.BgCmdTasks) != 9 {
-		t.Fatalf("overflow wiped previous cmds: BgCmds=%d list=%d tasks=%v", after.BgCmds, len(after.BgCmdList), after.BgCmdTasks)
+	if after.BgCmds != 9 || len(after.BgCmdList) != maxCmdsShown || len(after.BgCmdTasks) != 9 || len(after.BgAgentList) != 2 {
+		t.Fatalf("ErrOutputTooLarge wiped previous state: BgCmds=%d list=%d tasks=%v agents=%+v", after.BgCmds, len(after.BgCmdList), after.BgCmdTasks, after.BgAgentList)
 	}
-	if len(after.BgAgentList) != 2 {
-		t.Fatalf("overflow wiped previous BgAgentList: %+v", after.BgAgentList)
+
+	// 2. Round 3 P2-4: Simulate script unified budget truncation ("budget" -> errScanBudget): keep previous.
+	mode.Store(2)
+	<-scans
+	time.Sleep(20 * time.Millisecond)
+	afterBudget := readSummary()
+	if afterBudget.BgCmds != 9 || len(afterBudget.BgCmdList) != maxCmdsShown || len(afterBudget.BgCmdTasks) != 9 || len(afterBudget.BgAgentList) != 2 {
+		t.Fatalf("budget truncation wiped previous state: BgCmds=%d list=%d tasks=%v agents=%+v", afterBudget.BgCmds, len(afterBudget.BgCmdList), afterBudget.BgCmdTasks, afterBudget.BgAgentList)
+	}
+
+	// 3. Genuine non-budget incomplete scan ("more"): still clears stale lists as before.
+	mode.Store(3)
+	<-scans
+	time.Sleep(20 * time.Millisecond)
+	afterMore := readSummary()
+	if afterMore.BgCmds != 0 || len(afterMore.BgAgentList) != 0 {
+		t.Fatalf("non-budget 'more' scan should clear lists, got BgCmds=%d agents=%+v", afterMore.BgCmds, afterMore.BgAgentList)
 	}
 }
 
@@ -875,6 +956,44 @@ func TestCmdScanRealFakeAgyProcess(t *testing.T) {
 		t.Fatalf("expected sub preserved with description dropped under tight budget, got %+v\n%s", tSubs[realSess], tightOut)
 	}
 
+	// Subtest (Round 3 P2-4): when even plain cmd lines exceed totalBudget, the
+	// script emits "budget" (not "more") so parseCmdScanDetail reports budgetCut=true.
+	tinyCmd := exec.Command("sh", "-c", cmdScanCommandWithBudgets(40, cliScanBudget, "s:"+realSess))
+	tinyCmd.Env = append(os.Environ(), "HOME="+home)
+	tinyOut, err := tinyCmd.Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, tinyWhole, tinyBudgetCut := parseCmdScanDetail(string(tinyOut))
+	if tinyWhole || !tinyBudgetCut {
+		t.Fatalf("expected whole=false, budgetCut=true on 40-byte total budget, got whole=%v budgetCut=%v\n%s", tinyWhole, tinyBudgetCut, tinyOut)
+	}
+
+	// Subtest (Round 3 P2-5): native subagent scan streams with bounded
+	// candidate count & bytes (never buffering full find output into a variable).
+	if strings.Contains(cmdScanCommand("s:"+realSess), "_sc_subf=$(") {
+		t.Fatalf("cmdScanCommand must stream find output instead of buffering into a shell variable")
+	}
+	for i := 0; i < subCandPerSession+20; i++ {
+		id := fmt.Sprintf("submany%04d", i)
+		if err := os.WriteFile(filepath.Join(subDir, "agent-"+id+".jsonl"), []byte(`{"version":"2.1.331"}`+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(subDir, "agent-"+id+".meta.json"), []byte(`{"requestShape":"background","description":"Task"}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	manyCmd := exec.Command("sh", "-c", cmdScanCommand("s:"+realSess))
+	manyCmd.Env = append(os.Environ(), "HOME="+home)
+	manyOut, err := manyCmd.Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	manySubs := parseBgSubScan(string(manyOut))
+	if len(manySubs[realSess]) != subsScanned {
+		t.Fatalf("bounded streaming subagent scan got %d subs, want %d", len(manySubs[realSess]), subsScanned)
+	}
+
 	// Subtest (Backend review #1): a log directory containing a literal TAB must
 	// NOT be rewritten to spaces to alias onto a sibling space-named directory.
 	const tabSID = "55555555-6666-4777-8888-999999999991"
@@ -988,7 +1107,11 @@ func TestApiConversationSubagentBgCLI(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := os.WriteFile(claudeLog, []byte(`{"type":"assistant","uuid":"m1","message":{"content":[{"type":"text","text":"claude bg main"}]}}`+"\n"), 0o644); err != nil {
+	claudeLogContent := strings.Join([]string{
+		`{"type":"assistant","uuid":"m1","message":{"content":[{"type":"text","text":"claude bg main"},{"type":"tool_use","id":"tu_nest_1","name":"Agent","input":{"description":"nested"}}]}}`,
+		`{"type":"user","uuid":"u1","message":{"content":[{"type":"tool_result","tool_use_id":"tu_nest_1","content":"done"}]},"toolUseResult":{"agentId":"` + nestedSubID + `"}}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(claudeLog, []byte(claudeLogContent), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(nestedLog, []byte(`{"type":"assistant","uuid":"s1","isSidechain":true,"message":{"content":[{"type":"text","text":"nested subagent reply"}]}}`+"\n"), 0o644); err != nil {
@@ -1170,4 +1293,73 @@ func TestApiConversationSubagentBgCLIOwnershipAndChain(t *testing.T) {
 
 	resCodexCycle := admin.do("GET", "/api/sessions/"+sessID+"/conversation/subagent?pane=w1:p1&cli=codex&cli_parent="+codexA+"&cli_chain="+codexA+"&agent="+codexB+"&gen=0&rev=0", nil)
 	mustStatus(t, resCodexCycle, http.StatusBadRequest, "cycle in cli_chain rejected")
+
+	// --- Round 3 P2-2: Claude hop-by-hop ownership + strict 8-hop total depth cap ---
+	const (
+		claudeRoot = "22222222-3333-4444-8555-cccccccccc01"
+		claudeB    = "claudesubb01"
+		claudeC    = "claudesubc02"
+		claudeD    = "claudesubd03"
+	)
+	claudeRootLog := filepath.Join(home, ".claude", "projects", "-home-u-proj", claudeRoot+".jsonl")
+	claudeSubDir := filepath.Join(home, ".claude", "projects", "-home-u-proj", claudeRoot, "subagents")
+	if err := os.MkdirAll(claudeSubDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Root A spawns direct subagents B and C (NOT D).
+	claudeRootBody := strings.Join([]string{
+		`{"type":"assistant","uuid":"a1","message":{"content":[{"type":"tool_use","id":"tu_b","name":"Agent","input":{"description":"B"}},{"type":"tool_use","id":"tu_c","name":"Task","input":{"description":"C"}}]}}`,
+		`{"type":"user","uuid":"u1","message":{"content":[{"type":"tool_result","tool_use_id":"tu_b","content":"ok"}]},"toolUseResult":{"agentId":"` + claudeB + `"}}`,
+		`{"type":"user","uuid":"u2","message":{"content":[{"type":"tool_result","tool_use_id":"tu_c","content":"ok"}]},"toolUseResult":{"agentId":"` + claudeC + `"}}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(claudeRootLog, []byte(claudeRootBody), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// B spawns D (NOT C).
+	claudeBBody := strings.Join([]string{
+		`{"type":"assistant","uuid":"b1","isSidechain":true,"message":{"content":[{"type":"text","text":"Reply from claude B"},{"type":"tool_use","id":"tu_d","name":"Task","input":{"description":"D"}}]}}`,
+		`{"type":"user","uuid":"bu1","isSidechain":true,"message":{"content":[{"type":"tool_result","tool_use_id":"tu_d","content":"ok"}]},"toolUseResult":{"agentId":"` + claudeD + `"}}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(filepath.Join(claudeSubDir, "agent-"+claudeB+".jsonl"), []byte(claudeBBody), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(claudeSubDir, "agent-"+claudeC+".jsonl"), []byte(`{"type":"assistant","uuid":"c1","isSidechain":true,"message":{"content":[{"type":"text","text":"Reply from claude C"}]}}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(claudeSubDir, "agent-"+claudeD+".jsonl"), []byte(`{"type":"assistant","uuid":"d1","isSidechain":true,"message":{"content":[{"type":"text","text":"Reply from claude grandchild D"}]}}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	p.recordCLILogsLocked(map[string][]bgCmd{
+		cmdSess: {
+			{Task: "b3", clis: []bgCLI{{Agent: "claude", Session: claudeRoot, Log: claudeRootLog}}},
+		},
+	}, time.Now())
+
+	resClaudeB := admin.do("GET", "/api/sessions/"+sessID+"/conversation/subagent?pane=w1:p1&cli=claude&cli_parent="+claudeRoot+"&agent="+claudeB+"&gen=0&rev=0", nil)
+	mustStatus(t, resClaudeB, http.StatusOK, "claude direct child B")
+	if !strings.Contains(string(resClaudeB.Body), "Reply from claude B") {
+		t.Fatalf("unexpected claude B body: %s", resClaudeB.Body)
+	}
+
+	resClaudeC := admin.do("GET", "/api/sessions/"+sessID+"/conversation/subagent?pane=w1:p1&cli=claude&cli_parent="+claudeRoot+"&agent="+claudeC+"&gen=0&rev=0", nil)
+	mustStatus(t, resClaudeC, http.StatusOK, "claude direct child C")
+
+	resClaudeD := admin.do("GET", "/api/sessions/"+sessID+"/conversation/subagent?pane=w1:p1&cli=claude&cli_parent="+claudeRoot+"&cli_chain="+claudeB+"&agent="+claudeD+"&gen=0&rev=0", nil)
+	mustStatus(t, resClaudeD, http.StatusOK, "claude grandchild D via B")
+	if !strings.Contains(string(resClaudeD.Body), "Reply from claude grandchild D") {
+		t.Fatalf("unexpected claude D body: %s", resClaudeD.Body)
+	}
+
+	// Forged hop: B did NOT spawn C -> MUST return 403 Forbidden!
+	resClaudeForged := admin.do("GET", "/api/sessions/"+sessID+"/conversation/subagent?pane=w1:p1&cli=claude&cli_parent="+claudeRoot+"&cli_chain="+claudeB+"&agent="+claudeC+"&gen=0&rev=0", nil)
+	mustStatus(t, resClaudeForged, http.StatusForbidden, "claude forged chain B->C blocked")
+
+	// Skipping B to open D directly from A -> MUST return 403 Forbidden!
+	resClaudeSkip := admin.do("GET", "/api/sessions/"+sessID+"/conversation/subagent?pane=w1:p1&cli=claude&cli_parent="+claudeRoot+"&agent="+claudeD+"&gen=0&rev=0", nil)
+	mustStatus(t, resClaudeSkip, http.StatusForbidden, "claude grandchild D without cli_chain=B blocked")
+
+	// 8 intermediate IDs + 1 target = 9 total hops exceeds maxCLIChainDepth (8) -> 400 Bad Request!
+	tooDeepChain := "hop00001,hop00002,hop00003,hop00004,hop00005,hop00006,hop00007,hop00008"
+	resTooDeep := admin.do("GET", "/api/sessions/"+sessID+"/conversation/subagent?pane=w1:p1&cli=claude&cli_parent="+claudeRoot+"&cli_chain="+tooDeepChain+"&agent="+claudeC+"&gen=0&rev=0", nil)
+	mustStatus(t, resTooDeep, http.StatusBadRequest, "9 total hops (8 intermediate + target) rejected")
 }
