@@ -19,6 +19,41 @@ html.term-mode body { position: fixed; inset: 0; }
   --wb-warn: var(--term-warn-text); --wb-ok: var(--term-ok-text); --wb-danger: var(--term-danger-text);
   --wb-focus: inset 0 0 0 2px var(--term-accent-text); --wb-accent: var(--term-accent-text); --wb-accent-soft: var(--term-accent-soft);
 }
+.term-root, .term-vars { --sb-fg: var(--term-fg); }
+/* Shared slim scrollbars for terminal/agent scroll areas (sidebars, quick
+   switcher, conversation thread, side panels, popovers, dialogs). Matches
+   app.css; excludes xterm's own viewport and .convo-panelwin-screen. */
+@media (forced-colors: none) {
+  :where(.convo-side > .convo-list-groups, .convo-picker > .convo-list-groups, .agents-list, .agents-list.agents-phone > .convo-list-groups, .convo-scroll, .convo-panel-files, .convo-panel-body, .convo-tray-info, .gch, .convo-hunks, .convo-pre, .convo-tasks-list, .convo-dock-ask, .convo-ask-lead, .convo-ask-block, .convo-ask-plan, .convo-running-list, .convo-search-hits, .convo-runs-pop, .convo-models-scroll, .convo-notice-body, .convo-api-err-raw, .convo-task-full, .claude-card-text, .bg-out, .composer-complete, .new-tab-list, .new-agent-olds, .host-history-list, .sc-panel, .sc-page, .copy-text, .player-stage)::-webkit-scrollbar {
+    width: 8px; height: 8px;
+  }
+  :where(.convo-side > .convo-list-groups, .convo-picker > .convo-list-groups, .agents-list, .agents-list.agents-phone > .convo-list-groups, .convo-scroll, .convo-panel-files, .convo-panel-body, .convo-tray-info, .gch, .convo-hunks, .convo-pre, .convo-tasks-list, .convo-dock-ask, .convo-ask-lead, .convo-ask-block, .convo-ask-plan, .convo-running-list, .convo-search-hits, .convo-runs-pop, .convo-models-scroll, .convo-notice-body, .convo-api-err-raw, .convo-task-full, .claude-card-text, .bg-out, .composer-complete, .new-tab-list, .new-agent-olds, .host-history-list, .sc-panel, .sc-page, .copy-text, .player-stage)::-webkit-scrollbar-track,
+  :where(.convo-side > .convo-list-groups, .convo-picker > .convo-list-groups, .agents-list, .agents-list.agents-phone > .convo-list-groups, .convo-scroll, .convo-panel-files, .convo-panel-body, .convo-tray-info, .gch, .convo-hunks, .convo-pre, .convo-tasks-list, .convo-dock-ask, .convo-ask-lead, .convo-ask-block, .convo-ask-plan, .convo-running-list, .convo-search-hits, .convo-runs-pop, .convo-models-scroll, .convo-notice-body, .convo-api-err-raw, .convo-task-full, .claude-card-text, .bg-out, .composer-complete, .new-tab-list, .new-agent-olds, .host-history-list, .sc-panel, .sc-page, .copy-text, .player-stage)::-webkit-scrollbar-corner {
+    background: transparent;
+  }
+  :where(.convo-side > .convo-list-groups, .convo-picker > .convo-list-groups, .agents-list, .agents-list.agents-phone > .convo-list-groups, .convo-scroll, .convo-panel-files, .convo-panel-body, .convo-tray-info, .gch, .convo-hunks, .convo-pre, .convo-tasks-list, .convo-dock-ask, .convo-ask-lead, .convo-ask-block, .convo-ask-plan, .convo-running-list, .convo-search-hits, .convo-runs-pop, .convo-models-scroll, .convo-notice-body, .convo-api-err-raw, .convo-task-full, .claude-card-text, .bg-out, .composer-complete, .new-tab-list, .new-agent-olds, .host-history-list, .sc-panel, .sc-page, .copy-text, .player-stage)::-webkit-scrollbar-thumb {
+    min-height: 28px; border-radius: 999px; border: 2px solid transparent; background-clip: content-box;
+    background-color: color-mix(in srgb, var(--sb-fg, var(--fg)) 14%, transparent);
+  }
+  :where(.convo-side > .convo-list-groups, .convo-picker > .convo-list-groups, .agents-list, .agents-list.agents-phone > .convo-list-groups, .convo-scroll, .convo-panel-files, .convo-panel-body, .convo-tray-info, .gch, .convo-hunks, .convo-pre, .convo-tasks-list, .convo-dock-ask, .convo-ask-lead, .convo-ask-block, .convo-ask-plan, .convo-running-list, .convo-search-hits, .convo-runs-pop, .convo-models-scroll, .convo-notice-body, .convo-api-err-raw, .convo-task-full, .claude-card-text, .bg-out, .composer-complete, .new-tab-list, .new-agent-olds, .host-history-list, .sc-panel, .sc-page, .copy-text, .player-stage):hover::-webkit-scrollbar-thumb {
+    background-color: color-mix(in srgb, var(--sb-fg, var(--fg)) 26%, transparent);
+  }
+  :where(.convo-side > .convo-list-groups, .convo-picker > .convo-list-groups, .agents-list, .agents-list.agents-phone > .convo-list-groups, .convo-scroll, .convo-panel-files, .convo-panel-body, .convo-tray-info, .gch, .convo-hunks, .convo-pre, .convo-tasks-list, .convo-dock-ask, .convo-ask-lead, .convo-ask-block, .convo-ask-plan, .convo-running-list, .convo-search-hits, .convo-runs-pop, .convo-models-scroll, .convo-notice-body, .convo-api-err-raw, .convo-task-full, .claude-card-text, .bg-out, .composer-complete, .new-tab-list, .new-agent-olds, .host-history-list, .sc-panel, .sc-page, .copy-text, .player-stage)::-webkit-scrollbar-thumb:hover {
+    background-color: color-mix(in srgb, var(--sb-fg, var(--fg)) 42%, transparent);
+  }
+  :where(.convo-side > .convo-list-groups, .convo-picker > .convo-list-groups, .agents-list, .agents-list.agents-phone > .convo-list-groups, .convo-scroll, .convo-panel-files, .convo-panel-body, .convo-tray-info, .gch, .convo-hunks, .convo-pre, .convo-tasks-list, .convo-dock-ask, .convo-ask-lead, .convo-ask-block, .convo-ask-plan, .convo-running-list, .convo-search-hits, .convo-runs-pop, .convo-models-scroll, .convo-notice-body, .convo-api-err-raw, .convo-task-full, .claude-card-text, .bg-out, .composer-complete, .new-tab-list, .new-agent-olds, .host-history-list, .sc-panel, .sc-page, .copy-text, .player-stage)::-webkit-scrollbar-thumb:active {
+    background-color: color-mix(in srgb, var(--sb-fg, var(--fg)) 56%, transparent);
+  }
+  @supports not selector(::-webkit-scrollbar) {
+    :where(.convo-side > .convo-list-groups, .convo-picker > .convo-list-groups, .agents-list, .agents-list.agents-phone > .convo-list-groups, .convo-scroll, .convo-panel-files, .convo-panel-body, .convo-tray-info, .gch, .convo-hunks, .convo-pre, .convo-tasks-list, .convo-dock-ask, .convo-ask-lead, .convo-ask-block, .convo-ask-plan, .convo-running-list, .convo-search-hits, .convo-runs-pop, .convo-models-scroll, .convo-notice-body, .convo-api-err-raw, .convo-task-full, .claude-card-text, .bg-out, .composer-complete, .new-tab-list, .new-agent-olds, .host-history-list, .sc-panel, .sc-page, .copy-text, .player-stage) {
+      scrollbar-width: thin;
+      scrollbar-color: color-mix(in srgb, var(--sb-fg, var(--fg)) 16%, transparent) transparent;
+    }
+    :where(.convo-side > .convo-list-groups, .convo-picker > .convo-list-groups, .agents-list, .agents-list.agents-phone > .convo-list-groups, .convo-scroll, .convo-panel-files, .convo-panel-body, .convo-tray-info, .gch, .convo-hunks, .convo-pre, .convo-tasks-list, .convo-dock-ask, .convo-ask-lead, .convo-ask-block, .convo-ask-plan, .convo-running-list, .convo-search-hits, .convo-runs-pop, .convo-models-scroll, .convo-notice-body, .convo-api-err-raw, .convo-task-full, .claude-card-text, .bg-out, .composer-complete, .new-tab-list, .new-agent-olds, .host-history-list, .sc-panel, .sc-page, .copy-text, .player-stage):is(:hover, :focus-within) {
+      scrollbar-color: color-mix(in srgb, var(--sb-fg, var(--fg)) 34%, transparent) transparent;
+    }
+  }
+}
 .term-root.wb-on { padding: 0 0 var(--wb-status) var(--wb-rail); }
 /* (The workbench agents layout: sidebar full-height on the left beside the rail, tabs + conversation on the right.) */
 .wb-agent-layout { flex: 1; min-height: 0; min-width: 0; display: flex; position: relative; }
@@ -1858,7 +1893,7 @@ button.convo-queue-row.is-note:last-child { border-radius: 0 0 var(--r-lg) var(-
 .term-root.dark .convo-side { --term-side: var(--term-bg); --term-row-hover: rgba(255, 255, 255, 0.04); --term-row-current: rgba(255, 255, 255, 0.08); --row-lift: none; }
 /* (+ New agent and Search toolbar stay pinned at the top; only the agent list scrolls.) */
 .convo-side > * { flex-shrink: 0; }
-.convo-side > .convo-list-groups { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 2px 2px 4px 0; margin-right: -2px; }
+.convo-side > .convo-list-groups { flex: 1 1 auto; min-height: 0; overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; padding: 2px 4px 4px 0; margin-right: -8px; }
 .convo-side > .list-toolbar { margin-bottom: 6px; padding-bottom: 6px; border-bottom: 1px solid color-mix(in srgb, var(--term-line) 65%, transparent); }
 /* Its edge, dragged to size it: over the line between, taking no room */
 .convo-side-grip {
@@ -2309,7 +2344,7 @@ button.convo-queue-row.is-note:last-child { border-radius: 0 0 var(--r-lg) var(-
   box-shadow: 0 12px 32px rgba(0, 0, 0, 0.22); font-family: var(--font-ui);
 }
 .convo-picker > * { flex-shrink: 0; }
-.convo-picker > .convo-list-groups { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
+.convo-picker > .convo-list-groups { flex: 1 1 auto; min-height: 0; overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; }
 .convo-picker-title { padding: 4px 4px 8px 10px; font-weight: 600; font-size: var(--fs-h3); line-height: var(--lh-h3); display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 /* The list over the conversation, with a keyboard to hand: a quick switcher, as the palette (11-23). Its search the
    head, the order and "new" as the side list's icons beside it, the side list's rows, its keys at the foot. */
@@ -2324,7 +2359,7 @@ button.convo-queue-row.is-note:last-child { border-radius: 0 0 var(--r-lg) var(-
 .convo-picker.is-keyed .list-new-btn { color: var(--term-accent-text); }
 .convo-picker.is-keyed .list-new-btn:hover { background: var(--term-accent-soft); }
 .convo-picker.is-keyed .list-new-btn:focus-visible, .convo-picker.is-keyed .list-order-btn:focus-visible { outline: 2px solid var(--term-accent-text); outline-offset: -2px; }
-.convo-picker.is-keyed > .convo-list-groups { padding: 6px; }
+.convo-picker.is-keyed > .convo-list-groups { padding: 6px 2px 6px 6px; }
 .convo-picker.is-keyed .convo-list-group { margin-bottom: 4px; gap: 2px; }
 .convo-picker.is-keyed .convo-list-head { padding: 8px 10px 4px; }
 .convo-picker.is-keyed .convo-list-row { align-items: center; padding: 6px 10px; gap: 10px; border-radius: var(--r); }
@@ -2390,7 +2425,7 @@ button.convo-queue-row.is-note:last-child { border-radius: 0 0 var(--r-lg) var(-
    agent and "waiting on me" side by side; then its search, its groups. */
 .agents-list.agents-phone { display: flex; flex-direction: column; overflow: hidden; padding: 8px max(12px, env(safe-area-inset-right, 0px)) 0 max(12px, env(safe-area-inset-left, 0px)); }
 .agents-list.agents-phone > * { flex-shrink: 0; }
-.agents-list.agents-phone > .convo-list-groups { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding-bottom: calc(16px + env(safe-area-inset-bottom, 0px)); }
+.agents-list.agents-phone > .convo-list-groups { flex: 1 1 auto; min-height: 0; overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; padding-bottom: calc(16px + env(safe-area-inset-bottom, 0px)); }
 /* (Framed as New agent beside it, one look for the row's buttons — redesign 11-23.) */
 /* "Waiting on me" in a phone list's toolbar: a small chip by the order and new buttons (11-24). */
 .agents-phone-mine { flex: none; height: 32px; padding: 0 10px; border: 0; border-radius: var(--r); background: color-mix(in srgb, var(--term-fg) 5%, transparent); color: var(--term-fg-2); font: inherit; font-size: var(--fs-sub); line-height: var(--lh-sub); white-space: nowrap; cursor: pointer; }

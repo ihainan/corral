@@ -133,6 +133,43 @@ code, .mono { font-family: var(--font-mono); font-size: var(--fs-sub); }
   transition: background-color 0.12s var(--ease), color 0.12s var(--ease);
 }
 
+/* Shared slim scrollbars for persistent in-app scroll areas (lists, dialogs,
+   drawers, file & preview panels). Gated to forced-colors: none so high-contrast
+   mode keeps system scrollbars; Firefox rules live behind @supports not
+   selector(::-webkit-scrollbar) so Chromium 121+ keeps the slim webkit rules
+   instead of falling back to the wider standard scrollbar. */
+@media (forced-colors: none) {
+  :where(.palette-list, .dialog, .dlg-body, .menu, .scheme-scroll, .reply-screen, .attach-paste-text, .picture-body, .text-preview, .files-uploads, .files-list, .scard-pop, .sm-nav, .sm-body, .desk-aside)::-webkit-scrollbar {
+    width: 8px; height: 8px;
+  }
+  :where(.palette-list, .dialog, .dlg-body, .menu, .scheme-scroll, .reply-screen, .attach-paste-text, .picture-body, .text-preview, .files-uploads, .files-list, .scard-pop, .sm-nav, .sm-body, .desk-aside)::-webkit-scrollbar-track,
+  :where(.palette-list, .dialog, .dlg-body, .menu, .scheme-scroll, .reply-screen, .attach-paste-text, .picture-body, .text-preview, .files-uploads, .files-list, .scard-pop, .sm-nav, .sm-body, .desk-aside)::-webkit-scrollbar-corner {
+    background: transparent;
+  }
+  :where(.palette-list, .dialog, .dlg-body, .menu, .scheme-scroll, .reply-screen, .attach-paste-text, .picture-body, .text-preview, .files-uploads, .files-list, .scard-pop, .sm-nav, .sm-body, .desk-aside)::-webkit-scrollbar-thumb {
+    min-height: 28px; border-radius: 999px; border: 2px solid transparent; background-clip: content-box;
+    background-color: color-mix(in srgb, var(--sb-fg, var(--fg)) 14%, transparent);
+  }
+  :where(.palette-list, .dialog, .dlg-body, .menu, .scheme-scroll, .reply-screen, .attach-paste-text, .picture-body, .text-preview, .files-uploads, .files-list, .scard-pop, .sm-nav, .sm-body, .desk-aside):hover::-webkit-scrollbar-thumb {
+    background-color: color-mix(in srgb, var(--sb-fg, var(--fg)) 26%, transparent);
+  }
+  :where(.palette-list, .dialog, .dlg-body, .menu, .scheme-scroll, .reply-screen, .attach-paste-text, .picture-body, .text-preview, .files-uploads, .files-list, .scard-pop, .sm-nav, .sm-body, .desk-aside)::-webkit-scrollbar-thumb:hover {
+    background-color: color-mix(in srgb, var(--sb-fg, var(--fg)) 42%, transparent);
+  }
+  :where(.palette-list, .dialog, .dlg-body, .menu, .scheme-scroll, .reply-screen, .attach-paste-text, .picture-body, .text-preview, .files-uploads, .files-list, .scard-pop, .sm-nav, .sm-body, .desk-aside)::-webkit-scrollbar-thumb:active {
+    background-color: color-mix(in srgb, var(--sb-fg, var(--fg)) 56%, transparent);
+  }
+  @supports not selector(::-webkit-scrollbar) {
+    :where(.palette-list, .dialog, .dlg-body, .menu, .scheme-scroll, .reply-screen, .attach-paste-text, .picture-body, .text-preview, .files-uploads, .files-list, .scard-pop, .sm-nav, .sm-body, .desk-aside) {
+      scrollbar-width: thin;
+      scrollbar-color: color-mix(in srgb, var(--sb-fg, var(--fg)) 16%, transparent) transparent;
+    }
+    :where(.palette-list, .dialog, .dlg-body, .menu, .scheme-scroll, .reply-screen, .attach-paste-text, .picture-body, .text-preview, .files-uploads, .files-list, .scard-pop, .sm-nav, .sm-body, .desk-aside):is(:hover, :focus-within) {
+      scrollbar-color: color-mix(in srgb, var(--sb-fg, var(--fg)) 34%, transparent) transparent;
+    }
+  }
+}
+
 /* Workbench (760 and up, design 11-23): an icon rail on the left, a status bar
    along the bottom, the page between. The rail and the bar take the page's
    colours: a terminal's scheme sets --wb-* on its root (terminal.css); the
@@ -175,7 +212,7 @@ code, .mono { font-family: var(--font-mono); font-size: var(--fs-sub); }
 .palette-search input { flex: 1; min-width: 0; height: 100%; border: 0; padding: 0; background: none; color: var(--fg); outline: none; font-size: var(--fs-body); line-height: var(--lh-body); }
 .palette-search input:focus-visible { outline: none; box-shadow: none; } /* (the box is it) */
 .palette-esc, .palette-foot kbd { font-family: var(--font-mono); font-size: var(--fs-note); line-height: var(--lh-note); padding: 0 6px; border: 1px solid var(--line); border-radius: var(--r-xs); color: var(--fg-3); background: var(--bg-subtle); }
-.palette-list { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 6px; }
+.palette-list { flex: 1; min-height: 0; overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; padding: 6px; }
 .palette-head { padding: 8px 10px 4px; font-size: var(--fs-note); line-height: var(--lh-note); font-weight: 500; color: var(--fg-3); }
 .palette-row { display: flex; align-items: center; gap: 10px; min-height: 40px; padding: 6px 10px; border-radius: var(--r); cursor: pointer; }
 .palette-row[aria-selected='true'] { background: var(--bg-active); }
@@ -1153,7 +1190,7 @@ details.adv > .form { margin-top: 16px; }
 .files-progress i { display: block; height: 100%; background: var(--accent); transition: width 0.2s linear; }
 .files-upload-err { flex: 1; min-width: 0; color: var(--danger); font-size: var(--fs-note); line-height: var(--lh-note); }
 .files-body { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; }
-.files-list { list-style: none; margin: 0; padding: 4px 8px 12px; overflow-y: auto; overscroll-behavior: contain; min-height: 0; }
+.files-list { list-style: none; margin: 0; padding: 4px 8px 12px; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; min-height: 0; }
 .files-list.loading { opacity: 0.55; transition: opacity 0.15s 0.2s; }
 .files-row { display: flex; align-items: center; border-radius: var(--r); }
 .files-row:hover { background: var(--bg-hover); }
