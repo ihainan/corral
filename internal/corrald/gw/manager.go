@@ -373,7 +373,7 @@ func NewManager(cfg ManagerConfig) *Manager {
 	if handoffTO <= 0 {
 		handoffTO = DefaultHandoffTimeout
 	}
-	return &Manager{
+	mgr := &Manager{
 		cfg:                 cfg,
 		store:               cfg.Store,
 		dist:                cfg.Dist,
@@ -396,6 +396,12 @@ func NewManager(cfg ManagerConfig) *Manager {
 		opsByHost:           make(map[int64]*runningOp),
 		opsByAcct:           make(map[accountKey]*runningOp),
 	}
+	// Startup recovery: clear any orphaned active_op_id left behind if a
+	// previous gateway process crashed after finalizing corrald_ops.
+	if cfg.Store != nil {
+		_, _ = cfg.Store.ClearStaleCorraldHostOps(context.Background())
+	}
+	return mgr
 }
 
 // DefaultHandoffTimeout bounds daemon.handoff RPCs above the daemon's 60s
@@ -688,10 +694,12 @@ func (m *Manager) Status(ctx context.Context, userID, hostID int64) (*StatusResp
 	}
 
 	// Enforce authorization binding (fingerprint, username, gateway) via atomic
-	// conditional SQL so a concurrent reinstall/rebind is never overwritten.
+	// CAS SQL comparing the row's current binding against the read snapshot so
+	// neither a concurrent reinstall nor a stale observed identity can clobber
+	// a newer binding.
 	if ch.State != StateOff && ch.State != StateRemoving && ch.State != StateRemovePending && ch.State != StateInstalling && ch.State != StateRebind {
 		if !CheckBinding(toSnapshot(ch), fp, sshUser, m.gatewayID) {
-			if m.markRebindIfMismatch(ctx, hostID, fp, sshUser, false, "status") {
+			if m.markRebindIfMismatch(ctx, hostID, ch.BoundFingerprint, ch.BoundUsername, ch.BoundGateway, fp, sshUser, false, "status") {
 				ch.State = StateRebind
 			} else if fresh, ferr := m.store.CorraldHost(ctx, userID, hostID); ferr == nil {
 				ch = fresh
@@ -905,13 +913,11 @@ func (m *Manager) StartInstall(ctx context.Context, userID, hostID int64, corral
 		defer close(rop.done)
 		defer m.clearRunningOp(rop)
 		defer func() {
-			if released, _ := m.store.ReleaseCorraldHostOp(context.Background(), hostID, opID, StateOff); released {
-				op.State = OpFailed
-				if op.ErrorCode == "" {
-					op.ErrorCode = "other"
-				}
-				_, _ = m.store.UpdateCorraldOpIfActive(context.Background(), op)
+			op.State = OpFailed
+			if op.ErrorCode == "" {
+				op.ErrorCode = "other"
 			}
+			_, _ = m.store.ReleaseCorraldHostOpAndFinish(context.Background(), hostID, op, StateOff)
 		}()
 		m.runInstallOp(opCtx, rop, op, ch, dist, userID, hostID, corralUser)
 	}()
@@ -953,13 +959,17 @@ func (m *Manager) CancelInstall(ctx context.Context, userID, hostID int64) (*OpV
 		case <-ctx.Done():
 		}
 	} else {
-		// No in-memory goroutine (e.g. post-restart stale op); cancel directly in store.
+		// No in-memory goroutine (e.g. post-restart stale op); cancel op and
+		// release host row atomically in one transaction.
 		op.State = OpCancelled
-		_, _ = m.store.UpdateCorraldOpIfActive(ctx, op)
 		if ch, err := m.store.CorraldHostByID(ctx, hostID); err == nil && ch.State == StateInstalling {
 			ch.State = StateOff
 			ch.ActiveOpID = ""
-			_, _ = m.store.UpdateCorraldHostIfOp(ctx, ch, op.ID, true)
+			_, _ = m.store.FinalizeCorraldOpWithHost(ctx, op, ch)
+		} else {
+			if released, _ := m.store.ReleaseCorraldHostOpAndFinish(ctx, hostID, op, ""); !released {
+				_, _ = m.store.UpdateCorraldOpIfActive(ctx, op)
+			}
 		}
 	}
 	latest, err := m.store.LatestCorraldOp(ctx, hostID)
@@ -1138,10 +1148,8 @@ func (m *Manager) StartRemove(ctx context.Context, userID, hostID int64) (*OpVie
 		defer close(rop.done)
 		defer m.clearRunningOp(rop)
 		defer func() {
-			if released, _ := m.store.ReleaseCorraldHostOp(context.Background(), hostID, opID, ""); released {
-				op.State = OpUnknown
-				_, _ = m.store.UpdateCorraldOpIfActive(context.Background(), op)
-			}
+			op.State = OpUnknown
+			_, _ = m.store.ReleaseCorraldHostOpAndFinish(context.Background(), hostID, op, "")
 		}()
 		m.runRemoveOp(opCtx, rop, op, ch, userID, hostID)
 	}()
@@ -1229,36 +1237,32 @@ func (m *Manager) StartUpdate(ctx context.Context, userID, hostID int64, corralU
 					opFinalized := false
 					defer func() {
 						if !opFinalized {
-							// B-3: Always release active_op_id conditionally on failure,
-							// context cancel, or panic so the host is never wedged.
-							_, _ = m.store.ReleaseCorraldHostOp(context.Background(), hostID, opID, "")
+							// B-3: Always release active_op_id and finalize op atomically
+							// on failure, context cancel, or panic so host is never wedged.
 							op.State = OpFailed
 							if op.ErrorCode == "" {
 								op.ErrorCode = "other"
 							}
-							_, _ = m.store.UpdateCorraldOpIfActive(context.Background(), op)
+							if released, _ := m.store.ReleaseCorraldHostOpAndFinish(context.Background(), hostID, op, ""); !released {
+								_, _ = m.store.UpdateCorraldOpIfActive(context.Background(), op)
+							}
 						}
 					}()
 					if m.cfg.AfterScopeClaim != nil {
 						m.cfg.AfterScopeClaim(hostID, opID)
 					}
 					mb, _ := proto.MarshalManifest(liveHello.Manifest)
-					committed, err := m.store.CommitCorraldManifestIfOp(ctx, hostID, opID, string(mb))
+					committed, err := m.store.CommitCorraldManifestAndOp(ctx, hostID, op, string(mb))
 					if err != nil {
 						return nil, err
 					}
+					opFinalized = true
 					if !committed {
-						opFinalized = true
-						op.State = OpCancelled
-						_, _ = m.store.UpdateCorraldOpIfActive(context.Background(), op)
 						return nil, ErrInvalidState
 					}
-					opFinalized = true
 					sc.mu.Lock()
 					sc.scopeChange = nil
 					sc.mu.Unlock()
-					op.State = OpDone
-					_, _ = m.store.UpdateCorraldOpIfActive(context.Background(), op)
 					return m.toOpView(op), nil
 				}
 			}
@@ -1357,13 +1361,11 @@ func (m *Manager) Retry(ctx context.Context, userID, hostID int64, corralUser st
 		defer close(rop.done)
 		defer m.clearRunningOp(rop)
 		defer func() {
-			if released, _ := m.store.ReleaseCorraldHostOp(context.Background(), hostID, opID, StateError); released {
-				op.State = OpFailed
-				if op.ErrorCode == "" {
-					op.ErrorCode = "other"
-				}
-				_, _ = m.store.UpdateCorraldOpIfActive(context.Background(), op)
+			op.State = OpFailed
+			if op.ErrorCode == "" {
+				op.ErrorCode = "other"
 			}
+			_, _ = m.store.ReleaseCorraldHostOpAndFinish(context.Background(), hostID, op, StateError)
 		}()
 
 		sshClient, release, gotFP, gotUser, err := m.ssh.AcquireSSH(opCtx, userID, hostID)
@@ -1456,8 +1458,9 @@ func (m *Manager) onHostConnectedOwned(ctx context.Context, userID, hostID int64
 		return
 	}
 
-	// Check authorization binding BEFORE connecting via atomic conditional SQL
-	// (never overwrites a concurrent reinstall or already-rebind row).
+	// Check authorization binding BEFORE connecting via atomic CAS SQL comparing
+	// against the read binding so neither a concurrent reinstall nor a stale
+	// callback identity can clobber a newer binding.
 	if ch.State != StateOff && ch.State != StateRemoving && ch.State != StateRemovePending {
 		mismatch := false
 		if ch.State == StateInstalling {
@@ -1468,13 +1471,20 @@ func (m *Manager) onHostConnectedOwned(ctx context.Context, userID, hostID int64
 			mismatch = !CheckBinding(toSnapshot(ch), fingerprint, sshUser, m.gatewayID)
 		}
 		if mismatch {
-			m.markRebindIfMismatch(ctx, hostID, fingerprint, sshUser, true, "on_host_connected")
+			m.markRebindIfMismatch(ctx, hostID, ch.BoundFingerprint, ch.BoundUsername, ch.BoundGateway, fingerprint, sshUser, true, "on_host_connected")
 			return
 		}
 	}
 
+	// Self-heal any orphaned active_op_id pointing to a finished/missing op.
+	if ch.ActiveOpID != "" {
+		if cleared, _ := m.store.ClearStaleCorraldHostOp(ctx, hostID); cleared {
+			ch.ActiveOpID = ""
+		}
+	}
+
 	activeOp, activeErr := m.store.ActiveCorraldOp(ctx, hostID)
-	needsReconcile := activeErr == nil || ch.State == StateRemovePending || ch.State == StateRemoving || ch.State == StateInstalling || ch.State == StateUpdating
+	needsReconcile := activeErr == nil || ch.ActiveOpID != "" || ch.State == StateRemovePending || ch.State == StateRemoving || ch.State == StateInstalling || ch.State == StateUpdating
 	if needsReconcile {
 		m.reconcileHost(ctx, userID, hostID, corralUser, fingerprint, sshUser, sshClient, ch, activeOp)
 		ch, err = m.store.CorraldHostByID(ctx, hostID)
@@ -2146,29 +2156,26 @@ func (m *Manager) runRemoveOp(ctx context.Context, rop *runningOp, op *store.Cor
 		ch.UpdateTargetRel = 0
 		ch.UpdateReadyAt = 0
 		ch.UpdateCrashCount = 0
-		_, _ = m.store.UpdateCorraldHostIfOp(context.Background(), ch, op.ID, true)
 		op.State = OpDone
 		op.ErrorCode = ""
 		op.Detail = encodeOpDetail(opDetailPayload{Result: "removed"})
-		_, _ = m.store.UpdateCorraldOpIfActive(context.Background(), op)
+		_, _ = m.store.FinalizeCorraldOpWithHost(context.Background(), op, ch)
 	case "partial":
 		fail := &OpFailure{Code: "partial", Left: out.Left}
 		ch.State = StateError
 		ch.LastError = encodeLastError(fail)
-		_, _ = m.store.UpdateCorraldHostIfOp(context.Background(), ch, op.ID, true)
 		op.State = OpFailed
 		op.ErrorCode = "partial"
 		op.Detail = encodeOpDetail(opDetailPayload{Result: "partial", Left: out.Left})
-		_, _ = m.store.UpdateCorraldOpIfActive(context.Background(), op)
+		_, _ = m.store.FinalizeCorraldOpWithHost(context.Background(), op, ch)
 	case "stop_failed":
 		fail := &OpFailure{Code: "stop_failed", PID: out.PID, Detail: out.Detail}
 		ch.State = StateError
 		ch.LastError = encodeLastError(fail)
-		_, _ = m.store.UpdateCorraldHostIfOp(context.Background(), ch, op.ID, true)
 		op.State = OpFailed
 		op.ErrorCode = "stop_failed"
 		op.Detail = encodeOpDetail(opDetailPayload{Result: "stop_failed", PID: out.PID, Message: out.Detail})
-		_, _ = m.store.UpdateCorraldOpIfActive(context.Background(), op)
+		_, _ = m.store.FinalizeCorraldOpWithHost(context.Background(), op, ch)
 	default:
 		m.markRemovePending(op, ch, out.Detail)
 	}
@@ -2177,11 +2184,10 @@ func (m *Manager) runRemoveOp(ctx context.Context, rop *runningOp, op *store.Cor
 func (m *Manager) markRemovePending(op *store.CorraldOp, ch *store.CorraldHost, reason string) {
 	ch.State = StateRemovePending
 	ch.LastError = ""
-	_, _ = m.store.UpdateCorraldHostIfOp(context.Background(), ch, op.ID, true)
 	op.State = OpUnknown
 	op.ErrorCode = ""
 	op.Detail = encodeOpDetail(opDetailPayload{Result: "pending", Message: reason})
-	_, _ = m.store.UpdateCorraldOpIfActive(context.Background(), op)
+	_, _ = m.store.FinalizeCorraldOpWithHost(context.Background(), op, ch)
 }
 
 func (m *Manager) launchUpdateOp(ctx context.Context, userID, hostID int64, corralUser, fp, sshUser string, ch *store.CorraldHost, dist *Dist, manifestJSON string, replace bool) (*OpView, error) {
@@ -2246,13 +2252,11 @@ func (m *Manager) launchUpdateOp(ctx context.Context, userID, hostID int64, corr
 		defer close(rop.done)
 		defer m.clearRunningOp(rop)
 		defer func() {
-			if released, _ := m.store.ReleaseCorraldHostOp(context.Background(), hostID, opID, StateRunning); released {
-				op.State = OpFailed
-				if op.ErrorCode == "" {
-					op.ErrorCode = "other"
-				}
-				_, _ = m.store.UpdateCorraldOpIfActive(context.Background(), op)
+			op.State = OpFailed
+			if op.ErrorCode == "" {
+				op.ErrorCode = "other"
 			}
+			_, _ = m.store.ReleaseCorraldHostOpAndFinish(context.Background(), hostID, op, StateRunning)
 		}()
 		m.runUpdateOp(opCtx, rop, op, ch, dist, userID, hostID, corralUser, replace)
 	}()
@@ -2321,10 +2325,9 @@ func (m *Manager) runUpdateOp(ctx context.Context, rop *runningOp, op *store.Cor
 			}
 			ch.State = StateError
 			ch.LastError = encodeLastError(sfail)
-			_, _ = m.store.UpdateCorraldHostIfOp(context.Background(), ch, op.ID, true)
 			op.State = OpFailed
 			op.ErrorCode = sfail.Code
-			_, _ = m.store.UpdateCorraldOpIfActive(context.Background(), op)
+			_, _ = m.store.FinalizeCorraldOpWithHost(context.Background(), op, ch)
 			return
 		}
 		setStep("handoff")
@@ -2338,10 +2341,9 @@ func (m *Manager) runUpdateOp(ctx context.Context, rop *runningOp, op *store.Cor
 			}
 			ch.State = StateError
 			ch.LastError = encodeLastError(&OpFailure{Code: "start_failed", Detail: selErr.Error(), MachineID: probe.MachineID})
-			_, _ = m.store.UpdateCorraldHostIfOp(context.Background(), ch, op.ID, true)
 			op.State = OpFailed
 			op.ErrorCode = "start_failed"
-			_, _ = m.store.UpdateCorraldOpIfActive(context.Background(), op)
+			_, _ = m.store.FinalizeCorraldOpWithHost(context.Background(), op, ch)
 			return
 		}
 		if freshProbe != nil {
@@ -2354,10 +2356,9 @@ func (m *Manager) runUpdateOp(ctx context.Context, rop *runningOp, op *store.Cor
 			}
 			ch.State = StateError
 			ch.LastError = encodeLastError(serveFail)
-			_, _ = m.store.UpdateCorraldHostIfOp(context.Background(), ch, op.ID, true)
 			op.State = OpFailed
 			op.ErrorCode = serveFail.Code
-			_, _ = m.store.UpdateCorraldOpIfActive(context.Background(), op)
+			_, _ = m.store.FinalizeCorraldOpWithHost(context.Background(), op, ch)
 			return
 		}
 		setStep("verify")
@@ -2370,10 +2371,9 @@ func (m *Manager) runUpdateOp(ctx context.Context, rop *runningOp, op *store.Cor
 			}
 			ch.State = StateError
 			ch.LastError = encodeLastError(&OpFailure{Code: "start_failed", Detail: err.Error()})
-			_, _ = m.store.UpdateCorraldHostIfOp(context.Background(), ch, op.ID, true)
 			op.State = OpFailed
 			op.ErrorCode = "start_failed"
-			_, _ = m.store.UpdateCorraldOpIfActive(context.Background(), op)
+			_, _ = m.store.FinalizeCorraldOpWithHost(context.Background(), op, ch)
 			return
 		}
 		op.State = OpDone
@@ -2404,7 +2404,7 @@ func (m *Manager) runUpdateOp(ctx context.Context, rop *runningOp, op *store.Cor
 			if sfail.Code == "cancelled" || isCancelled() {
 				return
 			}
-			m.finishUpdateFailKeepPrev(op, ch, prevVer, prevRel, dist.Version, sfail.Error())
+			m.finishUpdateFailError(op, ch, dist.Version, probe.MachineID, sfail.Error())
 			return
 		}
 		if isCancelled() {
@@ -2412,10 +2412,11 @@ func (m *Manager) runUpdateOp(ctx context.Context, rop *runningOp, op *store.Cor
 		}
 		setStep("handoff")
 		// Re-probe after install so SelectStartBinary inspects the actual
-		// shared symlink target (e.g. an NFS peer's higher R3) and failed.json.
+		// shared symlink target (e.g. an NFS peer's higher R3) and failed.json,
+		// and returns an immutable versioned binary path (never the symlink).
 		freshProbe, cand, _, selErr := m.resolveStartBinary(ctx, sshClient, nil, hostID, fp, sshUser, ch, sc, StartSelectOptions{})
 		if selErr != nil {
-			m.finishUpdateFailKeepPrev(op, ch, prevVer, prevRel, dist.Version, selErr.Error())
+			m.finishUpdateFailError(op, ch, dist.Version, probe.MachineID, selErr.Error())
 			return
 		}
 		if freshProbe != nil {
@@ -2425,6 +2426,41 @@ func (m *Manager) runUpdateOp(ctx context.Context, rop *runningOp, op *store.Cor
 		if attemptedVer == "" {
 			attemptedVer = dist.Version
 		}
+		tryColdRollback := func(primaryErr string) {
+			_, rbCand, _, rberr := m.resolveStartBinary(ctx, sshClient, probe, hostID, fp, sshUser, ch, sc, StartSelectOptions{
+				Rollback:        true,
+				PreferredTarget: prevRelTarget,
+			})
+			if rberr != nil || rbCand.Path == "" {
+				m.finishUpdateFailError(op, ch, attemptedVer, probe.MachineID, fmt.Sprintf("%s; rollback unavailable: %v", primaryErr, rberr))
+				return
+			}
+			_, rbSock, rbFail := RunServeWithRetry(ctx, sshClient, rbCand.Path, m.gatewayID, probe.MachineID, probe.OS, probe.Arch, m.busyRetry)
+			if rbFail != nil {
+				m.finishUpdateFailError(op, ch, attemptedVer, probe.MachineID, fmt.Sprintf("%s; rollback serve failed: %s", primaryErr, rbFail.Error()))
+				return
+			}
+			if rbSock == "" {
+				rbSock = probe.SocketPath
+			}
+			// Only transition to StateRunning if we genuinely connect and complete
+			// hello on the rolled-back daemon; otherwise enter StateError so Retry works.
+			if aerr := m.attachAndHello(ctx, userID, hostID, corralUser, fp, sshUser, sshClient, own, probe, rbSock, ch, ""); aerr != nil {
+				m.finishUpdateFailError(op, ch, attemptedVer, probe.MachineID, fmt.Sprintf("%s; rollback connect failed: %v", primaryErr, aerr))
+				return
+			}
+			rbVer, rbRel := prevVer, prevRel
+			if curSC := m.sharedConnForHost(hostID, fp, sshUser); curSC != nil {
+				curSC.mu.Lock()
+				if curSC.hello != nil && curSC.hello.Release > 0 {
+					rbVer = curSC.hello.Version
+					rbRel = curSC.hello.Release
+				}
+				curSC.mu.Unlock()
+			}
+			m.finishUpdateFailKeepPrev(op, ch, rbVer, rbRel, attemptedVer, primaryErr)
+		}
+
 		_, sock, serveFail := RunServeWithRetry(ctx, sshClient, cand.Path, m.gatewayID, probe.MachineID, probe.OS, probe.Arch, m.busyRetry)
 		if serveFail != nil {
 			// B-4: Attribute failure to the ACTUAL started release (cand.Release),
@@ -2441,15 +2477,7 @@ func (m *Manager) runUpdateOp(ctx context.Context, rop *runningOp, op *store.Cor
 					}
 				}
 			}
-			// Fallback to starting a non-failed rollback binary via SelectStartBinary
-			// without lowering the shared symlink.
-			if _, rbCand, _, rberr := m.resolveStartBinary(ctx, sshClient, probe, hostID, fp, sshUser, ch, sc, StartSelectOptions{
-				Rollback:        true,
-				PreferredTarget: prevRelTarget,
-			}); rberr == nil && rbCand.Path != "" {
-				_, _, _ = RunServeWithRetry(ctx, sshClient, rbCand.Path, m.gatewayID, probe.MachineID, probe.OS, probe.Arch, m.busyRetry)
-			}
-			m.finishUpdateFailKeepPrev(op, ch, prevVer, prevRel, attemptedVer, serveFail.Error())
+			tryColdRollback(serveFail.Error())
 			return
 		}
 		setStep("verify")
@@ -2457,37 +2485,34 @@ func (m *Manager) runUpdateOp(ctx context.Context, rop *runningOp, op *store.Cor
 			sock = probe.SocketPath
 		}
 		if err := m.attachAndHello(ctx, userID, hostID, corralUser, fp, sshUser, sshClient, own, probe, sock, ch, op.ID); err != nil {
-			m.finishUpdateFailKeepPrev(op, ch, prevVer, prevRel, attemptedVer, err.Error())
+			tryColdRollback(err.Error())
 			return
 		}
-		// Arm crash-loop rollback window using ONLY the actual running hello
-		// version/release (never dist.Release).
+		// Arm crash-loop rollback window via the unified helper using ONLY the
+		// actual running hello version/release.
 		if curSC := m.sharedConnForHost(hostID, fp, sshUser); curSC != nil {
 			curSC.mu.Lock()
 			newHello := curSC.hello
 			curSC.mu.Unlock()
-			if newHello != nil && newHello.Release > prevRel {
+			if newHello != nil {
 				readyTime := time.Now()
-				fromVer, fromRel, fromTarget := prevVer, prevRel, prevRelTarget
-				if newHello.Release > dist.Release {
-					// Another NFS machine placed a higher release; do not record
-					// this gateway's stale pre-op rollback target for it.
-					fromVer, fromRel, fromTarget = "", 0, ""
+				win := computePostUpdateCrashWindow(readyTime.Unix(), newHello.Version, newHello.Release, dist.Version, dist.Release, prevVer, prevRel, prevRelTarget)
+				if win.ReadyAt > 0 {
+					curSC.mu.Lock()
+					curSC.updatedAt = readyTime
+					curSC.updateTargetVer = win.TargetVer
+					curSC.updateTargetRel = win.TargetRel
+					curSC.updateCrashCount = 0
+					curSC.prevVersion = win.FromVer
+					curSC.prevRelease = win.FromRel
+					curSC.prevRelTarget = win.FromTarget
+					curSC.scopeChange = nil
+					curSC.mu.Unlock()
+					_ = m.store.UpdateCorraldCrashWindowByBinding(
+						context.Background(), hostID, fp, sshUser,
+						win.ReadyAt, win.TargetVer, win.TargetRel, win.FromVer, win.FromRel, win.FromTarget, 0,
+					)
 				}
-				curSC.mu.Lock()
-				curSC.updatedAt = readyTime
-				curSC.updateTargetVer = newHello.Version
-				curSC.updateTargetRel = newHello.Release
-				curSC.updateCrashCount = 0
-				curSC.prevVersion = fromVer
-				curSC.prevRelease = fromRel
-				curSC.prevRelTarget = fromTarget
-				curSC.scopeChange = nil
-				curSC.mu.Unlock()
-				_ = m.store.UpdateCorraldCrashWindowByBinding(
-					context.Background(), hostID, fp, sshUser,
-					readyTime.Unix(), newHello.Version, newHello.Release, fromVer, fromRel, fromTarget, 0,
-				)
 			}
 		}
 		op.State = OpDone
@@ -2642,41 +2667,24 @@ func (m *Manager) runUpdateOp(ctx context.Context, rop *runningOp, op *store.Cor
 		actualRel = newHello.Release
 	}
 
-	// B-5: Crash-loop rollback window records ONLY the actual running hello
-	// version/release (never dist.Release). When a concurrent gateway already
-	// upgraded the host to a strictly higher release (> dist.Release), do NOT
-	// record this gateway's stale pre-op rollback info for it.
-	var (
-		winReadyAt    int64
-		winTargetVer  string
-		winTargetRel  int64
-		winFromVer    string
-		winFromRel    int64
-		winFromTarget string
-	)
-	if actualRel > 0 && actualRel > prevRel {
-		winReadyAt = readyTime.Unix()
-		winTargetVer = actualVer
-		winTargetRel = actualRel
-		if !alreadyAtTarget || actualRel == dist.Release {
-			winFromVer = prevVer
-			winFromRel = prevRel
-			winFromTarget = prevRelTarget
-		}
-	}
+	// Unified crash-loop rollback window (Item 5): applies identically whether
+	// a higher release was noticed during retry reconnect OR post-handoff verify
+	// reconnect. When actualRel > dist.Release, rollback target is our dist (R2),
+	// NOT the older pre-op R1.
+	win := computePostUpdateCrashWindow(readyTime.Unix(), actualVer, actualRel, dist.Version, dist.Release, prevVer, prevRel, prevRelTarget)
 
 	sc.mu.Lock()
-	if winReadyAt > 0 {
+	if win.ReadyAt > 0 {
 		sc.updatedAt = readyTime
 	} else {
 		sc.updatedAt = time.Time{}
 	}
-	sc.updateTargetVer = winTargetVer
-	sc.updateTargetRel = winTargetRel
+	sc.updateTargetVer = win.TargetVer
+	sc.updateTargetRel = win.TargetRel
 	sc.updateCrashCount = 0
-	sc.prevVersion = winFromVer
-	sc.prevRelease = winFromRel
-	sc.prevRelTarget = winFromTarget
+	sc.prevVersion = win.FromVer
+	sc.prevRelease = win.FromRel
+	sc.prevRelTarget = win.FromTarget
 	sc.mu.Unlock()
 
 	ch.State = StateRunning
@@ -2684,12 +2692,12 @@ func (m *Manager) runUpdateOp(ctx context.Context, rop *runningOp, op *store.Cor
 		ch.Version = actualVer
 		ch.Release = actualRel
 	}
-	ch.UpdatedFromVer = winFromVer
-	ch.UpdatedFromRel = winFromRel
-	ch.UpdatedFromTarget = winFromTarget
-	ch.UpdateTargetVer = winTargetVer
-	ch.UpdateTargetRel = winTargetRel
-	ch.UpdateReadyAt = winReadyAt
+	ch.UpdatedFromVer = win.FromVer
+	ch.UpdatedFromRel = win.FromRel
+	ch.UpdatedFromTarget = win.FromTarget
+	ch.UpdateTargetVer = win.TargetVer
+	ch.UpdateTargetRel = win.TargetRel
+	ch.UpdateReadyAt = win.ReadyAt
 	ch.UpdateCrashCount = 0
 	ch.LastOKAt = readyTime.Unix()
 	ch.LastError = ""
@@ -2697,17 +2705,15 @@ func (m *Manager) runUpdateOp(ctx context.Context, rop *runningOp, op *store.Cor
 	if files := ReadHostStateFiles(ctx, sshClient, probe, op.ID); files.Install != nil && len(files.Install.Files) > 0 {
 		ch.Files = files.Install.Files
 	}
-	if ok, _ := m.store.UpdateCorraldHostIfOp(context.Background(), ch, op.ID, true); ok {
+	op.State = OpDone
+	op.ErrorCode = ""
+	if ok, _ := m.store.FinalizeCorraldOpWithHost(context.Background(), op, ch); ok {
 		// Persist post-update crash window across all peers sharing this account (Item 22).
 		_ = m.store.UpdateCorraldCrashWindowByBinding(
 			context.Background(), hostID, fp, sshUser,
-			winReadyAt, winTargetVer, winTargetRel, winFromVer, winFromRel, winFromTarget, 0,
+			win.ReadyAt, win.TargetVer, win.TargetRel, win.FromVer, win.FromRel, win.FromTarget, 0,
 		)
 	}
-
-	op.State = OpDone
-	op.ErrorCode = ""
-	_, _ = m.store.UpdateCorraldOpIfActive(context.Background(), op)
 }
 
 func (m *Manager) finishUpdateFailKeepPrev(op *store.CorraldOp, ch *store.CorraldHost, prevVer string, prevRel int64, targetVer, detail string) {
@@ -2723,13 +2729,26 @@ func (m *Manager) finishUpdateFailKeepPrev(op *store.CorraldOp, ch *store.Corral
 		ch.Release = prevRel
 	}
 	ch.LastError = encodeLastError(fail)
-	// Conditional update: if a withdrawal-first remove superseded this op, do NOT overwrite! (Item 4)
-	_, _ = m.store.UpdateCorraldHostIfOp(context.Background(), ch, op.ID, true)
-
 	op.State = OpFailed
 	op.ErrorCode = "update_failed"
 	op.Detail = encodeOpDetail(opDetailPayload{Message: detail})
-	_, _ = m.store.UpdateCorraldOpIfActive(context.Background(), op)
+	// Atomic transactional finalization: clears active_op_id and marks op failed together.
+	_, _ = m.store.FinalizeCorraldOpWithHost(context.Background(), op, ch)
+}
+
+func (m *Manager) finishUpdateFailError(op *store.CorraldOp, ch *store.CorraldHost, targetVer, machineID, detail string) {
+	fail := &OpFailure{
+		Code:          "update_failed",
+		Detail:        detail,
+		TargetVersion: targetVer,
+		MachineID:     machineID,
+	}
+	ch.State = StateError
+	ch.LastError = encodeLastError(fail)
+	op.State = OpFailed
+	op.ErrorCode = "update_failed"
+	op.Detail = encodeOpDetail(opDetailPayload{Message: detail})
+	_, _ = m.store.FinalizeCorraldOpWithHost(context.Background(), op, ch)
 }
 
 // attachAndHello dials socketPath via direct-streamlocal, performs daemon.hello
@@ -3556,8 +3575,8 @@ func (m *Manager) reconcileHost(
 		_, _ = runSSH(ctx, sshClient, RmStageCommand(stage), 4096, sshx.ExecOptions{})
 	}
 
-	writeReconciled := func() {
-		_, _ = m.store.UpdateCorraldHostForReconcile(ctx, ch, opID)
+	writeReconciled := func(opToFinalize *store.CorraldOp) {
+		_, _ = m.store.UpdateCorraldHostForReconcile(ctx, ch, opToFinalize, opID)
 	}
 
 	switch dec.Action {
@@ -3572,38 +3591,35 @@ func (m *Manager) reconcileHost(
 			ch.Files = []string{}
 			ch.ActiveOpID = ""
 			ch.LastError = ""
-			writeReconciled()
 			if activeOp != nil {
 				activeOp.State = OpDone
 				activeOp.Detail = encodeOpDetail(opDetailPayload{Result: "removed"})
-				_, _ = m.store.UpdateCorraldOpIfActive(ctx, activeOp)
 			}
+			writeReconciled(activeOp)
 		case "partial":
 			ch.State = StateError
 			ch.ActiveOpID = ""
 			ch.LastError = encodeLastError(&OpFailure{Code: "partial", Left: out.Left})
-			writeReconciled()
 			if activeOp != nil {
 				activeOp.State = OpFailed
 				activeOp.ErrorCode = "partial"
 				activeOp.Detail = encodeOpDetail(opDetailPayload{Result: "partial", Left: out.Left})
-				_, _ = m.store.UpdateCorraldOpIfActive(ctx, activeOp)
 			}
+			writeReconciled(activeOp)
 		case "stop_failed":
 			ch.State = StateError
 			ch.ActiveOpID = ""
 			ch.LastError = encodeLastError(&OpFailure{Code: "stop_failed", PID: out.PID, Detail: out.Detail})
-			writeReconciled()
 			if activeOp != nil {
 				activeOp.State = OpFailed
 				activeOp.ErrorCode = "stop_failed"
 				activeOp.Detail = encodeOpDetail(opDetailPayload{Result: "stop_failed", PID: out.PID, Message: out.Detail})
-				_, _ = m.store.UpdateCorraldOpIfActive(ctx, activeOp)
 			}
+			writeReconciled(activeOp)
 		default:
 			ch.State = StateRemovePending
 			ch.ActiveOpID = ""
-			writeReconciled()
+			writeReconciled(nil)
 		}
 
 	case ReconcileMarkOff:
@@ -3612,12 +3628,13 @@ func (m *Manager) reconcileHost(
 		ch.Release = 0
 		ch.Files = []string{}
 		ch.ActiveOpID = ""
-		writeReconciled()
+		var opFin *store.CorraldOp
 		if activeOp != nil && dec.OpFinalState != "" {
 			activeOp.State = dec.OpFinalState
 			activeOp.ErrorCode = dec.OpErrorCode
-			_, _ = m.store.UpdateCorraldOpIfActive(ctx, activeOp)
+			opFin = activeOp
 		}
+		writeReconciled(opFin)
 
 	case ReconcileMarkOpFailed:
 		ch.State = dec.NextState
@@ -3625,12 +3642,11 @@ func (m *Manager) reconcileHost(
 		if dec.OpErrorCode != "" {
 			ch.LastError = encodeLastError(&OpFailure{Code: dec.OpErrorCode})
 		}
-		writeReconciled()
 		if activeOp != nil {
 			activeOp.State = dec.OpFinalState
 			activeOp.ErrorCode = dec.OpErrorCode
-			_, _ = m.store.UpdateCorraldOpIfActive(ctx, activeOp)
 		}
+		writeReconciled(activeOp)
 
 	case ReconcileConnect, ReconcileStartDaemon:
 		if files.Install != nil {
@@ -3650,26 +3666,87 @@ func (m *Manager) reconcileHost(
 		ch.State = dec.NextState
 		ch.ActiveOpID = ""
 		ch.MachineID = probe.MachineID
-		writeReconciled()
+		var opFin *store.CorraldOp
 		if activeOp != nil && dec.OpFinalState != "" {
 			activeOp.State = dec.OpFinalState
 			activeOp.ErrorCode = dec.OpErrorCode
-			_, _ = m.store.UpdateCorraldOpIfActive(ctx, activeOp)
+			opFin = activeOp
 		}
+		writeReconciled(opFin)
 	}
 }
 
 // --- Helpers ---
 
+type postUpdateCrashWindow struct {
+	ReadyAt    int64
+	TargetVer  string
+	TargetRel  int64
+	FromVer    string
+	FromRel    int64
+	FromTarget string
+}
+
+// computePostUpdateCrashWindow is the single unified computation for the
+// post-update crash-loop rollback window across cold-start updates, normal
+// handoff verification, and concurrent handoff retry/reconnect paths.
+//
+// Target is ALWAYS the actual running daemon's (actualVer, actualRel).
+// Rollback target is ALWAYS the previous known-good release immediately before
+// actualRel: when actualRel > distRel (another gateway / NFS peer upgraded the
+// host beyond this gateway's dist, e.g. R3 > R2), our already-installed dist
+// (R2) is recorded as the rollback target rather than the older pre-op R1.
+func computePostUpdateCrashWindow(
+	readyAt int64,
+	actualVer string, actualRel int64,
+	distVer string, distRel int64,
+	prevVer string, prevRel int64, prevRelTarget string,
+) postUpdateCrashWindow {
+	if actualRel <= 0 || actualRel <= prevRel {
+		return postUpdateCrashWindow{}
+	}
+	win := postUpdateCrashWindow{
+		ReadyAt:   readyAt,
+		TargetVer: actualVer,
+		TargetRel: actualRel,
+	}
+	if distRel > 0 && actualRel > distRel {
+		win.FromVer = distVer
+		win.FromRel = distRel
+		if distVer != "" {
+			win.FromTarget = fmt.Sprintf("corrald-%s-%d/corrald", distVer, distRel)
+		}
+	} else {
+		win.FromVer = prevVer
+		win.FromRel = prevRel
+		win.FromTarget = prevRelTarget
+	}
+	return win
+}
+
 // markRebindIfMismatch is the single gateway entrypoint for marking a host as
-// StateRebind upon observing an identity mismatch. It uses an atomic
-// conditional SQL update so a concurrent reinstall/rebind is never overwritten,
-// and only detaches the host when the SQL update actually took effect.
-func (m *Manager) markRebindIfMismatch(ctx context.Context, hostID int64, observedFP, observedUser string, includeInstalling bool, source string) bool {
+// StateRebind upon observing an identity mismatch. It uses an atomic CAS SQL
+// update verifying both that the row's current binding still equals the
+// caller's expected binding AND that it mismatches the observed identity, so
+// neither concurrent reinstalls nor stale callbacks with an outdated observed
+// identity can clobber a newer binding. Detaches only when the SQL update took effect.
+func (m *Manager) markRebindIfMismatch(
+	ctx context.Context,
+	hostID int64,
+	expectedBoundFP, expectedBoundUser, expectedBoundGW string,
+	observedFP, observedUser string,
+	includeInstalling bool,
+	source string,
+) bool {
 	if m.cfg.BeforeRebindMark != nil {
 		m.cfg.BeforeRebindMark(hostID, source)
 	}
-	changed, _ := m.store.MarkCorraldRebindIfMismatch(ctx, hostID, observedFP, observedUser, m.gatewayID, includeInstalling)
+	changed, _ := m.store.MarkCorraldRebindIfMismatch(
+		ctx, hostID,
+		expectedBoundFP, expectedBoundUser, expectedBoundGW,
+		observedFP, observedUser, m.gatewayID,
+		includeInstalling,
+	)
 	if changed {
 		m.detachHost(hostID)
 	}
@@ -3762,12 +3839,18 @@ func (m *Manager) acquireMatchingSSH(ctx context.Context, wantKey accountKey, re
 			if rel != nil {
 				rel()
 			}
-			// Atomic conditional SQL: never marks rebind if host already completed
-			// key rotation/reinstall on (fp, sshUser) or is currently installing.
+			// Atomic CAS SQL: only marks rebind if the row is still bound to
+			// wantKey (never clobbers a host already rebound to a newer identity B)
+			// and is not installing/terminal.
 			if m.cfg.BeforeRebindMark != nil {
 				m.cfg.BeforeRebindMark(ref.HostID, "acquire_matching_ssh")
 			}
-			changed, _ := m.store.MarkCorraldRebindIfMismatch(context.Background(), ref.HostID, fp, sshUser, m.gatewayID, false)
+			changed, _ := m.store.MarkCorraldRebindIfMismatch(
+				context.Background(), ref.HostID,
+				wantKey.Fingerprint, wantKey.Username, m.gatewayID,
+				fp, sshUser, m.gatewayID,
+				false,
+			)
 			if changed {
 				m.detachHost(ref.HostID)
 			} else {
@@ -4116,10 +4199,10 @@ func (m *Manager) isOpCancelled(rop *runningOp) bool {
 func (m *Manager) finishOpCancelled(op *store.CorraldOp, ch *store.CorraldHost) {
 	op.State = OpCancelled
 	op.ErrorCode = ""
-	_, _ = m.store.UpdateCorraldOpIfActive(context.Background(), op)
 	ch.State = StateOff
 	ch.LastError = ""
-	_, _ = m.store.UpdateCorraldHostIfOp(context.Background(), ch, op.ID, true)
+	// Atomic single-transaction finalization prevents leaving a dangling active_op_id.
+	_, _ = m.store.FinalizeCorraldOpWithHost(context.Background(), op, ch)
 }
 
 func (m *Manager) finishOpFail(op *store.CorraldOp, ch *store.CorraldHost, fail *OpFailure) {
@@ -4136,7 +4219,6 @@ func (m *Manager) finishOpFail(op *store.CorraldOp, ch *store.CorraldHost, fail 
 		ch.State = StateOff
 	}
 	ch.LastError = encodeLastError(fail)
-	_, _ = m.store.UpdateCorraldHostIfOp(context.Background(), ch, op.ID, true)
 
 	op.State = OpFailed
 	op.ErrorCode = fail.Code
@@ -4150,7 +4232,7 @@ func (m *Manager) finishOpFail(op *store.CorraldOp, ch *store.CorraldHost, fail 
 		PID:      fail.PID,
 		HostInfo: hostInfo,
 	})
-	_, _ = m.store.UpdateCorraldOpIfActive(context.Background(), op)
+	_, _ = m.store.FinalizeCorraldOpWithHost(context.Background(), op, ch)
 }
 
 func (m *Manager) toOpView(op *store.CorraldOp) *OpView {

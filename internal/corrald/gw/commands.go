@@ -616,16 +616,20 @@ func parseVersionDirInfo(name string) (ver string, rel int64, relTarget string, 
 // cold-start update, and rollback).
 //
 // Invariants:
-//  1. Never selects any release present in failedReleases.
-//  2. In normal mode (!opts.Rollback), never selects a version lower than the
+//  1. ALWAYS returns the immutable versioned binary path inside
+//     `<libDir>/corrald-<ver>-<rel>/corrald`, NEVER the mutable shared symlink
+//     path (`probe.CurrentBin`), preventing an NFS peer from mutating the
+//     symlink target between selection and execution.
+//  2. Never selects any release present in failedReleases.
+//  3. In normal mode (!opts.Rollback), never selects a version lower than the
 //     current shared symlink target unless the symlink target itself is in
 //     failedReleases (e.g. NFS post-rollback where the symlink is never lowered).
-//  3. In rollback mode (opts.Rollback), selects opts.PreferredTarget if present
+//  4. In rollback mode (opts.Rollback), selects opts.PreferredTarget if present
 //     on the host and not in failedReleases, otherwise the highest non-failed
 //     installed version directory.
-//  4. Returns ok=false if no eligible non-failed binary exists.
+//  5. Returns ok=false if no eligible non-failed versioned binary exists.
 func SelectStartBinary(probe *HostProbe, failedReleases []int64, opts StartSelectOptions) (StartCandidate, bool) {
-	if probe == nil {
+	if probe == nil || probe.LibDir == "" {
 		return StartCandidate{}, false
 	}
 	failed := make(map[int64]bool, len(failedReleases))
@@ -636,19 +640,17 @@ func SelectStartBinary(probe *HostProbe, failedReleases []int64, opts StartSelec
 	}
 
 	var installed []StartCandidate
-	if probe.LibDir != "" {
-		for _, dir := range probe.Versions {
-			ver, rel, relTarget, ok := parseVersionDirInfo(dir)
-			if !ok {
-				continue
-			}
-			installed = append(installed, StartCandidate{
-				Path:      probe.LibDir + "/" + relTarget,
-				Version:   ver,
-				Release:   rel,
-				RelTarget: relTarget,
-			})
+	for _, dir := range probe.Versions {
+		ver, rel, relTarget, ok := parseVersionDirInfo(dir)
+		if !ok {
+			continue
 		}
+		installed = append(installed, StartCandidate{
+			Path:      probe.LibDir + "/" + relTarget,
+			Version:   ver,
+			Release:   rel,
+			RelTarget: relTarget,
+		})
 	}
 
 	highestNonFailed := func(minRel int64) (StartCandidate, bool) {
@@ -678,20 +680,20 @@ func SelectStartBinary(probe *HostProbe, failedReleases []int64, opts StartSelec
 				}
 			}
 		}
-		if best, ok := highestNonFailed(1); ok {
-			return best, true
-		}
-		if probe.HasSymlink && !hasCur && probe.CurrentBin != "" {
-			return StartCandidate{Path: probe.CurrentBin}, true
-		}
-		return StartCandidate{}, false
+		return highestNonFailed(1)
 	}
 
-	// Normal mode: follow the shared symlink when it is not blacklisted.
+	// Normal mode: resolve the shared symlink target to its concrete versioned
+	// binary path when it is not blacklisted (NEVER return probe.CurrentBin).
 	if probe.HasSymlink && hasCur {
 		if !failed[curRel] {
+			for _, c := range installed {
+				if c.RelTarget == curRelTarget {
+					return c, true
+				}
+			}
 			return StartCandidate{
-				Path:      probe.CurrentBin,
+				Path:      probe.LibDir + "/" + curRelTarget,
 				Version:   curVer,
 				Release:   curRel,
 				RelTarget: curRelTarget,
@@ -704,10 +706,6 @@ func SelectStartBinary(probe *HostProbe, failedReleases []int64, opts StartSelec
 			return best, true
 		}
 		return highestNonFailed(1)
-	}
-
-	if probe.HasSymlink && !hasCur && probe.CurrentBin != "" {
-		return StartCandidate{Path: probe.CurrentBin}, true
 	}
 
 	return highestNonFailed(1)

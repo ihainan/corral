@@ -65,6 +65,16 @@ func TestScopeConfirmCannotOverwriteConcurrentRemove(t *testing.T) {
 	baseHash, _ := proto.ManifestSHA256(baseManifest)
 
 	// Host is ALREADY in removing state with an active remove op (simulating concurrent StartRemove).
+	if err := st.CreateCorraldOp(ctx, &store.CorraldOp{
+		ID:        "rem-op-1",
+		HostID:    h.ID,
+		Kind:      OpRemove,
+		State:     OpRunning,
+		Step:      "mark",
+		CreatedBy: u.ID,
+	}, false); err != nil {
+		t.Fatal(err)
+	}
 	if err := st.UpsertCorraldHost(ctx, &store.CorraldHost{
 		HostID:           h.ID,
 		State:            StateRemoving,
@@ -224,8 +234,8 @@ func TestSelectStartBinarySkipsFailedRelease(t *testing.T) {
 		CurrentTarget: "corrald-0.3.2-2000/corrald",
 		Versions:      []string{"corrald-0.3.1-1000", "corrald-0.3.2-2000"},
 	}
-	if got, ok := SelectStartBinary(probe, nil, StartSelectOptions{}); !ok || got.Path != probe.CurrentBin || got.Release != 2000 {
-		t.Fatalf("SelectStartBinary(no failed) = (%+v, %v), want path=%q rel=2000", got, ok, probe.CurrentBin)
+	if got, ok := SelectStartBinary(probe, nil, StartSelectOptions{}); !ok || got.Path != "/home/alice/.local/lib/corral/corrald-0.3.2-2000/corrald" || got.Release != 2000 {
+		t.Fatalf("SelectStartBinary(no failed) = (%+v, %v), want concrete versioned path for rel=2000 (never shared symlink)", got, ok)
 	}
 	if got, ok := SelectStartBinary(probe, []int64{2000}, StartSelectOptions{}); !ok || got.Path != "/home/alice/.local/lib/corral/corrald-0.3.1-1000/corrald" || got.Release != 1000 {
 		t.Fatalf("SelectStartBinary(2000 failed) = (%+v, %v), want 1000 binary", got, ok)

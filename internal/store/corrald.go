@@ -373,6 +373,218 @@ func (s *Store) ClaimCorraldHostOp(ctx context.Context, hostID int64, opID, next
 	return n > 0, nil
 }
 
+// FinalizeCorraldOpWithHost atomically updates corrald_hosts (clearing
+// active_op_id = ” only if it still matches op.ID) AND updates corrald_ops
+// (only if still pending/running) within a single SQLite transaction.
+// Prevents a crash between the two writes from leaving a permanent active_op_id.
+func (s *Store) FinalizeCorraldOpWithHost(ctx context.Context, op *CorraldOp, ch *CorraldHost) (bool, error) {
+	now := s.unix()
+	ch.UpdatedAt = now
+	op.UpdatedAt = now
+	filesJSON, pausedJSON, failedJSON, err := marshalCorraldSlices(ch)
+	if err != nil {
+		return false, err
+	}
+	var consentBy any
+	if ch.ConsentBy != nil {
+		consentBy = *ch.ConsentBy
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+
+	res, err := tx.ExecContext(ctx, `
+		UPDATE corrald_hosts SET
+			state = ?,
+			consent_by = ?,
+			consent_at = ?,
+			bound_fingerprint = ?,
+			bound_username = ?,
+			bound_gateway = ?,
+			manifest_json = ?,
+			version = ?,
+			release = ?,
+			machine_id = ?,
+			socket_path = ?,
+			files_json = ?,
+			paused_users_json = ?,
+			failed_releases_json = ?,
+			active_op_id = '',
+			updated_from_ver = ?,
+			updated_from_rel = ?,
+			updated_from_target = ?,
+			update_target_ver = ?,
+			update_target_rel = ?,
+			update_ready_at = ?,
+			update_crash_count = ?,
+			last_ok_at = ?,
+			last_error = ?,
+			restart_count = ?,
+			updated_at = ?
+		WHERE host_id = ? AND active_op_id = ?`,
+		ch.State, consentBy, ch.ConsentAt,
+		ch.BoundFingerprint, ch.BoundUsername, ch.BoundGateway,
+		ch.ManifestJSON, ch.Version, ch.Release,
+		ch.MachineID, ch.SocketPath, filesJSON, pausedJSON, failedJSON,
+		ch.UpdatedFromVer, ch.UpdatedFromRel, ch.UpdatedFromTarget,
+		ch.UpdateTargetVer, ch.UpdateTargetRel, ch.UpdateReadyAt, ch.UpdateCrashCount,
+		ch.LastOKAt, ch.LastError, ch.RestartCount, now,
+		ch.HostID, op.ID,
+	)
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE corrald_ops SET state = ?, step = ?, error_code = ?, detail = ?, updated_at = ?
+		WHERE id = ? AND state IN ('pending', 'running')`,
+		op.State, op.Step, op.ErrorCode, op.Detail, now, op.ID); err != nil {
+		return false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	if n > 0 {
+		ch.ActiveOpID = ""
+		return true, nil
+	}
+	return false, nil
+}
+
+// CommitCorraldManifestAndOp atomically commits manifest_json, clears
+// active_op_id = ” (when active_op_id still equals op.ID and state is not
+// off/removing/remove_pending), and marks op done (or cancelled if superseded)
+// in a single transaction.
+func (s *Store) CommitCorraldManifestAndOp(ctx context.Context, hostID int64, op *CorraldOp, manifestJSON string) (bool, error) {
+	now := s.unix()
+	op.UpdatedAt = now
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+
+	res, err := tx.ExecContext(ctx, `
+		UPDATE corrald_hosts
+		SET manifest_json = ?, active_op_id = '', updated_at = ?
+		WHERE host_id = ? AND active_op_id = ? AND state NOT IN ('off', 'removing', 'remove_pending')`,
+		manifestJSON, now, hostID, op.ID)
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	if n > 0 {
+		op.State = "done"
+	} else {
+		op.State = "cancelled"
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE corrald_ops SET state = ?, step = ?, error_code = ?, detail = ?, updated_at = ?
+		WHERE id = ? AND state IN ('pending', 'running')`,
+		op.State, op.Step, op.ErrorCode, op.Detail, now, op.ID); err != nil {
+		return false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
+// ReleaseCorraldHostOpAndFinish atomically clears active_op_id = ” (ONLY if it
+// still equals op.ID, optionally restoring updating/installing to fallbackState)
+// and finalizes op in a single transaction.
+func (s *Store) ReleaseCorraldHostOpAndFinish(ctx context.Context, hostID int64, op *CorraldOp, fallbackState string) (bool, error) {
+	if op == nil || op.ID == "" {
+		return false, nil
+	}
+	now := s.unix()
+	op.UpdatedAt = now
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+
+	var (
+		res  sql.Result
+		qerr error
+	)
+	if fallbackState != "" {
+		res, qerr = tx.ExecContext(ctx, `
+			UPDATE corrald_hosts
+			SET active_op_id = '',
+			    state = CASE WHEN state IN ('updating', 'installing') THEN ? ELSE state END,
+			    updated_at = ?
+			WHERE host_id = ? AND active_op_id = ?`,
+			fallbackState, now, hostID, op.ID)
+	} else {
+		res, qerr = tx.ExecContext(ctx, `
+			UPDATE corrald_hosts
+			SET active_op_id = '', updated_at = ?
+			WHERE host_id = ? AND active_op_id = ?`,
+			now, hostID, op.ID)
+	}
+	if qerr != nil {
+		return false, qerr
+	}
+	n, _ := res.RowsAffected()
+	if n > 0 {
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE corrald_ops SET state = ?, step = ?, error_code = ?, detail = ?, updated_at = ?
+			WHERE id = ? AND state IN ('pending', 'running')`,
+			op.State, op.Step, op.ErrorCode, op.Detail, now, op.ID); err != nil {
+			return false, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
+// ClearStaleCorraldHostOps clears active_op_id on all corrald_hosts rows whose
+// active_op_id references a finished (done/failed/cancelled/unknown) or missing
+// operation in corrald_ops. Called on manager startup for crash recovery.
+func (s *Store) ClearStaleCorraldHostOps(ctx context.Context) (int64, error) {
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE corrald_hosts
+		SET active_op_id = '', updated_at = ?
+		WHERE active_op_id != ''
+		  AND NOT EXISTS (
+		      SELECT 1 FROM corrald_ops o
+		      WHERE o.id = corrald_hosts.active_op_id AND o.state IN ('pending', 'running')
+		  )`,
+		s.unix())
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
+}
+
+// ClearStaleCorraldHostOp clears active_op_id on hostID if it references a
+// finished or missing operation in corrald_ops.
+func (s *Store) ClearStaleCorraldHostOp(ctx context.Context, hostID int64) (bool, error) {
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE corrald_hosts
+		SET active_op_id = '', updated_at = ?
+		WHERE host_id = ?
+		  AND active_op_id != ''
+		  AND NOT EXISTS (
+		      SELECT 1 FROM corrald_ops o
+		      WHERE o.id = corrald_hosts.active_op_id AND o.state IN ('pending', 'running')
+		  )`,
+		s.unix(), hostID)
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
+}
+
 // CommitCorraldManifestIfOp atomically updates ONLY manifest_json and clears
 // active_op_id = ” when active_op_id matches opID and the host is not
 // off/removing/remove_pending. Prevents scope confirmation from overwriting a
@@ -488,15 +700,23 @@ func (s *Store) ClaimCorraldHostForRetry(ctx context.Context, hostID int64, opID
 }
 
 // MarkCorraldRebindIfMismatch atomically transitions hostID to 'rebind' ONLY
-// when its stored binding still disagrees with (observedFP, observedUser,
-// observedGateway) and its current state is eligible. Always excludes
-// 'off', 'removing', 'remove_pending', 'rebind'. When includeInstalling is
-// false, also excludes 'installing'; when true, 'installing' rows are only
-// transitioned if a non-empty bound column disagrees with the observed identity.
+// when:
+//  1. The row's current binding STILL equals the caller's read/expected binding
+//     (expectedBoundFP, expectedBoundUser, expectedBoundGW) — so if the host
+//     was already rebound to a newer identity B while a stale callback carried
+//     observed identity A, the row is untouched.
+//  2. That binding disagrees with the observed identity (observedFP,
+//     observedUser, observedGateway).
+//  3. The current state is eligible: always excludes 'off', 'removing',
+//     'remove_pending', 'rebind'. When includeInstalling is false, also
+//     excludes 'installing'; when true, 'installing' rows are only transitioned
+//     if a non-empty bound column disagrees with the observed identity.
+//
 // Returns true iff the row was actually transitioned to 'rebind'.
 func (s *Store) MarkCorraldRebindIfMismatch(
 	ctx context.Context,
 	hostID int64,
+	expectedBoundFP, expectedBoundUser, expectedBoundGW string,
 	observedFP, observedUser, observedGateway string,
 	includeInstalling bool,
 ) (bool, error) {
@@ -510,6 +730,7 @@ func (s *Store) MarkCorraldRebindIfMismatch(
 			UPDATE corrald_hosts
 			SET state = 'rebind', updated_at = ?
 			WHERE host_id = ?
+			  AND bound_fingerprint = ? AND bound_username = ? AND bound_gateway = ?
 			  AND (
 			    (state = 'installing' AND (
 			      (bound_fingerprint != '' AND bound_fingerprint != ?)
@@ -523,6 +744,7 @@ func (s *Store) MarkCorraldRebindIfMismatch(
 			    ))
 			  )`,
 			now, hostID,
+			expectedBoundFP, expectedBoundUser, expectedBoundGW,
 			observedFP, observedUser, observedGateway,
 			observedFP, observedUser, observedGateway,
 		)
@@ -531,12 +753,15 @@ func (s *Store) MarkCorraldRebindIfMismatch(
 			UPDATE corrald_hosts
 			SET state = 'rebind', updated_at = ?
 			WHERE host_id = ?
+			  AND bound_fingerprint = ? AND bound_username = ? AND bound_gateway = ?
 			  AND state NOT IN ('off', 'removing', 'remove_pending', 'rebind', 'installing')
 			  AND (
 			    bound_fingerprint = '' OR bound_username = '' OR bound_gateway = ''
 			    OR bound_fingerprint != ? OR bound_username != ? OR bound_gateway != ?
 			  )`,
-			now, hostID, observedFP, observedUser, observedGateway,
+			now, hostID,
+			expectedBoundFP, expectedBoundUser, expectedBoundGW,
+			observedFP, observedUser, observedGateway,
 		)
 	}
 	if err != nil {
@@ -726,12 +951,12 @@ func (s *Store) UpdateCorraldRunningIfIdle(
 	return n > 0, nil
 }
 
-// UpdateCorraldHostForReconcile updates corrald_hosts ONLY if active_op_id is
-// empty or matches expectedOpID (handling both normal interrupted ops and a
-// crash between CreateCorraldOp and setting active_op_id, while never
-// clobbering a different concurrently-started operation). Always clears
-// active_op_id to empty.
-func (s *Store) UpdateCorraldHostForReconcile(ctx context.Context, ch *CorraldHost, expectedOpID string) (bool, error) {
+// UpdateCorraldHostForReconcile atomically updates corrald_hosts (and optional
+// activeOp in the same transaction) ONLY if active_op_id is empty, matches
+// expectedOpID, or points to an already-finished/nonexistent operation in
+// corrald_ops. Always clears active_op_id to empty and never clobbers a
+// different live pending/running operation.
+func (s *Store) UpdateCorraldHostForReconcile(ctx context.Context, ch *CorraldHost, activeOp *CorraldOp, expectedOpID string) (bool, error) {
 	now := s.unix()
 	ch.UpdatedAt = now
 	filesJSON, pausedJSON, failedJSON, err := marshalCorraldSlices(ch)
@@ -742,7 +967,19 @@ func (s *Store) UpdateCorraldHostForReconcile(ctx context.Context, ch *CorraldHo
 	if ch.ConsentBy != nil {
 		consentBy = *ch.ConsentBy
 	}
-	where := `WHERE host_id = ? AND active_op_id = ''`
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+
+	where := `WHERE host_id = ? AND (
+		active_op_id = ''
+		OR NOT EXISTS (
+			SELECT 1 FROM corrald_ops o
+			WHERE o.id = corrald_hosts.active_op_id AND o.state IN ('pending', 'running')
+		)
+	)`
 	args := []any{
 		ch.State, consentBy, ch.ConsentAt,
 		ch.BoundFingerprint, ch.BoundUsername, ch.BoundGateway,
@@ -754,10 +991,17 @@ func (s *Store) UpdateCorraldHostForReconcile(ctx context.Context, ch *CorraldHo
 		ch.HostID,
 	}
 	if expectedOpID != "" {
-		where = `WHERE host_id = ? AND active_op_id IN ('', ?)`
+		where = `WHERE host_id = ? AND (
+			active_op_id = ''
+			OR active_op_id = ?
+			OR NOT EXISTS (
+				SELECT 1 FROM corrald_ops o
+				WHERE o.id = corrald_hosts.active_op_id AND o.state IN ('pending', 'running')
+			)
+		)`
 		args = append(args, expectedOpID)
 	}
-	res, err := s.db.ExecContext(ctx, `
+	res, err := tx.ExecContext(ctx, `
 		UPDATE corrald_hosts SET
 			state = ?,
 			consent_by = ?,
@@ -790,6 +1034,18 @@ func (s *Store) UpdateCorraldHostForReconcile(ctx context.Context, ch *CorraldHo
 		return false, err
 	}
 	n, _ := res.RowsAffected()
+	if activeOp != nil {
+		activeOp.UpdatedAt = now
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE corrald_ops SET state = ?, step = ?, error_code = ?, detail = ?, updated_at = ?
+			WHERE id = ? AND state IN ('pending', 'running')`,
+			activeOp.State, activeOp.Step, activeOp.ErrorCode, activeOp.Detail, now, activeOp.ID); err != nil {
+			return false, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
 	if n > 0 {
 		ch.ActiveOpID = ""
 		return true, nil
