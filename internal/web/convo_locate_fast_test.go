@@ -1221,6 +1221,14 @@ func TestBgTailAndCmdScanStatelessSoleAndAmbiguous(t *testing.T) {
 	os.WriteFile(filepath.Join(orphanSubs, "agent-orphansub.jsonl"), []byte(`{"version":"2.1.305"}`+"\n"), 0o644)
 	os.WriteFile(filepath.Join(orphanSubs, "agent-orphansub.meta.json"), []byte(`{"requestShape":"background","description":"wrong dir sub"}`), 0o644)
 
+	// sidOrphanOnly: NO <sid>.jsonl anywhere, only a sole orphan subagents dir ->
+	// must NOT be returned (Round 4 P2-2: subagents only derived from sole log).
+	sidOrphanOnly := "66666666-6666-4666-8666-666666666666"
+	orphanOnlySubs := filepath.Join(defProjA, sidOrphanOnly, "subagents")
+	os.MkdirAll(orphanOnlySubs, 0o755)
+	os.WriteFile(filepath.Join(orphanOnlySubs, "agent-orphonly.jsonl"), []byte(`{"version":"2.1.305"}`+"\n"), 0o644)
+	os.WriteFile(filepath.Join(orphanOnlySubs, "agent-orphonly.meta.json"), []byte(`{"requestShape":"background","description":"orphan only"}`), 0o644)
+
 	// sidA: TWO logs across config dirs (different mtimes) -> ambiguous!
 	defLogA := filepath.Join(defProjA, sidA+".jsonl")
 	altLogA := filepath.Join(altProj, sidA+".jsonl")
@@ -1278,13 +1286,17 @@ func TestBgTailAndCmdScanStatelessSoleAndAmbiguous(t *testing.T) {
 		}
 
 		// cmdScanCommand: sidSole returns its sibling subagent; sidNoSubs does NOT
-		// pull orphanSubs from altCfg; ambiguous sidA returns empty.
-		subs := parseBgSubScan(string(run(bin, cmdScanCommand("w:"+sidSole, "s:"+sidNoSubs, "w:"+sidA), altCfg)))
+		// pull orphanSubs from altCfg; sidOrphanOnly (no parent log) returns empty;
+		// ambiguous sidA returns empty.
+		subs := parseBgSubScan(string(run(bin, cmdScanCommand("w:"+sidSole, "s:"+sidNoSubs, "s:"+sidOrphanOnly, "w:"+sidA), altCfg)))
 		if len(subs[sidSole]) != 1 || subs[sidSole][0].ID != "solesub" {
 			t.Fatalf("%s sidSole subs = %+v, want solesub", binName, subs[sidSole])
 		}
 		if len(subs[sidNoSubs]) != 0 {
 			t.Fatalf("%s sidNoSubs pulled subagents from another config dir: %+v", binName, subs[sidNoSubs])
+		}
+		if len(subs[sidOrphanOnly]) != 0 {
+			t.Fatalf("%s orphan subagents without parent log should not be returned: %+v", binName, subs[sidOrphanOnly])
 		}
 		if len(subs[sidA]) != 0 {
 			t.Fatalf("%s ambiguous sidA guessed subagents: %+v", binName, subs[sidA])
@@ -1297,6 +1309,196 @@ func TestBgTailAndCmdScanStatelessSoleAndAmbiguous(t *testing.T) {
 	}
 	if cmd := cmdScanCommand("w:" + sidSole + "=" + soleLog); strings.Contains(cmd, soleLog) {
 		t.Fatalf("cmdScanCommand must not accept pinned log paths: %s", cmd)
+	}
+}
+
+// Round 4 P3: Uppercase session UUIDs from herdr must be normalized to
+// lowercase in probe arguments and internal lookup keys so lowercase disk
+// logs are found consistently.
+func TestBgAndCmdUppercaseSIDNormalized(t *testing.T) {
+	sh, err := exec.LookPath("sh")
+	if err != nil {
+		t.Skip("no sh")
+	}
+	home := t.TempDir()
+	proj := filepath.Join(home, ".claude", "projects", "-work")
+	sidLower := "abcdef12-3456-4789-8abc-def012345678"
+	sidUpper := strings.ToUpper(sidLower)
+	subsDir := filepath.Join(proj, sidLower, "subagents")
+	if err := os.MkdirAll(subsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(proj, sidLower+".jsonl")
+	os.WriteFile(logPath, []byte(
+		`{"type":"assistant","message":{"model":"claude-opus-5-5","content":[{"type":"text","text":"done"}]}}`+"\n"+
+			`{"type":"system","subtype":"turn_duration","uuid":"u-upper","pendingBackgroundAgentCount":2}`+"\n",
+	), 0o644)
+	os.WriteFile(filepath.Join(subsDir, "agent-uppersub.jsonl"), []byte(`{"version":"2.1.305"}`+"\n"), 0o644)
+	os.WriteFile(filepath.Join(subsDir, "agent-uppersub.meta.json"), []byte(`{"requestShape":"background","description":"upper sid sub"}`), 0o644)
+
+	run := func(cmd string) []byte {
+		c := exec.Command(sh, "-c", cmd)
+		c.Env = []string{"HOME=" + home, "PATH=/usr/bin:/bin"}
+		out, err := c.Output()
+		if err != nil {
+			t.Fatalf("cmd failed: %v", err)
+		}
+		return out
+	}
+
+	// 1. bgTailCommand + parseBgTails + bgProber with uppercase SID.
+	bg := newBgProber(func(_ context.Context, sids []string, tail int) (map[string]bgRecord, error) {
+		return parseBgTails(run(bgTailCommand(sids, tail))), nil
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	go bg.run(ctx)
+	bg.consider("w1:p1", "claude", herdr.StatusDone, sidUpper, 1)
+	if st := bg.await(ctx, "w1:p1", 1); st != bgRunning {
+		t.Fatalf("bgProber uppercase SID state = %s, want running", st)
+	}
+	sum := herdrSummary{Workspaces: []herdrWorkspace{{Agents: []herdrAgent{
+		{PaneID: "w1:p1", Agent: "claude", Status: herdr.StatusDone, Session: sidUpper},
+	}}}}
+	bg.decorate(&sum)
+	a := sum.Workspaces[0].Agents[0]
+	if a.Bg != bgRunning || a.BgN != 2 || a.Model != "claude-opus-5-5" {
+		t.Fatalf("bgProber decorate uppercase SID = %+v, want running n=2 claude-opus-5-5", a)
+	}
+
+	// 2. cmdScanCommand with uppercase SID finds lowercase disk log & subagent.
+	subs := parseBgSubScan(string(run(cmdScanCommand("w:" + sidUpper))))
+	if len(subs[sidLower]) != 1 || subs[sidLower][0].ID != "uppersub" {
+		t.Fatalf("cmdScanCommand uppercase SID subs = %+v, want uppersub under %s", subs, sidLower)
+	}
+
+	// 3. logsWroteCommand with uppercase SID finds lowercase disk log.
+	lo, hi := parseLogsWrote(string(run(logsWroteCommand([]string{"claude:" + sidUpper}))), []string{"w1:p1"})
+	if lo["w1:p1"] <= 0 || hi["w1:p1"] <= 0 {
+		t.Fatalf("logsWroteCommand uppercase SID returned unknown time: lo=%v hi=%v", lo, hi)
+	}
+}
+
+// Round 4 P2-3 & P2-1:
+// - logsWroteCommand requires strictly 1 matching log; ambiguous copies across
+//   config dirs or project dirs return unknown time (empty "w=").
+// - When config dir enumeration is incomplete (e.g. unreadable custom config
+//   dir or projects dir), bgTailCommand, cmdScanCommand, and logsWroteCommand
+//   all refuse to treat a remaining copy as sole (exit 0, emit empty/missing).
+func TestLogsWroteSoleAndIncompleteConfigDirs(t *testing.T) {
+	sh, err := exec.LookPath("sh")
+	if err != nil {
+		t.Skip("no sh")
+	}
+	base := t.TempDir()
+	home := filepath.Join(base, "home")
+	defCfg := filepath.Join(home, ".claude")
+	altCfg := filepath.Join(base, "alt-claude")
+	defProjA := filepath.Join(defCfg, "projects", "-a")
+	defProjB := filepath.Join(defCfg, "projects", "-b")
+	altProj := filepath.Join(altCfg, "projects", "-c")
+	for _, d := range []string{defProjA, defProjB, altProj} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	sidUnique := "77777777-7777-4777-8777-777777777777"
+	sidDupDir := "88888888-8888-4888-8888-888888888888"
+	sidDupProj := "99999999-8888-4777-8666-555555555555"
+
+	os.WriteFile(filepath.Join(defProjA, sidUnique+".jsonl"), []byte(`{"type":"system","subtype":"turn_duration","uuid":"u-uniq","pendingBackgroundAgentCount":1}`+"\n"), 0o644)
+	uniqSubs := filepath.Join(defProjA, sidUnique, "subagents")
+	os.MkdirAll(uniqSubs, 0o755)
+	os.WriteFile(filepath.Join(uniqSubs, "agent-uniqsub.jsonl"), []byte(`{"version":"2.1.305"}`+"\n"), 0o644)
+	os.WriteFile(filepath.Join(uniqSubs, "agent-uniqsub.meta.json"), []byte(`{"requestShape":"background","description":"uniq"}`), 0o644)
+
+	// Duplicate across config dirs (newer in altCfg).
+	oldCopy := filepath.Join(defProjA, sidDupDir+".jsonl")
+	newCopy := filepath.Join(altProj, sidDupDir+".jsonl")
+	os.WriteFile(oldCopy, []byte(`{"type":"user"}`+"\n"), 0o644)
+	os.WriteFile(newCopy, []byte(`{"type":"user"}`+"\n"), 0o644)
+	os.Chtimes(oldCopy, time.Now().Add(-10*time.Minute), time.Now().Add(-10*time.Minute))
+
+	// Duplicate across two project dirs inside defCfg.
+	os.WriteFile(filepath.Join(defProjA, sidDupProj+".jsonl"), []byte(`{"type":"user"}`+"\n"), 0o644)
+	os.WriteFile(filepath.Join(defProjB, sidDupProj+".jsonl"), []byte(`{"type":"user"}`+"\n"), 0o644)
+
+	runWith := func(bin, cmd, envCfg string) []byte {
+		c := exec.Command(bin, "-c", cmd)
+		c.Env = []string{"HOME=" + home, "CLAUDE_CONFIG_DIR=" + envCfg, "PATH=/usr/bin:/bin"}
+		out, err := c.Output()
+		if err != nil {
+			t.Fatalf("%s cmd failed: %v (out=%q)", bin, err, string(out))
+		}
+		return out
+	}
+
+	// P2-3: logsWroteCommand returns mtime ONLY for sidUnique, unknown for duplicates.
+	for _, binName := range []string{sh, "dash"} {
+		bin, err := exec.LookPath(binName)
+		if err != nil {
+			continue
+		}
+		out := runWith(bin, logsWroteCommand([]string{"claude:" + sidUnique, "claude:" + sidDupDir, "claude:" + sidDupProj}), altCfg)
+		lo, hi := parseLogsWrote(string(out), []string{"p1", "p2", "p3"})
+		if lo["p1"] <= 0 || hi["p1"] <= 0 {
+			t.Fatalf("%s sole log missing mtime: out=%q lo=%v hi=%v", binName, string(out), lo, hi)
+		}
+		if _, ok := lo["p2"]; ok {
+			t.Fatalf("%s cross-dir duplicate must return unknown time, got lo=%v out=%q", binName, lo, string(out))
+		}
+		if _, ok := lo["p3"]; ok {
+			t.Fatalf("%s cross-project duplicate must return unknown time, got lo=%v out=%q", binName, lo, string(out))
+		}
+	}
+
+	// P2-1: Unreadable custom CLAUDE_CONFIG_DIR (chmod 000) marks enumeration
+	// incomplete -> bgTail, cmdScan, logsWrote all refuse to trust defCfg's copy.
+	if os.Geteuid() != 0 {
+		lockedCfg := filepath.Join(base, "locked-claude")
+		if err := os.MkdirAll(lockedCfg, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(lockedCfg, 0o000); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(lockedCfg, 0o755) })
+
+		for _, binName := range []string{sh, "dash"} {
+			bin, err := exec.LookPath(binName)
+			if err != nil {
+				continue
+			}
+			bgGot := parseBgTails(runWith(bin, bgTailCommand([]string{sidUnique}, 4096), lockedCfg))
+			if len(bgGot) != 0 {
+				t.Fatalf("%s incomplete scan bgTailCommand returned %+v, want empty", binName, bgGot)
+			}
+			subGot := parseBgSubScan(string(runWith(bin, cmdScanCommand("s:"+sidUnique), lockedCfg)))
+			if len(subGot) != 0 {
+				t.Fatalf("%s incomplete scan cmdScanCommand returned %+v, want empty", binName, subGot)
+			}
+			lo, _ := parseLogsWrote(string(runWith(bin, logsWroteCommand([]string{"claude:" + sidUnique}), lockedCfg)), []string{"p1"})
+			if len(lo) != 0 {
+				t.Fatalf("%s incomplete scan logsWroteCommand returned %+v, want unknown", binName, lo)
+			}
+		}
+
+		// Also verify unreadable projects/ subdir inside a readable config dir.
+		lockedProjCfg := filepath.Join(base, "locked-proj-claude")
+		lockedProjDir := filepath.Join(lockedProjCfg, "projects")
+		if err := os.MkdirAll(lockedProjDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(lockedProjDir, 0o000); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(lockedProjDir, 0o755) })
+
+		bgGot := parseBgTails(runWith(sh, bgTailCommand([]string{sidUnique}, 4096), lockedProjCfg))
+		if len(bgGot) != 0 {
+			t.Fatalf("unreadable projects/ dir bgTailCommand returned %+v, want empty", bgGot)
+		}
 	}
 }
 

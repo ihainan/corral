@@ -67,35 +67,80 @@ claude_cfg_dir() {
 // by physical path (pwd -P, so symlinks such as $HOME/.claude -> /data/claude do
 // not duplicate entries): the shell's CLAUDE_CONFIG_DIR (if set), "$HOME/.claude",
 // and any CLAUDE_CONFIG_DIR set on running Claude Code processes of the current user.
+// Sets cldirs_incomplete=1 when an existing config/projects directory cannot be
+// entered/read or a candidate Claude process's environment/cwd cannot be read,
+// so callers do not mistake a remaining copy for a sole unambiguous log.
 const claudeConfigDirsSh = `claude_cfg_dirs() {
   _cdnl=$(printf '\nx'); _cdnl=${_cdnl%x}
   _cdsoh=$(printf '\001')
   cldirs=
+  cldirs_incomplete=0
   _add_cldir() {
     _cd=$1
     [ -n "$_cd" ] || return 0
-    case $_cd in *"$_cdnl"*|*"$_cdsoh"*) return 0;; esac
-    [ -d "$_cd" ] || return 0
-    _cd=$(cd -- "$_cd" 2>/dev/null && pwd -P) || return 0
+    case $_cd in *"$_cdnl"*|*"$_cdsoh"*) cldirs_incomplete=1; return 0;; esac
+    if [ -e "$_cd" ] || [ -L "$_cd" ]; then
+      [ -d "$_cd" ] || return 0
+      if ! _cd=$(cd -- "$_cd" 2>/dev/null && pwd -P); then
+        cldirs_incomplete=1
+        return 0
+      fi
+      if [ -e "$_cd/projects" ]; then
+        if [ ! -r "$_cd/projects" ] || [ ! -x "$_cd/projects" ]; then
+          cldirs_incomplete=1
+          return 0
+        fi
+        for _pd in "$_cd"/projects/*; do
+          [ -d "$_pd" ] || continue
+          if [ ! -r "$_pd" ] || [ ! -x "$_pd" ]; then
+            cldirs_incomplete=1
+            return 0
+          fi
+        done
+      fi
+    else
+      return 0
+    fi
     while [ "$_cd" != / ] && [ "${_cd%/}" != "$_cd" ]; do _cd=${_cd%/}; done
     case "$_cdnl$cldirs$_cdnl" in *"$_cdnl$_cd$_cdnl"*) ;; *) cldirs="${cldirs:+$cldirs$_cdnl}$_cd";; esac
   }
   [ -n "${CLAUDE_CONFIG_DIR:-}" ] && _add_cldir "$CLAUDE_CONFIG_DIR"
   _add_cldir "$HOME/.claude"
   for _p in /proc/[0-9]*; do
-    [ -O "$_p" ] && [ -r "$_p/environ" ] || continue
+    [ -O "$_p" ] || continue
     _cm=; { IFS= read -r _cm <"$_p/comm"; } 2>/dev/null || continue
     case $_cm in
     claude) ;;
-    node|bun) grep -q 'claude' "$_p/cmdline" 2>/dev/null || continue;;
+    node|bun)
+      if [ ! -r "$_p/cmdline" ]; then
+        [ -d "$_p" ] && cldirs_incomplete=1
+        continue
+      fi
+      grep -q 'claude' "$_p/cmdline" 2>/dev/null || continue;;
     [0-9]*.[0-9]*)
-      case $(readlink "$_p/exe" 2>/dev/null) in */claude/*) ;; *) continue;; esac;;
+      _exe=$(readlink "$_p/exe" 2>/dev/null)
+      if [ -z "$_exe" ]; then
+        [ -d "$_p" ] && cldirs_incomplete=1
+        continue
+      fi
+      case $_exe in */claude/*) ;; *) continue;; esac;;
     *) continue;;
     esac
+    if [ ! -r "$_p/environ" ]; then
+      [ -d "$_p" ] && cldirs_incomplete=1
+      continue
+    fi
     _r=$(tr '\0\n' '\n\001' <"$_p/environ" 2>/dev/null | sed -n 's/^CLAUDE_CONFIG_DIR=//p' | head -n 1)
-    case $_r in ''|*"$_cdsoh"*) continue;; /*) _add_cldir "$_r";; *)
+    case $_r in
+    '') ;;
+    *"$_cdsoh"*) cldirs_incomplete=1 ;;
+    /*) _add_cldir "$_r" ;;
+    *)
       _cw=$(readlink "$_p/cwd" 2>/dev/null)
-      case $_cw in /*) _add_cldir "$_cw/$_r";; esac;;
+      case $_cw in
+      /*) _add_cldir "$_cw/$_r" ;;
+      *) [ -d "$_p" ] && cldirs_incomplete=1 ;;
+      esac ;;
     esac
   done
 }

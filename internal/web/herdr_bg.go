@@ -129,6 +129,7 @@ func (p *bgProber) consider(pane, agent, status, session string, round int64) {
 		}
 		return
 	}
+	session = strings.ToLower(session)
 	if b != nil && b.session == session {
 		b.round = round // (done, then idle: the same turn's end)
 		return
@@ -204,10 +205,10 @@ func (p *bgProber) decorate(sum *herdrSummary) {
 	for i := range sum.Workspaces {
 		for j := range sum.Workspaces[i].Agents {
 			a := &sum.Workspaces[i].Agents[j]
-			if m, ok := p.models[a.PaneID]; ok && a.Session != "" && m.session == a.Session {
+			if m, ok := p.models[a.PaneID]; ok && a.Session != "" && strings.EqualFold(m.session, a.Session) {
 				a.Model = m.model
 			}
-			if b := p.panes[a.PaneID]; b != nil && (a.Session == "" || b.session == a.Session) {
+			if b := p.panes[a.PaneID]; b != nil && (a.Session == "" || strings.EqualFold(b.session, a.Session)) {
 				a.Bg, a.BgN, a.BgSince = b.state, b.n, b.since
 				if b.state == bgNone {
 					a.Failed = b.failed // (with subagents out, its turn is not over: not failed yet)
@@ -437,22 +438,24 @@ func bgTailCommand(sessions []string, tail int) string {
 claude_cfg_dirs
 for s in "$@"; do
   _log= _found=0
-  while IFS= read -r _cd; do
-    [ -n "$_cd" ] || continue
-    for f in "$_cd"/projects/*/"$s".jsonl; do
-      [ -f "$f" ] || continue
-      _found=$((_found + 1))
-      if [ "$_found" -eq 1 ]; then
-        _log=$f
-      else
-        _log=
-        break
-      fi
-    done
-    [ "$_found" -le 1 ] || break
-  done <<CORRAL_CLDIRS
+  if [ "$cldirs_incomplete" = 0 ]; then
+    while IFS= read -r _cd; do
+      [ -n "$_cd" ] || continue
+      for f in "$_cd"/projects/*/"$s".jsonl; do
+        [ -f "$f" ] || continue
+        _found=$((_found + 1))
+        if [ "$_found" -eq 1 ]; then
+          _log=$f
+        else
+          _log=
+          break
+        fi
+      done
+      [ "$_found" -le 1 ] || break
+    done <<CORRAL_CLDIRS
 $cldirs
 CORRAL_CLDIRS
+  fi
   if [ -n "$_log" ]; then
     printf '\n@@corral-bg %s\n' "$s"
     if ! tail -c "$n" "$_log"; then
@@ -466,7 +469,7 @@ exit 0`
 	cmd := "sh -c " + sshx.QuoteShell(script) + " corral " + strconv.Itoa(tail)
 	for _, s := range sessions {
 		if convoUUID.MatchString(s) {
-			cmd += " " + sshx.QuoteShell(s)
+			cmd += " " + sshx.QuoteShell(strings.ToLower(s))
 		}
 	}
 	return cmd
@@ -486,13 +489,13 @@ func parseBgTails(out []byte) map[string]bgRecord {
 		hdr := string(part[:nl])
 		if rest, ok := strings.CutPrefix(hdr, "-missing "); ok {
 			if convoUUID.MatchString(rest) {
-				delete(got, rest)
+				delete(got, strings.ToLower(rest))
 			}
 			continue
 		}
 		if rest, ok := strings.CutPrefix(hdr, "-err "); ok {
 			if convoUUID.MatchString(rest) {
-				got[rest] = bgRecord{readErr: true}
+				got[strings.ToLower(rest)] = bgRecord{readErr: true}
 			}
 			continue
 		}
@@ -500,6 +503,7 @@ func parseBgTails(out []byte) map[string]bgRecord {
 		if !ok || !convoUUID.MatchString(sid) {
 			continue
 		}
+		sid = strings.ToLower(sid)
 		lines := bytes.Split(part[nl+1:], []byte("\n"))
 		rec := bgRecord{}
 		at := -1

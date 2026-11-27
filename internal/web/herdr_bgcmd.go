@@ -445,10 +445,12 @@ _ensure_cldirs() {
   if [ "$_cldirs_loaded" = 0 ]; then claude_cfg_dirs; _cldirs_loaded=1; fi
 }
 # _sole_claude_log <sid>: sets _best to the sole matching log across $cldirs
-# and _lfound to the match count (0, 1, or 2 for ambiguous). Never guesses by mtime.
+# and _lfound to the match count (0, 1, or 2 for ambiguous). Never guesses by
+# mtime, and returns empty when config dir enumeration was incomplete.
 _sole_claude_log() {
   _best= _lfound=0
   _ensure_cldirs
+  [ "$cldirs_incomplete" = 0 ] || return 0
   while IFS= read -r _cd; do
     [ -n "$_cd" ] || continue
     for _f in "$_cd"/projects/*/"$1".jsonl; do
@@ -467,36 +469,14 @@ $cldirs
 CORRAL_CLDIRS
 }
 # _sole_claude_subs <sid>: derives subagents strictly from the sole matching
-# log (<log without .jsonl>/subagents). Never searches other projects or config
-# dirs when a log exists or when multiple logs exist; when no log exists at
-# all, accepts only a sole unambiguous subagents directory.
+# log (<log without .jsonl>/subagents). Never searches orphan subagents dirs
+# when no log exists or when multiple logs exist.
 _sole_claude_subs() {
   _bestd=
   _sole_claude_log "$1"
-  if [ "$_lfound" -eq 1 ]; then
-    if [ -d "${_best%.jsonl}/subagents" ]; then _bestd="${_best%.jsonl}/subagents"; fi
-    return 0
+  if [ "$_lfound" -eq 1 ] && [ -d "${_best%.jsonl}/subagents" ]; then
+    _bestd="${_best%.jsonl}/subagents"
   fi
-  if [ "$_lfound" -gt 1 ]; then
-    return 0
-  fi
-  _dfound=0
-  while IFS= read -r _cd; do
-    [ -n "$_cd" ] || continue
-    for _d in "$_cd"/projects/*/"$1"/subagents; do
-      [ -d "$_d" ] || continue
-      _dfound=$((_dfound + 1))
-      if [ "$_dfound" -eq 1 ]; then
-        _bestd=$_d
-      else
-        _bestd=
-        break
-      fi
-    done
-    [ "$_dfound" -le 1 ] || break
-  done <<CORRAL_CLDIRS
-$cldirs
-CORRAL_CLDIRS
 }
 # (Of each session watched — "w:<id>" at work, "s:<id>" at rest —,
 # its subagents sent off in the background whose log was written to in the last
@@ -630,7 +610,7 @@ exit 0`
 		if n >= maxWatchedScanned || (!strings.HasPrefix(a, "w:") && !strings.HasPrefix(a, "s:")) || !convoUUID.MatchString(a[2:]) {
 			continue
 		}
-		cmd += " " + sshx.QuoteShell(a)
+		cmd += " " + sshx.QuoteShell(a[:2]+strings.ToLower(a[2:]))
 		n++
 	}
 	return cmd

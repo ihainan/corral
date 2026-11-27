@@ -114,7 +114,7 @@ func (s *Server) paneLogRef(ctx context.Context, sess *term.Session, hp herdr.Pa
 	case strings.Contains(agent, "codex"):
 		return s.codexLogSure(ctx, sess, hp.ID)
 	case strings.Contains(agent, "claude") && hp.AgentSession != nil && claudeSessionID.MatchString(hp.AgentSession.Value):
-		return "claude:" + hp.AgentSession.Value, nil
+		return "claude:" + strings.ToLower(hp.AgentSession.Value), nil
 	}
 	return "", nil
 }
@@ -221,8 +221,9 @@ func codexRecheckLog(panes map[string]codexPane, pane string) string {
 // it was last written: unix ms where the host's date tells them (GNU
 // date -r), else unix seconds (GNU stat, or BSD's and macOS's: no %N in
 // their date, no -c in their stat); empty: not read. A file
-// "claude:<session id>" is that Claude Code session's log, wherever its
-// folder put it (the newest of that name, under the account's own config).
+// "claude:<session id>" is that Claude Code session's log when strictly one
+// exists across physical-deduplicated config dirs (empty / unknown when absent,
+// ambiguous, or config dir enumeration was incomplete).
 func logsWroteCommand(files []string) string {
 	var b strings.Builder
 	needClaude := false
@@ -240,7 +241,8 @@ func logsWroteCommand(files []string) string {
 			if !claudeSessionID.MatchString(sid) {
 				b.WriteString(`f=; `)
 			} else {
-				b.WriteString(`f=; while IFS= read -r _cd; do [ -n "$_cd" ] || continue; for _cf in "$_cd"/projects/*/` + sid + `.jsonl; do [ -f "$_cf" ] || continue; { [ -z "$f" ] || [ "$_cf" -nt "$f" ]; } && f=$_cf; done; done <<CORRAL_CLDIRS` + "\n" + `$cldirs` + "\n" + `CORRAL_CLDIRS` + "\n")
+				sid = strings.ToLower(sid)
+				b.WriteString(`f=; _ln=0; if [ "$cldirs_incomplete" = 0 ]; then while IFS= read -r _cd; do [ -n "$_cd" ] || continue; for _cf in "$_cd"/projects/*/` + sid + `.jsonl; do [ -f "$_cf" ] || continue; _ln=$((_ln + 1)); if [ "$_ln" -eq 1 ]; then f=$_cf; else f=; break; fi; done; [ "$_ln" -le 1 ] || break; done <<CORRAL_CLDIRS` + "\n" + `$cldirs` + "\n" + `CORRAL_CLDIRS` + "\n" + `fi; `)
 			}
 		} else {
 			b.WriteString(`f=` + sshx.QuoteShell(f) + `; `)
