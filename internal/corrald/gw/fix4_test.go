@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -389,7 +390,7 @@ func TestColdStartRollbackFailureEntersStateErrorAndAllowsRetry(t *testing.T) {
 			VerifySHA256Hook:  func(string) string { return "deadbeef" },
 			ProbeOverride: func(context.Context, *ssh.Client) (*HostProbe, error) {
 				return &HostProbe{
-					OS: "Linux", Machine: "x86_64", Arch: "amd64", UID: "1000",
+					OS: "Linux", Machine: "x86_64", Arch: "amd64", UID: strconv.Itoa(os.Getuid()),
 					Home: home, HomeWritable: true, FreeKB: 100000, MachineID: "0123456789ab",
 					HasSymlink:    true,
 					CurrentTarget: "corrald-0.3.2-2000/corrald",
@@ -555,7 +556,7 @@ func TestPostHandoffVerifyReconnectHigherReleaseSetsDistAsRollbackTarget(t *test
 	_ = os.MkdirAll(stateDir, 0o700)
 	_ = os.MkdirAll(filepath.Join(home, ".local", "lib", "corral"), 0o755)
 	probe := &HostProbe{
-		OS: "Linux", Machine: "x86_64", Arch: "amd64", UID: "1000",
+		OS: "Linux", Machine: "x86_64", Arch: "amd64", UID: strconv.Itoa(os.Getuid()),
 		Home: home, HomeWritable: true, FreeKB: 100000, MachineID: "0123456789ab",
 		HasSymlink:    true,
 		CurrentTarget: "corrald-0.3.1-1000/corrald",
