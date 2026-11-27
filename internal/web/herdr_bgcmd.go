@@ -82,12 +82,6 @@ type cmdProber struct {
 	wake    chan struct{}
 	poke    func()
 	scan func(ctx context.Context, watched []string) (cmds map[string][]bgCmd, subs map[string][]bgAgent, bgIDs map[string]map[string]bool, whole bool, err error)
-	// logOf resolves the confirmed full Claude log path for (pane, sid), if known.
-	logOf func(pane, sid string) string
-	// paneKeys records the watch key ("<sid>" or "<sid>=<logPath>") used for
-	// each pane in the latest completed scan, so two panes running the same
-	// sid from different directories do not overwrite each other's subagents/bgIDs.
-	paneKeys map[string]string
 	// bgIDs: of the sessions at work, which of their commands running the
 	// last look found their log says they set going in the background.
 	bgIDs map[string]map[string]bool
@@ -128,12 +122,6 @@ func newCmdSubProber(scan func(ctx context.Context, watched []string) (map[strin
 func (p *cmdProber) setPoke(f func()) {
 	p.mu.Lock()
 	p.poke = f
-	p.mu.Unlock()
-}
-
-func (p *cmdProber) setLogOf(f func(pane, sid string) string) {
-	p.mu.Lock()
-	p.logOf = f
 	p.mu.Unlock()
 }
 
@@ -258,10 +246,9 @@ func (p *cmdProber) decorate(sum *herdrSummary) {
 			}
 			// (At work: those it set going in the background only — not what it runs in front now.)
 			if e, ok := p.working[a.PaneID]; ok && (a.Session == "" || strings.ToLower(a.Session) == e.session) && !p.at.Before(e.from) {
-				key := p.paneWatchKeyLocked(a.PaneID, e.session)
 				var quiet []bgCmd
 				for _, c := range p.cmds[e.session] {
-					if c.quiet || p.bgIDs[key][c.Task] {
+					if c.quiet || p.bgIDs[e.session][c.Task] {
 						quiet = append(quiet, c)
 					}
 				}
@@ -270,20 +257,10 @@ func (p *cmdProber) decorate(sum *herdrSummary) {
 				}
 			}
 			if sess := p.paneSessionLocked(a.PaneID, a.Session); sess != "" {
-				key := p.paneWatchKeyLocked(a.PaneID, sess)
-				a.BgAgentList = subsShown(p.subs[key], a.Status, a.Bg, a.BgN)
+				a.BgAgentList = subsShown(p.subs[sess], a.Status, a.Bg, a.BgN)
 			}
 		}
 	}
-}
-
-func (p *cmdProber) paneWatchKeyLocked(pane, sid string) string {
-	if k := p.paneKeys[pane]; k != "" {
-		if k == sid || strings.HasPrefix(k, sid+"=") {
-			return k
-		}
-	}
-	return sid
 }
 
 // of: the commands pane's agent (of session; "" any) left running, while
@@ -360,48 +337,24 @@ func (p *cmdProber) run(ctx context.Context) {
 			}
 		}
 		due := len(p.ended) > 0 || len(p.read) > 0 || len(p.working) > 0
-		workSnap := make(map[string]string, len(p.working))
-		for pane, e := range p.working {
-			workSnap[pane] = e.session
+		// (The sessions it is for: at work, "w:", their background commands told apart; at rest, "s:".)
+		var watched []string
+		for _, e := range p.working {
+			if !slices.Contains(watched, "w:"+e.session) {
+				watched = append(watched, "w:"+e.session)
+			}
 		}
-		endSnap := make(map[string]string, len(p.ended))
-		for pane, e := range p.ended {
-			endSnap[pane] = e.session
+		for _, e := range p.ended {
+			if !slices.Contains(watched, "s:"+e.session) && !slices.Contains(watched, "w:"+e.session) {
+				watched = append(watched, "s:"+e.session)
+			}
 		}
-		logOf := p.logOf
 		if !p.soon.After(began) {
 			p.soon = time.Time{} // (else it is due still: one coming to done or idle since the last)
 		}
 		p.mu.Unlock()
 		if !due {
 			continue
-		}
-		// (The sessions it is for: at work, "w:", their background commands told apart; at rest, "s:".)
-		paneKeys := make(map[string]string, len(workSnap)+len(endSnap))
-		var watched []string
-		for pane, sid := range workSnap {
-			key := sid
-			if logOf != nil {
-				if k := claudeWatchKey(sid, logOf(pane, sid)); k != "" {
-					key = k
-				}
-			}
-			paneKeys[pane] = key
-			if !slices.Contains(watched, "w:"+key) {
-				watched = append(watched, "w:"+key)
-			}
-		}
-		for pane, sid := range endSnap {
-			key := sid
-			if logOf != nil {
-				if k := claudeWatchKey(sid, logOf(pane, sid)); k != "" {
-					key = k
-				}
-			}
-			paneKeys[pane] = key
-			if !slices.Contains(watched, "s:"+key) && !slices.Contains(watched, "w:"+key) {
-				watched = append(watched, "s:"+key)
-			}
 		}
 		last = began
 		sctx, cancel := context.WithTimeout(ctx, 15*time.Second)
@@ -418,30 +371,22 @@ func (p *cmdProber) run(ctx context.Context) {
 		if err != nil || !whole {
 			// (Not known, or not all of it: nothing told, rather than what was.)
 			changed = changed || !p.at.IsZero()
-			p.at, p.cmds, p.subs, p.paneKeys = time.Time{}, nil, nil, nil
+			p.at, p.cmds, p.subs = time.Time{}, nil, nil
 		} else {
 			changed = changed || p.at.IsZero() || !sameCmds(p.cmds, found) || !sameSubs(p.subs, subs)
 			// (Or the same, but now told of a pane it was not before: one
 			// come to done or idle after the last look began.)
-			for pane, e := range p.ended {
-				k := paneKeys[pane]
-				if k == "" {
-					k = e.session
-				}
-				if p.at.Before(e.from) && !began.Before(e.from) && (len(found[e.session]) > 0 || len(subs[k]) > 0) {
+			for _, e := range p.ended {
+				if p.at.Before(e.from) && !began.Before(e.from) && (len(found[e.session]) > 0 || len(subs[e.session]) > 0) {
 					changed = true
 				}
 			}
-			for pane, e := range p.working {
-				k := paneKeys[pane]
-				if k == "" {
-					k = e.session
-				}
-				if p.at.Before(e.from) && !began.Before(e.from) && (len(found[e.session]) > 0 || len(subs[k]) > 0) {
+			for _, e := range p.working {
+				if p.at.Before(e.from) && !began.Before(e.from) && (len(found[e.session]) > 0 || len(subs[e.session]) > 0) {
 					changed = true
 				}
 			}
-			p.at, p.cmds, p.subs, p.paneKeys = began, found, subs, paneKeys // (as of when the look began)
+			p.at, p.cmds, p.subs = began, found, subs // (as of when the look began)
 		}
 		poke := p.poke
 		p.mu.Unlock()
@@ -499,30 +444,6 @@ _cldirs_loaded=0
 _ensure_cldirs() {
   if [ "$_cldirs_loaded" = 0 ]; then claude_cfg_dirs; _cldirs_loaded=1; fi
 }
-_pnl=$(printf '\nx'); _pnl=${_pnl%x}
-_pins=
-for a in "$@"; do
-  _rest=${a#?:}
-  case $_rest in
-  *=*) _pins="${_pins}${_rest%%=*}	${_rest#*=}$_pnl" ;;
-  esac
-done
-_pin_log_for_sid() {
-  _pin= _pin_ambig=0
-  [ -n "$_pins" ] || return 0
-  while IFS='	' read -r _ps _pl; do
-    [ "$_ps" = "$1" ] || continue
-    if [ -z "$_pin" ]; then
-      _pin=$_pl
-    elif [ "$_pin" != "$_pl" ]; then
-      _pin=
-      _pin_ambig=1
-      break
-    fi
-  done <<CORRAL_PINS
-$_pins
-CORRAL_PINS
-}
 # _sole_claude_log <sid>: sets _best to the sole matching log across $cldirs
 # and _lfound to the match count (0, 1, or 2 for ambiguous). Never guesses by mtime.
 _sole_claude_log() {
@@ -545,26 +466,12 @@ _sole_claude_log() {
 $cldirs
 CORRAL_CLDIRS
 }
-# _resolve_log <sid> <pinnedLog>: uses exact pinned log when provided; otherwise
-# uses the sole unambiguous log across $cldirs (empty when absent or ambiguous).
-_resolve_log() {
-  _best= _lfound=0
-  if [ -n "$2" ]; then
-    if [ -f "$2" ]; then _best=$2; _lfound=1; fi
-    return 0
-  fi
-  _sole_claude_log "$1"
-}
-# _resolve_subs <sid> <pinnedLog>: derives subagents strictly from the confirmed
-# or sole log (<log without .jsonl>/subagents). Never searches across projects or
-# config dirs when a log is pinned or found; when unpinned and no log exists at
+# _sole_claude_subs <sid>: derives subagents strictly from the sole matching
+# log (<log without .jsonl>/subagents). Never searches other projects or config
+# dirs when a log exists or when multiple logs exist; when no log exists at
 # all, accepts only a sole unambiguous subagents directory.
-_resolve_subs() {
+_sole_claude_subs() {
   _bestd=
-  if [ -n "$2" ]; then
-    if [ -d "${2%.jsonl}/subagents" ]; then _bestd="${2%.jsonl}/subagents"; fi
-    return 0
-  fi
   _sole_claude_log "$1"
   if [ "$_lfound" -eq 1 ]; then
     if [ -d "${_best%.jsonl}/subagents" ]; then _bestd="${_best%.jsonl}/subagents"; fi
@@ -591,17 +498,12 @@ _resolve_subs() {
 $cldirs
 CORRAL_CLDIRS
 }
-# (Of each session watched — "w:<id>" at work, "s:<id>" at rest, optionally
-# with "=<confirmedLogPath>" when locate already confirmed its exact log —,
+# (Of each session watched — "w:<id>" at work, "s:<id>" at rest —,
 # its subagents sent off in the background whose log was written to in the last
 # six hours, not marked finished: what its meta says it was sent for. At most ` + strconv.Itoa(subsScanned) + ` a session.)
 for a in "$@"; do
-  k=${a#?:}
-  case $k in
-  *=*) s=${k%%=*}; _ap=${k#*=} ;;
-  *) s=$k; _ap= ;;
-  esac
-  _resolve_subs "$s" "$_ap"
+  s=${a#?:}
+  _sole_claude_subs "$s"
   d=$_bestd
   [ -d "$d" ] || continue
   find "$d" -maxdepth 1 -name 'agent-*.jsonl' -mmin -360 2>/dev/null | {
@@ -618,7 +520,7 @@ for a in "$@"; do
       t=$(stat -c %Y "$m" 2>/dev/null || date -r "$m" +%s 2>/dev/null)
       v=$(head -c 65536 "$j" 2>/dev/null | grep -o '"version":"[0-9.]*"' | head -n 1 | cut -d'"' -f4)
       w=$(printf '%s' "$meta" | grep -oE '"description":"([^"\\]|\\.)*"' | head -n 1 | head -c 600)
-      printf 'sub\t%s\t%s\t%s\t%s\t{%s}\n' "$k" "$id" "$t" "$v" "$w"
+      printf 'sub\t%s\t%s\t%s\t%s\t{%s}\n' "$s" "$id" "$t" "$v" "$w"
     done
   }
 done
@@ -692,16 +594,12 @@ done
 for a in "$@"; do
   case $a in w:*) ;; *) continue;; esac
   [ -n "$seen" ] || break
-  k=${a#w:}
-  case $k in
-  *=*) s=${k%%=*}; _ap=${k#*=} ;;
-  *) s=$k; _ap= ;;
-  esac
-  _resolve_log "$s" "$_ap"
+  s=${a#w:}
+  _sole_claude_log "$s"
   f=$_best
   [ -f "$f" ] || continue
   grep -o '"backgroundTaskId":"[A-Za-z0-9_-]*"' "$f" | sed 's/^"backgroundTaskId":"//; s/"$//' | sort -u | while IFS= read -r id; do
-    case " $seen " in *" $id "*) printf 'bgid\t%s\t%s\n' "$k" "$id";; esac
+    case " $seen " in *" $id "*) printf 'bgid\t%s\t%s\n' "$s" "$id";; esac
   done
 done
 # (Of each command a Claude Code's task file tells, what the agent said it does — its call's
@@ -716,9 +614,7 @@ for p in $pairs; do
   s=${p%%/*}; id=${p#*/}
   case $s in *[!0-9a-fA-F-]*|"") continue;; esac
   case $id in *[!A-Za-z0-9_-]*|"") continue;; esac
-  _pin_log_for_sid "$s"
-  [ "$_pin_ambig" = 0 ] || continue
-  _resolve_log "$s" "$_pin"
+  _sole_claude_log "$s"
   f=$_best
   [ -f "$f" ] || continue
   i=$((i + 1))
@@ -731,14 +627,11 @@ exit 0`
 	cmd := "sh -c " + sshx.QuoteShell(script) + " corral"
 	n := 0
 	for _, a := range watched {
-		if n >= maxWatchedScanned || (!strings.HasPrefix(a, "w:") && !strings.HasPrefix(a, "s:")) {
+		if n >= maxWatchedScanned || (!strings.HasPrefix(a, "w:") && !strings.HasPrefix(a, "s:")) || !convoUUID.MatchString(a[2:]) {
 			continue
 		}
-		prefix := a[:2]
-		if key, _, _, ok := parseClaudeWatchKey(a[2:]); ok {
-			cmd += " " + sshx.QuoteShell(prefix+key)
-			n++
-		}
+		cmd += " " + sshx.QuoteShell(a)
+		n++
 	}
 	return cmd
 }
@@ -757,17 +650,14 @@ func parseBgIDs(out string) map[string]map[string]bool {
 	got := map[string]map[string]bool{}
 	for _, line := range strings.Split(out, "\n") {
 		f := strings.Split(line, "\t")
-		if len(f) != 3 || f[0] != "bgid" || !cmdTaskID.MatchString(f[2]) {
+		if len(f) != 3 || f[0] != "bgid" || !convoUUID.MatchString(f[1]) || !cmdTaskID.MatchString(f[2]) {
 			continue
 		}
-		key, _, _, ok := parseClaudeWatchKey(f[1])
-		if !ok {
-			continue
+		s := strings.ToLower(f[1])
+		if got[s] == nil {
+			got[s] = map[string]bool{}
 		}
-		if got[key] == nil {
-			got[key] = map[string]bool{}
-		}
-		got[key][f[2]] = true
+		got[s][f[2]] = true
 	}
 	return got
 }

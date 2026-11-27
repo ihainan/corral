@@ -42,11 +42,7 @@ func parseBgSubScan(out string) map[string][]bgAgent {
 	got := map[string][]bgAgent{}
 	for _, line := range strings.Split(out, "\n") {
 		f := strings.SplitN(line, "\t", 6)
-		if len(f) != 6 || f[0] != "sub" || !convo.SubagentID(f[2]) || !versionAtLeast(f[4], subMinVersion) {
-			continue
-		}
-		key, _, _, ok := parseClaudeWatchKey(f[1])
-		if !ok {
+		if len(f) != 6 || f[0] != "sub" || !convoUUID.MatchString(f[1]) || !convo.SubagentID(f[2]) || !versionAtLeast(f[4], subMinVersion) {
 			continue
 		}
 		// (Sent in the background and not finished, as the script told by its meta; of it, what it
@@ -59,8 +55,9 @@ func parseBgSubScan(out string) map[string][]bgAgent {
 		if t, err := strconv.ParseInt(f[3], 10, 64); err == nil && t > 0 && t < 1<<40 {
 			a.Since = t * 1000
 		}
-		if !slices.ContainsFunc(got[key], func(o bgAgent) bool { return o.ID == a.ID }) {
-			got[key] = append(got[key], a)
+		session := strings.ToLower(f[1])
+		if !slices.ContainsFunc(got[session], func(o bgAgent) bool { return o.ID == a.ID }) {
+			got[session] = append(got[session], a)
 		}
 	}
 	for _, l := range got {

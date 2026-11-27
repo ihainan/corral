@@ -370,11 +370,40 @@ emit_claude() { # pid sessionfile cfgdir
   # A "claude -p" of the person's own is found as before. side_question.go)
   json_str entrypoint
   if [ "$v" = sdk-cli ] && tr '\0\n' '\n\001' <"/proc/$_ecpid/environ" 2>/dev/null | grep -qx 'CORRAL_SIDE_COPY=1'; then _seen_claude="$_seen_claude $_ecpid"; return 0; fi
-  log=
+  log= _ln=0
   for l in "$_eccfg"/projects/*/"$sid".jsonl; do
     case $l in *"$nl"*) continue;; esac
-    [ -f "$l" ] && { log=$l; break; }
+    [ -f "$l" ] || continue
+    _ln=$((_ln + 1))
+    if [ "$_ln" -eq 1 ]; then log=$l; else log=; fi
   done
+  if [ "$_ln" -gt 1 ]; then
+    _ecreal=$(cd -- "$_eccfg" 2>/dev/null && pwd -P)
+    _fdm=0
+    for _fd in "/proc/$_ecpid"/fd/*; do
+      _fdt=$(readlink "$_fd" 2>/dev/null) || continue
+      case $_fdt in
+      *"$nl"*) continue;;
+      "$_eccfg"/projects/*/"$sid".jsonl) ;;
+      *)
+        if [ -n "$_ecreal" ]; then
+          case $_fdt in
+          "$_ecreal"/projects/*/"$sid".jsonl) ;;
+          *) continue;;
+          esac
+        else
+          continue
+        fi ;;
+      esac
+      [ -f "$_fdt" ] || continue
+      if [ "$_fdm" -eq 0 ]; then
+        log=$_fdt _fdm=1
+      elif [ "$log" != "$_fdt" ]; then
+        log= _fdm=2
+        break
+      fi
+    done
+  fi
   _seen_claude="$_seen_claude $_ecpid"
   rec "$_ecpid" "$st" "$fg" "$ps" "$sid" "$log" claude
   return 0
@@ -1407,7 +1436,11 @@ func candAt(l convoLocated, log, cwd string) *convoCand {
 // could have begun it, or was found to be its own, and was never one that
 // could be either of two; more for any other.
 func (s *Server) screenEnoughFor(p *convoProc, c *convoCand, sid string, l convoLocated) int {
-	if !s.convoClaimed.contested(sid) && (s.convoClaimed.owns(sid, p.id()) || onlyItsByTime(p, c, l)) {
+	return s.screenEnoughForHost("", p, c, sid, l)
+}
+
+func (s *Server) screenEnoughForHost(hostKey string, p *convoProc, c *convoCand, sid string, l convoLocated) int {
+	if !s.convoClaimed.contestedOn(hostKey, sid) && (s.convoClaimed.ownsOn(hostKey, sid, p.id()) || onlyItsByTime(p, c, l)) {
 		return screenEnough
 	}
 	return screenEnough2
@@ -1575,7 +1608,7 @@ func (s *Server) daemonLogFor(hostKey string, p *convoProc, l convoLocated) (too
 			}
 			continue
 		}
-		if !s.convoClaimed.owns(sid, p.id()) {
+		if !s.convoClaimed.ownsOn(hostKey, sid, p.id()) {
 			// Begun where this Codex runs, and after it started: one begun
 			// before it is another's.
 			if c.began <= 0 || c.began+convoBeganSlack < p.started {
@@ -1586,7 +1619,7 @@ func (s *Server) daemonLogFor(hostKey string, p *convoProc, l convoLocated) (too
 			// Neither takes it by this, then or later: once that other has
 			// ended, the one left is no more its owner than it was.
 			if !onlyItsByTime(p, c, l) {
-				s.convoClaimed.contest(sid)
+				s.convoClaimed.contestOn(hostKey, sid)
 				refused = true
 				continue
 			}
@@ -1603,7 +1636,7 @@ func (s *Server) daemonLogFor(hostKey string, p *convoProc, l convoLocated) (too
 	// may have gone on from since, so that another Codex at it is not kept
 	// from it.)
 	if resumed {
-		if s.convoClaimed.ownedByAnother(bestSID, p.id(), alive) {
+		if s.convoClaimed.ownedByAnotherOn(hostKey, bestSID, p.id(), alive) {
 			return false, true
 		}
 		p.log, p.sid = best.log, bestSID
@@ -1684,20 +1717,35 @@ func aliveCodex(l convoLocated) map[procID]bool {
 	return alive
 }
 
+func convoClaimKey(hostKey, sid string) string {
+	if hostKey == "" {
+		return sid
+	}
+	return hostKey + "\x1f" + sid
+}
+
 // owns: the conversation was found to be that process's.
 func (c *convoClaims) owns(sid string, p procID) bool {
+	return c.ownsOn("", sid, p)
+}
+
+func (c *convoClaims) ownsOn(hostKey, sid string, p procID) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	was, ok := c.by[sid]
+	was, ok := c.by[convoClaimKey(hostKey, sid)]
 	return ok && was.pid != 0 && was.of() == p
 }
 
 // ownedByAnother: the conversation was found to be another Codex's, one
 // running now.
 func (c *convoClaims) ownedByAnother(sid string, p procID, alive map[procID]bool) bool {
+	return c.ownedByAnotherOn("", sid, p, alive)
+}
+
+func (c *convoClaims) ownedByAnotherOn(hostKey, sid string, p procID, alive map[procID]bool) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	was, ok := c.by[sid]
+	was, ok := c.by[convoClaimKey(hostKey, sid)]
 	return ok && was.pid != 0 && was.of() != p && alive[was.of()]
 }
 
@@ -1715,20 +1763,18 @@ func (c *convoClaims) take(sid string, p procID, started int64, alive map[procID
 func (c *convoClaims) takeOn(hostKey, sid string, p procID, started int64, alive map[procID]bool, now int64, shown bool) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	was, ok := c.by[sid]
-	if ok && was.pid != 0 && alive[was.of()] && (was.host == "" || hostKey == "" || was.host == hostKey) {
+	k := convoClaimKey(hostKey, sid)
+	was, ok := c.by[k]
+	if ok && was.pid != 0 && alive[was.of()] {
 		was.seen = max(was.seen, now) // (a scan read before another may come in after it)
-		c.by[sid] = was
+		c.by[k] = was
 	}
 	switch {
 	case c.full:
 		return false
 	case ok && was.pid != 0 && was.of() == p:
 		was.seen = max(was.seen, now)
-		if was.host == "" && hostKey != "" {
-			was.host = hostKey
-		}
-		c.by[sid] = was
+		c.by[k] = was
 		return true
 	case ok && was.pid == 0 && !shown:
 		return false // (it could be either of two: of neither, till one's screen shows it)
@@ -1737,14 +1783,18 @@ func (c *convoClaims) takeOn(hostKey, sid string, p procID, started int64, alive
 	case ok && was.pid != 0 && started <= was.seen:
 		return false // (it was there beside the one it is of)
 	}
-	return c.set(sid, convoClaim{pid: p.pid, start: p.start, seen: now, disputed: ok && (was.pid == 0 || was.disputed), host: hostKey})
+	return c.set(k, convoClaim{pid: p.pid, start: p.start, seen: now, disputed: ok && (was.pid == 0 || was.disputed), host: hostKey})
 }
 
 // contested: it could be either of two (and is of none yet, or was once).
 func (c *convoClaims) contested(sid string) bool {
+	return c.contestedOn("", sid)
+}
+
+func (c *convoClaims) contestedOn(hostKey, sid string) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	was, ok := c.by[sid]
+	was, ok := c.by[convoClaimKey(hostKey, sid)]
 	return ok && (was.pid == 0 || was.disputed)
 }
 
@@ -1790,9 +1840,13 @@ func (c *convoClaims) seeAliveOn(hostKey string, l convoLocated, alive map[procI
 	c.hostStateLocked(hostKey).lastAlive = time.Now()
 	for i := range l.cands {
 		sid := convoSessionOf(l.cands[i].log)
-		if was, ok := c.by[sid]; ok && was.pid != 0 && alive[was.of()] && was.seen < now && (was.host == "" || hostKey == "" || was.host == hostKey) {
+		if sid == "" {
+			continue
+		}
+		k := convoClaimKey(hostKey, sid)
+		if was, ok := c.by[k]; ok && was.pid != 0 && alive[was.of()] && was.seen < now {
 			was.seen = now
-			c.by[sid] = was
+			c.by[k] = was
 		}
 	}
 }
@@ -1800,7 +1854,7 @@ func (c *convoClaims) seeAliveOn(hostKey string, l convoLocated, alive map[procI
 func (c *convoClaims) needsAliveRefreshLocked(hostKey string, now time.Time, ttl time.Duration) bool {
 	has := false
 	for _, cl := range c.by {
-		if cl.pid != 0 && (cl.host == hostKey || cl.host == "") {
+		if cl.pid != 0 && cl.host == hostKey {
 			has = true
 			break
 		}
@@ -1870,10 +1924,15 @@ func (s *Server) refreshCodexClaims(sess *term.Session) {
 // them ending makes the other no more its owner) — unless it was found to
 // be one's already: that stands.
 func (c *convoClaims) contest(sid string) {
+	c.contestOn("", sid)
+}
+
+func (c *convoClaims) contestOn(hostKey, sid string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if _, ok := c.by[sid]; !ok {
-		c.set(sid, convoClaim{})
+	k := convoClaimKey(hostKey, sid)
+	if _, ok := c.by[k]; !ok {
+		c.set(k, convoClaim{host: hostKey})
 	}
 }
 
@@ -2848,7 +2907,7 @@ func (s *Server) locateScan(ctx context.Context, sess *term.Session, st *convoSt
 				if log, sid, on, read := s.screenSays(ctx, sess, pane, p, l, p.log, st.screenLog); read {
 					st.screenNo, st.screenWeak = false, false
 					if sid != "" && sid != st.screenSID {
-						if c := candAt(l, log, p.cwd); c == nil || on < s.screenEnoughFor(p, c, sid, l) {
+						if c := candAt(l, log, p.cwd); c == nil || on < s.screenEnoughForHost(hostKey, p, c, sid, l) {
 							st.screenWeak = true
 						} else if s.convoClaimed.takeOn(hostKey, sid, p.id(), p.started, aliveCodex(l), l.now(), true) {
 							st.screenLog, st.screenSID = log, sid
@@ -2949,16 +3008,9 @@ func (s *Server) locateScan(ctx context.Context, sess *term.Session, st *convoSt
 	// alone, it is shown, weak — no word on where keys go.)
 	st.weak = st.guessed && !(st.screenSID != "" && st.screenSID == sid)
 	st.adopt(sid, log, agent, reason)
-	if sess.Persistence == "herdr" && pane != "" && !st.sub {
-		if agent == "claude" && log != "" && st.bind != nil {
-			s.noteClaudeLogEverywhere(sess, pane, st.bind.TerminalID, st.bind.PID, st.bind.Start, sid, log, looked)
-		} else {
-			s.clearClaudeLogEverywhere(sess, pane, looked)
-		}
-		if log != "" {
-			if lt := s.herdrSocks.lineageOf(sess.ID); lt != nil {
-				lt.notePaneLog(pane, agent, sid, log)
-			}
+	if sess.Persistence == "herdr" && pane != "" && log != "" && !st.sub {
+		if lt := s.herdrSocks.lineageOf(sess.ID); lt != nil {
+			lt.notePaneLog(pane, agent, sid, log)
 		}
 	}
 	return nil
