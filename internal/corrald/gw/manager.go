@@ -79,6 +79,7 @@ type ManagerConfig struct {
 	CapFailureThreshold   int
 	HandoffTimeout        time.Duration
 	WatchUnsubscribeDelay time.Duration
+	WatchRPCTimeout       time.Duration
 
 	// Callbacks (optional; can also be set via SetWatchCallbacks).
 	OnAgentChanged    func(hostIDs []int64, ev proto.AgentChangedEventData)
@@ -338,6 +339,7 @@ type Manager struct {
 	capFailureThreshold int
 	handoffTimeout      time.Duration
 	watchUnsubDelay     time.Duration
+	watchRPCTimeout     time.Duration
 
 	distMu sync.RWMutex
 	dist   *Dist
@@ -402,6 +404,10 @@ func NewManager(cfg ManagerConfig) *Manager {
 	if watchUnsubDelay <= 0 {
 		watchUnsubDelay = DefaultWatchUnsubscribeDelay
 	}
+	watchRPCTO := cfg.WatchRPCTimeout
+	if watchRPCTO <= 0 {
+		watchRPCTO = defaultWatchRPCTimeout
+	}
 	mgr := &Manager{
 		cfg:                 cfg,
 		store:               cfg.Store,
@@ -421,6 +427,7 @@ func NewManager(cfg ManagerConfig) *Manager {
 		capFailureThreshold: capThreshold,
 		handoffTimeout:      handoffTO,
 		watchUnsubDelay:     watchUnsubDelay,
+		watchRPCTimeout:     watchRPCTO,
 		onAgentChanged:      cfg.OnAgentChanged,
 		onCoverageChanged:   cfg.OnCoverageChanged,
 		conns:               make(map[accountKey]*sharedConn),
@@ -3199,11 +3206,17 @@ func (m *Manager) reconnectSharedConn(ctx context.Context, sc *sharedConn, overr
 			mf = &hello.Manifest
 		}
 		if wantWatch, extraLogs := m.hasAnyRunningWatchDemand(ctx, sc, mf); wantWatch {
-			wctx, wcancel := context.WithTimeout(ctx, watchRPCTimeout)
+			wctx, wcancel := context.WithTimeout(ctx, m.watchRPCTimeout)
 			wres, werr := newClient.Watch(wctx, extraLogs)
 			wcancel()
 			if werr != nil || wres == nil || !wres.Watching {
 				newWatchDegraded = true
+				var rpcErr *proto.RPCError
+				if werr != nil && !errors.As(werr, &rpcErr) && !newClient.Closed() {
+					// Ambiguous timeout/error while connection stays alive:
+					// track possible remote subscription so Unwatch still runs.
+					newWatchRemote = true
+				}
 			} else {
 				newWatchRemote = true
 				newWatchSig = watchLogsSignature(extraLogs)

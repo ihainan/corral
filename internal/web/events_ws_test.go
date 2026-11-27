@@ -8,8 +8,10 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"path/filepath"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -642,5 +644,184 @@ func TestEventsUnmatchedLogWakesNoLogAndQuietBindingsNotActive(t *testing.T) {
 	}
 	if stActive.relocAfter.Load() != 0 {
 		t.Fatal("active convoState must NOT have relocAfter forced by unrelated unmatched log")
+	}
+}
+
+// Regression fix2 #2: When corrald emits ONLY added_pids (no changed_logs) —
+// e.g. a Claude Code process creates its first log or switches to a new log on
+// the same PID, or a new agent PID starts in a pane — the gateway must set
+// relocAfter alongside the convo hint so the browser's immediate src=push GET
+// relocates and reads the new log immediately instead of waiting for the 10s
+// locate TTL.
+func TestEventsAddedPIDsTriggersRelocateAndReadsNewLog(t *testing.T) {
+	h := newHarness(t)
+	h.srv.events.SetCoalesceWindow(60 * time.Millisecond)
+	h.srv.events.SetUnmatchedLogQuietThreshold(2 * time.Second)
+
+	admin := h.admin()
+	srv, home, _ := startCountingCorraldSSH(t)
+	agents := spawnE2EFakeAgents(t, home)
+
+	// Start with NO log file for Claude (brand-new conversation before first reply).
+	if err := os.Remove(agents.claudeLog); err != nil {
+		t.Fatalf("remove initial claude log: %v", err)
+	}
+
+	hostID, sessID := createAndPinHost(t, admin, srv, "added-pids-box")
+	uid := int64(admin.do("GET", "/api/me", nil).json()["id"].(float64))
+	sess, err := h.srv.terms.Get(uid, sessID)
+	if err != nil {
+		t.Fatalf("session not found: %v", err)
+	}
+	sess.Persistence = "herdr"
+	h.srv.herdrSocks.set(sessID, agents.herdrSock)
+
+	ws, _, err := dialEventsWS(t, h, admin, h.cfg.Origin())
+	if err != nil {
+		t.Fatalf("dial events ws: %v", err)
+	}
+	defer ws.CloseNow()
+	rd := startPushReader(ws)
+	_ = rd.next(t, 2*time.Second) // initial cover
+	sendWatchHosts(t, ws, []int64{hostID})
+	time.Sleep(40 * time.Millisecond)
+
+	// 1. Initial GET locates the Claude PID with no log yet -> returns reason="no_log"
+	//    and caches st.located=now (well within 10s convoLocateTTL).
+	r0 := admin.do("GET", fmt.Sprintf("/api/sessions/%s/conversation?pane=%s", sessID, agents.claudePane), nil)
+	mustStatus(t, r0, http.StatusOK, "initial no-log conversation read")
+	j0 := r0.json()
+	if j0["reason"] != convoNoLog {
+		t.Fatalf("expected initial reason=%q, got %+v", convoNoLog, j0)
+	}
+
+	// Write the first reply log file on disk, then deliver ONLY added_pids (no changed_logs).
+	firstReply := "added-pids-first-reply-visible-immediately"
+	firstBody := strings.Join([]string{
+		`{"type":"user","uuid":"u-ap-1","timestamp":"2026-11-28T04:00:00Z","message":{"role":"user","content":"hello"}}`,
+		fmt.Sprintf(`{"type":"assistant","uuid":"a-ap-1","timestamp":"2026-11-28T04:00:01Z","message":{"role":"assistant","content":[{"type":"text","text":%q}]}}`, firstReply),
+		"",
+	}, "\n")
+	if err := os.WriteFile(agents.claudeLog, []byte(firstBody), 0o600); err != nil {
+		t.Fatalf("write claude first log: %v", err)
+	}
+
+	h.srv.events.HandleAgentChanged([]int64{hostID}, proto.AgentChangedEventData{
+		AddedPIDs: []int{agents.claudePID},
+	})
+
+	// Expect convo hint for claudePane.
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		m := rd.next(t, time.Until(deadline))
+		if m.T == "convo" && m.Session == sessID && m.Pane == agents.claudePane {
+			break
+		}
+	}
+
+	// Immediate src=push GET (still well inside 10s locateTTL) MUST relocate and read the new log!
+	r1 := admin.do("GET", fmt.Sprintf("/api/sessions/%s/conversation?pane=%s&src=push", sessID, agents.claudePane), nil)
+	mustStatus(t, r1, http.StatusOK, "src=push read after added_pids (first log)")
+	if !strings.Contains(string(r1.Body), firstReply) {
+		t.Fatalf("src=push read after added_pids did not relocate to new log: %s", r1.Body)
+	}
+	j1 := r1.json()
+	gen1 := int64(j1["gen"].(float64))
+	rev1 := int(j1["rev"].(float64))
+
+	// 2. Simulate same PID switching to a brand-new log (/clear or /resume) with ONLY added_pids.
+	time.Sleep(100 * time.Millisecond) // clear coalesce window
+	newSID := "22222222-2222-4222-8222-222222222222"
+	switchedReply := "added-pids-switched-log-content"
+	newLogPath := filepath.Join(filepath.Dir(agents.claudeLog), newSID+".jsonl")
+	switchedBody := strings.Join([]string{
+		`{"type":"user","uuid":"u-ap-2","timestamp":"2026-11-28T04:01:00Z","message":{"role":"user","content":"fresh"}}`,
+		fmt.Sprintf(`{"type":"assistant","uuid":"a-ap-2","timestamp":"2026-11-28T04:01:01Z","message":{"role":"assistant","content":[{"type":"text","text":%q}]}}`, switchedReply),
+		"",
+	}, "\n")
+	if err := os.WriteFile(newLogPath, []byte(switchedBody), 0o600); err != nil {
+		t.Fatalf("write switched claude log: %v", err)
+	}
+	sessFile := filepath.Join(home, ".claude", "sessions", strconv.Itoa(agents.claudePID)+".json")
+	origSessRaw, err := os.ReadFile(sessFile)
+	if err != nil {
+		t.Fatalf("read claude session file: %v", err)
+	}
+	var sessDoc map[string]any
+	if err := json.Unmarshal(origSessRaw, &sessDoc); err != nil {
+		t.Fatalf("unmarshal session file: %v", err)
+	}
+	sessDoc["sessionId"] = newSID
+	updatedSessRaw, err := json.Marshal(sessDoc)
+	if err != nil {
+		t.Fatalf("marshal updated session file: %v", err)
+	}
+	if err := os.WriteFile(sessFile, updatedSessRaw, 0o600); err != nil {
+		t.Fatalf("write updated session file: %v", err)
+	}
+
+	h.srv.events.HandleAgentChanged([]int64{hostID}, proto.AgentChangedEventData{
+		AddedPIDs: []int{agents.claudePID},
+	})
+	deadline = time.Now().Add(2 * time.Second)
+	for {
+		m := rd.next(t, time.Until(deadline))
+		if m.T == "convo" && m.Session == sessID && m.Pane == agents.claudePane {
+			break
+		}
+	}
+
+	r2 := admin.do("GET", fmt.Sprintf("/api/sessions/%s/conversation?pane=%s&gen=%d&rev=%d&src=push", sessID, agents.claudePane, gen1, rev1), nil)
+	mustStatus(t, r2, http.StatusOK, "src=push read after added_pids (switched log)")
+	if !strings.Contains(string(r2.Body), switchedReply) {
+		t.Fatalf("src=push read after same-PID log switch did not relocate to new log: %s", r2.Body)
+	}
+
+	// 3. Unmatched added_pids wakes no-log and quiet (>=2s) bindings with relocAfter,
+	//    while leaving an actively streaming binding untouched.
+	time.Sleep(100 * time.Millisecond)
+	stNoLog := h.srv.convos.get(sessID + "\x00w2:p_nolog")
+	stNoLog.done()
+	stQuiet := h.srv.convos.get(sessID + "\x00w2:p_quiet")
+	stQuiet.done()
+	stActive := h.srv.convos.get(sessID + "\x00w2:p_active")
+	stActive.done()
+
+	h.srv.events.RecordBindingWithActivity(uid, hostID, sessID, "w2:p_nolog", "w2:p_nolog", 60001, "", time.Time{})
+	h.srv.events.RecordBindingWithActivity(uid, hostID, sessID, "w2:p_quiet", "w2:p_quiet", 60002, "/tmp/quiet-ap.jsonl", time.Now().Add(-5*time.Second))
+	h.srv.events.RecordBindingWithActivity(uid, hostID, sessID, "w2:p_active", "w2:p_active", 60003, "/tmp/active-ap.jsonl", time.Now())
+
+	// Drain any earlier queued hints before testing unmatched added_pids.
+	for {
+		select {
+		case <-rd.ch:
+		default:
+			goto drained
+		}
+	}
+drained:
+	h.srv.events.HandleAgentChanged([]int64{hostID}, proto.AgentChangedEventData{
+		AddedPIDs: []int{agents.claudePID + 99999},
+	})
+
+	gotPanes := map[string]bool{}
+	waitEnd := time.Now().Add(300 * time.Millisecond)
+	for time.Now().Before(waitEnd) {
+		select {
+		case m := <-rd.ch:
+			if m.T == "convo" {
+				gotPanes[m.Pane] = true
+			}
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+	if !gotPanes["w2:p_nolog"] || stNoLog.relocAfter.Load() == 0 {
+		t.Fatalf("no-log pane must receive convo + relocAfter on unmatched added_pids (got=%+v reloc=%d)", gotPanes, stNoLog.relocAfter.Load())
+	}
+	if !gotPanes["w2:p_quiet"] || stQuiet.relocAfter.Load() == 0 {
+		t.Fatalf("quiet pane must receive convo + relocAfter on unmatched added_pids (got=%+v reloc=%d)", gotPanes, stQuiet.relocAfter.Load())
+	}
+	if gotPanes["w2:p_active"] || stActive.relocAfter.Load() != 0 {
+		t.Fatalf("active pane must NOT receive convo or relocAfter on unrelated added_pids (got=%+v reloc=%d)", gotPanes, stActive.relocAfter.Load())
 	}
 }

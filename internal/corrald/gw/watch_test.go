@@ -22,20 +22,22 @@ type fakeWatchDaemon struct {
 	sockPath string
 	ln       net.Listener
 
-	mu             sync.Mutex
-	epoch          string
-	watchCalls     int
-	unwatchCalls   int
-	lastWatchLogs  []string
-	watchErr       *proto.RPCError
-	watchMode      string
-	healthCaps     map[string]string
-	conns          []net.Conn
-	watchCallCh    chan []string
-	unwatchCallCh  chan struct{}
-	unwatchBlockCh chan struct{} // when non-nil, MethodAgentUnwatch waits for close before replying
-	nextSeq        uint64
-	activeWatching bool
+	mu               sync.Mutex
+	epoch            string
+	watchCalls       int
+	unwatchCalls     int
+	lastWatchLogs    []string
+	watchErr         *proto.RPCError
+	watchMode        string
+	healthCaps       map[string]string
+	conns            []net.Conn
+	watchCallCh      chan []string
+	watchBlockOnCall int
+	watchBlockCh     chan struct{} // when non-nil and watchCalls == watchBlockOnCall, MethodAgentWatch waits before replying
+	unwatchCallCh    chan struct{}
+	unwatchBlockCh   chan struct{} // when non-nil, MethodAgentUnwatch waits for close before replying
+	nextSeq          uint64
+	activeWatching   bool
 }
 
 func startFakeWatchDaemon(t *testing.T, epoch string) *fakeWatchDaemon {
@@ -125,10 +127,13 @@ func (d *fakeWatchDaemon) serveConn(c net.Conn) {
 			_ = json.Unmarshal(req.Params, &p)
 			d.mu.Lock()
 			d.watchCalls++
+			callNum := d.watchCalls
 			d.lastWatchLogs = append([]string(nil), p.Logs...)
 			werr := d.watchErr
 			mode := d.watchMode
 			ep := d.epoch
+			blockCh := d.watchBlockCh
+			blockOn := d.watchBlockOnCall
 			if werr == nil {
 				d.activeWatching = true
 			}
@@ -136,6 +141,9 @@ func (d *fakeWatchDaemon) serveConn(c net.Conn) {
 			select {
 			case d.watchCallCh <- p.Logs:
 			default:
+			}
+			if blockCh != nil && blockOn > 0 && callNum == blockOn {
+				<-blockCh
 			}
 			if werr != nil {
 				_ = proto.WriteJSON(c, proto.Response{ID: req.ID, Error: werr})
@@ -694,4 +702,148 @@ func TestWatchUnsubscribeRaceWithNewWatcherReSubscribes(t *testing.T) {
 		t.Fatal("timed out waiting for re-subscribe after in-flight unwatch raced with new watcher")
 	}
 	waitCond(t, 2*time.Second, "w2 covered after unwatch race", func() bool { return mgr.IsWatchCovered(uid, hid) })
+}
+
+// Regression fix2 #1: When the underlying client closes BEFORE mutateWatchState
+// runs (e.g. client.Done() fires while sc.updating or sc.reconnecting is true,
+// so monitorConn returns without calling handleUnexpectedDisconnect),
+// mutateWatchState must still detect that previously covered hosts
+// (sc.watchCoveredHosts) dropped to empty and immediately broadcast coverage
+// invalidation.
+func TestWatchMutateAfterClientAlreadyClosedNotifiesCoverage(t *testing.T) {
+	d := startFakeWatchDaemon(t, "ep-closed-mutate")
+	mgr, _, uid, hid, _, fp := setupWatchManagerHarness(t, d, time.Second, time.Hour)
+
+	coverCh := make(chan []int64, 16)
+	mgr.SetWatchCallbacks(nil, func(hostIDs []int64) {
+		coverCh <- append([]int64(nil), hostIDs...)
+	})
+
+	w1 := new(int)
+	mgr.SetWatcher(w1, uid, []int64{hid})
+	select {
+	case <-d.watchCallCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for initial watch")
+	}
+	waitCond(t, 2*time.Second, "initially covered", func() bool { return mgr.IsWatchCovered(uid, hid) })
+	for len(coverCh) > 0 {
+		<-coverCh
+	}
+
+	sc := mgr.getSharedConn(accountKey{Fingerprint: fp, Username: "alice"})
+	if sc == nil {
+		t.Fatal("expected sharedConn")
+	}
+	// Mark an in-progress update so monitorConn treats the disconnect as
+	// intentional and returns right after mutateWatchState without triggering
+	// handleUnexpectedDisconnect.
+	sc.mu.Lock()
+	sc.updating = true
+	sc.mu.Unlock()
+	t.Cleanup(func() {
+		sc.mu.Lock()
+		sc.updating = false
+		sc.mu.Unlock()
+	})
+
+	// Close the client so client.Closed() is already true when monitorConn
+	// enters mutateWatchState.
+	if !mgr.ForceDropConn(fp, "alice") {
+		t.Fatal("ForceDropConn failed")
+	}
+
+	// Coverage invalidation MUST fire immediately while sc.updating is still true.
+	select {
+	case ids := <-coverCh:
+		found := false
+		for _, id := range ids {
+			if id == hid {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("coverage invalidation %v missing host %d", ids, hid)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected immediate coverage invalidation when closed client ran mutateWatchState during update")
+	}
+	if mgr.IsWatchCovered(uid, hid) {
+		t.Fatal("host must not be covered after client closed")
+	}
+}
+
+// Regression fix2 #3: If a subsequent agent.watch update RPC times out while
+// the connection remains open, the host must immediately leave healthy cover,
+// yet watchRemoteActive must remain true so that when the last browser leaves,
+// the gateway still issues agent.unwatch instead of leaking the remote watcher.
+func TestWatchUpdateTimeoutStillUnsubscribesAfterLastBrowserLeaves(t *testing.T) {
+	d := startFakeWatchDaemon(t, "ep-update-timeout")
+	mgr, _, uid, hid, _, _ := setupWatchManagerHarness(t, d, 60*time.Millisecond, time.Hour)
+	mgr.watchRPCTimeout = 80 * time.Millisecond
+
+	coverCh := make(chan []int64, 16)
+	mgr.SetWatchCallbacks(nil, func(hostIDs []int64) {
+		coverCh <- append([]int64(nil), hostIDs...)
+	})
+
+	w1 := new(int)
+	mgr.SetWatcher(w1, uid, []int64{hid})
+	select {
+	case <-d.watchCallCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for initial watch")
+	}
+	waitCond(t, 2*time.Second, "initially covered", func() bool { return mgr.IsWatchCovered(uid, hid) })
+	for len(coverCh) > 0 {
+		<-coverCh
+	}
+
+	// Block the 2nd agent.watch call until after watchRPCTimeout expires.
+	blockSecondWatch := make(chan struct{})
+	d.mu.Lock()
+	d.watchBlockOnCall = 2
+	d.watchBlockCh = blockSecondWatch
+	d.mu.Unlock()
+	t.Cleanup(func() {
+		select {
+		case <-blockSecondWatch:
+		default:
+			close(blockSecondWatch)
+		}
+	})
+
+	mgr.AddHostWatchLog(hid, "/tmp/new-log-triggers-update.jsonl")
+	select {
+	case <-d.watchCallCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for 2nd agent.watch RPC")
+	}
+
+	// Wait for the 80ms Watch timeout -> host leaves healthy cover, yet remote
+	// subscription remains tracked because the connection is still alive.
+	waitCond(t, 2*time.Second, "uncovered after 2nd watch timed out", func() bool { return !mgr.IsWatchCovered(uid, hid) })
+	select {
+	case <-coverCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected coverage invalidation when 2nd agent.watch timed out")
+	}
+	if !mgr.WatchSubscribedForHost(hid) {
+		t.Fatal("expected remote watch subscription to remain tracked while connection stays open")
+	}
+
+	// Release the slow 2nd Watch response on the still-open socket so Unwatch
+	// can be served normally on the same connection.
+	close(blockSecondWatch)
+
+	// Last browser leaves -> after grace delay, gateway MUST still send agent.unwatch.
+	mgr.RemoveWatcher(w1)
+	select {
+	case <-d.unwatchCallCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for agent.unwatch after 2nd watch timed out and last browser left")
+	}
+	waitCond(t, 2*time.Second, "remote watch cleared after unwatch", func() bool {
+		return !mgr.WatchSubscribedForHost(hid)
+	})
 }

@@ -458,13 +458,13 @@ func (h *eventHub) HandleAgentChanged(hostIDs []int64, ev proto.AgentChangedEven
 				}
 			}
 
-			// When an unmatched log changes on this host (e.g. a brand-new
-			// conversation's first log write or a /clear / /resume log switch),
-			// also notify this user's bindings on the same host that either
-			// have no log yet or whose bound log has been quiet for at least
-			// quietThreshold — without disturbing other actively streaming
-			// conversations on the same host.
-			if hasUnmatchedLog {
+			// When an unmatched log changes or a new/changed agent PID appears
+			// on this host (e.g. a brand-new conversation's first log write or
+			// a /clear / /resume log switch), also notify this user's bindings
+			// on the same host that either have no log yet or whose bound log
+			// has been quiet for at least quietThreshold — without disturbing
+			// other actively streaming conversations on the same host.
+			if hasUnmatchedLog || len(ev.AddedPIDs) > 0 {
 				for _, b := range liveBindings {
 					if b.ownerID != uid || b.hostID != hid {
 						continue
@@ -496,6 +496,7 @@ func (h *eventHub) HandleAgentChanged(hostIDs []int64, ev proto.AgentChangedEven
 							sessionID: b.sessionID,
 							pane:      b.bindPane,
 						}] = struct{}{}
+						relocKeys[convoBindKey{sessionID: b.sessionID, pane: b.pane}] = struct{}{}
 					}
 				}
 				needAgents = true
@@ -547,7 +548,12 @@ func (h *eventHub) HandleAgentChanged(hostIDs []int64, ev proto.AgentChangedEven
 		ts := now.UnixNano()
 		for bk := range relocKeys {
 			if st := h.s.convos.peek(bk.sessionID + "\x00" + bk.pane); st != nil {
-				st.relocAfter.Store(ts)
+				for {
+					was := st.relocAfter.Load()
+					if was >= ts || st.relocAfter.CompareAndSwap(was, ts) {
+						break
+					}
+				}
 			}
 		}
 	}

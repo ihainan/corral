@@ -3,6 +3,7 @@ package gw
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"slices"
 	"sort"
 	"strings"
@@ -18,7 +19,7 @@ const DefaultWatchUnsubscribeDelay = 30 * time.Second
 const (
 	maxExtraWatchLogsPerHost = 128
 	maxExtraWatchLogsPerConn = 512
-	watchRPCTimeout          = 5 * time.Second
+	defaultWatchRPCTimeout   = 5 * time.Second
 )
 
 type watchRegistration struct {
@@ -228,16 +229,14 @@ func (m *Manager) mutateWatchState(sc *sharedConn, extraHosts []int64, mutate fu
 	beforeConnHosts := m.connHostIDs(sc)
 
 	var (
-		wasCovered  bool
-		nowCovered  bool
 		wasDegraded bool
 		nowDegraded bool
 		prevCovered []int64
+		nextCovered []int64
 		afterRefs   []int64
 	)
 
 	sc.mu.Lock()
-	wasCovered = sc.isWatchEffectivelyCoveredLocked()
 	wasDegraded = sc.capDegraded["watch"]
 	for hid := range sc.watchCoveredHosts {
 		prevCovered = append(prevCovered, hid)
@@ -245,7 +244,7 @@ func (m *Manager) mutateWatchState(sc *sharedConn, extraHosts []int64, mutate fu
 	if mutate != nil {
 		mutate()
 	}
-	nowCovered = sc.isWatchEffectivelyCoveredLocked()
+	nowCovered := sc.isWatchEffectivelyCoveredLocked()
 	nowDegraded = sc.capDegraded["watch"]
 	for hid := range sc.hostRefs {
 		afterRefs = append(afterRefs, hid)
@@ -258,17 +257,20 @@ func (m *Manager) mutateWatchState(sc *sharedConn, extraHosts []int64, mutate fu
 		for _, hid := range afterRefs {
 			sc.watchCoveredHosts[hid] = struct{}{}
 		}
+		nextCovered = append(nextCovered, afterRefs...)
 	} else {
 		clear(sc.watchCoveredHosts)
 	}
 	sc.mu.Unlock()
 
+	sort.Slice(prevCovered, func(i, j int) bool { return prevCovered[i] < prevCovered[j] })
+	sort.Slice(nextCovered, func(i, j int) bool { return nextCovered[i] < nextCovered[j] })
 	sort.Slice(afterRefs, func(i, j int) bool { return afterRefs[i] < afterRefs[j] })
-	affected := mergeUniqueHostIDs(beforeConnHosts, prevCovered, afterRefs, extraHosts)
+	affected := mergeUniqueHostIDs(beforeConnHosts, prevCovered, nextCovered, afterRefs, extraHosts)
 	if len(affected) == 0 {
 		return
 	}
-	if wasCovered != nowCovered || wasDegraded != nowDegraded || len(extraHosts) > 0 || (wasCovered && !slices.Equal(beforeConnHosts, afterRefs)) {
+	if !slices.Equal(prevCovered, nextCovered) || wasDegraded != nowDegraded || len(extraHosts) > 0 {
 		m.notifyCoverageChanged(affected)
 	}
 }
@@ -533,17 +535,36 @@ func (m *Manager) reconcileWatchOnce(sc *sharedConn) {
 			return
 		}
 
-		wctx, cancel := context.WithTimeout(context.Background(), watchRPCTimeout)
+		wctx, cancel := context.WithTimeout(context.Background(), m.watchRPCTimeout)
 		res, err := curClient.Watch(wctx, logs)
 		cancel()
 
 		m.mutateWatchState(sc, nil, func() {
 			if sc.client != curClient || curClient.Closed() {
+				if sc.watchClient == curClient && curClient.Closed() {
+					sc.clearWatchStateLocked()
+				}
 				return
 			}
 			if err != nil || res == nil || !res.Watching {
 				sc.capDegraded["watch"] = true
-				sc.clearWatchStateLocked()
+				alreadyRemote := sc.watchRemoteActive && sc.watchClient == curClient
+				var rpcErr *proto.RPCError
+				explicitRPCReject := err != nil && errors.As(err, &rpcErr)
+				if (alreadyRemote && err != nil) || (!alreadyRemote && err != nil && !explicitRPCReject) {
+					// The connection is still open and either a prior remote
+					// subscription was active or the Watch RPC ended ambiguously
+					// (e.g. timeout while corrald may still process it): drop
+					// healthy coverage immediately, but keep watchRemoteActive
+					// so the last browser leaving still issues agent.unwatch.
+					sc.cancelUnsubTimerLocked()
+					sc.watchUnsubDue = false
+					sc.watchRemoteActive = true
+					sc.watchHealthy = false
+					sc.watchClient = curClient
+				} else {
+					sc.clearWatchStateLocked()
+				}
 				return
 			}
 			sc.cancelUnsubTimerLocked()
@@ -591,7 +612,7 @@ func (m *Manager) reconcileWatchOnce(sc *sharedConn) {
 			return
 		}
 
-		uctx, cancel := context.WithTimeout(context.Background(), watchRPCTimeout)
+		uctx, cancel := context.WithTimeout(context.Background(), m.watchRPCTimeout)
 		_, _ = curClient.Unwatch(uctx)
 		cancel()
 
