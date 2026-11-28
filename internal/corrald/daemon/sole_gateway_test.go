@@ -1061,6 +1061,170 @@ func TestCLIUninstallOnlyIfSoleGateway(t *testing.T) {
 			})
 		}
 	})
+
+	// Regression test for Fix Round 8 Item #3 [P1]:
+	// cmdUninstall MUST check run/ (and every other leftover) BEFORE removing
+	// the removing tombstone, and MUST keep the tombstone whenever run/ cannot
+	// be removed so a subsequent retry can still recover cleanly.
+	t.Run("fix8_item3_run_dir_leftover_keeps_tombstone_for_retry", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("chmod 0500 does not block root")
+		}
+		home := t.TempDir()
+		mid := randomHexMid(t)
+		env := []string{"CORRALD_TEST_MACHINE_ID=" + mid}
+		installedBin, layout := installAndServe(t, home, mid)
+
+		var h proto.HelloResult
+		if err := callLocalRPC(layout.SocketPath, proto.MethodDaemonHello, proto.HelloParams{
+			Gateway: "gw-a", ProtoMin: 1, ProtoMax: 1, Client: proto.ClientIdentity{CorralUser: "alice", HostID: "1"},
+		}, &h, 2*time.Second); err != nil {
+			t.Fatalf("Hello gw-a: %v", err)
+		}
+
+		// Create run/ with a leftover file and make run/ read-only so deletion fails.
+		if err := os.MkdirAll(layout.RunDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(layout.RunDir, "corral-send-tmux-_0"), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(layout.RunDir, 0o500); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(layout.RunDir, 0o700) })
+
+		out, code := runCLI(t, installedBin, home, env, "uninstall", "--op", "opRunFail1", "--only-if-sole-gateway", "gw-a")
+		if code == 0 || parseKV(out)["result"] != "partial" {
+			t.Fatalf("expected partial when run/ cannot be removed, got code=%d\n%s", code, out)
+		}
+		if !strings.Contains(out, layout.RunDir) {
+			t.Fatalf("expected left output to mention %s, got:\n%s", layout.RunDir, out)
+		}
+		if !layout.TombstoneExists() {
+			t.Fatalf("Fix8 Item #3 regression: removing tombstone was deleted even though run/ remained!\n%s", out)
+		}
+
+		// Clear fault: reinstall binary into LibDir via --for-uninstall-recovery
+		// and re-run normal locked uninstall -> cleanly removes run/, LibDir, StateDir, tombstone.
+		if err := os.Chmod(layout.RunDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		stage := stageBinary(t, home, mid, "opRunRec2", bins.v1)
+		if recOut, recCode := runCLI(t, filepath.Join(stage, "corrald"), home, env,
+			"install", "--for-uninstall-recovery", "--stage", stage, "--op", "opRunRec2", "--gateway", "gw-a"); recCode != 0 || parseKV(recOut)["result"] != "ok" {
+			t.Fatalf("install --for-uninstall-recovery failed: code=%d\n%s", recCode, recOut)
+		}
+		out2, code2 := runCLI(t, installedBin, home, env, "uninstall", "--op", "opRunRec2", "--only-if-sole-gateway", "gw-a")
+		if code2 != 0 || parseKV(out2)["result"] != "removed" {
+			t.Fatalf("retry uninstall after clearing run/ fault failed: code=%d\n%s", code2, out2)
+		}
+		if _, err := os.Lstat(layout.RunDir); !os.IsNotExist(err) {
+			t.Fatalf("expected run/ removed, stat err=%v", err)
+		}
+		if layout.TombstoneExists() {
+			t.Fatal("expected removing tombstone removed on clean retry")
+		}
+		if _, err := os.Lstat(layout.LibDir); !os.IsNotExist(err) {
+			t.Fatalf("expected LibDir removed on clean retry, stat err=%v", err)
+		}
+	})
+
+	// Regression test for Fix Round 8 Item #3 [P1] (post-check ordering):
+	// When initial deletions succeed (len(left)==0) and a leftover is only
+	// discovered during post-check (e.g. an unlisted corrald-* dir in LibDir
+	// or recreated run/), the removing tombstone MUST NOT have been deleted yet.
+	t.Run("fix8_item3_postcheck_leftover_keeps_tombstone", func(t *testing.T) {
+		home2 := t.TempDir()
+		mid2 := randomHexMid(t)
+		env2 := []string{"CORRALD_TEST_MACHINE_ID=" + mid2}
+		installedBin2, layout2 := installAndServe(t, home2, mid2)
+		var h2 proto.HelloResult
+		if err := callLocalRPC(layout2.SocketPath, proto.MethodDaemonHello, proto.HelloParams{
+			Gateway: "gw-a", ProtoMin: 1, ProtoMax: 1, Client: proto.ClientIdentity{CorralUser: "alice", HostID: "1"},
+		}, &h2, 2*time.Second); err != nil {
+			t.Fatalf("Hello gw-a (case 2): %v", err)
+		}
+		unlistedDir := filepath.Join(layout2.LibDir, "corrald-9.9.9-99")
+		if err := os.MkdirAll(unlistedDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		outP, codeP := runCLI(t, installedBin2, home2, env2, "uninstall", "--op", "opPostCheck1", "--only-if-sole-gateway", "gw-a")
+		if codeP == 0 || parseKV(outP)["result"] != "partial" {
+			t.Fatalf("expected partial when post-check finds unlisted corrald dir, got code=%d\n%s", codeP, outP)
+		}
+		if !layout2.TombstoneExists() {
+			t.Fatalf("Fix8 Item #3 regression: removing tombstone was deleted BEFORE post-check found %s!\n%s", unlistedDir, outP)
+		}
+	})
+
+	// Regression test for Fix Round 8 Items #1+#4+#5:
+	// `corrald install --for-uninstall-recovery` creates LibDir + holds
+	// .corrald-shared.lock -> op.lock, validates the removing tombstone and
+	// gateway, places the binary without writing install.json or removing the
+	// tombstone or starting the daemon, and cleans up stage-<op>.
+	t.Run("fix8_item1_4_install_for_uninstall_recovery_creates_libdir_and_locks", func(t *testing.T) {
+		home := t.TempDir()
+		mid := randomHexMid(t)
+		env := []string{"CORRALD_TEST_MACHINE_ID=" + mid}
+		uid := uint32(os.Getuid())
+		layout, err := ResolveLayout(PathOptions{Home: home, UID: &uid, MachineID: mid})
+		if err != nil {
+			t.Fatalf("ResolveLayout: %v", err)
+		}
+		if err := os.MkdirAll(layout.StateDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		// LibDir intentionally does NOT exist yet!
+		if err := os.WriteFile(layout.TombstonePath, []byte(`{"created_at":"2026-11-28T00:00:00Z","gateway":"gw-a"}`+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		// Wrong gateway must refuse with other_gateways and not place binary.
+		stageWrong := stageBinary(t, home, mid, "opRecWrong", bins.v1)
+		outW, codeW := runCLI(t, filepath.Join(stageWrong, "corrald"), home, env,
+			"install", "--for-uninstall-recovery", "--stage", stageWrong, "--op", "opRecWrong", "--gateway", "gw-b")
+		if codeW != 0 || parseKV(outW)["result"] != "other_gateways" {
+			t.Fatalf("expected other_gateways for foreign tombstone, got code=%d\n%s", codeW, outW)
+		}
+		if _, err := os.Lstat(layout.CurrentSymlink); !os.IsNotExist(err) {
+			t.Fatalf("binary must not be placed for foreign gateway, stat err=%v", err)
+		}
+
+		// Matching gateway places binary into LibDir without writing install.json or removing tombstone.
+		stage := stageBinary(t, home, mid, "opRecOK", bins.v1)
+		out, code := runCLI(t, filepath.Join(stage, "corrald"), home, env,
+			"install", "--for-uninstall-recovery", "--stage", stage, "--op", "opRecOK", "--gateway", "gw-a")
+		if code != 0 || parseKV(out)["result"] != "ok" {
+			t.Fatalf("install --for-uninstall-recovery failed: code=%d\n%s", code, out)
+		}
+		if _, err := os.Stat(layout.CurrentSymlink); err != nil {
+			t.Fatalf("expected CurrentSymlink placed in LibDir: %v", err)
+		}
+		if _, err := os.Stat(layout.SharedLockPath); err != nil {
+			t.Fatalf("expected .corrald-shared.lock created in LibDir: %v", err)
+		}
+		if _, err := os.Lstat(layout.InstallJSON); !os.IsNotExist(err) {
+			t.Fatalf("install.json must NOT be written during uninstall recovery, err=%v", err)
+		}
+		if !layout.TombstoneExists() {
+			t.Fatal("removing tombstone must remain intact after recovery binary placement")
+		}
+		if _, err := os.Lstat(stage); !os.IsNotExist(err) {
+			t.Fatalf("stage dir must be removed, stat err=%v", err)
+		}
+		// Now normal locked uninstall cleans up everything including LibDir and tombstone.
+		uOut, uCode := runCLI(t, layout.CurrentSymlink, home, env, "uninstall", "--op", "opRecOK", "--only-if-sole-gateway", "gw-a")
+		if uCode != 0 || parseKV(uOut)["result"] != "removed" {
+			t.Fatalf("locked uninstall after recovery install failed: code=%d\n%s", uCode, uOut)
+		}
+		if _, err := os.Lstat(layout.LibDir); !os.IsNotExist(err) {
+			t.Fatalf("expected LibDir removed, stat err=%v", err)
+		}
+		if _, err := os.Lstat(layout.StateDir); !os.IsNotExist(err) {
+			t.Fatalf("expected StateDir removed, stat err=%v", err)
+		}
+	})
 }
 
 // Regression test for Fix Round 6 F2 [P3]:

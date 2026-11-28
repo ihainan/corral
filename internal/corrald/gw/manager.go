@@ -200,14 +200,15 @@ type hostRef struct {
 }
 
 type runningOp struct {
-	opID      string
-	hostID    int64
-	acct      accountKey
-	kind      string
-	step      string
-	cancel    context.CancelFunc
-	cancelled bool
-	done      chan struct{}
+	opID        string
+	hostID      int64
+	acct        accountKey
+	pendingAcct accountKey
+	kind        string
+	step        string
+	cancel      context.CancelFunc
+	cancelled   bool
+	done        chan struct{}
 }
 
 // sshOwnership transfers ownership of an AcquireSSH release callback so an
@@ -959,10 +960,17 @@ func (m *Manager) StartInstall(ctx context.Context, userID, hostID int64, corral
 	}
 
 	opCtx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-	rop := &runningOp{opID: opID, hostID: hostID, acct: acct, kind: OpInstall, step: "check", cancel: cancel, done: make(chan struct{})}
-	if err := m.registerRunningOp(rop); err != nil {
+	rop := &runningOp{opID: opID, hostID: hostID, acct: acct, pendingAcct: acct, kind: OpInstall, step: "check", cancel: cancel, done: make(chan struct{})}
+	waitPeer, err := m.registerInstallOp(rop)
+	if err != nil {
 		cancel()
 		return nil, err
+	}
+	if waitPeer != nil {
+		// Peer host on the same account is already installing: keep account_key
+		// empty on this queued corrald_ops row so it satisfies the per-account
+		// unique index until the peer install finishes and this op attaches.
+		op.AccountKey = ""
 	}
 	if err := m.store.CreateCorraldOp(ctx, op, false); err != nil {
 		m.clearRunningOp(rop)
@@ -1005,6 +1013,7 @@ func (m *Manager) StartInstall(ctx context.Context, userID, hostID int64, corral
 				if ok, _ := m.store.ReleaseCorraldHostOpAndFinish(context.Background(), hostID, op, StateRemovePending); ok {
 					m.markPendingCleanup()
 				}
+				_, _ = m.store.UpdateCorraldOpIfActive(context.Background(), op)
 				return
 			}
 			op.State = OpFailed
@@ -1012,8 +1021,9 @@ func (m *Manager) StartInstall(ctx context.Context, userID, hostID int64, corral
 				op.ErrorCode = "other"
 			}
 			_, _ = m.store.ReleaseCorraldHostOpAndFinish(context.Background(), hostID, op, StateOff)
+			_, _ = m.store.UpdateCorraldOpIfActive(context.Background(), op)
 		}()
-		m.runInstallOp(opCtx, rop, op, ch, dist, userID, hostID, corralUser)
+		m.runInstallOp(opCtx, rop, op, ch, dist, userID, hostID, corralUser, waitPeer, acct)
 	}()
 
 	return view, nil
@@ -1876,7 +1886,7 @@ func (m *Manager) DeleteHostCleanup(ctx context.Context, userID, hostID int64, c
 		}
 	}
 
-	hasOnHost := probe.HasSymlink || probe.HasInstall || probe.HasTombstone || len(probe.Versions) > 0 || len(probe.Stages) > 0
+	hasOnHost := probe.HasSymlink || probe.HasInstall || probe.HasTombstone || probe.HasRunDir || len(probe.Versions) > 0 || len(probe.Stages) > 0
 	if !hasOnHost {
 		files := ReadHostStateFiles(ctx, sshClient, probe, "")
 		hasOnHost = files.Install != nil || files.Meta != nil
@@ -2109,7 +2119,21 @@ func (m *Manager) CleanupUserHosts(ctx context.Context, userID int64, corralUser
 
 // --- Internal execution flows ---
 
-func (m *Manager) runInstallOp(ctx context.Context, rop *runningOp, op *store.CorraldOp, ch *store.CorraldHost, dist *Dist, userID, hostID int64, corralUser string) {
+func (m *Manager) runInstallOp(ctx context.Context, rop *runningOp, op *store.CorraldOp, ch *store.CorraldHost, dist *Dist, userID, hostID int64, corralUser string, waitPeer *runningOp, initialAcct accountKey) {
+	if waitPeer != nil && initialAcct.valid() {
+		if err := m.waitAndClaimInstallAccount(ctx, rop, initialAcct); err != nil {
+			if m.isOpCancelled(rop) || m.AdminDisabled() {
+				if m.AdminDisabled() {
+					return // outer defer sets remove_pending + finishes op if host still installing
+				}
+				m.finishOpCancelled(op, ch)
+				return
+			}
+			m.finishOpFail(op, ch, &OpFailure{Code: "other", Detail: err.Error()})
+			return
+		}
+	}
+
 	sshClient, release, fp, sshUser, err := m.ssh.AcquireSSH(ctx, userID, hostID)
 	if err != nil {
 		if m.isOpCancelled(rop) {
@@ -2122,10 +2146,23 @@ func (m *Manager) runInstallOp(ctx context.Context, rop *runningOp, op *store.Co
 	own := newSSHOwnership(release)
 	defer own.releaseIfOwned()
 
-	// If binding was unknown when StartInstall began, bind it now and enforce account exclusivity.
+	// Record real SSH authentication for this host record so shared status is visible.
+	if fp != "" && sshUser != "" {
+		_ = m.store.RecordSSHVerified(ctx, hostID, fp, sshUser)
+	}
+
+	// If binding was unknown when StartInstall began, wait for any peer OpInstall
+	// on the same account and claim account exclusivity instead of failing to off.
 	acct := accountKey{Fingerprint: fp, Username: sshUser}
 	if acct.valid() && !rop.acct.valid() {
-		if err := m.attachOpAccount(rop, acct); err != nil {
+		if err := m.waitAndClaimInstallAccount(ctx, rop, acct); err != nil {
+			if m.isOpCancelled(rop) || m.AdminDisabled() {
+				if m.AdminDisabled() {
+					return
+				}
+				m.finishOpCancelled(op, ch)
+				return
+			}
 			m.finishOpFail(op, ch, &OpFailure{Code: "other", Detail: err.Error()})
 			return
 		}
@@ -2139,7 +2176,105 @@ func (m *Manager) runInstallOp(ctx context.Context, rop *runningOp, op *store.Co
 		}
 	}
 
+	// Fast path for concurrent/subsequent peer host install on the same account:
+	// if another host record already installed and attached a live sharedConn
+	// running Release >= dist.Release, register this host on the live shared
+	// connection without disrupting the peer or re-uploading.
+	if acct.valid() && !m.AdminDisabled() && !m.isOpCancelled(rop) {
+		if m.tryAttachInstallToLiveConn(ctx, op, ch, dist, userID, hostID, corralUser, acct) {
+			return
+		}
+	}
+
 	m.runInstallWithSSH(ctx, rop, op, ch, dist, userID, hostID, corralUser, fp, sshUser, sshClient, own)
+}
+
+func (m *Manager) tryAttachInstallToLiveConn(ctx context.Context, op *store.CorraldOp, ch *store.CorraldHost, dist *Dist, userID, hostID int64, corralUser string, key accountKey) bool {
+	sc := m.getSharedConn(key)
+	if sc == nil {
+		return false
+	}
+	sc.mu.Lock()
+	client := sc.client
+	hello := sc.hello
+	sock := sc.socketPath
+	mid := sc.machineID
+	sc.mu.Unlock()
+	if client == nil || client.Closed() || hello == nil || hello.Release < dist.Release {
+		return false
+	}
+
+	freshHello, err := client.Hello(ctx, proto.HelloParams{
+		Gateway:        m.gatewayID,
+		GatewayVersion: m.gatewayVersion,
+		ProtoMin:       m.protoMin,
+		ProtoMax:       m.protoMax,
+		Client: proto.ClientIdentity{
+			CorralUser: corralUser,
+			HostID:     strconv.FormatInt(hostID, 10),
+		},
+	})
+	if err != nil || freshHello == nil || freshHello.Release < dist.Release {
+		return false
+	}
+
+	var peerFiles []string
+	if peers, perr := m.store.CorraldPeersByBinding(ctx, key.Fingerprint, key.Username); perr == nil {
+		for _, p := range peers {
+			if p.HostID != hostID {
+				if pch, cerr := m.store.CorraldHostByID(ctx, p.HostID); cerr == nil && len(pch.Files) > 0 {
+					peerFiles = slices.Clone(pch.Files)
+					break
+				}
+			}
+		}
+	}
+
+	m.policyMu.RLock()
+	if m.adminDisabled.Load() {
+		m.policyMu.RUnlock()
+		return false
+	}
+	m.mu.Lock()
+	if m.closed || m.conns[key] != sc {
+		m.mu.Unlock()
+		m.policyMu.RUnlock()
+		return false
+	}
+	m.hostConn[hostID] = key
+	m.mu.Unlock()
+
+	sc.mu.Lock()
+	sc.hello = freshHello
+	sc.hostRefs[hostID] = &hostRef{HostID: hostID, OwnerID: userID, CorralUser: corralUser}
+	sc.mu.Unlock()
+
+	now := time.Now().Unix()
+	ch.State = StateRunning
+	ch.Version = freshHello.Version
+	ch.Release = freshHello.Release
+	if sock != "" {
+		ch.SocketPath = sock
+	}
+	if mid != "" {
+		ch.MachineID = mid
+	}
+	if len(peerFiles) > 0 {
+		ch.Files = peerFiles
+	}
+	ch.LastOKAt = now
+	ch.RestartCount = 0
+	ch.LastError = ""
+	op.State = OpDone
+	op.Step = "start"
+	op.ErrorCode = ""
+	ok, _ := m.store.FinalizeCorraldOpWithHost(context.Background(), op, ch)
+	m.policyMu.RUnlock()
+	if !ok {
+		return false
+	}
+	m.notifyCoverageForConn(sc)
+	return true
 }
 
 func (m *Manager) runInstallWithSSH(ctx context.Context, rop *runningOp, op *store.CorraldOp, ch *store.CorraldHost, dist *Dist, userID, hostID int64, corralUser, fp, sshUser string, sshClient *ssh.Client, own *sshOwnership) {
@@ -2544,6 +2679,10 @@ func (m *Manager) launchUpdateOp(ctx context.Context, userID, hostID int64, corr
 				if ok, _ := m.store.ReleaseCorraldHostOpAndFinish(context.Background(), hostID, op, StateRemovePending); ok {
 					m.markPendingCleanup()
 				}
+				// Fix8 Item #2: Always finalize the corrald_ops row by op.ID even
+				// when runUpdateOp's exit cleanup already cleared active_op_id on
+				// corrald_hosts, so idx_corrald_ops_active_* never blocks future ops.
+				_, _ = m.store.UpdateCorraldOpIfActive(context.Background(), op)
 				return
 			}
 			op.State = OpFailed
@@ -2551,6 +2690,7 @@ func (m *Manager) launchUpdateOp(ctx context.Context, userID, hostID int64, corr
 				op.ErrorCode = "other"
 			}
 			_, _ = m.store.ReleaseCorraldHostOpAndFinish(context.Background(), hostID, op, StateRunning)
+			_, _ = m.store.UpdateCorraldOpIfActive(context.Background(), op)
 		}()
 		m.runUpdateOp(opCtx, rop, op, ch, dist, userID, hostID, corralUser, replace)
 	}()
@@ -4690,6 +4830,68 @@ func (m *Manager) registerRunningOp(rop *runningOp) error {
 	return nil
 }
 
+func (m *Manager) registerInstallOp(rop *runningOp) (*runningOp, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.closed {
+		return nil, errors.New("manager closed")
+	}
+	if _, exists := m.opsByHost[rop.hostID]; exists {
+		return nil, store.ErrOpInProgress
+	}
+	var waitPeer *runningOp
+	if rop.acct.valid() {
+		if existing, exists := m.opsByAcct[rop.acct]; exists {
+			if existing.kind != OpInstall {
+				return nil, store.ErrOpInProgress
+			}
+			// Fix8 Item #7: Another host record of the same account is already
+			// installing corrald; queue behind it instead of returning 409 / silent off.
+			waitPeer = existing
+			rop.pendingAcct = rop.acct
+			rop.acct = accountKey{}
+		} else {
+			m.opsByAcct[rop.acct] = rop
+		}
+	}
+	m.opsByHost[rop.hostID] = rop
+	return waitPeer, nil
+}
+
+func (m *Manager) waitAndClaimInstallAccount(ctx context.Context, rop *runningOp, acct accountKey) error {
+	for {
+		m.mu.Lock()
+		if m.closed {
+			m.mu.Unlock()
+			return errors.New("manager closed")
+		}
+		if rop.cancelled || m.adminDisabled.Load() {
+			m.mu.Unlock()
+			return ErrAdminDisabled
+		}
+		prev, exists := m.opsByAcct[acct]
+		if !exists || prev == rop {
+			rop.acct = acct
+			rop.pendingAcct = acct
+			m.opsByAcct[acct] = rop
+			m.mu.Unlock()
+			return nil
+		}
+		if prev.kind != OpInstall {
+			m.mu.Unlock()
+			return store.ErrOpInProgress
+		}
+		doneCh := prev.done
+		m.mu.Unlock()
+
+		select {
+		case <-doneCh:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+}
+
 func (m *Manager) attachOpAccount(rop *runningOp, acct accountKey) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -4753,6 +4955,11 @@ func (m *Manager) cancelAndWaitOps(ctx context.Context, hostID int64, acct accou
 	add(m.opsByHost[hostID])
 	if acct.valid() {
 		add(m.opsByAcct[acct])
+		for _, rop := range m.opsByHost {
+			if rop != nil && rop.pendingAcct == acct {
+				add(rop)
+			}
+		}
 	}
 	m.mu.Unlock()
 

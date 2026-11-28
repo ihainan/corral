@@ -100,6 +100,7 @@ type HostProbe struct {
 	HasTombstone  bool
 	HasSymlink    bool
 	HasInstall    bool
+	HasRunDir     bool
 	CurrentTarget string
 	Stages        []string
 	Versions      []string
@@ -171,6 +172,9 @@ if [ -d "$L" ]; then
     [ -d "$d" ] && echo "version_dir=$(basename "$d")"
   done
 fi
+if [ -e "$HOME/.local/state/corral/run" ]; then
+  echo "has_run_dir=1"
+fi
 echo "result=ok"
 `)
 }
@@ -203,6 +207,7 @@ func ParseProbe(out []byte) (*HostProbe, error) {
 		FreeKB:        -1,
 		HomeWritable:  f["home_writable"] == "1",
 		HasSymlink:    f["has_symlink"] == "1",
+		HasRunDir:     f["has_run_dir"] == "1",
 		CurrentTarget: strings.TrimSpace(f["current_target"]),
 	}
 	p.Arch = ArchMap[p.Machine]
@@ -267,6 +272,21 @@ func ComputeSocketPath(home, uid, mid string) string {
 // directory (0700) step-by-step, refusing any symlink or foreign-owned component
 // along ~/.local/lib/corral and ~/.local/state/corral/corrald/<mid>/stage-<op>.
 func MkStageCommand(home, stateDir, stageDir string) string {
+	return mkStageCommandWithOptions(home, stateDir, stageDir, false)
+}
+
+// MkStageForRecoveryCommand creates the normal stage-<op> directory while
+// requiring a removing tombstone (used when reinstalling the binary into LibDir
+// solely to run locked Go uninstall recovery).
+func MkStageForRecoveryCommand(home, stateDir, stageDir string) string {
+	return mkStageCommandWithOptions(home, stateDir, stageDir, true)
+}
+
+func mkStageCommandWithOptions(home, stateDir, stageDir string, forRecovery bool) string {
+	tombCheck := `if [ -e "$ST/removing" ]; then echo "error=removing"; exit 1; fi`
+	if forRecovery {
+		tombCheck = `if [ ! -f "$ST/removing" ] || [ -L "$ST/removing" ]; then echo "error=no_tombstone"; exit 1; fi`
+	}
 	return shellScript(`umask 077
 ME=$(id -u)
 check_or_mk() {
@@ -329,7 +349,7 @@ check_or_mk "$H/.local/state" ""
 check_or_mk "$H/.local/state/corral" ""
 check_or_mk "$H/.local/state/corral/corrald" ""
 check_or_mk "$ST" "700"
-if [ -e "$ST/removing" ]; then echo "error=removing"; exit 1; fi
+`+tombCheck+`
 check_or_mk "$STAGE" "700"
 echo "result=ok"
 `, "HOME_DIR", home, "ST", stateDir, "STAGE", stageDir)
@@ -364,6 +384,14 @@ func InstallCommand(binPath, stageDir, opID, gateway, by string, upgrade bool) s
 	}
 	return shellScript(`"$BIN" install --stage "$STAGE" --op "$OP" --gateway "$GW" --by "$BY"`+upFlag+`
 `, "BIN", binPath, "STAGE", stageDir, "OP", opID, "GW", gateway, "BY", by)
+}
+
+// InstallForRecoveryCommand places the staged binary into LibDir under
+// .corrald-shared.lock -> op.lock without writing install.json or removing the
+// removing tombstone, so the subsequent locked `corrald uninstall` can run.
+func InstallForRecoveryCommand(binPath, stageDir, opID, gateway string) string {
+	return shellScript(`"$BIN" install --stage "$STAGE" --op "$OP" --gateway "$GW" --for-uninstall-recovery
+`, "BIN", binPath, "STAGE", stageDir, "OP", opID, "GW", gateway)
 }
 
 // ServeCommand starts corrald detached via `<bin> serve --gateway <gw>`,
@@ -441,79 +469,12 @@ func UninstallCommand(libDir, stateDir, sockPath, opID string) string {
 //   - when no state dir, corrald lib entries, or last-machine run/ dir remain:
 //     reports result=removed;
 //   - when a removing tombstone exists without a binary: reports
-//     error=binary_missing_with_tombstone so the gateway can upload a temporary
-//     Go corrald binary and execute the locked Go uninstall path instead of
-//     running an unlocked shell fallback;
+//     error=binary_missing_with_tombstone so the gateway reinstalls its own
+//     corrald binary into LibDir through the normal locked install path (without
+//     starting the daemon) and then runs the normal locked Go uninstall;
 //   - otherwise fails closed with error=cannot_verify_exclusivity.
 func UninstallCommandSoleGateway(libDir, stateDir, sockPath, opID, soleGateway string) string {
 	return uninstallCommandWithOptions(libDir, stateDir, sockPath, opID, soleGateway)
-}
-
-// MkRecoveryDirCommand safely creates a private 0700 temporary directory under
-// ~/.local/state/corral/ for uploading a temporary corrald binary when
-// recovering from a leftover removing tombstone whose host binary was already
-// deleted.
-func MkRecoveryDirCommand(home, recoveryDir string) string {
-	return shellScript(`umask 077
-ME=$(id -u)
-check_or_mk() {
-  p="$1"
-  mode="$2"
-  if [ -L "$p" ]; then
-    echo "error=unsafe_path"
-    echo "detail=symlink at $p"
-    exit 1
-  fi
-  if [ -e "$p" ]; then
-    if [ ! -d "$p" ]; then
-      echo "error=unsafe_path"
-      echo "detail=not a directory: $p"
-      exit 1
-    fi
-  else
-    mkdir "$p" || { echo "error=mkdir"; exit 1; }
-  fi
-  if [ -L "$p" ] || [ ! -d "$p" ]; then
-    echo "error=unsafe_path"
-    exit 1
-  fi
-  own=$(stat -c %u "$p" 2>/dev/null || echo "")
-  if [ -n "$own" ] && [ "$own" != "$ME" ]; then
-    echo "error=unsafe_path"
-    echo "detail=unexpected owner $own on $p"
-    exit 1
-  fi
-  if [ -n "$mode" ]; then
-    chmod "$mode" "$p" || { echo "error=chmod"; exit 1; }
-  fi
-}
-H="${HOME_DIR%/}"
-check_or_mk "$H/.local" ""
-check_or_mk "$H/.local/state" ""
-check_or_mk "$H/.local/state/corral" ""
-check_or_mk "$RDIR" "700"
-echo "result=ok"
-`, "HOME_DIR", home, "RDIR", recoveryDir)
-}
-
-// RmRecoveryDirCommand removes a temporary recovery binary directory and
-// best-effort removes ~/.local/state/corral if now empty.
-func RmRecoveryDirCommand(recoveryDir string) string {
-	return shellScript(`rm -rf -- "$RDIR"
-rmdir -- "$(dirname -- "$RDIR")" 2>/dev/null || true
-echo "result=ok"
-`, "RDIR", recoveryDir)
-}
-
-// RunBinaryUninstallSoleGatewayCommand executes a specific uploaded corrald
-// binary's `uninstall --only-if-sole-gateway` subcommand.
-func RunBinaryUninstallSoleGatewayCommand(binPath, opID, soleGateway string) string {
-	return shellScript(`if [ -n "$OP" ]; then
-  "$BIN" uninstall --op "$OP" --only-if-sole-gateway "$GW"
-else
-  "$BIN" uninstall --only-if-sole-gateway "$GW"
-fi
-`, "BIN", binPath, "OP", opID, "GW", soleGateway)
 }
 
 func uninstallCommandWithOptions(libDir, stateDir, sockPath, opID, soleGateway string) string {

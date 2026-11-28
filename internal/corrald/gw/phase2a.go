@@ -1009,7 +1009,7 @@ func (m *Manager) runSafeCleanupLocked(
 	}
 
 	files := ReadHostStateFiles(ctx, sshClient, probe, "")
-	hasOnHost := probe.HasSymlink || probe.HasInstall || probe.HasTombstone ||
+	hasOnHost := probe.HasSymlink || probe.HasInstall || probe.HasTombstone || probe.HasRunDir ||
 		len(probe.Versions) > 0 || len(probe.Stages) > 0 ||
 		files.Install != nil || files.Meta != nil
 	if !hasOnHost {

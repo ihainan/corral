@@ -1968,13 +1968,16 @@ func TestCorraldFix7_EndToEnd(t *testing.T) {
 		sshCl := dialTestSSH(t, sshSrv)
 		defer sshCl.Close()
 
-		// Probe the fresh home to get exact libDir/stateDir/machineID.
-		probe, err := gw.ProbeHost(context.Background(), sshCl)
+		// Probe once to learn paths, then set up the exact production fault state
+		// (binaries removed, removing tombstone + .corrald-shared.lock + read-only run/),
+		// and THEN re-probe AFTER creating the tombstone (production order:
+		// probe.HasTombstone == true)!
+		initProbe, err := gw.ProbeHost(context.Background(), sshCl)
 		if err != nil {
 			t.Fatalf("ProbeHost: %v", err)
 		}
-		libDir := probe.LibDir
-		stateDir := probe.StateDir
+		libDir := initProbe.LibDir
+		stateDir := initProbe.StateDir
 		runDir := filepath.Join(home, ".local", "state", "corral", "run")
 		if err := os.MkdirAll(libDir, 0o700); err != nil {
 			t.Fatal(err)
@@ -1985,8 +1988,6 @@ func TestCorraldFix7_EndToEnd(t *testing.T) {
 		if err := os.MkdirAll(runDir, 0o700); err != nil {
 			t.Fatal(err)
 		}
-		// Simulate binaries already removed, leaving valid removing tombstone +
-		// .corrald-shared.lock + a leftover file inside read-only run/.
 		tombPath := filepath.Join(stateDir, "removing")
 		if err := os.WriteFile(tombPath, []byte(`{"created_at":"2026-11-28T00:00:00Z","gateway":"gw-fix7.local"}`+"\n"), 0o600); err != nil {
 			t.Fatal(err)
@@ -2004,6 +2005,15 @@ func TestCorraldFix7_EndToEnd(t *testing.T) {
 			t.Fatal(err)
 		}
 		t.Cleanup(func() { _ = os.Chmod(runDir, 0o700) })
+
+		// Re-probe AFTER creating the tombstone (production order, Fix8 Item #1)!
+		probe, err := gw.ProbeHost(context.Background(), sshCl)
+		if err != nil {
+			t.Fatalf("ProbeHost (with tombstone): %v", err)
+		}
+		if !probe.HasTombstone || !probe.HasRunDir {
+			t.Fatalf("expected HasTombstone=true and HasRunDir=true, got %+v", probe)
+		}
 
 		// Hold .corrald-shared.lock concurrently to prove Go recovery blocks on
 		// .corrald-shared.lock (Item #1)!
@@ -2024,26 +2034,31 @@ func TestCorraldFix7_EndToEnd(t *testing.T) {
 		select {
 		case out := <-outCh:
 			_ = lockFD.Close()
-			t.Fatalf("Fix7 Item #1 regression: no-binary recovery did NOT wait on .corrald-shared.lock! out=%+v", out)
+			t.Fatalf("Fix7/Fix8 Item #1 regression: no-binary recovery did NOT wait on .corrald-shared.lock! out=%+v", out)
 		case <-time.After(200 * time.Millisecond):
 		}
 		_ = lockFD.Close()
 
 		// First attempt must report partial because run/ could not be removed (Item #8),
-		// AND must preserve the removing tombstone for retry (Item #5)!
+		// AND must preserve the removing tombstone for retry (Fix8 Item #3)!
 		out1 := <-outCh
 		if out1.Result != "partial" {
-			t.Fatalf("Fix7 Item #8 regression: expected result=partial when run/ cannot be deleted, got %+v", out1)
+			t.Fatalf("Fix7/Fix8 regression: expected result=partial when run/ cannot be deleted, got %+v", out1)
 		}
 		if _, err := os.Stat(tombPath); err != nil {
-			t.Fatalf("Fix7 Item #5 regression: removing tombstone was deleted on partial recovery failure: %v", err)
+			t.Fatalf("Fix8 Item #3 regression: removing tombstone was deleted on partial recovery failure: %v", err)
 		}
 
-		// Clear fault -> second retry completes cleanly to result=removed and removes run/ + stateDir + temp recovery dir!
+		// Clear fault -> re-probe (still has tombstone) and retry -> completes cleanly
+		// to result=removed and removes run/, stateDir, libDir, and any stage dir!
 		if err := os.Chmod(runDir, 0o700); err != nil {
 			t.Fatal(err)
 		}
-		out2 := gw.RunUninstallSoleGatewayWithRetry(context.Background(), sshCl, distV1, probe, "op7rec2", "gw-fix7.local", gw.DefaultBusyRetryPolicy, nil)
+		probe2, err := gw.ProbeHost(context.Background(), sshCl)
+		if err != nil {
+			t.Fatalf("ProbeHost retry: %v", err)
+		}
+		out2 := gw.RunUninstallSoleGatewayWithRetry(context.Background(), sshCl, distV1, probe2, "op7rec2", "gw-fix7.local", gw.DefaultBusyRetryPolicy, nil)
 		if out2.Result != "removed" {
 			t.Fatalf("expected retry to succeed with result=removed, got %+v", out2)
 		}
@@ -2053,8 +2068,63 @@ func TestCorraldFix7_EndToEnd(t *testing.T) {
 		if _, err := os.Lstat(stateDir); !os.IsNotExist(err) {
 			t.Fatalf("expected stateDir removed, stat err=%v", err)
 		}
-		if _, err := os.Lstat(filepath.Join(home, ".local", "state", "corral", ".rm-op7rec2")); !os.IsNotExist(err) {
-			t.Fatalf("expected temp recovery dir removed, stat err=%v", err)
+		if _, err := os.Lstat(libDir); !os.IsNotExist(err) {
+			t.Fatalf("expected libDir removed, stat err=%v", err)
+		}
+	})
+
+	t.Run("fix8_item1_4_5_binaryless_tombstone_recovery_when_libdir_missing", func(t *testing.T) {
+		sshSrv, home := startCorraldSSH(t)
+		sshCl := dialTestSSH(t, sshSrv)
+		defer sshCl.Close()
+
+		initProbe, err := gw.ProbeHost(context.Background(), sshCl)
+		if err != nil {
+			t.Fatalf("ProbeHost: %v", err)
+		}
+		libDir := initProbe.LibDir
+		stateDir := initProbe.StateDir
+		runDir := filepath.Join(home, ".local", "state", "corral", "run")
+		// LibDir is intentionally ABSENT (simulating partial uninstall that already
+		// deleted LibDir while leaving removing tombstone and run/).
+		if err := os.MkdirAll(stateDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(runDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(runDir, "corral-send-tmux-_1"), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		tombPath := filepath.Join(stateDir, "removing")
+		if err := os.WriteFile(tombPath, []byte(`{"created_at":"2026-11-28T00:00:00Z","gateway":"gw-fix8.local"}`+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		// Production order: probe AFTER tombstone exists!
+		probe, err := gw.ProbeHost(context.Background(), sshCl)
+		if err != nil {
+			t.Fatalf("ProbeHost (tombstone, no LibDir): %v", err)
+		}
+		if !probe.HasTombstone || probe.HasSymlink || !probe.HasRunDir {
+			t.Fatalf("unexpected probe: %+v", probe)
+		}
+
+		out := gw.RunUninstallSoleGatewayWithRetry(context.Background(), sshCl, distV1, probe, "op8rec1", "gw-fix8.local", gw.DefaultBusyRetryPolicy, nil)
+		if out.Result != "removed" {
+			t.Fatalf("Fix8 Items #1+#4+#5 regression: expected result=removed when LibDir missing + tombstone present, got %+v", out)
+		}
+		if _, err := os.Lstat(libDir); !os.IsNotExist(err) {
+			t.Fatalf("expected LibDir removed after recovery, stat err=%v", err)
+		}
+		if _, err := os.Lstat(stateDir); !os.IsNotExist(err) {
+			t.Fatalf("expected StateDir removed after recovery, stat err=%v", err)
+		}
+		if _, err := os.Lstat(runDir); !os.IsNotExist(err) {
+			t.Fatalf("expected run/ removed after recovery, stat err=%v", err)
+		}
+		if matches, _ := filepath.Glob(filepath.Join(home, ".local", "state", "corral", ".rm-*")); len(matches) > 0 {
+			t.Fatalf("unexpected .rm-* leftovers: %v", matches)
 		}
 	})
 
@@ -2117,6 +2187,18 @@ func TestCorraldFix7_EndToEnd(t *testing.T) {
 			time.Sleep(50 * time.Millisecond)
 		}
 
+		// Fix8 Item #2: Verify the corrald_ops row was explicitly finished (NOT left
+		// running by ReleaseCorraldHostOpAndFinish matching 0 rows)!
+		if err := h.srv.corrald.WaitOpsIdle(context.Background()); err != nil {
+			t.Fatalf("WaitOpsIdle: %v", err)
+		}
+		if actOp, actErr := h.srv.store.ActiveCorraldOp(context.Background(), hostID); !errors.Is(actErr, store.ErrNotFound) {
+			t.Fatalf("Fix8 Item #2 regression: corrald_ops row still active after update-disable! op=%+v err=%v", actOp, actErr)
+		}
+		if latestOp, lerr := h.srv.store.LatestCorraldOp(context.Background(), hostID); lerr != nil || latestOp.State != gw.OpCancelled {
+			t.Fatalf("Fix8 Item #2 regression: expected latest op state=cancelled, got (%+v, %v)", latestOp, lerr)
+		}
+
 		// Once transient probe error clears, existing-conn retry cleans up cleanly to off!
 		failProbe.Store(false)
 		existingSSH := dialTestSSH(t, sshSrv)
@@ -2136,6 +2218,12 @@ func TestCorraldFix7_EndToEnd(t *testing.T) {
 			}
 			time.Sleep(50 * time.Millisecond)
 		}
+
+		// Fix8 Item #2: Re-allow and start a fresh install — must succeed (202 -> running),
+		// proving idx_corrald_ops_active_* is not wedged by an orphaned running op row!
+		h.srv.corrald.SetAdminDisabled(context.Background(), false)
+		startCorraldInstall(t, admin, hostID)
+		waitCorraldState(t, admin, hostID, gw.StateRunning)
 		_ = fp
 	})
 
@@ -2175,11 +2263,18 @@ func TestCorraldFix7_EndToEnd(t *testing.T) {
 		if out, err := serveCmd.CombinedOutput(); err != nil {
 			t.Fatalf("pre-serve: %v (%s)", err, out)
 		}
+		// Verify daemon is genuinely running before StartInstall.
+		statusCmd := exec.Command(installedBin, "status")
+		statusCmd.Env = append(os.Environ(), "HOME="+home)
+		if stStatus, _ := statusCmd.CombinedOutput(); !strings.Contains(string(stStatus), "state=running") {
+			t.Fatalf("expected pre-started daemon to be running, got: %s", string(stStatus))
+		}
 
 		// Trigger SetAdminDisabled(true) right after Hello inside attachAndHello
 		// (which cancels install's opCtx!) while also failing probe transiently
 		// so immediate uninstall cannot finish -> MUST end in StateRemovePending
-		// (NEVER StateOff while binary/daemon remain on host!).
+		// (NEVER StateOff while binary/daemon remain on host!) AND MUST actually
+		// stop the daemon via conditional shutdown RPC over a non-cancelled context!
 		var failProbe atomic.Bool
 		var once sync.Once
 		h.srv.corrald.Close()
@@ -2220,7 +2315,212 @@ func TestCorraldFix7_EndToEnd(t *testing.T) {
 			}
 			time.Sleep(50 * time.Millisecond)
 		}
+		// Fix8 Item #6: Because failProbe is still true, SSH uninstall could NOT have
+		// stopped the daemon — proving the daemon stopped here proves
+		// enforceAdminDisableOnClient actually ran Health + ShutdownConditional RPC
+		// on a non-cancelled context!
+		waitDaemonStopped(t, home)
 	})
+}
+
+// Regression test for Fix Round 8 Item #3 [P1] (gateway hasOnHost side):
+// If only ~/.local/state/corral/run remains on the host (no LibDir, no StateDir),
+// ProbeHost must report HasRunDir=true and cleanup must NOT silently flip the
+// host to StateOff while run/ cannot be removed.
+func TestCorraldFix8_RunDirCountsAsOnHost(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("requires linux")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("chmod 0500 does not block root")
+	}
+	v1Dir, _ := buildTestCorraldDist(t)
+	h := newHarness(t, func(c *config.Config) {
+		c.CorraldDir = v1Dir
+		c.GatewayID = "gw-fix8-run.local"
+	})
+	admin := h.admin()
+	adminID := userIDOf(t, admin)
+	sshSrv, home := startCorraldSSH(t)
+	hostID, _ := createAndPinHost(t, admin, sshSrv, "run-only-leftover")
+	fp := hostFingerprint(t, h, adminID, hostID)
+
+	// Place ONLY ~/.local/state/corral/run with a leftover file (no LibDir, no StateDir).
+	runDir := filepath.Join(home, ".local", "state", "corral", "run")
+	if err := os.MkdirAll(runDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(runDir, "corral-send-tmux-_9"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(runDir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(runDir, 0o700) })
+
+	// Verify ProbeHost reports HasRunDir=true.
+	sshCl := dialTestSSH(t, sshSrv)
+	defer sshCl.Close()
+	probe, err := gw.ProbeHost(context.Background(), sshCl)
+	if err != nil {
+		t.Fatalf("ProbeHost: %v", err)
+	}
+	if !probe.HasRunDir {
+		t.Fatalf("Fix8 Item #3 regression: expected ProbeHost.HasRunDir=true, got %+v", probe)
+	}
+
+	// Put host in StateRemovePending while admin-disabled and trigger retry.
+	uid := adminID
+	if err := h.srv.store.UpsertCorraldHost(context.Background(), &store.CorraldHost{
+		HostID:           hostID,
+		State:            gw.StateRemovePending,
+		ConsentBy:        &uid,
+		ConsentAt:        time.Now().Unix(),
+		BoundFingerprint: fp,
+		BoundUsername:    "alice",
+		BoundGateway:     "gw-fix8-run.local",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	h.srv.corrald.SetAdminDisabled(context.Background(), true)
+	// Call Status once so the manager marks hasPendingCleanup for this
+	// remove_pending host, then trigger MaybeRetryPendingCleanup over our live SSH.
+	stRes := admin.do("GET", fmt.Sprintf("/api/hosts/%d/corrald", hostID), nil)
+	mustStatus(t, stRes, http.StatusOK, "status marks pending cleanup")
+	h.srv.corrald.MaybeRetryPendingCleanup(adminID, hostID, "admin", sshCl)
+
+	// Wait for retry goroutine to complete.
+	time.Sleep(500 * time.Millisecond)
+	ch, err := h.srv.store.CorraldHostByID(context.Background(), hostID)
+	if err != nil {
+		t.Fatalf("CorraldHostByID: %v", err)
+	}
+	if ch.State == gw.StateOff {
+		t.Fatalf("Fix8 Item #3 regression: host flipped to StateOff even though %s still exists on host!", runDir)
+	}
+}
+
+type lateBindingSSHProvider struct {
+	inner    gw.SSHProvider
+	mu       sync.Mutex
+	acquired map[int64]bool
+}
+
+func (p *lateBindingSSHProvider) AcquireSSH(ctx context.Context, ownerID, hostID int64) (*ssh.Client, func(), string, string, error) {
+	cl, rel, fp, u, err := p.inner.AcquireSSH(ctx, ownerID, hostID)
+	if err == nil && fp != "" {
+		p.mu.Lock()
+		if p.acquired == nil {
+			p.acquired = make(map[int64]bool)
+		}
+		p.acquired[hostID] = true
+		p.mu.Unlock()
+	}
+	return cl, rel, fp, u, err
+}
+
+func (p *lateBindingSSHProvider) HostBinding(ctx context.Context, ownerID, hostID int64) (string, string, error) {
+	p.mu.Lock()
+	ok := p.acquired[hostID]
+	p.mu.Unlock()
+	if !ok {
+		return "", "", nil
+	}
+	return p.inner.HostBinding(ctx, ownerID, hostID)
+}
+
+func (p *lateBindingSSHProvider) UserLabel(ctx context.Context, userID int64) string {
+	return p.inner.UserLabel(ctx, userID)
+}
+
+// Regression test for Fix Round 8 Item #7 [P2]:
+// Two hosts pointing to the same SSH account installed back-to-back concurrently
+// MUST both accept (202) and BOTH reach StateRunning with consent recorded —
+// never leaving host 2 in silent StateOff or returning 409.
+func TestCorraldFix8_ConcurrentSameAccountInstall(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("requires linux")
+	}
+	v1Dir, _ := buildTestCorraldDist(t)
+	distV1, err := gw.LoadDist(v1Dir)
+	if err != nil {
+		t.Fatalf("LoadDist v1: %v", err)
+	}
+
+	runCase := func(t *testing.T, lateBinding bool) {
+		h := newHarness(t, func(c *config.Config) {
+			c.CorraldDir = v1Dir
+			c.GatewayID = "gw-fix8-conc.local"
+		})
+		admin := h.admin()
+		sshSrv, _ := startCorraldSSH(t)
+
+		h1, _ := createAndPinHost(t, admin, sshSrv, "same-acct-1")
+		h2, _ := createAndPinHost(t, admin, sshSrv, "same-acct-2")
+
+		if lateBinding {
+			h.srv.corrald.Close()
+			h.srv.corrald = gw.NewManager(gw.ManagerConfig{
+				Store:     h.store,
+				Dist:      distV1,
+				GatewayID: "gw-fix8-conc.local",
+				SSH:       &lateBindingSSHProvider{inner: &webSSHProvider{s: h.srv}},
+			})
+		}
+
+		// Fetch manifest_hash first, then fire POST /api/hosts/{h1,h2}/corrald/install
+		// back-to-back concurrently.
+		st := admin.do("GET", fmt.Sprintf("/api/hosts/%d/corrald", h1), nil)
+		mustStatus(t, st, http.StatusOK, "get manifest_hash")
+		mhash, _ := st.json()["manifest_hash"].(string)
+
+		start := make(chan struct{})
+		codes := make([]int, 2)
+		bodies := make([]string, 2)
+		var wg sync.WaitGroup
+		for i, hid := range []int64{h1, h2} {
+			wg.Add(1)
+			go func(idx int, hostID int64) {
+				defer wg.Done()
+				<-start
+				r := admin.do("POST", fmt.Sprintf("/api/hosts/%d/corrald/install", hostID), map[string]any{
+					"manifest_hash": mhash,
+				})
+				codes[idx] = r.Status
+				bodies[idx] = string(r.Body)
+			}(i, hid)
+		}
+		close(start)
+		wg.Wait()
+
+		for i, hid := range []int64{h1, h2} {
+			if codes[i] != http.StatusAccepted {
+				t.Fatalf("Fix8 Item #7 regression (lateBinding=%v): host %d install returned %d (want 202): %s", lateBinding, hid, codes[i], bodies[i])
+			}
+		}
+
+		// Both hosts MUST settle in StateRunning with consent recorded!
+		waitCorraldState(t, admin, h1, gw.StateRunning)
+		waitCorraldState(t, admin, h2, gw.StateRunning)
+		for _, hid := range []int64{h1, h2} {
+			ch, err := h.srv.store.CorraldHostByID(context.Background(), hid)
+			if err != nil {
+				t.Fatalf("CorraldHostByID(%d): %v", hid, err)
+			}
+			if ch.State != gw.StateRunning {
+				t.Fatalf("Fix8 Item #7 regression (lateBinding=%v): host %d ended in state=%q (want running)", lateBinding, hid, ch.State)
+			}
+			if ch.ConsentBy == nil || ch.ConsentAt <= 0 {
+				t.Fatalf("Fix8 Item #7 regression (lateBinding=%v): host %d missing consent: %+v", lateBinding, hid, ch)
+			}
+		}
+		if n := h.srv.corrald.SharedConnCount(); n != 1 {
+			t.Fatalf("expected 1 shared corrald connection for both hosts, got %d", n)
+		}
+	}
+
+	t.Run("pinned_hosts", func(t *testing.T) { runCase(t, false) })
+	t.Run("late_binding_hosts", func(t *testing.T) { runCase(t, true) })
 }
 
 func syscallFlockEx(f *os.File) error {

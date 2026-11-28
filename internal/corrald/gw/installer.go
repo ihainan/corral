@@ -287,6 +287,16 @@ func RecordFailedOnHost(ctx context.Context, c *ssh.Client, home string, expecte
 
 // ValidateProbe checks whether the probed host satisfies corrald requirements.
 func ValidateProbe(probe *HostProbe, dist *Dist) (*ArchBinary, *OpFailure) {
+	return validateProbeWithOptions(probe, dist, false)
+}
+
+// ValidateProbeForRecovery validates OS/arch/writability/space when recovering
+// from a leftover removing tombstone whose host binary was already deleted.
+func ValidateProbeForRecovery(probe *HostProbe, dist *Dist) (*ArchBinary, *OpFailure) {
+	return validateProbeWithOptions(probe, dist, true)
+}
+
+func validateProbeWithOptions(probe *HostProbe, dist *Dist, allowTombstone bool) (*ArchBinary, *OpFailure) {
 	if probe == nil {
 		return nil, &OpFailure{Code: "disconnected", Detail: "host probe unavailable"}
 	}
@@ -312,7 +322,7 @@ func ValidateProbe(probe *HostProbe, dist *Dist) (*ArchBinary, *OpFailure) {
 			Arch: probe.Machine,
 		}
 	}
-	if probe.HasTombstone {
+	if probe.HasTombstone && !allowTombstone {
 		return nil, &OpFailure{
 			Code:      proto.ErrRemoving,
 			MachineID: probe.MachineID,
@@ -690,7 +700,7 @@ func RunUninstallSoleGatewayWithRetry(ctx context.Context, c *ssh.Client, dist *
 		if dist == nil {
 			return UninstallOutcome{Result: "pending", Detail: firstNonEmpty(f["detail"], f["error"])}
 		}
-		return runTempBinarySoleGatewayUninstall(ctx, c, dist, probe, opID, soleGateway, busyRetry, onStep)
+		return runLibDirReinstallSoleGatewayUninstall(ctx, c, dist, probe, opID, soleGateway, busyRetry, onStep)
 	}
 
 	if onStep != nil {
@@ -699,37 +709,41 @@ func RunUninstallSoleGatewayWithRetry(ctx context.Context, c *ssh.Client, dist *
 	return parseSoleGatewayUninstallOutcome(res, err, f)
 }
 
-func runTempBinarySoleGatewayUninstall(ctx context.Context, c *ssh.Client, dist *Dist, probe *HostProbe, opID, soleGateway string, busyRetry BusyRetryPolicy, onStep func(step string)) UninstallOutcome {
-	bin, vfail := ValidateProbe(probe, dist)
+// runLibDirReinstallSoleGatewayUninstall handles binaryless tombstone recovery
+// (Fix8 Items #1+#4+#5): reinstalls the gateway's own corrald binary into
+// LibDir through the normal stage-<op> upload + locked `install --for-uninstall-recovery`
+// path (creating LibDir and acquiring .corrald-shared.lock -> op.lock without
+// starting the daemon or writing install.json), then runs the normal locked
+// `corrald uninstall --only-if-sole-gateway`.
+func runLibDirReinstallSoleGatewayUninstall(ctx context.Context, c *ssh.Client, dist *Dist, probe *HostProbe, opID, soleGateway string, busyRetry BusyRetryPolicy, onStep func(step string)) UninstallOutcome {
+	bin, vfail := ValidateProbeForRecovery(probe, dist)
 	if vfail != nil {
 		return UninstallOutcome{Result: "pending", Detail: firstNonEmpty(vfail.Detail, vfail.Code)}
 	}
 	if opID == "" {
 		opID = newHexID()
 	}
-	home := strings.TrimRight(probe.Home, "/")
-	if home == "" {
-		return UninstallOutcome{Result: "pending", Detail: "probe home is empty"}
-	}
-	tempDir := home + "/.local/state/corral/.rm-" + opID
-	tempBin := tempDir + "/corrald"
+	stageDir := probe.StateDir + "/stage-" + opID
+	stageBin := stageDir + "/corrald"
 
-	mkRes, mkErr := runSSH(ctx, c, MkRecoveryDirCommand(probe.Home, tempDir), 4096, sshx.ExecOptions{})
+	mkRes, mkErr := runSSH(ctx, c, MkStageForRecoveryCommand(probe.Home, probe.StateDir, stageDir), 4096, sshx.ExecOptions{})
 	mkFields := ParseKeyValues(mkRes.Out)
 	if mkErr != nil || mkFields["result"] != "ok" {
 		return UninstallOutcome{Result: "pending", Detail: firstNonEmpty(mkFields["detail"], mkFields["error"], errStr(mkErr))}
 	}
-	defer func() {
+	cleanupStage := func() {
 		cctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		_, _ = runSSH(cctx, c, RmRecoveryDirCommand(tempDir), 4096, sshx.ExecOptions{})
-	}()
+		_, _ = runSSH(cctx, c, RmStageCommand(stageDir), 4096, sshx.ExecOptions{})
+	}
 
-	if err := sftpUploadBinarySecure(ctx, c, bin.Path, probe.Home, probe.UIDInt64(), probe.LibDir, tempDir, tempBin); err != nil {
+	if err := sftpUploadBinarySecure(ctx, c, bin.Path, probe.Home, probe.UIDInt64(), probe.LibDir, stageDir, stageBin); err != nil {
+		cleanupStage()
 		return UninstallOutcome{Result: "pending", Detail: err.Error()}
 	}
-	gotSHA, rerr := sftpReadbackSHA256(ctx, c, tempBin)
+	gotSHA, rerr := sftpReadbackSHA256(ctx, c, stageBin)
 	if rerr != nil || !strings.EqualFold(gotSHA, bin.SHA256) {
+		cleanupStage()
 		detail := "recovery binary checksum mismatch"
 		if rerr != nil {
 			detail = rerr.Error()
@@ -738,11 +752,40 @@ func runTempBinarySoleGatewayUninstall(ctx context.Context, c *ssh.Client, dist 
 	}
 
 	iv, maxRetries := busyRetry.effective()
+	var instRes sshx.ExecResult
+	var instErr error
+	var instF map[string]string
+	for attempt := 0; ; attempt++ {
+		instRes, instErr = runSSH(ctx, c, InstallForRecoveryCommand(stageBin, stageDir, opID, soleGateway), 16<<10, sshx.ExecOptions{})
+		if instErr != nil && !instRes.Ended {
+			cleanupStage()
+			return UninstallOutcome{Result: "pending", Detail: instErr.Error()}
+		}
+		instF = ParseKeyValues(instRes.Out)
+		if instF["error"] == proto.ErrBusy && attempt < maxRetries {
+			if waitBusyRetry(ctx, iv, nil) {
+				continue
+			}
+			cleanupStage()
+			return UninstallOutcome{Result: "pending", Detail: firstNonEmpty(instF["detail"], "busy")}
+		}
+		break
+	}
+	if instF["result"] == "other_gateways" {
+		return UninstallOutcome{Result: "other_gateways", Detail: instF["detail"]}
+	}
+	if instErr != nil || instF["result"] != "ok" {
+		cleanupStage()
+		return UninstallOutcome{Result: "pending", Detail: firstNonEmpty(instF["detail"], instF["error"], errStr(instErr))}
+	}
+
+	// LibDir now holds our corrald binary and .corrald-shared.lock; execute the
+	// normal locked `corrald uninstall --only-if-sole-gateway` path.
 	var res sshx.ExecResult
 	var err error
 	var f map[string]string
 	for attempt := 0; ; attempt++ {
-		res, err = runSSH(ctx, c, RunBinaryUninstallSoleGatewayCommand(tempBin, opID, soleGateway), 64<<10, sshx.ExecOptions{})
+		res, err = runSSH(ctx, c, UninstallCommandSoleGateway(probe.LibDir, probe.StateDir, probe.SocketPath, opID, soleGateway), 64<<10, sshx.ExecOptions{})
 		if err != nil && !res.Ended {
 			return UninstallOutcome{Result: "pending", Detail: err.Error()}
 		}

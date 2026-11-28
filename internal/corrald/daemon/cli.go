@@ -188,11 +188,12 @@ func cmdInstall(args []string, build proto.BuildInfo, stdout io.Writer) int {
 	gateway := fs.String("gateway", "", "gateway identifier")
 	by := fs.String("by", "", "enabling user")
 	upgrade := fs.Bool("upgrade", false, "stage new version without switching symlink")
+	forUninstallRecovery := fs.Bool("for-uninstall-recovery", false, "internal: place binary in lib dir for locked uninstall recovery when removing tombstone exists")
 	if err := fs.Parse(args); err != nil {
 		writeErr(stdout, "invalid_args", err.Error())
 		return 2
 	}
-	if *stageDir == "" || *opID == "" || *gateway == "" || *by == "" {
+	if *stageDir == "" || *opID == "" || *gateway == "" || (*by == "" && !*forUninstallRecovery) {
 		writeErr(stdout, "invalid_args", "required flags: --stage, --op, --gateway, --by")
 		return 2
 	}
@@ -234,6 +235,75 @@ func cmdInstall(args []string, build proto.BuildInfo, stdout io.Writer) int {
 		return 1
 	}
 	defer opLock.Release()
+
+	if *forUninstallRecovery {
+		// Recovery binary placement for binaryless tombstone uninstall:
+		//   - Holds SharedLock (creating LibDir) -> OpLock like normal install.
+		//   - Requires a valid removing tombstone belonging to *gateway.
+		//   - Places the binary + symlink in LibDir WITHOUT writing install.json,
+		//     removing the tombstone, or starting the daemon.
+		if fi, terr := os.Lstat(layout.TombstonePath); terr != nil || !fi.Mode().IsRegular() {
+			_ = os.RemoveAll(expectedStage)
+			writeErr(stdout, "no_tombstone", "removing tombstone not present")
+			return 1
+		}
+		tombRec, tombErr := readUninstallTombstone(layout.TombstonePath)
+		if tombErr != nil || tombRec == nil || tombRec.CreatedAt == "" || tombRec.Gateway == "" {
+			_ = os.RemoveAll(expectedStage)
+			detail := "removing tombstone is truncated or missing required fields"
+			if tombErr != nil {
+				detail = tombErr.Error()
+			}
+			writeErr(stdout, "tombstone_unreadable", detail)
+			return 1
+		}
+		if tombRec.Gateway != *gateway {
+			_ = os.RemoveAll(expectedStage)
+			fmt.Fprintf(stdout, "result=other_gateways\n")
+			return 0
+		}
+		if err := EnsureSecureDir(expectedStage, layout.UID); err != nil {
+			writeErr(stdout, "invalid_stage", err.Error())
+			return 1
+		}
+		srcPath := filepath.Join(expectedStage, "corrald")
+		srcInfo, err := os.Lstat(srcPath)
+		if err != nil || srcInfo.Mode()&os.ModeSymlink != 0 || !srcInfo.Mode().IsRegular() {
+			writeErr(stdout, "stage_missing", fmt.Sprintf("staged regular binary not found at %s", srcPath))
+			return 1
+		}
+		if st, ok := srcInfo.Sys().(*syscall.Stat_t); !ok || st.Uid != layout.UID {
+			writeErr(stdout, "invalid_stage", "staged binary is not owned by current user")
+			return 1
+		}
+		verDir, err := layout.VersionDir(build.Version, build.Release)
+		if err != nil {
+			writeErr(stdout, "invalid_version", err.Error())
+			return 1
+		}
+		if err := os.Mkdir(verDir, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
+			writeErr(stdout, "mkdir_failed", err.Error())
+			return 1
+		}
+		if err := EnsureSecureDir(verDir, layout.UID); err != nil {
+			writeErr(stdout, "ver_dir_invalid", err.Error())
+			return 1
+		}
+		dstBin := filepath.Join(verDir, "corrald")
+		if err := copyBinaryAtomic(srcPath, dstBin); err != nil {
+			writeErr(stdout, "copy_failed", err.Error())
+			return 1
+		}
+		relTarget := filepath.Join(filepath.Base(verDir), "corrald")
+		if err := AtomicSymlink(relTarget, layout.CurrentSymlink); err != nil {
+			writeErr(stdout, "symlink_failed", err.Error())
+			return 1
+		}
+		_ = os.RemoveAll(expectedStage)
+		fmt.Fprintf(stdout, "result=ok\n")
+		fmt.Fprintf(stdout, "bin=%s\n", layout.CurrentSymlink)
+		return 0
+	}
 
 	if layout.TombstoneExists() {
 		writeErr(stdout, proto.ErrRemoving, "uninstall tombstone present")
@@ -1800,6 +1870,19 @@ func cmdUninstall(args []string, stdout io.Writer) int {
 	} else if isLast && lastCheckErr == nil && libDirExists {
 		if installErr == nil && installRec != nil {
 			sharedTargets = collectSharedCorraldTargets(layout, installRec)
+			if tombstoneExisted {
+				seenT := make(map[string]struct{}, len(sharedTargets))
+				for _, t := range sharedTargets {
+					seenT[filepath.Clean(t)] = struct{}{}
+				}
+				for _, p := range listPreservedSharedPaths(layout) {
+					cp := filepath.Clean(p)
+					if _, ok := seenT[cp]; !ok {
+						seenT[cp] = struct{}{}
+						sharedTargets = append(sharedTargets, cp)
+					}
+				}
+			}
 		} else {
 			sharedTargets = listPreservedSharedPaths(layout)
 		}
@@ -1811,12 +1894,8 @@ func cmdUninstall(args []string, stdout io.Writer) int {
 	}
 
 	// Rule 4: Explicitly delete all non-lock entries inside StateDir, keeping
-	// op.lock and corrald.lock intact (avoids unlink+new-inode lock races).
-	// If any shared/state removal failed transiently while we had a valid
-	// manifest (not Rule 6 missing-install preservation), KEEP the manifest-
-	// bearing removing tombstone so the next retry can finish cleaning up
-	// shared program files in LibDir instead of hitting missing install.json.
-	keepTombstoneForRetry := !willPreserveForMissingInstall && len(left) > 0
+	// op.lock, corrald.lock, and removing intact until ALL post-check
+	// verifications (including run/ and LibDir) pass.
 	if stateDirExists {
 		entries, rerr := os.ReadDir(layout.StateDir)
 		if rerr != nil {
@@ -1832,16 +1911,10 @@ func cmdUninstall(args []string, stdout io.Writer) int {
 					addLeft(p, err.Error())
 				}
 			}
-			keepTombstoneForRetry = !willPreserveForMissingInstall && len(left) > 0
-			if !keepTombstoneForRetry {
-				if err := os.Remove(layout.TombstonePath); err != nil && !errors.Is(err, os.ErrNotExist) {
-					addLeft(layout.TombstonePath, err.Error())
-				}
-			}
 		}
 	}
 
-	// Post-check verification (回查).
+	// Post-check verification (回查) BEFORE removing the tombstone!
 	if metaBefore != nil && ProcessMatches(metaBefore.PID, metaBefore.StartTime) {
 		fmt.Fprintf(stdout, "error=stop_failed\n")
 		fmt.Fprintf(stdout, "pid=%d\n", metaBefore.PID)
@@ -1856,7 +1929,7 @@ func cmdUninstall(args []string, stdout io.Writer) int {
 		if entries, err := os.ReadDir(layout.StateDir); err == nil {
 			for _, e := range entries {
 				name := e.Name()
-				if name == "op.lock" || name == "corrald.lock" || (keepTombstoneForRetry && name == "removing") {
+				if name == "op.lock" || name == "corrald.lock" || name == "removing" {
 					continue
 				}
 				addLeft(filepath.Join(layout.StateDir, name), "state entry still exists after removal")
@@ -1880,6 +1953,26 @@ func cmdUninstall(args []string, stdout io.Writer) int {
 			for _, rem := range listPreservedSharedPaths(layout) {
 				addLeft(rem, "corrald file still exists in lib dir after removal")
 			}
+		}
+	}
+
+	if stateDirExists && isLast && lastCheckErr == nil && !willPreserveForMissingInstall {
+		if entries, err := os.ReadDir(layout.StateRoot); err == nil {
+			for _, e := range entries {
+				if e.Name() == layout.MachineID {
+					continue
+				}
+				addLeft(filepath.Join(layout.StateRoot, e.Name()), "leftover entry in corrald state root")
+			}
+		}
+	}
+
+	// Fix8 Item #3: Remove the removing tombstone LAST, only when all other
+	// targets and post-checks succeeded (or in Rule 6 missing-install mode
+	// where shared files are intentionally preserved).
+	if stateDirExists && (len(left) == 0 || willPreserveForMissingInstall) {
+		if err := os.Remove(layout.TombstonePath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			addLeft(layout.TombstonePath, err.Error())
 		}
 	}
 
