@@ -373,9 +373,9 @@ func TestCLIUninstallOnlyIfSoleGateway(t *testing.T) {
 	installAndServe := func(t *testing.T, home, mid string) (string, *Layout) {
 		t.Helper()
 		env := []string{"CORRALD_TEST_MACHINE_ID=" + mid}
-		stage := stageBinary(t, home, mid, "opSole1", bins.v1)
+		stage := stageBinary(t, home, mid, "23071e2c5a7701c8", bins.v1)
 		if out, code := runCLI(t, filepath.Join(stage, "corrald"), home, env,
-			"install", "--stage", stage, "--op", "opSole1", "--gateway", "gw-a", "--by", "alice"); code != 0 {
+			"install", "--stage", stage, "--op", "23071e2c5a7701c8", "--gateway", "gw-a", "--by", "alice"); code != 0 {
 			t.Fatalf("install failed: %s", out)
 		}
 		installedBin := filepath.Join(home, ".local", "lib", "corral", "corrald")
@@ -407,7 +407,7 @@ func TestCLIUninstallOnlyIfSoleGateway(t *testing.T) {
 			t.Fatalf("Hello gw-a: %v", err)
 		}
 
-		out, code := runCLI(t, installedBin, home, env, "uninstall", "--op", "opRm1", "--only-if-sole-gateway", "gw-a")
+		out, code := runCLI(t, installedBin, home, env, "uninstall", "--op", "bfb7f4053adf35df", "--only-if-sole-gateway", "gw-a")
 		if code != 0 || parseKV(out)["result"] != "removed" {
 			t.Fatalf("expected sole-gateway uninstall removed, got code=%d\n%s", code, out)
 		}
@@ -434,7 +434,7 @@ func TestCLIUninstallOnlyIfSoleGateway(t *testing.T) {
 			t.Fatalf("Hello gw-b: %v", err)
 		}
 
-		out, code := runCLI(t, installedBin, home, env, "uninstall", "--op", "opRm2", "--only-if-sole-gateway", "gw-a")
+		out, code := runCLI(t, installedBin, home, env, "uninstall", "--op", "36fc46328de5f8ff", "--only-if-sole-gateway", "gw-a")
 		if code != 0 || parseKV(out)["result"] != "other_gateways" {
 			t.Fatalf("expected result=other_gateways, got code=%d\n%s", code, out)
 		}
@@ -467,7 +467,7 @@ func TestCLIUninstallOnlyIfSoleGateway(t *testing.T) {
 			t.Fatalf("write corrupt clients.json: %v", err)
 		}
 
-		out, code := runCLI(t, installedBin, home, env, "uninstall", "--op", "opRm3", "--only-if-sole-gateway", "gw-a")
+		out, code := runCLI(t, installedBin, home, env, "uninstall", "--op", "cc4eac9dd8eba3ca", "--only-if-sole-gateway", "gw-a")
 		if code == 0 || parseKV(out)["error"] != "clients_unreadable" {
 			t.Fatalf("expected error=clients_unreadable, got code=%d\n%s", code, out)
 		}
@@ -486,9 +486,9 @@ func TestCLIUninstallOnlyIfSoleGateway(t *testing.T) {
 		home := t.TempDir()
 		mid := randomHexMid(t)
 		env := []string{"CORRALD_TEST_MACHINE_ID=" + mid}
-		stage := stageBinary(t, home, mid, "opOld1", bins.v1)
+		stage := stageBinary(t, home, mid, "2872e3188f45e568", bins.v1)
 		if out, code := runCLI(t, filepath.Join(stage, "corrald"), home, env,
-			"install", "--stage", stage, "--op", "opOld1", "--gateway", "gw-a", "--by", "alice"); code != 0 {
+			"install", "--stage", stage, "--op", "2872e3188f45e568", "--gateway", "gw-a", "--by", "alice"); code != 0 {
 			t.Fatalf("install failed: %s", out)
 		}
 		installedBin := filepath.Join(home, ".local", "lib", "corral", "corrald")
@@ -552,7 +552,7 @@ func TestCLIUninstallOnlyIfSoleGateway(t *testing.T) {
 			}
 		}()
 
-		out, code := runCLI(t, installedBin, home, env, "uninstall", "--op", "opRmOld", "--only-if-sole-gateway", "gw-a")
+		out, code := runCLI(t, installedBin, home, env, "uninstall", "--op", "7a14e93405c8f6bf", "--only-if-sole-gateway", "gw-a")
 		if code == 0 || parseKV(out)["error"] != "unsupported_conditional_shutdown" {
 			t.Fatalf("expected error=unsupported_conditional_shutdown, got code=%d\n%s", code, out)
 		}
@@ -594,7 +594,7 @@ func TestCLIUninstallOnlyIfSoleGateway(t *testing.T) {
 			code int
 		}, 1)
 		go func() {
-			out, code := runCLI(t, installedBin, home, env, "uninstall", "--op", "opRmLock", "--only-if-sole-gateway", "gw-a")
+			out, code := runCLI(t, installedBin, home, env, "uninstall", "--op", "b788b491de925f29", "--only-if-sole-gateway", "gw-a")
 			done <- struct {
 				out  string
 				code int
@@ -652,7 +652,7 @@ func TestCLIUninstallOnlyIfSoleGateway(t *testing.T) {
 		if err := os.MkdirAll(filepath.Join(layout.TombstonePath, "blocker"), 0o700); err != nil {
 			t.Fatal(err)
 		}
-		out, code := runCLI(t, installedBin, home, env, "uninstall", "--op", "opTombFail", "--only-if-sole-gateway", "gw-a")
+		out, code := runCLI(t, installedBin, home, env, "uninstall", "--op", "064d8c0e95ec4e41", "--only-if-sole-gateway", "gw-a")
 		if code == 0 || parseKV(out)["error"] != "tombstone_failed" {
 			t.Fatalf("expected error=tombstone_failed, got code=%d\n%s", code, out)
 		}
@@ -665,7 +665,7 @@ func TestCLIUninstallOnlyIfSoleGateway(t *testing.T) {
 		if err := os.RemoveAll(layout.TombstonePath); err != nil {
 			t.Fatal(err)
 		}
-		out, code = runCLI(t, installedBin, home, env, "uninstall", "--op", "opTombRetry", "--only-if-sole-gateway", "gw-a")
+		out, code = runCLI(t, installedBin, home, env, "uninstall", "--op", "e3dbf04c0d4cd308", "--only-if-sole-gateway", "gw-a")
 		if code != 0 || parseKV(out)["result"] != "removed" {
 			t.Fatalf("expected retry after tombstone_failed to succeed with result=removed, got code=%d\n%s", code, out)
 		}
@@ -711,7 +711,7 @@ func TestCLIUninstallOnlyIfSoleGateway(t *testing.T) {
 		}
 		t.Cleanup(func() { _ = os.Chmod(verDir, 0o700) })
 
-		out, code := runCLI(t, installedBin, home, env, "uninstall", "--op", "opPart1", "--only-if-sole-gateway", "gw-a")
+		out, code := runCLI(t, installedBin, home, env, "uninstall", "--op", "1c09c6e6e83a50c5", "--only-if-sole-gateway", "gw-a")
 		if code == 0 || parseKV(out)["result"] != "partial" {
 			t.Fatalf("expected result=partial while verDir is read-only, got code=%d\n%s", code, out)
 		}
@@ -727,7 +727,7 @@ func TestCLIUninstallOnlyIfSoleGateway(t *testing.T) {
 			t.Fatal(err)
 		}
 		retryBin := filepath.Join(verDir, "corrald")
-		out, code = runCLI(t, retryBin, home, env, "uninstall", "--op", "opPartRetry", "--only-if-sole-gateway", "gw-a")
+		out, code = runCLI(t, retryBin, home, env, "uninstall", "--op", "3609269a820a4791", "--only-if-sole-gateway", "gw-a")
 		if code != 0 || parseKV(out)["result"] != "removed" {
 			t.Fatalf("Fix5 Item #4 regression: retry from tombstone+missing install.json failed: code=%d\n%s", code, out)
 		}
@@ -750,9 +750,9 @@ func TestCLIUninstallOnlyIfSoleGateway(t *testing.T) {
 		home := t.TempDir()
 		mid := randomHexMid(t)
 		env := []string{"CORRALD_TEST_MACHINE_ID=" + mid}
-		stage := stageBinary(t, home, mid, "opF1a", bins.v1)
+		stage := stageBinary(t, home, mid, "df9380c60d9d0227", bins.v1)
 		if out, code := runCLI(t, filepath.Join(stage, "corrald"), home, env,
-			"install", "--stage", stage, "--op", "opF1a", "--gateway", "gw-a", "--by", "alice"); code != 0 {
+			"install", "--stage", stage, "--op", "df9380c60d9d0227", "--gateway", "gw-a", "--by", "alice"); code != 0 {
 			t.Fatalf("install: %s", out)
 		}
 		installedBin := filepath.Join(home, ".local", "lib", "corral", "corrald")
@@ -804,7 +804,7 @@ func TestCLIUninstallOnlyIfSoleGateway(t *testing.T) {
 			_ = lifeLock.Release()
 		}()
 
-		out, code := runCLI(t, installedBin, home, env, "uninstall", "--op", "opRmF1a", "--only-if-sole-gateway", "gw-a")
+		out, code := runCLI(t, installedBin, home, env, "uninstall", "--op", "bea7b67d56c0cbb1", "--only-if-sole-gateway", "gw-a")
 		if code != 0 || parseKV(out)["result"] != "removed" {
 			t.Fatalf("F1 regression: expected uninstall during ErrShuttingDown window to wait and return result=removed, got code=%d\n%s", code, out)
 		}
@@ -822,9 +822,9 @@ func TestCLIUninstallOnlyIfSoleGateway(t *testing.T) {
 		home := t.TempDir()
 		mid := randomHexMid(t)
 		env := []string{"CORRALD_TEST_MACHINE_ID=" + mid}
-		stage := stageBinary(t, home, mid, "opF1b", bins.v1)
+		stage := stageBinary(t, home, mid, "b183d3b1002342da", bins.v1)
 		if out, code := runCLI(t, filepath.Join(stage, "corrald"), home, env,
-			"install", "--stage", stage, "--op", "opF1b", "--gateway", "gw-a", "--by", "alice"); code != 0 {
+			"install", "--stage", stage, "--op", "b183d3b1002342da", "--gateway", "gw-a", "--by", "alice"); code != 0 {
 			t.Fatalf("install: %s", out)
 		}
 		installedBin := filepath.Join(home, ".local", "lib", "corral", "corrald")
@@ -877,7 +877,7 @@ func TestCLIUninstallOnlyIfSoleGateway(t *testing.T) {
 			_ = lifeLock.Release()
 		}()
 
-		out, code := runCLI(t, installedBin, home, env, "uninstall", "--op", "opRmF1b", "--only-if-sole-gateway", "gw-a")
+		out, code := runCLI(t, installedBin, home, env, "uninstall", "--op", "68fb07dc9a7c17b3", "--only-if-sole-gateway", "gw-a")
 		if code != 0 || parseKV(out)["result"] != "other_gateways" {
 			t.Fatalf("F1 safety regression: expected result=other_gateways when gw-b is in clients.json, got code=%d\n%s", code, out)
 		}
@@ -896,9 +896,9 @@ func TestCLIUninstallOnlyIfSoleGateway(t *testing.T) {
 		home := t.TempDir()
 		mid := randomHexMid(t)
 		env := []string{"CORRALD_TEST_MACHINE_ID=" + mid}
-		stage := stageBinary(t, home, mid, "opF1c", bins.v1)
+		stage := stageBinary(t, home, mid, "cb4b7082efb493b6", bins.v1)
 		if out, code := runCLI(t, filepath.Join(stage, "corrald"), home, env,
-			"install", "--stage", stage, "--op", "opF1c", "--gateway", "gw-a", "--by", "alice"); code != 0 {
+			"install", "--stage", stage, "--op", "cb4b7082efb493b6", "--gateway", "gw-a", "--by", "alice"); code != 0 {
 			t.Fatalf("install: %s", out)
 		}
 		installedBin := filepath.Join(home, ".local", "lib", "corral", "corrald")
@@ -924,7 +924,7 @@ func TestCLIUninstallOnlyIfSoleGateway(t *testing.T) {
 			_ = lifeLock.Release()
 		}()
 
-		out, code := runCLI(t, installedBin, home, env, "uninstall", "--op", "opRmF1c", "--only-if-sole-gateway", "gw-a")
+		out, code := runCLI(t, installedBin, home, env, "uninstall", "--op", "3da57b93fe94fd6b", "--only-if-sole-gateway", "gw-a")
 		if code != 0 || parseKV(out)["result"] != "removed" {
 			t.Fatalf("expected uninstall to succeed after daemon released lock shortly after socket close, got code=%d\n%s", code, out)
 		}
@@ -934,9 +934,9 @@ func TestCLIUninstallOnlyIfSoleGateway(t *testing.T) {
 		home := t.TempDir()
 		mid := randomHexMid(t)
 		env := []string{"CORRALD_TEST_MACHINE_ID=" + mid}
-		stage := stageBinary(t, home, mid, "opF1d", bins.v1)
+		stage := stageBinary(t, home, mid, "ca9370a00e1003f2", bins.v1)
 		if out, code := runCLI(t, filepath.Join(stage, "corrald"), home, env,
-			"install", "--stage", stage, "--op", "opF1d", "--gateway", "gw-a", "--by", "alice"); code != 0 {
+			"install", "--stage", stage, "--op", "ca9370a00e1003f2", "--gateway", "gw-a", "--by", "alice"); code != 0 {
 			t.Fatalf("install: %s", out)
 		}
 		installedBin := filepath.Join(home, ".local", "lib", "corral", "corrald")
@@ -955,7 +955,7 @@ func TestCLIUninstallOnlyIfSoleGateway(t *testing.T) {
 		}
 		defer lifeLock.Release()
 
-		out, code := runCLI(t, installedBin, home, env, "uninstall", "--op", "opRmF1d", "--only-if-sole-gateway", "gw-a")
+		out, code := runCLI(t, installedBin, home, env, "uninstall", "--op", "93a498853c552977", "--only-if-sole-gateway", "gw-a")
 		if code == 0 || parseKV(out)["error"] != "daemon_unreachable" {
 			t.Fatalf("expected error=daemon_unreachable when lock remains held with unreachable socket, got code=%d\n%s", code, out)
 		}
@@ -1006,7 +1006,7 @@ func TestCLIUninstallOnlyIfSoleGateway(t *testing.T) {
 		}
 		t.Cleanup(func() { _ = os.Chmod(verDir, 0o700) })
 
-		out, code := runCLI(t, installedBin, home, env, "uninstall", "--op", "opGwB1", "--only-if-sole-gateway", "gw-b")
+		out, code := runCLI(t, installedBin, home, env, "uninstall", "--op", "d28cd63aad030770", "--only-if-sole-gateway", "gw-b")
 		if code == 0 || parseKV(out)["result"] != "partial" {
 			t.Fatalf("expected partial on locked verDir, got code=%d\n%s", code, out)
 		}
@@ -1018,7 +1018,7 @@ func TestCLIUninstallOnlyIfSoleGateway(t *testing.T) {
 			t.Fatal(err)
 		}
 		retryBin := filepath.Join(verDir, "corrald")
-		out, code = runCLI(t, retryBin, home, env, "uninstall", "--op", "opGwB2", "--only-if-sole-gateway", "gw-b")
+		out, code = runCLI(t, retryBin, home, env, "uninstall", "--op", "8c1442d6c6401c68", "--only-if-sole-gateway", "gw-b")
 		if code != 0 || parseKV(out)["result"] != "removed" {
 			t.Fatalf("Fix7 Item #4 regression: gw-b retry failed (tombstone recorded wrong gateway?): code=%d\n%s", code, out)
 		}
@@ -1051,7 +1051,7 @@ func TestCLIUninstallOnlyIfSoleGateway(t *testing.T) {
 					t.Fatal(err)
 				}
 
-				out, code := runCLI(t, installedBin, home, env, "uninstall", "--op", "opBadTomb", "--only-if-sole-gateway", "gw-a")
+				out, code := runCLI(t, installedBin, home, env, "uninstall", "--op", "5aea1c8f2580a376", "--only-if-sole-gateway", "gw-a")
 				if code == 0 || parseKV(out)["error"] != "tombstone_unreadable" {
 					t.Fatalf("Fix7 Item #6 regression (%s): expected error=tombstone_unreadable, got code=%d\n%s", tc.name, code, out)
 				}
@@ -1094,7 +1094,7 @@ func TestCLIUninstallOnlyIfSoleGateway(t *testing.T) {
 		}
 		t.Cleanup(func() { _ = os.Chmod(layout.RunDir, 0o700) })
 
-		out, code := runCLI(t, installedBin, home, env, "uninstall", "--op", "opRunFail1", "--only-if-sole-gateway", "gw-a")
+		out, code := runCLI(t, installedBin, home, env, "uninstall", "--op", "19d44765e3d45c48", "--only-if-sole-gateway", "gw-a")
 		if code == 0 || parseKV(out)["result"] != "partial" {
 			t.Fatalf("expected partial when run/ cannot be removed, got code=%d\n%s", code, out)
 		}
@@ -1110,12 +1110,12 @@ func TestCLIUninstallOnlyIfSoleGateway(t *testing.T) {
 		if err := os.Chmod(layout.RunDir, 0o700); err != nil {
 			t.Fatal(err)
 		}
-		stage := stageBinary(t, home, mid, "opRunRec2", bins.v1)
+		stage := stageBinary(t, home, mid, "92f35c4079754c3c", bins.v1)
 		if recOut, recCode := runCLI(t, filepath.Join(stage, "corrald"), home, env,
-			"install", "--for-uninstall-recovery", "--stage", stage, "--op", "opRunRec2", "--gateway", "gw-a"); recCode != 0 || parseKV(recOut)["result"] != "ok" {
+			"install", "--for-uninstall-recovery", "--stage", stage, "--op", "92f35c4079754c3c", "--gateway", "gw-a"); recCode != 0 || parseKV(recOut)["result"] != "ok" {
 			t.Fatalf("install --for-uninstall-recovery failed: code=%d\n%s", recCode, recOut)
 		}
-		out2, code2 := runCLI(t, installedBin, home, env, "uninstall", "--op", "opRunRec2", "--only-if-sole-gateway", "gw-a")
+		out2, code2 := runCLI(t, installedBin, home, env, "uninstall", "--op", "92f35c4079754c3c", "--only-if-sole-gateway", "gw-a")
 		if code2 != 0 || parseKV(out2)["result"] != "removed" {
 			t.Fatalf("retry uninstall after clearing run/ fault failed: code=%d\n%s", code2, out2)
 		}
@@ -1149,7 +1149,7 @@ func TestCLIUninstallOnlyIfSoleGateway(t *testing.T) {
 		if err := os.MkdirAll(unlistedDir, 0o700); err != nil {
 			t.Fatal(err)
 		}
-		outP, codeP := runCLI(t, installedBin2, home2, env2, "uninstall", "--op", "opPostCheck1", "--only-if-sole-gateway", "gw-a")
+		outP, codeP := runCLI(t, installedBin2, home2, env2, "uninstall", "--op", "58eaa18dcaab3d15", "--only-if-sole-gateway", "gw-a")
 		if codeP == 0 || parseKV(outP)["result"] != "partial" {
 			t.Fatalf("expected partial when post-check finds unlisted corrald dir, got code=%d\n%s", codeP, outP)
 		}
@@ -1181,9 +1181,9 @@ func TestCLIUninstallOnlyIfSoleGateway(t *testing.T) {
 		}
 
 		// Wrong gateway must refuse with other_gateways and not place binary.
-		stageWrong := stageBinary(t, home, mid, "opRecWrong", bins.v1)
+		stageWrong := stageBinary(t, home, mid, "80f14e0fce17fe62", bins.v1)
 		outW, codeW := runCLI(t, filepath.Join(stageWrong, "corrald"), home, env,
-			"install", "--for-uninstall-recovery", "--stage", stageWrong, "--op", "opRecWrong", "--gateway", "gw-b")
+			"install", "--for-uninstall-recovery", "--stage", stageWrong, "--op", "80f14e0fce17fe62", "--gateway", "gw-b")
 		if codeW != 0 || parseKV(outW)["result"] != "other_gateways" {
 			t.Fatalf("expected other_gateways for foreign tombstone, got code=%d\n%s", codeW, outW)
 		}
@@ -1192,9 +1192,9 @@ func TestCLIUninstallOnlyIfSoleGateway(t *testing.T) {
 		}
 
 		// Matching gateway places binary into LibDir without writing install.json or removing tombstone.
-		stage := stageBinary(t, home, mid, "opRecOK", bins.v1)
+		stage := stageBinary(t, home, mid, "d914f0a10759a094", bins.v1)
 		out, code := runCLI(t, filepath.Join(stage, "corrald"), home, env,
-			"install", "--for-uninstall-recovery", "--stage", stage, "--op", "opRecOK", "--gateway", "gw-a")
+			"install", "--for-uninstall-recovery", "--stage", stage, "--op", "d914f0a10759a094", "--gateway", "gw-a")
 		if code != 0 || parseKV(out)["result"] != "ok" {
 			t.Fatalf("install --for-uninstall-recovery failed: code=%d\n%s", code, out)
 		}
@@ -1214,7 +1214,7 @@ func TestCLIUninstallOnlyIfSoleGateway(t *testing.T) {
 			t.Fatalf("stage dir must be removed, stat err=%v", err)
 		}
 		// Now normal locked uninstall cleans up everything including LibDir and tombstone.
-		uOut, uCode := runCLI(t, layout.CurrentSymlink, home, env, "uninstall", "--op", "opRecOK", "--only-if-sole-gateway", "gw-a")
+		uOut, uCode := runCLI(t, layout.CurrentSymlink, home, env, "uninstall", "--op", "d914f0a10759a094", "--only-if-sole-gateway", "gw-a")
 		if uCode != 0 || parseKV(uOut)["result"] != "removed" {
 			t.Fatalf("locked uninstall after recovery install failed: code=%d\n%s", uCode, uOut)
 		}
@@ -1255,7 +1255,7 @@ func TestCLIUninstallOnlyIfSoleGateway(t *testing.T) {
 			}
 			t.Cleanup(func() { _ = os.Chmod(libParent, 0o700) })
 
-			out, code := runCLI(t, installedBin, home, env, "uninstall", "--op", "opLibRmdirFail", "--only-if-sole-gateway", "gw-a")
+			out, code := runCLI(t, installedBin, home, env, "uninstall", "--op", "5c19d6cf9492066b", "--only-if-sole-gateway", "gw-a")
 			if code == 0 || parseKV(out)["result"] != "partial" {
 				t.Fatalf("expected result=partial when LibDir rmdir fails, got code=%d\n%s", code, out)
 			}
@@ -1284,7 +1284,7 @@ func TestCLIUninstallOnlyIfSoleGateway(t *testing.T) {
 			}
 			t.Cleanup(func() { _ = os.Chmod(layout.StateRoot, 0o700) })
 
-			out, code := runCLI(t, installedBin, home, env, "uninstall", "--op", "opStateRmdirFail", "--only-if-sole-gateway", "gw-a")
+			out, code := runCLI(t, installedBin, home, env, "uninstall", "--op", "71fd8ba5c9019417", "--only-if-sole-gateway", "gw-a")
 			if code == 0 || parseKV(out)["result"] != "partial" {
 				t.Fatalf("expected result=partial when StateDir rmdir fails, got code=%d\n%s", code, out)
 			}
@@ -1308,9 +1308,9 @@ func TestCLIUninstallOnlyIfSoleGateway(t *testing.T) {
 		}
 
 		// Install v2 (higher release) first so LibDir/corrald points to v2.
-		stageV2 := stageBinary(t, home, mid, "opV2Init", bins.v2)
+		stageV2 := stageBinary(t, home, mid, "974d3ed642c06613", bins.v2)
 		if out, code := runCLI(t, filepath.Join(stageV2, "corrald"), home, env,
-			"install", "--stage", stageV2, "--op", "opV2Init", "--gateway", "gw-a", "--by", "alice"); code != 0 {
+			"install", "--stage", stageV2, "--op", "974d3ed642c06613", "--gateway", "gw-a", "--by", "alice"); code != 0 {
 			t.Fatalf("install v2 failed: %s", out)
 		}
 		v2Target, err := os.Readlink(layout.CurrentSymlink)
@@ -1325,9 +1325,9 @@ func TestCLIUninstallOnlyIfSoleGateway(t *testing.T) {
 		}
 
 		// Run recovery install with older v1 binary.
-		stageV1 := stageBinary(t, home, mid, "opV1Rec", bins.v1)
+		stageV1 := stageBinary(t, home, mid, "498578ff6730b962", bins.v1)
 		out, code := runCLI(t, filepath.Join(stageV1, "corrald"), home, env,
-			"install", "--for-uninstall-recovery", "--stage", stageV1, "--op", "opV1Rec", "--gateway", "gw-a")
+			"install", "--for-uninstall-recovery", "--stage", stageV1, "--op", "498578ff6730b962", "--gateway", "gw-a")
 		if code != 0 || parseKV(out)["result"] != "ok" {
 			t.Fatalf("recovery install v1 failed: code=%d\n%s", code, out)
 		}
@@ -1377,7 +1377,7 @@ func TestCLIUninstallOnlyIfSoleGateway(t *testing.T) {
 			}
 
 			// Execute uninstall directly from LibDir/corrald-backups/corrald!
-			out, code := runCLI(t, backupBin, home, env, "uninstall", "--op", "opBkp1", "--only-if-sole-gateway", "gw-a")
+			out, code := runCLI(t, backupBin, home, env, "uninstall", "--op", "1ecdccb759ba69fd", "--only-if-sole-gateway", "gw-a")
 			if code != 0 || parseKV(out)["result"] != "removed" {
 				t.Fatalf("expected clean uninstall of real corrald while preserving corrald-backups, got code=%d\n%s", code, out)
 			}
@@ -1416,7 +1416,7 @@ func TestCLIUninstallOnlyIfSoleGateway(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			out, code := runCLI(t, installedBin, home, env, "uninstall", "--op", "opVerUser1", "--only-if-sole-gateway", "gw-a")
+			out, code := runCLI(t, installedBin, home, env, "uninstall", "--op", "adf15e2473380112", "--only-if-sole-gateway", "gw-a")
 			if code == 0 || parseKV(out)["result"] != "partial" {
 				t.Fatalf("Fix10 Item #1 regression: expected partial when version dir has unknown user file, got code=%d\n%s", code, out)
 			}
@@ -1452,7 +1452,7 @@ func TestCLIUninstallOnlyIfSoleGateway(t *testing.T) {
 		}
 		t.Cleanup(func() { _ = os.Chmod(layout.StateRoot, 0o700) })
 
-		out, code := runCLI(t, installedBin, home, env, "uninstall", "--op", "opSLKeep", "--only-if-sole-gateway", "gw-a")
+		out, code := runCLI(t, installedBin, home, env, "uninstall", "--op", "65c7e8ceb0b2e848", "--only-if-sole-gateway", "gw-a")
 		if code == 0 || parseKV(out)["result"] != "partial" {
 			t.Fatalf("expected partial when StateRoot is read-only, got code=%d\n%s", code, out)
 		}
@@ -1504,7 +1504,7 @@ func TestCLIUninstallOnlyIfSoleGateway(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			out, code := runCLI(t, installedBin, home, env, "uninstall", "--op", "op11sym1", "--only-if-sole-gateway", "gw-a")
+			out, code := runCLI(t, installedBin, home, env, "uninstall", "--op", "a897793bea2eae80", "--only-if-sole-gateway", "gw-a")
 			if code == 0 || parseKV(out)["result"] != "partial" {
 				t.Fatalf("Fix11 regression: expected partial when ops and stage-* are symlinks, got code=%d\n%s", code, out)
 			}
@@ -1545,7 +1545,7 @@ func TestCLIUninstallOnlyIfSoleGateway(t *testing.T) {
 				}
 			}
 
-			out, code := runCLI(t, installedBin, home, env, "uninstall", "--op", "op11unown1", "--only-if-sole-gateway", "gw-a")
+			out, code := runCLI(t, installedBin, home, env, "uninstall", "--op", "a085a16653dd746c", "--only-if-sole-gateway", "gw-a")
 			if code == 0 || parseKV(out)["result"] != "partial" {
 				t.Fatalf("Fix11 regression: expected partial when unowned files exist, got code=%d\n%s", code, out)
 			}
@@ -1633,6 +1633,302 @@ func TestCLIUninstallOnlyIfSoleGateway(t *testing.T) {
 			}
 		}
 	})
+
+	t.Run("fix12_item1_run_dir_preserves_user_files_and_symlinks", func(t *testing.T) {
+		home := t.TempDir()
+		mid := randomHexMid(t)
+		env := []string{"CORRALD_TEST_MACHINE_ID=" + mid}
+		installedBin, layout := installAndServe(t, home, mid)
+
+		if err := os.MkdirAll(layout.RunDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		ownedLock := filepath.Join(layout.RunDir, "corral-send-tmux-_0")
+		if err := os.WriteFile(ownedLock, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		userNotes := filepath.Join(layout.RunDir, "notes.txt")
+		if err := os.WriteFile(userNotes, []byte("keep-my-run-notes\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		extTarget := filepath.Join(home, "outside.txt")
+		if err := os.WriteFile(extTarget, []byte("keep-outside\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		userLink := filepath.Join(layout.RunDir, "user-link")
+		if err := os.Symlink(extTarget, userLink); err != nil {
+			t.Fatal(err)
+		}
+
+		out, code := runCLI(t, installedBin, home, env, "uninstall", "--op", "1201000000000001", "--only-if-sole-gateway", "gw-a")
+		if code == 0 || parseKV(out)["result"] != "partial" {
+			t.Fatalf("Fix12 Item #1 regression: expected partial when run/ contains user files/symlinks, got code=%d\n%s", code, out)
+		}
+		if _, err := os.Lstat(ownedLock); !os.IsNotExist(err) {
+			t.Fatalf("expected owned pane lock %s removed, stat err=%v", ownedLock, err)
+		}
+		if got, err := os.ReadFile(userNotes); err != nil || string(got) != "keep-my-run-notes\n" {
+			t.Fatalf("Fix12 Item #1 regression: run/notes.txt deleted! err=%v content=%q", err, string(got))
+		}
+		if info, err := os.Lstat(userLink); err != nil || info.Mode()&os.ModeSymlink == 0 {
+			t.Fatalf("Fix12 Item #1 regression: run/user-link deleted! err=%v", err)
+		}
+		if got, err := os.ReadFile(extTarget); err != nil || string(got) != "keep-outside\n" {
+			t.Fatalf("Fix12 Item #1 regression: symlink target %s disturbed! err=%v", extTarget, err)
+		}
+		if !strings.Contains(out, "left="+userNotes+"\t") {
+			t.Fatalf("expected %s in left=:\n%s", userNotes, out)
+		}
+	})
+
+	t.Run("fix12_item5_socket_only_at_layout_path_and_only_if_socket", func(t *testing.T) {
+		home := t.TempDir()
+		mid := randomHexMid(t)
+		env := []string{"CORRALD_TEST_MACHINE_ID=" + mid}
+		installedBin, layout := installAndServe(t, home, mid)
+
+		// Stop cleanly, then tamper meta.json.socket_path to point at a user file.
+		if out, code := runCLI(t, installedBin, home, env, "stop"); code != 0 {
+			t.Fatalf("stop: %s", out)
+		}
+		userNotes := filepath.Join(home, "notes.txt")
+		if err := os.WriteFile(userNotes, []byte("precious\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		metaBytes, err := json.Marshal(MetaRecord{
+			PID: 999999999, StartTime: "0", SocketPath: userNotes, Version: "0.1.0", Release: 100,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(layout.MetaJSON, metaBytes, 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		// StopDaemon cleanup must NEVER unlink meta.json.socket_path!
+		if _, _, err := StopDaemon(layout); err != nil {
+			t.Fatalf("StopDaemon: %v", err)
+		}
+		if got, err := os.ReadFile(userNotes); err != nil || string(got) != "precious\n" {
+			t.Fatalf("Fix12 Item #5 regression: StopDaemon deleted meta.json.socket_path %s! err=%v", userNotes, err)
+		}
+
+		// Re-write tampered meta.json AND place a regular non-socket file at layout.SocketPath.
+		if err := os.WriteFile(layout.MetaJSON, metaBytes, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(filepath.Dir(layout.SocketPath), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(layout.SocketPath, []byte("not-a-socket\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() {
+			_ = os.Remove(layout.SocketPath)
+			if layout.SocketUsesTmpDir {
+				_ = os.Remove(layout.SocketDir)
+			}
+		})
+
+		out, code := runCLI(t, installedBin, home, env, "uninstall", "--op", "1205000000000001", "--only-if-sole-gateway", "gw-a")
+		if code == 0 || parseKV(out)["result"] != "partial" {
+			t.Fatalf("Fix12 Item #5 regression: expected partial when regular file sits at layout.SocketPath, got code=%d\n%s", code, out)
+		}
+		if got, err := os.ReadFile(userNotes); err != nil || string(got) != "precious\n" {
+			t.Fatalf("Fix12 Item #5 regression: uninstall deleted meta.json.socket_path %s! err=%v", userNotes, err)
+		}
+		if got, err := os.ReadFile(layout.SocketPath); err != nil || string(got) != "not-a-socket\n" {
+			t.Fatalf("Fix12 Item #5 regression: uninstall deleted non-socket regular file at %s! err=%v", layout.SocketPath, err)
+		}
+	})
+
+	t.Run("fix12_item6_clean_stage_takes_locks_and_respects_active_op", func(t *testing.T) {
+		home := t.TempDir()
+		mid := randomHexMid(t)
+		env := []string{"CORRALD_TEST_MACHINE_ID=" + mid}
+		installedBin, layout := installAndServe(t, home, mid)
+
+		const stageOp = "1206000000000001"
+		stageDir := filepath.Join(layout.StateDir, "stage-"+stageOp)
+		stageBin := filepath.Join(stageDir, "corrald")
+		if err := os.MkdirAll(stageDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(stageBin, []byte("in-progress-binary"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		// Hold OpLock to simulate an active install op in progress.
+		opLk, err := AcquireLock(layout.OpLockPath)
+		if err != nil {
+			t.Fatalf("AcquireLock(OpLock): %v", err)
+		}
+		out, code := runCLI(t, installedBin, home, env, "clean-stage", "--stage", stageDir, "--op", stageOp)
+		_ = opLk.Release()
+		if code == 0 || parseKV(out)["error"] != proto.ErrBusy {
+			t.Fatalf("Fix12 Item #6 regression: clean-stage ignored held OpLock! code=%d\n%s", code, out)
+		}
+		if _, err := os.Stat(stageBin); err != nil {
+			t.Fatalf("Fix12 Item #6 regression: clean-stage deleted in-progress stage while OpLock held: %v", err)
+		}
+
+		// Hold SharedLock to verify SharedLock -> OpLock lock chain.
+		shLk, err := AcquireLock(layout.SharedLockPath)
+		if err != nil {
+			t.Fatalf("AcquireLock(SharedLock): %v", err)
+		}
+		out, code = runCLI(t, installedBin, home, env, "clean-stage", "--stage", stageDir, "--op", stageOp)
+		_ = shLk.Release()
+		if code == 0 || parseKV(out)["error"] != proto.ErrBusy {
+			t.Fatalf("Fix12 Item #6 regression: clean-stage ignored held SharedLock! code=%d\n%s", code, out)
+		}
+		if _, err := os.Stat(stageBin); err != nil {
+			t.Fatalf("Fix12 Item #6 regression: clean-stage deleted stage while SharedLock held: %v", err)
+		}
+
+		// Once unlocked, clean-stage succeeds cleanly.
+		out, code = runCLI(t, installedBin, home, env, "clean-stage", "--stage", stageDir, "--op", stageOp)
+		if code != 0 || parseKV(out)["result"] != "ok" {
+			t.Fatalf("expected clean-stage ok after locks released, got code=%d\n%s", code, out)
+		}
+		if _, err := os.Lstat(stageDir); !os.IsNotExist(err) {
+			t.Fatalf("expected stage dir %s removed, stat err=%v", stageDir, err)
+		}
+	})
+
+	t.Run("fix12_item7_stage_and_manifest_cannot_widen_owned_names", func(t *testing.T) {
+		home := t.TempDir()
+		mid := randomHexMid(t)
+		env := []string{"CORRALD_TEST_MACHINE_ID=" + mid}
+		installedBin, layout := installAndServe(t, home, mid)
+
+		// 1. clean-stage --op backups --stage <StateDir>/stage-backups must be rejected!
+		bkpStage := filepath.Join(layout.StateDir, "stage-backups")
+		bkpFile := filepath.Join(bkpStage, "corrald")
+		if err := os.MkdirAll(bkpStage, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(bkpFile, []byte("user-corrald-backup\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		out, code := runCLI(t, installedBin, home, env, "clean-stage", "--stage", bkpStage, "--op", "backups")
+		if code == 0 {
+			t.Fatalf("Fix12 Item #7 regression: clean-stage accepted non-16hex stage-backups!\n%s", out)
+		}
+		if got, err := os.ReadFile(bkpFile); err != nil || string(got) != "user-corrald-backup\n" {
+			t.Fatalf("Fix12 Item #7 regression: clean-stage deleted stage-backups/corrald! err=%v content=%q", err, string(got))
+		}
+		// Direct RemoveOwned(OwnedRemoveStageDir) must also reject stage-backups.
+		if left := RemoveOwned(layout, OwnedRemoveStageDir, bkpStage, nil); len(left) == 0 {
+			t.Fatalf("Fix12 Item #7 regression: RemoveOwned accepted non-16hex stage-backups!")
+		}
+		if got, err := os.ReadFile(bkpFile); err != nil || string(got) != "user-corrald-backup\n" {
+			t.Fatalf("Fix12 Item #7 regression: RemoveOwned deleted stage-backups/corrald! err=%v", err)
+		}
+		_ = os.RemoveAll(bkpStage)
+
+		// 2. Putting ops/notes.json in install.json's Files manifest MUST NOT allow deleting it!
+		opsNotes := filepath.Join(layout.OpsDir, "notes.json")
+		if err := os.WriteFile(opsNotes, []byte(`{"user":"keep"}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		instRec, err := ReadInstallRecord(layout.InstallJSON)
+		if err != nil {
+			t.Fatalf("ReadInstallRecord: %v", err)
+		}
+		instRec.Files = append(instRec.Files, opsNotes)
+		if err := WriteInstallRecord(layout.InstallJSON, instRec); err != nil {
+			t.Fatalf("WriteInstallRecord: %v", err)
+		}
+		out, code = runCLI(t, installedBin, home, env, "uninstall", "--op", "1207000000000001", "--only-if-sole-gateway", "gw-a")
+		if code == 0 || parseKV(out)["result"] != "partial" {
+			t.Fatalf("Fix12 Item #7 regression: expected partial preserving manifest-listed ops/notes.json, got code=%d\n%s", code, out)
+		}
+		if got, err := os.ReadFile(opsNotes); err != nil || string(got) != `{"user":"keep"}` {
+			t.Fatalf("Fix12 Item #7 regression: manifest widened ops rule and deleted ops/notes.json! err=%v content=%q", err, string(got))
+		}
+	})
+
+	t.Run("fix12_item8_selftest_and_rebind_sockets_cleaned_by_uninstall", func(t *testing.T) {
+		// Use short /tmp dir so Unix socket sun_path stays well under 108 bytes.
+		home, err := os.MkdirTemp("/tmp", "c12s-")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.RemoveAll(home) })
+		mid := randomHexMid(t)
+		env := []string{"CORRALD_TEST_MACHINE_ID=" + mid}
+		installedBin, layout := installAndServe(t, home, mid)
+
+		selftestSock := filepath.Join(layout.StateDir, ".selftest-12345.sock")
+		rebindSock := filepath.Join(layout.StateDir, ".rebind-12345-a1b2c3.sock")
+		for _, sp := range []string{selftestSock, rebindSock} {
+			ln, lerr := net.ListenUnix("unix", &net.UnixAddr{Name: sp, Net: "unix"})
+			if lerr != nil {
+				t.Fatalf("ListenUnix(%s): %v", sp, lerr)
+			}
+			ln.SetUnlinkOnClose(false)
+			_ = ln.Close()
+		}
+
+		out, code := runCLI(t, installedBin, home, env, "uninstall", "--op", "1208000000000001", "--only-if-sole-gateway", "gw-a")
+		if code != 0 || parseKV(out)["result"] != "removed" {
+			t.Fatalf("Fix12 Item #8 regression: leftover .selftest/.rebind sockets blocked uninstall! code=%d\n%s", code, out)
+		}
+		for _, p := range []string{selftestSock, rebindSock, layout.StateDir, layout.LibDir} {
+			if _, err := os.Lstat(p); !os.IsNotExist(err) {
+				t.Fatalf("expected %s removed, stat err=%v", p, err)
+			}
+		}
+	})
+
+	t.Run("fix12_item9_libdir_temp_files_enumerated_and_enotempty_reported", func(t *testing.T) {
+		// Subcase A: interrupted atomic update leaves .corrald.tmp.* and .README.txt.tmp.*
+		// directly in LibDir -> uninstall MUST enumerate and delete them AND remove LibDir.
+		homeA := t.TempDir()
+		midA := randomHexMid(t)
+		envA := []string{"CORRALD_TEST_MACHINE_ID=" + midA}
+		installedBinA, layoutA := installAndServe(t, homeA, midA)
+
+		tmpBin := filepath.Join(layoutA.LibDir, ".corrald.tmp.12345.deadbeef")
+		tmpReadme := filepath.Join(layoutA.LibDir, ".README.txt.tmp.12345.cafebabe")
+		if err := os.WriteFile(tmpBin, []byte("tmp-bin"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(tmpReadme, []byte("tmp-readme"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		outA, codeA := runCLI(t, installedBinA, homeA, envA, "uninstall", "--op", "1209000000000001", "--only-if-sole-gateway", "gw-a")
+		if codeA != 0 || parseKV(outA)["result"] != "removed" {
+			t.Fatalf("expected clean uninstall removing LibDir temp files, got code=%d\n%s", codeA, outA)
+		}
+		for _, p := range []string{tmpBin, tmpReadme, layoutA.LibDir} {
+			if _, err := os.Lstat(p); !os.IsNotExist(err) {
+				t.Fatalf("Fix12 Item #9 regression: %s left behind after uninstall reported removed! stat err=%v", p, err)
+			}
+		}
+
+		// Subcase B: an unexpected regular file in LibDir causes LibDir rmdir ENOTEMPTY ->
+		// MUST NOT silently report result=removed; must report result=partial with left=.
+		homeB := t.TempDir()
+		midB := randomHexMid(t)
+		envB := []string{"CORRALD_TEST_MACHINE_ID=" + midB}
+		installedBinB, layoutB := installAndServe(t, homeB, midB)
+		extraLibFile := filepath.Join(layoutB.LibDir, ".notes.tmp.backup")
+		if err := os.WriteFile(extraLibFile, []byte("keep-lib-file\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		outB, codeB := runCLI(t, installedBinB, homeB, envB, "uninstall", "--op", "1209000000000002", "--only-if-sole-gateway", "gw-a")
+		if codeB == 0 || parseKV(outB)["result"] != "partial" {
+			t.Fatalf("Fix12 Item #9 regression: LibDir ENOTEMPTY with leftover file reported removed! code=%d\n%s", codeB, outB)
+		}
+		if got, err := os.ReadFile(extraLibFile); err != nil || string(got) != "keep-lib-file\n" {
+			t.Fatalf("expected unowned file %s preserved: err=%v content=%q", extraLibFile, err, string(got))
+		}
+		if !strings.Contains(outB, "left="+extraLibFile+"\t") {
+			t.Fatalf("expected %s in left=:\n%s", extraLibFile, outB)
+		}
+	})
 }
 
 // Regression test for Fix Round 6 F2 [P3]:
@@ -1689,9 +1985,9 @@ func TestCleanStopAndSelftestRemoveTmpSocketDir(t *testing.T) {
 	_ = heldLock.Release()
 
 	// 2. serve creates the tmp socket dir; clean stop removes it.
-	stage := stageBinary(t, home, mid, "opF2", bins.v1)
+	stage := stageBinary(t, home, mid, "2cb05f3775aecce4", bins.v1)
 	if out, code := runCLI(t, filepath.Join(stage, "corrald"), home, env,
-		"install", "--stage", stage, "--op", "opF2", "--gateway", "gw-f2", "--by", "alice"); code != 0 {
+		"install", "--stage", stage, "--op", "2cb05f3775aecce4", "--gateway", "gw-f2", "--by", "alice"); code != 0 {
 		t.Fatalf("install failed: %s", out)
 	}
 	installedBin := filepath.Join(home, ".local", "lib", "corral", "corrald")

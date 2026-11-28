@@ -2028,7 +2028,7 @@ func TestCorraldFix7_EndToEnd(t *testing.T) {
 
 		outCh := make(chan gw.UninstallOutcome, 1)
 		go func() {
-			outCh <- gw.RunUninstallSoleGatewayWithRetry(context.Background(), sshCl, distV1, probe, "op7rec1", "gw-fix7.local", gw.DefaultBusyRetryPolicy, nil)
+			outCh <- gw.RunUninstallSoleGatewayWithRetry(context.Background(), sshCl, distV1, probe, "0700000000000001", "gw-fix7.local", gw.DefaultBusyRetryPolicy, nil)
 		}()
 
 		select {
@@ -2058,7 +2058,7 @@ func TestCorraldFix7_EndToEnd(t *testing.T) {
 		if err != nil {
 			t.Fatalf("ProbeHost retry: %v", err)
 		}
-		out2 := gw.RunUninstallSoleGatewayWithRetry(context.Background(), sshCl, distV1, probe2, "op7rec2", "gw-fix7.local", gw.DefaultBusyRetryPolicy, nil)
+		out2 := gw.RunUninstallSoleGatewayWithRetry(context.Background(), sshCl, distV1, probe2, "0700000000000002", "gw-fix7.local", gw.DefaultBusyRetryPolicy, nil)
 		if out2.Result != "removed" {
 			t.Fatalf("expected retry to succeed with result=removed, got %+v", out2)
 		}
@@ -2110,7 +2110,7 @@ func TestCorraldFix7_EndToEnd(t *testing.T) {
 			t.Fatalf("unexpected probe: %+v", probe)
 		}
 
-		out := gw.RunUninstallSoleGatewayWithRetry(context.Background(), sshCl, distV1, probe, "op8rec1", "gw-fix8.local", gw.DefaultBusyRetryPolicy, nil)
+		out := gw.RunUninstallSoleGatewayWithRetry(context.Background(), sshCl, distV1, probe, "0800000000000001", "gw-fix8.local", gw.DefaultBusyRetryPolicy, nil)
 		if out.Result != "removed" {
 			t.Fatalf("Fix8 Items #1+#4+#5 regression: expected result=removed when LibDir missing + tombstone present, got %+v", out)
 		}
@@ -2248,11 +2248,11 @@ func TestCorraldFix7_EndToEnd(t *testing.T) {
 			t.Fatalf("selftest: %v (%s)", err, stOut)
 		}
 		stDir := gw.ParseKeyValues(stOut)["state_dir"]
-		stageDir := filepath.Join(stDir, "stage-pre0001")
+		stageDir := filepath.Join(stDir, "stage-0700000000000003")
 		_ = os.MkdirAll(stageDir, 0o700)
 		b1, _ := os.ReadFile(v1Bin)
 		_ = os.WriteFile(filepath.Join(stageDir, "corrald"), b1, 0o700)
-		instCmd := exec.Command(filepath.Join(stageDir, "corrald"), "install", "--stage", stageDir, "--op", "pre0001", "--gateway", "gw-fix7-reuse.local", "--by", "admin")
+		instCmd := exec.Command(filepath.Join(stageDir, "corrald"), "install", "--stage", stageDir, "--op", "0700000000000003", "--gateway", "gw-fix7-reuse.local", "--by", "admin")
 		instCmd.Env = append(os.Environ(), "HOME="+home)
 		if out, err := instCmd.CombinedOutput(); err != nil {
 			t.Fatalf("pre-install: %v (%s)", err, out)
@@ -3668,6 +3668,190 @@ func TestCorraldFix11_HasOnHostCountsClientsJSONAndLocks(t *testing.T) {
 			t.Fatalf("Fix11 Item #6 regression: StateDir/locks still left on disk after cleanup reported off! stat err=%v", err)
 		}
 	})
+}
+
+// Regression test for Fix Round 12 Item #2 [P1]:
+// When the uploaded staged binary's SHA-256 readback does not match (both in
+// StageAndInstall and in binaryless recovery install), the staged binary MUST
+// NEVER be executed. If a verified host binary exists it cleans the stage;
+// otherwise the stage is left for the next verified run and reported in Left.
+func TestCorraldFix12_ChecksumMismatchNeverExecutesStagedBinary(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("requires linux")
+	}
+
+	makeBadDist := func(t *testing.T, marker string) *gw.Dist {
+		t.Helper()
+		dir := t.TempDir()
+		binPath := filepath.Join(dir, "corrald-linux-"+runtime.GOARCH)
+		// If this unverified binary is ever executed (e.g. via clean-stage),
+		// it writes marker so the test immediately catches it!
+		script := "#!/bin/sh\necho EXECUTED > " + marker + "\necho result=ok\n"
+		if err := os.WriteFile(binPath, []byte(script), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		return &gw.Dist{
+			Version: "0.9.9",
+			Release: 999,
+			Binaries: map[string]*gw.ArchBinary{
+				runtime.GOARCH: {
+					Arch:   runtime.GOARCH,
+					Path:   binPath,
+					SHA256: strings.Repeat("0", 64), // guaranteed mismatch
+					Size:   int64(len(script)),
+				},
+			},
+		}
+	}
+
+	t.Run("fresh_install_checksum_mismatch_never_executes_staged_binary", func(t *testing.T) {
+		sshSrv, _ := startCorraldSSH(t)
+		sshCl := dialTestSSH(t, sshSrv)
+		defer sshCl.Close()
+		probe, err := gw.ProbeHost(context.Background(), sshCl)
+		if err != nil {
+			t.Fatalf("ProbeHost: %v", err)
+		}
+		marker := filepath.Join(t.TempDir(), "staged-executed")
+		badDist := makeBadDist(t, marker)
+		bin := badDist.Binaries[runtime.GOARCH]
+
+		_, fail := gw.StageAndInstallWithRetry(
+			context.Background(), sshCl, badDist, probe, bin,
+			"1202000000000001", "gw-fix12.local", "admin", false,
+			gw.BusyRetryPolicy{}, nil, nil, nil,
+		)
+		if fail == nil || fail.Code != "checksum_mismatch" {
+			t.Fatalf("expected checksum_mismatch failure, got %+v", fail)
+		}
+		if _, err := os.Stat(marker); err == nil {
+			t.Fatalf("Fix12 Item #2 regression: unverified staged binary was executed after checksum_mismatch!")
+		}
+		if len(fail.Left) == 0 {
+			t.Fatalf("expected uncleaned stage dir reported in fail.Left when no verified host binary exists")
+		}
+	})
+
+	t.Run("recovery_install_checksum_mismatch_never_executes_staged_binary", func(t *testing.T) {
+		sshSrv, _ := startCorraldSSH(t)
+		sshCl := dialTestSSH(t, sshSrv)
+		defer sshCl.Close()
+		probe, err := gw.ProbeHost(context.Background(), sshCl)
+		if err != nil {
+			t.Fatalf("ProbeHost: %v", err)
+		}
+		if err := os.MkdirAll(probe.StateDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(probe.TombstonePath, []byte(`{"created_at":"2026-11-28T00:00:00Z","gateway":"gw-fix12.local"}`+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		probe, err = gw.ProbeHost(context.Background(), sshCl)
+		if err != nil {
+			t.Fatalf("ProbeHost: %v", err)
+		}
+		marker := filepath.Join(t.TempDir(), "recovery-staged-executed")
+		badDist := makeBadDist(t, marker)
+
+		out := gw.RunUninstallSoleGatewayWithRetry(
+			context.Background(), sshCl, badDist, probe,
+			"1202000000000002", "gw-fix12.local", gw.BusyRetryPolicy{}, nil,
+		)
+		if out.Result != "pending" {
+			t.Fatalf("expected pending outcome on recovery checksum mismatch, got %+v", out)
+		}
+		if _, err := os.Stat(marker); err == nil {
+			t.Fatalf("Fix12 Item #2 regression: unverified recovery binary was executed after checksum mismatch!")
+		}
+		if len(out.Left) == 0 {
+			t.Fatalf("expected uncleaned recovery stage dir reported in out.Left, got %+v", out)
+		}
+	})
+}
+
+// Regression test for Fix Round 12 Item #4 [P1]:
+// After a gateway crash with state=removing and active_op_id=<remove-op>
+// (op row still running in SQLite), reconnecting after restart MUST finish
+// that crashed op row and complete cleanup to StateOff (and accept a new op
+// without unique-index rejection).
+func TestCorraldFix12_CrashMidRemoveResumesToOffAndFinishesOp(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("requires linux")
+	}
+	v1Dir, _ := buildTestCorraldDist(t)
+	distV1, err := gw.LoadDist(v1Dir)
+	if err != nil {
+		t.Fatalf("LoadDist v1: %v", err)
+	}
+	h := newHarness(t, func(c *config.Config) {
+		c.CorraldDir = v1Dir
+		c.GatewayID = "gw-fix12-crash.local"
+	})
+	admin := h.admin()
+	adminID := userIDOf(t, admin)
+	sshSrv, home := startCorraldSSH(t)
+	hostID, _ := createAndPinHost(t, admin, sshSrv, "crash-rm-host")
+	fp := hostFingerprint(t, h, adminID, hostID)
+
+	startCorraldInstall(t, admin, hostID)
+	waitCorraldState(t, admin, hostID, gw.StateRunning)
+
+	// Simulate gateway crash mid-remove: DB persists state=removing,
+	// active_op_id=<removeOpID>, and a still-running corrald_ops row.
+	const crashedOpID = "1204000000000001"
+	acctKey := fp + "\x00alice"
+	if err := h.store.CreateCorraldOp(context.Background(), &store.CorraldOp{
+		ID:         crashedOpID,
+		HostID:     hostID,
+		AccountKey: acctKey,
+		Kind:       gw.OpRemove,
+		State:      gw.OpRunning,
+		Step:       "uninstall",
+	}, false); err != nil {
+		t.Fatalf("CreateCorraldOp: %v", err)
+	}
+	if err := h.store.ClaimCorraldHostForRemove(context.Background(), hostID, crashedOpID); err != nil {
+		t.Fatalf("ClaimCorraldHostForRemove: %v", err)
+	}
+
+	// Simulate hard gateway restart (new Manager on the same DB).
+	h.srv.corrald.Close()
+	h.srv.corrald = gw.NewManager(gw.ManagerConfig{
+		Store:     h.store,
+		Dist:      distV1,
+		GatewayID: "gw-fix12-crash.local",
+		SSH:       &webSSHProvider{s: h.srv},
+	})
+
+	// Reconnect -> MUST finish the crashed op row and clean host to StateOff!
+	sshCl := dialTestSSH(t, sshSrv)
+	defer sshCl.Close()
+	h.srv.corrald.OnHostConnected(context.Background(), adminID, hostID, "admin", fp, "alice", sshCl)
+
+	ch, err := h.store.CorraldHostByID(context.Background(), hostID)
+	if err != nil {
+		t.Fatalf("CorraldHostByID: %v", err)
+	}
+	if ch.State != gw.StateOff {
+		t.Fatalf("Fix12 Item #4 regression: host stuck after mid-remove crash reconnect! state=%q active_op_id=%q", ch.State, ch.ActiveOpID)
+	}
+	if ch.ActiveOpID != "" {
+		t.Fatalf("Fix12 Item #4 regression: active_op_id not cleared! got %q", ch.ActiveOpID)
+	}
+	if activeOp, aerr := h.store.ActiveCorraldOp(context.Background(), hostID); aerr == nil && activeOp != nil {
+		t.Fatalf("Fix12 Item #4 regression: crashed remove op row still active! %+v", activeOp)
+	}
+	latestOp, lerr := h.store.LatestCorraldOp(context.Background(), hostID)
+	if lerr != nil || latestOp == nil || latestOp.ID != crashedOpID || latestOp.State == gw.OpRunning || latestOp.State == gw.OpPending {
+		t.Fatalf("Fix12 Item #4 regression: expected crashed op %s finished, got (%+v, %v)", crashedOpID, latestOp, lerr)
+	}
+	bin := filepath.Join(home, ".local", "lib", "corral", "corrald")
+	if _, err := os.Lstat(bin); !os.IsNotExist(err) {
+		t.Fatalf("expected binary %s cleaned up on post-crash reconnect, stat err=%v", bin, err)
+	}
+	// Verify a subsequent operation (install) is accepted without unique-index conflict.
+	startCorraldInstall(t, admin, hostID)
+	waitCorraldState(t, admin, hostID, gw.StateRunning)
 }
 
 func syscallFlockEx(f *os.File) error {

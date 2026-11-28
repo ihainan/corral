@@ -31,9 +31,9 @@ func TestUninstallRemovesLocksAndEmptyDirsSingleMachine(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	stage := stageBinary(t, home, mid, "opClean1", bins.v1)
+	stage := stageBinary(t, home, mid, "840cc9f0738a7ba2", bins.v1)
 	if out, code := runCLI(t, filepath.Join(stage, "corrald"), home, env,
-		"install", "--stage", stage, "--op", "opClean1", "--gateway", "gw.clean", "--by", "alice"); code != 0 {
+		"install", "--stage", stage, "--op", "840cc9f0738a7ba2", "--gateway", "gw.clean", "--by", "alice"); code != 0 {
 		t.Fatalf("install failed: %s", out)
 	}
 	installedBin := filepath.Join(home, ".local", "lib", "corral", "corrald")
@@ -51,7 +51,7 @@ func TestUninstallRemovesLocksAndEmptyDirsSingleMachine(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	out, code := runCLI(t, installedBin, home, env, "uninstall", "--op", "opRmClean1")
+	out, code := runCLI(t, installedBin, home, env, "uninstall", "--op", "26e01e033d43b3d4")
 	if code != 0 || parseKV(out)["result"] != "removed" {
 		t.Fatalf("uninstall failed: code=%d\n%s", code, out)
 	}
@@ -129,13 +129,13 @@ func TestUninstallAndInstallConcurrentNoDualLock(t *testing.T) {
 	const mid = "ddeeff445566"
 	env := []string{"CORRALD_TEST_MACHINE_ID=" + mid}
 
-	stage1 := stageBinary(t, home, mid, "opRace1", bins.v1)
+	stage1 := stageBinary(t, home, mid, "6eb98ca203d9b39c", bins.v1)
 	if out, code := runCLI(t, filepath.Join(stage1, "corrald"), home, env,
-		"install", "--stage", stage1, "--op", "opRace1", "--gateway", "gw.race", "--by", "alice"); code != 0 {
+		"install", "--stage", stage1, "--op", "6eb98ca203d9b39c", "--gateway", "gw.race", "--by", "alice"); code != 0 {
 		t.Fatalf("initial install failed: %s", out)
 	}
 	installedBin := filepath.Join(home, ".local", "lib", "corral", "corrald")
-	stage2 := stageBinary(t, home, mid, "opRace2", bins.v2)
+	stage2 := stageBinary(t, home, mid, "c86d166ec9c93c8e", bins.v2)
 
 	var wg2 sync.WaitGroup
 	var rmOut, inOut string
@@ -143,12 +143,12 @@ func TestUninstallAndInstallConcurrentNoDualLock(t *testing.T) {
 	wg2.Add(2)
 	go func() {
 		defer wg2.Done()
-		rmOut, rmCode = runCLI(t, installedBin, home, env, "uninstall", "--op", "opRaceRm")
+		rmOut, rmCode = runCLI(t, installedBin, home, env, "uninstall", "--op", "502b1789ccb8956b")
 	}()
 	go func() {
 		defer wg2.Done()
 		inOut, inCode = runCLI(t, filepath.Join(stage2, "corrald"), home, env,
-			"install", "--stage", stage2, "--op", "opRace2", "--gateway", "gw.race", "--by", "bob")
+			"install", "--stage", stage2, "--op", "c86d166ec9c93c8e", "--gateway", "gw.race", "--by", "bob")
 	}()
 	wg2.Wait()
 
@@ -184,9 +184,9 @@ func TestHandoffDropsInvalidatedTmuxPath(t *testing.T) {
 	// 1. Real CLI serve with an invalid --tmux path succeeds without exiting.
 	// 2. Real CLI handoff when meta/cfg holds a stale tmux path (via in-process
 	//    Server with SetTrustedTmuxCheckRootForTest) succeeds cleanly.
-	stage1 := stageBinary(t, home, mid, "opTmux1", bins.v1)
+	stage1 := stageBinary(t, home, mid, "105a366d72b41879", bins.v1)
 	if out, code := runCLI(t, filepath.Join(stage1, "corrald"), home, env,
-		"install", "--stage", stage1, "--op", "opTmux1", "--gateway", "gw.tmux", "--by", "alice"); code != 0 {
+		"install", "--stage", stage1, "--op", "105a366d72b41879", "--gateway", "gw.tmux", "--by", "alice"); code != 0 {
 		t.Fatalf("install v1 failed: %s", out)
 	}
 	installedBin := filepath.Join(home, ".local", "lib", "corral", "corrald")
@@ -210,9 +210,9 @@ func TestHandoffDropsInvalidatedTmuxPath(t *testing.T) {
 
 	// 2. Also verify handoff to v2 succeeds cleanly when v1 was started with --tmux /bin/sh or stale path.
 	sock := parseKV(out)["socket"]
-	stage2 := stageBinary(t, home, mid, "opTmux2", bins.v2)
+	stage2 := stageBinary(t, home, mid, "81bef567407d3d39", bins.v2)
 	out2, code2 := runCLI(t, filepath.Join(stage2, "corrald"), home, env,
-		"install", "--upgrade", "--stage", stage2, "--op", "opTmux2", "--gateway", "gw.tmux", "--by", "alice")
+		"install", "--upgrade", "--stage", stage2, "--op", "81bef567407d3d39", "--gateway", "gw.tmux", "--by", "alice")
 	if code2 != 0 {
 		t.Fatalf("upgrade v2 failed: %s", out2)
 	}
@@ -246,16 +246,16 @@ func TestColdStartUpdatePreservesInstallManifestAndUninstallPartialOnLeftover(t 
 		home := t.TempDir()
 
 		// 1. Install V1.
-		stage1 := stageBinary(t, home, mid, "opCold1", bins.v1)
+		stage1 := stageBinary(t, home, mid, "4080591eb01a08c7", bins.v1)
 		if out, code := runCLI(t, filepath.Join(stage1, "corrald"), home, env,
-			"install", "--stage", stage1, "--op", "opCold1", "--gateway", "gw.cold", "--by", "alice"); code != 0 {
+			"install", "--stage", stage1, "--op", "4080591eb01a08c7", "--gateway", "gw.cold", "--by", "alice"); code != 0 {
 			t.Fatalf("install v1 failed: %s", out)
 		}
 
 		// 2. Cold-start update to V2 (install WITHOUT --upgrade).
-		stage2 := stageBinary(t, home, mid, "opCold2", bins.v2)
+		stage2 := stageBinary(t, home, mid, "e4414ad919c82cbd", bins.v2)
 		if out, code := runCLI(t, filepath.Join(stage2, "corrald"), home, env,
-			"install", "--stage", stage2, "--op", "opCold2", "--gateway", "gw.cold", "--by", "alice"); code != 0 {
+			"install", "--stage", stage2, "--op", "e4414ad919c82cbd", "--gateway", "gw.cold", "--by", "alice"); code != 0 {
 			t.Fatalf("cold-start install v2 failed: %s", out)
 		}
 
@@ -271,7 +271,7 @@ func TestColdStartUpdatePreservesInstallManifestAndUninstallPartialOnLeftover(t 
 
 		// 3. Uninstall: MUST delete V1, V2, symlink, README, locks, and empty dirs -> result=removed.
 		installedBin := filepath.Join(home, ".local", "lib", "corral", "corrald")
-		out, code := runCLI(t, installedBin, home, env, "uninstall", "--op", "opColdRm")
+		out, code := runCLI(t, installedBin, home, env, "uninstall", "--op", "0024022c36f6568d")
 		kv := parseKV(out)
 		if code != 0 || kv["result"] != "removed" {
 			t.Fatalf("expected clean result=removed after V1->V2 cold-start update, got code=%d:\n%s", code, out)
@@ -295,9 +295,9 @@ func TestColdStartUpdatePreservesInstallManifestAndUninstallPartialOnLeftover(t 
 	t.Run("leftover_file_reports_partial_with_left_path", func(t *testing.T) {
 		home := t.TempDir()
 
-		stage1 := stageBinary(t, home, mid, "opLeft1", bins.v1)
+		stage1 := stageBinary(t, home, mid, "afa575444d54689d", bins.v1)
 		if out, code := runCLI(t, filepath.Join(stage1, "corrald"), home, env,
-			"install", "--stage", stage1, "--op", "opLeft1", "--gateway", "gw.left", "--by", "alice"); code != 0 {
+			"install", "--stage", stage1, "--op", "afa575444d54689d", "--gateway", "gw.left", "--by", "alice"); code != 0 {
 			t.Fatalf("install v1 failed: %s", out)
 		}
 
@@ -313,7 +313,7 @@ func TestColdStartUpdatePreservesInstallManifestAndUninstallPartialOnLeftover(t 
 		}
 
 		installedBin := filepath.Join(home, ".local", "lib", "corral", "corrald")
-		out, code := runCLI(t, installedBin, home, env, "uninstall", "--op", "opLeftRm")
+		out, code := runCLI(t, installedBin, home, env, "uninstall", "--op", "4e4b80a4ec0c3bd2")
 		kv := parseKV(out)
 		if code == 0 || kv["result"] != "partial" {
 			t.Fatalf("expected non-zero exit with result=partial when leftover corrald file exists, got code=%d:\n%s", code, out)
@@ -399,9 +399,9 @@ func TestUninstallBusyWhenRunDirPaneLockHeld(t *testing.T) {
 		"CORRALD_TEST_RUN_LOCK_TIMEOUT=100ms",
 	}
 
-	stage := stageBinary(t, home, mid, "opRunBusy1", bins.v1)
+	stage := stageBinary(t, home, mid, "fa73b0ea0a81a764", bins.v1)
 	if out, code := runCLI(t, filepath.Join(stage, "corrald"), home, env,
-		"install", "--stage", stage, "--op", "opRunBusy1", "--gateway", "gw.lock", "--by", "alice"); code != 0 {
+		"install", "--stage", stage, "--op", "fa73b0ea0a81a764", "--gateway", "gw.lock", "--by", "alice"); code != 0 {
 		t.Fatalf("install failed: %s", out)
 	}
 	installedBin := filepath.Join(home, ".local", "lib", "corral", "corrald")
@@ -423,7 +423,7 @@ func TestUninstallBusyWhenRunDirPaneLockHeld(t *testing.T) {
 	}
 
 	// Uninstall while SSH send holds lock MUST fail with error=busy and keep run/ intact.
-	out, code := runCLI(t, installedBin, home, env, "uninstall", "--op", "opRmBusy1")
+	out, code := runCLI(t, installedBin, home, env, "uninstall", "--op", "23c840837110906a")
 	kv := parseKV(out)
 	if code == 0 || kv["error"] != proto.ErrBusy {
 		t.Fatalf("expected uninstall to return error=busy while run/ pane lock is held, got code=%d:\n%s", code, out)
@@ -444,7 +444,7 @@ func TestUninstallBusyWhenRunDirPaneLockHeld(t *testing.T) {
 	if err := heldLock.Release(); err != nil {
 		t.Fatalf("Release: %v", err)
 	}
-	out2, code2 := runCLI(t, installedBin, home, env, "uninstall", "--op", "opRmBusy2")
+	out2, code2 := runCLI(t, installedBin, home, env, "uninstall", "--op", "d1ce8d1cb59a57c5")
 	if code2 != 0 || parseKV(out2)["result"] != "removed" {
 		t.Fatalf("retry uninstall after pane lock release failed: code=%d\n%s", code2, out2)
 	}

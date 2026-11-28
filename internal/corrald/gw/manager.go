@@ -4495,7 +4495,10 @@ func (m *Manager) reconcileHost(
 	dec := ReconcileAfterRestart(ch.State, opKind, obs)
 
 	// Clean only owned leftover stage-<16hex> directories from interrupted uploads
-	// via corrald clean-stage (daemon.RemoveOwned), never rm -rf.
+	// via the already-installed verified binary's `corrald clean-stage`
+	// (SharedLock -> OpLock -> daemon.RemoveOwned). Never execute an unverified
+	// staged binary, and when opID is known, only clean that interrupted op's
+	// stage so another gateway's in-progress upload is never touched.
 	for _, stage := range dec.CleanupStages {
 		base := stage
 		if idx := strings.LastIndexByte(stage, '/'); idx >= 0 {
@@ -4505,7 +4508,10 @@ func (m *Manager) reconcileHost(
 			continue
 		}
 		stageOpID := strings.TrimPrefix(base, "stage-")
-		_, _ = runSSH(ctx, sshClient, CleanStageCommand(probe.CurrentBin, stage+"/corrald", stage, stageOpID), 4096, sshx.ExecOptions{})
+		if opID != "" && stageOpID != opID {
+			continue
+		}
+		_, _ = runSSH(ctx, sshClient, CleanStageCommand(probe.CurrentBin, "", stage, stageOpID), 4096, sshx.ExecOptions{})
 	}
 
 	writeReconciled := func(opToFinalize *store.CorraldOp) {

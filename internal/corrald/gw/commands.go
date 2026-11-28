@@ -186,6 +186,11 @@ if [ -d "$L" ]; then
   if [ -e "$L/README.txt" ] || [ -L "$L/README.txt" ] || [ -e "$L/.corrald-shared.lock" ] || [ -L "$L/.corrald-shared.lock" ]; then
     echo "has_lib_files=1"
   fi
+  for f in "$L"/.corrald.tmp.* "$L"/.README.txt.tmp.*; do
+    if [ -e "$f" ] || [ -L "$f" ]; then
+      echo "lib_tmp=$(basename "$f")"
+    fi
+  done
   for d in "$L"/corrald-*; do
     [ -d "$d" ] && [ ! -L "$d" ] && echo "version_dir=$(basename "$d")"
   done
@@ -243,12 +248,18 @@ func ParseProbe(out []byte) (*HostProbe, error) {
 	}
 
 	// Collect only strictly validated corrald-<ver>-<rel> version directories
-	// (ignoring unrelated directories like corrald-backups).
+	// (ignoring unrelated directories like corrald-backups) and validated
+	// corrald-owned LibDir temp files (.corrald.tmp.*, .README.txt.tmp.*).
 	sc := bufio.NewScanner(strings.NewReader(string(out)))
 	for sc.Scan() {
-		if v, ok := strings.CutPrefix(sc.Text(), "version_dir="); ok && v != "" {
+		line := sc.Text()
+		if v, ok := strings.CutPrefix(line, "version_dir="); ok && v != "" {
 			if _, _, _, valid := parseVersionDirInfo(v); valid {
 				p.Versions = append(p.Versions, v)
+			}
+		} else if v, ok := strings.CutPrefix(line, "lib_tmp="); ok && v != "" {
+			if daemon.IsOwnedLibFileName(v) {
+				p.HasLibFiles = true
 			}
 		}
 	}
@@ -391,11 +402,12 @@ echo "result=ok"
 `, "HOME_DIR", home, "ST", stateDir, "STAGE", stageDir)
 }
 
-// CleanStageCommand removes an owned staging directory using corrald's own
-// `clean-stage` subcommand (which delegates to daemon.RemoveOwned). If no
-// binary is executable yet (e.g. upload failed before the binary landed), it
-// only unlinks regular non-symlink upload/binary files inside a real non-symlink
-// stage directory and calls rmdir — never `rm -rf` and never following symlinks.
+// CleanStageCommand removes an owned staging directory strictly via a verified
+// corrald binary's `clean-stage` subcommand (which takes SharedLock -> OpLock
+// and delegates to daemon.RemoveOwned). Never executes an unverified binary and
+// never runs shell `rm`: if no verified binary is executable on the host, it
+// emits error=no_verified_binary so the stage is reported and left for the next
+// verified run.
 func CleanStageCommand(primaryBin, fallbackBin, stageDir, opID string) string {
 	return shellScript(`if [ -n "$BIN" ] && [ -x "$BIN" ]; then
   "$BIN" clean-stage --stage "$STAGE" --op "$OP"
@@ -405,29 +417,8 @@ if [ -n "$ALT" ] && [ -x "$ALT" ]; then
   "$ALT" clean-stage --stage "$STAGE" --op "$OP"
   exit $?
 fi
-if [ ! -e "$STAGE" ] && [ ! -L "$STAGE" ]; then
-  echo "result=ok"
-  exit 0
-fi
-if [ -L "$STAGE" ] || [ ! -d "$STAGE" ]; then
-  echo "error=unsafe_stage"
-  exit 1
-fi
-if [ -f "$STAGE/corrald" ] && [ ! -L "$STAGE/corrald" ]; then
-  rm -f -- "$STAGE/corrald" || { echo "error=rm_failed"; exit 1; }
-fi
-for f in "$STAGE"/.corrald.upload.*; do
-  [ -e "$f" ] || continue
-  [ -L "$f" ] && continue
-  [ -f "$f" ] || continue
-  bn=$(basename -- "$f")
-  hex=${bn#.corrald.upload.}
-  if [ "${#hex}" -eq 16 ]; then
-    case "$hex" in *[!0-9a-f]*) ;; *) rm -f -- "$f" || { echo "error=rm_failed"; exit 1; } ;; esac
-  fi
-done
-rmdir -- "$STAGE" || { echo "error=rm_failed"; exit 1; }
-echo "result=ok"
+echo "error=no_verified_binary"
+exit 1
 `, "BIN", primaryBin, "ALT", fallbackBin, "STAGE", stageDir, "OP", opID)
 }
 

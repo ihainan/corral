@@ -83,6 +83,10 @@ func cmdCleanStage(args []string, stdout io.Writer) int {
 		writeErr(stdout, "invalid_args", "required flags: --stage, --op")
 		return 2
 	}
+	if !IsOwnedOpID(*opID) {
+		writeErr(stdout, "invalid_op", fmt.Sprintf("invalid op id %q", *opID))
+		return 2
+	}
 	layout, err := resolveDefaultLayout()
 	if err != nil {
 		writeErr(stdout, "layout_failed", err.Error())
@@ -98,6 +102,46 @@ func cmdCleanStage(args []string, stdout io.Writer) int {
 		writeErr(stdout, "invalid_stage", fmt.Sprintf("--stage must be %s", expectedStage))
 		return 2
 	}
+
+	// Fix12 Item #6: Take the exact same lock chain as install (SharedLock ->
+	// OpLock), non-blocking so clean-stage never cleans a stage while an
+	// install/update/uninstall op is in progress.
+	if linfo, lerr := os.Lstat(layout.LibDir); lerr == nil {
+		if linfo.Mode()&os.ModeSymlink != 0 || !linfo.IsDir() {
+			writeErr(stdout, "unsafe_path", "lib dir is a symlink or non-directory")
+			return 1
+		}
+		sharedLock, serr := AcquireLock(layout.SharedLockPath)
+		if serr != nil && !errors.Is(serr, os.ErrNotExist) {
+			return writeLockErr(stdout, serr)
+		}
+		if sharedLock != nil {
+			defer sharedLock.Release()
+		}
+	} else if !errors.Is(lerr, os.ErrNotExist) {
+		writeErr(stdout, "lib_dir_failed", lerr.Error())
+		return 1
+	}
+
+	sinfo, serr := os.Lstat(layout.StateDir)
+	if serr != nil {
+		if errors.Is(serr, os.ErrNotExist) {
+			fmt.Fprintf(stdout, "result=ok\n")
+			return 0
+		}
+		writeErr(stdout, "state_dir_failed", serr.Error())
+		return 1
+	}
+	if sinfo.Mode()&os.ModeSymlink != 0 || !sinfo.IsDir() {
+		writeErr(stdout, "unsafe_path", "state dir is a symlink or non-directory")
+		return 1
+	}
+	opLock, oerr := AcquireLock(layout.OpLockPath)
+	if oerr != nil {
+		return writeLockErr(stdout, oerr)
+	}
+	defer opLock.Release()
+
 	if left := RemoveOwned(layout, OwnedRemoveStageDir, expectedStage, nil); len(left) > 0 {
 		writeErr(stdout, "stage_cleanup_failed", formatOwnedLeftoverErr(left).Error())
 		return 1
@@ -1618,7 +1662,7 @@ func StopDaemon(layout *Layout) (stopped bool, pid int, err error) {
 		return false, pid, lockHeldErr
 	}
 
-	cleanupStoppedArtifacts(layout, sockPath)
+	cleanupStoppedArtifacts(layout)
 	return wasRunning, 0, nil
 }
 
@@ -1706,12 +1750,11 @@ func waitLockFree(lockPath string, timeout time.Duration) bool {
 	}
 }
 
-func cleanupStoppedArtifacts(layout *Layout, sockPath string) {
-	if sockPath != "" {
-		_ = os.Remove(sockPath)
-	}
-	if layout.SocketPath != "" && layout.SocketPath != sockPath {
-		_ = os.Remove(layout.SocketPath)
+func cleanupStoppedArtifacts(layout *Layout) {
+	// Fix12 Item #5: Remove ONLY the layout-computed socket path and ONLY if
+	// Lstat confirms it is a Unix socket (never trust meta.json's socket_path).
+	if layout.SocketPath != "" {
+		_ = removeOwnedSocket(layout.SocketPath)
 	}
 	if layout.SocketUsesTmpDir {
 		_ = os.Remove(layout.SocketDir)
@@ -1961,11 +2004,6 @@ func cmdUninstall(args []string, stdout io.Writer) int {
 		installErr = os.ErrNotExist
 	}
 
-	sockPath := layout.SocketPath
-	if metaBefore != nil && metaBefore.SocketPath != "" {
-		sockPath = metaBefore.SocketPath
-	}
-
 	// Stop running daemon (and any draining predecessor) and confirm lock is free
 	// (skipped when sole-gateway mode already stopped it and holds lifeLock).
 	if lifeLock == nil {
@@ -2012,13 +2050,13 @@ func cmdUninstall(args []string, stdout io.Writer) int {
 
 	// Before deleting binaries / state dir on the last machine, acquire every
 	// existing pane send lock in ~/.local/state/corral/run (in the same fixed
-	// order as senders) and remove run/ under lock. If any SSH send still holds
-	// a lock there, restore install.json while keeping the removing tombstone
-	// (so serve remains blocked and retry still has the full manifest), and
-	// abort with error=busy so gateway retries cleanly.
+	// order as senders) and remove run/ under lock via RemoveOwned. If any SSH
+	// send still holds a lock there, restore install.json while keeping the
+	// removing tombstone (so serve remains blocked and retry still has the full
+	// manifest), and abort with error=busy so gateway retries cleanly.
 	willPreserveForMissingInstall := installErr != nil && !resumingFromTombstone && (stateDirExists || len(listPreservedSharedPaths(layout)) > 0)
 	if isLast && lastCheckErr == nil && !willPreserveForMissingInstall && layout.RunDir != "" {
-		if rerr := RemoveRunDirLocked(layout.RunDir, defaultUninstallSystemRunDir(layout.UID), layout.UID, defaultRunDirLockTimeout()); rerr != nil {
+		if runLeft, rerr := RemoveRunDirLockedOwned(layout, defaultUninstallSystemRunDir(layout.UID), defaultRunDirLockTimeout()); rerr != nil {
 			if errors.Is(rerr, ErrLocked) {
 				if stateDirExists && installErr == nil && installRec != nil {
 					_ = WriteInstallRecord(layout.InstallJSON, installRec)
@@ -2026,16 +2064,35 @@ func cmdUninstall(args []string, stdout io.Writer) int {
 				writeErr(stdout, proto.ErrBusy, "pane send lock is held in run dir")
 				return 1
 			}
-			addLeft(layout.RunDir, rerr.Error())
+			if len(runLeft) > 0 {
+				for _, l := range runLeft {
+					addLeft(l.Path, l.Reason)
+				}
+			} else {
+				addLeft(layout.RunDir, rerr.Error())
+			}
 		}
 	}
 
-	// Remove socket (and empty /tmp fallback dir if used).
-	if sockPath != "" {
-		if err := os.Remove(sockPath); err != nil && !errors.Is(err, os.ErrNotExist) {
-			addLeft(sockPath, err.Error())
+	// Fix12 Items #5 & #8: Remove ONLY the layout-computed socket path (never
+	// meta.json's socket_path) and ONLY if it is a Unix socket. When using the
+	// /tmp fallback socket dir, also remove any owned temporary sockets there
+	// before rmdiring it.
+	if layout.SocketPath != "" {
+		if err := removeOwnedSocket(layout.SocketPath); err != nil {
+			addLeft(layout.SocketPath, err.Error())
 		}
 		if layout.SocketUsesTmpDir {
+			if entries, rerr := os.ReadDir(layout.SocketDir); rerr == nil {
+				for _, e := range entries {
+					if isOwnedSocketFileName(e.Name()) {
+						p := filepath.Join(layout.SocketDir, e.Name())
+						if serr := removeOwnedSocket(p); serr != nil {
+							addLeft(p, serr.Error())
+						}
+					}
+				}
+			}
 			_ = os.Remove(layout.SocketDir)
 		}
 	}
@@ -2059,7 +2116,7 @@ func cmdUninstall(args []string, stdout io.Writer) int {
 	} else if isLast && lastCheckErr == nil && libDirExists {
 		if installErr == nil && installRec != nil {
 			sharedTargets = collectSharedCorraldTargets(layout, installRec)
-			seenT := make(map[string]struct{}, len(sharedTargets)+2)
+			seenT := make(map[string]struct{}, len(sharedTargets)+4)
 			for _, t := range sharedTargets {
 				seenT[filepath.Clean(t)] = struct{}{}
 			}
@@ -2076,6 +2133,20 @@ func cmdUninstall(args []string, stdout io.Writer) int {
 						if _, seen := seenT[selfDir]; !seen {
 							seenT[selfDir] = struct{}{}
 							sharedTargets = append(sharedTargets, selfDir)
+						}
+					}
+				}
+			}
+			// Fix12 Item #9: Always include corrald's own top-level atomic temp
+			// files in LibDir (.corrald.tmp.*, .README.txt.tmp.*) so interrupted
+			// updates never leave them behind.
+			if entries, rerr := os.ReadDir(layout.LibDir); rerr == nil {
+				for _, e := range entries {
+					if isOwnedLibTempFileName(e.Name()) {
+						cp := filepath.Clean(filepath.Join(layout.LibDir, e.Name()))
+						if _, ok := seenT[cp]; !ok {
+							seenT[cp] = struct{}{}
+							sharedTargets = append(sharedTargets, cp)
 						}
 					}
 				}
@@ -2117,9 +2188,9 @@ func cmdUninstall(args []string, stdout io.Writer) int {
 		fmt.Fprintf(stdout, "pid=%d\n", metaBefore.PID)
 		return 1
 	}
-	if sockPath != "" {
-		if _, err := os.Lstat(sockPath); err == nil {
-			addLeft(sockPath, "socket still exists after removal")
+	if layout.SocketPath != "" {
+		if _, err := os.Lstat(layout.SocketPath); err == nil {
+			addLeft(layout.SocketPath, "socket still exists after removal")
 		}
 	}
 	if stateDirExists {
@@ -2341,11 +2412,26 @@ func cmdUninstall(args []string, stdout io.Writer) int {
 		if len(left) == 0 {
 			if err := os.Remove(layout.LibDir); err != nil && !errors.Is(err, os.ErrNotExist) {
 				corraldLeft := listPreservedSharedPaths(layout)
+				if _, serr := os.Lstat(layout.SharedLockPath); serr == nil {
+					corraldLeft = append(corraldLeft, layout.SharedLockPath)
+				}
 				for _, p := range corraldLeft {
 					addLeft(p, "corrald file still exists in lib dir after removal")
 				}
-				if len(corraldLeft) == 0 && !errors.Is(err, syscall.ENOTEMPTY) && !errors.Is(err, syscall.EEXIST) {
-					addLeft(layout.LibDir, err.Error())
+				if len(corraldLeft) == 0 {
+					entries, rerr := os.ReadDir(layout.LibDir)
+					if rerr != nil || len(entries) == 0 || (!errors.Is(err, syscall.ENOTEMPTY) && !errors.Is(err, syscall.EEXIST)) {
+						addLeft(layout.LibDir, err.Error())
+					} else {
+						// Only permit ENOTEMPTY when every remaining entry in LibDir
+						// is a non-corrald sibling directory (e.g. code-server-*,
+						// corrald-backups); any remaining file is reported as leftover.
+						for _, e := range entries {
+							if !e.IsDir() {
+								addLeft(filepath.Join(layout.LibDir, e.Name()), "unexpected file still exists in lib dir after removal")
+							}
+						}
+					}
 				}
 			}
 		}
@@ -2434,20 +2520,35 @@ func collectSharedCorraldTargets(layout *Layout, installRec *InstallRecord) []st
 
 func listPreservedSharedPaths(layout *Layout) []string {
 	var preserved []string
-	if _, err := os.Lstat(layout.CurrentSymlink); err == nil {
-		preserved = append(preserved, layout.CurrentSymlink)
-	}
-	if _, err := os.Lstat(layout.ReadmePath); err == nil {
-		preserved = append(preserved, layout.ReadmePath)
+	seen := make(map[string]struct{})
+	add := func(p string) {
+		cp := filepath.Clean(p)
+		if _, ok := seen[cp]; ok {
+			return
+		}
+		seen[cp] = struct{}{}
+		preserved = append(preserved, cp)
 	}
 	if entries, err := os.ReadDir(layout.LibDir); err == nil {
 		for _, e := range entries {
+			name := e.Name()
+			if isOwnedLibFileName(name) {
+				add(filepath.Join(layout.LibDir, name))
+				continue
+			}
 			if e.IsDir() {
-				if _, _, ok := ParseVersionDirName(e.Name()); ok {
-					preserved = append(preserved, filepath.Join(layout.LibDir, e.Name()))
+				if _, _, ok := ParseVersionDirName(name); ok {
+					add(filepath.Join(layout.LibDir, name))
 				}
 			}
 		}
+		return preserved
+	}
+	if _, err := os.Lstat(layout.CurrentSymlink); err == nil {
+		add(layout.CurrentSymlink)
+	}
+	if _, err := os.Lstat(layout.ReadmePath); err == nil {
+		add(layout.ReadmePath)
 	}
 	return preserved
 }

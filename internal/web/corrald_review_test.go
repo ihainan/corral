@@ -268,7 +268,7 @@ func TestCorraldReview_RunningManifestScopeAndNoFirstEnableDowngrade(t *testing.
 	}
 	stFields := gw.ParseKeyValues(stOut)
 	midStateDir := stFields["state_dir"]
-	preStage := filepath.Join(midStateDir, "stage-preinst01")
+	preStage := filepath.Join(midStateDir, "stage-aa00000000000001")
 	if err := os.MkdirAll(preStage, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -279,7 +279,7 @@ func TestCorraldReview_RunningManifestScopeAndNoFirstEnableDowngrade(t *testing.
 	if err := os.WriteFile(filepath.Join(preStage, "corrald"), b2, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	instCmd := exec.Command(filepath.Join(preStage, "corrald"), "install", "--stage", preStage, "--op", "preinst01", "--gateway", "other-gw", "--by", "other")
+	instCmd := exec.Command(filepath.Join(preStage, "corrald"), "install", "--stage", preStage, "--op", "aa00000000000001", "--gateway", "other-gw", "--by", "other")
 	instCmd.Env = append(os.Environ(), "HOME="+home)
 	if out, err := instCmd.CombinedOutput(); err != nil {
 		t.Fatalf("v2 pre-install: %v (%s)", err, out)
@@ -720,11 +720,11 @@ func TestCorraldReview_DeleteHostProbesWithoutRecordAndAllFalseSkipsVSCode(t *te
 		t.Fatalf("selftest: %v (%s)", err, stOut)
 	}
 	stDir := gw.ParseKeyValues(stOut)["state_dir"]
-	stageDir := filepath.Join(stDir, "stage-ext00001")
+	stageDir := filepath.Join(stDir, "stage-aa00000000000002")
 	_ = os.MkdirAll(stageDir, 0o700)
 	b1, _ := os.ReadFile(v1Bin)
 	_ = os.WriteFile(filepath.Join(stageDir, "corrald"), b1, 0o700)
-	instCmd := exec.Command(filepath.Join(stageDir, "corrald"), "install", "--stage", stageDir, "--op", "ext00001", "--gateway", "other-gw", "--by", "ext")
+	instCmd := exec.Command(filepath.Join(stageDir, "corrald"), "install", "--stage", stageDir, "--op", "aa00000000000002", "--gateway", "other-gw", "--by", "ext")
 	instCmd.Env = append(os.Environ(), "HOME="+home)
 	if out, err := instCmd.CombinedOutput(); err != nil {
 		t.Fatalf("ext install: %v (%s)", err, out)

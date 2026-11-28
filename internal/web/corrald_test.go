@@ -355,11 +355,18 @@ func TestCorraldInstallFailures(t *testing.T) {
 			if errObj == nil || errObj["code"] != tc.wantCode {
 				t.Fatalf("error = %v, want code %q", errObj, tc.wantCode)
 			}
-			// Ensure no leftover stage directories remain on checksum failure.
+			// Fix12 Items #2 & #6: On a fresh host with no verified binary, a
+			// checksum_mismatch MUST NOT execute the unverified staged binary
+			// or run shell rm; it leaves the stage for the next verified run
+			// and reports it in error.left.
 			if tc.name == "checksum_mismatch" {
 				matches, _ := filepath.Glob(filepath.Join(home, ".local", "state", "corral", "corrald", "*", "stage-*"))
-				if len(matches) > 0 {
-					t.Fatalf("expected stage directory to be deleted, found %v", matches)
+				if len(matches) != 1 {
+					t.Fatalf("expected unverified stage directory left for next verified run, found %v", matches)
+				}
+				left, _ := errObj["left"].([]any)
+				if len(left) == 0 {
+					t.Fatalf("expected uncleaned stage directory reported in error.left on fresh checksum_mismatch, got %v", errObj)
 				}
 			}
 		})

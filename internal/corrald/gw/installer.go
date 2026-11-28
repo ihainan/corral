@@ -426,14 +426,24 @@ func StageAndInstallWithRetry(
 ) (installedBin string, fail *OpFailure) {
 	stageDir := probe.StateDir + "/stage-" + opID
 	stageBin := stageDir + "/corrald"
+	stageVerified := false
 
 	cleanupStage := func() []LeftItem {
+		// Fix12 Item #2: NEVER execute stageBin unless its SHA-256 readback has
+		// already been verified against bin.SHA256. Always prefer the already-
+		// installed verified host binary; if none is available, leave the stage
+		// for the next verified run and report it as a leftover.
+		fallbackBin := ""
+		if stageVerified {
+			fallbackBin = stageBin
+		}
 		cctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		r, err := runSSH(cctx, c, CleanStageCommand(stageBin, probe.CurrentBin, stageDir, opID), 4096, sshx.ExecOptions{})
-		if err != nil || ParseKeyValues(r.Out)["result"] != "ok" {
-			reason := "cleanup failed"
-			if err != nil {
+		r, err := runSSH(cctx, c, CleanStageCommand(probe.CurrentBin, fallbackBin, stageDir, opID), 4096, sshx.ExecOptions{})
+		kv := ParseKeyValues(r.Out)
+		if err != nil || kv["result"] != "ok" {
+			reason := firstNonEmpty(kv["detail"], kv["error"], "cleanup failed")
+			if err != nil && kv["error"] == "" {
 				reason = err.Error()
 			}
 			return []LeftItem{{Path: stageDir, Reason: reason}}
@@ -526,6 +536,7 @@ func StageAndInstallWithRetry(
 			Left:      left,
 		}
 	}
+	stageVerified = true
 
 	if cf := checkCancel(); cf != nil {
 		return "", cf
@@ -735,25 +746,41 @@ func runLibDirReinstallUninstall(ctx context.Context, c *ssh.Client, dist *Dist,
 	if mkErr != nil || mkFields["result"] != "ok" {
 		return UninstallOutcome{Result: "pending", Detail: firstNonEmpty(mkFields["detail"], mkFields["error"], errStr(mkErr))}
 	}
-	cleanupStage := func() {
+	stageVerified := false
+	cleanupStage := func() []LeftItem {
+		// Fix12 Item #2: Never execute an unverified staged binary.
+		fallbackBin := ""
+		if stageVerified {
+			fallbackBin = stageBin
+		}
 		cctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		_, _ = runSSH(cctx, c, CleanStageCommand(stageBin, probe.CurrentBin, stageDir, opID), 4096, sshx.ExecOptions{})
+		r, err := runSSH(cctx, c, CleanStageCommand(probe.CurrentBin, fallbackBin, stageDir, opID), 4096, sshx.ExecOptions{})
+		kv := ParseKeyValues(r.Out)
+		if err != nil || kv["result"] != "ok" {
+			reason := firstNonEmpty(kv["detail"], kv["error"], "cleanup failed")
+			if err != nil && kv["error"] == "" {
+				reason = err.Error()
+			}
+			return []LeftItem{{Path: stageDir, Reason: reason}}
+		}
+		return nil
 	}
 
 	if err := sftpUploadBinarySecure(ctx, c, bin.Path, probe.Home, probe.UIDInt64(), probe.LibDir, stageDir, stageBin); err != nil {
-		cleanupStage()
-		return UninstallOutcome{Result: "pending", Detail: err.Error()}
+		left := cleanupStage()
+		return UninstallOutcome{Result: "pending", Detail: err.Error(), Left: left}
 	}
 	gotSHA, rerr := sftpReadbackSHA256(ctx, c, stageBin)
 	if rerr != nil || !strings.EqualFold(gotSHA, bin.SHA256) {
-		cleanupStage()
+		left := cleanupStage()
 		detail := "recovery binary checksum mismatch"
 		if rerr != nil {
 			detail = rerr.Error()
 		}
-		return UninstallOutcome{Result: "pending", Detail: detail}
+		return UninstallOutcome{Result: "pending", Detail: detail, Left: left}
 	}
+	stageVerified = true
 
 	iv, maxRetries := busyRetry.effective()
 	var instRes sshx.ExecResult

@@ -936,6 +936,48 @@ func (m *Manager) handleAdminDisabledWhileHoldingOp(
 	m.runSafeCleanupLocked(ctx, userID, hostID, corralUser, fp, sshUser, sshClient, opID, false, 0, heldOpID)
 }
 
+// isOpRunningInMemory reports whether opID is currently tracked as an active
+// in-memory operation in this Manager process.
+func (m *Manager) isOpRunningInMemory(opID string) bool {
+	if m == nil || opID == "" {
+		return false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, r := range m.opsByHost {
+		if r != nil && r.opID == opID {
+			return true
+		}
+	}
+	for _, r := range m.opsByAcct {
+		if r != nil && r.opID == opID {
+			return true
+		}
+	}
+	return false
+}
+
+// finalizeCrashedHostOp finishes a host's active_op_id left behind in SQLite
+// by a previous gateway process crash so pending cleanup and future operations
+// are not permanently blocked. Callers must already hold acquireCleanupOpLock.
+func (m *Manager) finalizeCrashedHostOp(ctx context.Context, hostID int64, activeOpID string) bool {
+	if m == nil || m.store == nil || activeOpID == "" || m.isOpRunningInMemory(activeOpID) {
+		return false
+	}
+	if op, err := m.store.ActiveCorraldOp(ctx, hostID); err == nil && op != nil && op.ID == activeOpID {
+		op.State = OpFailed
+		op.ErrorCode = "interrupted"
+		op.Detail = encodeOpDetail(opDetailPayload{Message: "interrupted by gateway restart"})
+		if released, rerr := m.store.ReleaseCorraldHostOpAndFinish(ctx, hostID, op, ""); rerr == nil && released {
+			return true
+		}
+	}
+	if cleared, cerr := m.store.ClearStaleCorraldHostOp(ctx, hostID); cerr == nil && cleared {
+		return true
+	}
+	return false
+}
+
 // runSafeCleanupLocked executes the host-side atomic sole-gateway uninstall
 // flow while the caller holds the per-account runningOp lock.
 //
@@ -979,7 +1021,32 @@ func (m *Manager) runSafeCleanupLocked(
 		return
 	}
 	if fresh.ActiveOpID != "" && fresh.ActiveOpID != heldOpID {
-		return
+		// Fix12 Item #4: When heldOpID == "", the caller holds
+		// acquireCleanupOpLock, which guarantees no in-memory operation is
+		// active for this host or account. If SQLite still has an active_op_id
+		// from a gateway crash mid-remove (running op row still in DB), finish
+		// that crashed op so cleanup proceeds and retries/new removes are not
+		// permanently blocked by active_op_id or idx_corrald_ops_active_*.
+		if heldOpID == "" && !m.isOpRunningInMemory(fresh.ActiveOpID) {
+			if m.finalizeCrashedHostOp(ctx, hostID, fresh.ActiveOpID) {
+				fresh.ActiveOpID = ""
+			} else {
+				return
+			}
+		} else {
+			return
+		}
+	}
+	if heldOpID == "" {
+		// Also finish any orphaned running remove op row for this host whose
+		// active_op_id was already cleared before crash, so idx_corrald_ops_active_*
+		// cannot reject future removes.
+		if op, oerr := m.store.ActiveCorraldOp(ctx, hostID); oerr == nil && op != nil && op.Kind == OpRemove && !m.isOpRunningInMemory(op.ID) {
+			op.State = OpFailed
+			op.ErrorCode = "interrupted"
+			op.Detail = encodeOpDetail(opDetailPayload{Message: "interrupted by gateway restart"})
+			_, _ = m.store.UpdateCorraldOpIfActive(ctx, op)
+		}
 	}
 
 	wasPending := fresh.State == StateRemovePending || fresh.State == StateRemoving

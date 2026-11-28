@@ -161,3 +161,79 @@ func TestUninstallCommandRejectsOverflowReleaseCandidate(t *testing.T) {
 		t.Fatalf("Fix11 regression: ParseProbe accepted overflow version_dir: %v", probe.Versions)
 	}
 }
+
+// TestCleanStageCommandNeverRunsShellRm verifies Fix12 Items #2 & #6:
+// CleanStageCommand MUST NEVER fall back to shell `rm`; when no verified
+// binary is executable on the host it returns error=no_verified_binary and
+// leaves the stage directory intact for the next verified run.
+func TestCleanStageCommandNeverRunsShellRm(t *testing.T) {
+	sh, err := exec.LookPath("sh")
+	if err != nil {
+		t.Skip("sh not found")
+	}
+
+	home := t.TempDir()
+	stageDir := filepath.Join(home, ".local", "state", "corral", "corrald", "aa11bb22cc66", "stage-1206000000000001")
+	if err := os.MkdirAll(stageDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	stagedFile := filepath.Join(stageDir, "corrald")
+	if err := os.WriteFile(stagedFile, []byte("unverified-bytes"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command(sh, "-c", CleanStageCommand(filepath.Join(home, ".local", "lib", "corral", "corrald"), "", stageDir, "1206000000000001"))
+	cmd.Env = []string{"HOME=" + home, "PATH=/usr/bin:/bin", "LC_ALL=C"}
+	out, runErr := cmd.CombinedOutput()
+	if runErr == nil || ParseKeyValues(out)["error"] != "no_verified_binary" {
+		t.Fatalf("Fix12 Item #6 regression: expected error=no_verified_binary without shell rm, got err=%v out=%s", runErr, string(out))
+	}
+	if _, err := os.Stat(stagedFile); err != nil {
+		t.Fatalf("Fix12 Item #6 regression: shell rm fallback deleted staged file %s: %v", stagedFile, err)
+	}
+}
+
+// TestProbeCommandDetectsLibDirTempFiles verifies Fix12 Item #9:
+// ProbeCommand + ParseProbe MUST detect corrald's own top-level temp files in
+// LibDir (.corrald.tmp.<pid>.<8hex> and .README.txt.tmp.<pid>.<8hex>) while
+// ignoring unrelated temp filenames like .notes.tmp.backup.
+func TestProbeCommandDetectsLibDirTempFiles(t *testing.T) {
+	sh, err := exec.LookPath("sh")
+	if err != nil {
+		t.Skip("sh not found")
+	}
+
+	for _, tc := range []struct {
+		name     string
+		filename string
+		wantLib  bool
+	}{
+		{"corrald_tmp", ".corrald.tmp.12345.deadbeef", true},
+		{"readme_tmp", ".README.txt.tmp.12345.cafebabe", true},
+		{"unowned_tmp", ".notes.tmp.backup", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			libDir := filepath.Join(home, ".local", "lib", "corral")
+			if err := os.MkdirAll(libDir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(libDir, tc.filename), []byte("x"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			cmd := exec.Command(sh, "-c", ProbeCommand())
+			cmd.Env = []string{"HOME=" + home, "PATH=/usr/bin:/bin", "LC_ALL=C"}
+			out, runErr := cmd.CombinedOutput()
+			if runErr != nil {
+				t.Fatalf("ProbeCommand failed: %v\n%s", runErr, string(out))
+			}
+			probe, err := ParseProbe(out)
+			if err != nil {
+				t.Fatalf("ParseProbe: %v\nout=%s", err, string(out))
+			}
+			if probe.HasLibFiles != tc.wantLib {
+				t.Fatalf("Fix12 Item #9 regression: filename=%q HasLibFiles=%v, want %v (out=%s)", tc.filename, probe.HasLibFiles, tc.wantLib, string(out))
+			}
+		})
+	}
+}

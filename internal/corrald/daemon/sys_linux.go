@@ -406,18 +406,28 @@ func flockExistingNonBlocking(dirFD int, name string, uid uint32, deadline time.
 }
 
 // RemoveRunDirLocked safely removes ~/.local/state/corral/run only after
-// acquiring exclusive flocks on every existing lock file inside it (in the
-// same fixed order as senders: systemRunDir first when present, then runDir,
-// sorted by filename), unlinking those files while locked, and removing the
-// empty directory with os.Remove (rmdir) before releasing the locks.
+// acquiring exclusive flocks on every existing corrald-owned pane lock file
+// inside it (in the same fixed order as senders: systemRunDir first when
+// present, then runDir, sorted by filename), delegating all unlinking and
+// rmdir to RemoveOwned while holding the locks.
 //
-// If any pane lock is currently held by an active sender (or new lock files
-// are concurrently created), RemoveRunDirLocked leaves runDir intact and
-// returns ErrLocked so uninstall reports `busy` and retries cleanly.
+// Any unowned file, symlink, or subdirectory inside run/ is left untouched and
+// reported as a leftover. If any owned pane lock is currently held by an active
+// sender (or new owned lock files are concurrently created), runDir is left
+// intact and ErrLocked is returned so uninstall reports `busy` and retries cleanly.
 func RemoveRunDirLocked(runDir, systemRunDir string, uid uint32, timeout time.Duration) error {
-	if runDir == "" {
-		return nil
+	_, err := RemoveRunDirLockedOwned(&Layout{RunDir: runDir, UID: uid}, systemRunDir, timeout)
+	return err
+}
+
+// RemoveRunDirLockedOwned is the Layout-aware entry point returning per-file
+// OwnedLeftover entries for any unowned files preserved in run/.
+func RemoveRunDirLockedOwned(layout *Layout, systemRunDir string, timeout time.Duration) ([]OwnedLeftover, error) {
+	if layout == nil || layout.RunDir == "" {
+		return nil, nil
 	}
+	runDir := layout.RunDir
+	uid := layout.UID
 	if timeout < 0 {
 		timeout = 0
 	}
@@ -428,31 +438,36 @@ func RemoveRunDirLocked(runDir, systemRunDir string, uid uint32, timeout time.Du
 		rinfo, rerr := os.Lstat(runDir)
 		if rerr != nil {
 			if errors.Is(rerr, os.ErrNotExist) {
-				return nil
+				return nil, nil
 			}
-			return rerr
+			return nil, rerr
+		}
+		if rinfo.Mode()&os.ModeSymlink != 0 {
+			left := []OwnedLeftover{{Path: filepath.Clean(runDir), Reason: "symlinked run dir not traversed"}}
+			return left, formatOwnedLeftoverErr(left)
 		}
 		rst, ok := rinfo.Sys().(*syscall.Stat_t)
-		if rinfo.Mode()&os.ModeSymlink != 0 || !rinfo.IsDir() || !ok || rst.Uid != uid {
-			// Never touch symlinks, non-directories, or foreign-owned paths.
-			return nil
+		if !rinfo.IsDir() || !ok || rst.Uid != uid {
+			left := []OwnedLeftover{{Path: filepath.Clean(runDir), Reason: "run dir is not a user-owned directory"}}
+			return left, formatOwnedLeftoverErr(left)
 		}
 
 		runDirFD, runDirSt, ok := openValidatedDirLinux(runDir, uid)
 		if !ok {
 			if _, err := os.Lstat(runDir); errors.Is(err, os.ErrNotExist) {
-				return nil
+				return nil, nil
 			}
-			return nil
+			left := []OwnedLeftover{{Path: filepath.Clean(runDir), Reason: "run dir could not be opened safely"}}
+			return left, formatOwnedLeftoverErr(left)
 		}
 
 		entries, err := os.ReadDir(runDir)
 		if err != nil {
 			_ = unix.Close(runDirFD)
 			if errors.Is(err, os.ErrNotExist) {
-				return nil
+				return nil, nil
 			}
-			return err
+			return nil, err
 		}
 
 		sysDirFD, sysDirSt, sysOK := openValidatedDirLinux(systemRunDir, uid)
@@ -463,7 +478,8 @@ func RemoveRunDirLocked(runDir, systemRunDir string, uid uint32, timeout time.Du
 		}
 
 		var heldFDs []int
-		var toUnlink []string
+		seenOwned := make(map[string]struct{}, len(entries))
+		hasUnowned := false
 		releaseAll := func() {
 			for i := len(heldFDs) - 1; i >= 0; i-- {
 				_ = unix.Flock(heldFDs[i], unix.LOCK_UN)
@@ -486,15 +502,24 @@ func RemoveRunDirLocked(runDir, systemRunDir string, uid uint32, timeout time.Du
 			if name == "" || name == "." || name == ".." {
 				continue
 			}
-			typ := e.Type()
-			if typ&os.ModeSymlink != 0 {
-				toUnlink = append(toUnlink, name)
+			// Fix12 Item #1: Only lock and remove corrald's exact owned pane
+			// lock filenames; leave any other file, symlink, or directory untouched.
+			if !isOwnedRunFileName(name) {
+				hasUnowned = true
 				continue
 			}
+			typ := e.Type()
 			if typ.IsDir() {
-				releaseAll()
-				return fmt.Errorf("unexpected subdirectory %s in run dir", filepath.Join(runDir, name))
+				hasUnowned = true
+				continue
 			}
+			if typ&os.ModeSymlink != 0 {
+				// Owned-name symlink: senders ignore symlinks (O_NOFOLLOW);
+				// RemoveOwned unlinks the link without traversing it.
+				seenOwned[name] = struct{}{}
+				continue
+			}
+			seenOwned[name] = struct{}{}
 
 			// Acquire locks in the exact same order as senders:
 			// 1. systemRunDir/<name> (only if already present; never created)
@@ -503,7 +528,7 @@ func RemoveRunDirLocked(runDir, systemRunDir string, uid uint32, timeout time.Du
 				sfd, _, sexists, serr := flockExistingNonBlocking(sysDirFD, name, uid, deadline)
 				if serr != nil {
 					releaseAll()
-					return serr
+					return nil, serr
 				}
 				if sexists && sfd >= 0 {
 					heldFDs = append(heldFDs, sfd)
@@ -513,7 +538,7 @@ func RemoveRunDirLocked(runDir, systemRunDir string, uid uint32, timeout time.Du
 			rfd, fst, rexists, rerr := flockExistingNonBlocking(runDirFD, name, uid, deadline)
 			if rerr != nil {
 				releaseAll()
-				return rerr
+				return nil, rerr
 			}
 			if !rexists || rfd < 0 {
 				continue
@@ -529,42 +554,46 @@ func RemoveRunDirLocked(runDir, systemRunDir string, uid uint32, timeout time.Du
 				break
 			}
 			heldFDs = append(heldFDs, rfd)
-			toUnlink = append(toUnlink, name)
 		}
 		if retryPass {
 			continue
 		}
 
-		// While still holding every exclusive flock, unlink the locked files
-		// and remove runDir with rmdir (os.Remove) so any concurrent creation
-		// of a new lock file causes ENOTEMPTY instead of silently deleting it.
-		var unlinkErr error
-		for _, name := range toUnlink {
-			if err := unix.Unlinkat(runDirFD, name, 0); err != nil && !errors.Is(err, unix.ENOENT) {
-				unlinkErr = err
-				break
-			}
-		}
-		if unlinkErr != nil {
-			releaseAll()
-			return unlinkErr
-		}
-
-		rmErr := os.Remove(runDir)
+		// While still holding every exclusive flock, delegate unlinking of
+		// owned files and rmdir of runDir to the single RemoveOwned routine.
+		left := RemoveOwned(layout, OwnedRemoveRunDir, runDir, nil)
 		releaseAll()
 
-		if rmErr == nil || errors.Is(rmErr, os.ErrNotExist) {
-			return nil
+		if len(left) == 0 {
+			return nil, nil
 		}
-		if errors.Is(rmErr, syscall.ENOTEMPTY) || errors.Is(rmErr, syscall.EEXIST) {
-			// A sender created a new lock file before rmdir; retry pass to
-			// detect whether it is currently held (ErrLocked) or idle.
-			if time.Now().After(deadline) {
-				return ErrLocked
+		// If a concurrent sender created a NEW owned lock file between ReadDir
+		// and rmdir (with no unowned entries present), retry pass to detect
+		// whether it is currently held (ErrLocked) or idle. Files that were
+		// already present in ReadDir and failed to unlink (e.g. EACCES) are
+		// genuine leftovers and must not be misclassified as ErrLocked.
+		if !hasUnowned {
+			newOwnedCreated := false
+			for _, l := range left {
+				base := filepath.Base(l.Path)
+				if _, existed := seenOwned[base]; existed {
+					continue
+				}
+				if filepath.Dir(l.Path) == filepath.Clean(runDir) && isOwnedRunFileName(base) {
+					if info, serr := os.Lstat(l.Path); serr == nil && info.Mode().IsRegular() {
+						newOwnedCreated = true
+						break
+					}
+				}
 			}
-			continue
+			if newOwnedCreated {
+				if time.Now().After(deadline) {
+					return nil, ErrLocked
+				}
+				continue
+			}
 		}
-		return rmErr
+		return left, formatOwnedLeftoverErr(left)
 	}
-	return ErrLocked
+	return nil, ErrLocked
 }

@@ -36,6 +36,9 @@ const (
 	// OwnedRemoveStateEntries removes all owned non-lock/non-tombstone entries
 	// inside layout.StateDir (leaving op.lock, corrald.lock, removing intact).
 	OwnedRemoveStateEntries
+	// OwnedRemoveRunDir removes owned pane lock files inside layout.RunDir and
+	// rmdirs it if empty.
+	OwnedRemoveRunDir
 )
 
 // IsOwnedOpID reports whether id matches corrald's exact generated operation ID
@@ -128,6 +131,82 @@ func isOwnedSelftestLock(name string) bool {
 	return isDigits(mid)
 }
 
+// isOwnedSelftestSock matches cmdSelftest's ".selftest-<pid>.sock".
+func isOwnedSelftestSock(name string) bool {
+	if !strings.HasPrefix(name, ".selftest-") || !strings.HasSuffix(name, ".sock") {
+		return false
+	}
+	mid := strings.TrimSuffix(strings.TrimPrefix(name, ".selftest-"), ".sock")
+	return isDigits(mid)
+}
+
+// isOwnedRebindSock matches Server.rebindSocket's ".rebind-<pid>-<6hex>.sock".
+func isOwnedRebindSock(name string) bool {
+	if !strings.HasPrefix(name, ".rebind-") || !strings.HasSuffix(name, ".sock") {
+		return false
+	}
+	mid := strings.TrimSuffix(strings.TrimPrefix(name, ".rebind-"), ".sock")
+	dash := strings.IndexByte(mid, '-')
+	if dash <= 0 || dash+1 >= len(mid) {
+		return false
+	}
+	return isDigits(mid[:dash]) && isHexLen(mid[dash+1:], 6)
+}
+
+// isOwnedSocketFileName matches exact Unix socket filenames corrald creates in
+// layout.SocketDir (corrald.sock, .selftest-<pid>.sock, .rebind-<pid>-<6hex>.sock).
+func isOwnedSocketFileName(name string) bool {
+	return name == "corrald.sock" || isOwnedSelftestSock(name) || isOwnedRebindSock(name)
+}
+
+// isOwnedRunFileName matches exact per-pane flock filenames created in
+// ~/.local/state/corral/run by corrald/convoGated:
+// "corral-send-tmux-<pane>" or "corral-send-herdr-<pane>" where <pane> is
+// non-empty and consists only of [A-Za-z0-9_-].
+func isOwnedRunFileName(name string) bool {
+	var rest string
+	switch {
+	case strings.HasPrefix(name, "corral-send-tmux-"):
+		rest = strings.TrimPrefix(name, "corral-send-tmux-")
+	case strings.HasPrefix(name, "corral-send-herdr-"):
+		rest = strings.TrimPrefix(name, "corral-send-herdr-")
+	default:
+		return false
+	}
+	if len(rest) == 0 || len(rest) > 200 {
+		return false
+	}
+	for i := 0; i < len(rest); i++ {
+		c := rest[i]
+		if !((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '_') {
+			return false
+		}
+	}
+	return true
+}
+
+// removeOwnedSocket removes path ONLY if Lstat confirms it is a Unix socket.
+// Never unlinks regular files, symlinks, or directories.
+func removeOwnedSocket(p string) error {
+	if p == "" {
+		return nil
+	}
+	info, err := os.Lstat(p)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	if info.Mode()&os.ModeSocket == 0 {
+		return fmt.Errorf("expected socket but found non-socket; preserved")
+	}
+	if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
+}
+
 var fixedStateTempBases = []string{
 	"install.json",
 	"meta.json",
@@ -139,7 +218,7 @@ var fixedStateTempBases = []string{
 func isOwnedStateFileName(name string) bool {
 	switch name {
 	case "install.json", "meta.json", "clients.json", "failed.json",
-		"corrald.log", "corrald.log.1", "corrald.sock":
+		"corrald.log", "corrald.log.1":
 		return true
 	}
 	if isOwnedSelftestLock(name) {
@@ -153,25 +232,30 @@ func isOwnedStateFileName(name string) bool {
 	return false
 }
 
+// IsOwnedLibFileName reports whether name is a corrald-owned top-level file
+// directly under LibDir (corrald symlink, README.txt, or their exact atomic
+// temp files).
+func IsOwnedLibFileName(name string) bool {
+	return isOwnedLibFileName(name)
+}
+
+func isOwnedLibTempFileName(name string) bool {
+	return isOwnedTempForBase(name, "corrald") || isOwnedTempForBase(name, "README.txt")
+}
+
 func isOwnedLibFileName(name string) bool {
 	if name == "corrald" || name == "README.txt" {
 		return true
 	}
-	return isOwnedTempForBase(name, "corrald") || isOwnedTempForBase(name, "README.txt")
+	return isOwnedLibTempFileName(name)
 }
 
 func isOwnedOpsFileName(layout *Layout, name string, manifestFiles map[string]struct{}) bool {
 	if strings.HasSuffix(name, ".json") {
 		opID := strings.TrimSuffix(name, ".json")
-		if IsOwnedOpID(opID) {
-			return true
-		}
-		if manifestFiles != nil {
-			if _, ok := manifestFiles[filepath.Clean(filepath.Join(layout.OpsDir, name))]; ok {
-				return true
-			}
-		}
-		return false
+		// Fix12 Item #7: Exact-name rule ALWAYS applies; manifest can narrow,
+		// never widen beyond IsOwnedOpID.
+		return IsOwnedOpID(opID)
 	}
 	if strings.HasPrefix(name, ".") {
 		idx := strings.Index(name[1:], ".tmp.")
@@ -325,7 +409,7 @@ func RemoveOwned(layout *Layout, kind OwnedRemoveKind, target string, manifestFi
 	case OwnedRemoveStageDir:
 		cleanState := filepath.Clean(layout.StateDir)
 		clean := filepath.Clean(target)
-		if filepath.Dir(clean) != cleanState || !strings.HasPrefix(filepath.Base(clean), "stage-") {
+		if filepath.Dir(clean) != cleanState || !IsOwnedStageDirName(filepath.Base(clean)) {
 			add(clean, "path is not a valid stage directory")
 			return left
 		}
@@ -345,6 +429,17 @@ func RemoveOwned(layout *Layout, kind OwnedRemoveKind, target string, manifestFi
 		removeOwnedDir(cleanOps, func(name string) bool {
 			return isOwnedOpsFileName(layout, name, manifestFiles)
 		}, "unexpected file in ops dir preserved")
+
+	case OwnedRemoveRunDir:
+		if layout.RunDir == "" {
+			return nil
+		}
+		cleanRun := filepath.Clean(layout.RunDir)
+		if filepath.Clean(target) != cleanRun {
+			add(target, "path is not layout run dir")
+			return left
+		}
+		removeOwnedDir(cleanRun, isOwnedRunFileName, "unexpected file in run dir preserved")
 
 	case OwnedRemoveStateEntries:
 		cleanState := filepath.Clean(layout.StateDir)
@@ -375,6 +470,10 @@ func RemoveOwned(layout *Layout, kind OwnedRemoveKind, target string, manifestFi
 			}
 			p := filepath.Join(cleanState, name)
 			switch {
+			case isOwnedSocketFileName(name):
+				if serr := removeOwnedSocket(p); serr != nil {
+					add(p, serr.Error())
+				}
 			case isOwnedStateFileName(name):
 				removeOwnedFile(p)
 			case name == "ops":
