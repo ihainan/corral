@@ -106,10 +106,27 @@ func parseHerdrExplain(raw json.RawMessage) *paneInspectExplain {
 }
 
 const tmuxPaneInspectScript = `PATH="$HOME/.local/bin:$HOME/bin:$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
-sess=$1 pane=$2
+sess=$1 pane=$2 sess_id=$3
+[ -n "$sess" ] || exit 0
+cur_id=$(tmux -u display-message -p -t "=$sess:" '#{session_id}' 2>/dev/null)
+case "$cur_id" in
+  '$'[0-9]*)
+    case "${cur_id#\$}" in
+      ''|*[!0-9]*) cur_id="" ;;
+    esac
+    ;;
+  *) cur_id="" ;;
+esac
+if [ -n "$sess_id" ]; then
+  [ "$cur_id" = "$sess_id" ] || exit 0
+  target="$sess_id:"
+else
+  [ -n "$cur_id" ] || exit 0
+  printf 'ID\t%s\n' "$cur_id"
+  target="$cur_id:"
+fi
 if [ -n "$pane" ]; then
-  [ -n "$sess" ] || exit 0
-  panes=$(tmux -u list-panes -s -t "=$sess:" -F '#{pane_id}' 2>/dev/null) || exit 0
+  panes=$(tmux -u list-panes -s -t "$target" -F '#{pane_id}' 2>/dev/null) || exit 0
   in_sess=0
   while IFS= read -r p; do
     if [ "$p" = "$pane" ]; then
@@ -122,7 +139,7 @@ EOF
   [ "$in_sess" = 1 ] || exit 0
   line=$(tmux -u display-message -p -t "$pane" '#{pane_id}|#{pane_pid}|#{pane_tty}|#{pane_current_command}|#{window_zoomed_flag}' 2>/dev/null)
 else
-  line=$(tmux -u display-message -p -t "=$sess:" '#{pane_id}|#{pane_pid}|#{pane_tty}|#{pane_current_command}|#{window_zoomed_flag}' 2>/dev/null)
+  line=$(tmux -u display-message -p -t "$target" '#{pane_id}|#{pane_pid}|#{pane_tty}|#{pane_current_command}|#{window_zoomed_flag}' 2>/dev/null)
 fi
 [ -n "$line" ] || exit 0
 printf 'pane\t%s\n' "$line"
@@ -133,12 +150,21 @@ ps -t "$tdev" -o pid=,comm=,args= 2>/dev/null | head -n 16 | while IFS= read -r 
   printf 'proc\t%s\n' "$row"
 done`
 
-func tmuxPaneInspectCommand(tmuxSession, pane string) string {
-	return "sh -c " + sshx.QuoteShell(tmuxPaneInspectScript) + " corral " + sshx.QuoteShell(tmuxSession) + " " + sshx.QuoteShell(pane)
+func tmuxPaneInspectCommand(tmuxSession, tmuxSessionID, pane string) string {
+	if !tmuxSessionIDRE.MatchString(tmuxSessionID) {
+		tmuxSessionID = ""
+	}
+	return "sh -c " + sshx.QuoteShell(tmuxPaneInspectScript) + " corral " + sshx.QuoteShell(tmuxSession) + " " + sshx.QuoteShell(pane) + " " + sshx.QuoteShell(tmuxSessionID)
 }
 
 func parseTmuxPaneInspect(out []byte) paneInspectResponse {
+	res, _ := parseTmuxPaneInspectWithID(out)
+	return res
+}
+
+func parseTmuxPaneInspectWithID(out []byte) (paneInspectResponse, string) {
 	res := paneInspectResponse{Mode: "tmux"}
+	var sessionID string
 	for _, raw := range strings.Split(string(out), "\n") {
 		line := strings.TrimSpace(raw)
 		if line == "" {
@@ -149,6 +175,11 @@ func parseTmuxPaneInspect(out []byte) paneInspectResponse {
 			continue
 		}
 		switch kind {
+		case "ID":
+			cand := strings.TrimSpace(rest)
+			if sessionID == "" && tmuxSessionIDRE.MatchString(cand) {
+				sessionID = cand
+			}
 		case "pane":
 			parts := strings.Split(rest, "|")
 			if len(parts) >= 1 {
@@ -180,11 +211,11 @@ func parseTmuxPaneInspect(out []byte) paneInspectResponse {
 				Cmdline: truncate(cmdline, 240),
 			})
 			if len(res.Processes) >= 16 {
-				return res
+				return res, sessionID
 			}
 		}
 	}
-	return res
+	return res, sessionID
 }
 
 func (s *Server) apiPaneInspect(w http.ResponseWriter, r *http.Request) {
@@ -287,7 +318,8 @@ func (s *Server) apiPaneInspect(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "bad_request", "invalid tmux pane id")
 			return
 		}
-		res, err := sshx.Exec(ctx, sess.Client(), tmuxPaneInspectCommand(sess.CurrentTmuxSession(), pane), 64<<10, sshx.ExecOptions{Interactive: true, AwaitSlot: 2 * time.Second})
+		boundID := sess.CurrentTmuxSessionID()
+		res, err := sshx.Exec(ctx, sess.Client(), tmuxPaneInspectCommand(sess.CurrentTmuxSession(), boundID, pane), 64<<10, sshx.ExecOptions{Interactive: true, AwaitSlot: 2 * time.Second})
 		if errors.Is(err, sshx.ErrBusy) {
 			writeSSHChannelsBusy(w)
 			return
@@ -296,7 +328,21 @@ func (s *Server) apiPaneInspect(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadGateway, "inspect_failed", "could not inspect tmux pane")
 			return
 		}
-		writeJSON(w, http.StatusOK, parseTmuxPaneInspect(res.Out))
+		parsed, discoveredID := parseTmuxPaneInspectWithID(res.Out)
+		if boundID == "" {
+			if discoveredID == "" {
+				writeJSON(w, http.StatusOK, paneInspectResponse{Mode: "tmux"})
+				return
+			}
+			if !sess.SetTmuxSessionID(discoveredID) {
+				writeError(w, http.StatusConflict, "session_mismatch", "the tmux session was renamed or replaced outside Corral")
+				return
+			}
+		} else if discoveredID != "" && !sess.SetTmuxSessionID(discoveredID) {
+			writeError(w, http.StatusConflict, "session_mismatch", "the tmux session was renamed or replaced outside Corral")
+			return
+		}
+		writeJSON(w, http.StatusOK, parsed)
 
 	default:
 		writeJSON(w, http.StatusOK, paneInspectResponse{Mode: sess.Persistence})

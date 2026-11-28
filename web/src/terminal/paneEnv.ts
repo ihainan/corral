@@ -57,7 +57,7 @@ export function envDisplayValue(
   if (Object.prototype.hasOwnProperty.call(revealed, v.name)) {
     return { text: revealed[v.name], masked: false, revealed: true }
   }
-  return { text: v.preview || '••••••••', masked: true, revealed: false }
+  return { text: '••••••••', masked: true, revealed: false }
 }
 
 // Returns the full value eligible to copy, or undefined when a sensitive
@@ -75,6 +75,7 @@ export type PaneEnvReasonKey =
   | 'card.envReasonHerdr'
   | 'card.envReasonUnsupported'
   | 'card.envReasonPaneNotInSession'
+  | 'card.envReasonSessionMismatch'
   | 'card.envReasonFailed'
 
 export function envReasonKey(reason?: string): PaneEnvReasonKey {
@@ -91,6 +92,8 @@ export function envReasonKey(reason?: string): PaneEnvReasonKey {
       return 'card.envReasonUnsupported'
     case 'pane_not_in_session':
       return 'card.envReasonPaneNotInSession'
+    case 'session_mismatch':
+      return 'card.envReasonSessionMismatch'
     default:
       return 'card.envReasonFailed'
   }
