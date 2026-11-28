@@ -857,15 +857,13 @@ export function InlineReply({ target, onLoaded, resizedAt, active = true, held, 
           press={target.live.press}
           active={active}
           onSettled={() => void load()}
+          onInput={act}
           toast={toast}
           live={{
             note: t('panel.waiting'),
             onFull: showTerminal,
             canNotice: (target.agent ?? 'claude') === 'claude',
-            onNoticeSent: () => {
-              act?.()
-              setSent(answered.current || 'notice')
-            },
+            onNoticeSent: () => setSent(answered.current || 'notice'),
           }}
         />
       </div>

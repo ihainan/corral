@@ -14,6 +14,8 @@ const {
   paneFocusAction,
   onPaneTerminalClaim,
   claimPaneTerminal,
+  createTerminalKeyGate,
+  isTerminalBeforeInput,
 } = await import(`data:text/javascript;base64,${Buffer.from(outputText).toString('base64')}`)
 
 const K1 = 's1 p1 100 200 sess-a'
@@ -133,5 +135,46 @@ assert.equal(hitsB, 1)
 offB()
 claimPaneTerminal('s1', 'pane-2')
 assert.equal(hitsB, 1)
+
+// 12. createTerminalKeyGate pairs keydown/keypress with synchronous onData and disarms at microtask end.
+{
+  const gate = createTerminalKeyGate()
+  assert.equal(gate.consume(), false, 'unarmed gate must not consume')
+
+  // keyup does not arm
+  gate.arm({ type: 'keyup' })
+  assert.equal(gate.consume(), false, 'keyup must not arm gate')
+
+  // keydown arms for a single synchronous consume
+  gate.arm({ type: 'keydown' })
+  assert.equal(gate.consume(), true, 'armed gate must consume once synchronously')
+  assert.equal(gate.consume(), false, 'consumed gate must disarm immediately')
+
+  // keypress also arms (used by xterm for uppercase A-Z / third-level shift)
+  gate.arm({ type: 'keypress' })
+  assert.equal(gate.consume(), true, 'keypress must arm gate')
+
+  // keydown with no synchronous onData (e.g. Shift+PageUp, Ctrl+Insert, bare Alt) disarms at microtask end
+  gate.arm({ type: 'keydown' })
+  await Promise.resolve()
+  assert.equal(gate.consume(), false, 'gate must disarm after current event turn if no onData fired')
+
+  // rapid back-to-back arm keeps newer generation armed when older microtask runs
+  gate.arm({ type: 'keydown' })
+  gate.arm({ type: 'keydown' })
+  assert.equal(gate.consume(), true, 're-armed gate must consume synchronously')
+
+  // explicit reset clears armed state
+  gate.arm({ type: 'keydown' })
+  gate.reset()
+  assert.equal(gate.consume(), false, 'reset must disarm gate')
+}
+
+// 13. isTerminalBeforeInput accepts mobile/paste edits and ignores mid-composition previews.
+assert.equal(isTerminalBeforeInput({ inputType: 'insertText', data: 'a' }), true)
+assert.equal(isTerminalBeforeInput({ inputType: 'deleteContentBackward', data: null }), true)
+assert.equal(isTerminalBeforeInput({ inputType: 'insertFromPaste', data: 'hi' }), true)
+assert.equal(isTerminalBeforeInput({ inputType: 'insertCompositionText', data: 'ni' }), false)
+assert.equal(isTerminalBeforeInput({ inputType: 'deleteCompositionText', data: null }), false)
 
 console.log('termViewKeep: all tests passed')

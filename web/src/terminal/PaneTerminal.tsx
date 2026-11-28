@@ -12,7 +12,7 @@ import { modalShown } from '../shown'
 import { darkTheme } from './themes'
 import type { PanelLive } from './PanelWindow'
 import { classifyPaneWsMessage } from './paneWsMsg'
-import { paneFocusAction, shouldResizePty, type TermDims } from './termViewKeep'
+import { createTerminalKeyGate, isTerminalBeforeInput, paneFocusAction, shouldResizePty, type TermDims } from './termViewKeep'
 
 const FONT_STACK = "'JetBrains Mono', 'SFMono-Regular', Menlo, Consolas, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', monospace"
 
@@ -52,6 +52,7 @@ export function PaneTerminal({
   backToCard,
   onSettled,
   onFallback,
+  onInput,
 }: {
   sid: string
   pane: string
@@ -61,6 +62,7 @@ export function PaneTerminal({
   backToCard?: () => void
   onSettled: () => void
   onFallback: () => void
+  onInput?: () => void
 }) {
   const prefs = usePrefs()
   // (The main view's colours: the person's terminal scheme, which follows the page's light or dark — read anew on each.)
@@ -78,6 +80,8 @@ export function PaneTerminal({
   onSettledRef.current = onSettled
   const onFallbackRef = useRef(onFallback)
   onFallbackRef.current = onFallback
+  const onInputRef = useRef(onInput)
+  onInputRef.current = onInput
   const liveRef = useRef(live)
   liveRef.current = live
   const activeRef = useRef(active)
@@ -166,10 +170,12 @@ export function PaneTerminal({
     term.unicode.activeVersion = '11'
     term.open(el)
 
+    const keyGate = createTerminalKeyGate()
     term.attachCustomKeyEventHandler((e) => {
       if (e.type === 'keydown' && e.key === 'Enter' && e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey) {
         e.preventDefault()
         e.stopPropagation()
+        onInputRef.current?.()
         sendBytesRef.current('\x1b\r')
         return false
       }
@@ -180,18 +186,30 @@ export function PaneTerminal({
         else el.closest('.convo-panelwin')?.querySelector<HTMLElement>('.convo-panelwin-head button')?.focus()
         return false
       }
+      keyGate.arm(e)
       return true
     })
 
     const dataSub = term.onData((data) => {
+      if (data && keyGate.consume()) onInputRef.current?.()
       sendBytesRef.current(data)
     })
 
     const ta = term.textarea
     const onFocus = () => setTaking(true)
     const onBlur = () => setTaking(false)
+    const onPaste = () => onInputRef.current?.()
+    const onCompositionEnd = (e: CompositionEvent) => {
+      if (e.data) onInputRef.current?.()
+    }
+    const onBeforeInput = (e: InputEvent) => {
+      if (isTerminalBeforeInput(e)) onInputRef.current?.()
+    }
     ta?.addEventListener('focus', onFocus)
     ta?.addEventListener('blur', onBlur)
+    ta?.addEventListener('paste', onPaste)
+    ta?.addEventListener('compositionend', onCompositionEnd)
+    ta?.addEventListener('beforeinput', onBeforeInput)
 
     termRef.current = term
     fitRef.current = fit
@@ -219,9 +237,13 @@ export function PaneTerminal({
     return () => {
       clearTimeout(fitTimer)
       ro.disconnect()
+      keyGate.reset()
       dataSub.dispose()
       ta?.removeEventListener('focus', onFocus)
       ta?.removeEventListener('blur', onBlur)
+      ta?.removeEventListener('paste', onPaste)
+      ta?.removeEventListener('compositionend', onCompositionEnd)
+      ta?.removeEventListener('beforeinput', onBeforeInput)
       term.dispose()
       termRef.current = null
       fitRef.current = null
@@ -428,7 +450,14 @@ export function PaneTerminal({
               </button>
             )
           ) : (
-            <button type="button" className="link-btn convo-panelwin-close" onClick={() => sendBytes('\x1b')}>
+            <button
+              type="button"
+              className="link-btn convo-panelwin-close"
+              onClick={() => {
+                onInputRef.current?.()
+                sendBytes('\x1b')
+              }}
+            >
               {t('agents.closeDialog')}
             </button>
           )}
@@ -503,7 +532,10 @@ export function PaneTerminal({
               key={k}
               type="button"
               className="convo-panelwin-key"
-              onClick={() => sendBytes(seq)}
+              onClick={() => {
+                onInputRef.current?.()
+                sendBytes(seq)
+              }}
               aria-label={t('panel.sendKey', { key: label, who })}
               title={t('panel.sendKey', { key: label, who })}
             >

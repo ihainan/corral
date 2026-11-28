@@ -33,7 +33,7 @@ export type DockSink = { file: (path: string, lines?: LineSpan) => void; files: 
 // here (liveFor: AgentsChat's one switch for it), what a key is pressed with,
 // the whole terminal.
 // (letters: a letter pressed only on the screen shown — Codex's, as the composer's live panel.)
-export type DockTerminal = { can: boolean; press: () => Record<string, unknown>; onFull: () => void; letters?: boolean; who?: string; onComposer?: () => void }
+export type DockTerminal = { can: boolean; press: () => Record<string, unknown>; onFull: () => void; letters?: boolean; who?: string; onComposer?: () => void; onInput?: () => void }
 
 // The person's: kept in this browser (none there — private, blocked: as at first).
 const KEY = 'corral.dock'
@@ -253,7 +253,7 @@ export function Dock({
         ) : tab === 'changes' ? (
           <DockChanges key={of + ' ' + ident} of={of} sid={sid} pane={pane} start={start} acts={acts} />
         ) : terminal?.can ? (
-          <PanelWindow key={of + ' ' + ident} sid={sid} active={active} press={terminal.press} onSettled={onSettled} toast={toast} live={{ bare: true, onFull: terminal.onFull, letters: terminal.letters, who: terminal.who, onComposer: terminal.onComposer, onLeave: () => root.current?.querySelector<HTMLElement>('.convo-tray-tab[aria-selected="true"]')?.focus() }} />
+          <PanelWindow key={of + ' ' + ident} sid={sid} active={active} press={terminal.press} onSettled={onSettled} onInput={terminal.onInput} toast={toast} live={{ bare: true, onFull: terminal.onFull, letters: terminal.letters, who: terminal.who, onComposer: terminal.onComposer, onLeave: () => root.current?.querySelector<HTMLElement>('.convo-tray-tab[aria-selected="true"]')?.focus() }} />
         ) : (
           <div className="convo-tray-note">
             <p>{t('dock.noScreen')}</p>

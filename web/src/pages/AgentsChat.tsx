@@ -3609,7 +3609,7 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, previewTabKey
       )}
       {/* (Something written while it works: what will become of it, said while it is typed — the placeholder that said so is gone by then.) */}
       {!blocked && draft.trim() && agent?.status === 'working' && <p className="agents-chat-why is-note">{t(steers ? 'convo.steerNote' : 'convo.queueNote')}</p>}
-      {panelOpen && <PanelWindow key={bindKey} sid={sid} active={active} press={pressBody} onSettled={convo.refresh} onFull={() => openTerminal()} toast={toast} />}
+      {panelOpen && <PanelWindow key={bindKey} sid={sid} active={active} press={pressBody} onSettled={convo.refresh} onInput={onInteract} onFull={() => openTerminal()} toast={toast} />}
       {showDraftCard && activeBlocker?.draft && (
         <DraftCard
           draft={activeBlocker.draft}
@@ -3631,6 +3631,7 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, previewTabKey
             convo.refresh()
             checkBlockerNow.current?.()
           }}
+          onInput={onInteract}
           toast={toast}
           live={{
             note: showBlockerTerminal && activeBlocker ? t(liveTerminalNoteKey(activeBlocker.reason)) : undefined,
@@ -4483,7 +4484,7 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, previewTabKey
       }}
       onShowTerminal={openTerminal}
       dockSink={dockSink}
-      dockTerminal={{ can: liveFor(convo.bind?.agent) && !!convo.bind, press: pressBody, onFull: openTerminal, letters: convo.bind?.agent === 'codex' }}
+      dockTerminal={{ can: liveFor(convo.bind?.agent) && !!convo.bind, press: pressBody, onFull: openTerminal, letters: convo.bind?.agent === 'codex', onInput: onInteract }}
       inlinePanel={panelOpen || showInlineLive}
       // (herdr's only: its pane's terminal is had live, tmux's not — review of c2ae00c.)
       viewOf={cur.s.persistence === 'herdr' ? cur.key : undefined}

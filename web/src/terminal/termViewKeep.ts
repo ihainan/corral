@@ -94,3 +94,44 @@ export function claimPaneTerminal(sid: string, pane: string): void {
   if (!set) return
   for (const fn of [...set]) fn()
 }
+
+// Short-lived gate pairing xterm keyboard events (`keydown` / `keypress`) with
+// the synchronous `term.onData` emission they produce. The gate disarms at the
+// end of the event turn (microtask), so keys xterm handles locally without
+// emitting PTY data (e.g. Shift+PageUp/PageDown, Ctrl+Insert, ⌘C, bare
+// modifiers) never pin, while any key that actually emits data (including
+// Shift+F3, Mac Option+N under macOptionIsMeta, Command+Backspace, and
+// uppercase A-Z via keypress) pins immediately without maintaining a key list.
+export function createTerminalKeyGate() {
+  let armed = false
+  let gen = 0
+  return {
+    arm(e: { type?: string }): void {
+      if (e.type !== 'keydown' && e.type !== 'keypress') return
+      armed = true
+      const cur = ++gen
+      queueMicrotask(() => {
+        if (gen === cur) armed = false
+      })
+    },
+    consume(): boolean {
+      if (!armed) return false
+      armed = false
+      gen++
+      return true
+    },
+    reset(): void {
+      armed = false
+      gen++
+    },
+  }
+}
+
+// Whether a `beforeinput` event on xterm's helper textarea represents a real
+// user edit (e.g. mobile soft keyboard insert/delete or paste), excluding
+// in-progress IME composition previews (which commit via `compositionend`).
+export function isTerminalBeforeInput(e: { inputType?: string; data?: string | null }): boolean {
+  const inputType = e.inputType ?? ''
+  if (inputType === 'insertCompositionText' || inputType === 'deleteCompositionText') return false
+  return !!e.data || inputType.startsWith('insert') || inputType.startsWith('delete')
+}
