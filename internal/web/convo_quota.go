@@ -269,38 +269,49 @@ func claudePlanName(subType, rateLimitTier string) string {
 	}
 }
 
-// planOfClaudeAuthStatus parses the public JSON output of `claude auth status`
-// and returns Anthropic's official plan name, or "" when unavailable or not a
-// first-party subscription sign-in.
-func planOfClaudeAuthStatus(raw []byte) string {
+// claudeAuthInfoOfStatus parses the public JSON output of `claude auth status`
+// and returns Anthropic's official plan name and non-secret email label, or ""
+// when unavailable or not a first-party subscription sign-in.
+func claudeAuthInfoOfStatus(raw []byte) (plan, email string) {
 	var doc struct {
 		LoggedIn         bool   `json:"loggedIn"`
 		AuthMethod       string `json:"authMethod"`
 		APIProvider      string `json:"apiProvider"`
+		Email            string `json:"email"`
 		SubscriptionType string `json:"subscriptionType"`
 		RateLimitTier    string `json:"rateLimitTier"`
 	}
 	if json.Unmarshal(raw, &doc) != nil || !doc.LoggedIn {
-		return ""
+		return "", ""
 	}
 	switch strings.ToLower(strings.TrimSpace(doc.AuthMethod)) {
 	case "api_key", "anthropic_api_key", "bedrock", "vertex", "foundry", "none":
-		return ""
+		return "", ""
 	}
 	if p := strings.ToLower(strings.TrimSpace(doc.APIProvider)); p != "" && p != "firstparty" {
-		return ""
+		return "", ""
 	}
-	return claudePlanName(doc.SubscriptionType, doc.RateLimitTier)
+	return claudePlanName(doc.SubscriptionType, doc.RateLimitTier), cleanPlanName(doc.Email)
+}
+
+// planOfClaudeAuthStatus parses the public JSON output of `claude auth status`
+// and returns Anthropic's official plan name, or "" when unavailable or not a
+// first-party subscription sign-in.
+func planOfClaudeAuthStatus(raw []byte) string {
+	plan, _ := claudeAuthInfoOfStatus(raw)
+	return plan
 }
 
 type claudePlanEntry struct {
-	plan string
-	at   time.Time
+	plan  string
+	email string
+	at    time.Time
 }
 
 type claudePlanFlight struct {
-	done chan struct{}
-	plan string
+	done  chan struct{}
+	plan  string
+	email string
 }
 
 // claudePlanCache caches Claude Code's subscription tier per (owner, host, account)
@@ -329,16 +340,24 @@ func (c *claudePlanCache) waitLimit() time.Duration {
 }
 
 func (c *claudePlanCache) get(ctx context.Context, key string, fetch func(context.Context) (string, error)) string {
+	plan, _ := c.getInfo(ctx, key, func(fctx context.Context) (string, string, error) {
+		p, err := fetch(fctx)
+		return p, "", err
+	})
+	return plan
+}
+
+func (c *claudePlanCache) getInfo(ctx context.Context, key string, fetch func(context.Context) (string, string, error)) (string, string) {
 	now := c.now()
 	c.mu.Lock()
 	if ent, ok := c.cache[key]; ok {
 		ttl := claudePlanFresh
-		if ent.plan == "" {
+		if ent.plan == "" && ent.email == "" {
 			ttl = claudePlanFailBackoff
 		}
 		if now.Sub(ent.at) < ttl {
 			c.mu.Unlock()
-			return ent.plan
+			return ent.plan, ent.email
 		}
 	}
 	if c.flight == nil {
@@ -354,10 +373,10 @@ func (c *claudePlanCache) get(ctx context.Context, key string, fetch func(contex
 	if !inFlight {
 		go func() {
 			fctx, cancel := context.WithTimeout(context.Background(), claudePlanFetchLimit)
-			plan, err := fetch(fctx)
+			plan, email, err := fetch(fctx)
 			cancel()
 			if err != nil {
-				plan = ""
+				plan, email = "", ""
 			}
 			at := c.now()
 			c.mu.Lock()
@@ -371,9 +390,9 @@ func (c *claudePlanCache) get(ctx context.Context, key string, fetch func(contex
 					}
 				}
 			}
-			c.cache[key] = claudePlanEntry{plan: plan, at: at}
+			c.cache[key] = claudePlanEntry{plan: plan, email: email, at: at}
 			delete(c.flight, key)
-			fl.plan = plan
+			fl.plan, fl.email = plan, email
 			close(fl.done)
 			c.mu.Unlock()
 		}()
@@ -383,23 +402,24 @@ func (c *claudePlanCache) get(ctx context.Context, key string, fetch func(contex
 	defer timer.Stop()
 	select {
 	case <-fl.done:
-		return fl.plan
+		return fl.plan, fl.email
 	case <-timer.C:
-		return ""
+		return "", ""
 	case <-ctx.Done():
-		return ""
+		return "", ""
 	}
 }
 
-func (s *Server) fetchClaudePlan(ctx context.Context, sess *term.Session) (string, error) {
+func (s *Server) fetchClaudeAuthInfo(ctx context.Context, sess *term.Session) (string, string, error) {
 	if sess == nil || sess.State() != term.StateRunning {
-		return "", errors.New("session not running")
+		return "", "", errors.New("session not running")
 	}
 	res, err := sshx.Exec(ctx, sess.Client(), claudeAuthStatusCommand(), claudeAuthStatusMax, sshx.ExecOptions{})
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
-	return planOfClaudeAuthStatus(res.Out), nil
+	plan, email := claudeAuthInfoOfStatus(res.Out)
+	return plan, email, nil
 }
 
 const (
@@ -453,6 +473,18 @@ func (p *agyQuotaPoller) getCached(key string) (agyQuotaEntry, bool) {
 	defer p.mu.Unlock()
 	ent, ok := p.cache[key]
 	return ent, ok
+}
+
+func (p *agyQuotaPoller) putCached(key string, q quotaInfo, at time.Time) {
+	if !q.Known {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.cache == nil {
+		p.cache = map[string]agyQuotaEntry{}
+	}
+	p.cache[key] = agyQuotaEntry{q: q, at: at}
 }
 
 // startFetch ensures at most one in-flight fetch per key (singleflight) and
@@ -589,6 +621,9 @@ func (s *Server) fetchAgyQuota(ctx context.Context, sess *term.Session) (quotaIn
 	q, ok := quotaOfAgyUsage(res.Out, time.Now())
 	if !ok {
 		return quotaInfo{}, errors.New("quota parse failed")
+	}
+	if q.Known {
+		s.recordSubscriptionSnapshot(sess.OwnerID, "agy", fmt.Sprintf("host:%d", sess.HostID), "", sess.HostID, sess.HostName, q)
 	}
 	return q, nil
 }
@@ -763,11 +798,20 @@ func (s *Server) apiConversationQuota(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadGateway, "no_quota", "Claude Code's record could not be read")
 		return
 	}
+	var email string
+	accUUID := quotaAccountOfConfig(res.Out)
 	if signedIn {
-		planKey := fmt.Sprintf("%d\x00%d\x00%s", sess.OwnerID, sess.HostID, quotaAccountOfConfig(res.Out))
-		q.Plan = s.claudePlan.get(r.Context(), planKey, func(fctx context.Context) (string, error) {
-			return s.fetchClaudePlan(fctx, sess)
+		planKey := fmt.Sprintf("%d\x00%d\x00%s", sess.OwnerID, sess.HostID, accUUID)
+		q.Plan, email = s.claudePlan.getInfo(r.Context(), planKey, func(fctx context.Context) (string, string, error) {
+			return s.fetchClaudeAuthInfo(fctx, sess)
 		})
+	}
+	if q.Known {
+		accKey := accUUID
+		if accKey == "" {
+			accKey = fmt.Sprintf("host:%d", sess.HostID)
+		}
+		s.recordSubscriptionSnapshot(sess.OwnerID, "claude", accKey, email, sess.HostID, sess.HostName, q)
 	}
 	// Grown old, or none yet: asked for afresh, for the next look. (Not waited for.)
 	old := !q.Known || now.Unix()-q.UpdatedAt >= int64(quotaEvery/time.Second)

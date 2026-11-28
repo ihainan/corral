@@ -2682,6 +2682,9 @@ func (s *Server) apiConversation(w http.ResponseWriter, r *http.Request) {
 	ans.Title, ans.Tasks = st.parser.Title(), st.parser.Tasks()
 	if m := st.meta(); m != (convo.Meta{}) {
 		ans.Meta = &m
+		if st.agent == "codex" && m.Quota != nil {
+			s.recordCodexQuotaSnapshot(sess, m.Quota)
+		}
 	}
 	ans.Queued = st.parser.Queued()
 	if st.agent == "agy" && len(ans.Queued) == 0 && len(st.agyQueued) > 0 && (st.status == "busy" || st.status == "") {
@@ -6072,6 +6075,9 @@ func (s *Server) subagentAnswer(w http.ResponseWriter, r *http.Request, sess *te
 	ans.Running = st.parser.Running() // (what it set going in turn)
 	if m := st.meta(); m != (convo.Meta{}) {
 		ans.Meta = &m
+		if st.agent == "codex" && m.Quota != nil {
+			s.recordCodexQuotaSnapshot(sess, m.Quota)
+		}
 	}
 	writeJSONCompressed(w, r, http.StatusOK, ans)
 }

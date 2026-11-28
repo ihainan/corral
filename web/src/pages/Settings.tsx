@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react'
-import { ArrowLeft, Bot, Brain, ChevronDown, ChevronRight, Film, Keyboard, KeyRound, Languages, LogOut, Minus, Plus, ScrollText, Search, SlidersHorizontal, SquareTerminal, User, Users, X } from 'lucide-react'
+import { ArrowLeft, Bot, Brain, ChevronDown, ChevronRight, Film, Gauge, Keyboard, KeyRound, Languages, LogOut, Minus, Plus, ScrollText, Search, SlidersHorizontal, SquareTerminal, User, Users, X } from 'lucide-react'
 import { disablePush, enablePush, pushState, syncPush, type PushState } from '../push'
 import { api, ApiError, authGen, errorText, type Me } from '../api'
 import { getLang, hasKey, setLang, t, type I18nKey, type Lang } from '../i18n'
@@ -17,6 +17,7 @@ import { setScreenReader, useScreenReader } from '../terminal/screenReader'
 import { saveTranslateConfig, testTranslateConfig, TRANSLATE_LANGS, useTranslateConfig, type TranslateConfig, type TranslateMode } from '../terminal/thoughtTranslate'
 import { Markdown } from '../terminal/markdown'
 import { Avatar, AvatarTooLarge, squareAvatar } from '../components/Avatar'
+import { SubscriptionsSection } from './Subscriptions'
 
 // Desktop Settings modal event: opens the two-column native-style Settings
 // dialog over the current workspace (preserving live agents & terminals).
@@ -27,7 +28,7 @@ export function isDesktopSettings(): boolean {
 }
 export function openSettingsModal(cat?: SettingsCatId) {
   if (isDesktopSettings()) window.dispatchEvent(new CustomEvent(OPEN_SETTINGS, { detail: { cat } }))
-  else navigate('/settings')
+  else navigate(cat === 'subscriptions' ? '/subscriptions' : '/settings')
 }
 
 function useDesktopSettings(): boolean {
@@ -41,7 +42,7 @@ function useDesktopSettings(): boolean {
   return ok
 }
 
-export type SettingsCatId = 'general' | 'chat' | 'terminal' | 'touch' | 'account'
+export type SettingsCatId = 'general' | 'chat' | 'terminal' | 'touch' | 'account' | 'subscriptions'
 interface SettingsCatDef {
   id: SettingsCatId
   group: 'general' | 'terminal' | 'account'
@@ -56,6 +57,7 @@ const SETTINGS_CATS: SettingsCatDef[] = [
   { id: 'terminal', group: 'terminal', labelKey: 'settings.cat.terminal', keywords: 'terminal theme scheme color font size webgl screen reader clipboard option meta alt 终端 配色 字体 剪贴板 读屏', icon: (p) => <SquareTerminal {...p} /> },
   { id: 'touch', group: 'terminal', labelKey: 'settings.cat.touch', keywords: 'touch keybar keyboard custom keys macro 触控 键栏 按键 自定义 快捷键', icon: (p) => <Keyboard {...p} /> },
   { id: 'account', group: 'account', labelKey: 'settings.cat.account', keywords: 'account profile display name password sso oidc 2fa totp two step sign out logout notices 账户 密码 登录 两步验证 退出 声明', icon: (p) => <User {...p} /> },
+  { id: 'subscriptions', group: 'account', labelKey: 'settings.cat.subscriptions', keywords: 'subscriptions quota usage limit plan claude codex antigravity gemini weekly five hour reset 订阅 额度 用量 套餐 重置', icon: (p) => <Gauge {...p} /> },
 ]
 const SETTINGS_GROUPS: { id: 'general' | 'terminal' | 'account'; labelKey: I18nKey }[] = [
   { id: 'general', labelKey: 'settings.group.general' },
@@ -564,6 +566,8 @@ function SettingsWorkbench({ modal, initialCat, onClose }: { modal?: boolean; in
             </div>
           </>
         )
+      case 'subscriptions':
+        return <SubscriptionsSection />
       case 'account':
         return (
           <>
@@ -910,6 +914,14 @@ export function SettingsPage() {
       <section className="section">
         <h2>{t('settings.account')}</h2>
         <div className="settings-group">
+          <a className="setting setting-link" href="/subscriptions" onClick={morePage('/subscriptions')}>
+            <Gauge size={18} strokeWidth={1.75} className="row-icon" />
+            <span className="setting-label">
+              {t('nav.subscriptions')}
+              <span className="hint">{t('subs.entryHint')}</span>
+            </span>
+            <ChevronRight size={16} className="chev" />
+          </a>
           <AvatarSetting preview />
           <ProfileSetting onDirty={setProfileDirty} />
           <PasswordSetting />

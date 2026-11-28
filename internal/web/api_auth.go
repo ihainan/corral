@@ -859,7 +859,7 @@ func signInAs(name string) map[string]any {
 // The kinds an audit list can be narrowed to, by the first part of an
 // action ("login" of "login.failed"). Anything else is "other".
 var auditKinds = map[string][]string{
-	"account":  {"login", "logout", "password", "totp", "user", "admin", "invite", "setup", "push"},
+	"account":  {"login", "logout", "password", "totp", "user", "admin", "invite", "setup", "push", "subscription"},
 	"hosts":    {"host", "hostkey", "credential", "corrald"},
 	"sessions": {"session", "recording", "file", "forward", "code"},
 	"agents":   {"convo", "agents", "herdr"},
