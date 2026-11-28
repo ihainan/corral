@@ -815,6 +815,15 @@ html:not(.kb-open) .convo-scroll-wrap { min-height: min(30vh, 240px); }
 html.kb-open .convo-dock { padding-bottom: 6px; }
 .convo-dock:empty { display: none; }
 .convo-dock .composer { padding: 0; background: none; border-top: 0; }
+/* (The dock gives way at the box to type in, not past the window: its height
+   capped at 40% of the window alone, with files attached, a running task and a
+   note over it, the box ran off the bottom on a short window — 11-28. The box
+   shrinks, never under a line, and scrolls within.) */
+.convo-dock > .composer { flex: 0 1 auto; min-height: 0; display: flex; flex-direction: column; }
+.convo-dock > .composer > * { flex: none; }
+.convo-dock > .composer > .composer-box { flex: 0 1 auto; min-height: 0; }
+.convo-dock .composer-box > * { flex: none; }
+.convo-dock .composer-box > .composer-input { flex: 0 1 auto; min-height: 44px; overflow-y: auto; }
 .convo-dock .composer > .convo-panelwin { margin-bottom: 8px; }
 .convo-dock .composer > .convo-panelwin .convo-panelwin-screen { max-height: min(32dvh, 300px); }
 /* (A neutral frame and a soft shadow; with the focus, the frame darkens — the
