@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -19,6 +20,7 @@ import (
 
 	"github.com/ihainan/corral/internal/herdr"
 	"github.com/ihainan/corral/internal/store"
+	"github.com/ihainan/corral/internal/term"
 	"github.com/ihainan/corral/internal/testutil"
 )
 
@@ -413,6 +415,10 @@ func TestIsSensitiveEnvURLAndConnStrings(t *testing.T) {
 		{"odbc spaced PWD =", "CONN_STR", "Driver=SQL Server;Server=db;UID=alice;PWD = hunter2", true},
 		{"json pwd", "APP_CONFIG", `{"pwd":"hunter2"}`, true},
 		{"json spaced pwd colon", "APP_CONFIG", `{"pwd" : "hunter2"}`, true},
+		{"yaml single-quoted pwd", "APP_CONFIG", `{'pwd':'hunter2'}`, true},
+		{"yaml single-quoted key", "APP_CONFIG", `{'key':'abc123'}`, true},
+		{"json tab escape before eq", "APP_CONFIG", `{"x":"pwd\t=hunter2"}`, true},
+		{"json newline escape before eq", "APP_CONFIG", `{"x":"pwd\n=hunter2"}`, true},
 		{"json passkey", "APP_CONFIG", `{"passkey":"hunter2"}`, true},
 		{"json dotted api.key", "APP_CONFIG", `{"api.key":"hunter2"}`, true},
 		{"short PWD=", "SHORT_CONN", "PWD=a", true},
@@ -478,8 +484,14 @@ func TestIsSensitiveEnvURLAndConnStrings(t *testing.T) {
 		{"XDG_CONFIG_HOME with auth", "XDG_CONFIG_HOME", "/home/author/.config/auth", false},
 		{"XDG_RUNTIME_DIR with auth", "XDG_RUNTIME_DIR", "/run/user/1000/auth", false},
 		{"XDG_CACHE_PATH with secret", "XDG_CACHE_PATH", "/var/cache/secret", false},
+		{"XDG_DATA_DIRS with auth", "XDG_DATA_DIRS", "/opt/auth/share:/usr/share", false},
+		{"XDG_CONFIG_DIRS with auth", "XDG_CONFIG_DIRS", "/etc/xdg:/opt/auth/xdg", false},
+		{"TERMINFO with author", "TERMINFO", "/home/author/.terminfo", false},
+		{"TERMINFO_DIRS with auth", "TERMINFO_DIRS", "/opt/auth/terminfo:/usr/share/terminfo", false},
 		{"MANPATH with auth", "MANPATH", "/opt/auth/share/man:/usr/share/man", false},
 		{"INFOPATH with auth", "INFOPATH", "/opt/auth/share/info", false},
+		{"HOME with query key still masked", "HOME", "/tmp/config?key=abc", true},
+		{"PATH with query sig still masked", "PATH", "/opt/tools?sig=abc", true},
 		{"HOME with embedded dsn cred still masked", "HOME", "alice:hunter2@tcp(localhost:3306)/app", true},
 		{"PATH with api key prefix still masked", "PATH", "sk-ant-api03-1234567890abcdefghij", true},
 		{"TMPDIR with jwt still masked", "TMPDIR", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c", true},
@@ -573,39 +585,33 @@ func TestPaneEnvLinearScaling(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			small := tc.build(smallSize)
 			large := tc.build(largeSize)
-			// Warm up once and verify classification.
-			if got := isSensitiveEnv("PLAIN_VAR", small); got != tc.want {
-				t.Fatalf("small got %v, want %v", got, tc.want)
+
+			var smallStats, largeStats envScanStats
+			gotSmall := hasSensitiveValuePatternWithStats(small, false, &smallStats)
+			if gotSmall != tc.want {
+				t.Fatalf("small got %v, want %v", gotSmall, tc.want)
 			}
-			if got := isSensitiveEnv("PLAIN_VAR", large); got != tc.want {
-				t.Fatalf("large got %v, want %v", got, tc.want)
-			}
-			// Pick enough iterations so the 128 KiB run clears timer/scheduler noise.
-			iters := 0
-			var dSmall time.Duration
 			start := time.Now()
-			for iters < 200 && time.Since(start) < 10*time.Millisecond {
-				isSensitiveEnv("PLAIN_VAR", small)
-				iters++
+			gotLarge := hasSensitiveValuePatternWithStats(large, false, &largeStats)
+			elapsed := time.Since(start)
+			if gotLarge != tc.want {
+				t.Fatalf("large got %v, want %v", gotLarge, tc.want)
 			}
-			dSmall = time.Since(start)
-
-			startLarge := time.Now()
-			for i := 0; i < iters; i++ {
-				isSensitiveEnv("PLAIN_VAR", large)
+			if largeStats.forms > maxDecodeForms {
+				t.Errorf("%s expanded %d forms, want <= %d", tc.name, largeStats.forms, maxDecodeForms)
 			}
-			dLarge := time.Since(startLarge)
-
-			perCallLarge := dLarge / time.Duration(iters)
-			if perCallLarge >= 50*time.Millisecond {
-				t.Errorf("%s 256 KiB took %v/op, want < 50ms", tc.name, perCallLarge)
+			// Deterministic O(n) check via exact scan steps (immune to GC/scheduler jitter).
+			ratio := float64(largeStats.steps) / float64(smallStats.steps)
+			if ratio > 2.1 {
+				t.Errorf("%s step ratio 256KiB/128KiB = %.2fx (%d vs %d steps), want <= 2.1x",
+					tc.name, ratio, largeStats.steps, smallStats.steps)
 			}
-			if dSmall >= 2*time.Millisecond {
-				ratio := float64(dLarge) / float64(dSmall)
-				if ratio > 2.5 {
-					t.Errorf("%s scaling ratio 256KiB/128KiB = %.2fx (%v vs %v over %d iters), want <= 2.5x",
-						tc.name, ratio, dLarge, dSmall, iters)
-				}
+			// Also confirm end-to-end classification matches and stays fast on 256 KiB.
+			if got := isSensitiveEnv("PLAIN_VAR", large); got != tc.want {
+				t.Errorf("isSensitiveEnv(%s) = %v, want %v", tc.name, got, tc.want)
+			}
+			if elapsed >= 200*time.Millisecond {
+				t.Errorf("%s 256 KiB took %v, want < 200ms", tc.name, elapsed)
 			}
 		})
 	}
@@ -638,7 +644,7 @@ func TestTmuxPaneEnvOwnershipCheckAndRename(t *testing.T) {
 
 	home := t.TempDir()
 	stateFile := filepath.Join(home, "tmux_sessions.txt")
-	if err := os.WriteFile(stateFile, []byte("work\nother\n"), 0o600); err != nil {
+	if err := os.WriteFile(stateFile, []byte("$0\twork\n$1\tother\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	// Pane membership table: paneID \t session \t pid.
@@ -657,9 +663,20 @@ STATE="` + stateFile + `"
 PANES="` + paneFile + `"
 if [ "$1" = "-u" ]; then shift; fi
 cmd="$1"; shift
+resolve_name() {
+  want="${1#=}"
+  want="${want%:*}"
+  while IFS='	' read -r sid sname; do
+    if [ "$sid" = "$want" ] || [ "$sname" = "$want" ]; then
+      printf '%s\n' "$sname"
+      return 0
+    fi
+  done < "$STATE"
+  return 1
+}
 case "$cmd" in
   list-sessions)
-    while IFS= read -r n; do
+    while IFS='	' read -r sid n; do
       [ -n "$n" ] && printf '%s|1|1\n' "$n"
     done < "$STATE"
     exit 0
@@ -672,10 +689,7 @@ case "$cmd" in
         *) shift;;
       esac
     done
-    target="${target#=}"
-    while IFS= read -r n; do
-      [ "$n" = "$target" ] && exit 0
-    done < "$STATE"
+    resolve_name "$target" >/dev/null && exit 0
     exit 1
     ;;
   rename-session)
@@ -688,19 +702,19 @@ case "$cmd" in
       esac
     done
     new="$1"
-    old="${old#=}"
+    old_name=$(resolve_name "$old") || { echo "can't find session: $old" >&2; exit 1; }
     tmp="$STATE.tmp"
     : > "$tmp"
-    while IFS= read -r n; do
-      if [ "$n" = "$old" ]; then printf '%s\n' "$new" >> "$tmp"
-      elif [ -n "$n" ]; then printf '%s\n' "$n" >> "$tmp"
+    while IFS='	' read -r sid n; do
+      if [ "$n" = "$old_name" ]; then printf '%s\t%s\n' "$sid" "$new" >> "$tmp"
+      elif [ -n "$n" ]; then printf '%s\t%s\n' "$sid" "$n" >> "$tmp"
       fi
     done < "$STATE"
     mv "$tmp" "$STATE"
     ptmp="$PANES.tmp"
     : > "$ptmp"
     while IFS='	' read -r pid sess ppid; do
-      if [ "$sess" = "$old" ]; then sess="$new"; fi
+      if [ "$sess" = "$old_name" ]; then sess="$new"; fi
       [ -n "$pid" ] && printf '%s\t%s\t%s\n' "$pid" "$sess" "$ppid" >> "$ptmp"
     done < "$PANES"
     mv "$ptmp" "$PANES"
@@ -716,13 +730,7 @@ case "$cmd" in
         *) shift;;
       esac
     done
-    want="${target#=}"
-    want="${want%:*}"
-    found_sess=0
-    while IFS= read -r n; do
-      [ "$n" = "$want" ] && found_sess=1
-    done < "$STATE"
-    [ "$found_sess" = 1 ] || exit 1
+    want=$(resolve_name "$target") || exit 1
     while IFS='	' read -r pid sess ppid; do
       if [ "$sess" = "$want" ]; then
         printf '%s\n' "$pid"
@@ -756,9 +764,19 @@ case "$cmd" in
         done < "$PANES"
         exit 1
         ;;
-      =*:*)
-        want="${target#=}"
-        want="${want%:*}"
+      =*:*|\$*:*)
+        want_raw="${target#=}"
+        want_raw="${want_raw%:*}"
+        if [ "$fmt" = '#{session_id}' ]; then
+          while IFS='	' read -r sid sname; do
+            if [ "$sid" = "$want_raw" ] || [ "$sname" = "$want_raw" ]; then
+              printf '%s\n' "$sid"
+              exit 0
+            fi
+          done < "$STATE"
+          exit 1
+        fi
+        want=$(resolve_name "$target") || exit 1
         while IFS='	' read -r pid sess ppid; do
           if [ "$sess" = "$want" ]; then
             case "$fmt" in
@@ -1261,6 +1279,288 @@ func TestTmuxPaneEnvAndInspectRealTmux(t *testing.T) {
 	}
 	if renamedOnly.Reason != "session_mismatch" {
 		t.Fatalf("expected session_mismatch when original id exists under another name, got %+v", renamedOnly)
+	}
+
+	// Item 9: once the bound session itself is killed (neither old name nor bound ID exists,
+	// while another session "other-renamed" is still alive on the tmux server), both pane-env
+	// and rename MUST report missing/no_process rather than session_mismatch.
+	runTmux("kill-session", "-t", workID+":")
+	rDeadEnv := admin.do("GET", "/api/sessions/"+workSessID+"/pane-env", nil)
+	mustStatus(t, rDeadEnv, http.StatusOK, "GET pane-env on killed bound session while server has other sessions")
+	var deadEnv paneEnvResponse
+	if err := json.Unmarshal(rDeadEnv.Body, &deadEnv); err != nil {
+		t.Fatal(err)
+	}
+	if deadEnv.Reason != "no_process" {
+		t.Fatalf("expected no_process for killed session while other sessions exist, got %+v", deadEnv)
+	}
+	rDeadRename := admin.do("PUT", "/api/sessions/"+workSessID+"/name", map[string]any{"name": "renamed-dead"})
+	mustStatus(t, rDeadRename, http.StatusConflict, "rename killed bound session")
+	if rDeadRename.code() != "session_not_found" {
+		t.Fatalf("expected session_not_found for killed session while other sessions exist, got %s", rDeadRename.Body)
+	}
+}
+
+func TestTmuxRealRenameAndFirstReadRaces(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("linux /proc/<pid>/environ required")
+	}
+	realTmux, err := exec.LookPath("tmux")
+	if err != nil {
+		t.Skip("tmux not installed")
+	}
+
+	tmuxTmp, err := os.MkdirTemp("/tmp", "ctm-race-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sockName := fmt.Sprintf("cr-%d", os.Getpid())
+	runTmux := func(args ...string) string {
+		t.Helper()
+		full := append([]string{"-L", sockName}, args...)
+		cmd := exec.Command(realTmux, full...)
+		cmd.Env = append(os.Environ(), "TMUX_TMPDIR="+tmuxTmp)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("tmux %v failed: %v\n%s", args, err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	t.Cleanup(func() {
+		cmd := exec.Command(realTmux, "-L", sockName, "kill-server")
+		cmd.Env = append(os.Environ(), "TMUX_TMPDIR="+tmuxTmp)
+		_ = cmd.Run()
+		_ = os.RemoveAll(tmuxTmp)
+	})
+
+	runTmux("-f", "/dev/null", "new-session", "-d", "-s", "work", "-n", "main",
+		"sh", "-c", "export CORRAL_ORIG_WORK=from-orig-work; exec sleep 60")
+	runTmux("new-session", "-d", "-s", "keeper", "sleep 60")
+
+	home := t.TempDir()
+	bin := filepath.Join(home, ".local", "bin")
+	if err := os.MkdirAll(bin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	wrapper := fmt.Sprintf("#!/bin/sh\nexport TMUX_TMPDIR=%q\nfor a in \"$@\"; do\n  case \"$a\" in\n    new-session|attach-session) read x; exit 0;;\n  esac\ndone\nexec %q -L %q \"$@\"\n", tmuxTmp, realTmux, sockName)
+	if err := os.WriteFile(filepath.Join(bin, "tmux"), []byte(wrapper), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sys := filepath.Join(t.TempDir(), "sys")
+	if err := os.MkdirAll(sys, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, tool := range []string{"sh", "sed", "cut", "tr", "head", "ps"} {
+		if p, err := exec.LookPath(tool); err == nil {
+			_ = os.Symlink(p, filepath.Join(sys, tool))
+		}
+	}
+
+	h := newHarness(t)
+	admin := h.admin()
+	baseExec := testutil.ShellExec(home, func(cmd string) bool {
+		return strings.Contains(cmd, "tmux") || strings.Contains(cmd, "/proc/")
+	}, "PATH="+sys)
+
+	var hookMu sync.Mutex
+	var hook func(cmd string)
+	setHook := func(fn func(cmd string)) {
+		hookMu.Lock()
+		hook = fn
+		hookMu.Unlock()
+	}
+	srv := h.sshServer(home)
+	srv.HandleExec(func(cmd string) func(ssh.Channel) {
+		fn := baseExec(cmd)
+		if fn == nil {
+			return nil
+		}
+		return func(ch ssh.Channel) {
+			hookMu.Lock()
+			hfn := hook
+			hookMu.Unlock()
+			if hfn != nil {
+				hfn(cmd)
+			}
+			fn(ch)
+		}
+	})
+
+	rHost := admin.do("POST", "/api/hosts", map[string]any{
+		"name": "real-race-box", "address": "127.0.0.1", "port": srv.Addr.Port,
+		"username": "alice", "auth": "password", "password": "alice-pass",
+	})
+	mustStatus(t, rHost, http.StatusCreated, "create host")
+	hostID := rHost.json()["id"].(float64)
+
+	me := admin.do("GET", "/api/me", nil)
+	mustStatus(t, me, http.StatusOK, "me")
+	uid := int64(me.json()["id"].(float64))
+
+	openSession := func(name string) (string, *term.Session) {
+		t.Helper()
+		r := admin.do("POST", "/api/sessions", map[string]any{
+			"host_id": hostID,
+			"open":    map[string]any{"kind": "tmux", "name": name},
+		})
+		mustStatus(t, r, http.StatusCreated, "open "+name)
+		sid := r.json()["id"].(string)
+		s, err := h.srv.terms.Get(uid, sid)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return sid, s
+	}
+
+	// --- Scenario 1 (Timing 1): Unbound rename vs concurrent bind + external rename/reuse ---
+	// Must return 409 session_mismatch AND must NOT rename the replacement session on the remote host.
+	origWorkID := runTmux("display-message", "-p", "-t", "=work:", "#{session_id}")
+	sid1, sess1 := openSession("work")
+
+	resolvePaused := make(chan struct{})
+	resolveResume := make(chan struct{})
+	var pauseMu sync.Mutex
+	var pausedOnce bool
+	setHook(func(cmd string) {
+		// Pause the first rename-path tmux exec (Step 1 resolve on fix6, or rename on 19f2da3).
+		if strings.Contains(cmd, "#{session_id}") && !strings.Contains(cmd, "/proc/") && !strings.Contains(cmd, "#{pane_id}") {
+			pauseMu.Lock()
+			first := !pausedOnce
+			if first {
+				pausedOnce = true
+			}
+			pauseMu.Unlock()
+			if first {
+				close(resolvePaused)
+				<-resolveResume
+			}
+		}
+	})
+	renameDone := make(chan resp, 1)
+	go func() {
+		renameDone <- admin.do("PUT", "/api/sessions/"+sid1+"/name", map[string]any{"name": "backend-new"})
+	}()
+	<-resolvePaused
+
+	// While rename is paused: a concurrent pane-env binds origWorkID, then an external
+	// user renames origWorkID -> "archive-1" and creates a replacement session named "work".
+	rBind := admin.do("GET", "/api/sessions/"+sid1+"/pane-env", nil)
+	mustStatus(t, rBind, http.StatusOK, "concurrent pane-env bind")
+	if got := sess1.CurrentTmuxSessionID(); got != origWorkID {
+		t.Fatalf("expected concurrent pane-env to bind %q, got %q", origWorkID, got)
+	}
+	runTmux("rename-session", "-t", "=work:", "archive-1")
+	runTmux("new-session", "-d", "-s", "work", "-n", "hijack",
+		"sh", "-c", "export CORRAL_REPLACEMENT_SECRET=secret-in-replacement; exec sleep 60")
+	replacementID := runTmux("display-message", "-p", "-t", "=work:", "#{session_id}")
+
+	close(resolveResume)
+	rRename := <-renameDone
+	setHook(nil)
+
+	mustStatus(t, rRename, http.StatusConflict, "rename after concurrent bind+reuse")
+	if rRename.code() != "session_mismatch" {
+		t.Fatalf("expected session_mismatch, got %s", rRename.Body)
+	}
+	if got := sess1.CurrentTmuxSession(); got != "work" {
+		t.Fatalf("local session name changed: got %q want work", got)
+	}
+	if got := sess1.CurrentTmuxSessionID(); got != origWorkID {
+		t.Fatalf("bound id changed: got %q want %q", got, origWorkID)
+	}
+	// Remote side effect check: replacement session MUST still be named "work" (never renamed to "backend-new")!
+	if got := runTmux("display-message", "-p", "-t", replacementID+":", "#{session_name}"); got != "work" {
+		t.Fatalf("remote replacement session %s was wrongly renamed to %q (want work)", replacementID, got)
+	}
+	mustStatus(t, admin.do("DELETE", "/api/sessions/"+sid1, nil), http.StatusOK, "close sid1")
+
+	// --- Scenario 2 (Reverse timing): Delayed unbound pane-env vs unbound Corral rename + external name reuse ---
+	// Corral rename binds and renames replacementID ("work" -> "renamed-ok") first; external creates new "work";
+	// delayed unbound pane-env must return session_mismatch with ZERO replacement env data.
+	sid2, sess2 := openSession("work")
+	envPaused := make(chan struct{})
+	envResume := make(chan struct{})
+	var envPauseMu sync.Mutex
+	var envPausedOnce bool
+	setHook(func(cmd string) {
+		if strings.Contains(cmd, "/proc/$pid/environ") {
+			envPauseMu.Lock()
+			first := !envPausedOnce
+			if first {
+				envPausedOnce = true
+			}
+			envPauseMu.Unlock()
+			if first {
+				close(envPaused)
+				<-envResume
+			}
+		}
+	})
+	envDone := make(chan resp, 1)
+	go func() {
+		envDone <- admin.do("GET", "/api/sessions/"+sid2+"/pane-env", nil)
+	}()
+	<-envPaused
+
+	rRename2 := admin.do("PUT", "/api/sessions/"+sid2+"/name", map[string]any{"name": "renamed-ok"})
+	mustStatus(t, rRename2, http.StatusOK, "unbound Corral rename succeeds")
+	if got := sess2.CurrentTmuxSessionID(); got != replacementID {
+		t.Fatalf("expected rename to bind %q, got %q", replacementID, got)
+	}
+	// Create a brand new "work" session with a secret before the delayed unbound pane-env runs.
+	runTmux("new-session", "-d", "-s", "work", "-n", "new-hijack",
+		"sh", "-c", "export CORRAL_LATE_SECRET=must-never-leak; exec sleep 60")
+	lateWorkID := runTmux("display-message", "-p", "-t", "=work:", "#{session_id}")
+	// Brief wait so `exec sleep 60` exports CORRAL_LATE_SECRET in /proc/<pid>/environ.
+	time.Sleep(100 * time.Millisecond)
+
+	close(envResume)
+	rLateEnv := <-envDone
+	setHook(nil)
+
+	mustStatus(t, rLateEnv, http.StatusOK, "delayed unbound pane-env")
+	if strings.Contains(string(rLateEnv.Body), "must-never-leak") || strings.Contains(string(rLateEnv.Body), "CORRAL_LATE_SECRET") {
+		t.Fatalf("delayed unbound pane-env leaked replacement session env: %s", rLateEnv.Body)
+	}
+	var lateEnvResp paneEnvResponse
+	if err := json.Unmarshal(rLateEnv.Body, &lateEnvResp); err != nil {
+		t.Fatal(err)
+	}
+	if lateEnvResp.Reason != "session_mismatch" || len(lateEnvResp.Vars) != 0 {
+		t.Fatalf("expected session_mismatch with empty vars, got %+v", lateEnvResp)
+	}
+	if got := runTmux("display-message", "-p", "-t", lateWorkID+":", "#{session_name}"); got != "work" {
+		t.Fatalf("unrelated replacement session %s was altered to %q", lateWorkID, got)
+	}
+	mustStatus(t, admin.do("DELETE", "/api/sessions/"+sid2, nil), http.StatusOK, "close sid2")
+
+	// --- Scenario 3 (Empty ID resolution must never fall back to name) ---
+	// When session name does not exist at first-read ID lookup time, pane-env returns no_process
+	// and pane-inspect returns empty without falling back to name resolution.
+	sid3, _ := openSession("work")
+	runTmux("rename-session", "-t", "=work:", "gone-before-bind")
+	rMissingEnv := admin.do("GET", "/api/sessions/"+sid3+"/pane-env", nil)
+	mustStatus(t, rMissingEnv, http.StatusOK, "unbound pane-env when name missing")
+	var missingEnv paneEnvResponse
+	if err := json.Unmarshal(rMissingEnv.Body, &missingEnv); err != nil {
+		t.Fatal(err)
+	}
+	if missingEnv.Reason != "no_process" || len(missingEnv.Vars) != 0 {
+		t.Fatalf("expected no_process when initial ID resolution is empty, got %+v", missingEnv)
+	}
+	rMissingInspect := admin.do("GET", "/api/sessions/"+sid3+"/pane-inspect", nil)
+	mustStatus(t, rMissingInspect, http.StatusOK, "unbound pane-inspect when name missing")
+	var missingInspect paneInspectResponse
+	if err := json.Unmarshal(rMissingInspect.Body, &missingInspect); err != nil {
+		t.Fatal(err)
+	}
+	if missingInspect.Pane != "" || missingInspect.ShellPID != 0 {
+		t.Fatalf("expected empty inspect when initial ID resolution is empty, got %+v", missingInspect)
+	}
+	rMissingRename := admin.do("PUT", "/api/sessions/"+sid3+"/name", map[string]any{"name": "never-created"})
+	mustStatus(t, rMissingRename, http.StatusConflict, "unbound rename when name missing")
+	if rMissingRename.code() != "session_not_found" {
+		t.Fatalf("expected session_not_found when initial ID resolution is empty, got %s", rMissingRename.Body)
 	}
 }
 

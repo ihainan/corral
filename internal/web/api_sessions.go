@@ -651,6 +651,39 @@ func (s *Server) apiRenameSession(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 			boundID := sess.CurrentTmuxSessionID()
+			if boundID == "" {
+				// Step 1 (read-only): resolve session ID and CAS-bind locally BEFORE mutating anything remotely.
+				rctx, rcancel := context.WithTimeout(ctx, probeTimeout)
+				idRes, err := sshx.Exec(rctx, sess.Client(), tmuxResolveSessionIDCommand(oldName), 256, sshx.ExecOptions{Interactive: true, AwaitSlot: 2 * time.Second})
+				rcancel()
+				if err != nil {
+					var xe *sshx.ExitError
+					if errors.As(err, &xe) {
+						out := strings.TrimSpace(string(idRes.Out))
+						if xe.Status == 11 || out == "missing" {
+							writeError(w, http.StatusConflict, "session_not_found", "the tmux session was not found on the host")
+							return
+						}
+					}
+					if errors.Is(err, sshx.ErrBusy) {
+						writeError(w, http.StatusTooManyRequests, "busy", "the host is busy; try again in a moment")
+						return
+					}
+					writeError(w, http.StatusBadGateway, "rename_failed", "could not rename the tmux session on the host")
+					return
+				}
+				resolvedID := strings.TrimSpace(string(idRes.Out))
+				if !tmuxSessionIDRE.MatchString(resolvedID) {
+					writeError(w, http.StatusConflict, "session_not_found", "the tmux session was not found on the host")
+					return
+				}
+				if !sess.SetTmuxSessionID(resolvedID) {
+					writeError(w, http.StatusConflict, "session_mismatch", "the tmux session was renamed or replaced outside Corral")
+					return
+				}
+				boundID = resolvedID
+			}
+			// Step 2: rename strictly targeting the bound session ID (never by name).
 			rctx, rcancel := context.WithTimeout(ctx, probeTimeout)
 			res, err := sshx.Exec(rctx, sess.Client(), tmuxRenameCommand(oldName, name, boundID), 4096, sshx.ExecOptions{Interactive: true, AwaitSlot: 2 * time.Second})
 			rcancel()
@@ -678,17 +711,9 @@ func (s *Server) apiRenameSession(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			renamedID := strings.TrimSpace(string(res.Out))
-			if tmuxSessionIDRE.MatchString(renamedID) {
-				if !sess.SetTmuxSessionID(renamedID) {
-					writeError(w, http.StatusConflict, "session_mismatch", "the tmux session was renamed or replaced outside Corral")
-					return
-				}
-			} else if curID := sess.CurrentTmuxSessionID(); curID != "" {
-				if boundID == "" || curID != boundID {
-					writeError(w, http.StatusConflict, "session_mismatch", "the tmux session was renamed or replaced outside Corral")
-					return
-				}
-				renamedID = curID
+			if renamedID != boundID || !sess.SetTmuxSessionID(boundID) {
+				writeError(w, http.StatusConflict, "session_mismatch", "the tmux session was renamed or replaced outside Corral")
+				return
 			}
 			sess.SetTmuxSession(name)
 			if err := s.store.RenameTab(ctx, u.ID, sess.ID, name); err != nil {

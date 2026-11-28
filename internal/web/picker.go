@@ -86,14 +86,23 @@ func herdrDisplayKey(name string) string {
 
 var tmuxSessionIDRE = regexp.MustCompile(`^\$[0-9]+$`)
 
-// tmuxRenameCommand renames an existing tmux session from oldName to newName
-// after verifying newName does not already exist (exact match). Both names
-// must already be validated against tmuxNameRE. When boundID is non-empty,
-// oldName must still resolve to boundID (otherwise it refuses with exit 12
-// "mismatch", or exit 11 "missing" if neither exists) and the rename targets
-// boundID directly. When boundID is empty, the script first resolves oldName
-// to its #{session_id}, targets "$id:" for the rename, and prints that id on
-// success so the gateway can verify it against any concurrent first-use bind.
+// tmuxResolveSessionIDCommand resolves oldName (validated against tmuxNameRE)
+// to its immutable tmux #{session_id} (e.g. "$0") without mutating anything.
+// Exit code 11 ("missing") indicates the session was not found or tmux is unavailable.
+func tmuxResolveSessionIDCommand(name string) string {
+	script := `PATH="$HOME/.local/bin:$HOME/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"; ` +
+		`command -v tmux >/dev/null 2>&1 || { echo missing; exit 11; }; ` +
+		`cur_id=$(tmux -u display-message -p -t "=$1:" '#{session_id}' 2>/dev/null); ` +
+		`case "$cur_id" in '$'[0-9]*) case "${cur_id#\$}" in ''|*[!0-9]*) cur_id="" ;; esac;; *) cur_id="" ;; esac; ` +
+		`[ -n "$cur_id" ] || { echo missing; exit 11; }; ` +
+		`printf '%s\n' "$cur_id"`
+	return "sh -c " + sshx.QuoteShell(script) + " corral " + sshx.QuoteShell(name)
+}
+
+// tmuxRenameCommand renames an existing tmux session identified by boundID
+// (must match tmuxSessionIDRE) from oldName to newName after verifying
+// oldName still resolves to boundID and newName does not already exist.
+// Never falls back to renaming by name when boundID is empty or missing.
 // Exit codes: 10 ("duplicate"), 11 ("missing"), 12 ("mismatch").
 func tmuxRenameCommand(oldName, newName, boundID string) string {
 	if !tmuxSessionIDRE.MatchString(boundID) {
@@ -101,19 +110,15 @@ func tmuxRenameCommand(oldName, newName, boundID string) string {
 	}
 	script := `PATH="$HOME/.local/bin:$HOME/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"; ` +
 		`command -v tmux >/dev/null 2>&1 || { echo missing; exit 11; }; ` +
+		`[ -n "$3" ] || { echo missing; exit 11; }; ` +
 		`cur_id=$(tmux -u display-message -p -t "=$1:" '#{session_id}' 2>/dev/null); ` +
-		`target="=$1"; rid=""; ` +
-		`if [ -n "$3" ]; then ` +
+		`case "$cur_id" in '$'[0-9]*) case "${cur_id#\$}" in ''|*[!0-9]*) cur_id="" ;; esac;; *) cur_id="" ;; esac; ` +
 		`if [ "$cur_id" != "$3" ]; then ` +
-		`if [ -n "$cur_id" ] || tmux -u display-message -p -t "$3:" '#{session_id}' >/dev/null 2>&1; then echo mismatch; exit 12; fi; ` +
+		`if [ -n "$cur_id" ] || tmux -u has-session -t "$3" >/dev/null 2>&1; then echo mismatch; exit 12; fi; ` +
 		`echo missing; exit 11; ` +
 		`fi; ` +
-		`target="$3:"; rid="$3"; ` +
-		`else ` +
-		`case "$cur_id" in '$'[0-9]*) case "${cur_id#\$}" in ''|*[!0-9]*) ;; *) target="$cur_id:"; rid="$cur_id" ;; esac;; esac; ` +
-		`fi; ` +
 		`tmux -u has-session -t "=$2" >/dev/null 2>&1 && { echo duplicate; exit 10; }; ` +
-		`out=$(tmux -u rename-session -t "$target" -- "$2" 2>&1) && { if [ -n "$rid" ]; then printf '%s\n' "$rid"; else tmux -u display-message -p -t "=$2:" '#{session_id}' 2>/dev/null || true; fi; exit 0; }; ` +
+		`out=$(tmux -u rename-session -t "$3:" -- "$2" 2>&1) && { printf '%s\n' "$3"; exit 0; }; ` +
 		`case "$out" in *"duplicate session"*) echo duplicate; exit 10;; *"can't find session"*|*"no server running"*) echo missing; exit 11;; esac; ` +
 		`printf "%s\n" "$out" >&2; exit 1`
 	return "sh -c " + sshx.QuoteShell(script) + " corral " + sshx.QuoteShell(oldName) + " " + sshx.QuoteShell(newName) + " " + sshx.QuoteShell(boundID)

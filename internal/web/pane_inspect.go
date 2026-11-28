@@ -108,20 +108,22 @@ func parseHerdrExplain(raw json.RawMessage) *paneInspectExplain {
 const tmuxPaneInspectScript = `PATH="$HOME/.local/bin:$HOME/bin:$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
 sess=$1 pane=$2 sess_id=$3
 [ -n "$sess" ] || exit 0
-target="=$sess:"
 cur_id=$(tmux -u display-message -p -t "=$sess:" '#{session_id}' 2>/dev/null)
+case "$cur_id" in
+  '$'[0-9]*)
+    case "${cur_id#\$}" in
+      ''|*[!0-9]*) cur_id="" ;;
+    esac
+    ;;
+  *) cur_id="" ;;
+esac
 if [ -n "$sess_id" ]; then
   [ "$cur_id" = "$sess_id" ] || exit 0
   target="$sess_id:"
 else
-  case "$cur_id" in
-    '$'[0-9]*)
-      case "${cur_id#\$}" in
-        ''|*[!0-9]*) ;;
-        *) printf 'ID\t%s\n' "$cur_id"; target="$cur_id:" ;;
-      esac
-      ;;
-  esac
+  [ -n "$cur_id" ] || exit 0
+  printf 'ID\t%s\n' "$cur_id"
+  target="$cur_id:"
 fi
 if [ -n "$pane" ]; then
   panes=$(tmux -u list-panes -s -t "$target" -F '#{pane_id}' 2>/dev/null) || exit 0
@@ -316,7 +318,8 @@ func (s *Server) apiPaneInspect(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "bad_request", "invalid tmux pane id")
 			return
 		}
-		res, err := sshx.Exec(ctx, sess.Client(), tmuxPaneInspectCommand(sess.CurrentTmuxSession(), sess.CurrentTmuxSessionID(), pane), 64<<10, sshx.ExecOptions{Interactive: true, AwaitSlot: 2 * time.Second})
+		boundID := sess.CurrentTmuxSessionID()
+		res, err := sshx.Exec(ctx, sess.Client(), tmuxPaneInspectCommand(sess.CurrentTmuxSession(), boundID, pane), 64<<10, sshx.ExecOptions{Interactive: true, AwaitSlot: 2 * time.Second})
 		if errors.Is(err, sshx.ErrBusy) {
 			writeSSHChannelsBusy(w)
 			return
@@ -326,7 +329,16 @@ func (s *Server) apiPaneInspect(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		parsed, discoveredID := parseTmuxPaneInspectWithID(res.Out)
-		if discoveredID != "" && !sess.SetTmuxSessionID(discoveredID) {
+		if boundID == "" {
+			if discoveredID == "" {
+				writeJSON(w, http.StatusOK, paneInspectResponse{Mode: "tmux"})
+				return
+			}
+			if !sess.SetTmuxSessionID(discoveredID) {
+				writeError(w, http.StatusConflict, "session_mismatch", "the tmux session was renamed or replaced outside Corral")
+				return
+			}
+		} else if discoveredID != "" && !sess.SetTmuxSessionID(discoveredID) {
 			writeError(w, http.StatusConflict, "session_mismatch", "the tmux session was renamed or replaced outside Corral")
 			return
 		}

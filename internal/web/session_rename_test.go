@@ -22,7 +22,11 @@ func fakeTmuxRenameHost(t *testing.T, h *harness, admin *client, initial []strin
 	t.Helper()
 	home := t.TempDir()
 	stateFile := filepath.Join(home, "tmux_sessions.txt")
-	if err := os.WriteFile(stateFile, []byte(strings.Join(initial, "\n")+"\n"), 0o600); err != nil {
+	var stateLines []string
+	for idx, n := range initial {
+		stateLines = append(stateLines, "$"+jsonNumber(float64(idx))+"\t"+n)
+	}
+	if err := os.WriteFile(stateFile, []byte(strings.Join(stateLines, "\n")+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	bin := filepath.Join(home, ".local", "bin")
@@ -33,11 +37,45 @@ func fakeTmuxRenameHost(t *testing.T, h *harness, admin *client, initial []strin
 STATE="` + stateFile + `"
 if [ "$1" = "-u" ]; then shift; fi
 cmd="$1"; shift
+resolve_name() {
+  want="${1#=}"
+  want="${want%:*}"
+  while IFS='	' read -r sid sname; do
+    if [ "$sid" = "$want" ] || [ "$sname" = "$want" ]; then
+      printf '%s\n' "$sname"
+      return 0
+    fi
+  done < "$STATE"
+  return 1
+}
 case "$cmd" in
   list-sessions)
-    while IFS= read -r n; do
+    while IFS='	' read -r sid n; do
       [ -n "$n" ] && printf '%s|1|1\n' "$n"
     done < "$STATE"
+    exit 0
+    ;;
+  display-message)
+    target=""
+    fmt=""
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        -p) shift;;
+        -t) target="$2"; shift 2;;
+        *) fmt="$1"; shift;;
+      esac
+    done
+    want="${target#=}"
+    want="${want%:*}"
+    if [ "$fmt" = '#{session_id}' ]; then
+      while IFS='	' read -r sid sname; do
+        if [ "$sid" = "$want" ] || [ "$sname" = "$want" ]; then
+          printf '%s\n' "$sid"
+          exit 0
+        fi
+      done < "$STATE"
+      exit 1
+    fi
     exit 0
     ;;
   has-session)
@@ -48,10 +86,7 @@ case "$cmd" in
         *) shift;;
       esac
     done
-    target="${target#=}"
-    while IFS= read -r n; do
-      [ "$n" = "$target" ] && exit 0
-    done < "$STATE"
+    resolve_name "$target" >/dev/null && exit 0
     echo "can't find session: $target" >&2
     exit 1
     ;;
@@ -65,20 +100,17 @@ case "$cmd" in
       esac
     done
     new="$1"
-    old="${old#=}"
-    found=0
-    while IFS= read -r n; do
+    old_name=$(resolve_name "$old") || { echo "can't find session: $old" >&2; exit 1; }
+    while IFS='	' read -r sid n; do
       [ "$n" = "$new" ] && { echo "duplicate session: $new" >&2; exit 1; }
-      [ "$n" = "$old" ] && found=1
     done < "$STATE"
-    [ "$found" -eq 0 ] && { echo "can't find session: $old" >&2; exit 1; }
     tmp="$STATE.tmp"
     : > "$tmp"
-    while IFS= read -r n; do
-      if [ "$n" = "$old" ]; then
-        printf '%s\n' "$new" >> "$tmp"
+    while IFS='	' read -r sid n; do
+      if [ "$n" = "$old_name" ]; then
+        printf '%s\t%s\n' "$sid" "$new" >> "$tmp"
       elif [ -n "$n" ]; then
-        printf '%s\n' "$n" >> "$tmp"
+        printf '%s\t%s\n' "$sid" "$n" >> "$tmp"
       fi
     done < "$STATE"
     mv "$tmp" "$STATE"
@@ -281,7 +313,11 @@ func fakeTmuxRenameServer(t *testing.T, h *harness, initial []string) (int, stri
 	t.Helper()
 	home := t.TempDir()
 	stateFile := filepath.Join(home, "tmux_sessions.txt")
-	if err := os.WriteFile(stateFile, []byte(strings.Join(initial, "\n")+"\n"), 0o600); err != nil {
+	var stateLines []string
+	for idx, n := range initial {
+		stateLines = append(stateLines, "$"+jsonNumber(float64(idx))+"\t"+n)
+	}
+	if err := os.WriteFile(stateFile, []byte(strings.Join(stateLines, "\n")+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	bin := filepath.Join(home, ".local", "bin")
@@ -292,11 +328,45 @@ func fakeTmuxRenameServer(t *testing.T, h *harness, initial []string) (int, stri
 STATE="` + stateFile + `"
 if [ "$1" = "-u" ]; then shift; fi
 cmd="$1"; shift
+resolve_name() {
+  want="${1#=}"
+  want="${want%:*}"
+  while IFS='	' read -r sid sname; do
+    if [ "$sid" = "$want" ] || [ "$sname" = "$want" ]; then
+      printf '%s\n' "$sname"
+      return 0
+    fi
+  done < "$STATE"
+  return 1
+}
 case "$cmd" in
   list-sessions)
-    while IFS= read -r n; do
+    while IFS='	' read -r sid n; do
       [ -n "$n" ] && printf '%s|1|1\n' "$n"
     done < "$STATE"
+    exit 0
+    ;;
+  display-message)
+    target=""
+    fmt=""
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        -p) shift;;
+        -t) target="$2"; shift 2;;
+        *) fmt="$1"; shift;;
+      esac
+    done
+    want="${target#=}"
+    want="${want%:*}"
+    if [ "$fmt" = '#{session_id}' ]; then
+      while IFS='	' read -r sid sname; do
+        if [ "$sid" = "$want" ] || [ "$sname" = "$want" ]; then
+          printf '%s\n' "$sid"
+          exit 0
+        fi
+      done < "$STATE"
+      exit 1
+    fi
     exit 0
     ;;
   has-session)
@@ -307,10 +377,7 @@ case "$cmd" in
         *) shift;;
       esac
     done
-    target="${target#=}"
-    while IFS= read -r n; do
-      [ "$n" = "$target" ] && exit 0
-    done < "$STATE"
+    resolve_name "$target" >/dev/null && exit 0
     exit 1
     ;;
   rename-session)
@@ -323,20 +390,17 @@ case "$cmd" in
       esac
     done
     new="$1"
-    old="${old#=}"
-    found=0
-    while IFS= read -r n; do
+    old_name=$(resolve_name "$old") || { echo "can't find session: $old" >&2; exit 1; }
+    while IFS='	' read -r sid n; do
       [ "$n" = "$new" ] && { echo "duplicate session: $new" >&2; exit 1; }
-      [ "$n" = "$old" ] && found=1
     done < "$STATE"
-    [ "$found" -eq 0 ] && { echo "can't find session: $old" >&2; exit 1; }
     tmp="$STATE.tmp"
     : > "$tmp"
-    while IFS= read -r n; do
-      if [ "$n" = "$old" ]; then
-        printf '%s\n' "$new" >> "$tmp"
+    while IFS='	' read -r sid n; do
+      if [ "$n" = "$old_name" ]; then
+        printf '%s\t%s\n' "$sid" "$new" >> "$tmp"
       elif [ -n "$n" ]; then
-        printf '%s\n' "$n" >> "$tmp"
+        printf '%s\t%s\n' "$sid" "$n" >> "$tmp"
       fi
     done < "$STATE"
     mv "$tmp" "$STATE"
@@ -583,8 +647,10 @@ func TestRenameTmuxConcurrentFirstBindConflict(t *testing.T) {
 	home := t.TempDir()
 	srv := h.sshServer(home)
 
-	renameStarted := make(chan struct{})
-	renameRelease := make(chan struct{})
+	resolveStarted := make(chan struct{})
+	resolveRelease := make(chan struct{})
+	var renameMu sync.Mutex
+	renameCalls := 0
 
 	srv.HandleExec(func(cmd string) func(ssh.Channel) {
 		if strings.Contains(cmd, "new-session") || strings.Contains(cmd, "attach-session") {
@@ -596,9 +662,19 @@ func TestRenameTmuxConcurrentFirstBindConflict(t *testing.T) {
 		}
 		if strings.Contains(cmd, "rename-session") {
 			return func(ch ssh.Channel) {
-				close(renameStarted)
-				<-renameRelease
-				// Simulate remote script resolving/renaming replacement session $2.
+				renameMu.Lock()
+				renameCalls++
+				renameMu.Unlock()
+				_, _ = ch.Write([]byte("$2\n"))
+				ch.CloseWrite()
+				ch.SendRequest("exit-status", false, []byte{0, 0, 0, 0})
+			}
+		}
+		if strings.Contains(cmd, "#{session_id}") {
+			return func(ch ssh.Channel) {
+				close(resolveStarted)
+				<-resolveRelease
+				// Simulate read-only Step 1 resolving replacement session $2.
 				_, _ = ch.Write([]byte("$2\n"))
 				ch.CloseWrite()
 				ch.SendRequest("exit-status", false, []byte{0, 0, 0, 0})
@@ -632,22 +708,28 @@ func TestRenameTmuxConcurrentFirstBindConflict(t *testing.T) {
 		t.Fatalf("expected unbound session before rename, got %q", got)
 	}
 
-	// Start rename while boundID is empty; while remote rename is in flight,
-	// bind session to $0; then let remote rename finish reporting $2.
+	// Start rename while boundID is empty; while read-only Step 1 is in flight,
+	// bind session to $0; then let Step 1 report $2. Step 2 (rename-session) must NEVER run.
 	done := make(chan resp, 1)
 	go func() {
 		done <- admin.do("PUT", "/api/sessions/"+sid+"/name", map[string]any{"name": "backend-new"})
 	}()
-	<-renameStarted
+	<-resolveStarted
 	if !sess.SetTmuxSessionID("$0") {
 		t.Fatal("expected concurrent bind to $0")
 	}
-	close(renameRelease)
+	close(resolveRelease)
 
 	rRename := <-done
 	mustStatus(t, rRename, http.StatusConflict, "rename conflict with concurrent bind")
 	if rRename.code() != "session_mismatch" {
 		t.Fatalf("expected session_mismatch, got %s", rRename.Body)
+	}
+	renameMu.Lock()
+	gotRenameCalls := renameCalls
+	renameMu.Unlock()
+	if gotRenameCalls != 0 {
+		t.Fatalf("remote rename-session was executed %d times despite Step 1 bind conflict, want 0", gotRenameCalls)
 	}
 	if got := sess.CurrentTmuxSession(); got != "work" {
 		t.Fatalf("local session name changed after conflict: got %q, want work", got)

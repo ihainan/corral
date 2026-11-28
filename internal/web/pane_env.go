@@ -189,8 +189,8 @@ func percentDecodeOnce(s string) (string, bool) {
 	return b.String(), true
 }
 
-// jsonUnescapeOnce decodes JSON \uXXXX, \/, \", and \\ escapes in a single
-// linear pass, leaving malformed escapes intact.
+// jsonUnescapeOnce decodes JSON \uXXXX, \/, \", \\, \t, \n, \r, \b, and \f
+// escapes in a single linear pass, leaving malformed escapes intact.
 func jsonUnescapeOnce(s string) (string, bool) {
 	if !strings.ContainsRune(s, '\\') {
 		return s, false
@@ -203,6 +203,31 @@ func jsonUnescapeOnce(s string) (string, bool) {
 			switch s[i+1] {
 			case '/', '"', '\\':
 				b.WriteByte(s[i+1])
+				i++
+				changed = true
+				continue
+			case 't':
+				b.WriteByte('\t')
+				i++
+				changed = true
+				continue
+			case 'n':
+				b.WriteByte('\n')
+				i++
+				changed = true
+				continue
+			case 'r':
+				b.WriteByte('\r')
+				i++
+				changed = true
+				continue
+			case 'b':
+				b.WriteByte('\b')
+				i++
+				changed = true
+				continue
+			case 'f':
+				b.WriteByte('\f')
 				i++
 				changed = true
 				continue
@@ -254,26 +279,43 @@ func isASCIIAlphaNum(c byte) bool {
 	return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')
 }
 
+// envScanStats counts the exact scanning work performed during value
+// classification so linearity tests can assert O(n) scaling deterministically
+// without wall-clock jitter.
+type envScanStats struct {
+	forms int
+	steps int
+}
+
 // hasSensitiveFieldToken scans lower in a single forward pass (no backtracking)
 // for standalone field names (key, sig, accountkey, sharedaccesskey, pwd)
-// followed by optional ASCII whitespace and one of '=', ':', or '"'.
-func hasSensitiveFieldToken(lower string) bool {
+// followed by optional ASCII whitespace and one of '=', ':', '"', or '\”.
+func hasSensitiveFieldToken(lower string, stats *envScanStats) bool {
 	n := len(lower)
 	for i := 0; i < n; {
+		if stats != nil {
+			stats.steps++
+		}
 		if !isASCIIAlphaNum(lower[i]) {
 			i++
 			continue
 		}
 		start := i
 		for i < n && isASCIIAlphaNum(lower[i]) {
+			if stats != nil {
+				stats.steps++
+			}
 			i++
 		}
 		switch lower[start:i] {
 		case "key", "sig", "accountkey", "sharedaccesskey", "pwd":
 			for i < n && (lower[i] == ' ' || lower[i] == '\t' || lower[i] == '\r' || lower[i] == '\n') {
+				if stats != nil {
+					stats.steps++
+				}
 				i++
 			}
-			if i < n && (lower[i] == '=' || lower[i] == ':' || lower[i] == '"') {
+			if i < n && (lower[i] == '=' || lower[i] == ':' || lower[i] == '"' || lower[i] == '\'') {
 				return true
 			}
 		}
@@ -285,35 +327,44 @@ func hasSensitiveFieldToken(lower string) bool {
 // the small allowlist of standard shell/path/locale variables whose values skip
 // keyword-substring matching (so e.g. HOME=/home/author or
 // PATH=/usr/local/sbin:/opt/auth:/usr/bin stay visible). Structural checks
-// (colon-before-at credentials, key prefixes, JWT, AWS keys, high entropy)
-// still apply.
+// (field tokens like ?key=/sig=, colon-before-at credentials, key prefixes,
+// JWT, AWS keys, high entropy) still apply.
 func isBasicNonSecretEnvName(upper string) bool {
 	switch upper {
 	case "HOME", "PATH", "PWD", "OLDPWD", "SHELL", "USER", "LOGNAME",
-		"LANG", "LANGUAGE", "TERM", "TMPDIR", "MANPATH", "INFOPATH":
+		"LANG", "LANGUAGE", "TERM", "TMPDIR", "MANPATH", "INFOPATH",
+		"TERMINFO", "TERMINFO_DIRS":
 		return true
 	}
 	if strings.HasPrefix(upper, "LC_") {
 		return true
 	}
 	if strings.HasPrefix(upper, "XDG_") &&
-		(strings.HasSuffix(upper, "_DIR") || strings.HasSuffix(upper, "_HOME") || strings.HasSuffix(upper, "_PATH")) {
+		(strings.HasSuffix(upper, "_DIR") || strings.HasSuffix(upper, "_DIRS") ||
+			strings.HasSuffix(upper, "_HOME") || strings.HasSuffix(upper, "_PATH")) {
 		return true
 	}
 	return false
 }
 
-func matchesSensitiveForm(s string, skipKeywords bool) bool {
+func matchesSensitiveForm(s string, skipKeywords bool, stats *envScanStats) bool {
+	if stats != nil {
+		stats.forms++
+		stats.steps += len(s) // ToLower + colon-before-at scan
+	}
 	lower := strings.ToLower(s)
 	if !skipKeywords {
 		for _, sub := range sensitiveValueSubstrings {
+			if stats != nil {
+				stats.steps += len(lower)
+			}
 			if strings.Contains(lower, sub) {
 				return true
 			}
 		}
-		if hasSensitiveFieldToken(lower) {
-			return true
-		}
+	}
+	if hasSensitiveFieldToken(lower, stats) {
+		return true
 	}
 	return hasColonBeforeAt(lower)
 }
@@ -327,7 +378,11 @@ const (
 // of single-step percent-decoding and JSON-unescaping (deduplicated, capped at
 // maxDecodeForms distinct forms) and checks each form in linear time.
 func hasSensitiveValuePattern(v string, skipKeywords bool) bool {
-	if matchesSensitiveForm(v, skipKeywords) {
+	return hasSensitiveValuePatternWithStats(v, skipKeywords, nil)
+}
+
+func hasSensitiveValuePatternWithStats(v string, skipKeywords bool, stats *envScanStats) bool {
+	if matchesSensitiveForm(v, skipKeywords, stats) {
 		return true
 	}
 	forms := make([]string, 0, maxDecodeForms)
@@ -343,9 +398,12 @@ func hasSensitiveValuePattern(v string, skipKeywords bool) bool {
 		}
 		for i := frontierStart; i < frontierEnd && len(forms) < maxDecodeForms; i++ {
 			cur := forms[i]
+			if stats != nil {
+				stats.steps += len(cur)
+			}
 			if d, ok := percentDecodeOnce(cur); ok {
 				if _, dup := seen[d]; !dup {
-					if matchesSensitiveForm(d, skipKeywords) {
+					if matchesSensitiveForm(d, skipKeywords, stats) {
 						return true
 					}
 					seen[d] = struct{}{}
@@ -355,9 +413,12 @@ func hasSensitiveValuePattern(v string, skipKeywords bool) bool {
 					}
 				}
 			}
+			if stats != nil {
+				stats.steps += len(cur)
+			}
 			if u, ok := jsonUnescapeOnce(cur); ok {
 				if _, dup := seen[u]; !dup {
-					if matchesSensitiveForm(u, skipKeywords) {
+					if matchesSensitiveForm(u, skipKeywords, stats) {
 						return true
 					}
 					seen[u] = struct{}{}
@@ -626,11 +687,18 @@ if [ -z "$sess" ]; then
   printf 'ERR\tpane_not_in_session\n'
   exit 0
 fi
-target="=$sess:"
 cur_id=$(tmux -u display-message -p -t "=$sess:" '#{session_id}' 2>/dev/null)
+case "$cur_id" in
+  '$'[0-9]*)
+    case "${cur_id#\$}" in
+      ''|*[!0-9]*) cur_id="" ;;
+    esac
+    ;;
+  *) cur_id="" ;;
+esac
 if [ -n "$sess_id" ]; then
   if [ "$cur_id" != "$sess_id" ]; then
-    if [ -n "$cur_id" ] || tmux -u display-message -p -t "$sess_id:" '#{session_id}' >/dev/null 2>&1; then
+    if [ -n "$cur_id" ] || tmux -u has-session -t "$sess_id" >/dev/null 2>&1; then
       printf 'ERR\tsession_mismatch\n'
     else
       printf 'ERR\tno_process\n'
@@ -639,14 +707,12 @@ if [ -n "$sess_id" ]; then
   fi
   target="$sess_id:"
 else
-  case "$cur_id" in
-    '$'[0-9]*)
-      case "${cur_id#\$}" in
-        ''|*[!0-9]*) ;;
-        *) printf 'ID\t%s\n' "$cur_id"; target="$cur_id:" ;;
-      esac
-      ;;
-  esac
+  if [ -z "$cur_id" ]; then
+    printf 'ERR\tno_process\n'
+    exit 0
+  fi
+  printf 'ID\t%s\n' "$cur_id"
+  target="$cur_id:"
 fi
 if [ -n "$pane" ]; then
   if ! panes=$(tmux -u list-panes -s -t "$target" -F '#{pane_id}' 2>/dev/null); then
@@ -783,13 +849,24 @@ func (s *Server) readPaneEnviron(ctx context.Context, sess *term.Session, pane s
 		if pane != "" && !tmuxPaneID.MatchString(pane) {
 			return 0, "", nil, "bad_pane", false, nil
 		}
-		res, execErr := sshx.Exec(ctx, sess.Client(), tmuxPaneEnvironCommand(sess.CurrentTmuxSession(), sess.CurrentTmuxSessionID(), pane), paneEnvReadMax+512, sshx.ExecOptions{Interactive: true, AwaitSlot: 2 * time.Second})
+		boundID := sess.CurrentTmuxSessionID()
+		res, execErr := sshx.Exec(ctx, sess.Client(), tmuxPaneEnvironCommand(sess.CurrentTmuxSession(), boundID, pane), paneEnvReadMax+512, sshx.ExecOptions{Interactive: true, AwaitSlot: 2 * time.Second})
 		if execErr != nil {
 			return 0, "", nil, "", false, execErr
 		}
 		var discoveredID string
 		discoveredID, pid, procName, vars, reason, truncated = parseEnvExecOutput(res.Out)
-		if discoveredID != "" && !sess.SetTmuxSessionID(discoveredID) {
+		if boundID == "" {
+			if discoveredID == "" {
+				if reason == "" {
+					reason = "no_process"
+				}
+				return 0, "", nil, reason, false, nil
+			}
+			if !sess.SetTmuxSessionID(discoveredID) {
+				return 0, "", nil, "session_mismatch", false, nil
+			}
+		} else if discoveredID != "" && !sess.SetTmuxSessionID(discoveredID) {
 			return 0, "", nil, "session_mismatch", false, nil
 		}
 		return pid, procName, vars, reason, truncated, nil
