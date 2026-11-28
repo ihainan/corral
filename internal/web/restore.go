@@ -372,11 +372,6 @@ func (s *Server) restoreOne(parent context.Context, t *store.OpenTab) {
 	switch t.Kind {
 	case store.PersistTmux:
 		opts.TmuxSession = t.Name
-		idCtx, idCancel := context.WithTimeout(ctx, 2*time.Second)
-		if id, _ := lookupTmuxSessionID(idCtx, client, t.Name); id != "" {
-			opts.TmuxSessionID = id
-		}
-		idCancel()
 	case store.PersistHerdr:
 		if !t.HerdrDefault {
 			opts.HerdrSession = t.Name

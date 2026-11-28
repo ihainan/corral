@@ -870,11 +870,20 @@ func (s *Session) CurrentTmuxSessionID() string {
 	return s.TmuxSessionID
 }
 
-// SetTmuxSessionID records tmux's immutable session ID (e.g. "$0") for this session.
-func (s *Session) SetTmuxSessionID(id string) {
+// SetTmuxSessionID records tmux's immutable session ID (e.g. "$0") for this
+// session only if no ID is bound yet. It never replaces an already-bound ID
+// and reports whether the session is now bound to id.
+func (s *Session) SetTmuxSessionID(id string) bool {
+	if id == "" {
+		return false
+	}
 	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.TmuxSessionID != "" {
+		return s.TmuxSessionID == id
+	}
 	s.TmuxSessionID = id
-	s.mu.Unlock()
+	return true
 }
 
 // CurrentDisplayName returns the session's Corral display name override, if any.

@@ -117,105 +117,34 @@ var sensitiveValuePrefixes = []string{
 }
 
 var (
-	// URLs containing embedded username:password@host credentials.
-	credURLRe = regexp.MustCompile(`[a-zA-Z][a-zA-Z0-9+.-]*://[^/\s@]*:[^/\s@]+@`)
 	// JWT: three base64url segments starting with eyJ.
 	jwtValueRe = regexp.MustCompile(`^eyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]*$`)
 	// AWS access key IDs (AKIA / ASIA + 16 uppercase alphanumeric chars).
 	awsAccessKeyRe = regexp.MustCompile(`^(?:AKIA|ASIA)[0-9A-Z]{16}$`)
 )
 
-// sensitiveParamAnySegs are lowercase segments that mark a URL query/fragment
-// parameter or connection string key as sensitive anywhere in its segmented name.
-var sensitiveParamAnySegs = map[string]bool{
-	"password":      true,
-	"passwd":        true,
-	"passphrase":    true,
-	"pwd":           true,
-	"secret":        true,
-	"authorization": true,
-	"apikey":        true,
-	"passkey":       true,
-	"accesskey":     true,
-	"secretkey":     true,
-	"privatekey":    true,
-	"authkey":       true,
-	"appkey":        true,
-	"clientkey":     true,
-	"accesstoken":   true,
-	"authtoken":     true,
-	"refreshtoken":  true,
-	"idtoken":       true,
-	"clientsecret":  true,
-	"appsecret":     true,
-	"signature":     true,
-	"sig":           true,
-	"credential":    true,
-	"credentials":   true,
-	"jwt":           true,
-	"bearer":        true,
-	"cookie":        true,
-}
-
-// sensitiveParamLastSegs are lowercase segments that mark a parameter/key as
-// sensitive when they are the final (or sole) segment (e.g. api_key, key,
-// access_token, token, basic_auth, auth, db_pass, pass), avoiding false
-// positives on words like authSource, SharedAccessKeyName, KEY_SIZE, or
-// token_budget.
-var sensitiveParamLastSegs = map[string]bool{
-	"key":   true,
-	"token": true,
-	"auth":  true,
-	"pass":  true,
-}
-
-// splitParamSegments splits a parameter/key name into lowercase word segments
-// on '_', '-', '.', and camelCase/acronym boundaries.
-func splitParamSegments(key string) []string {
-	var segs []string
-	var cur []byte
-	flush := func() {
-		if len(cur) > 0 {
-			segs = append(segs, string(cur))
-			cur = cur[:0]
-		}
-	}
-	for i := 0; i < len(key); i++ {
-		c := key[i]
-		if c == '_' || c == '-' || c == '.' {
-			flush()
-			continue
-		}
-		if c >= 'A' && c <= 'Z' {
-			if len(cur) > 0 {
-				prev := key[i-1]
-				prevLower := prev >= 'a' && prev <= 'z'
-				prevDigit := prev >= '0' && prev <= '9'
-				nextLower := i+1 < len(key) && key[i+1] >= 'a' && key[i+1] <= 'z'
-				if prevLower || prevDigit || (prev >= 'A' && prev <= 'Z' && nextLower) {
-					flush()
-				}
-			}
-			cur = append(cur, c+('a'-'A'))
-		} else {
-			cur = append(cur, c)
-		}
-	}
-	flush()
-	return segs
-}
-
-func isSensitiveParamKey(key string) bool {
-	segs := splitParamSegments(key)
-	if len(segs) == 0 {
-		return false
-	}
-	for _, seg := range segs {
-		if sensitiveParamAnySegs[seg] {
-			return true
-		}
-	}
-	return sensitiveParamLastSegs[segs[len(segs)-1]]
+// sensitiveValueSubstrings are lowercase substrings that mark an environment
+// variable value as sensitive anywhere they appear in the raw, percent-decoded,
+// or JSON-unescaped value.
+var sensitiveValueSubstrings = []string{
+	"password",
+	"passwd",
+	"passphrase",
+	"pwd=",
+	"secret",
+	"token",
+	"auth",
+	"credential",
+	"apikey",
+	"api_key",
+	"api-key",
+	"access_key",
+	"accesskey",
+	"private_key",
+	"privatekey",
+	"bearer",
+	"cookie",
+	"signature",
 }
 
 func fromHexByte(c byte) (byte, bool) {
@@ -259,27 +188,37 @@ func percentDecodeOnce(s string) (string, bool) {
 	return b.String(), true
 }
 
-// jsonUnicodeDecodeOnce decodes \uXXXX hex escapes (common in JSON keys such as
-// {"pass\u0077ord":"..."}) in a single linear pass, leaving malformed escapes intact.
-func jsonUnicodeDecodeOnce(s string) (string, bool) {
-	if !strings.Contains(s, `\u`) {
+// jsonUnescapeOnce decodes JSON \uXXXX, \/, \", and \\ escapes in a single
+// linear pass, leaving malformed escapes intact.
+func jsonUnescapeOnce(s string) (string, bool) {
+	if !strings.ContainsRune(s, '\\') {
 		return s, false
 	}
 	var b strings.Builder
 	b.Grow(len(s))
 	changed := false
 	for i := 0; i < len(s); i++ {
-		if s[i] == '\\' && i+5 < len(s) && s[i+1] == 'u' {
-			h0, ok0 := fromHexByte(s[i+2])
-			h1, ok1 := fromHexByte(s[i+3])
-			h2, ok2 := fromHexByte(s[i+4])
-			h3, ok3 := fromHexByte(s[i+5])
-			if ok0 && ok1 && ok2 && ok3 {
-				r := rune(h0)<<12 | rune(h1)<<8 | rune(h2)<<4 | rune(h3)
-				b.WriteRune(r)
-				i += 5
+		if s[i] == '\\' && i+1 < len(s) {
+			switch s[i+1] {
+			case '/', '"', '\\':
+				b.WriteByte(s[i+1])
+				i++
 				changed = true
 				continue
+			case 'u':
+				if i+5 < len(s) {
+					h0, ok0 := fromHexByte(s[i+2])
+					h1, ok1 := fromHexByte(s[i+3])
+					h2, ok2 := fromHexByte(s[i+4])
+					h3, ok3 := fromHexByte(s[i+5])
+					if ok0 && ok1 && ok2 && ok3 {
+						r := rune(h0)<<12 | rune(h1)<<8 | rune(h2)<<4 | rune(h3)
+						b.WriteRune(r)
+						i += 5
+						changed = true
+						continue
+					}
+				}
 			}
 		}
 		b.WriteByte(s[i])
@@ -290,145 +229,53 @@ func jsonUnicodeDecodeOnce(s string) (string, bool) {
 	return b.String(), true
 }
 
-func isParamKeyChar(c byte) bool {
-	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '.'
-}
-
-func isASCIIWhitespace(c byte) bool {
-	return c == ' ' || c == '\t' || c == '\r' || c == '\n'
-}
-
-var logLevelTokens = map[string]bool{
-	"trace":   true,
-	"debug":   true,
-	"info":    true,
-	"warn":    true,
-	"warning": true,
-	"error":   true,
-	"off":     true,
-	"fatal":   true,
-}
-
-// isLogLevelValue reports whether s[pos:] begins with a standalone log level
-// token (e.g. RUST_LOG=myapp::auth=debug,sqlx=info).
-func isLogLevelValue(s string, pos int) bool {
-	for pos < len(s) && (s[pos] == ' ' || s[pos] == '\t') {
-		pos++
-	}
-	start := pos
-	for pos < len(s) && isParamKeyChar(s[pos]) {
-		pos++
-	}
-	if pos == start {
-		return false
-	}
-	if pos < len(s) && s[pos] != ',' && s[pos] != ';' && !isASCIIWhitespace(s[pos]) {
-		return false
-	}
-	return logLevelTokens[strings.ToLower(s[start:pos])]
-}
-
-// scanSensitiveKeyValue scans s fail-closed for any key token (with optional
-// [...] subscript suffixes and optional surrounding quotes) followed by
-// optional whitespace (including newlines), '=' or ':', and any non-whitespace
-// character before the end of the value.
-func scanSensitiveKeyValue(s string) bool {
-	if !strings.ContainsAny(s, "=:") {
-		return false
-	}
-	for i := 0; i < len(s); {
-		if !isParamKeyChar(s[i]) {
-			i++
-			continue
-		}
-		start := i
-		hasLetter := false
-		for i < len(s) && isParamKeyChar(s[i]) {
-			c := s[i]
-			if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') {
-				hasLetter = true
+// hasColonBeforeAt reports whether any whitespace-free run in s contains ':'
+// followed later by '@' (user:pass@host URLs, Go MySQL DSNs, scp-like URLs
+// with embedded passwords, while leaving git@host:org/repo visible).
+func hasColonBeforeAt(s string) bool {
+	seenColon := false
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case ' ', '\t', '\r', '\n', '\v', '\f':
+			seenColon = false
+		case ':':
+			seenColon = true
+		case '@':
+			if seenColon {
+				return true
 			}
-			i++
-		}
-		if !hasLetter {
-			continue
-		}
-		key := s[start:i]
-		if !isSensitiveParamKey(key) {
-			continue
-		}
-		j := i
-		// Allow subscripted keys such as ?user[password]=x, ?password[]=x, ?credentials[db]=x.
-		if j < len(s) && s[j] == ']' && start > 0 && s[start-1] == '[' {
-			j++
-		}
-		for j < len(s) && s[j] == '[' {
-			k := j + 1
-			for k < len(s) && s[k] != ']' && s[k] != '[' && s[k] != '=' && s[k] != ':' && s[k] != '\n' && s[k] != '\r' {
-				k++
-			}
-			if k < len(s) && s[k] == ']' {
-				j = k + 1
-			} else {
-				break
-			}
-		}
-		// Allow quoted keys such as JSON/YAML `"password": "hunter2"`.
-		if j < len(s) && (s[j] == '"' || s[j] == '\'') && start > 0 && s[start-1] == s[j] {
-			j++
-		}
-		for j < len(s) && isASCIIWhitespace(s[j]) {
-			j++
-		}
-		if j >= len(s) || (s[j] != '=' && s[j] != ':') {
-			continue
-		}
-		sep := s[j]
-		if sep == ':' {
-			// Skip URL schemes (scheme://) and path/host components preceded by '/'.
-			if j+2 < len(s) && s[j+1] == '/' && s[j+2] == '/' {
-				continue
-			}
-			if start > 0 && s[start-1] == '/' {
-				continue
-			}
-		}
-		// Exclude `::`-qualified module paths followed by a log level (e.g. RUST_LOG=myapp::auth=debug).
-		if sep == '=' && start >= 2 && s[start-1] == ':' && s[start-2] == ':' && isLogLevelValue(s, j+1) {
-			continue
-		}
-		k := j + 1
-		for k < len(s) && isASCIIWhitespace(s[k]) {
-			k++
-		}
-		if k < len(s) {
-			return true
 		}
 	}
 	return false
 }
 
-// hasSensitiveKeyValueOrCredURL checks the raw value, JSON \uXXXX-decoded text,
-// and up to two passes of best-effort percent-decoding for either sensitive
-// key/value pairs or embedded username:password@ URLs.
-func hasSensitiveKeyValueOrCredURL(v string) bool {
-	check := func(s string) bool {
-		return scanSensitiveKeyValue(s) || credURLRe.MatchString(s)
+func matchesSensitiveForm(s string) bool {
+	lower := strings.ToLower(s)
+	for _, sub := range sensitiveValueSubstrings {
+		if strings.Contains(lower, sub) {
+			return true
+		}
 	}
-	if check(v) {
+	return hasColonBeforeAt(lower)
+}
+
+// hasSensitiveValuePattern checks up to three linear-time forms of v: raw,
+// percent-decoded (up to two passes), and JSON-unescaped.
+func hasSensitiveValuePattern(v string) bool {
+	if matchesSensitiveForm(v) {
 		return true
 	}
-	if u, ok := jsonUnicodeDecodeOnce(v); ok && check(u) {
+	if u, ok := jsonUnescapeOnce(v); ok && matchesSensitiveForm(u) {
 		return true
 	}
 	if d1, ok := percentDecodeOnce(v); ok {
-		if check(d1) {
+		if matchesSensitiveForm(d1) {
 			return true
 		}
-		if u1, ok := jsonUnicodeDecodeOnce(d1); ok && check(u1) {
+		if d2, ok := percentDecodeOnce(d1); ok && matchesSensitiveForm(d2) {
 			return true
 		}
-		if d2, ok := percentDecodeOnce(d1); ok && check(d2) {
+		if u1, ok := jsonUnescapeOnce(d1); ok && matchesSensitiveForm(u1) {
 			return true
 		}
 	}
@@ -452,7 +299,7 @@ func isSensitiveEnvValue(value string) bool {
 	if len(v) == 0 {
 		return false
 	}
-	if hasSensitiveKeyValueOrCredURL(v) {
+	if hasSensitiveValuePattern(v) {
 		return true
 	}
 	if len(v) < 6 {
@@ -463,8 +310,7 @@ func isSensitiveEnvValue(value string) bool {
 			return true
 		}
 	}
-	lower := strings.ToLower(v)
-	if strings.HasPrefix(lower, "bearer ") || strings.HasPrefix(lower, "basic ") {
+	if strings.HasPrefix(strings.ToLower(v), "basic ") {
 		return true
 	}
 	if strings.HasPrefix(v, "AIza") && len(v) >= 30 {
@@ -710,8 +556,8 @@ if [ -z "$sess" ]; then
   exit 0
 fi
 target="=$sess:"
+cur_id=$(tmux -u display-message -p -t "=$sess:" '#{session_id}' 2>/dev/null)
 if [ -n "$sess_id" ]; then
-  cur_id=$(tmux -u display-message -p -t "=$sess:" '#{session_id}' 2>/dev/null)
   if [ "$cur_id" != "$sess_id" ]; then
     if [ -n "$cur_id" ] || tmux -u display-message -p -t "$sess_id:" '#{session_id}' >/dev/null 2>&1; then
       printf 'ERR\tsession_mismatch\n'
@@ -721,6 +567,15 @@ if [ -n "$sess_id" ]; then
     exit 0
   fi
   target="$sess_id:"
+else
+  case "$cur_id" in
+    '$'[0-9]*)
+      case "${cur_id#\$}" in
+        ''|*[!0-9]*) ;;
+        *) printf 'ID\t%s\n' "$cur_id"; target="$cur_id:" ;;
+      esac
+      ;;
+  esac
 fi
 if [ -n "$pane" ]; then
   if ! panes=$(tmux -u list-panes -s -t "$target" -F '#{pane_id}' 2>/dev/null); then
@@ -790,20 +645,29 @@ func tmuxPaneEnvironCommand(tmuxSession, tmuxSessionID, pane string) string {
 	return "sh -c " + sshx.QuoteShell(tmuxPaneEnvironScript) + " corral " + sshx.QuoteShell(tmuxSession) + " " + sshx.QuoteShell(pane) + " " + sshx.QuoteShell(tmuxSessionID)
 }
 
-func parseEnvExecOutput(out []byte) (pid int, procName string, vars []rawEnvVar, reason string, truncated bool) {
+func parseEnvExecOutput(out []byte) (sessionID string, pid int, procName string, vars []rawEnvVar, reason string, truncated bool) {
+	if bytes.HasPrefix(out, []byte("ID\t")) {
+		if nl := bytes.IndexByte(out, '\n'); nl >= 0 {
+			cand := strings.TrimSpace(string(out[3:nl]))
+			if tmuxSessionIDRE.MatchString(cand) {
+				sessionID = cand
+			}
+			out = out[nl+1:]
+		}
+	}
 	nl := bytes.IndexByte(out, '\n')
 	if nl < 0 {
-		return 0, "", nil, "read_failed", false
+		return sessionID, 0, "", nil, "read_failed", false
 	}
 	header := strings.TrimRight(string(out[:nl]), "\r")
 	payload := out[nl+1:]
 	parts := strings.Split(header, "\t")
 	if len(parts) < 2 {
-		return 0, "", nil, "read_failed", false
+		return sessionID, 0, "", nil, "read_failed", false
 	}
 	switch parts[0] {
 	case "ERR":
-		return 0, "", nil, strings.TrimSpace(parts[1]), false
+		return sessionID, 0, "", nil, strings.TrimSpace(parts[1]), false
 	case "OK":
 		pid, _ = strconv.Atoi(strings.TrimSpace(parts[1]))
 		if len(parts) >= 3 {
@@ -811,9 +675,9 @@ func parseEnvExecOutput(out []byte) (pid int, procName string, vars []rawEnvVar,
 		}
 		truncated = len(payload) >= paneEnvReadMax
 		vars = parseProcEnviron(payload, truncated)
-		return pid, procName, vars, "", truncated
+		return sessionID, pid, procName, vars, "", truncated
 	default:
-		return 0, "", nil, "read_failed", false
+		return sessionID, 0, "", nil, "read_failed", false
 	}
 }
 
@@ -838,7 +702,7 @@ func (s *Server) readPaneEnviron(ctx context.Context, sess *term.Session, pane s
 		if execErr != nil {
 			return 0, "", nil, "", false, execErr
 		}
-		pid, procName, vars, reason, truncated = parseEnvExecOutput(res.Out)
+		_, pid, procName, vars, reason, truncated = parseEnvExecOutput(res.Out)
 		if procName == "" {
 			procName = truncate(fallbackName, 64)
 		}
@@ -852,7 +716,11 @@ func (s *Server) readPaneEnviron(ctx context.Context, sess *term.Session, pane s
 		if execErr != nil {
 			return 0, "", nil, "", false, execErr
 		}
-		pid, procName, vars, reason, truncated = parseEnvExecOutput(res.Out)
+		var discoveredID string
+		discoveredID, pid, procName, vars, reason, truncated = parseEnvExecOutput(res.Out)
+		if discoveredID != "" {
+			sess.SetTmuxSessionID(discoveredID)
+		}
 		return pid, procName, vars, reason, truncated, nil
 
 	default:

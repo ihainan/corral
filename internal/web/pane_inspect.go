@@ -109,10 +109,19 @@ const tmuxPaneInspectScript = `PATH="$HOME/.local/bin:$HOME/bin:$HOME/.cargo/bin
 sess=$1 pane=$2 sess_id=$3
 [ -n "$sess" ] || exit 0
 target="=$sess:"
+cur_id=$(tmux -u display-message -p -t "=$sess:" '#{session_id}' 2>/dev/null)
 if [ -n "$sess_id" ]; then
-  cur_id=$(tmux -u display-message -p -t "=$sess:" '#{session_id}' 2>/dev/null)
   [ "$cur_id" = "$sess_id" ] || exit 0
   target="$sess_id:"
+else
+  case "$cur_id" in
+    '$'[0-9]*)
+      case "${cur_id#\$}" in
+        ''|*[!0-9]*) ;;
+        *) printf 'ID\t%s\n' "$cur_id"; target="$cur_id:" ;;
+      esac
+      ;;
+  esac
 fi
 if [ -n "$pane" ]; then
   panes=$(tmux -u list-panes -s -t "$target" -F '#{pane_id}' 2>/dev/null) || exit 0
@@ -147,7 +156,13 @@ func tmuxPaneInspectCommand(tmuxSession, tmuxSessionID, pane string) string {
 }
 
 func parseTmuxPaneInspect(out []byte) paneInspectResponse {
+	res, _ := parseTmuxPaneInspectWithID(out)
+	return res
+}
+
+func parseTmuxPaneInspectWithID(out []byte) (paneInspectResponse, string) {
 	res := paneInspectResponse{Mode: "tmux"}
+	var sessionID string
 	for _, raw := range strings.Split(string(out), "\n") {
 		line := strings.TrimSpace(raw)
 		if line == "" {
@@ -158,6 +173,11 @@ func parseTmuxPaneInspect(out []byte) paneInspectResponse {
 			continue
 		}
 		switch kind {
+		case "ID":
+			cand := strings.TrimSpace(rest)
+			if sessionID == "" && tmuxSessionIDRE.MatchString(cand) {
+				sessionID = cand
+			}
 		case "pane":
 			parts := strings.Split(rest, "|")
 			if len(parts) >= 1 {
@@ -189,11 +209,11 @@ func parseTmuxPaneInspect(out []byte) paneInspectResponse {
 				Cmdline: truncate(cmdline, 240),
 			})
 			if len(res.Processes) >= 16 {
-				return res
+				return res, sessionID
 			}
 		}
 	}
-	return res
+	return res, sessionID
 }
 
 func (s *Server) apiPaneInspect(w http.ResponseWriter, r *http.Request) {
@@ -305,7 +325,11 @@ func (s *Server) apiPaneInspect(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadGateway, "inspect_failed", "could not inspect tmux pane")
 			return
 		}
-		writeJSON(w, http.StatusOK, parseTmuxPaneInspect(res.Out))
+		parsed, discoveredID := parseTmuxPaneInspectWithID(res.Out)
+		if discoveredID != "" {
+			sess.SetTmuxSessionID(discoveredID)
+		}
+		writeJSON(w, http.StatusOK, parsed)
 
 	default:
 		writeJSON(w, http.StatusOK, paneInspectResponse{Mode: sess.Persistence})
