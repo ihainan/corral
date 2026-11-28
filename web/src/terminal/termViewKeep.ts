@@ -95,47 +95,36 @@ export function claimPaneTerminal(sid: string, pane: string): void {
   for (const fn of [...set]) fn()
 }
 
-// Keys that do not produce terminal input on their own (modifiers, locks,
-// IME placeholders, OS/menu keys). Meta shortcuts (⌘C/⌘P/etc.) never send
-// PTY bytes either; ⌘V paste is captured by the textarea `paste` listener.
-const NON_INPUT_KEYS = new Set([
-  'Shift',
-  'Control',
-  'Alt',
-  'Meta',
-  'AltGraph',
-  'CapsLock',
-  'NumLock',
-  'ScrollLock',
-  'Fn',
-  'FnLock',
-  'Super',
-  'Hyper',
-  'Symbol',
-  'SymbolLock',
-  'OS',
-  'Dead',
-  'Process',
-  'Unidentified',
-  'ContextMenu',
-  'PrintScreen',
-])
-
-// Whether an xterm key event represents a user keypress that produces terminal
-// input (used to pin a preview tab from the real user event source rather than
-// guessing from PTY byte streams).
-export function isTerminalInputKey(e: {
-  type?: string
-  key: string
-  metaKey?: boolean
-  isComposing?: boolean
-  keyCode?: number
-}): boolean {
-  if (e.type && e.type !== 'keydown') return false
-  if (e.isComposing || e.keyCode === 229) return false
-  if (e.metaKey) return false
-  if (!e.key || NON_INPUT_KEYS.has(e.key)) return false
-  return true
+// Short-lived gate pairing xterm keyboard events (`keydown` / `keypress`) with
+// the synchronous `term.onData` emission they produce. The gate disarms at the
+// end of the event turn (microtask), so keys xterm handles locally without
+// emitting PTY data (e.g. Shift+PageUp/PageDown, Ctrl+Insert, ⌘C, bare
+// modifiers) never pin, while any key that actually emits data (including
+// Shift+F3, Mac Option+N under macOptionIsMeta, Command+Backspace, and
+// uppercase A-Z via keypress) pins immediately without maintaining a key list.
+export function createTerminalKeyGate() {
+  let armed = false
+  let gen = 0
+  return {
+    arm(e: { type?: string }): void {
+      if (e.type !== 'keydown' && e.type !== 'keypress') return
+      armed = true
+      const cur = ++gen
+      queueMicrotask(() => {
+        if (gen === cur) armed = false
+      })
+    },
+    consume(): boolean {
+      if (!armed) return false
+      armed = false
+      gen++
+      return true
+    },
+    reset(): void {
+      armed = false
+      gen++
+    },
+  }
 }
 
 // Whether a `beforeinput` event on xterm's helper textarea represents a real

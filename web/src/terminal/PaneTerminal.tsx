@@ -12,7 +12,7 @@ import { modalShown } from '../shown'
 import { darkTheme } from './themes'
 import type { PanelLive } from './PanelWindow'
 import { classifyPaneWsMessage } from './paneWsMsg'
-import { isTerminalBeforeInput, isTerminalInputKey, paneFocusAction, shouldResizePty, type TermDims } from './termViewKeep'
+import { createTerminalKeyGate, isTerminalBeforeInput, paneFocusAction, shouldResizePty, type TermDims } from './termViewKeep'
 
 const FONT_STACK = "'JetBrains Mono', 'SFMono-Regular', Menlo, Consolas, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', monospace"
 
@@ -170,6 +170,7 @@ export function PaneTerminal({
     term.unicode.activeVersion = '11'
     term.open(el)
 
+    const keyGate = createTerminalKeyGate()
     term.attachCustomKeyEventHandler((e) => {
       if (e.type === 'keydown' && e.key === 'Enter' && e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey) {
         e.preventDefault()
@@ -185,11 +186,12 @@ export function PaneTerminal({
         else el.closest('.convo-panelwin')?.querySelector<HTMLElement>('.convo-panelwin-head button')?.focus()
         return false
       }
-      if (isTerminalInputKey(e)) onInputRef.current?.()
+      keyGate.arm(e)
       return true
     })
 
     const dataSub = term.onData((data) => {
+      if (data && keyGate.consume()) onInputRef.current?.()
       sendBytesRef.current(data)
     })
 
@@ -235,6 +237,7 @@ export function PaneTerminal({
     return () => {
       clearTimeout(fitTimer)
       ro.disconnect()
+      keyGate.reset()
       dataSub.dispose()
       ta?.removeEventListener('focus', onFocus)
       ta?.removeEventListener('blur', onBlur)

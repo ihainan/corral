@@ -14,7 +14,7 @@ const {
   paneFocusAction,
   onPaneTerminalClaim,
   claimPaneTerminal,
-  isTerminalInputKey,
+  createTerminalKeyGate,
   isTerminalBeforeInput,
 } = await import(`data:text/javascript;base64,${Buffer.from(outputText).toString('base64')}`)
 
@@ -136,29 +136,38 @@ offB()
 claimPaneTerminal('s1', 'pane-2')
 assert.equal(hitsB, 1)
 
-// 12. isTerminalInputKey accepts real input keys (including Shift+F3) and ignores modifiers/meta/keyup/IME.
-for (const ev of [
-  { type: 'keydown', key: 'y' },
-  { type: 'keydown', key: 'Enter' },
-  { type: 'keydown', key: 'Escape' },
-  { type: 'keydown', key: 'F3', shiftKey: true },
-  { type: 'keydown', key: 'ArrowUp' },
-  { type: 'keydown', key: 'c', ctrlKey: true },
-]) {
-  assert.equal(isTerminalInputKey(ev), true, `expected input key: ${JSON.stringify(ev)}`)
-}
-for (const ev of [
-  { type: 'keyup', key: 'y' },
-  { type: 'keydown', key: 'Shift' },
-  { type: 'keydown', key: 'Control' },
-  { type: 'keydown', key: 'Alt' },
-  { type: 'keydown', key: 'Meta' },
-  { type: 'keydown', key: 'c', metaKey: true },
-  { type: 'keydown', key: 'a', isComposing: true },
-  { type: 'keydown', key: 'Process', keyCode: 229 },
-  { type: 'keydown', key: 'Unidentified' },
-]) {
-  assert.equal(isTerminalInputKey(ev), false, `expected non-input key: ${JSON.stringify(ev)}`)
+// 12. createTerminalKeyGate pairs keydown/keypress with synchronous onData and disarms at microtask end.
+{
+  const gate = createTerminalKeyGate()
+  assert.equal(gate.consume(), false, 'unarmed gate must not consume')
+
+  // keyup does not arm
+  gate.arm({ type: 'keyup' })
+  assert.equal(gate.consume(), false, 'keyup must not arm gate')
+
+  // keydown arms for a single synchronous consume
+  gate.arm({ type: 'keydown' })
+  assert.equal(gate.consume(), true, 'armed gate must consume once synchronously')
+  assert.equal(gate.consume(), false, 'consumed gate must disarm immediately')
+
+  // keypress also arms (used by xterm for uppercase A-Z / third-level shift)
+  gate.arm({ type: 'keypress' })
+  assert.equal(gate.consume(), true, 'keypress must arm gate')
+
+  // keydown with no synchronous onData (e.g. Shift+PageUp, Ctrl+Insert, bare Alt) disarms at microtask end
+  gate.arm({ type: 'keydown' })
+  await Promise.resolve()
+  assert.equal(gate.consume(), false, 'gate must disarm after current event turn if no onData fired')
+
+  // rapid back-to-back arm keeps newer generation armed when older microtask runs
+  gate.arm({ type: 'keydown' })
+  gate.arm({ type: 'keydown' })
+  assert.equal(gate.consume(), true, 're-armed gate must consume synchronously')
+
+  // explicit reset clears armed state
+  gate.arm({ type: 'keydown' })
+  gate.reset()
+  assert.equal(gate.consume(), false, 'reset must disarm gate')
 }
 
 // 13. isTerminalBeforeInput accepts mobile/paste edits and ignores mid-composition previews.

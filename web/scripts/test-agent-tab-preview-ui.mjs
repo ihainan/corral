@@ -792,12 +792,15 @@ function loadInlineReplyEnv(hooks, { screen, opts, readState, target, capturedKe
 }
 
 // ============================================================================
-// 6. P2 (fix4): PaneTerminal pins from real user input events (not PTY bytes):
-//    - wheel/mouse-move/focus bytes via term.onData do NOT pin (even ESC[A/B,
-//      ESC[<73;10;5M, ESC[<35;10;5M)
-//    - Shift+F3 (ESC[1;2R) pins immediately via custom key handler
-//    - keypress, IME commit, paste, and touch key bar pin even while WebSocket
-//      is connecting or closed
+// 6. P2 (fix4 + fix5): PaneTerminal pins only when a user key actually emits
+//    xterm onData (no key blacklist/whitelist), plus explicit input sources:
+//    - Shift+PageUp, Shift+PageDown, Ctrl+Insert emit no onData -> do NOT pin
+//    - Mac Option+N (Dead + optionIsMeta -> ESC+n) and Command+Backspace (-> DEL)
+//      emit onData -> DO pin
+//    - wheel/mouse-move/focus/CPR bytes via term.onData have no armed key -> do NOT pin
+//    - Shift+F3 (ESC[1;2R) and uppercase A (via keypress) -> DO pin
+//    - keyboard onData, Shift+Enter, IME commit, paste, mobile beforeinput, and
+//      touch key bar pin even while WebSocket is connecting or closed
 // ============================================================================
 {
   const paneTermFile = parseTsx('../src/terminal/PaneTerminal.tsx')
@@ -814,6 +817,7 @@ function loadInlineReplyEnv(hooks, { screen, opts, readState, target, capturedKe
     ).toString('base64')}`
   )
   assert.equal('isUserTerminalInput' in paneWsMod, false, 'paneWsMsg.ts must not classify PTY bytes')
+  assert.equal('isTerminalInputKey' in termKeepMod, false, 'termViewKeep.ts must not maintain a key blacklist')
 
   const paneTermCode = transpileFn(paneTermFile, 'PaneTerminal')
 
@@ -883,7 +887,7 @@ function loadInlineReplyEnv(hooks, { screen, opts, readState, target, capturedKe
       }
     },
     useLayoutEffect() {},
-    usePrefs: () => ({ fontSize: 13, optionIsMeta: false }),
+    usePrefs: () => ({ fontSize: 13, optionIsMeta: true }),
     termScheme: () => ({ id: 'dark', theme: { background: '#000' } }),
     isCoarse: () => true,
     t: (k) => k,
@@ -907,7 +911,7 @@ function loadInlineReplyEnv(hooks, { screen, opts, readState, target, capturedKe
     isActiveTerminalStatus: () => true,
     setLeaveGuardTerminal: () => {},
     classifyPaneWsMessage: paneWsMod.classifyPaneWsMessage,
-    isTerminalInputKey: termKeepMod.isTerminalInputKey,
+    createTerminalKeyGate: termKeepMod.createTerminalKeyGate,
     isTerminalBeforeInput: termKeepMod.isTerminalBeforeInput,
     paneFocusAction: () => 'none',
     shouldResizePty: () => false,
@@ -932,6 +936,10 @@ function loadInlineReplyEnv(hooks, { screen, opts, readState, target, capturedKe
     pinCalls++
     tabs = policy.pinAgentTabByKey(tabs, 'A').tabs
   }
+  const resetPreview = () => {
+    tabs = [{ id: 't1', key: 'A', s: 's1', preview: true }]
+    pinCalls = 0
+  }
 
   const tree = PaneTerminal({
     sid: 's1',
@@ -947,6 +955,14 @@ function loadInlineReplyEnv(hooks, { screen, opts, readState, target, capturedKe
   assert.equal(typeof customKeyHandler, 'function', 'PaneTerminal must attach custom key handler')
   assert.equal(typeof onDataCb, 'function', 'PaneTerminal must subscribe to term.onData')
 
+  // Emulates xterm CoreBrowserTerminal._keyDown/_keyPress: calls customKeyEventHandler,
+  // and if allowed and xterm produces terminal bytes, synchronously fires term.onData(data).
+  const dispatchKey = async (ev, xtermData = null) => {
+    const allowed = customKeyHandler(ev)
+    if (allowed !== false && xtermData) onDataCb(xtermData)
+    await Promise.resolve()
+  }
+
   // 6a. Wheel scrolling (alt-screen ESC[A/B, SGR Alt+wheel ESC[<73;10;5M), SGR mouse movement
   //     (ESC[<35;10;5M), and focus/CPR replies via term.onData must NOT pin preview tab A!
   for (const seq of ['\x1b[A', '\x1b[B', '\x1b[<73;10;5M', '\x1b[<35;10;5M', '\x1b[I', '\x1b[O', '\x1b[24;1R']) {
@@ -956,43 +972,87 @@ function loadInlineReplyEnv(hooks, { screen, opts, readState, target, capturedKe
   assert.equal(tabs[0].preview, true)
   assert.equal(sentFrames.length, 7, 'terminal data still forwards over WebSocket')
 
-  // Pure modifiers, Meta copy shortcut, keyup, focus/blur, and F6 leave-focus must NOT pin:
-  customKeyHandler({ type: 'keydown', key: 'Shift', shiftKey: true })
-  customKeyHandler({ type: 'keydown', key: 'Control', ctrlKey: true })
-  customKeyHandler({ type: 'keydown', key: 'c', metaKey: true })
-  customKeyHandler({ type: 'keyup', key: 'a' })
+  // 6b. fix5 non-input keys handled locally by xterm (no onData emitted) must NOT pin:
+  //     1) Shift+PageUp (scrolls viewport only)
+  //     2) Shift+PageDown (scrolls viewport only)
+  //     3) Ctrl+Insert (copy only)
+  await dispatchKey({ type: 'keydown', key: 'PageUp', keyCode: 33, shiftKey: true }, null)
+  assert.equal(pinCalls, 0, 'Shift+PageUp (local scroll, no onData) must NOT pin preview tab')
+  assert.equal(tabs[0].preview, true)
+
+  await dispatchKey({ type: 'keydown', key: 'PageDown', keyCode: 34, shiftKey: true }, null)
+  assert.equal(pinCalls, 0, 'Shift+PageDown (local scroll, no onData) must NOT pin preview tab')
+  assert.equal(tabs[0].preview, true)
+
+  await dispatchKey({ type: 'keydown', key: 'Insert', keyCode: 45, ctrlKey: true }, null)
+  assert.equal(pinCalls, 0, 'Ctrl+Insert (copy, no onData) must NOT pin preview tab')
+  assert.equal(tabs[0].preview, true)
+
+  // Subsequent non-keyboard onData after a local-only key (e.g. holding Alt then scrolling wheel) must NOT pin:
+  await dispatchKey({ type: 'keydown', key: 'Alt', altKey: true }, null)
+  onDataCb('\x1b[<73;10;5M')
+  assert.equal(pinCalls, 0, 'Alt+wheel after Alt keydown must NOT pin preview tab')
+
+  // Pure modifiers, Meta copy shortcut, keyup, focus/blur, and F6 leave-focus (even if blur emits ESC[O]) must NOT pin:
+  await dispatchKey({ type: 'keydown', key: 'Shift', shiftKey: true }, null)
+  await dispatchKey({ type: 'keydown', key: 'Control', ctrlKey: true }, null)
+  await dispatchKey({ type: 'keydown', key: 'c', metaKey: true }, null)
+  await dispatchKey({ type: 'keyup', key: 'a' }, null)
   customKeyHandler({ type: 'keydown', key: 'F6', preventDefault() {}, stopPropagation() {} })
+  onDataCb('\x1b[O') // focus-out report if moving focus out of terminal
   taListeners.get('focus')?.()
   taListeners.get('blur')?.()
   assert.equal(pinCalls, 0, 'modifiers, Meta shortcuts, keyup, F6 leave, and focus/blur must NOT pin')
   assert.equal(tabs[0].preview, true)
 
-  // 6b. Shift+F3 (which emits ESC[1;2R) MUST pin immediately via keyboard event!
-  customKeyHandler({ type: 'keydown', key: 'F3', shiftKey: true })
-  onDataCb('\x1b[1;2R')
+  // 6c. fix5 keys that xterm DOES turn into PTY input MUST pin:
+  //     4) Mac Option+N under macOptionIsMeta (key === 'Dead', code === 'KeyN', keyCode === 229 -> ESC+n)
+  resetPreview()
+  await dispatchKey({ type: 'keydown', key: 'Dead', code: 'KeyN', keyCode: 229, altKey: true }, '\x1bn')
+  assert.equal(pinCalls, 1, 'Mac Option+N (Dead under optionIsMeta -> ESC+n) must pin preview tab')
+  assert.equal(tabs[0].preview, undefined)
+
+  //     5) Mac Command+Backspace (metaKey === true, key === 'Backspace', keyCode === 8 -> DEL)
+  resetPreview()
+  await dispatchKey({ type: 'keydown', key: 'Backspace', keyCode: 8, metaKey: true }, '\x7f')
+  assert.equal(pinCalls, 1, 'Mac Command+Backspace (metaKey -> DEL) must pin preview tab')
+  assert.equal(tabs[0].preview, undefined)
+
+  // 6d. Shift+F3 (which emits ESC[1;2R) and uppercase A (emitted in keypress) MUST pin:
+  resetPreview()
+  await dispatchKey({ type: 'keydown', key: 'F3', keyCode: 114, shiftKey: true }, '\x1b[1;2R')
   assert.equal(pinCalls, 1, 'Shift+F3 keypress must pin preview tab immediately')
   assert.equal(tabs[0].preview, undefined, 'preview tab A must be pinned after Shift+F3')
 
-  // 6c. Typing / Shift+Enter / Paste / IME commit / Touch key bar while WebSocket is
-  //     CONNECTING or CLOSED (readyState !== OPEN) must STILL pin immediately!
+  resetPreview()
+  await dispatchKey({ type: 'keydown', key: 'A', keyCode: 65, shiftKey: true }, null)
+  assert.equal(pinCalls, 0, 'A-Z keydown without onData waits for keypress')
+  await dispatchKey({ type: 'keypress', key: 'A', charCode: 65, shiftKey: true }, 'A')
+  assert.equal(pinCalls, 1, 'uppercase A via keypress onData must pin preview tab')
+  assert.equal(tabs[0].preview, undefined)
+
+  // 6e. Typing / Option+N / Command+Backspace / Shift+Enter / Paste / IME commit / Touch key bar
+  //     while WebSocket is CONNECTING or CLOSED (readyState !== OPEN) must STILL pin immediately!
   fakeWs.readyState = 0 // CONNECTING
   const beforeSent = sentFrames.length
 
-  tabs = [{ id: 't1', key: 'A', s: 's1', preview: true }]
-  pinCalls = 0
-  customKeyHandler({ type: 'keydown', key: 'y' })
+  resetPreview()
+  await dispatchKey({ type: 'keydown', key: 'y', keyCode: 89 }, 'y')
   assert.equal(pinCalls, 1, 'typing while WebSocket is connecting must still pin immediately')
   assert.equal(tabs[0].preview, undefined)
 
   fakeWs.readyState = 3 // CLOSED
-  tabs = [{ id: 't1', key: 'A', s: 's1', preview: true }]
-  pinCalls = 0
+  resetPreview()
+  await dispatchKey({ type: 'keydown', key: 'Dead', code: 'KeyN', keyCode: 229, altKey: true }, '\x1bn')
+  assert.equal(pinCalls, 1, 'Option+N while WebSocket is closed must still pin immediately')
+  assert.equal(tabs[0].preview, undefined)
+
+  resetPreview()
   customKeyHandler({ type: 'keydown', key: 'Enter', shiftKey: true, preventDefault() {}, stopPropagation() {} })
   assert.equal(pinCalls, 1, 'Shift+Enter while WebSocket is closed must still pin immediately')
   assert.equal(tabs[0].preview, undefined)
 
-  tabs = [{ id: 't1', key: 'A', s: 's1', preview: true }]
-  pinCalls = 0
+  resetPreview()
   const [enterBtn] = findAll(tree, (el) => el.type === 'button' && el.props.className === 'convo-panelwin-key')
   assert.ok(enterBtn, 'PaneTerminal should render touch key button when isCoarse()')
   enterBtn.props.onClick()
@@ -1001,22 +1061,19 @@ function loadInlineReplyEnv(hooks, { screen, opts, readState, target, capturedKe
   assert.equal(sentFrames.length, beforeSent, 'no WS frames sent while disconnected')
 
   // Paste and IME compositionend + mobile beforeinput must also pin immediately (even disconnected):
-  tabs = [{ id: 't1', key: 'A', s: 's1', preview: true }]
-  pinCalls = 0
+  resetPreview()
   taListeners.get('paste')?.()
   assert.equal(pinCalls, 1, 'paste in PTY terminal must pin immediately')
   assert.equal(tabs[0].preview, undefined)
 
-  tabs = [{ id: 't1', key: 'A', s: 's1', preview: true }]
-  pinCalls = 0
+  resetPreview()
   taListeners.get('beforeinput')?.({ inputType: 'insertCompositionText', data: 'ni' })
   assert.equal(pinCalls, 0, 'in-progress IME composition preview should wait for commit')
   taListeners.get('compositionend')?.({ data: '你' })
   assert.equal(pinCalls, 1, 'IME compositionend with committed text must pin immediately')
   assert.equal(tabs[0].preview, undefined)
 
-  tabs = [{ id: 't1', key: 'A', s: 's1', preview: true }]
-  pinCalls = 0
+  resetPreview()
   taListeners.get('beforeinput')?.({ inputType: 'insertText', data: 'a' })
   assert.equal(pinCalls, 1, 'mobile soft keyboard beforeinput insertText must pin immediately')
   assert.equal(tabs[0].preview, undefined)
