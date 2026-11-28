@@ -1219,8 +1219,10 @@ func (s *Server) handleShutdown(_ context.Context, caller *Conn, raw json.RawMes
 
 	s.clientGateMu.Lock()
 	if soleGW := p.OnlyIfSoleGateway; soleGW != "" {
-		// Under clientGateMu, atomically verify that no other gateway is
-		// currently connected AND no other gateway is registered in clients.json.
+		// Under clientGateMu, atomically verify that no other connection is
+		// currently active (including a freshly re-established connection from
+		// the same gateway after admin re-allowed!) AND no other gateway is
+		// registered in clients.json.
 		s.connMu.Lock()
 		for other := range s.conns {
 			if other == caller {
@@ -1229,12 +1231,10 @@ func (s *Server) handleShutdown(_ context.Context, caller *Conn, raw json.RawMes
 			other.mu.Lock()
 			ogw := other.gateway
 			other.mu.Unlock()
-			if ogw != soleGW {
-				s.connMu.Unlock()
-				s.clientGateMu.Unlock()
-				s.log.Info("conditional shutdown refused: other gateway connected", "requested_gateway", soleGW, "other_gateway", ogw)
-				return proto.ShutdownResult{OK: false, OtherGateways: true}, nil
-			}
+			s.connMu.Unlock()
+			s.clientGateMu.Unlock()
+			s.log.Info("conditional shutdown refused: another connection active", "requested_gateway", soleGW, "other_gateway", ogw)
+			return proto.ShutdownResult{OK: false, OtherGateways: true}, nil
 		}
 		s.connMu.Unlock()
 

@@ -1752,3 +1752,186 @@ func (p *countingSSHProvider) HostBinding(ctx context.Context, ownerID, hostID i
 func (p *countingSSHProvider) UserLabel(ctx context.Context, userID int64) string {
 	return p.base.UserLabel(ctx, userID)
 }
+
+// Regression tests for Fix Round 5 end-to-end flows:
+//   - Item #2 [P1]: CleanupUserHosts holds the per-account op lock until AFTER
+//     the conditional DB reset finishes, so a concurrent install on a peer host
+//     cannot race in and get clobbered.
+//   - Item #3 [P2]: Admin disable firing after RunServeWithRetry inside
+//     runInstallWithSSH reuses the install's held op lock (never skipping
+//     cleanup on ErrOpConflict and never resetting a failed cleanup to off).
+func TestCorraldFix5_EndToEnd(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("requires linux")
+	}
+	v1Dir, _ := buildTestCorraldDist(t)
+	distV1, err := gw.LoadDist(v1Dir)
+	if err != nil {
+		t.Fatalf("LoadDist: %v", err)
+	}
+
+	t.Run("item2_cleanup_user_hosts_holds_lock_through_db_reset", func(t *testing.T) {
+		h := newHarness(t, func(c *config.Config) {
+			c.CorraldDir = v1Dir
+			c.GatewayID = "gw-fix5-cu.local"
+		})
+		admin := h.admin()
+		alice := h.member(admin, "alice")
+		bob := h.member(admin, "bob")
+		aliceID := userIDOf(t, alice)
+		sshSrv, _ := startCorraldSSH(t)
+
+		aliceHost, _ := createAndPinHost(t, alice, sshSrv, "cu5-alice")
+		bobHost, _ := createAndPinHost(t, bob, sshSrv, "cu5-bob")
+
+		startCorraldInstall(t, alice, aliceHost)
+		waitCorraldState(t, alice, aliceHost, gw.StateRunning)
+
+		// Bob's host is off on the same SSH account (so Bob is not a peer blocking cleanup).
+		if err := h.srv.store.ResetCorraldHostOff(context.Background(), bobHost); err != nil {
+			t.Fatalf("ResetCorraldHostOff(bobHost): %v", err)
+		}
+
+		// Pause CleanupUserHosts right between uninstall and DB reset.
+		inReset := make(chan struct{}, 1)
+		releaseReset := make(chan struct{})
+		var once sync.Once
+		h.srv.corrald.Close()
+		h.srv.corrald = gw.NewManager(gw.ManagerConfig{
+			Store:     h.store,
+			Dist:      distV1,
+			GatewayID: "gw-fix5-cu.local",
+			SSH:       &webSSHProvider{s: h.srv},
+			BeforeCleanupUserDBReset: func(hid int64) {
+				once.Do(func() {
+					inReset <- struct{}{}
+					<-releaseReset
+				})
+			},
+		})
+
+		doneCh := make(chan map[int64]string, 1)
+		go func() {
+			doneCh <- h.srv.CorraldManager().CleanupUserHosts(context.Background(), aliceID, "alice")
+		}()
+
+		select {
+		case <-inReset:
+		case <-time.After(10 * time.Second):
+			t.Fatal("CleanupUserHosts did not reach BeforeCleanupUserDBReset")
+		}
+
+		// While CleanupUserHosts is about to reset DB, per-account op lock MUST
+		// STILL be held so Bob cannot start a concurrent install and get clobbered!
+		stBob := bob.do("GET", fmt.Sprintf("/api/hosts/%d/corrald", bobHost), nil)
+		mustStatus(t, stBob, http.StatusOK, "bob status")
+		mhash, _ := stBob.json()["manifest_hash"].(string)
+		resp := bob.do("POST", fmt.Sprintf("/api/hosts/%d/corrald/install", bobHost), map[string]any{"manifest_hash": mhash})
+		if resp.Status != http.StatusConflict {
+			close(releaseReset)
+			t.Fatalf("Fix5 Item #2 regression: expected 409 Conflict while CleanupUserHosts holds lock before DB reset, got %d (%s)", resp.Status, resp.Body)
+		}
+
+		close(releaseReset)
+		res := <-doneCh
+		if res[aliceHost] != "removed" {
+			t.Fatalf("expected CleanupUserHosts removed, got %v", res)
+		}
+	})
+
+	t.Run("item3a_install_post_serve_admin_disable_reuses_lock_and_cleans_up", func(t *testing.T) {
+		h := newHarness(t, func(c *config.Config) {
+			c.CorraldDir = v1Dir
+			c.GatewayID = "gw-fix5-inst.local"
+		})
+		admin := h.admin()
+		sshSrv, home := startCorraldSSH(t)
+		hostID, _ := createAndPinHost(t, admin, sshSrv, "inst5-clean")
+
+		var once sync.Once
+		h.srv.corrald.Close()
+		h.srv.corrald = gw.NewManager(gw.ManagerConfig{
+			Store:     h.store,
+			Dist:      distV1,
+			GatewayID: "gw-fix5-inst.local",
+			SSH:       &webSSHProvider{s: h.srv},
+			AfterInstallServe: func(hid int64, _ string) {
+				once.Do(func() {
+					// Admin disables right after corrald serve succeeds while
+					// runInstallWithSSH STILL holds the OpInstall lock!
+					h.srv.corrald.SetAdminDisabled(context.Background(), true)
+				})
+			},
+		})
+
+		startCorraldInstall(t, admin, hostID)
+
+		bin := filepath.Join(home, ".local", "lib", "corral", "corrald")
+		deadline := time.Now().Add(10 * time.Second)
+		for {
+			ch, err := h.srv.store.CorraldHostByID(context.Background(), hostID)
+			_, binErr := os.Stat(bin)
+			if err == nil && ch.State == gw.StateOff && os.IsNotExist(binErr) {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("Fix5 Item #3 regression: post-serve admin disable did not clean up while holding install op lock; ch=(%+v,%v) binErr=%v", ch, err, binErr)
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+	})
+
+	t.Run("item3b_install_post_serve_disable_transient_fail_marks_remove_pending", func(t *testing.T) {
+		h := newHarness(t, func(c *config.Config) {
+			c.CorraldDir = v1Dir
+			c.GatewayID = "gw-fix5-inst2.local"
+		})
+		admin := h.admin()
+		sshSrv, home := startCorraldSSH(t)
+		hostID, _ := createAndPinHost(t, admin, sshSrv, "inst5-pend")
+
+		var failProbe atomic.Bool
+		var once sync.Once
+		h.srv.corrald.Close()
+		h.srv.corrald = gw.NewManager(gw.ManagerConfig{
+			Store:     h.store,
+			Dist:      distV1,
+			GatewayID: "gw-fix5-inst2.local",
+			SSH:       &webSSHProvider{s: h.srv},
+			ProbeOverride: func(ctx context.Context, c *ssh.Client) (*gw.HostProbe, error) {
+				if failProbe.Load() {
+					return nil, errors.New("simulated transient probe failure after serve")
+				}
+				return gw.ProbeHost(ctx, c)
+			},
+			AfterInstallServe: func(hid int64, _ string) {
+				once.Do(func() {
+					failProbe.Store(true)
+					h.srv.corrald.SetAdminDisabled(context.Background(), true)
+				})
+			},
+		})
+
+		startCorraldInstall(t, admin, hostID)
+
+		deadline := time.Now().Add(10 * time.Second)
+		for {
+			ch, err := h.srv.store.CorraldHostByID(context.Background(), hostID)
+			if err == nil && ch.State == gw.StateRemovePending {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("Fix5 Item #3 regression: expected StateRemovePending when post-serve disable cleanup fails transiently, got (%+v, %v)", ch, err)
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+
+		// Clean up the running daemon left on temp home.
+		bin := filepath.Join(home, ".local", "lib", "corral", "corrald")
+		if _, err := os.Stat(bin); err == nil {
+			stopCmd := exec.Command(bin, "stop")
+			stopCmd.Env = append(os.Environ(), "HOME="+home)
+			_, _ = stopCmd.CombinedOutput()
+		}
+	})
+}

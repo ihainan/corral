@@ -292,6 +292,13 @@ func (s *Store) HostOwnerID(ctx context.Context, hostID int64) (int64, error) {
 // peers sharing fingerprint+username) to remove_pending so the host's files are
 // cleaned up on next SSH connection or immediate cleanup.
 func (s *Store) MarkCorraldHostsRemovePending(ctx context.Context, hostIDs []int64, fingerprint, username string) error {
+	return s.MarkCorraldHostsRemovePendingIfOp(ctx, hostIDs, fingerprint, username, "")
+}
+
+// MarkCorraldHostsRemovePendingIfOp conditionally transitions idle rows (or rows
+// owned by allowedOpID) to remove_pending without clobbering a concurrent new
+// install/update operation's active_op_id.
+func (s *Store) MarkCorraldHostsRemovePendingIfOp(ctx context.Context, hostIDs []int64, fingerprint, username, allowedOpID string) error {
 	now := s.unix()
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -306,7 +313,9 @@ func (s *Store) MarkCorraldHostsRemovePending(ctx context.Context, hostIDs []int
 		if _, err := tx.ExecContext(ctx, `
 			UPDATE corrald_hosts
 			SET state = 'remove_pending', active_op_id = '', updated_at = ?
-			WHERE host_id = ? AND state NOT IN ('off')`, now, id); err != nil {
+			WHERE host_id = ? AND state NOT IN ('off')
+			  AND ((active_op_id = '' AND state NOT IN ('installing')) OR (? != '' AND active_op_id = ?))`,
+			now, id, allowedOpID, allowedOpID); err != nil {
 			return err
 		}
 	}
@@ -314,7 +323,9 @@ func (s *Store) MarkCorraldHostsRemovePending(ctx context.Context, hostIDs []int
 		if _, err := tx.ExecContext(ctx, `
 			UPDATE corrald_hosts
 			SET state = 'remove_pending', active_op_id = '', updated_at = ?
-			WHERE bound_fingerprint = ? AND bound_username = ? AND state NOT IN ('off')`, now, fingerprint, username); err != nil {
+			WHERE bound_fingerprint = ? AND bound_username = ? AND state NOT IN ('off')
+			  AND ((active_op_id = '' AND state NOT IN ('installing')) OR (? != '' AND active_op_id = ?))`,
+			now, fingerprint, username, allowedOpID, allowedOpID); err != nil {
 			return err
 		}
 	}
@@ -325,6 +336,13 @@ func (s *Store) MarkCorraldHostsRemovePending(ctx context.Context, hostIDs []int
 // to stopped without downgrading hosts that are already in remove_pending or
 // removing (transient check/cleanup failures must keep remove_pending for retry).
 func (s *Store) MarkCorraldHostsStopped(ctx context.Context, hostIDs []int64, fingerprint, username string) error {
+	return s.MarkCorraldHostsStoppedIfOp(ctx, hostIDs, fingerprint, username, "")
+}
+
+// MarkCorraldHostsStoppedIfOp conditionally transitions idle active rows (or
+// rows owned by allowedOpID) to stopped without touching remove_pending/removing
+// or any concurrent new operation.
+func (s *Store) MarkCorraldHostsStoppedIfOp(ctx context.Context, hostIDs []int64, fingerprint, username, allowedOpID string) error {
 	now := s.unix()
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -339,7 +357,9 @@ func (s *Store) MarkCorraldHostsStopped(ctx context.Context, hostIDs []int64, fi
 		if _, err := tx.ExecContext(ctx, `
 			UPDATE corrald_hosts
 			SET state = 'stopped', active_op_id = '', updated_at = ?
-			WHERE host_id = ? AND state IN ('running', 'lost', 'updating', 'incompatible')`, now, id); err != nil {
+			WHERE host_id = ? AND state IN ('running', 'lost', 'updating', 'incompatible')
+			  AND (active_op_id = '' OR (? != '' AND active_op_id = ?))`,
+			now, id, allowedOpID, allowedOpID); err != nil {
 			return err
 		}
 	}
@@ -347,7 +367,9 @@ func (s *Store) MarkCorraldHostsStopped(ctx context.Context, hostIDs []int64, fi
 		if _, err := tx.ExecContext(ctx, `
 			UPDATE corrald_hosts
 			SET state = 'stopped', active_op_id = '', updated_at = ?
-			WHERE bound_fingerprint = ? AND bound_username = ? AND state IN ('running', 'lost', 'updating', 'incompatible')`, now, fingerprint, username); err != nil {
+			WHERE bound_fingerprint = ? AND bound_username = ? AND state IN ('running', 'lost', 'updating', 'incompatible')
+			  AND (active_op_id = '' OR (? != '' AND active_op_id = ?))`,
+			now, fingerprint, username, allowedOpID, allowedOpID); err != nil {
 			return err
 		}
 	}
@@ -358,6 +380,12 @@ func (s *Store) MarkCorraldHostsStopped(ctx context.Context, hostIDs []int64, fi
 // removing hosts to stopped ONLY when another gateway is confirmed to be using
 // corrald (or an older daemon cannot support safe conditional shutdown/uninstall).
 func (s *Store) MarkCorraldHostsPreservedOtherGateway(ctx context.Context, hostIDs []int64, fingerprint, username string) error {
+	return s.MarkCorraldHostsPreservedOtherGatewayIfOp(ctx, hostIDs, fingerprint, username, "")
+}
+
+// MarkCorraldHostsPreservedOtherGatewayIfOp conditionally marks hosts stopped
+// when another gateway is confirmed, without clobbering a different active op.
+func (s *Store) MarkCorraldHostsPreservedOtherGatewayIfOp(ctx context.Context, hostIDs []int64, fingerprint, username, allowedOpID string) error {
 	now := s.unix()
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -372,7 +400,10 @@ func (s *Store) MarkCorraldHostsPreservedOtherGateway(ctx context.Context, hostI
 		if _, err := tx.ExecContext(ctx, `
 			UPDATE corrald_hosts
 			SET state = 'stopped', active_op_id = '', updated_at = ?
-			WHERE host_id = ? AND state IN ('running', 'lost', 'updating', 'incompatible', 'remove_pending', 'removing')`, now, id); err != nil {
+			WHERE host_id = ? AND (
+				(state IN ('running', 'lost', 'updating', 'incompatible', 'remove_pending', 'removing') AND active_op_id = '')
+				OR (? != '' AND active_op_id = ?)
+			)`, now, id, allowedOpID, allowedOpID); err != nil {
 			return err
 		}
 	}
@@ -380,7 +411,10 @@ func (s *Store) MarkCorraldHostsPreservedOtherGateway(ctx context.Context, hostI
 		if _, err := tx.ExecContext(ctx, `
 			UPDATE corrald_hosts
 			SET state = 'stopped', active_op_id = '', updated_at = ?
-			WHERE bound_fingerprint = ? AND bound_username = ? AND state IN ('running', 'lost', 'updating', 'incompatible', 'remove_pending', 'removing')`, now, fingerprint, username); err != nil {
+			WHERE bound_fingerprint = ? AND bound_username = ? AND (
+				(state IN ('running', 'lost', 'updating', 'incompatible', 'remove_pending', 'removing') AND active_op_id = '')
+				OR (? != '' AND active_op_id = ?)
+			)`, now, fingerprint, username, allowedOpID, allowedOpID); err != nil {
 			return err
 		}
 	}
@@ -509,6 +543,12 @@ func (s *Store) HasCorraldHostsInStates(ctx context.Context, states ...string) (
 
 // ResetCorraldHostOff resets a single corrald_hosts row to 'off' after cleanup.
 func (s *Store) ResetCorraldHostOff(ctx context.Context, hostID int64) error {
+	return s.ResetCorraldHostOffIfIdle(ctx, hostID, "")
+}
+
+// ResetCorraldHostOffIfIdle conditionally resets hostID to 'off' ONLY when the
+// row is idle (not actively installing/updating) or owned by allowedOpID.
+func (s *Store) ResetCorraldHostOffIfIdle(ctx context.Context, hostID int64, allowedOpID string) error {
 	if hostID <= 0 {
 		return nil
 	}
@@ -519,7 +559,29 @@ func (s *Store) ResetCorraldHostOff(ctx context.Context, hostID int64) error {
 		    updated_from_ver = '', updated_from_rel = 0, updated_from_target = '',
 		    update_target_ver = '', update_target_rel = 0, update_ready_at = 0, update_crash_count = 0,
 		    last_error = '', restart_count = 0, updated_at = ?
-		WHERE host_id = ?`,
-		s.unix(), hostID)
+		WHERE host_id = ?
+		  AND ((active_op_id = '' AND state NOT IN ('installing', 'updating')) OR (? != '' AND active_op_id = ?))`,
+		s.unix(), hostID, allowedOpID, allowedOpID)
+	return err
+}
+
+// CorraldResetByBindingIfIdle conditionally resets corrald_hosts rows for
+// (fingerprint, username) to 'off' ONLY when idle (not actively installing or
+// updating) or owned by allowedOpID, so a concurrent install on a peer host is
+// never clobbered.
+func (s *Store) CorraldResetByBindingIfIdle(ctx context.Context, fingerprint, username, allowedOpID string) error {
+	if fingerprint == "" || username == "" {
+		return nil
+	}
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE corrald_hosts
+		SET state = 'off', version = '', release = 0, socket_path = '', files_json = '[]',
+		    paused_users_json = '[]', failed_releases_json = '[]', active_op_id = '',
+		    updated_from_ver = '', updated_from_rel = 0, updated_from_target = '',
+		    update_target_ver = '', update_target_rel = 0, update_ready_at = 0, update_crash_count = 0,
+		    last_error = '', restart_count = 0, updated_at = ?
+		WHERE bound_fingerprint = ? AND bound_username = ?
+		  AND ((active_op_id = '' AND state NOT IN ('installing', 'updating')) OR (? != '' AND active_op_id = ?))`,
+		s.unix(), fingerprint, username, allowedOpID, allowedOpID)
 	return err
 }

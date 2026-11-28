@@ -258,8 +258,11 @@ func (m *Manager) enforceAdminDisableOnConn(ctx context.Context, sc *sharedConn,
 		return
 	}
 
-	exclusive := m.enforceAdminDisableOnClient(ctx, client, hello, refs, hostIDs, key)
+	exclusive := m.enforceAdminDisableOnClient(ctx, client, hello, refs, hostIDs, key, gen, "")
 	if !exclusive {
+		return
+	}
+	if !m.isAdminDisableGen(gen) {
 		return
 	}
 
@@ -273,29 +276,51 @@ func (m *Manager) enforceAdminDisableOnConn(ctx context.Context, sc *sharedConn,
 
 	// Immediately borrow the existing SSH connection (sc.sshClient or pooled SSH
 	// from m.ssh) and run host-side atomic sole-gateway uninstall under lock.
-	m.tryImmediateAdminUninstall(ctx, key, refs, hostIDs, sshClient, gen)
+	m.tryImmediateAdminUninstall(ctx, key, refs, hostIDs, sshClient, gen, "")
 }
 
 // enforceAdminDisableOnClient atomically requests conditional shutdown on the
 // daemon (ShutdownParams.OnlyIfSoleGateway) ONLY after confirming the daemon
 // advertises proto.FeatureConditionalShutdown in HelloResult.Features.
 //
+//   - Before every RPC and before every DB write (under policyMu.RLock), re-verifies
+//     m.isAdminDisableGen(gen) so an obsolete disable worker superseded by a
+//     subsequent "re-allow" can never shut down a new connection or overwrite DB state.
 //   - Old daemons without FeatureConditionalShutdown: never sent unconditional
 //     Shutdown; marked stopped (files preserved).
-//   - Live Health failure or conditional Shutdown RPC error: never falls back
-//     to cached health or unconditional shutdown; leaves daemon running.
+//   - Live Health/Hello failure: never falls back to cached health or unconditional
+//     shutdown; leaves daemon running and marks stopped.
+//   - Conditional Shutdown transport/timeout error (response lost): treated as
+//     outcome unknown — marks remove_pending + markPendingCleanup so host-side
+//     atomic retry resolves whether to clean up or preserve.
 //   - Confirmed other gateway (Health.ConnectedGateways > 1 or ShutdownResult.OtherGateways):
 //     marked stopped (files preserved).
 //   - Confirmed sole gateway (atomic ShutdownConditional OK): daemon enters
 //     shuttingDown (rejecting new Hello) and host is marked remove_pending.
-func (m *Manager) enforceAdminDisableOnClient(ctx context.Context, client *Client, hello *proto.HelloResult, refs []*hostRef, hostIDs []int64, key accountKey) bool {
+func (m *Manager) enforceAdminDisableOnClient(ctx context.Context, client *Client, hello *proto.HelloResult, refs []*hostRef, hostIDs []int64, key accountKey, gen uint64, heldOpID string) bool {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if client == nil || client.Closed() || m.gatewayID == "" {
-		if m.store != nil {
-			_ = m.store.MarkCorraldHostsStopped(context.Background(), hostIDs, key.Fingerprint, key.Username)
+	writeIfActive := func(fn func()) bool {
+		if m.store == nil {
+			return true
 		}
+		m.policyMu.RLock()
+		defer m.policyMu.RUnlock()
+		if !m.isAdminDisableGen(gen) {
+			return false
+		}
+		fn()
+		return true
+	}
+
+	if !m.isAdminDisableGen(gen) {
+		return false
+	}
+	if client == nil || client.Closed() || m.gatewayID == "" {
+		writeIfActive(func() {
+			_ = m.store.MarkCorraldHostsStoppedIfOp(context.Background(), hostIDs, key.Fingerprint, key.Username, heldOpID)
+		})
 		return false
 	}
 
@@ -303,15 +328,19 @@ func (m *Manager) enforceAdminDisableOnClient(ctx context.Context, client *Clien
 	hctx, hcancel := context.WithTimeout(ctx, 3*time.Second)
 	h, herr := client.Health(hctx)
 	hcancel()
+	if !m.isAdminDisableGen(gen) {
+		return false
+	}
 	if herr != nil || h == nil {
-		if m.store != nil {
-			_ = m.store.MarkCorraldHostsStopped(context.Background(), hostIDs, key.Fingerprint, key.Username)
-		}
+		writeIfActive(func() {
+			_ = m.store.MarkCorraldHostsStoppedIfOp(context.Background(), hostIDs, key.Fingerprint, key.Username, heldOpID)
+		})
 		return false
 	}
 	if h.ConnectedGateways > 1 {
-		if m.store != nil {
-			_ = m.store.MarkCorraldHostsPreservedOtherGateway(context.Background(), hostIDs, key.Fingerprint, key.Username)
+		if writeIfActive(func() {
+			_ = m.store.MarkCorraldHostsPreservedOtherGatewayIfOp(context.Background(), hostIDs, key.Fingerprint, key.Username, heldOpID)
+		}) {
 			m.refreshPendingCleanupFlag()
 		}
 		return false
@@ -321,6 +350,9 @@ func (m *Manager) enforceAdminDisableOnClient(ctx context.Context, client *Clien
 	// If hello was not cached yet, fetch it once without downgrading to
 	// unconditional shutdown on older daemons.
 	if hello == nil {
+		if !m.isAdminDisableGen(gen) {
+			return false
+		}
 		var ident proto.ClientIdentity
 		if len(refs) > 0 {
 			ident = proto.ClientIdentity{
@@ -337,10 +369,13 @@ func (m *Manager) enforceAdminDisableOnClient(ctx context.Context, client *Clien
 			Client:         ident,
 		})
 		helloCancel()
+		if !m.isAdminDisableGen(gen) {
+			return false
+		}
 		if err != nil || freshHello == nil {
-			if m.store != nil {
-				_ = m.store.MarkCorraldHostsStopped(context.Background(), hostIDs, key.Fingerprint, key.Username)
-			}
+			writeIfActive(func() {
+				_ = m.store.MarkCorraldHostsStoppedIfOp(context.Background(), hostIDs, key.Fingerprint, key.Username, heldOpID)
+			})
 			return false
 		}
 		hello = freshHello
@@ -348,10 +383,17 @@ func (m *Manager) enforceAdminDisableOnClient(ctx context.Context, client *Clien
 	if !hello.HasFeature(proto.FeatureConditionalShutdown) {
 		// Older daemon cannot perform atomic sole-gateway shutdown: only
 		// disconnect, mark stopped, and preserve files.
-		if m.store != nil {
-			_ = m.store.MarkCorraldHostsPreservedOtherGateway(context.Background(), hostIDs, key.Fingerprint, key.Username)
+		if writeIfActive(func() {
+			_ = m.store.MarkCorraldHostsPreservedOtherGatewayIfOp(context.Background(), hostIDs, key.Fingerprint, key.Username, heldOpID)
+		}) {
 			m.refreshPendingCleanupFlag()
 		}
+		return false
+	}
+
+	// Re-check policy generation right before sending conditional shutdown so an
+	// obsolete worker superseded by a re-allow never sends ShutdownConditional.
+	if !m.isAdminDisableGen(gen) {
 		return false
 	}
 
@@ -360,24 +402,36 @@ func (m *Manager) enforceAdminDisableOnClient(ctx context.Context, client *Clien
 	sctx, scancel := context.WithTimeout(ctx, 3*time.Second)
 	sres, serr := client.ShutdownConditional(sctx, "admin_disabled", m.gatewayID)
 	scancel()
+	if !m.isAdminDisableGen(gen) {
+		return false
+	}
 	if serr != nil || sres == nil {
-		if m.store != nil {
-			_ = m.store.MarkCorraldHostsStopped(context.Background(), hostIDs, key.Fingerprint, key.Username)
+		// Response lost (EOF/disconnect/timeout): the daemon may have accepted
+		// shutdown and exited before flushing the reply. Treat as unknown and
+		// record remove_pending so host-side atomic sole-gateway retry finishes
+		// cleanup (or preserves if another gateway is actually present).
+		if writeIfActive(func() {
+			_ = m.store.MarkCorraldHostsRemovePendingIfOp(context.Background(), hostIDs, key.Fingerprint, key.Username, heldOpID)
+		}) {
+			m.markPendingCleanup()
 		}
 		return false
 	}
 	if sres.OtherGateways || !sres.OK {
-		if m.store != nil {
-			_ = m.store.MarkCorraldHostsPreservedOtherGateway(context.Background(), hostIDs, key.Fingerprint, key.Username)
+		if writeIfActive(func() {
+			_ = m.store.MarkCorraldHostsPreservedOtherGatewayIfOp(context.Background(), hostIDs, key.Fingerprint, key.Username, heldOpID)
+		}) {
 			m.refreshPendingCleanupFlag()
 		}
 		return false
 	}
 
-	if m.store != nil {
-		_ = m.store.MarkCorraldHostsRemovePending(context.Background(), hostIDs, key.Fingerprint, key.Username)
-		m.markPendingCleanup()
+	if !writeIfActive(func() {
+		_ = m.store.MarkCorraldHostsRemovePendingIfOp(context.Background(), hostIDs, key.Fingerprint, key.Username, heldOpID)
+	}) {
+		return false
 	}
+	m.markPendingCleanup()
 	return true
 }
 
@@ -411,7 +465,8 @@ func (m *Manager) releaseCleanupOpLock(rop *runningOp) {
 // tryImmediateAdminUninstall borrows an existing SSH connection (preferring
 // scSSH, falling back to m.acquireMatchingSSH which reuses open terminal pool
 // sessions first) and runs host-side atomic sole-gateway uninstall under the
-// per-account operation lock.
+// per-account operation lock. When heldOpID is non-empty, the caller already
+// holds the account's runningOp lock and this function reuses it.
 func (m *Manager) tryImmediateAdminUninstall(
 	ctx context.Context,
 	key accountKey,
@@ -419,19 +474,27 @@ func (m *Manager) tryImmediateAdminUninstall(
 	hostIDs []int64,
 	scSSH *ssh.Client,
 	gen uint64,
+	heldOpID string,
 ) {
 	if ctx == nil {
 		ctx = context.Background()
+	}
+	if !m.isAdminDisableGen(gen) {
+		return
 	}
 	primaryHostID := int64(0)
 	if len(hostIDs) > 0 {
 		primaryHostID = hostIDs[0]
 	}
-	rop, ok := m.acquireCleanupOpLock(primaryHostID, key)
-	if !ok {
-		return
+	opID := heldOpID
+	if heldOpID == "" {
+		rop, ok := m.acquireCleanupOpLock(primaryHostID, key)
+		if !ok {
+			return
+		}
+		defer m.releaseCleanupOpLock(rop)
+		opID = rop.opID
 	}
-	defer m.releaseCleanupOpLock(rop)
 
 	uctx, cancel := context.WithTimeout(ctx, 25*time.Second)
 	defer cancel()
@@ -476,25 +539,37 @@ func (m *Manager) tryImmediateAdminUninstall(
 		if err != nil || fresh.State == StateOff || !CheckBinding(toSnapshot(fresh), key.Fingerprint, key.Username, m.gatewayID) {
 			return
 		}
+		if fresh.ActiveOpID != "" && fresh.ActiveOpID != heldOpID {
+			return
+		}
 	}
 
-	out := RunUninstallSoleGatewayWithRetry(uctx, activeSSH, probe, rop.opID, m.gatewayID, m.busyRetry, nil)
-	m.applySoleGatewayUninstallOutcome(key.Fingerprint, key.Username, hostIDs, true, out)
+	out := RunUninstallSoleGatewayWithRetry(uctx, activeSSH, probe, opID, m.gatewayID, m.busyRetry, nil)
+	m.applySoleGatewayUninstallOutcome(key.Fingerprint, key.Username, hostIDs, true, out, gen, heldOpID)
 }
 
 // applySoleGatewayUninstallOutcome updates DB state after host-side atomic
 // sole-gateway uninstall, strictly distinguishing confirmed other_gateways /
 // unsupported (marked stopped, files preserved) from transient failures
-// (which preserve remove_pending for retry).
-func (m *Manager) applySoleGatewayUninstallOutcome(fp, sshUser string, hostIDs []int64, wasPending bool, out UninstallOutcome) {
+// (which preserve remove_pending for retry). When disableGen > 0, checks
+// m.isAdminDisableGen(disableGen) under policyMu.RLock before writing DB.
+func (m *Manager) applySoleGatewayUninstallOutcome(fp, sshUser string, hostIDs []int64, wasPending bool, out UninstallOutcome, disableGen uint64, heldOpID string) {
 	if m.store == nil {
 		return
 	}
+	if disableGen > 0 {
+		m.policyMu.RLock()
+		if !m.isAdminDisableGen(disableGen) {
+			m.policyMu.RUnlock()
+			return
+		}
+		defer m.policyMu.RUnlock()
+	}
 	switch out.Result {
 	case "removed":
-		m.resetHostsOff(fp, sshUser, hostIDs)
+		m.resetHostsOff(fp, sshUser, hostIDs, heldOpID)
 	case "other_gateways", "unsupported":
-		_ = m.store.MarkCorraldHostsPreservedOtherGateway(context.Background(), hostIDs, fp, sshUser)
+		_ = m.store.MarkCorraldHostsPreservedOtherGatewayIfOp(context.Background(), hostIDs, fp, sshUser, heldOpID)
 		m.refreshPendingCleanupFlag()
 	default:
 		// Transient/incomplete failure (pending, partial, stop_failed, busy):
@@ -502,22 +577,22 @@ func (m *Manager) applySoleGatewayUninstallOutcome(fp, sshUser string, hostIDs [
 		if wasPending {
 			m.markPendingCleanup()
 		} else {
-			_ = m.store.MarkCorraldHostsRemovePending(context.Background(), hostIDs, fp, sshUser)
+			_ = m.store.MarkCorraldHostsRemovePendingIfOp(context.Background(), hostIDs, fp, sshUser, heldOpID)
 			m.markPendingCleanup()
 		}
 	}
 }
 
-func (m *Manager) resetHostsOff(fp, sshUser string, hostIDs []int64) {
+func (m *Manager) resetHostsOff(fp, sshUser string, hostIDs []int64, allowedOpID string) {
 	if m.store == nil {
 		return
 	}
 	ctx := context.Background()
 	if fp != "" && sshUser != "" {
-		_ = m.store.CorraldResetByBinding(ctx, fp, sshUser)
+		_ = m.store.CorraldResetByBindingIfIdle(ctx, fp, sshUser, allowedOpID)
 	}
 	for _, hid := range hostIDs {
-		_ = m.store.ResetCorraldHostOff(ctx, hid)
+		_ = m.store.ResetCorraldHostOffIfIdle(ctx, hid, allowedOpID)
 	}
 	m.refreshPendingCleanupFlag()
 }
@@ -682,7 +757,7 @@ func (m *Manager) MaybeRetryPendingCleanup(userID, hostID int64, corralUser stri
 		if corralUser == "" && m.ssh != nil && userID > 0 {
 			corralUser = m.ssh.UserLabel(ctx, userID)
 		}
-		m.runSafeCleanupLocked(ctx, userID, hostID, corralUser, fp, sshUser, activeSSH, rop.opID, true, 0)
+		m.runSafeCleanupLocked(ctx, userID, hostID, corralUser, fp, sshUser, activeSSH, rop.opID, true, 0, "")
 	}()
 }
 
@@ -779,7 +854,7 @@ func (m *Manager) reconcileRemovePendingOnAllow(gen uint64) {
 			if m.AdminDisabled() || m.policyGen.Load() != gen {
 				return
 			}
-			m.runSafeCleanupLocked(ctx, it.OwnerID, it.HostID, it.CorralUser, fp, sshUser, c, rop.opID, true, gen)
+			m.runSafeCleanupLocked(ctx, it.OwnerID, it.HostID, it.CorralUser, fp, sshUser, c, rop.opID, true, gen, "")
 		}(item)
 	}
 	wg.Wait()
@@ -811,7 +886,41 @@ func (m *Manager) handleAdminDisabledOnConnect(
 	defer m.releaseCleanupOpLock(rop)
 
 	requirePending := !m.AdminDisabled()
-	m.runSafeCleanupLocked(ctx, userID, hostID, corralUser, fp, sshUser, sshClient, rop.opID, requirePending, 0)
+	m.runSafeCleanupLocked(ctx, userID, hostID, corralUser, fp, sshUser, sshClient, rop.opID, requirePending, 0, "")
+}
+
+// handleAdminDisabledWhileHoldingOp enforces safe host-side sole-gateway
+// cleanup when admin-disable fires mid-operation (e.g. inside runInstallWithSSH
+// or attachAndHello while the caller ALREADY holds the account's runningOp lock).
+// Reusing heldOpID avoids deadlocking/skipping on acquireCleanupOpLock and
+// guarantees the host is either cleaned to off, preserved as stopped, or
+// reliably marked remove_pending + hasPendingCleanup for retry.
+func (m *Manager) handleAdminDisabledWhileHoldingOp(
+	ctx context.Context,
+	userID, hostID int64,
+	corralUser, fp, sshUser string,
+	sshClient *ssh.Client,
+	ch *store.CorraldHost,
+	heldOpID string,
+) {
+	if m == nil {
+		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if sshClient == nil || ch == nil {
+		if m.store != nil {
+			_ = m.store.MarkCorraldHostsRemovePendingIfOp(context.Background(), []int64{hostID}, fp, sshUser, heldOpID)
+			m.markPendingCleanup()
+		}
+		return
+	}
+	opID := heldOpID
+	if opID == "" {
+		opID = newHexID()
+	}
+	m.runSafeCleanupLocked(ctx, userID, hostID, corralUser, fp, sshUser, sshClient, opID, false, 0, heldOpID)
 }
 
 // runSafeCleanupLocked executes the host-side atomic sole-gateway uninstall
@@ -831,6 +940,7 @@ func (m *Manager) runSafeCleanupLocked(
 	opID string,
 	requirePending bool,
 	allowGen uint64,
+	heldOpID string,
 ) {
 	if m == nil || sshClient == nil || m.store == nil {
 		return
@@ -855,6 +965,9 @@ func (m *Manager) runSafeCleanupLocked(
 	if !CheckBinding(toSnapshot(fresh), fp, sshUser, m.gatewayID) {
 		return
 	}
+	if fresh.ActiveOpID != "" && fresh.ActiveOpID != heldOpID {
+		return
+	}
 
 	wasPending := fresh.State == StateRemovePending || fresh.State == StateRemoving
 
@@ -877,7 +990,7 @@ func (m *Manager) runSafeCleanupLocked(
 		// Transient probe failure: keep remove_pending if already pending;
 		// otherwise mark remove_pending so future connections/uses retry safely.
 		if !wasPending {
-			_ = m.store.MarkCorraldHostsRemovePending(context.Background(), []int64{hostID}, fp, sshUser)
+			_ = m.store.MarkCorraldHostsRemovePendingIfOp(context.Background(), []int64{hostID}, fp, sshUser, heldOpID)
 		}
 		m.markPendingCleanup()
 		return
@@ -888,7 +1001,7 @@ func (m *Manager) runSafeCleanupLocked(
 		len(probe.Versions) > 0 || len(probe.Stages) > 0 ||
 		files.Install != nil || files.Meta != nil
 	if !hasOnHost {
-		m.resetHostsOff(fp, sshUser, []int64{hostID})
+		m.resetHostsOff(fp, sshUser, []int64{hostID}, heldOpID)
 		return
 	}
 
@@ -896,7 +1009,7 @@ func (m *Manager) runSafeCleanupLocked(
 	// op.lock -> corrald.lock. Refuses without modifying files if another
 	// gateway is connected/registered or if the host binary/daemon is too old.
 	out := RunUninstallSoleGatewayWithRetry(ctx, sshClient, probe, opID, m.gatewayID, m.busyRetry, nil)
-	m.applySoleGatewayUninstallOutcome(fp, sshUser, []int64{hostID}, wasPending, out)
+	m.applySoleGatewayUninstallOutcome(fp, sshUser, []int64{hostID}, wasPending, out, 0, heldOpID)
 }
 
 // Changelog returns the filtered release notes for userID, showing the current

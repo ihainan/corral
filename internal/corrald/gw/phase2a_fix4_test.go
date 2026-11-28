@@ -336,7 +336,7 @@ func TestFix4_Item6_TransientFailurePreservesRemovePending(t *testing.T) {
 	defer m.Close()
 
 	// 1. Transient probe failure during runSafeCleanupLocked -> MUST keep remove_pending!
-	m.runSafeCleanupLocked(ctx, uID, hostID, "tester", fp, sshUser, &ssh.Client{}, "op1", true, 0)
+	m.runSafeCleanupLocked(ctx, uID, hostID, "tester", fp, sshUser, &ssh.Client{}, "op1", true, 0, "")
 	ch, err := st.CorraldHostByID(ctx, hostID)
 	if err != nil {
 		t.Fatalf("CorraldHostByID: %v", err)
@@ -349,12 +349,12 @@ func TestFix4_Item6_TransientFailurePreservesRemovePending(t *testing.T) {
 	}
 
 	// 2. Uninstall returning partial / stop_failed -> MUST keep remove_pending!
-	m.applySoleGatewayUninstallOutcome(fp, sshUser, []int64{hostID}, true, UninstallOutcome{Result: "partial"})
+	m.applySoleGatewayUninstallOutcome(fp, sshUser, []int64{hostID}, true, UninstallOutcome{Result: "partial"}, 0, "")
 	ch, _ = st.CorraldHostByID(ctx, hostID)
 	if ch.State != StateRemovePending {
 		t.Fatalf("partial uninstall downgraded remove_pending to %q", ch.State)
 	}
-	m.applySoleGatewayUninstallOutcome(fp, sshUser, []int64{hostID}, true, UninstallOutcome{Result: "stop_failed"})
+	m.applySoleGatewayUninstallOutcome(fp, sshUser, []int64{hostID}, true, UninstallOutcome{Result: "stop_failed"}, 0, "")
 	ch, _ = st.CorraldHostByID(ctx, hostID)
 	if ch.State != StateRemovePending {
 		t.Fatalf("stop_failed uninstall downgraded remove_pending to %q", ch.State)
@@ -370,7 +370,7 @@ func TestFix4_Item6_TransientFailurePreservesRemovePending(t *testing.T) {
 	}
 
 	// 4. Confirmed other_gateways -> DOES transition remove_pending to stopped!
-	m.applySoleGatewayUninstallOutcome(fp, sshUser, []int64{hostID}, true, UninstallOutcome{Result: "other_gateways"})
+	m.applySoleGatewayUninstallOutcome(fp, sshUser, []int64{hostID}, true, UninstallOutcome{Result: "other_gateways"}, 0, "")
 	ch, _ = st.CorraldHostByID(ctx, hostID)
 	if ch.State != StateStopped {
 		t.Fatalf("confirmed other_gateways should mark stopped, got %q", ch.State)

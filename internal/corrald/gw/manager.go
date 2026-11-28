@@ -88,18 +88,20 @@ type ManagerConfig struct {
 	PerfCompare       func(ctx context.Context, hostID, consentAt int64) []PerfCompareItem
 
 	// Test hooks (nil in production).
-	ProbeOverride           func(ctx context.Context, c *ssh.Client) (*HostProbe, error)
-	VerifySHA256Hook        func(actual string) string
-	OnEvent                 func(fingerprint, sshUser string, ev proto.Event)
-	OnResync                func(fingerprint, sshUser string)
-	BeforeInstallStart      func(hostID int64, opID string)
-	BeforeUpdateStage       func(hostID int64, opID string)
-	BeforeRebindMark        func(hostID int64, source string)
-	AfterScopeClaim         func(hostID int64, opID string)
-	AfterAttachHello        func(hostID int64)
-	AfterAttachConnsInsert  func(hostID int64)
-	BeforeAdminDisableCheck func(hostID int64)
-	BeforePendingCleanupSSH func(hostID int64)
+	ProbeOverride            func(ctx context.Context, c *ssh.Client) (*HostProbe, error)
+	VerifySHA256Hook         func(actual string) string
+	OnEvent                  func(fingerprint, sshUser string, ev proto.Event)
+	OnResync                 func(fingerprint, sshUser string)
+	BeforeInstallStart       func(hostID int64, opID string)
+	BeforeUpdateStage        func(hostID int64, opID string)
+	BeforeRebindMark         func(hostID int64, source string)
+	AfterScopeClaim          func(hostID int64, opID string)
+	AfterAttachHello         func(hostID int64)
+	AfterAttachConnsInsert   func(hostID int64)
+	BeforeAdminDisableCheck  func(hostID int64)
+	BeforePendingCleanupSSH  func(hostID int64)
+	BeforeCleanupUserDBReset func(hostID int64)
+	AfterInstallServe        func(hostID int64, opID string)
 }
 
 // API view types matching web/src/corraldLogic.ts.
@@ -2075,18 +2077,24 @@ func (m *Manager) CleanupUserHosts(ctx context.Context, userID int64, corralUser
 			opID = rop.opID
 		}
 		out := RunUninstallSoleGatewayWithRetry(ctx, sshClient, probe, opID, m.gatewayID, m.busyRetry, nil)
-		if rop != nil {
-			m.releaseCleanupOpLock(rop)
-		}
 		release()
 		switch out.Result {
 		case "removed":
-			_ = m.store.CorraldResetByBinding(ctx, fp, sshUser)
+			if m.cfg.BeforeCleanupUserDBReset != nil {
+				m.cfg.BeforeCleanupUserDBReset(h.ID)
+			}
+			_ = m.store.CorraldResetByBindingIfIdle(ctx, fp, sshUser, opID)
 			outcomes[h.ID] = "removed"
 		case "other_gateways":
 			outcomes[h.ID] = "kept_other_users"
 		default:
 			outcomes[h.ID] = "not_cleaned"
+		}
+		// Keep per-account cleanup op lock held until AFTER the conditional DB
+		// reset completes so a concurrent install on a peer host cannot start
+		// and get clobbered between uninstall and DB reset.
+		if rop != nil {
+			m.releaseCleanupOpLock(rop)
 		}
 	}
 	return outcomes
@@ -2179,6 +2187,11 @@ func (m *Manager) runInstallWithSSH(ctx context.Context, rop *runningOp, op *sto
 				ch.Files = existingFiles.Install.Files
 			}
 			if err := m.attachAndHello(ctx, userID, hostID, corralUser, fp, sshUser, sshClient, own, probe, sock, ch, op.ID); err != nil {
+				if errors.Is(err, ErrAdminDisabled) {
+					op.State = OpCancelled
+					_, _ = m.store.UpdateCorraldOpIfActive(context.Background(), op)
+					return
+				}
 				var rpcErr *proto.RPCError
 				if errors.As(err, &rpcErr) && rpcErr.Code == proto.ErrProtoMismatch {
 					op.State = OpFailed
@@ -2208,6 +2221,11 @@ func (m *Manager) runInstallWithSSH(ctx context.Context, rop *runningOp, op *sto
 					ch.SocketPath = sock
 				}
 				if err := m.attachAndHello(ctx, userID, hostID, corralUser, fp, sshUser, sshClient, own, probe, sock, ch, op.ID); err != nil {
+					if errors.Is(err, ErrAdminDisabled) {
+						op.State = OpCancelled
+						_, _ = m.store.UpdateCorraldOpIfActive(context.Background(), op)
+						return
+					}
 					if errors.As(err, &rpcErr) && rpcErr.Code == proto.ErrProtoMismatch {
 						op.State = OpFailed
 						op.ErrorCode = proto.ErrProtoMismatch
@@ -2280,8 +2298,9 @@ func (m *Manager) runInstallWithSSH(ctx context.Context, rop *runningOp, op *sto
 	// Step: start (no longer cancellable past this point).
 	// Re-probe so SelectStartBinary observes the freshly installed symlink & version dirs.
 	if m.AdminDisabled() {
-		m.handleAdminDisabledOnConnect(context.Background(), userID, hostID, corralUser, fp, sshUser, sshClient, ch)
-		m.finishOpCancelled(op, ch)
+		m.handleAdminDisabledWhileHoldingOp(context.Background(), userID, hostID, corralUser, fp, sshUser, sshClient, ch, op.ID)
+		op.State = OpCancelled
+		_, _ = m.store.UpdateCorraldOpIfActive(context.Background(), op)
 		return
 	}
 	setStep("start")
@@ -2302,8 +2321,9 @@ func (m *Manager) runInstallWithSSH(ctx context.Context, rop *runningOp, op *sto
 		probe = freshProbe
 	}
 	if m.AdminDisabled() {
-		m.handleAdminDisabledOnConnect(context.Background(), userID, hostID, corralUser, fp, sshUser, sshClient, ch)
-		m.finishOpCancelled(op, ch)
+		m.handleAdminDisabledWhileHoldingOp(context.Background(), userID, hostID, corralUser, fp, sshUser, sshClient, ch, op.ID)
+		op.State = OpCancelled
+		_, _ = m.store.UpdateCorraldOpIfActive(context.Background(), op)
 		return
 	}
 	_, sock, serveFail := RunServeWithRetry(ctx, sshClient, cand.Path, m.gatewayID, probe.MachineID, probe.OS, probe.Arch, m.busyRetry)
@@ -2312,8 +2332,11 @@ func (m *Manager) runInstallWithSSH(ctx context.Context, rop *runningOp, op *sto
 		m.finishOpFail(op, ch, serveFail)
 		return
 	}
+	if m.cfg.AfterInstallServe != nil {
+		m.cfg.AfterInstallServe(hostID, op.ID)
+	}
 	if m.AdminDisabled() {
-		m.handleAdminDisabledOnConnect(context.Background(), userID, hostID, corralUser, fp, sshUser, sshClient, ch)
+		m.handleAdminDisabledWhileHoldingOp(context.Background(), userID, hostID, corralUser, fp, sshUser, sshClient, ch, op.ID)
 		op.State = OpCancelled
 		_, _ = m.store.UpdateCorraldOpIfActive(context.Background(), op)
 		return
@@ -3153,13 +3176,16 @@ func (m *Manager) attachAndHello(
 	opID string,
 ) error {
 	if m.AdminDisabled() {
-		// Item #5: If serve just succeeded right before admin disabled, do not
-		// abandon the newly started daemon — run safe host-side cleanup on the
-		// existing SSH connection, or reliably record remove_pending for retry.
-		if sshClient != nil && ch != nil {
+		// Item #5 / Fix5 #3: If serve just succeeded right before admin disabled,
+		// do not abandon the newly started daemon — reuse held op lock when
+		// called from install/update (opID != ""), or acquire cleanup op lock
+		// on normal connect, and reliably record remove_pending on failure.
+		if opID != "" {
+			m.handleAdminDisabledWhileHoldingOp(context.Background(), userID, hostID, corralUser, fp, sshUser, sshClient, ch, opID)
+		} else if sshClient != nil && ch != nil {
 			m.handleAdminDisabledOnConnect(context.Background(), userID, hostID, corralUser, fp, sshUser, sshClient, ch)
 		} else if m.store != nil {
-			_ = m.store.MarkCorraldHostsRemovePending(context.Background(), []int64{hostID}, fp, sshUser)
+			_ = m.store.MarkCorraldHostsRemovePendingIfOp(context.Background(), []int64{hostID}, fp, sshUser, opID)
 			m.markPendingCleanup()
 		}
 		return ErrAdminDisabled
@@ -3226,10 +3252,10 @@ func (m *Manager) attachAndHello(
 	}
 	refList := []*hostRef{{HostID: hostID, OwnerID: userID, CorralUser: corralUser}}
 	if m.AdminDisabled() {
-		exclusive := m.enforceAdminDisableOnClient(ctx, client, hello, refList, []int64{hostID}, key)
+		exclusive := m.enforceAdminDisableOnClient(ctx, client, hello, refList, []int64{hostID}, key, 0, opID)
 		_ = client.Close()
 		if exclusive {
-			m.tryImmediateAdminUninstall(ctx, key, refList, []int64{hostID}, sshClient, 0)
+			m.tryImmediateAdminUninstall(ctx, key, refList, []int64{hostID}, sshClient, 0, opID)
 		}
 		return ErrAdminDisabled
 	}
@@ -3265,10 +3291,10 @@ func (m *Manager) attachAndHello(
 	m.policyMu.RLock()
 	if m.adminDisabled.Load() {
 		m.policyMu.RUnlock()
-		exclusive := m.enforceAdminDisableOnClient(ctx, client, hello, refList, []int64{hostID}, key)
+		exclusive := m.enforceAdminDisableOnClient(ctx, client, hello, refList, []int64{hostID}, key, 0, opID)
 		_ = client.Close()
 		if exclusive {
-			m.tryImmediateAdminUninstall(ctx, key, refList, []int64{hostID}, sshClient, 0)
+			m.tryImmediateAdminUninstall(ctx, key, refList, []int64{hostID}, sshClient, 0, opID)
 		}
 		return ErrAdminDisabled
 	}
@@ -3600,10 +3626,10 @@ func (m *Manager) reconnectSharedConn(ctx context.Context, sc *sharedConn, overr
 		for _, r := range refs {
 			hostIDs = append(hostIDs, r.HostID)
 		}
-		exclusive := m.enforceAdminDisableOnClient(ctx, newClient, hello, refs, hostIDs, sc.key)
+		exclusive := m.enforceAdminDisableOnClient(ctx, newClient, hello, refs, hostIDs, sc.key, 0, "")
 		_ = newClient.Close()
 		if exclusive {
-			m.tryImmediateAdminUninstall(ctx, sc.key, refs, hostIDs, sshClient, 0)
+			m.tryImmediateAdminUninstall(ctx, sc.key, refs, hostIDs, sshClient, 0, "")
 		}
 		return ErrAdminDisabled
 	}

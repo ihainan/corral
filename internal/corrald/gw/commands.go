@@ -459,14 +459,103 @@ if [ -x "$BIN" ]; then
   fi
   exit $?
 fi
-if [ ! -e "$ST" ] && [ ! -e "$L" ]; then
+
+has_corrald_lib() {
+  [ -L "$L/corrald" ] || [ -e "$L/corrald" ] && return 0
+  [ -e "$L/README.txt" ] && return 0
+  [ -e "$L/.corrald-shared.lock" ] && return 0
+  for d in "$L"/corrald-[0-9]*; do
+    [ -e "$d" ] && return 0
+  done
+  return 1
+}
+
+if [ ! -e "$ST" ] && ! has_corrald_lib; then
   echo "result=removed"
   exit 0
 fi
+
+# Reentrant recovery when binaries in LibDir were already deleted by an earlier
+# uninstall attempt, leaving the removing tombstone (and/or lock files/empty dirs)
+# behind. Never bypass exclusivity when no removing tombstone exists.
+if [ -f "$ST/removing" ] && [ ! -L "$ST/removing" ]; then
+  # Verify no daemon is still holding corrald.lock.
+  if [ -e "$ST/corrald.lock" ] && command -v flock >/dev/null 2>&1; then
+    if ! flock -n "$ST/corrald.lock" true 2>/dev/null; then
+      echo "error=stop_failed"
+      echo "pid=0"
+      echo "detail=corrald.lock is still held"
+      exit 1
+    fi
+  fi
+  # If clients.json somehow still exists alongside a tombstone without a binary,
+  # fail closed unless we can confirm no other gateway is registered.
+  if [ -e "$ST/clients.json" ]; then
+    echo "error=cannot_verify_exclusivity"
+    echo "detail=clients.json present without binary"
+    exit 1
+  fi
+  # If tombstone recorded an owning gateway, verify it matches GW.
+  tomb_gw=$(sed -n 's/.*"gateway"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$ST/removing" 2>/dev/null | head -n 1)
+  if [ -n "$tomb_gw" ] && [ "$tomb_gw" != "$GW" ]; then
+    echo "result=other_gateways"
+    exit 0
+  fi
+
+  left=""
+  add_left() {
+    left="${left}left=$1	$2
+"
+  }
+  if [ -n "$SOCK" ] && [ -e "$SOCK" ]; then
+    rm -f -- "$SOCK" 2>/dev/null || add_left "$SOCK" "remove failed"
+  fi
+  # Clean remaining state entries including tombstone and locks.
+  for entry in "$ST"/* "$ST"/.*; do
+    base=$(basename -- "$entry")
+    case "$base" in .|..|'*'|'.*') continue ;; esac
+    [ -e "$entry" ] || [ -L "$entry" ] || continue
+    rm -rf -- "$entry" 2>/dev/null || add_left "$entry" "remove failed"
+  done
+  if [ -z "$left" ]; then
+    rmdir -- "$ST" 2>/dev/null || true
+    st_root=$(dirname -- "$ST")
+    # Check whether any other machine still has install.json under state root.
+    other_machine=0
+    if [ -d "$st_root" ]; then
+      for m in "$st_root"/*; do
+        [ -d "$m" ] || continue
+        [ "$m" = "$ST" ] && continue
+        if [ -e "$m/install.json" ]; then other_machine=1; break; fi
+      done
+    fi
+    rmdir -- "$st_root" 2>/dev/null || true
+    rmdir -- "$(dirname -- "$st_root")" 2>/dev/null || true
+    if [ "$other_machine" -eq 0 ] && [ -d "$L" ]; then
+      for p in "$L/corrald" "$L/README.txt" "$L/.corrald-shared.lock" "$L"/corrald-[0-9]*; do
+        [ -e "$p" ] || [ -L "$p" ] || continue
+        rm -rf -- "$p" 2>/dev/null || add_left "$p" "remove failed"
+      done
+      rmdir -- "$L" 2>/dev/null || true
+    fi
+  fi
+  if [ -n "$left" ] || [ -e "$ST" ] || { [ "${other_machine:-1}" -eq 0 ] && has_corrald_lib; }; then
+    echo "result=partial"
+    if [ -n "$left" ]; then
+      printf '%s' "$left"
+    else
+      echo "left=$ST	leftover files remain"
+    fi
+    exit 1
+  fi
+  echo "result=removed"
+  exit 0
+fi
+
 echo "error=cannot_verify_exclusivity"
 echo "detail=corrald binary missing; cannot safely verify sole-gateway uninstall"
 exit 1
-`, "L", libDir, "ST", stateDir, "OP", opID, "GW", soleGateway)
+`, "L", libDir, "ST", stateDir, "SOCK", sockPath, "OP", opID, "GW", soleGateway)
 	}
 	return shellScript(`BIN="$L/corrald"
 if [ ! -x "$BIN" ]; then

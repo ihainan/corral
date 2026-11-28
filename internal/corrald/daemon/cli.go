@@ -1513,9 +1513,12 @@ func cmdUninstall(args []string, stdout io.Writer) int {
 	}
 
 	var (
-		metaBefore *MetaRecord
-		installRec *InstallRecord
-		installErr error
+		metaBefore            *MetaRecord
+		installRec            *InstallRecord
+		installErr            error
+		tombstoneExisted      bool
+		tombstoneRec          *uninstallTombstone
+		resumingFromTombstone bool
 	)
 	if stateDirExists {
 		opLock, err = AcquireLockWait(layout.OpLockPath, lockTimeout)
@@ -1531,6 +1534,25 @@ func cmdUninstall(args []string, stdout io.Writer) int {
 
 			metaBefore, _ = ReadMetaRecord(layout.MetaJSON)
 			installRec, installErr = ReadInstallRecord(layout.InstallJSON)
+
+			// Check if an earlier uninstall already committed a removing tombstone.
+			if fi, terr := os.Lstat(layout.TombstonePath); terr == nil && fi.Mode().IsRegular() {
+				tombstoneExisted = true
+				tombstoneRec = readUninstallTombstone(layout.TombstonePath)
+			}
+			if errors.Is(installErr, os.ErrNotExist) && tombstoneExisted {
+				// Reentrant retry of an interrupted uninstall that already removed
+				// install.json and wrote the removing tombstone.
+				if tombstoneRec != nil && len(tombstoneRec.Files) > 0 {
+					installRec = &InstallRecord{
+						Gateway: tombstoneRec.Gateway,
+						Files:   tombstoneRec.Files,
+					}
+					installErr = nil
+				} else {
+					resumingFromTombstone = true
+				}
+			}
 
 			// Atomic sole-gateway check under SharedLock -> OpLock BEFORE
 			// removing install.json, writing tombstone, or stopping any daemon.
@@ -1591,20 +1613,34 @@ func cmdUninstall(args []string, stdout io.Writer) int {
 				} else if !errors.Is(rerr, os.ErrNotExist) {
 					writeErr(stdout, "clients_unreadable", rerr.Error())
 					return 1
-				} else if installRec != nil && installRec.Gateway != "" && installRec.Gateway != soleGW {
-					fmt.Fprintf(stdout, "result=other_gateways\n")
-					return 0
+				} else {
+					ownerGW := ""
+					if installRec != nil && installRec.Gateway != "" {
+						ownerGW = installRec.Gateway
+					} else if tombstoneRec != nil && tombstoneRec.Gateway != "" {
+						ownerGW = tombstoneRec.Gateway
+					}
+					if ownerGW != "" && ownerGW != soleGW {
+						fmt.Fprintf(stdout, "result=other_gateways\n")
+						return 0
+					}
 				}
 			}
 
 			// Rule 4: Under OpLock, first remove install.json, then write the
-			// removing tombstone. If either step fails, abort before stopping the
-			// running daemon or touching other files.
+			// removing tombstone (carrying the install manifest so any retry
+			// after a transient deletion error can finish removing shared files).
+			// If writing the tombstone fails, restore install.json before
+			// aborting so no manifest is ever lost.
 			if err := os.Remove(layout.InstallJSON); err != nil && !errors.Is(err, os.ErrNotExist) {
 				writeErr(stdout, "remove_install_json_failed", err.Error())
 				return 1
 			}
-			if err := WriteFileAtomic(layout.TombstonePath, []byte(time.Now().UTC().Format(time.RFC3339)+"\n"), 0o600); err != nil {
+			tombPayload := marshalUninstallTombstone(installRec, soleGW)
+			if err := WriteFileAtomic(layout.TombstonePath, tombPayload, 0o600); err != nil {
+				if installErr == nil && installRec != nil {
+					_ = WriteInstallRecord(layout.InstallJSON, installRec)
+				}
 				writeErr(stdout, "tombstone_failed", err.Error())
 				return 1
 			}
@@ -1668,7 +1704,7 @@ func cmdUninstall(args []string, stdout io.Writer) int {
 	// a lock there, restore install.json while keeping the removing tombstone
 	// (so serve remains blocked and retry still has the full manifest), and
 	// abort with error=busy so gateway retries cleanly.
-	willPreserveForMissingInstall := installErr != nil && (stateDirExists || len(listPreservedSharedPaths(layout)) > 0)
+	willPreserveForMissingInstall := installErr != nil && !resumingFromTombstone && (stateDirExists || len(listPreservedSharedPaths(layout)) > 0)
 	if isLast && lastCheckErr == nil && !willPreserveForMissingInstall && layout.RunDir != "" {
 		if rerr := RemoveRunDirLocked(layout.RunDir, defaultUninstallSystemRunDir(layout.UID), layout.UID, defaultRunDirLockTimeout()); rerr != nil {
 			if errors.Is(rerr, ErrLocked) {
@@ -1692,11 +1728,13 @@ func cmdUninstall(args []string, stdout io.Writer) int {
 		}
 	}
 
-	// Rule 6: If install.json was missing or unreadable (whether last machine
-	// or not), NEVER delete shared program files and ALWAYS report partial with
-	// remaining paths (unless nothing was installed at all).
+	// Rule 6: If install.json was missing or unreadable AND no removing tombstone
+	// existed from an earlier uninstall attempt, NEVER delete shared program files
+	// and ALWAYS report partial with remaining paths (unless nothing was installed).
+	// When retrying an interrupted uninstall (resumingFromTombstone == true),
+	// finish removing Corral-owned files in LibDir on the last machine.
 	var sharedTargets []string
-	if installErr != nil {
+	if installErr != nil && !resumingFromTombstone {
 		preserved := listPreservedSharedPaths(layout)
 		if stateDirExists || len(preserved) > 0 {
 			for _, p := range preserved {
@@ -1707,7 +1745,11 @@ func cmdUninstall(args []string, stdout io.Writer) int {
 			}
 		}
 	} else if isLast && lastCheckErr == nil && libDirExists {
-		sharedTargets = collectSharedCorraldTargets(layout, installRec)
+		if installErr == nil && installRec != nil {
+			sharedTargets = collectSharedCorraldTargets(layout, installRec)
+		} else {
+			sharedTargets = listPreservedSharedPaths(layout)
+		}
 		for _, target := range sharedTargets {
 			if err := os.RemoveAll(target); err != nil {
 				addLeft(target, err.Error())
@@ -1716,9 +1758,12 @@ func cmdUninstall(args []string, stdout io.Writer) int {
 	}
 
 	// Rule 4: Explicitly delete all non-lock entries inside StateDir, keeping
-	// op.lock and corrald.lock intact (avoids unlink+new-inode lock races),
-	// then remove the tombstone last (serve still refuses because install.json
-	// is gone).
+	// op.lock and corrald.lock intact (avoids unlink+new-inode lock races).
+	// If any shared/state removal failed transiently while we had a valid
+	// manifest (not Rule 6 missing-install preservation), KEEP the manifest-
+	// bearing removing tombstone so the next retry can finish cleaning up
+	// shared program files in LibDir instead of hitting missing install.json.
+	keepTombstoneForRetry := !willPreserveForMissingInstall && len(left) > 0
 	if stateDirExists {
 		entries, rerr := os.ReadDir(layout.StateDir)
 		if rerr != nil {
@@ -1734,8 +1779,11 @@ func cmdUninstall(args []string, stdout io.Writer) int {
 					addLeft(p, err.Error())
 				}
 			}
-			if err := os.Remove(layout.TombstonePath); err != nil && !errors.Is(err, os.ErrNotExist) {
-				addLeft(layout.TombstonePath, err.Error())
+			keepTombstoneForRetry = !willPreserveForMissingInstall && len(left) > 0
+			if !keepTombstoneForRetry {
+				if err := os.Remove(layout.TombstonePath); err != nil && !errors.Is(err, os.ErrNotExist) {
+					addLeft(layout.TombstonePath, err.Error())
+				}
 			}
 		}
 	}
@@ -1755,14 +1803,14 @@ func cmdUninstall(args []string, stdout io.Writer) int {
 		if entries, err := os.ReadDir(layout.StateDir); err == nil {
 			for _, e := range entries {
 				name := e.Name()
-				if name == "op.lock" || name == "corrald.lock" {
+				if name == "op.lock" || name == "corrald.lock" || (keepTombstoneForRetry && name == "removing") {
 					continue
 				}
 				addLeft(filepath.Join(layout.StateDir, name), "state entry still exists after removal")
 			}
 		}
 	}
-	if isLast && installErr == nil && installRec != nil {
+	if isLast && ((installErr == nil && installRec != nil) || resumingFromTombstone) {
 		for _, target := range sharedTargets {
 			if _, err := os.Lstat(target); err == nil {
 				addLeft(target, "path still exists after removal")
@@ -1826,7 +1874,7 @@ func cmdUninstall(args []string, stdout io.Writer) int {
 		// its parent ~/.local/state/corral if now empty.
 		_ = os.Remove(filepath.Dir(layout.StateRoot)) // ~/.local/state/corral (best-effort if empty)
 	}
-	if isLast && lastCheckErr == nil && installErr == nil && libDirExists {
+	if isLast && lastCheckErr == nil && (installErr == nil || resumingFromTombstone) && libDirExists {
 		if err := os.Remove(layout.SharedLockPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 			addLeft(layout.SharedLockPath, err.Error())
 		}
@@ -1997,6 +2045,42 @@ func parseClientsJSON(b []byte) ([]proto.ClientInfo, error) {
 		return nil, err
 	}
 	return wrapped.Clients, nil
+}
+
+type uninstallTombstone struct {
+	CreatedAt string   `json:"created_at"`
+	Gateway   string   `json:"gateway,omitempty"`
+	Files     []string `json:"files,omitempty"`
+}
+
+func marshalUninstallTombstone(installRec *InstallRecord, soleGW string) []byte {
+	t := uninstallTombstone{
+		CreatedAt: time.Now().UTC().Format(time.RFC3339),
+	}
+	if installRec != nil {
+		t.Gateway = installRec.Gateway
+		t.Files = installRec.Files
+	}
+	if t.Gateway == "" && soleGW != "" {
+		t.Gateway = soleGW
+	}
+	b, err := json.Marshal(t)
+	if err != nil {
+		return []byte(t.CreatedAt + "\n")
+	}
+	return append(b, '\n')
+}
+
+func readUninstallTombstone(path string) *uninstallTombstone {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	var t uninstallTombstone
+	if err := json.Unmarshal(b, &t); err != nil {
+		return nil
+	}
+	return &t
 }
 
 // callLocalSoleShutdown checks daemon capabilities (HelloResult.Features) and

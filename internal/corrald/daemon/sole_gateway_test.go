@@ -314,6 +314,50 @@ func TestDaemonConditionalShutdownSoleGateway(t *testing.T) {
 			cancel()
 		}
 	})
+
+	// Regression test for Fix Round 5 Item #1 [P1] (daemon side):
+	// A second active connection from the SAME gateway (e.g. established after
+	// admin re-allowed corrald) MUST prevent an obsolete connection's in-flight
+	// ShutdownConditional from killing the daemon.
+	t.Run("refuses_when_second_connection_from_same_gateway_is_active", func(t *testing.T) {
+		_, layout, _, doneCh := startTestServerForSoleGW(t, t.TempDir(), randomHexMid(t))
+
+		cOld := dialUnixRPC(t, layout.SocketPath)
+		cNew := dialUnixRPC(t, layout.SocketPath)
+		var h1, h2 proto.HelloResult
+		if rpcErr, err := rpcCallConn(cOld, 1, proto.MethodDaemonHello, proto.HelloParams{
+			Gateway: "gw-a", ProtoMin: 1, ProtoMax: 1, Client: proto.ClientIdentity{CorralUser: "alice", HostID: "1"},
+		}, &h1); err != nil || rpcErr != nil {
+			t.Fatalf("Hello old: %v / %v", err, rpcErr)
+		}
+		if rpcErr, err := rpcCallConn(cNew, 1, proto.MethodDaemonHello, proto.HelloParams{
+			Gateway: "gw-a", ProtoMin: 1, ProtoMax: 1, Client: proto.ClientIdentity{CorralUser: "alice", HostID: "1"},
+		}, &h2); err != nil || rpcErr != nil {
+			t.Fatalf("Hello new: %v / %v", err, rpcErr)
+		}
+
+		var sRes proto.ShutdownResult
+		if rpcErr, err := rpcCallConn(cOld, 2, proto.MethodDaemonShutdown, proto.ShutdownParams{
+			Reason:            "stale_admin_disabled",
+			OnlyIfSoleGateway: "gw-a",
+		}, &sRes); err != nil || rpcErr != nil {
+			t.Fatalf("ShutdownConditional: %v / %v", err, rpcErr)
+		}
+		if sRes.OK || !sRes.OtherGateways {
+			t.Fatalf("Fix5 Item #1 regression: expected refusal when second same-gateway conn is active, got %+v", sRes)
+		}
+
+		// Daemon must stay alive and keep serving cNew.
+		var health proto.HealthResult
+		if rpcErr, err := rpcCallConn(cNew, 2, proto.MethodDaemonHealth, nil, &health); err != nil || rpcErr != nil {
+			t.Fatalf("daemon died despite active second same-gateway connection: %v / %v", err, rpcErr)
+		}
+		select {
+		case <-doneCh:
+			t.Fatal("server unexpectedly exited while second same-gateway connection was active")
+		case <-time.After(60 * time.Millisecond):
+		}
+	})
 }
 
 // Regression test for Fix Round 4 Item #1 [P1] (host CLI side):
@@ -584,6 +628,111 @@ func TestCLIUninstallOnlyIfSoleGateway(t *testing.T) {
 			}
 		case <-time.After(10 * time.Second):
 			t.Fatal("timed out waiting for blocked uninstall after SharedLock release")
+		}
+	})
+
+	// Regression tests for Fix Round 5 Item #4 [P2] (CLI reentrant uninstall):
+	t.Run("reentrant_tombstone_write_failure_restores_install_json_and_recovers", func(t *testing.T) {
+		home := t.TempDir()
+		mid := randomHexMid(t)
+		env := []string{"CORRALD_TEST_MACHINE_ID=" + mid}
+		installedBin, layout := installAndServe(t, home, mid)
+
+		var hA proto.HelloResult
+		if err := callLocalRPC(layout.SocketPath, proto.MethodDaemonHello, proto.HelloParams{
+			Gateway: "gw-a", ProtoMin: 1, ProtoMax: 1, Client: proto.ClientIdentity{CorralUser: "alice", HostID: "1"},
+		}, &hA, 2*time.Second); err != nil {
+			t.Fatalf("Hello gw-a: %v", err)
+		}
+
+		// Block tombstone creation with a non-empty directory at removing.
+		if err := os.MkdirAll(filepath.Join(layout.TombstonePath, "blocker"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		out, code := runCLI(t, installedBin, home, env, "uninstall", "--op", "opTombFail", "--only-if-sole-gateway", "gw-a")
+		if code == 0 || parseKV(out)["error"] != "tombstone_failed" {
+			t.Fatalf("expected error=tombstone_failed, got code=%d\n%s", code, out)
+		}
+		// install.json MUST have been restored when tombstone write failed!
+		if _, err := os.Stat(layout.InstallJSON); err != nil {
+			t.Fatalf("Fix5 Item #4 regression: install.json lost after tombstone write failure: %v", err)
+		}
+
+		// Clear blocker and retry -> must succeed cleanly to result=removed!
+		if err := os.RemoveAll(layout.TombstonePath); err != nil {
+			t.Fatal(err)
+		}
+		out, code = runCLI(t, installedBin, home, env, "uninstall", "--op", "opTombRetry", "--only-if-sole-gateway", "gw-a")
+		if code != 0 || parseKV(out)["result"] != "removed" {
+			t.Fatalf("expected retry after tombstone_failed to succeed with result=removed, got code=%d\n%s", code, out)
+		}
+		if _, err := os.Lstat(installedBin); !os.IsNotExist(err) {
+			t.Fatalf("expected binary removed on retry, stat err=%v", err)
+		}
+	})
+
+	t.Run("reentrant_partial_lib_delete_after_install_json_removed_recovers", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("chmod 0500 does not block root")
+		}
+		home := t.TempDir()
+		mid := randomHexMid(t)
+		env := []string{"CORRALD_TEST_MACHINE_ID=" + mid}
+		installedBin, layout := installAndServe(t, home, mid)
+
+		var hA proto.HelloResult
+		if err := callLocalRPC(layout.SocketPath, proto.MethodDaemonHello, proto.HelloParams{
+			Gateway: "gw-a", ProtoMin: 1, ProtoMax: 1, Client: proto.ClientIdentity{CorralUser: "alice", HostID: "1"},
+		}, &hA, 2*time.Second); err != nil {
+			t.Fatalf("Hello gw-a: %v", err)
+		}
+
+		// Lock the version directory so removing binaries fails transiently AFTER
+		// install.json has been removed and tombstone written.
+		entries, err := os.ReadDir(layout.LibDir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var verDir string
+		for _, e := range entries {
+			if e.IsDir() && strings.HasPrefix(e.Name(), "corrald-") {
+				verDir = filepath.Join(layout.LibDir, e.Name())
+				break
+			}
+		}
+		if verDir == "" {
+			t.Fatalf("could not find version dir in %s", layout.LibDir)
+		}
+		if err := os.Chmod(verDir, 0o500); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(verDir, 0o700) })
+
+		out, code := runCLI(t, installedBin, home, env, "uninstall", "--op", "opPart1", "--only-if-sole-gateway", "gw-a")
+		if code == 0 || parseKV(out)["result"] != "partial" {
+			t.Fatalf("expected result=partial while verDir is read-only, got code=%d\n%s", code, out)
+		}
+		// cmdUninstall MUST preserve the manifest-bearing removing tombstone on
+		// transient partial failure so retry can recover automatically!
+		if !layout.TombstoneExists() {
+			t.Fatal("Fix5 Item #4 regression: removing tombstone was deleted despite partial LibDir failure")
+		}
+
+		// Fault clears -> retry using versioned binary MUST recover automatically
+		// via the preserved tombstone manifest and return result=removed!
+		if err := os.Chmod(verDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		retryBin := filepath.Join(verDir, "corrald")
+		out, code = runCLI(t, retryBin, home, env, "uninstall", "--op", "opPartRetry", "--only-if-sole-gateway", "gw-a")
+		if code != 0 || parseKV(out)["result"] != "removed" {
+			t.Fatalf("Fix5 Item #4 regression: retry from tombstone+missing install.json failed: code=%d\n%s", code, out)
+		}
+		if _, err := os.Lstat(verDir); !os.IsNotExist(err) {
+			t.Fatalf("expected version dir removed on retry, stat err=%v", err)
+		}
+		if _, err := os.Lstat(layout.StateDir); !os.IsNotExist(err) {
+			t.Fatalf("expected state dir removed on retry, stat err=%v", err)
 		}
 	})
 }
