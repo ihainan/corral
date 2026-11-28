@@ -6,6 +6,7 @@ import { AgentIcon } from '../terminal/agentIcons'
 import type { AgentStatusMark } from '../terminal/sideState'
 import { showFront, useTabDrag, useTabSlide } from '../terminal/tabDrag'
 import { copyText, isCoarse, MenuLayer, useToast, type MenuItem } from '../components/ui'
+import { openInNewTab } from '../components/AppLink'
 
 // The agents' page's tabs (11-24, plans/agent-tabs.md): each a conversation
 // the person has open, so several are at hand; the side list is every agent,
@@ -138,7 +139,7 @@ export function AgentTabBar(p: {
     const right = p.views.slice(at + 1).map((x) => x.tab)
     const url = location.origin + v.address
     return [
-      { label: t('tabs.menu.window'), icon: <ExternalLink size={16} />, onSelect: () => window.open(url, '_blank', 'noopener') },
+      { label: t('tabs.menu.window'), icon: <ExternalLink size={16} />, onSelect: () => openInNewTab(url) },
       { label: t('tabs.menu.copyLink'), icon: <Link2 size={16} />, onSelect: () => void copyText(url).then((ok) => toast(ok ? t('tabs.menu.copied') : url)) },
       { label: t('agentTabs.close'), icon: <X size={16} />, separator: true, onSelect: () => p.onClose(v.tab) },
       { label: t('agentTabs.closeOthers', { n: others.length }), icon: <span className="menu-icon-space" />, disabled: !others.length, onSelect: () => p.onCloseMany(others) },

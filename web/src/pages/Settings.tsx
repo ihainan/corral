@@ -5,9 +5,10 @@ import { api, ApiError, authGen, errorText, type Me } from '../api'
 import { getLang, hasKey, setLang, t, type I18nKey, type Lang } from '../i18n'
 import { reloadPage } from '../leaveGuard'
 import { setPrefs, usePrefs } from '../prefs'
-import { linkHandler, navigate } from '../router'
+import { navigate } from '../router'
 import { rememberSettingsScroll, signOut, takeSettingsScroll, useSession } from '../app'
 import { Confirm, Dialog, DialogHead, Field, isCoarse, LoadError, useToast } from '../components/ui'
+import { AppLink } from '../components/AppLink'
 import { CurrentScheme, SchemeDialog } from '../terminal/SchemePicker'
 import { TwoStepSetting } from './TwoStep'
 import { ssoErrorText } from './Auth'
@@ -431,10 +432,10 @@ function SettingsWorkbench({ modal, initialCat, onClose }: { modal?: boolean; in
                   checked={prefs.confirmLeave}
                   onChange={(v) => setPrefs({ confirmLeave: v })}
                 />
-                <a className="setting setting-link" href="/THIRD-PARTY-NOTICES.txt" target="_blank" rel="noopener">
+                <AppLink className="setting setting-link" href="/THIRD-PARTY-NOTICES.txt" newTab>
                   <span className="setting-label"><span>{t('settings.notices')}</span></span>
                   <ChevronRight size={15} className="chev" aria-hidden="true" />
-                </a>
+                </AppLink>
               </div>
             </section>
           </>
@@ -720,9 +721,8 @@ export function SettingsPage() {
     const y = takeSettingsScroll()
     if (y) window.scrollTo(0, y)
   }, [desktop])
-  const morePage = (href: string) => (e: React.MouseEvent) => {
+  const morePage = () => {
     rememberSettingsScroll()
-    linkHandler(href)(e)
   }
   const stepFont = (d: number) => setPrefs({ fontSize: Math.min(FONT_MAX, Math.max(FONT_MIN, prefs.fontSize + d)) })
 
@@ -745,24 +745,24 @@ export function SettingsPage() {
           <h2>{t('settings.more')}</h2>
           <div className="settings-group">
             {boot.recordings && (
-              <a className="setting setting-link" href="/recordings" onClick={morePage('/recordings')}>
+              <AppLink className="setting setting-link" href="/recordings" onClick={morePage}>
                 <Film size={18} strokeWidth={1.75} className="row-icon" />
                 <span className="setting-label">{t('nav.recordings')}</span>
                 <ChevronRight size={16} className="chev" />
-              </a>
+              </AppLink>
             )}
             {me?.role === 'admin' && (
               <>
-                <a className="setting setting-link" href="/admin/users" onClick={morePage('/admin/users')}>
+                <AppLink className="setting setting-link" href="/admin/users" onClick={morePage}>
                   <Users size={18} strokeWidth={1.75} className="row-icon" />
                   <span className="setting-label">{t('nav.users')}</span>
                   <ChevronRight size={16} className="chev" />
-                </a>
-                <a className="setting setting-link" href="/admin/audit" onClick={morePage('/admin/audit')}>
+                </AppLink>
+                <AppLink className="setting setting-link" href="/admin/audit" onClick={morePage}>
                   <ScrollText size={18} strokeWidth={1.75} className="row-icon" />
                   <span className="setting-label">{t('nav.audit')}</span>
                   <ChevronRight size={16} className="chev" />
-                </a>
+                </AppLink>
               </>
             )}
           </div>
@@ -928,7 +928,7 @@ export function SettingsPage() {
       </section>
 
       <p className="notices">
-        <a href="/THIRD-PARTY-NOTICES.txt" target="_blank" rel="noopener">{t('settings.notices')}</a>
+        <AppLink href="/THIRD-PARTY-NOTICES.txt" newTab>{t('settings.notices')}</AppLink>
       </p>
     </main>
   )

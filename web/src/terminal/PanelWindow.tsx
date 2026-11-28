@@ -4,6 +4,7 @@ import { shouldIgnorePanelPollError } from './busyCode'
 import { api, ApiError, errorText } from '../api'
 import { t, type I18nKey } from '../i18n'
 import { isCoarse } from '../components/ui'
+import { AppLink } from '../components/AppLink'
 import { ansiLines, type AnsiRun } from './ansi'
 import { readNoticeDialog, type NoticeAction } from './noticeDialog'
 import { PaneTerminal } from './PaneTerminal'
@@ -62,9 +63,9 @@ function renderLinked(text: string) {
   const parts = text.split(URL_PART)
   return parts.map((p, i) =>
     i % 2 === 1 ? (
-      <a key={i} href={p} target="_blank" rel="noopener noreferrer">
+      <AppLink key={i} href={p}>
         {p}
-      </a>
+      </AppLink>
     ) : (
       <Fragment key={i}>{p}</Fragment>
     ),

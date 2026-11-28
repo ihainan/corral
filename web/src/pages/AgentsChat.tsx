@@ -1567,7 +1567,7 @@ export function AgentsChat({ bar, active = true, onHead }: { bar?: ReactNode; ac
           {termBody}
         </>
       )}
-      {wbOn && <Rail active="agents" />}
+      {wbOn && <Rail active="agents" shown={active} />}
       {wbOn && (
         <StatusBar>
           {cur && (

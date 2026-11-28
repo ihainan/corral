@@ -12,6 +12,7 @@
 // half-made change, or meet the agent's own git).
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
+import { AppLink } from '../components/AppLink'
 import { Activity, Bot, ChevronDown, ChevronRight, Cpu, FolderOpen, GitBranch, GitCommitHorizontal, GitPullRequest, Gauge, ListTodo, Maximize2, MessageSquareText, SquareTerminal, Terminal } from 'lucide-react'
 import { api, ApiError } from '../api'
 import { t } from '../i18n'
@@ -266,7 +267,7 @@ export function CardBody({ data, acts, close }: { data: CardData; acts: CardActs
               </Row>
             )}
             {pr?.pr && (
-              <a className="scard-row is-act" href={pr.pr.url} target="_blank" rel="noreferrer" title={pr.pr.url}>
+              <AppLink className="scard-row is-act" href={pr.pr.url} title={pr.pr.url}>
                 <span className="scard-ic" aria-hidden="true">
                   <GitPullRequest size={16} />
                 </span>
@@ -276,7 +277,7 @@ export function CardBody({ data, acts, close }: { data: CardData; acts: CardActs
                   </span>
                   <span className="scard-sub">{t(pr.pr.draft ? 'card.prDraft' : pr.pr.state === 'MERGED' ? 'card.prMerged' : pr.pr.state === 'CLOSED' ? 'card.prClosed' : 'card.prOpen')}</span>
                 </span>
-              </a>
+              </AppLink>
             )}
           </>
         )}

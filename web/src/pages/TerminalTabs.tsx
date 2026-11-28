@@ -12,6 +12,7 @@ import { local } from '../storage'
 import { navigate } from '../router'
 import { agentsAddress, takeTabs } from '../notifyopen'
 import { Confirm, copyText, isCoarse, MenuLayer, useToast, type MenuItem } from '../components/ui'
+import { openInNewTab } from '../components/AppLink'
 import { estimateSize, useConnect } from '../connect'
 import type { TabInfo } from './Terminal'
 import { TerminalPage } from './lazyPages'
@@ -632,7 +633,7 @@ function TabBar(p: { tabs: SessionInfo[]; current: string; infos: Record<string,
     const url = location.origin + '/t/' + s.id
     return [
       { label: t('tabs.menu.rename'), icon: <TextCursorInput size={16} />, onSelect: () => p.onRename(s) },
-      { label: t('tabs.menu.window'), icon: <ExternalLink size={16} />, separator: true, onSelect: () => window.open(url, '_blank', 'noopener') },
+      { label: t('tabs.menu.window'), icon: <ExternalLink size={16} />, separator: true, onSelect: () => openInNewTab(url) },
       { label: t('tabs.menu.copyLink'), icon: <Link2 size={16} />, onSelect: () => void copyText(url).then((ok) => toast(ok ? t('tabs.menu.copied') : url)) },
       { label: t('tabs.new'), icon: <Plus size={16} />, onSelect: p.onNew },
       { label: t('tabs.menu.first'), icon: <ArrowLeftToLine size={16} />, separator: true, disabled: at <= 0, onSelect: () => p.onMove(s.id, 0) },

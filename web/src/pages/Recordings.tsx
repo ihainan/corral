@@ -4,8 +4,9 @@ import { Unicode11Addon } from '@xterm/addon-unicode11'
 import { ChevronLeft, Download, Film, Maximize2, MoreHorizontal, Pause, Play, RotateCw, Trash2 } from 'lucide-react'
 import { api, authGen, errorText, type Recording } from '../api'
 import { t } from '../i18n'
-import { linkHandler, navigate } from '../router'
+import { navigate } from '../router'
 import { PhoneBack, useSession } from '../app'
+import { AppLink } from '../components/AppLink'
 import { termScheme } from '../prefs'
 import { chromeVars } from '../terminal/themes'
 import { formatSize } from '../terminal/FilesDialog'
@@ -425,13 +426,12 @@ export function RecordingsPage() {
             const href = '/recordings/' + r.id
             return (
               <li className="row" key={r.id} data-rec={r.id}>
-                <a
+                <AppLink
                   className="row-main no-icon rec-row"
                   href={href}
-                  onClick={(e) => {
+                  onClick={() => {
                     opened.current = r.id
                     if (kept) kept.opened = r.id
-                    linkHandler(href)(e)
                   }}
                 >
                   {/* (Host first; how long — or recording, in red words — a column of its own;
@@ -446,7 +446,7 @@ export function RecordingsPage() {
                     {r.truncated && <span className="warn-text">{' · ' + t('rec.truncated')}</span>}
                     {r.gaps && <span className="warn-text">{' · ' + t('rec.gaps')}</span>}
                   </span>
-                </a>
+                </AppLink>
                 {admin && (
                   <div className="row-actions">
                     <Menu
