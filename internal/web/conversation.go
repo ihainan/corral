@@ -3957,26 +3957,52 @@ f=$(mktemp) || exit 4
 trap 'rm -f "$f"; [ -n "${lk:-}" ] && rm -f "$lk"; [ -n "$partdir" ] && rm -rf "$partdir"; [ "$mode" = tmux ] && tmux delete-buffer -b "$b" 2>/dev/null 9>&-' EXIT
 trap '[ "$typing" = 1 ] && exit 6; exit 4' HUP INT TERM
 if [ "$len" != keys ]; then cat >"$f" || exit 4; fi
-ld=
+_lname="corral-send-$(printf '%s' "$mode-$p" | tr -c 'A-Za-z0-9-' _)"
 _u=$(id -u 2>/dev/null)
-if [ -n "$_u" ] && [ -d "` + convoSystemRunBase + `/$_u" ] && [ ! -L "` + convoSystemRunBase + `/$_u" ] && [ -O "` + convoSystemRunBase + `/$_u" ]; then
-  ld="` + convoSystemRunBase + `/$_u"
-elif [ -n "${HOME:-}" ] && [ -d "$HOME/.local/state/corral/run" ] && [ ! -L "$HOME/.local/state/corral/run" ] && [ -O "$HOME/.local/state/corral/run" ]; then
-  ld="$HOME/.local/state/corral/run"
-elif [ -n "${XDG_RUNTIME_DIR:-}" ] && [ -d "$XDG_RUNTIME_DIR" ]; then
-  ld="$XDG_RUNTIME_DIR"
-fi
-l=
-if [ -n "$ld" ]; then
-  l="$ld/corral-send-$(printf '%s' "$mode-$p" | tr -c 'A-Za-z0-9-' _)"
-fi
-if [ -n "$l" ] && [ ! -L "$l" ] && command -v flock >/dev/null 2>&1 && (exec 9>>"$l") 2>/dev/null; then
-  exec 9>>"$l"
-  n=0
-  until flock -n 9; do
-    [ "$n" -ge 100 ] && exit 7
-    if sleep 0.1 2>/dev/null; then n=$((n + 1)); else sleep 1; n=$((n + 10)); fi
+_d1= _d2=
+if [ -n "$_u" ]; then _d1="` + convoSystemRunBase + `/$_u"; fi
+if [ -n "${HOME:-}" ]; then _d2="$HOME/.local/state/corral/run"; fi
+_locked=0 _n=0
+_lock_one() {
+  _dir=$1 _fd=$2
+  while [ -n "$_dir" ] && [ -d "$_dir" ] && [ ! -L "$_dir" ] && [ -O "$_dir" ]; do
+    _lf="$_dir/$_lname"
+    [ ! -L "$_lf" ] || return 0
+    [ ! -e "$_lf" ] || [ -O "$_lf" ] || return 0
+    exec 7>&2 2>/dev/null
+    if [ "$_fd" = 9 ]; then command exec 9>>"$_lf"; else command exec 8>>"$_lf"; fi
+    _rc=$?
+    exec 2>&7 7>&-
+    if [ "$_rc" -ne 0 ]; then
+      return 0
+    fi
+    while ! flock -n "$_fd"; do
+      [ "$_n" -ge 100 ] && exit 7
+      if sleep 0.1 2>/dev/null; then _n=$((_n + 1)); else sleep 1; _n=$((_n + 10)); fi
+    done
+    if [ ! -L "$_lf" ] && [ -f "$_lf" ] && [ -O "$_lf" ] && [ "$_lf" -ef "/proc/self/fd/$_fd" ]; then
+      _locked=$((_locked + 1))
+      return 0
+    fi
+    if [ "$_fd" = 9 ]; then exec 9<&- 2>/dev/null || true; else exec 8<&- 2>/dev/null || true; fi
   done
+  return 0
+}
+if command -v flock >/dev/null 2>&1; then
+  if [ -n "$_d1" ] && [ -d "$_d1" ] && [ ! -L "$_d1" ] && [ -O "$_d1" ]; then
+    _lock_one "$_d1" 9
+  fi
+  if [ -n "$_d2" ] && [ -d "$_d2" ] && [ ! -L "$_d2" ] && [ -O "$_d2" ]; then
+    if [ -z "$_d1" ] || [ ! "$_d1" -ef "$_d2" ]; then
+      _lock_one "$_d2" 8
+    fi
+  fi
+  if [ "$_locked" -eq 0 ] && [ -n "$_d1" ] && [ -d "$_d1" ] && [ ! -L "$_d1" ] && [ -O "$_d1" ]; then
+    _lock_one "$_d1" 9
+  fi
+  if [ "$_locked" -eq 0 ] && [ -n "${XDG_RUNTIME_DIR:-}" ] && [ -d "$XDG_RUNTIME_DIR" ] && [ ! -L "$XDG_RUNTIME_DIR" ] && [ -O "$XDG_RUNTIME_DIR" ]; then
+    _lock_one "$XDG_RUNTIME_DIR" 9
+  fi
 fi
 [ "$len" = keys ] || [ "$(wc -c <"$f" | tr -d ' ')" = "$len" ] || exit 4
 # (The first letter of what is to be typed: a command of Claude Code's own
@@ -4468,6 +4494,7 @@ fi`
 	script = strings.ReplaceAll(script, "CARDAWK", cardRegionAwk) // (see convo_card.go)
 	script = strings.ReplaceAll(script, "PANELDIGEST", panelDigestPipe)
 	script = strings.ReplaceAll(script, "LOOKDIGEST", lookDigestPipe)
+	script = strings.ReplaceAll(script, "9>&-", "8>&- 9>&-")
 	script = strings.ReplaceAll(script, "STEADYSCREEN", steadyPipe)
 	script = strings.ReplaceAll(script, "OCBOXPIPE", ocBoxPipe)     // (see convo_opencode_input.go)
 	script = strings.ReplaceAll(script, "AGYBOXPIPE", agyBoxPipe)   // (see convo_agy_input.go)

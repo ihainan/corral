@@ -5,6 +5,7 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"strconv"
@@ -32,6 +33,25 @@ func defaultLifecycleLockTimeout() time.Duration {
 		}
 	}
 	return DefaultLifecycleLockTimeout
+}
+
+func defaultUninstallSystemRunDir(uid uint32) string {
+	if v, ok := os.LookupEnv("CORRALD_TEST_SYSTEM_RUN_DIR"); ok {
+		if v == "none" {
+			return ""
+		}
+		return v
+	}
+	return fmt.Sprintf("/run/user/%d", uid)
+}
+
+func defaultRunDirLockTimeout() time.Duration {
+	if v := os.Getenv("CORRALD_TEST_RUN_LOCK_TIMEOUT"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d >= 0 {
+			return d
+		}
+	}
+	return 200 * time.Millisecond
 }
 
 type blockingLogWriter struct {

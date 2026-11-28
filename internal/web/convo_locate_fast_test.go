@@ -439,7 +439,12 @@ func spawnFakeHerdrTree(t *testing.T, workDir, home string, childEnvs [][]string
 	}
 	childStarts = make([]string, len(childPIDs))
 	for i, pid := range childPIDs {
-		for try := 0; try < 50 && childStarts[i] == ""; try++ {
+		for try := 0; try < 100 && childStarts[i] == ""; try++ {
+			commBytes, _ := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/comm")
+			if strings.TrimSpace(string(commBytes)) != "sleep" {
+				time.Sleep(10 * time.Millisecond)
+				continue
+			}
 			b, _ := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/stat")
 			if j := strings.LastIndex(string(b), ") "); j >= 0 {
 				if f := strings.Fields(string(b)[j+2:]); len(f) > 19 {
@@ -451,7 +456,7 @@ func spawnFakeHerdrTree(t *testing.T, workDir, home string, childEnvs [][]string
 			}
 		}
 		if childStarts[i] == "" {
-			t.Fatalf("could not read /proc/%d/stat", pid)
+			t.Fatalf("could not read /proc/%d/stat after waiting for exec sleep", pid)
 		}
 	}
 	return shellPID, childPIDs, childStarts
@@ -910,10 +915,10 @@ func isolateClaudeCfgProc(t *testing.T, cmd, procDir string) string {
 }
 
 // Review Items 5 & 6:
-// - Physical deduplication (pwd -P) when $HOME/.claude is a symlink to the same
-//   directory as CLAUDE_CONFIG_DIR so forkFindCommand returns 1 path (not 2).
-// - Forking a Claude session in a custom CLAUDE_CONFIG_DIR passes
-//   CLAUDE_CONFIG_DIR to both tmux (QuoteShell'd) and herdr (workspace.create env).
+//   - Physical deduplication (pwd -P) when $HOME/.claude is a symlink to the same
+//     directory as CLAUDE_CONFIG_DIR so forkFindCommand returns 1 path (not 2).
+//   - Forking a Claude session in a custom CLAUDE_CONFIG_DIR passes
+//     CLAUDE_CONFIG_DIR to both tmux (QuoteShell'd) and herdr (workspace.create env).
 func TestClaudeConfigDirsPhysicalDedupAndFork(t *testing.T) {
 	sh, err := exec.LookPath("sh")
 	if err != nil {
@@ -1199,12 +1204,12 @@ func TestBgTailBatchMissingLastAndReadError(t *testing.T) {
 }
 
 // Round 3: Stateless bgTailCommand & cmdScanCommand rules:
-// 1. When strictly 1 log exists across physical-deduplicated claude_cfg_dirs,
-//    use it and derive subagents strictly from its sibling subagents dir.
-// 2. When the sole log has no sibling subagents dir, never pull subagents from
-//    another project or config dir.
-// 3. When >1 logs exist for the same SID (across projects or config dirs),
-//    refuse to guess by mtime (emit nothing, exit 0).
+//  1. When strictly 1 log exists across physical-deduplicated claude_cfg_dirs,
+//     use it and derive subagents strictly from its sibling subagents dir.
+//  2. When the sole log has no sibling subagents dir, never pull subagents from
+//     another project or config dir.
+//  3. When >1 logs exist for the same SID (across projects or config dirs),
+//     refuse to guess by mtime (emit nothing, exit 0).
 func TestBgTailAndCmdScanStatelessSoleAndAmbiguous(t *testing.T) {
 	sh, err := exec.LookPath("sh")
 	if err != nil {
@@ -1405,11 +1410,11 @@ func TestBgAndCmdUppercaseSIDNormalized(t *testing.T) {
 }
 
 // Round 4 P2-3 & P2-1:
-// - logsWroteCommand requires strictly 1 matching log; ambiguous copies across
-//   config dirs or project dirs return unknown time (empty "w=").
-// - When config dir enumeration is incomplete (e.g. unreadable custom config
-//   dir or projects dir), bgTailCommand, cmdScanCommand, and logsWroteCommand
-//   all refuse to treat a remaining copy as sole (exit 0, emit empty/missing).
+//   - logsWroteCommand requires strictly 1 matching log; ambiguous copies across
+//     config dirs or project dirs return unknown time (empty "w=").
+//   - When config dir enumeration is incomplete (e.g. unreadable custom config
+//     dir or projects dir), bgTailCommand, cmdScanCommand, and logsWroteCommand
+//     all refuse to treat a remaining copy as sole (exit 0, emit empty/missing).
 func TestLogsWroteSoleAndIncompleteConfigDirs(t *testing.T) {
 	sh, err := exec.LookPath("sh")
 	if err != nil {
@@ -1882,7 +1887,10 @@ func TestConvoLocatePidsAndCustomConfigDirHost(t *testing.T) {
 	}
 
 	// bgTailCommand, forkFindCommand, logsWroteCommand, cmdScanCommand with spaces.
-	cBg := exec.Command(sh, "-c", bgTailCommand([]string{sid1}, 4096))
+	// Isolate claude_cfg_dirs's /proc scan so unrelated host Claude/Node processes
+	// or concurrent tests under the same user cannot interfere with this test.
+	fakeProc := t.TempDir()
+	cBg := exec.Command(sh, "-c", isolateClaudeCfgProc(t, bgTailCommand([]string{sid1}, 4096), fakeProc))
 	cBg.Env = []string{"HOME=" + home, "CLAUDE_CONFIG_DIR=" + absCustom, "PATH=/usr/bin:/bin"}
 	outBg, err := cBg.Output()
 	if err != nil {
@@ -1892,7 +1900,7 @@ func TestConvoLocatePidsAndCustomConfigDirHost(t *testing.T) {
 		t.Fatalf("bgTailCommand custom dir = %+v, want uuid=u1 n=2", r)
 	}
 
-	cFork := exec.Command(sh, "-c", forkFindCommand("claude", sid1))
+	cFork := exec.Command(sh, "-c", isolateClaudeCfgProc(t, forkFindCommand("claude", sid1), fakeProc))
 	cFork.Env = []string{"HOME=" + home, "CLAUDE_CONFIG_DIR=" + absCustom, "PATH=/usr/bin:/bin"}
 	outFork, err := cFork.Output()
 	if err != nil {
@@ -1902,7 +1910,7 @@ func TestConvoLocatePidsAndCustomConfigDirHost(t *testing.T) {
 		t.Fatalf("forkFindCommand custom dir = %q, want %q", got, logAbs)
 	}
 
-	cWrote := exec.Command(sh, "-c", logsWroteCommand([]string{"claude:" + sid1}))
+	cWrote := exec.Command(sh, "-c", isolateClaudeCfgProc(t, logsWroteCommand([]string{"claude:" + sid1}), fakeProc))
 	cWrote.Env = []string{"HOME=" + home, "CLAUDE_CONFIG_DIR=" + absCustom, "PATH=/usr/bin:/bin"}
 	outWrote, err := cWrote.Output()
 	if err != nil {
@@ -1919,7 +1927,7 @@ func TestConvoLocatePidsAndCustomConfigDirHost(t *testing.T) {
 	}
 	os.WriteFile(filepath.Join(subDir, "agent-abc123.jsonl"), []byte(`{"version":"2.1.305"}`+"\n"), 0o644)
 	os.WriteFile(filepath.Join(subDir, "agent-abc123.meta.json"), []byte(`{"requestShape":"background","description":"custom cfg subagent"}`), 0o644)
-	cCmdScan := exec.Command(sh, "-c", cmdScanCommand("w:"+sid1))
+	cCmdScan := exec.Command(sh, "-c", isolateClaudeCfgProc(t, cmdScanCommand("w:"+sid1), fakeProc))
 	cCmdScan.Env = []string{"HOME=" + home, "CLAUDE_CONFIG_DIR=" + absCustom, "PATH=/usr/bin:/bin"}
 	outCmdScan, err := cCmdScan.Output()
 	if err != nil {
@@ -1928,6 +1936,57 @@ func TestConvoLocatePidsAndCustomConfigDirHost(t *testing.T) {
 	subs := parseBgSubScan(string(outCmdScan))
 	if len(subs[sid1]) != 1 || subs[sid1][0].ID != "abc123" || subs[sid1][0].What != "custom cfg subagent" {
 		t.Fatalf("cmdScanCommand custom dir subs = %+v, want abc123", subs)
+	}
+}
+
+// Regression: a zombie (Z) or dead (X) Claude/versioned process in /proc has
+// no readable /proc/<pid>/exe or /cwd while /proc/<pid> still exists.
+// claude_cfg_dirs must skip zombie/dead processes instead of setting
+// cldirs_incomplete=1 (which would cause bgTailCommand to report missing).
+func TestBgTailIgnoresZombieClaudeProcessInProc(t *testing.T) {
+	sh, err := exec.LookPath("sh")
+	if err != nil {
+		t.Skip("no sh")
+	}
+	home := t.TempDir()
+	customCfg := filepath.Join(home, "custom-claude")
+	projDir := filepath.Join(customCfg, "projects", "-work")
+	if err := os.MkdirAll(projDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sid := "11111111-1111-4111-8111-111111111111"
+	logPath := filepath.Join(projDir, sid+".jsonl")
+	if err := os.WriteFile(logPath, []byte(`{"type":"system","subtype":"turn_duration","uuid":"u-z","pendingBackgroundAgentCount":1}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	fakeProc := t.TempDir()
+	// Simulate a zombie versioned Claude Code binary (comm=2.1.105, state=Z, no exe symlink).
+	zDir := filepath.Join(fakeProc, "42424")
+	if err := os.MkdirAll(zDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(zDir, "comm"), []byte("2.1.105\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(zDir, "stat"), []byte("42424 (2.1.105) Z 1 42424 42424 0 -1 4194304 0 0 0 0 0 0 0 0 20 0 1 0 12345 0 0\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, binName := range []string{sh, "dash"} {
+		bin, err := exec.LookPath(binName)
+		if err != nil {
+			continue
+		}
+		cmd := exec.Command(bin, "-c", isolateClaudeCfgProc(t, bgTailCommand([]string{sid}, 4096), fakeProc))
+		cmd.Env = []string{"HOME=" + home, "CLAUDE_CONFIG_DIR=" + customCfg, "PATH=/usr/bin:/bin"}
+		out, err := cmd.Output()
+		if err != nil {
+			t.Fatalf("%s bgTailCommand failed: %v", binName, err)
+		}
+		if r, ok := parseBgTails(out)[sid]; !ok || r.uuid != "u-z" || r.n != 1 {
+			t.Fatalf("%s bgTailCommand with zombie process in /proc = %+v (out=%q), want uuid=u-z n=1", binName, r, string(out))
+		}
 	}
 }
 

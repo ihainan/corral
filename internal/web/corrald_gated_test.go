@@ -1683,16 +1683,18 @@ time.sleep(30)`, holdSock))
 				releaseFile := filepath.Join(home, tc.name+"-release")
 				_ = startShellHoldingLock(t, home, tc.xdgDir, "tmux", tc.pane, readyFile, releaseFile)
 
-				// Both must use sysDir (NOT stateRun, NOT otherXDG).
-				wantLock := filepath.Join(sysDir, agent.PaneLockFilename("tmux", tc.pane))
-				if _, err := os.Stat(wantLock); err != nil {
-					t.Fatalf("expected lock file in %s: %v", wantLock, err)
+				// Both sysDir and stateRun exist -> BOTH must be locked in fixed order,
+				// while unrelated XDG_RUNTIME_DIR stays untouched.
+				wantSysLock := filepath.Join(sysDir, agent.PaneLockFilename("tmux", tc.pane))
+				if _, err := os.Stat(wantSysLock); err != nil {
+					t.Fatalf("expected lock file in %s: %v", wantSysLock, err)
 				}
-				if entries, _ := os.ReadDir(stateRun); len(entries) != 0 {
-					t.Fatalf("stateRunDir should be untouched when sysDir is valid: %v", entries)
+				wantStateLock := filepath.Join(stateRun, agent.PaneLockFilename("tmux", tc.pane))
+				if _, err := os.Stat(wantStateLock); err != nil {
+					t.Fatalf("expected lock file in %s when both dirs exist: %v", wantStateLock, err)
 				}
 				if entries, _ := os.ReadDir(otherXDG); len(entries) != 0 {
-					t.Fatalf("XDG_RUNTIME_DIR should be untouched when sysDir is valid: %v", entries)
+					t.Fatalf("XDG_RUNTIME_DIR should be untouched when sysDir/stateRun are valid: %v", entries)
 				}
 
 				// corrald sees the exact same flock and times out with exit 7.
@@ -1810,6 +1812,254 @@ time.sleep(30)`, holdSock))
 			if _, err := os.Stat(filepath.Join(xdgFallback, agent.PaneLockFilename("tmux", "%8"))); err != nil {
 				t.Fatalf("expected shell to reject non-owned /usr/bin and fall back to XDG_RUNTIME_DIR: %v", err)
 			}
+		}
+	})
+
+	// Regression for 1(b): /run/user/<uid> appears AFTER an active send has
+	// already locked ~/.local/state/corral/run. Both SSH->corrald and SSH->SSH
+	// and corrald->SSH must remain strictly mutually exclusive.
+	t.Run("runtime_dir_appears_mid_send_keeps_mutex_both_directions", func(t *testing.T) {
+		home := t.TempDir()
+		sysBase := t.TempDir()
+		sysDir := filepath.Join(sysBase, uidStr) // NOT created yet!
+		otherXDG := t.TempDir()
+
+		origBase := convoSystemRunBase
+		convoSystemRunBase = sysBase
+		t.Cleanup(func() { convoSystemRunBase = origBase })
+
+		layout, err := daemon.ResolveLayout(daemon.PathOptions{Home: home, UID: &uid, MachineID: "1122334455aa"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := layout.EnsureRunDir(); err != nil {
+			t.Fatalf("EnsureRunDir: %v", err)
+		}
+
+		// Direction 1: SSH convoGated locks stateRun while sysDir is absent ->
+		// sysDir appears -> corrald PaneSender AND a 2nd SSH convoGated MUST block!
+		mode, pane := "tmux", "%31"
+		readyFile := filepath.Join(home, "mid-ready")
+		releaseFile := filepath.Join(home, "mid-release")
+		_ = startShellHoldingLock(t, home, otherXDG, mode, pane, readyFile, releaseFile)
+
+		// Now simulate user login creating /run/user/<uid> mid-send!
+		if err := os.MkdirAll(sysDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+
+		// corrald with short timeout MUST fail with exit 7 (cannot bypass via sysDir).
+		psShort := agent.NewPaneSender(nil, nil, nil, nil)
+		psShort.SetLockDirsForTest(sysDir, layout.RunDir)
+		psShort.SetLockTimeoutForTest(250 * time.Millisecond)
+		if exitCode, _ := sendLockProbe(psShort, mode, pane); exitCode != 7 {
+			t.Fatalf("corrald bypassed stateRun lock after sysDir appeared: exit=%d, want 7", exitCode)
+		}
+
+		// 2nd SSH convoGated MUST wait for 1st SSH convoGated to release stateRun.
+		go func() {
+			time.Sleep(280 * time.Millisecond)
+			_ = os.WriteFile(releaseFile, []byte("go"), 0o600)
+		}()
+		t0 := time.Now()
+		sh2 := exec.Command(sh, "-c", convoGated("", mode, "s1", pane, "", 0, 0, sid, "keys", []string{}, 0))
+		sh2.Env = []string{"HOME=" + home, "XDG_RUNTIME_DIR=" + otherXDG, "PATH=/usr/bin:/bin", "LC_ALL=C"}
+		_ = sh2.Run() // exits 3 at front() AFTER acquiring locks
+		if elapsed := time.Since(t0); elapsed < 220*time.Millisecond {
+			t.Fatalf("2nd convoGated bypassed 1st convoGated after sysDir appeared (elapsed=%v)", elapsed)
+		}
+
+		// Direction 2: corrald holds stateRun while sysDir is absent -> sysDir
+		// appears -> SSH convoGated MUST wait for corrald!
+		if err := os.RemoveAll(sysDir); err != nil {
+			t.Fatal(err)
+		}
+		py, pyErr := exec.LookPath("python3")
+		if pyErr != nil {
+			t.Skip("python3 not found")
+		}
+		holdDir := t.TempDir()
+		holdSock := filepath.Join(holdDir, "h2.sock")
+		if len(holdSock) > 90 {
+			holdDir, err = os.MkdirTemp("/tmp", "c-hold2-")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = os.RemoveAll(holdDir) })
+			holdSock = filepath.Join(holdDir, "h2.sock")
+		}
+		lockedCh := make(chan struct{}, 1)
+		releaseCh := make(chan struct{})
+		ln, err := net.Listen("unix", holdSock)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = ln.Close() })
+		go func() {
+			for {
+				c, lerr := ln.Accept()
+				if lerr != nil {
+					return
+				}
+				go func(conn net.Conn) {
+					defer conn.Close()
+					buf := make([]byte, 4096)
+					_, _ = conn.Read(buf)
+					select {
+					case lockedCh <- struct{}{}:
+					default:
+					}
+					<-releaseCh
+					_, _ = conn.Write([]byte(`{"id":"1","result":{"read":{"text":"ok"}}}` + "\n"))
+				}(c)
+			}
+		}()
+
+		hp := exec.Command(py, "-c", fmt.Sprintf(`import os, pty, time
+pid, fd = pty.fork()
+if pid == 0:
+    os.environ["HERDR_PANE_ID"] = "w2:p9"
+    os.environ["HERDR_SOCKET_PATH"] = %q
+    os.execvp("sleep", ["sleep", "30"])
+print(pid, flush=True)
+time.sleep(30)`, holdSock))
+		hpOut, err := hp.StdoutPipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := hp.Start(); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() {
+			_ = hp.Process.Kill()
+			_, _ = hp.Process.Wait()
+		})
+		var hpid int64
+		if _, err := fmt.Fscan(hpOut, &hpid); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() {
+			if p, perr := os.FindProcess(int(hpid)); perr == nil {
+				_ = p.Kill()
+			}
+		})
+		time.Sleep(60 * time.Millisecond)
+		hStartStr := waitForProcStart(t, int(hpid))
+		hStart, _ := strconv.ParseInt(hStartStr, 10, 64)
+		if err := os.MkdirAll(filepath.Join(home, ".claude", "sessions"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		_ = os.WriteFile(filepath.Join(home, ".claude", "sessions", fmt.Sprintf("%d.json", hpid)),
+			[]byte(fmt.Sprintf(`{"pid":%d,"sessionId":%q,"procStart":"%d","status":"idle"}`, hpid, sid, hStart)), 0o600)
+
+		val := agent.NewPathValidator(home, uid, "/proc")
+		val.UpdateHerdrSockets("test", []string{holdSock})
+		loc, err := agent.NewLocator(agent.LocatorOptions{Home: home, UID: &uid})
+		if err != nil {
+			t.Fatal(err)
+		}
+		herdrExec := agent.NewHerdrExecutorForTest(uid, "/proc", val)
+		psReal := agent.NewPaneSender(loc, val, agent.NewTmuxExecutor(home), herdrExec)
+		psReal.SetLockDirsForTest(sysDir, layout.RunDir)
+
+		sendDone := make(chan int, 1)
+		go func() {
+			res := psReal.Send(context.Background(), proto.PaneSendParams{
+				OpID:    proto.NewOpID(time.Now()),
+				Mode:    "herdr",
+				Pane:    "w2:p9",
+				Socket:  holdSock,
+				PID:     hpid,
+				Start:   hStart,
+				SID:     sid,
+				LenSpec: "keys",
+				Keys:    []string{},
+				Gate:    "free",
+			})
+			sendDone <- res.Exit
+		}()
+		select {
+		case <-lockedCh:
+		case rc := <-sendDone:
+			t.Fatalf("corrald PaneSender returned exit %d before herdr read", rc)
+		case <-time.After(3 * time.Second):
+			t.Fatal("corrald PaneSender did not reach herdr read")
+		}
+
+		// /run/user/<uid> appears while corrald holds stateRun lock!
+		if err := os.MkdirAll(sysDir, 0o700); err != nil {
+			close(releaseCh)
+			t.Fatal(err)
+		}
+
+		go func() {
+			time.Sleep(280 * time.Millisecond)
+			close(releaseCh)
+		}()
+		t1 := time.Now()
+		shCmd := exec.Command(sh, "-c", convoGated("", "herdr", "", "w2:p9", holdSock, 0, 0, sid, "keys", []string{}, 0))
+		shCmd.Env = []string{"HOME=" + home, "XDG_RUNTIME_DIR=" + otherXDG, "PATH=/usr/bin:/bin", "LC_ALL=C"}
+		_ = shCmd.Run()
+		shElapsed := time.Since(t1)
+		<-sendDone
+		if shElapsed < 220*time.Millisecond {
+			t.Fatalf("convoGated bypassed corrald stateRun lock after sysDir appeared (elapsed=%v)", shElapsed)
+		}
+	})
+
+	// Regression for 1(a): while SSH convoGated holds a lock in stateRunDir,
+	// uninstall's RemoveRunDirLocked MUST fail with ErrLocked and leave stateRunDir
+	// intact so a 2nd SSH send still blocks behind the 1st send.
+	t.Run("uninstall_busy_preserves_state_run_lock_for_concurrent_ssh_sends", func(t *testing.T) {
+		home := t.TempDir()
+		otherXDG := t.TempDir()
+		missingBase := filepath.Join(t.TempDir(), "no-run-user")
+		missingSysDir := filepath.Join(missingBase, uidStr)
+
+		origBase := convoSystemRunBase
+		convoSystemRunBase = missingBase
+		t.Cleanup(func() { convoSystemRunBase = origBase })
+
+		layout, err := daemon.ResolveLayout(daemon.PathOptions{Home: home, UID: &uid, MachineID: "5544332211ff"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := layout.EnsureRunDir(); err != nil {
+			t.Fatalf("EnsureRunDir: %v", err)
+		}
+
+		mode, pane := "tmux", "%33"
+		readyFile := filepath.Join(home, "uninst-ready")
+		releaseFile := filepath.Join(home, "uninst-release")
+		_ = startShellHoldingLock(t, home, otherXDG, mode, pane, readyFile, releaseFile)
+
+		// Concurrent uninstall attempts to remove run/ -> MUST return ErrLocked and keep run/ intact.
+		if err := daemon.RemoveRunDirLocked(layout.RunDir, missingSysDir, uid, 80*time.Millisecond); !errors.Is(err, daemon.ErrLocked) {
+			t.Fatalf("RemoveRunDirLocked = %v, want ErrLocked while SSH convoGated holds lock", err)
+		}
+		if _, err := os.Stat(filepath.Join(layout.RunDir, agent.PaneLockFilename(mode, pane))); err != nil {
+			t.Fatalf("lock file disappeared during busy RemoveRunDirLocked: %v", err)
+		}
+
+		// 2nd SSH send MUST still wait for 1st SSH send (cannot slip through unlocked).
+		go func() {
+			time.Sleep(280 * time.Millisecond)
+			_ = os.WriteFile(releaseFile, []byte("go"), 0o600)
+		}()
+		t0 := time.Now()
+		sh2 := exec.Command(sh, "-c", convoGated("", mode, "s1", pane, "", 0, 0, sid, "keys", []string{}, 0))
+		sh2.Env = []string{"HOME=" + home, "XDG_RUNTIME_DIR=" + otherXDG, "PATH=/usr/bin:/bin", "LC_ALL=C"}
+		_ = sh2.Run()
+		if elapsed := time.Since(t0); elapsed < 220*time.Millisecond {
+			t.Fatalf("2nd SSH send did not wait after busy uninstall attempt (elapsed=%v)", elapsed)
+		}
+
+		// Once both sends finished, RemoveRunDirLocked cleanly removes run/.
+		if err := daemon.RemoveRunDirLocked(layout.RunDir, missingSysDir, uid, 500*time.Millisecond); err != nil {
+			t.Fatalf("RemoveRunDirLocked after sends completed: %v", err)
+		}
+		if _, err := os.Lstat(layout.RunDir); !os.IsNotExist(err) {
+			t.Fatalf("expected run/ removed, lstat err=%v", err)
 		}
 	})
 }

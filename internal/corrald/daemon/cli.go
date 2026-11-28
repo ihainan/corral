@@ -1573,6 +1573,33 @@ func cmdUninstall(args []string, stdout io.Writer) int {
 		left = append(left, leftover{path: p, reason: strings.ReplaceAll(reason, "\n", " ")})
 	}
 
+	// Freshly check whether other machines still have install.json under SharedLock.
+	isLast, lastCheckErr := isLastMachineInStateRoot(layout.StateRoot, layout.MachineID)
+	if lastCheckErr != nil {
+		isLast = false
+		addLeft(layout.StateRoot, fmt.Sprintf("unable to verify other machines (shared binaries preserved): %v", lastCheckErr))
+	}
+
+	// Before deleting binaries / state dir on the last machine, acquire every
+	// existing pane send lock in ~/.local/state/corral/run (in the same fixed
+	// order as senders) and remove run/ under lock. If any SSH send still holds
+	// a lock there, restore install.json while keeping the removing tombstone
+	// (so serve remains blocked and retry still has the full manifest), and
+	// abort with error=busy so gateway retries cleanly.
+	willPreserveForMissingInstall := installErr != nil && (stateDirExists || len(listPreservedSharedPaths(layout)) > 0)
+	if isLast && lastCheckErr == nil && !willPreserveForMissingInstall && layout.RunDir != "" {
+		if rerr := RemoveRunDirLocked(layout.RunDir, defaultUninstallSystemRunDir(layout.UID), layout.UID, defaultRunDirLockTimeout()); rerr != nil {
+			if errors.Is(rerr, ErrLocked) {
+				if stateDirExists && installErr == nil && installRec != nil {
+					_ = WriteInstallRecord(layout.InstallJSON, installRec)
+				}
+				writeErr(stdout, proto.ErrBusy, "pane send lock is held in run dir")
+				return 1
+			}
+			addLeft(layout.RunDir, rerr.Error())
+		}
+	}
+
 	// Remove socket (and empty /tmp fallback dir if used).
 	if sockPath != "" {
 		if err := os.Remove(sockPath); err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -1581,13 +1608,6 @@ func cmdUninstall(args []string, stdout io.Writer) int {
 		if layout.SocketUsesTmpDir {
 			_ = os.Remove(layout.SocketDir)
 		}
-	}
-
-	// Freshly check whether other machines still have install.json under SharedLock.
-	isLast, lastCheckErr := isLastMachineInStateRoot(layout.StateRoot, layout.MachineID)
-	if lastCheckErr != nil {
-		isLast = false
-		addLeft(layout.StateRoot, fmt.Sprintf("unable to verify other machines (shared binaries preserved): %v", lastCheckErr))
 	}
 
 	// Rule 6: If install.json was missing or unreadable (whether last machine
@@ -1720,14 +1740,8 @@ func cmdUninstall(args []string, stdout io.Writer) int {
 		_ = os.Remove(filepath.Dir(layout.StateRoot)) // ~/.local/state/corral (best-effort if empty)
 	}
 	if isLast && lastCheckErr == nil && layout.RunDir != "" {
-		if rinfo, rerr := os.Lstat(layout.RunDir); rerr == nil {
-			st, ok := rinfo.Sys().(*syscall.Stat_t)
-			if rinfo.Mode()&os.ModeSymlink == 0 && rinfo.IsDir() && ok && st.Uid == layout.UID {
-				if err := os.RemoveAll(layout.RunDir); err != nil && !errors.Is(err, os.ErrNotExist) {
-					addLeft(layout.RunDir, err.Error())
-				}
-			}
-		}
+		// RunDir was already removed under pane locks above; best-effort clean
+		// its parent ~/.local/state/corral if now empty.
 		_ = os.Remove(filepath.Dir(layout.StateRoot)) // ~/.local/state/corral (best-effort if empty)
 	}
 	if isLast && lastCheckErr == nil && installErr == nil && libDirExists {

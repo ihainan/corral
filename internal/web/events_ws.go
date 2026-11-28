@@ -36,6 +36,7 @@ const (
 	maxFallbackWakeLogsPerHost = 256
 	maxFallbackWakePIDsPerHost = 256
 	maxFallbackWakeScopes      = 2048
+	maxDeferredWakes           = 2048
 )
 
 // userHostKey scopes the fallback-wake memory to one watched pane (user,
@@ -82,6 +83,16 @@ type coalesceKey struct {
 type coalesceEntry struct {
 	timer   *time.Timer
 	pending bool
+}
+
+type deferredWakeEntry struct {
+	ownerID  int64
+	hostID   int64
+	bindPane string
+	logs     map[string]struct{}
+	pids     map[int]struct{}
+	timer    *time.Timer
+	gen      uint64
 }
 
 type eventSub struct {
@@ -160,6 +171,7 @@ type eventHub struct {
 	bindings      map[convoBindKey]*convoHintBinding
 	coalesce      map[coalesceKey]*coalesceEntry
 	wakeSeen      map[userHostKey]*hostWakeSeen
+	deferredWakes map[convoBindKey]*deferredWakeEntry
 	onDeliverHint func(key coalesceKey) // test hook, nil in production
 }
 
@@ -174,6 +186,7 @@ func newEventHub(s *Server) *eventHub {
 		bindings:        make(map[convoBindKey]*convoHintBinding),
 		coalesce:        make(map[coalesceKey]*coalesceEntry),
 		wakeSeen:        make(map[userHostKey]*hostWakeSeen),
+		deferredWakes:   make(map[convoBindKey]*deferredWakeEntry),
 	}
 }
 
@@ -188,6 +201,13 @@ func (h *eventHub) Close() {
 			e.timer.Stop()
 		}
 		delete(h.coalesce, k)
+	}
+	for k, dw := range h.deferredWakes {
+		if dw.timer != nil {
+			dw.timer.Stop()
+		}
+		dw.gen++
+		delete(h.deferredWakes, k)
 	}
 	clear(h.wakeSeen)
 	h.mu.Unlock()
@@ -278,6 +298,13 @@ func (h *eventHub) markFreshUnmatchedWakes(uid, hid int64, sessionID, pane strin
 	if h.closed {
 		return false
 	}
+	return h.markFreshUnmatchedWakesLocked(uid, hid, sessionID, pane, logs, pids, now)
+}
+
+func (h *eventHub) markFreshUnmatchedWakesLocked(uid, hid int64, sessionID, pane string, logs []string, pids []int, now time.Time) bool {
+	if len(logs) == 0 && len(pids) == 0 {
+		return false
+	}
 	ttl := h.fallbackWakeTTL
 	if ttl <= 0 {
 		ttl = DefaultFallbackWakeTTL
@@ -354,6 +381,253 @@ func (h *eventHub) markFreshUnmatchedWakes(uid, hid int64, sessionID, pane strin
 	return fresh
 }
 
+// freshUnmatchedLocked returns the subset of logs and pids that have NOT yet
+// woken (uid, hid, sessionID, pane) within fallbackWakeTTL, without mutating
+// wakeSeen.
+func (h *eventHub) freshUnmatchedLocked(uid, hid int64, sessionID, pane string, logs []string, pids []int, now time.Time) ([]string, []int) {
+	ttl := h.fallbackWakeTTL
+	if ttl <= 0 {
+		ttl = DefaultFallbackWakeTTL
+	}
+	sc := h.wakeSeen[userHostKey{userID: uid, hostID: hid, sessionID: sessionID, pane: pane}]
+	var outLogs []string
+	for _, logPath := range logs {
+		if logPath == "" {
+			continue
+		}
+		if sc != nil {
+			if seenAt, ok := sc.logs[logPath]; ok && now.Sub(seenAt) < ttl {
+				continue
+			}
+		}
+		outLogs = append(outLogs, logPath)
+	}
+	var outPIDs []int
+	for _, pid := range pids {
+		if pid <= 0 {
+			continue
+		}
+		if sc != nil {
+			if seenAt, ok := sc.pids[pid]; ok && now.Sub(seenAt) < ttl {
+				continue
+			}
+		}
+		outPIDs = append(outPIDs, pid)
+	}
+	return outLogs, outPIDs
+}
+
+func (h *eventHub) cancelDeferredWakeLocked(bk convoBindKey) {
+	if dw := h.deferredWakes[bk]; dw != nil {
+		if dw.timer != nil {
+			dw.timer.Stop()
+		}
+		dw.gen++
+		delete(h.deferredWakes, bk)
+	}
+}
+
+func (h *eventHub) userWatchesHostLocked(userID, hostID int64) bool {
+	for sub := range h.byUser[userID] {
+		if sub.watchesHost(hostID) {
+			return true
+		}
+	}
+	return false
+}
+
+func (h *eventHub) cancelDeferredWakesForUnwatchedLocked(userID int64) {
+	for bk, dw := range h.deferredWakes {
+		if dw.ownerID != userID {
+			continue
+		}
+		if !h.userWatchesHostLocked(userID, dw.hostID) {
+			if dw.timer != nil {
+				dw.timer.Stop()
+			}
+			dw.gen++
+			delete(h.deferredWakes, bk)
+		}
+	}
+}
+
+func (h *eventHub) pruneUnwatchedDeferredWakes(userID int64) {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	h.cancelDeferredWakesForUnwatchedLocked(userID)
+	h.mu.Unlock()
+}
+
+func (h *eventHub) DeferredWakeCountForTest() int {
+	if h == nil {
+		return 0
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return len(h.deferredWakes)
+}
+
+func (h *eventHub) rescheduleDeferredWakeLocked(bk convoBindKey, dw *deferredWakeEntry, fireAt, now time.Time) {
+	if dw.timer != nil {
+		dw.timer.Stop()
+	}
+	dw.gen++
+	gen := dw.gen
+	delay := fireAt.Sub(now)
+	if delay < 0 {
+		delay = 0
+	}
+	dw.timer = time.AfterFunc(delay, func() {
+		h.onDeferredWake(bk, dw, gen)
+	})
+}
+
+func (h *eventHub) scheduleDeferredWakeLocked(b *convoHintBinding, logs []string, pids []int, lastActivity, now time.Time, quietThreshold time.Duration) {
+	if h.closed || b == nil {
+		return
+	}
+	freshLogs, freshPIDs := h.freshUnmatchedLocked(b.ownerID, b.hostID, b.sessionID, b.pane, logs, pids, now)
+	if len(freshLogs) == 0 && len(freshPIDs) == 0 {
+		return
+	}
+	bk := convoBindKey{sessionID: b.sessionID, pane: b.pane}
+	dw := h.deferredWakes[bk]
+	if dw == nil {
+		if len(h.deferredWakes) >= maxDeferredWakes {
+			return
+		}
+		dw = &deferredWakeEntry{
+			ownerID:  b.ownerID,
+			hostID:   b.hostID,
+			bindPane: b.bindPane,
+			logs:     make(map[string]struct{}),
+			pids:     make(map[int]struct{}),
+		}
+		h.deferredWakes[bk] = dw
+	} else {
+		dw.ownerID = b.ownerID
+		dw.hostID = b.hostID
+		dw.bindPane = b.bindPane
+	}
+	for _, p := range freshLogs {
+		if p != "" && p != b.log && len(dw.logs) < maxFallbackWakeLogsPerHost {
+			dw.logs[p] = struct{}{}
+		}
+	}
+	for _, pid := range freshPIDs {
+		if pid > 0 && pid != b.pid && len(dw.pids) < maxFallbackWakePIDsPerHost {
+			dw.pids[pid] = struct{}{}
+		}
+	}
+	if len(dw.logs) == 0 && len(dw.pids) == 0 {
+		h.cancelDeferredWakeLocked(bk)
+		return
+	}
+	fireAt := lastActivity.Add(quietThreshold)
+	if b.log != "" && !b.lastLogChange.IsZero() {
+		if bFire := b.lastLogChange.Add(quietThreshold); bFire.After(fireAt) {
+			fireAt = bFire
+		}
+	}
+	h.rescheduleDeferredWakeLocked(bk, dw, fireAt, now)
+}
+
+func (h *eventHub) onDeferredWake(bk convoBindKey, entry *deferredWakeEntry, gen uint64) {
+	now := time.Now()
+	h.mu.Lock()
+	if h.closed || h.deferredWakes[bk] != entry || entry.gen != gen {
+		h.mu.Unlock()
+		return
+	}
+	b := h.bindings[bk]
+	if b == nil {
+		delete(h.deferredWakes, bk)
+		h.mu.Unlock()
+		return
+	}
+	qt := h.quietThreshold
+	if qt <= 0 {
+		qt = DefaultUnmatchedLogQuietThreshold
+	}
+	// If the binding received more log writes before becoming quiet, postpone
+	// until lastLogChange + quietThreshold.
+	if b.log != "" && !b.lastLogChange.IsZero() && now.Sub(b.lastLogChange) < qt {
+		h.rescheduleDeferredWakeLocked(bk, entry, b.lastLogChange.Add(qt), now)
+		h.mu.Unlock()
+		return
+	}
+	if !h.userWatchesHostLocked(b.ownerID, b.hostID) {
+		delete(h.deferredWakes, bk)
+		h.mu.Unlock()
+		return
+	}
+
+	ownerID := b.ownerID
+	hostID := b.hostID
+	sessionID := b.sessionID
+	pane := b.pane
+	bindPane := b.bindPane
+	logs := make([]string, 0, len(entry.logs))
+	for p := range entry.logs {
+		if p != "" && p != b.log {
+			logs = append(logs, p)
+		}
+	}
+	pids := make([]int, 0, len(entry.pids))
+	for pid := range entry.pids {
+		if pid > 0 && pid != b.pid {
+			pids = append(pids, pid)
+		}
+	}
+	delete(h.deferredWakes, bk)
+	h.mu.Unlock()
+
+	if len(logs) == 0 && len(pids) == 0 {
+		return
+	}
+
+	// Verify session is still running outside h.mu (matching HandleAgentChanged).
+	if h.s != nil && h.s.terms != nil {
+		sess, err := h.s.terms.Get(ownerID, sessionID)
+		if err != nil || sess == nil || sess.State() != term.StateRunning {
+			h.mu.Lock()
+			if cur := h.bindings[bk]; cur != nil && cur.ownerID == ownerID && cur.hostID == hostID {
+				delete(h.bindings, bk)
+			}
+			h.mu.Unlock()
+			return
+		}
+	}
+
+	if !h.markFreshUnmatchedWakes(ownerID, hostID, sessionID, pane, logs, pids, now) {
+		return
+	}
+
+	// Write relocAfter BEFORE emitting the convo hint so any immediate
+	// push-triggered GET is guaranteed to observe relocAfter.
+	if h.s != nil {
+		ts := now.UnixNano()
+		if st := h.s.convos.peek(sessionID + "\x00" + pane); st != nil {
+			for {
+				was := st.relocAfter.Load()
+				if was >= ts || st.relocAfter.CompareAndSwap(was, ts) {
+					break
+				}
+			}
+		}
+	}
+
+	h.enqueueHint(coalesceKey{
+		kind:      "convo",
+		userID:    ownerID,
+		hostID:    hostID,
+		sessionID: sessionID,
+		pane:      bindPane,
+	})
+}
+
 func (h *eventHub) forgetWakePIDs(uid, hid int64, pids []int) {
 	if len(pids) == 0 {
 		return
@@ -365,6 +639,17 @@ func (h *eventHub) forgetWakePIDs(uid, hid int64, pids []int) {
 		}
 		for _, pid := range pids {
 			delete(sc.pids, pid)
+		}
+	}
+	for bk, dw := range h.deferredWakes {
+		if dw.ownerID != uid || dw.hostID != hid {
+			continue
+		}
+		for _, pid := range pids {
+			delete(dw.pids, pid)
+		}
+		if len(dw.logs) == 0 && len(dw.pids) == 0 {
+			h.cancelDeferredWakeLocked(bk)
 		}
 	}
 	h.mu.Unlock()
@@ -389,6 +674,7 @@ func (h *eventHub) removeSub(sub *eventSub) {
 			delete(h.byUser, sub.userID)
 		}
 	}
+	h.cancelDeferredWakesForUnwatchedLocked(sub.userID)
 	h.mu.Unlock()
 	if h.s != nil && h.s.corrald != nil {
 		h.s.corrald.RemoveWatcher(sub)
@@ -413,6 +699,7 @@ func (h *eventHub) RecordBindingWithActivity(ownerID, hostID int64, sessionID, p
 	h.mu.Lock()
 	if pid <= 0 && logPath == "" {
 		delete(h.bindings, k)
+		h.cancelDeferredWakeLocked(k)
 	} else {
 		if bindPane == "" {
 			bindPane = pane
@@ -439,6 +726,28 @@ func (h *eventHub) RecordBindingWithActivity(ownerID, hostID int64, sessionID, p
 			log:           logPath,
 			lastLogChange: lastChange,
 		}
+		if dw := h.deferredWakes[k]; dw != nil {
+			if logPath != "" {
+				delete(dw.logs, logPath)
+			}
+			if pid > 0 {
+				delete(dw.pids, pid)
+			}
+			if len(dw.logs) == 0 && len(dw.pids) == 0 {
+				h.cancelDeferredWakeLocked(k)
+			} else {
+				dw.ownerID = ownerID
+				dw.hostID = hostID
+				dw.bindPane = bindPane
+				if logPath != "" && !lastChange.IsZero() {
+					qt := h.quietThreshold
+					if qt <= 0 {
+						qt = DefaultUnmatchedLogQuietThreshold
+					}
+					h.rescheduleDeferredWakeLocked(k, dw, lastChange.Add(qt), time.Now())
+				}
+			}
+		}
 	}
 	h.mu.Unlock()
 
@@ -456,6 +765,11 @@ func (h *eventHub) ForgetSession(sessionID string) {
 	for k := range h.bindings {
 		if k.sessionID == sessionID {
 			delete(h.bindings, k)
+		}
+	}
+	for k := range h.deferredWakes {
+		if k.sessionID == sessionID {
+			h.cancelDeferredWakeLocked(k)
 		}
 	}
 	h.mu.Unlock()
@@ -601,6 +915,7 @@ func (h *eventHub) HandleAgentChanged(hostIDs []int64, ev proto.AgentChangedEven
 		h.mu.Lock()
 		for _, k := range staleKeys {
 			delete(h.bindings, k)
+			h.cancelDeferredWakeLocked(k)
 		}
 		h.mu.Unlock()
 	}
@@ -615,9 +930,17 @@ func (h *eventHub) HandleAgentChanged(hostIDs []int64, ev proto.AgentChangedEven
 		quietThreshold = DefaultUnmatchedLogQuietThreshold
 	}
 
+	type deferredWakeReq struct {
+		b            *convoHintBinding
+		logs         []string
+		pids         []int
+		lastActivity time.Time
+	}
+
 	matchedKeys := make(map[convoBindKey]struct{})
 	relocKeys := make(map[convoBindKey]struct{})
 	pendingHints := make(map[coalesceKey]struct{})
+	var deferredReqs []deferredWakeReq
 
 	for hid, users := range usersByHost {
 		for uid := range users {
@@ -676,10 +999,10 @@ func (h *eventHub) HandleAgentChanged(hostIDs []int64, ev proto.AgentChangedEven
 
 			// An unmatched log path or unmatched added PID wakes each of this
 			// user's no-log or quiet (>= quietThreshold) bindings on this host
-			// once within fallbackWakeTTL: other busy agents on the host cause
-			// no relocation storm, and a binding that was busy when the path
-			// first appeared is still woken by it once it is quiet (only a
-			// binding actually woken remembers the path).
+			// once within fallbackWakeTTL. Bindings currently busy (own log
+			// written within quietThreshold, or written in this same event) are
+			// deferred until they go quiet so short replies on a newly-created
+			// log are not missed until the 10s fallback poll.
 			if len(unmatchedLogs) > 0 || len(unmatchedAddedPIDs) > 0 {
 				for _, b := range liveBindings {
 					if b.ownerID != uid || b.hostID != hid {
@@ -687,9 +1010,23 @@ func (h *eventHub) HandleAgentChanged(hostIDs []int64, ev proto.AgentChangedEven
 					}
 					bk := convoBindKey{sessionID: b.sessionID, pane: b.pane}
 					if _, already := directMatched[bk]; already {
+						if _, relocating := relocKeys[bk]; !relocating {
+							deferredReqs = append(deferredReqs, deferredWakeReq{
+								b:            b,
+								logs:         unmatchedLogs,
+								pids:         unmatchedAddedPIDs,
+								lastActivity: now,
+							})
+						}
 						continue
 					}
 					if b.log != "" && !b.lastLogChange.IsZero() && now.Sub(b.lastLogChange) < quietThreshold {
+						deferredReqs = append(deferredReqs, deferredWakeReq{
+							b:            b,
+							logs:         unmatchedLogs,
+							pids:         unmatchedAddedPIDs,
+							lastActivity: b.lastLogChange,
+						})
 						continue
 					}
 					if h.markFreshUnmatchedWakes(uid, hid, b.sessionID, b.pane, unmatchedLogs, unmatchedAddedPIDs, now) {
@@ -734,12 +1071,43 @@ func (h *eventHub) HandleAgentChanged(hostIDs []int64, ev proto.AgentChangedEven
 		}
 	}
 
-	if len(matchedKeys) > 0 {
+	if len(matchedKeys) > 0 || len(relocKeys) > 0 || len(deferredReqs) > 0 {
 		h.mu.Lock()
 		for bk := range matchedKeys {
 			if b := h.bindings[bk]; b != nil && b.log != "" {
 				b.lastLogChange = now
+				if dw := h.deferredWakes[bk]; dw != nil {
+					h.rescheduleDeferredWakeLocked(bk, dw, now.Add(quietThreshold), now)
+				}
 			}
+		}
+		for bk := range relocKeys {
+			if dw := h.deferredWakes[bk]; dw != nil {
+				logs := make([]string, 0, len(dw.logs))
+				for p := range dw.logs {
+					logs = append(logs, p)
+				}
+				pids := make([]int, 0, len(dw.pids))
+				for pid := range dw.pids {
+					pids = append(pids, pid)
+				}
+				h.markFreshUnmatchedWakesLocked(dw.ownerID, dw.hostID, bk.sessionID, bk.pane, logs, pids, now)
+				h.cancelDeferredWakeLocked(bk)
+			}
+		}
+		for _, req := range deferredReqs {
+			bk := convoBindKey{sessionID: req.b.sessionID, pane: req.b.pane}
+			if _, relocating := relocKeys[bk]; relocating {
+				continue
+			}
+			cur := h.bindings[bk]
+			if cur == nil || cur.ownerID != req.b.ownerID || cur.hostID != req.b.hostID {
+				continue
+			}
+			if !h.userWatchesHostLocked(cur.ownerID, cur.hostID) {
+				continue
+			}
+			h.scheduleDeferredWakeLocked(cur, req.logs, req.pids, req.lastActivity, now, quietThreshold)
 		}
 		h.mu.Unlock()
 	}
@@ -1059,6 +1427,7 @@ func (s *Server) apiEventsSocket(w http.ResponseWriter, r *http.Request) {
 			}
 			sub.watchedHosts = next
 			sub.mu.Unlock()
+			s.events.pruneUnwatchedDeferredWakes(u.ID)
 			if s.corrald != nil {
 				s.corrald.SetWatcher(sub, u.ID, owned)
 			}

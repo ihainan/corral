@@ -418,11 +418,19 @@ echo "result=ok"
 `, "ST", stateDir)
 }
 
+// uninstallSystemRunBase is the parent directory of per-UID runtime dirs
+// (/run/user/<uid>), overridable in tests so fallback uninstall tests never
+// depend on host /run/user or hardcoded UIDs.
+var uninstallSystemRunBase = "/run/user"
+
 // UninstallCommand runs `<bin> uninstall [--op <id>]`. If the current symlink
 // and all versioned binaries are missing, the fallback verifies meta.json and
 // corrald.lock, stops any running process (verifying /proc/<pid>/stat start
 // time), and refuses to delete state files (returning error=stop_failed) if
-// the process or lock cannot be stopped.
+// the process or lock cannot be stopped. Before deleting ~/.local/state/corral/run
+// on the last machine, it acquires existing pane send locks in the same fixed
+// order as senders (/run/user/<uid> then run/) and returns error=busy if any
+// send lock is held.
 func UninstallCommand(libDir, stateDir, sockPath, opID string) string {
 	return shellScript(`BIN="$L/corrald"
 if [ ! -x "$BIN" ]; then
@@ -531,22 +539,120 @@ if [ -f "$ST/corrald.lock" ] && command -v flock >/dev/null 2>&1; then
   fi
 fi
 
-if [ -n "$SOCK" ]; then rm -f "$SOCK" 2>/dev/null || true; fi
-rm -rf "$ST" 2>/dev/null || true
 SR=$(dirname "$ST")
 others=0
 if [ -d "$SR" ]; then
   for d in "$SR"/*; do
-    if [ -d "$d" ] && [ -f "$d/install.json" ]; then others=1; break; fi
+    if [ -d "$d" ] && [ "$d" != "$ST" ] && [ -f "$d/install.json" ]; then others=1; break; fi
   done
 fi
 SC=$(dirname "$SR")
+if [ "$others" = "0" ] && [ -d "$SC/run" ] && [ ! -L "$SC/run" ] && [ -O "$SC/run" ]; then
+  _u=$(id -u 2>/dev/null)
+  _sysdir=
+  if [ -n "$_u" ] && [ -d "$SRB/$_u" ] && [ ! -L "$SRB/$_u" ] && [ -O "$SRB/$_u" ] && [ ! "$SRB/$_u" -ef "$SC/run" ]; then
+    _sysdir="$SRB/$_u"
+  fi
+  if command -v flock >/dev/null 2>&1; then
+    _pass=0
+    while [ "$_pass" -lt 4 ] && [ -d "$SC/run" ]; do
+      _pass=$((_pass + 1))
+      # Pass A: non-destructive check that no lock in run/ (or matching lock in
+      # /run/user/<uid>) is currently held before unlinking anything.
+      for _f in "$SC/run"/*; do
+        [ -e "$_f" ] || [ -L "$_f" ] || continue
+        [ -L "$_f" ] && continue
+        [ -f "$_f" ] || continue
+        _bn=${_f##*/}
+        if [ -n "$_sysdir" ] && [ -f "$_sysdir/$_bn" ] && [ ! -L "$_sysdir/$_bn" ] && [ -O "$_sysdir/$_bn" ]; then
+          if ! flock -n "$_sysdir/$_bn" true 2>/dev/null; then
+            echo "error=busy"
+            echo "detail=pane send lock is held in run dir"
+            exit 1
+          fi
+        fi
+        if [ -O "$_f" ]; then
+          if ! flock -n "$_f" true 2>/dev/null; then
+            echo "error=busy"
+            echo "detail=pane send lock is held in run dir"
+            exit 1
+          fi
+        fi
+      done
+      # Pass B: lock each entry in fixed order (_sysdir then run/), verify
+      # inode, unlink while locked, then release.
+      for _f in "$SC/run"/*; do
+        [ -e "$_f" ] || [ -L "$_f" ] || continue
+        if [ -L "$_f" ]; then
+          rm -f "$_f" 2>/dev/null || true
+          continue
+        fi
+        [ -f "$_f" ] || continue
+        _bn=${_f##*/}
+        _held9=0
+        if [ -n "$_sysdir" ] && [ -f "$_sysdir/$_bn" ] && [ ! -L "$_sysdir/$_bn" ] && [ -O "$_sysdir/$_bn" ]; then
+          exec 7>&2 2>/dev/null
+          command exec 9>>"$_sysdir/$_bn"
+          _rc=$?
+          exec 2>&7 7>&-
+          if [ "$_rc" -eq 0 ]; then
+            if ! flock -n 9; then
+              exec 9<&- 2>/dev/null || true
+              echo "error=busy"
+              echo "detail=pane send lock is held in run dir"
+              exit 1
+            fi
+            _held9=1
+          fi
+        fi
+        if [ -O "$_f" ]; then
+          exec 7>&2 2>/dev/null
+          command exec 8>>"$_f"
+          _rc=$?
+          exec 2>&7 7>&-
+          if [ "$_rc" -eq 0 ]; then
+            if ! flock -n 8; then
+              exec 8<&- 2>/dev/null || true
+              [ "$_held9" = 1 ] && exec 9<&- 2>/dev/null || true
+              echo "error=busy"
+              echo "detail=pane send lock is held in run dir"
+              exit 1
+            fi
+            if [ ! -L "$_f" ] && [ -f "$_f" ] && [ "$_f" -ef /proc/self/fd/8 ]; then
+              rm -f "$_f" 2>/dev/null || true
+            fi
+            exec 8<&- 2>/dev/null || true
+          fi
+        fi
+        [ "$_held9" = 1 ] && exec 9<&- 2>/dev/null || true
+      done
+      rmdir "$SC/run" 2>/dev/null && break
+    done
+    if [ -d "$SC/run" ]; then
+      # Directory still not empty: check whether a newly created lock is held.
+      for _f in "$SC/run"/*; do
+        [ -f "$_f" ] && [ ! -L "$_f" ] && [ -O "$_f" ] || continue
+        if ! flock -n "$_f" true 2>/dev/null; then
+          echo "error=busy"
+          echo "detail=pane send lock is held in run dir"
+          exit 1
+        fi
+      done
+    fi
+  else
+    for _f in "$SC/run"/*; do
+      [ -f "$_f" ] || [ -L "$_f" ] || continue
+      rm -f "$_f" 2>/dev/null || true
+    done
+    rmdir "$SC/run" 2>/dev/null || true
+  fi
+fi
+
+if [ -n "$SOCK" ]; then rm -f "$SOCK" 2>/dev/null || true; fi
+rm -rf "$ST" 2>/dev/null || true
 if [ "$others" = "0" ]; then
   rm -rf "$L/corrald" "$L"/corrald-* "$L/README.txt" 2>/dev/null || true
   rmdir "$SR" 2>/dev/null || true
-  if [ -d "$SC/run" ] && [ ! -L "$SC/run" ] && [ -O "$SC/run" ]; then
-    rm -rf "$SC/run" 2>/dev/null || true
-  fi
   rmdir "$SC" 2>/dev/null || true
   rmdir "$L" 2>/dev/null || true
 fi
@@ -572,7 +678,7 @@ if [ "$left_any" = "1" ]; then
   exit 1
 fi
 echo "result=removed"
-`, "L", libDir, "ST", stateDir, "SOCK", sockPath, "OP", opID)
+`, "L", libDir, "ST", stateDir, "SOCK", sockPath, "OP", opID, "SRB", uninstallSystemRunBase)
 }
 
 // StartCandidate describes the single authoritative binary chosen by

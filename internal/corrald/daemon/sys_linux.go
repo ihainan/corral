@@ -16,6 +16,8 @@ import (
 	"syscall"
 	"time"
 	"unsafe"
+
+	"golang.org/x/sys/unix"
 )
 
 // ErrLocked is returned when another corrald instance already holds the flock.
@@ -346,4 +348,223 @@ func SetProcessName(name string) {
 	b := make([]byte, 16)
 	copy(b[:15], name)
 	_, _, _ = syscall.RawSyscall(syscall.SYS_PRCTL, syscall.PR_SET_NAME, uintptr(unsafe.Pointer(&b[0])), 0)
+}
+
+func openValidatedDirLinux(dir string, uid uint32) (int, unix.Stat_t, bool) {
+	var zero unix.Stat_t
+	if dir == "" {
+		return -1, zero, false
+	}
+	fd, err := unix.Open(dir, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return -1, zero, false
+	}
+	var st unix.Stat_t
+	if err := unix.Fstat(fd, &st); err != nil || st.Mode&unix.S_IFMT != unix.S_IFDIR || st.Uid != uid {
+		_ = unix.Close(fd)
+		return -1, zero, false
+	}
+	return fd, st, true
+}
+
+func flockExistingNonBlocking(dirFD int, name string, uid uint32, deadline time.Time) (fd int, st unix.Stat_t, exists bool, err error) {
+	fd, err = unix.Openat(dirFD, name, unix.O_WRONLY|unix.O_APPEND|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		if errors.Is(err, unix.ENOENT) || errors.Is(err, unix.ELOOP) || errors.Is(err, unix.EISDIR) {
+			return -1, unix.Stat_t{}, false, nil
+		}
+		return -1, unix.Stat_t{}, false, err
+	}
+	if err := unix.Fstat(fd, &st); err != nil || st.Mode&unix.S_IFMT != unix.S_IFREG || st.Uid != uid {
+		_ = unix.Close(fd)
+		return -1, unix.Stat_t{}, false, nil
+	}
+	for {
+		err := unix.Flock(fd, unix.LOCK_EX|unix.LOCK_NB)
+		if err == nil {
+			return fd, st, true, nil
+		}
+		if errors.Is(err, unix.EINTR) {
+			continue
+		}
+		if errors.Is(err, unix.EWOULDBLOCK) || errors.Is(err, unix.EAGAIN) {
+			rem := time.Until(deadline)
+			if rem <= 0 {
+				_ = unix.Close(fd)
+				return -1, unix.Stat_t{}, true, ErrLocked
+			}
+			step := 25 * time.Millisecond
+			if rem < step {
+				step = rem
+			}
+			time.Sleep(step)
+			continue
+		}
+		_ = unix.Close(fd)
+		return -1, unix.Stat_t{}, true, err
+	}
+}
+
+// RemoveRunDirLocked safely removes ~/.local/state/corral/run only after
+// acquiring exclusive flocks on every existing lock file inside it (in the
+// same fixed order as senders: systemRunDir first when present, then runDir,
+// sorted by filename), unlinking those files while locked, and removing the
+// empty directory with os.Remove (rmdir) before releasing the locks.
+//
+// If any pane lock is currently held by an active sender (or new lock files
+// are concurrently created), RemoveRunDirLocked leaves runDir intact and
+// returns ErrLocked so uninstall reports `busy` and retries cleanly.
+func RemoveRunDirLocked(runDir, systemRunDir string, uid uint32, timeout time.Duration) error {
+	if runDir == "" {
+		return nil
+	}
+	if timeout < 0 {
+		timeout = 0
+	}
+	deadline := time.Now().Add(timeout)
+
+	const maxPasses = 8
+	for pass := 0; pass < maxPasses; pass++ {
+		rinfo, rerr := os.Lstat(runDir)
+		if rerr != nil {
+			if errors.Is(rerr, os.ErrNotExist) {
+				return nil
+			}
+			return rerr
+		}
+		rst, ok := rinfo.Sys().(*syscall.Stat_t)
+		if rinfo.Mode()&os.ModeSymlink != 0 || !rinfo.IsDir() || !ok || rst.Uid != uid {
+			// Never touch symlinks, non-directories, or foreign-owned paths.
+			return nil
+		}
+
+		runDirFD, runDirSt, ok := openValidatedDirLinux(runDir, uid)
+		if !ok {
+			if _, err := os.Lstat(runDir); errors.Is(err, os.ErrNotExist) {
+				return nil
+			}
+			return nil
+		}
+
+		entries, err := os.ReadDir(runDir)
+		if err != nil {
+			_ = unix.Close(runDirFD)
+			if errors.Is(err, os.ErrNotExist) {
+				return nil
+			}
+			return err
+		}
+
+		sysDirFD, sysDirSt, sysOK := openValidatedDirLinux(systemRunDir, uid)
+		if sysOK && sysDirSt.Dev == runDirSt.Dev && sysDirSt.Ino == runDirSt.Ino {
+			_ = unix.Close(sysDirFD)
+			sysDirFD = -1
+			sysOK = false
+		}
+
+		var heldFDs []int
+		var toUnlink []string
+		releaseAll := func() {
+			for i := len(heldFDs) - 1; i >= 0; i-- {
+				_ = unix.Flock(heldFDs[i], unix.LOCK_UN)
+				_ = unix.Close(heldFDs[i])
+			}
+			heldFDs = nil
+			if sysDirFD >= 0 {
+				_ = unix.Close(sysDirFD)
+				sysDirFD = -1
+			}
+			if runDirFD >= 0 {
+				_ = unix.Close(runDirFD)
+				runDirFD = -1
+			}
+		}
+
+		retryPass := false
+		for _, e := range entries {
+			name := e.Name()
+			if name == "" || name == "." || name == ".." {
+				continue
+			}
+			typ := e.Type()
+			if typ&os.ModeSymlink != 0 {
+				toUnlink = append(toUnlink, name)
+				continue
+			}
+			if typ.IsDir() {
+				releaseAll()
+				return fmt.Errorf("unexpected subdirectory %s in run dir", filepath.Join(runDir, name))
+			}
+
+			// Acquire locks in the exact same order as senders:
+			// 1. systemRunDir/<name> (only if already present; never created)
+			// 2. runDir/<name>
+			if sysOK {
+				sfd, _, sexists, serr := flockExistingNonBlocking(sysDirFD, name, uid, deadline)
+				if serr != nil {
+					releaseAll()
+					return serr
+				}
+				if sexists && sfd >= 0 {
+					heldFDs = append(heldFDs, sfd)
+				}
+			}
+
+			rfd, fst, rexists, rerr := flockExistingNonBlocking(runDirFD, name, uid, deadline)
+			if rerr != nil {
+				releaseAll()
+				return rerr
+			}
+			if !rexists || rfd < 0 {
+				continue
+			}
+			// Verify the locked fd still matches the directory entry.
+			var curSt unix.Stat_t
+			if ferr := unix.Fstatat(runDirFD, name, &curSt, unix.AT_SYMLINK_NOFOLLOW); ferr != nil ||
+				curSt.Dev != fst.Dev || curSt.Ino != fst.Ino {
+				_ = unix.Flock(rfd, unix.LOCK_UN)
+				_ = unix.Close(rfd)
+				releaseAll()
+				retryPass = true
+				break
+			}
+			heldFDs = append(heldFDs, rfd)
+			toUnlink = append(toUnlink, name)
+		}
+		if retryPass {
+			continue
+		}
+
+		// While still holding every exclusive flock, unlink the locked files
+		// and remove runDir with rmdir (os.Remove) so any concurrent creation
+		// of a new lock file causes ENOTEMPTY instead of silently deleting it.
+		var unlinkErr error
+		for _, name := range toUnlink {
+			if err := unix.Unlinkat(runDirFD, name, 0); err != nil && !errors.Is(err, unix.ENOENT) {
+				unlinkErr = err
+				break
+			}
+		}
+		if unlinkErr != nil {
+			releaseAll()
+			return unlinkErr
+		}
+
+		rmErr := os.Remove(runDir)
+		releaseAll()
+
+		if rmErr == nil || errors.Is(rmErr, os.ErrNotExist) {
+			return nil
+		}
+		if errors.Is(rmErr, syscall.ENOTEMPTY) || errors.Is(rmErr, syscall.EEXIST) {
+			// A sender created a new lock file before rmdir; retry pass to
+			// detect whether it is currently held (ErrLocked) or idle.
+			if time.Now().After(deadline) {
+				return ErrLocked
+			}
+			continue
+		}
+		return rmErr
+	}
+	return ErrLocked
 }
