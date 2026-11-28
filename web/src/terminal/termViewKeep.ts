@@ -94,3 +94,55 @@ export function claimPaneTerminal(sid: string, pane: string): void {
   if (!set) return
   for (const fn of [...set]) fn()
 }
+
+// Keys that do not produce terminal input on their own (modifiers, locks,
+// IME placeholders, OS/menu keys). Meta shortcuts (⌘C/⌘P/etc.) never send
+// PTY bytes either; ⌘V paste is captured by the textarea `paste` listener.
+const NON_INPUT_KEYS = new Set([
+  'Shift',
+  'Control',
+  'Alt',
+  'Meta',
+  'AltGraph',
+  'CapsLock',
+  'NumLock',
+  'ScrollLock',
+  'Fn',
+  'FnLock',
+  'Super',
+  'Hyper',
+  'Symbol',
+  'SymbolLock',
+  'OS',
+  'Dead',
+  'Process',
+  'Unidentified',
+  'ContextMenu',
+  'PrintScreen',
+])
+
+// Whether an xterm key event represents a user keypress that produces terminal
+// input (used to pin a preview tab from the real user event source rather than
+// guessing from PTY byte streams).
+export function isTerminalInputKey(e: {
+  type?: string
+  key: string
+  metaKey?: boolean
+  isComposing?: boolean
+  keyCode?: number
+}): boolean {
+  if (e.type && e.type !== 'keydown') return false
+  if (e.isComposing || e.keyCode === 229) return false
+  if (e.metaKey) return false
+  if (!e.key || NON_INPUT_KEYS.has(e.key)) return false
+  return true
+}
+
+// Whether a `beforeinput` event on xterm's helper textarea represents a real
+// user edit (e.g. mobile soft keyboard insert/delete or paste), excluding
+// in-progress IME composition previews (which commit via `compositionend`).
+export function isTerminalBeforeInput(e: { inputType?: string; data?: string | null }): boolean {
+  const inputType = e.inputType ?? ''
+  if (inputType === 'insertCompositionText' || inputType === 'deleteCompositionText') return false
+  return !!e.data || inputType.startsWith('insert') || inputType.startsWith('delete')
+}

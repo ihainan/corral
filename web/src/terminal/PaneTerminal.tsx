@@ -11,8 +11,8 @@ import { isCoarse } from '../components/ui'
 import { modalShown } from '../shown'
 import { darkTheme } from './themes'
 import type { PanelLive } from './PanelWindow'
-import { classifyPaneWsMessage, isUserTerminalInput } from './paneWsMsg'
-import { paneFocusAction, shouldResizePty, type TermDims } from './termViewKeep'
+import { classifyPaneWsMessage } from './paneWsMsg'
+import { isTerminalBeforeInput, isTerminalInputKey, paneFocusAction, shouldResizePty, type TermDims } from './termViewKeep'
 
 const FONT_STACK = "'JetBrains Mono', 'SFMono-Regular', Menlo, Consolas, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', monospace"
 
@@ -123,7 +123,6 @@ export function PaneTerminal({
     (s: string) => {
       const ws = wsRef.current
       if (!ws || ws.readyState !== WebSocket.OPEN) return
-      if (isUserTerminalInput(s)) onInputRef.current?.()
       const encoded = new TextEncoder().encode(s)
       for (let off = 0; off < encoded.byteLength; off += MAX_INPUT_CHUNK) {
         ws.send(encoded.subarray(off, Math.min(off + MAX_INPUT_CHUNK, encoded.byteLength)))
@@ -175,6 +174,7 @@ export function PaneTerminal({
       if (e.type === 'keydown' && e.key === 'Enter' && e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey) {
         e.preventDefault()
         e.stopPropagation()
+        onInputRef.current?.()
         sendBytesRef.current('\x1b\r')
         return false
       }
@@ -185,6 +185,7 @@ export function PaneTerminal({
         else el.closest('.convo-panelwin')?.querySelector<HTMLElement>('.convo-panelwin-head button')?.focus()
         return false
       }
+      if (isTerminalInputKey(e)) onInputRef.current?.()
       return true
     })
 
@@ -195,8 +196,18 @@ export function PaneTerminal({
     const ta = term.textarea
     const onFocus = () => setTaking(true)
     const onBlur = () => setTaking(false)
+    const onPaste = () => onInputRef.current?.()
+    const onCompositionEnd = (e: CompositionEvent) => {
+      if (e.data) onInputRef.current?.()
+    }
+    const onBeforeInput = (e: InputEvent) => {
+      if (isTerminalBeforeInput(e)) onInputRef.current?.()
+    }
     ta?.addEventListener('focus', onFocus)
     ta?.addEventListener('blur', onBlur)
+    ta?.addEventListener('paste', onPaste)
+    ta?.addEventListener('compositionend', onCompositionEnd)
+    ta?.addEventListener('beforeinput', onBeforeInput)
 
     termRef.current = term
     fitRef.current = fit
@@ -227,6 +238,9 @@ export function PaneTerminal({
       dataSub.dispose()
       ta?.removeEventListener('focus', onFocus)
       ta?.removeEventListener('blur', onBlur)
+      ta?.removeEventListener('paste', onPaste)
+      ta?.removeEventListener('compositionend', onCompositionEnd)
+      ta?.removeEventListener('beforeinput', onBeforeInput)
       term.dispose()
       termRef.current = null
       fitRef.current = null
@@ -433,7 +447,14 @@ export function PaneTerminal({
               </button>
             )
           ) : (
-            <button type="button" className="link-btn convo-panelwin-close" onClick={() => sendBytes('\x1b')}>
+            <button
+              type="button"
+              className="link-btn convo-panelwin-close"
+              onClick={() => {
+                onInputRef.current?.()
+                sendBytes('\x1b')
+              }}
+            >
               {t('agents.closeDialog')}
             </button>
           )}
@@ -508,7 +529,10 @@ export function PaneTerminal({
               key={k}
               type="button"
               className="convo-panelwin-key"
-              onClick={() => sendBytes(seq)}
+              onClick={() => {
+                onInputRef.current?.()
+                sendBytes(seq)
+              }}
               aria-label={t('panel.sendKey', { key: label, who })}
               title={t('panel.sendKey', { key: label, who })}
             >

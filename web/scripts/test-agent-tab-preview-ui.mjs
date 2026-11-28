@@ -644,13 +644,7 @@ function loadInlineReplyEnv(hooks, { screen, opts, readState, target, capturedKe
 // ============================================================================
 {
   const panelFile = parseTsx('../src/terminal/PanelWindow.tsx')
-  const paneWsSrc = readSrc('../src/terminal/paneWsMsg.ts')
   const noticeSrc = readSrc('../src/terminal/noticeDialog.ts')
-  const paneWsMod = await import(
-    `data:text/javascript;base64,${Buffer.from(
-      ts.transpileModule(paneWsSrc, { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 } }).outputText,
-    ).toString('base64')}`
-  )
   const noticeMod = await import(
     `data:text/javascript;base64,${Buffer.from(
       ts.transpileModule(noticeSrc, { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 } }).outputText,
@@ -795,49 +789,98 @@ function loadInlineReplyEnv(hooks, { screen, opts, readState, target, capturedKe
   const [paneTermEl] = findAll(ptyTree, (el) => el.type === PaneTerminalStub)
   assert.ok(paneTermEl, 'PanelWindow should render PaneTerminal when no notice card is shown')
   assert.equal(typeof paneTermEl.props.onInput, 'function', 'PanelWindow must forward onInput to PaneTerminal')
-  assert.ok(paneWsMod.isUserTerminalInput('\r'))
 }
 
 // ============================================================================
-// 6. P2 (fix3b): PaneTerminal PTY input pins preview tab immediately on first
-//    real user input, and does NOT pin on automatic terminal replies / wheel.
+// 6. P2 (fix4): PaneTerminal pins from real user input events (not PTY bytes):
+//    - wheel/mouse-move/focus bytes via term.onData do NOT pin (even ESC[A/B,
+//      ESC[<73;10;5M, ESC[<35;10;5M)
+//    - Shift+F3 (ESC[1;2R) pins immediately via custom key handler
+//    - keypress, IME commit, paste, and touch key bar pin even while WebSocket
+//      is connecting or closed
 // ============================================================================
 {
   const paneTermFile = parseTsx('../src/terminal/PaneTerminal.tsx')
   const paneWsSrc = readSrc('../src/terminal/paneWsMsg.ts')
+  const termKeepSrc = readSrc('../src/terminal/termViewKeep.ts')
   const paneWsMod = await import(
     `data:text/javascript;base64,${Buffer.from(
       ts.transpileModule(paneWsSrc, { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 } }).outputText,
     ).toString('base64')}`
   )
+  const termKeepMod = await import(
+    `data:text/javascript;base64,${Buffer.from(
+      ts.transpileModule(termKeepSrc, { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 } }).outputText,
+    ).toString('base64')}`
+  )
+  assert.equal('isUserTerminalInput' in paneWsMod, false, 'paneWsMsg.ts must not classify PTY bytes')
+
   const paneTermCode = transpileFn(paneTermFile, 'PaneTerminal')
 
   const sentFrames = []
   const fakeWs = {
-    readyState: 1,
+    readyState: 1, // starts OPEN
     send(payload) {
       sentFrames.push(payload)
     },
+    close() {},
   }
+  const taListeners = new Map()
+  const fakeTextarea = {
+    addEventListener(type, fn) {
+      taListeners.set(type, fn)
+    },
+    removeEventListener(type) {
+      taListeners.delete(type)
+    },
+  }
+  let customKeyHandler = null
+  let onDataCb = null
+  class FakeTerminal {
+    constructor() {
+      this.textarea = fakeTextarea
+      this.unicode = {}
+      this.options = {}
+      this.cols = 80
+      this.rows = 24
+    }
+    loadAddon() {}
+    open() {}
+    focus() {}
+    blur() {}
+    dispose() {}
+    attachCustomKeyEventHandler(fn) {
+      customKeyHandler = fn
+    }
+    onData(cb) {
+      onDataCb = cb
+      return { dispose() {} }
+    }
+  }
+
   const hooks = makeHooks()
   let refIdx = 0
   const origRef = hooks.useRef.bind(hooks)
   hooks.useRef = (init) => {
     const r = origRef(init)
-    // In PaneTerminal: 0=hostRef, 1=wsRef
-    if (refIdx++ === 1) r.current = fakeWs
+    const idx = refIdx++
+    // 0=hostRef, 1=wsRef
+    if (idx === 0) r.current = { clientWidth: 400, clientHeight: 200, closest: () => null }
+    if (idx === 1) r.current = fakeWs
     return r
   }
 
-  let capturedDataCb = null
+  const effects = []
   const env = {
     React,
     ...hooks,
     useCallback: (fn) => fn,
     useId: () => 'pty-1',
-    useEffect(fn) {
-      // Capture xterm onData wiring by running effects only if hostRef is populated; here we test sendBytes directly via touch keys & onData.
-      void fn
+    useEffect(fn, deps) {
+      // Run the mount-xterm effect (deps = [sid, pane]) so real key/textarea/onData handlers bind.
+      if (Array.isArray(deps) && deps.length === 2 && deps[0] === 's1' && deps[1] === '%1') {
+        effects.push(fn)
+      }
     },
     useLayoutEffect() {},
     usePrefs: () => ({ fontSize: 13, optionIsMeta: false }),
@@ -854,27 +897,34 @@ function loadInlineReplyEnv(hooks, { screen, opts, readState, target, capturedKe
     ACK_BATCH_BYTES: 64 * 1024,
     FONT_STACK: 'mono',
     PANEL_THEME: {},
-    WebSocket: { OPEN: 1 },
+    WebSocket: { OPEN: 1, CONNECTING: 0, CLOSED: 3 },
     TextEncoder,
+    ResizeObserver: class {
+      observe() {}
+      disconnect() {}
+    },
+    document: { activeElement: null },
     isActiveTerminalStatus: () => true,
     setLeaveGuardTerminal: () => {},
     classifyPaneWsMessage: paneWsMod.classifyPaneWsMessage,
-    isUserTerminalInput: paneWsMod.isUserTerminalInput,
+    isTerminalInputKey: termKeepMod.isTerminalInputKey,
+    isTerminalBeforeInput: termKeepMod.isTerminalBeforeInput,
     paneFocusAction: () => 'none',
     shouldResizePty: () => false,
     modalShown: () => false,
     openTerminalLink: () => {},
-    Terminal: class {},
-    FitAddon: class {},
+    Terminal: FakeTerminal,
+    FitAddon: class {
+      proposeDimensions() {
+        return { cols: 80, rows: 24 }
+      }
+    },
     Unicode11Addon: class {},
     WebLinksAddon: class {},
     setTimeout,
     clearTimeout,
   }
-  const { PaneTerminal } = new Function(
-    'env',
-    `with (env) {\n${paneTermCode}\nreturn { PaneTerminal }\n}`,
-  )(env)
+  const { PaneTerminal } = new Function('env', `with (env) {\n${paneTermCode}\nreturn { PaneTerminal }\n}`)(env)
 
   let tabs = [{ id: 't1', key: 'A', s: 's1', preview: true }]
   let pinCalls = 0
@@ -887,54 +937,88 @@ function loadInlineReplyEnv(hooks, { screen, opts, readState, target, capturedKe
     sid: 's1',
     pane: '%1',
     active: true,
+    live: { note: 'waiting' },
     onSettled: () => {},
     onFallback: () => {},
     onInput,
   })
-  // Also extract sendBytes directly from PaneTerminal to test automatic terminal replies vs real typing!
-  const paneFnNode = paneTermFile.statements.find((s) => ts.isFunctionDeclaration(s) && s.name?.text === 'PaneTerminal')
-  const sendBytesDecl = paneFnNode.body.statements
-    .filter(ts.isVariableStatement)
-    .flatMap((s) => [...s.declarationList.declarations])
-    .find((d) => ts.isIdentifier(d.name) && d.name.text === 'sendBytes')
-  assert.ok(sendBytesDecl?.initializer)
-  const sendBytesJs = ts.transpileModule(`const sendBytes = ${sendBytesDecl.initializer.getText(paneTermFile)};`, {
-    compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 },
-  }).outputText
-  const { sendBytes } = new Function(
-    'env',
-    `with (env) {\n${sendBytesJs}\nreturn { sendBytes }\n}`,
-  )({
-    useCallback: (fn) => fn,
-    wsRef: { current: fakeWs },
-    onInputRef: { current: onInput },
-    WebSocket: { OPEN: 1 },
-    TextEncoder,
-    MAX_INPUT_CHUNK: 256 * 1024,
-    scheduleSettle: () => {},
-    isUserTerminalInput: paneWsMod.isUserTerminalInput,
-  })
+  assert.equal(effects.length, 1, 'mount xterm effect should be captured')
+  effects[0]()
+  assert.equal(typeof customKeyHandler, 'function', 'PaneTerminal must attach custom key handler')
+  assert.equal(typeof onDataCb, 'function', 'PaneTerminal must subscribe to term.onData')
 
-  // Automatic focus-in, CPR, and mouse wheel events must NOT pin preview tab A:
-  sendBytes('\x1b[I')
-  sendBytes('\x1b[24;1R')
-  sendBytes('\x1b[<64;10;5M')
-  assert.equal(pinCalls, 0, 'viewing/focusing/scrolling in PTY terminal must not accidentally pin preview tab')
+  // 6a. Wheel scrolling (alt-screen ESC[A/B, SGR Alt+wheel ESC[<73;10;5M), SGR mouse movement
+  //     (ESC[<35;10;5M), and focus/CPR replies via term.onData must NOT pin preview tab A!
+  for (const seq of ['\x1b[A', '\x1b[B', '\x1b[<73;10;5M', '\x1b[<35;10;5M', '\x1b[I', '\x1b[O', '\x1b[24;1R']) {
+    onDataCb(seq)
+  }
+  assert.equal(pinCalls, 0, 'wheel scrolling, mouse movement, and terminal replies must NOT pin preview tab')
   assert.equal(tabs[0].preview, true)
-  assert.equal(sentFrames.length, 3, 'protocol replies still forward over WebSocket')
+  assert.equal(sentFrames.length, 7, 'terminal data still forwards over WebSocket')
 
-  // First real user keystroke in PTY terminal must immediately pin preview tab A:
-  sendBytes('y')
-  assert.equal(pinCalls, 1, 'typing in PTY terminal must immediately call onInput')
-  assert.equal(tabs[0].preview, undefined, 'preview tab A must be pinned after first PTY input')
+  // Pure modifiers, Meta copy shortcut, keyup, focus/blur, and F6 leave-focus must NOT pin:
+  customKeyHandler({ type: 'keydown', key: 'Shift', shiftKey: true })
+  customKeyHandler({ type: 'keydown', key: 'Control', ctrlKey: true })
+  customKeyHandler({ type: 'keydown', key: 'c', metaKey: true })
+  customKeyHandler({ type: 'keyup', key: 'a' })
+  customKeyHandler({ type: 'keydown', key: 'F6', preventDefault() {}, stopPropagation() {} })
+  taListeners.get('focus')?.()
+  taListeners.get('blur')?.()
+  assert.equal(pinCalls, 0, 'modifiers, Meta shortcuts, keyup, F6 leave, and focus/blur must NOT pin')
+  assert.equal(tabs[0].preview, true)
 
-  // Clicking a touch key bar button (Enter) also calls sendBytes -> pins immediately:
+  // 6b. Shift+F3 (which emits ESC[1;2R) MUST pin immediately via keyboard event!
+  customKeyHandler({ type: 'keydown', key: 'F3', shiftKey: true })
+  onDataCb('\x1b[1;2R')
+  assert.equal(pinCalls, 1, 'Shift+F3 keypress must pin preview tab immediately')
+  assert.equal(tabs[0].preview, undefined, 'preview tab A must be pinned after Shift+F3')
+
+  // 6c. Typing / Shift+Enter / Paste / IME commit / Touch key bar while WebSocket is
+  //     CONNECTING or CLOSED (readyState !== OPEN) must STILL pin immediately!
+  fakeWs.readyState = 0 // CONNECTING
+  const beforeSent = sentFrames.length
+
+  tabs = [{ id: 't1', key: 'A', s: 's1', preview: true }]
+  pinCalls = 0
+  customKeyHandler({ type: 'keydown', key: 'y' })
+  assert.equal(pinCalls, 1, 'typing while WebSocket is connecting must still pin immediately')
+  assert.equal(tabs[0].preview, undefined)
+
+  fakeWs.readyState = 3 // CLOSED
+  tabs = [{ id: 't1', key: 'A', s: 's1', preview: true }]
+  pinCalls = 0
+  customKeyHandler({ type: 'keydown', key: 'Enter', shiftKey: true, preventDefault() {}, stopPropagation() {} })
+  assert.equal(pinCalls, 1, 'Shift+Enter while WebSocket is closed must still pin immediately')
+  assert.equal(tabs[0].preview, undefined)
+
   tabs = [{ id: 't1', key: 'A', s: 's1', preview: true }]
   pinCalls = 0
   const [enterBtn] = findAll(tree, (el) => el.type === 'button' && el.props.className === 'convo-panelwin-key')
   assert.ok(enterBtn, 'PaneTerminal should render touch key button when isCoarse()')
   enterBtn.props.onClick()
-  assert.equal(pinCalls, 1, 'pressing Enter key button in PaneTerminal must pin preview tab immediately')
+  assert.equal(pinCalls, 1, 'touch key bar click while WebSocket is closed must still pin immediately')
+  assert.equal(tabs[0].preview, undefined)
+  assert.equal(sentFrames.length, beforeSent, 'no WS frames sent while disconnected')
+
+  // Paste and IME compositionend + mobile beforeinput must also pin immediately (even disconnected):
+  tabs = [{ id: 't1', key: 'A', s: 's1', preview: true }]
+  pinCalls = 0
+  taListeners.get('paste')?.()
+  assert.equal(pinCalls, 1, 'paste in PTY terminal must pin immediately')
+  assert.equal(tabs[0].preview, undefined)
+
+  tabs = [{ id: 't1', key: 'A', s: 's1', preview: true }]
+  pinCalls = 0
+  taListeners.get('beforeinput')?.({ inputType: 'insertCompositionText', data: 'ni' })
+  assert.equal(pinCalls, 0, 'in-progress IME composition preview should wait for commit')
+  taListeners.get('compositionend')?.({ data: '你' })
+  assert.equal(pinCalls, 1, 'IME compositionend with committed text must pin immediately')
+  assert.equal(tabs[0].preview, undefined)
+
+  tabs = [{ id: 't1', key: 'A', s: 's1', preview: true }]
+  pinCalls = 0
+  taListeners.get('beforeinput')?.({ inputType: 'insertText', data: 'a' })
+  assert.equal(pinCalls, 1, 'mobile soft keyboard beforeinput insertText must pin immediately')
   assert.equal(tabs[0].preview, undefined)
 
   // Verify every PanelWindow in AgentsChat.tsx, Conversation.tsx, and dock.tsx passes onInput.
@@ -956,7 +1040,6 @@ function loadInlineReplyEnv(hooks, { screen, opts, readState, target, capturedKe
     checkPanel(sf)
     assert.ok(count > 0, `expected PanelWindow in ${rel}`)
   }
-  void capturedDataCb
 }
 
 console.log('agentTabPreviewUI: all tests passed')

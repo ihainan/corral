@@ -14,6 +14,8 @@ const {
   paneFocusAction,
   onPaneTerminalClaim,
   claimPaneTerminal,
+  isTerminalInputKey,
+  isTerminalBeforeInput,
 } = await import(`data:text/javascript;base64,${Buffer.from(outputText).toString('base64')}`)
 
 const K1 = 's1 p1 100 200 sess-a'
@@ -133,5 +135,37 @@ assert.equal(hitsB, 1)
 offB()
 claimPaneTerminal('s1', 'pane-2')
 assert.equal(hitsB, 1)
+
+// 12. isTerminalInputKey accepts real input keys (including Shift+F3) and ignores modifiers/meta/keyup/IME.
+for (const ev of [
+  { type: 'keydown', key: 'y' },
+  { type: 'keydown', key: 'Enter' },
+  { type: 'keydown', key: 'Escape' },
+  { type: 'keydown', key: 'F3', shiftKey: true },
+  { type: 'keydown', key: 'ArrowUp' },
+  { type: 'keydown', key: 'c', ctrlKey: true },
+]) {
+  assert.equal(isTerminalInputKey(ev), true, `expected input key: ${JSON.stringify(ev)}`)
+}
+for (const ev of [
+  { type: 'keyup', key: 'y' },
+  { type: 'keydown', key: 'Shift' },
+  { type: 'keydown', key: 'Control' },
+  { type: 'keydown', key: 'Alt' },
+  { type: 'keydown', key: 'Meta' },
+  { type: 'keydown', key: 'c', metaKey: true },
+  { type: 'keydown', key: 'a', isComposing: true },
+  { type: 'keydown', key: 'Process', keyCode: 229 },
+  { type: 'keydown', key: 'Unidentified' },
+]) {
+  assert.equal(isTerminalInputKey(ev), false, `expected non-input key: ${JSON.stringify(ev)}`)
+}
+
+// 13. isTerminalBeforeInput accepts mobile/paste edits and ignores mid-composition previews.
+assert.equal(isTerminalBeforeInput({ inputType: 'insertText', data: 'a' }), true)
+assert.equal(isTerminalBeforeInput({ inputType: 'deleteContentBackward', data: null }), true)
+assert.equal(isTerminalBeforeInput({ inputType: 'insertFromPaste', data: 'hi' }), true)
+assert.equal(isTerminalBeforeInput({ inputType: 'insertCompositionText', data: 'ni' }), false)
+assert.equal(isTerminalBeforeInput({ inputType: 'deleteCompositionText', data: null }), false)
 
 console.log('termViewKeep: all tests passed')
