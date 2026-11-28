@@ -41,19 +41,25 @@ var (
 	rowAgeRe       = regexp.MustCompile(`[ \t]+[0-9]+[hms][ \t]*$`)
 	blankLineRe    = regexp.MustCompile(`^[ \t]*$`)
 
-	askPureRuleRe = regexp.MustCompile(`^[ \t]*[─━╌▔]{8,}[ \t]*$`)
-	askHintRuleRe = regexp.MustCompile(`^[ \t]*[─━╌▔]{2,}.*[─━╌▔]{2,}[ \t]*$`)
-	askMultiTabRe = regexp.MustCompile(`^[ \t]*(?:←[ \t]+)?(?:☐|☒|☑)[ \t]+[^ \t].*[ \t]+(?:✔|✓)[ \t]+Submit(?:[ \t]+→)?[ \t]*$`)
-	askLoneTabRe  = regexp.MustCompile(`^[ \t]*(?:☐|☒)[ \t]+[^ \t]`)
-	askOptLineRe  = regexp.MustCompile(`^[ \t]*(❯)?[ \t]*([0-9]{1,2})\.[ \t]+(.*)$`)
-	askSubmitLnRe = regexp.MustCompile(`^[ \t]*(?:❯[ \t]+)?Submit[ \t]*$`)
-	askChatLineRe = regexp.MustCompile(`^[ \t]*(?:[0-9]{1,2}\.[ \t]+)?Chat about this[ \t]*$`)
-	askReviewHdRe = regexp.MustCompile(`^[ \t]*Review your answers[ \t]*$`)
-	askHintSegRe  = regexp.MustCompile(`^(?:Enter to (?:select|confirm|submit)|(?:[↑↓←→/]+|Tab/Arrow keys|Arrow keys) to navigate|Tab to (?:switch questions|amend)|n to add notes|Esc to cancel|shift\+tab to approve with this feedback|ctrl\+g to edit in Vim(?: .*)?)$`)
-	askNavSegRe   = regexp.MustCompile(`Enter to (?:select|confirm|submit)|to navigate|Tab to switch questions`)
-	bgFooterRe    = regexp.MustCompile(`[0-9]+ background (?:task|agent|shell)s?|[0-9]+ local agents?|↓ to manage|ctrl\+o to expand|ctrl\+t to hide`)
-	bgStatusRe    = regexp.MustCompile(`│.*(?:Ctx |\$[0-9])|(?:Ctx |\$[0-9]).*│`)
-	bgModeRe      = regexp.MustCompile(`^[ \t]*(?:⏵|⏸|\? for shortcuts|Tip:[ \t])`)
+	askPureRuleRe  = regexp.MustCompile(`^[ \t]*[─━╌▔]{8,}[ \t]*$`)
+	askHintRuleRe  = regexp.MustCompile(`^[ \t]*[─━╌▔]{2,}.*[─━╌▔]{2,}[ \t]*$`)
+	overlinePureRe = regexp.MustCompile(`^ ?▔{8,}[ \t]*$`)
+	overlineBarRe  = regexp.MustCompile(`^ ?▔{2,}.*▔+[ \t]*$`)
+	overlineTailRe = regexp.MustCompile(`^ ?[^ \t].*[ \t]▔+[ \t]*$`)
+	solidRuleRe    = regexp.MustCompile(`^[ \t]*[─━]{8,}[ \t]*$`)
+	promptTopRe    = regexp.MustCompile(`^[ \t]*❯(?:[ \t]|$)`)
+	dialogTitleRe  = regexp.MustCompile(`^[ \t]*[A-Z][A-Za-z0-9 ,-]{2,}\?[ \t]*$`)
+	askMultiTabRe  = regexp.MustCompile(`^[ \t]*(?:←[ \t]+)?(?:☐|☒|☑)[ \t]+[^ \t].*[ \t]+(?:✔|✓)[ \t]+Submit(?:[ \t]+→)?[ \t]*$`)
+	askLoneTabRe   = regexp.MustCompile(`^[ \t]*(?:☐|☒)[ \t]+[^ \t]`)
+	askOptLineRe   = regexp.MustCompile(`^[ \t]*(❯)?[ \t]*([0-9]{1,2})\.[ \t]+(.*)$`)
+	askSubmitLnRe  = regexp.MustCompile(`^[ \t]*(?:❯[ \t]+)?Submit[ \t]*$`)
+	askChatLineRe  = regexp.MustCompile(`^[ \t]*(?:[0-9]{1,2}\.[ \t]+)?Chat about this[ \t]*$`)
+	askReviewHdRe  = regexp.MustCompile(`^[ \t]*Review your answers[ \t]*$`)
+	askHintSegRe   = regexp.MustCompile(`^(?:Enter to (?:select|confirm|submit)|(?:[↑↓←→/]+|Tab/Arrow keys|Arrow keys) to navigate|Tab to (?:switch questions|amend)|n to add notes|Esc to cancel|shift\+tab to approve with this feedback|ctrl\+g to edit in Vim(?: .*)?)$`)
+	askNavSegRe    = regexp.MustCompile(`Enter to (?:select|confirm|submit)|to navigate|Tab to switch questions`)
+	bgFooterRe     = regexp.MustCompile(`[0-9]+ background (?:task|agent|shell)s?|[0-9]+ local agents?|↓ to manage|ctrl\+o to expand|ctrl\+t to hide`)
+	bgStatusRe     = regexp.MustCompile(`│.*(?:Ctx |\$[0-9])|(?:Ctx |\$[0-9]).*│`)
+	bgModeRe       = regexp.MustCompile(`^[ \t]*(?:⏵|⏸|\? for shortcuts|Tip:[ \t])`)
 
 	ocSpinnerRe = regexp.MustCompile(`(?m)^([ \t]*┃[ \t]+)[\x{2800}-\x{28FF}]`)
 	ocBarRe     = regexp.MustCompile(`(?m)^([ \t]*)[⬝■]+ `)
@@ -384,6 +390,37 @@ func isAskRule(s string) bool {
 	return askPureRuleRe.MatchString(s) || (askHintRuleRe.MatchString(s) && !strings.Contains(s, "❯"))
 }
 
+func isOverlineLine(s string) bool {
+	if strings.Contains(s, "❯") || isIndented(s) || askOptLineRe.MatchString(s) {
+		return false
+	}
+	return overlinePureRe.MatchString(s) || overlineBarRe.MatchString(s) || overlineTailRe.MatchString(s)
+}
+
+func isOverlineChrome(plain []string, i int) bool {
+	if i < 0 || i >= len(plain) || !isOverlineLine(plain[i]) {
+		return false
+	}
+	blanks := 0
+	for j := i + 1; j < len(plain); j++ {
+		if blankLineRe.MatchString(plain[j]) {
+			blanks++
+			if blanks > 2 {
+				return false
+			}
+			continue
+		}
+		nxt := plain[j]
+		return solidRuleRe.MatchString(nxt) ||
+			promptTopRe.MatchString(nxt) ||
+			askMultiTabRe.MatchString(nxt) ||
+			askLoneTabRe.MatchString(nxt) ||
+			askReviewHdRe.MatchString(nxt) ||
+			dialogTitleRe.MatchString(nxt)
+	}
+	return false
+}
+
 func isAskHintLine(s string) bool {
 	t := strings.Trim(s, " \t")
 	if t == "" || strings.Contains(t, "❯") {
@@ -601,7 +638,7 @@ func askDialogBounds(lines []string) (top, end int, ok bool) {
 	hitRule := false
 	for j := firstOpt - 1; j >= tabLimit; j-- {
 		l := lines[j]
-		if isAskRule(l) {
+		if isAskRule(l) || isOverlineChrome(lines, j) {
 			hitRule = true
 			break
 		}
@@ -661,7 +698,15 @@ func steadyScreen(raw []byte) []byte {
 		}
 		return out.Bytes()
 	}
-	out := agentRowsAged(append(bytes.Join(rawLines, []byte("\n")), '\n'))
+	normLines := make([][]byte, len(rawLines))
+	for i, rl := range rawLines {
+		if isOverlineChrome(plain, i) {
+			normLines[i] = []byte("▔")
+		} else {
+			normLines[i] = rl
+		}
+	}
+	out := agentRowsAged(append(bytes.Join(normLines, []byte("\n")), '\n'))
 	out = spinnerLineRe.ReplaceAll(out, nil)
 	out = blinkingMarkRe.ReplaceAll(out, []byte("${1} "))
 	return out

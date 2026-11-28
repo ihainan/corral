@@ -233,10 +233,10 @@ func TestScreenDigestSteady(t *testing.T) {
 	// A tab-like line inside the question body (e.g. "☐ Preview ✔ Submit") must
 	// NOT become the dialog's top anchor and drop the real question above it.
 	fakeTabCases := []struct {
-		name     string
-		staging  string
-		timer    string
-		prod     string
+		name    string
+		staging string
+		timer   string
+		prod    string
 	}{
 		{
 			name: "multi-tab with fake tab line in body",
@@ -487,6 +487,166 @@ func TestLookDigest(t *testing.T) {
 	for _, c := range other {
 		if lookDigest([]byte(c[0])) == lookDigest([]byte(c[1])) {
 			t.Errorf("what a key acts on does not count: %q, %q", c[0], c[1])
+		}
+	}
+}
+
+// Regression test for Fix Round 3:
+// Claude Code renders transient notices (~8s) and effort status on the top-edge
+// `▔` overline bar above a dialog or input box. Both Go (steadyScreen /
+// panelDigest) and every POSIX awk (steadyPipe / panelDigestPipe) must
+// normalize that top-edge row identically, while preserving all dialog body,
+// option, cursor, arbitrary prose ending with `▔`, and non-`▔` rule diffs.
+func TestScreenDigestOverlineNotice(t *testing.T) {
+	// Real Claude Code plan card captures differing ONLY on line 3:
+	// before: transient focus-events notice ending in ` ▔`
+	// after:  overline bar with effort status ending in ` ▔`
+	planBody := strings.Join([]string{
+		"",
+		"  ──────────────────────────────────────────────────────────────────────────────────────────────",
+		"   Ready to code?",
+		"",
+		"   Here is Claude's plan:",
+		"  ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌",
+		"   Plan: add search",
+		"",
+		"   1. Add a search table                                                                        ↓",
+		"  ──────────────────────────────────────────────────────────────────────────────────────────────",
+		"   Claude has written up a plan and is ready to execute. Would you like to proceed?",
+		"",
+		"   ❯ 1. Yes, and use auto mode",
+		"     2. Yes, manually approve edits",
+		"     3. Tell Claude what to change",
+		"        shift+tab to approve with this feedback",
+		"",
+		"   ctrl+g to edit in Vim · ~/.claude/plans/set-up-the-service-snug-pond.md",
+	}, "\n") + "\n"
+
+	noticeBefore := "\n  ⎿ \u00a0/plan to preview\n" +
+		" tmux focus-events off · add 'set -g focus-events on' to ~/.tmux.conf and reattach for focus tr… ▔\n" +
+		planBody
+	noticeAfter := "\n  ⎿ \u00a0/plan to preview\n" +
+		"▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔ ◐ medium · /effort ▔\n" +
+		planBody
+	noticePure := "\n  ⎿ \u00a0/plan to preview\n" +
+		"▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔\n" +
+		planBody
+
+	// Coloured herdr (`--format ansi`) equivalents with SGR sequences on the
+	// overline bar, cursor, and borders.
+	ansiBefore := "\n  \x1b[38;5;244m⎿ \u00a0/plan to preview\x1b[0m\n" +
+		"\x1b[38;5;244m tmux focus-events off · add 'set -g focus-events on' to ~/.tmux.conf and reattach for focus tr… \x1b[38;5;238m▔\x1b[0m\n" +
+		strings.Replace(planBody, "❯", "\x1b[38;5;75m❯\x1b[0m", 1)
+	ansiAfter := "\n  \x1b[38;5;244m⎿ \u00a0/plan to preview\x1b[0m\n" +
+		"\x1b[38;5;238m▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔ \x1b[38;5;244m◐ medium · /effort \x1b[38;5;238m▔\x1b[0m\n" +
+		strings.Replace(planBody, "❯", "\x1b[38;5;75m❯\x1b[0m", 1)
+
+	// Input prompt & dialog-title screens with overline notice vs effort status.
+	promptBefore := " tmux focus-events off · add focus-events on ▔\n❯ \n"
+	promptAfter := "▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔ ◐ medium · /effort ▔\n❯ \n"
+	titleBefore := " transient notice ▔\n   Switch model?\n   ❯ 1. Sonnet\n     2. Opus\n"
+	titleAfter := "▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔\n   Switch model?\n   ❯ 1. Sonnet\n     2. Opus\n"
+
+	// Counterexamples: MUST remain distinct!
+	planDiffBody := strings.Replace(noticeAfter, "1. Add a search table", "1. Drop the users table", 1)
+	planDiffOpt := strings.Replace(noticeAfter, "2. Yes, manually approve edits", "2. Reject all edits", 1)
+	planDiffCursor := strings.Replace(
+		strings.Replace(noticeAfter, "   ❯ 1. Yes, and use auto mode", "     1. Yes, and use auto mode", 1),
+		"     2. Yes, manually approve edits", "   ❯ 2. Yes, manually approve edits", 1,
+	)
+	proseOverline1 := "Here is prose ending with ▔\nNormal follow-up line\n"
+	proseOverline2 := "Different prose ending with ▔\nNormal follow-up line\n"
+	indentedPlanOverline1 := strings.Replace(noticeAfter, "1. Add a search table                                                                        ↓", "1. Keep staging border ▔", 1)
+	indentedPlanOverline2 := strings.Replace(noticeAfter, "1. Add a search table                                                                        ↓", "1. Drop production border ▔", 1)
+	dashNotice := "\n  ⎿ \u00a0/plan to preview\n some notice ─\n" + planBody
+	dashRule := "\n  ⎿ \u00a0/plan to preview\n────────────────────────────────────────────────────────────\n" + planBody
+
+	// 1. Go vs every installed awk parity on plain screens.
+	allPlain := []string{
+		noticeBefore, noticeAfter, noticePure,
+		promptBefore, promptAfter, titleBefore, titleAfter,
+		planDiffBody, planDiffOpt, planDiffCursor,
+		proseOverline1, proseOverline2,
+		indentedPlanOverline1, indentedPlanOverline2,
+		dashNotice, dashRule,
+	}
+	for idx, s := range allPlain {
+		_, gwDigest, _ := screenOf([]byte(s))
+		for _, awk := range []string{"awk", "mawk", "gawk", "busybox awk", "original-awk"} {
+			if _, err := exec.LookPath(strings.Fields(awk)[0]); err != nil {
+				continue
+			}
+			pipe := strings.ReplaceAll(steadyPipe, "LC_ALL=C awk", "LC_ALL=C "+awk) + " | sha256sum"
+			cmd := exec.Command("sh", "-c", pipe)
+			cmd.Stdin = strings.NewReader(s)
+			out, err := cmd.Output()
+			if err != nil {
+				t.Fatalf("case %d (%s): %v", idx, awk, err)
+			}
+			if host, _, _ := strings.Cut(string(out), " "); host != gwDigest {
+				t.Errorf("case %d (%s) steadyPipe parity mismatch:\nhost: %s\ngw:   %s\ninput:\n%s", idx, awk, host, gwDigest, s)
+			}
+		}
+	}
+
+	// 2. Go panelDigest vs shell panelDigestPipe parity on ANSI-coloured screens.
+	for idx, s := range []string{ansiBefore, ansiAfter, "\x1b[38;5;244m" + promptBefore + "\x1b[0m", "\x1b[38;5;238m" + promptAfter + "\x1b[0m"} {
+		gwDig := panelDigest([]byte(s))
+		for _, awk := range []string{"awk", "mawk", "gawk", "busybox awk", "original-awk"} {
+			if _, err := exec.LookPath(strings.Fields(awk)[0]); err != nil {
+				continue
+			}
+			pipe := strings.ReplaceAll(panelDigestPipe, "LC_ALL=C awk", "LC_ALL=C "+awk)
+			cmd := exec.Command("sh", "-c", pipe)
+			cmd.Stdin = strings.NewReader(s)
+			out, err := cmd.Output()
+			if err != nil {
+				t.Fatalf("ansi case %d (%s): %v", idx, awk, err)
+			}
+			if host, _, _ := strings.Cut(string(out), " "); host != gwDig {
+				t.Errorf("ansi case %d (%s) panelDigestPipe mismatch:\nhost: %s\ngw:   %s", idx, awk, host, gwDig)
+			}
+		}
+	}
+
+	// 3. Equal-digest assertions (plain + ANSI).
+	_, dBefore, _ := screenOf([]byte(noticeBefore))
+	_, dAfter, _ := screenOf([]byte(noticeAfter))
+	_, dPure, _ := screenOf([]byte(noticePure))
+	if dBefore != dAfter || dBefore != dPure {
+		t.Errorf("plan card overline notice/status/pure must share digest: before=%s after=%s pure=%s", dBefore, dAfter, dPure)
+	}
+	if panelDigest([]byte(ansiBefore)) != panelDigest([]byte(ansiAfter)) || panelDigest([]byte(ansiBefore)) != dAfter {
+		t.Errorf("ANSI plan card overline notice/status must match plain digest: ansiBefore=%s ansiAfter=%s plain=%s",
+			panelDigest([]byte(ansiBefore)), panelDigest([]byte(ansiAfter)), dAfter)
+	}
+	_, dp1, _ := screenOf([]byte(promptBefore))
+	_, dp2, _ := screenOf([]byte(promptAfter))
+	if dp1 != dp2 {
+		t.Errorf("prompt overline notice/status must share digest: %s vs %s", dp1, dp2)
+	}
+	_, dt1, _ := screenOf([]byte(titleBefore))
+	_, dt2, _ := screenOf([]byte(titleAfter))
+	if dt1 != dt2 {
+		t.Errorf("dialog-title overline notice/pure must share digest: %s vs %s", dt1, dt2)
+	}
+
+	// 4. Counterexamples MUST produce different digests.
+	mustDiffer := []struct {
+		name string
+		a, b string
+	}{
+		{"plan body change", noticeAfter, planDiffBody},
+		{"option text change", noticeAfter, planDiffOpt},
+		{"cursor position change", noticeAfter, planDiffCursor},
+		{"ANSI cursor position change", ansiAfter, strings.Replace(ansiAfter, "\x1b[38;5;75m❯\x1b[0m 1. Yes, and use auto mode\n     2. Yes, manually approve edits", "  1. Yes, and use auto mode\n   \x1b[38;5;75m❯\x1b[0m 2. Yes, manually approve edits", 1)},
+		{"arbitrary prose ending with overline", proseOverline1, proseOverline2},
+		{"indented plan line ending with overline", indentedPlanOverline1, indentedPlanOverline2},
+		{"non-overline dash rule unchanged", dashNotice, dashRule},
+	}
+	for _, tc := range mustDiffer {
+		if panelDigest([]byte(tc.a)) == panelDigest([]byte(tc.b)) {
+			t.Errorf("%s: digests unexpectedly collided", tc.name)
 		}
 	}
 }
