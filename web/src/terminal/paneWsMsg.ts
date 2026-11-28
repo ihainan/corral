@@ -27,3 +27,24 @@ export function classifyPaneWsMessage(raw: string, receivedBytes: number): PaneW
   }
   return { kind: 'ignore' }
 }
+
+// Terminal-generated protocol replies (focus in/out, cursor position, device
+// attributes, mode reports, OSC/DCS query replies, and SGR mouse wheel scroll)
+// that xterm.js may emit via onData when the user is only viewing or scrolling.
+const NON_USER_TERM_INPUT = [
+  /^\x1b\[[IO]$/,
+  /^\x1b\[\??\d+(?:;\d+)*[Rn]$/,
+  /^\x1b\[[?>=][\d;]*c$/,
+  /^\x1b\[\??[\d;]*\$y$/,
+  /^\x1b\]\d+;[^\x07\x1b]*(?:\x07|\x1b\\)$/,
+  /^\x1bP[\s\S]*\x1b\\$/,
+  /^\x1b\[<6[4-7];\d+;\d+[Mm]$/,
+]
+
+// Whether an xterm.js onData / button byte payload represents real user input
+// (typing, pressing Enter/Esc/arrows, pasting) rather than automatic terminal
+// query responses or wheel scrolling.
+export function isUserTerminalInput(data: string): boolean {
+  if (!data) return false
+  return !NON_USER_TERM_INPUT.some((re) => re.test(data))
+}

@@ -638,4 +638,325 @@ function loadInlineReplyEnv(hooks, { screen, opts, readState, target, capturedKe
   assert.equal(navTo, '/agents?s=s1&pane=p2')
 }
 
+// ============================================================================
+// 5. P2 (fix3a): InlineReply -> PanelWindow notice card "Continue" pins
+//    SYNCHRONOUSLY on click, before the panel POST request resolves.
+// ============================================================================
+{
+  const panelFile = parseTsx('../src/terminal/PanelWindow.tsx')
+  const paneWsSrc = readSrc('../src/terminal/paneWsMsg.ts')
+  const noticeSrc = readSrc('../src/terminal/noticeDialog.ts')
+  const paneWsMod = await import(
+    `data:text/javascript;base64,${Buffer.from(
+      ts.transpileModule(paneWsSrc, { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 } }).outputText,
+    ).toString('base64')}`
+  )
+  const noticeMod = await import(
+    `data:text/javascript;base64,${Buffer.from(
+      ts.transpileModule(noticeSrc, { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 } }).outputText,
+    ).toString('base64')}`
+  )
+
+  // Step A: InlineReply in shownLive fallback mode must pass onInput={act} to PanelWindow.
+  const screen = { text: '──────────────\nAn unrecognized confirmation notice\n\nEnter to continue · Esc to cancel', digest: 'dig-notice' }
+  const target = {
+    key: 't-live',
+    agent: 'claude',
+    live: { sid: 's1', press: () => ({ pane: '%1' }) },
+    screen: async () => screen,
+    reply: async () => {},
+  }
+  const replyHooks = makeHooks()
+  const origUseState = replyHooks.useState.bind(replyHooks)
+  let stateCall = 0
+  replyHooks.useState = (init) => {
+    const idx = stateCall++
+    return idx === 2 ? origUseState(screen) : origUseState(init)
+  }
+  let tabs = [{ id: 't1', key: 'A', s: 's1', preview: true }]
+  const onInteract = () => {
+    tabs = policy.pinAgentTabByKey(tabs, 'A').tabs
+  }
+  const replyEnv = loadInlineReplyEnv(replyHooks, { screen, opts: [], readState: { kind: 'unknown' }, target })
+  const inlineTree = replyEnv.InlineReply({
+    target,
+    onTyped: onInteract,
+    onAct: onInteract,
+    onAnswered: () => {},
+  })
+  const [panelEl] = findAll(inlineTree, (el) => el.type?.name === 'PanelWindow' || el.type === 'PanelWindowStub')
+  assert.ok(panelEl, 'InlineReply must render PanelWindow when falling back to live view')
+  assert.equal(typeof panelEl.props.onInput, 'function', 'InlineReply must pass onInput to PanelWindow so clicks pin synchronously')
+
+  // Step B: Execute actual PanelWindow with the props from InlineReply on a notice card,
+  // with `api` hanging (never resolved yet), click "Continue", and assert A is pinned immediately!
+  const panelHooks = makeHooks()
+  let pStateIdx = 0
+  const pOrigState = panelHooks.useState.bind(panelHooks)
+  panelHooks.useState = (init) => {
+    const idx = pStateIdx++
+    // In PanelWindow: 0=screen, 1=loaded
+    if (idx === 0) return pOrigState(screen)
+    if (idx === 1) return pOrigState(true)
+    return pOrigState(init)
+  }
+  let atRef
+  const pOrigRef = panelHooks.useRef.bind(panelHooks)
+  panelHooks.useRef = (init) => {
+    const r = pOrigRef(init)
+    if (init && typeof init === 'object' && 'queue' in init && 'shown' in init) {
+      r.current.shown = screen.digest
+      atRef = r
+    }
+    return r
+  }
+
+  let apiCalled = 0
+  let resolveApi
+  const pendingApi = new Promise((r) => {
+    resolveApi = r
+  })
+  const PaneTerminalStub = (p) => React.createElement('PaneTerminalStub', p)
+  const panelCode = transpileFn(panelFile, 'PanelWindow')
+  const panelEnv = {
+    React,
+    Fragment: React.Fragment,
+    ...panelHooks,
+    useCallback: (fn) => fn,
+    useMemo: (fn) => fn(),
+    useId: () => 'id-1',
+    useWhenGone: () => ({ back() {}, gone() {} }),
+    t: (k) => k,
+    isCoarse: () => false,
+    claimPaneTerminal: () => {},
+    ansiLines: (txt) => txt.split('\n').map((line) => [{ text: line }]),
+    readNoticeDialog: noticeMod.readNoticeDialog,
+    renderLinked: (txt) => txt,
+    noticeLabel: (a) => a.hint,
+    keyWord: (k) => k,
+    settles: (k) => k === 'enter' || k === 'space' || k === 'shift+tab' || /^[0-9]$/.test(k),
+    runStyle: () => ({}),
+    shouldIgnorePanelPollError: () => false,
+    PaneTerminal: PaneTerminalStub,
+    ApiError: class ApiError extends Error {},
+    errorText: (e) => String(e),
+    api: () => {
+      apiCalled++
+      return pendingApi
+    },
+    EVERY: 800,
+    EVERY_LIVE: 350,
+    ESC_AGAIN: 1000,
+    QUEUE: 16,
+    FAILS: 4,
+    NOTICE_LOOK_MS: 4000,
+    SAID_FOR: 2000,
+    STALE: 3000,
+    PTY_TRIES: 2,
+    TOUCH_KEYS: [],
+    document: { hidden: false },
+    setTimeout,
+    clearTimeout,
+  }
+  const { PanelWindow } = new Function('env', `with (env) {\n${panelCode}\nreturn { PanelWindow }\n}`)(panelEnv)
+
+  const noticeTree = PanelWindow(panelEl.props)
+  const noticeBtns = findAll(noticeTree, (el) => el.type === 'button' && el.props.className?.includes('convo-notice-act'))
+  assert.ok(noticeBtns.length >= 1, 'PanelWindow should render notice action button')
+  assert.ok(atRef)
+
+  // Click "Continue" while api() is still pending (unresolved):
+  noticeBtns[0].props.onClick()
+  assert.equal(apiCalled, 1, 'clicking Continue should trigger panel POST request')
+  assert.equal(tabs[0].preview, undefined, 'clicking Continue on notice card must pin preview tab A synchronously before request resolves')
+
+  // Switching to B right after clicking (before request resolves) must preserve A!
+  const switched = policy.openAgentTab(tabs, 't1', { key: 'B', s: 's2' }, 'preview', () => 't2')
+  assert.equal(switched.tabs.some((x) => x.key === 'A'), true, 'A must not be replaced by B while notice request is in flight')
+  assert.equal(switched.tabs.some((x) => x.key === 'B' && x.preview), true)
+  resolveApi({ text: '', digest: 'next' })
+
+  // Step C: When PanelWindow renders PaneTerminal (usePty = true, no notice on screen),
+  // it must forward onInput down to PaneTerminal.
+  const ptyHooks = makeHooks()
+  let ptyIdx = 0
+  const ptyOrigState = ptyHooks.useState.bind(ptyHooks)
+  ptyHooks.useState = (init) => {
+    const idx = ptyIdx++
+    if (idx === 0) return ptyOrigState({ text: 'plain terminal', digest: 'dig-pty' })
+    if (idx === 1) return ptyOrigState(true)
+    return ptyOrigState(init)
+  }
+  const { PanelWindow: PanelWindowPty } = new Function('env', `with (env) {\n${panelCode}\nreturn { PanelWindow }\n}`)({
+    ...panelEnv,
+    ...ptyHooks,
+  })
+  const ptyTree = PanelWindowPty(panelEl.props)
+  const [paneTermEl] = findAll(ptyTree, (el) => el.type === PaneTerminalStub)
+  assert.ok(paneTermEl, 'PanelWindow should render PaneTerminal when no notice card is shown')
+  assert.equal(typeof paneTermEl.props.onInput, 'function', 'PanelWindow must forward onInput to PaneTerminal')
+  assert.ok(paneWsMod.isUserTerminalInput('\r'))
+}
+
+// ============================================================================
+// 6. P2 (fix3b): PaneTerminal PTY input pins preview tab immediately on first
+//    real user input, and does NOT pin on automatic terminal replies / wheel.
+// ============================================================================
+{
+  const paneTermFile = parseTsx('../src/terminal/PaneTerminal.tsx')
+  const paneWsSrc = readSrc('../src/terminal/paneWsMsg.ts')
+  const paneWsMod = await import(
+    `data:text/javascript;base64,${Buffer.from(
+      ts.transpileModule(paneWsSrc, { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 } }).outputText,
+    ).toString('base64')}`
+  )
+  const paneTermCode = transpileFn(paneTermFile, 'PaneTerminal')
+
+  const sentFrames = []
+  const fakeWs = {
+    readyState: 1,
+    send(payload) {
+      sentFrames.push(payload)
+    },
+  }
+  const hooks = makeHooks()
+  let refIdx = 0
+  const origRef = hooks.useRef.bind(hooks)
+  hooks.useRef = (init) => {
+    const r = origRef(init)
+    // In PaneTerminal: 0=hostRef, 1=wsRef
+    if (refIdx++ === 1) r.current = fakeWs
+    return r
+  }
+
+  let capturedDataCb = null
+  const env = {
+    React,
+    ...hooks,
+    useCallback: (fn) => fn,
+    useId: () => 'pty-1',
+    useEffect(fn) {
+      // Capture xterm onData wiring by running effects only if hostRef is populated; here we test sendBytes directly via touch keys & onData.
+      void fn
+    },
+    useLayoutEffect() {},
+    usePrefs: () => ({ fontSize: 13, optionIsMeta: false }),
+    termScheme: () => ({ id: 'dark', theme: { background: '#000' } }),
+    isCoarse: () => true,
+    t: (k) => k,
+    TOUCH_KEYS: [
+      ['enter', 'Enter', '\r'],
+      ['esc', 'Esc', '\x1b'],
+    ],
+    MAX_INPUT_CHUNK: 256 * 1024,
+    PING_EVERY_MS: 25000,
+    PONG_TIMEOUT_MS: 12000,
+    ACK_BATCH_BYTES: 64 * 1024,
+    FONT_STACK: 'mono',
+    PANEL_THEME: {},
+    WebSocket: { OPEN: 1 },
+    TextEncoder,
+    isActiveTerminalStatus: () => true,
+    setLeaveGuardTerminal: () => {},
+    classifyPaneWsMessage: paneWsMod.classifyPaneWsMessage,
+    isUserTerminalInput: paneWsMod.isUserTerminalInput,
+    paneFocusAction: () => 'none',
+    shouldResizePty: () => false,
+    modalShown: () => false,
+    openTerminalLink: () => {},
+    Terminal: class {},
+    FitAddon: class {},
+    Unicode11Addon: class {},
+    WebLinksAddon: class {},
+    setTimeout,
+    clearTimeout,
+  }
+  const { PaneTerminal } = new Function(
+    'env',
+    `with (env) {\n${paneTermCode}\nreturn { PaneTerminal }\n}`,
+  )(env)
+
+  let tabs = [{ id: 't1', key: 'A', s: 's1', preview: true }]
+  let pinCalls = 0
+  const onInput = () => {
+    pinCalls++
+    tabs = policy.pinAgentTabByKey(tabs, 'A').tabs
+  }
+
+  const tree = PaneTerminal({
+    sid: 's1',
+    pane: '%1',
+    active: true,
+    onSettled: () => {},
+    onFallback: () => {},
+    onInput,
+  })
+  // Also extract sendBytes directly from PaneTerminal to test automatic terminal replies vs real typing!
+  const paneFnNode = paneTermFile.statements.find((s) => ts.isFunctionDeclaration(s) && s.name?.text === 'PaneTerminal')
+  const sendBytesDecl = paneFnNode.body.statements
+    .filter(ts.isVariableStatement)
+    .flatMap((s) => [...s.declarationList.declarations])
+    .find((d) => ts.isIdentifier(d.name) && d.name.text === 'sendBytes')
+  assert.ok(sendBytesDecl?.initializer)
+  const sendBytesJs = ts.transpileModule(`const sendBytes = ${sendBytesDecl.initializer.getText(paneTermFile)};`, {
+    compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 },
+  }).outputText
+  const { sendBytes } = new Function(
+    'env',
+    `with (env) {\n${sendBytesJs}\nreturn { sendBytes }\n}`,
+  )({
+    useCallback: (fn) => fn,
+    wsRef: { current: fakeWs },
+    onInputRef: { current: onInput },
+    WebSocket: { OPEN: 1 },
+    TextEncoder,
+    MAX_INPUT_CHUNK: 256 * 1024,
+    scheduleSettle: () => {},
+    isUserTerminalInput: paneWsMod.isUserTerminalInput,
+  })
+
+  // Automatic focus-in, CPR, and mouse wheel events must NOT pin preview tab A:
+  sendBytes('\x1b[I')
+  sendBytes('\x1b[24;1R')
+  sendBytes('\x1b[<64;10;5M')
+  assert.equal(pinCalls, 0, 'viewing/focusing/scrolling in PTY terminal must not accidentally pin preview tab')
+  assert.equal(tabs[0].preview, true)
+  assert.equal(sentFrames.length, 3, 'protocol replies still forward over WebSocket')
+
+  // First real user keystroke in PTY terminal must immediately pin preview tab A:
+  sendBytes('y')
+  assert.equal(pinCalls, 1, 'typing in PTY terminal must immediately call onInput')
+  assert.equal(tabs[0].preview, undefined, 'preview tab A must be pinned after first PTY input')
+
+  // Clicking a touch key bar button (Enter) also calls sendBytes -> pins immediately:
+  tabs = [{ id: 't1', key: 'A', s: 's1', preview: true }]
+  pinCalls = 0
+  const [enterBtn] = findAll(tree, (el) => el.type === 'button' && el.props.className === 'convo-panelwin-key')
+  assert.ok(enterBtn, 'PaneTerminal should render touch key button when isCoarse()')
+  enterBtn.props.onClick()
+  assert.equal(pinCalls, 1, 'pressing Enter key button in PaneTerminal must pin preview tab immediately')
+  assert.equal(tabs[0].preview, undefined)
+
+  // Verify every PanelWindow in AgentsChat.tsx, Conversation.tsx, and dock.tsx passes onInput.
+  for (const rel of ['../src/pages/AgentsChat.tsx', '../src/terminal/Conversation.tsx', '../src/terminal/dock.tsx']) {
+    const sf = parseTsx(rel)
+    let count = 0
+    function checkPanel(node) {
+      if (ts.isJsxOpeningElement(node) || ts.isJsxSelfClosingElement(node)) {
+        if (node.tagName.getText(sf) === 'PanelWindow') {
+          count++
+          const hasOnInput = node.attributes.properties.some(
+            (p) => ts.isJsxAttribute(p) && p.name.getText(sf) === 'onInput',
+          )
+          assert.equal(hasOnInput, true, `PanelWindow in ${rel} must pass onInput`)
+        }
+      }
+      ts.forEachChild(node, checkPanel)
+    }
+    checkPanel(sf)
+    assert.ok(count > 0, `expected PanelWindow in ${rel}`)
+  }
+  void capturedDataCb
+}
+
 console.log('agentTabPreviewUI: all tests passed')

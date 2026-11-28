@@ -11,7 +11,7 @@ import { isCoarse } from '../components/ui'
 import { modalShown } from '../shown'
 import { darkTheme } from './themes'
 import type { PanelLive } from './PanelWindow'
-import { classifyPaneWsMessage } from './paneWsMsg'
+import { classifyPaneWsMessage, isUserTerminalInput } from './paneWsMsg'
 import { paneFocusAction, shouldResizePty, type TermDims } from './termViewKeep'
 
 const FONT_STACK = "'JetBrains Mono', 'SFMono-Regular', Menlo, Consolas, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', monospace"
@@ -52,6 +52,7 @@ export function PaneTerminal({
   backToCard,
   onSettled,
   onFallback,
+  onInput,
 }: {
   sid: string
   pane: string
@@ -61,6 +62,7 @@ export function PaneTerminal({
   backToCard?: () => void
   onSettled: () => void
   onFallback: () => void
+  onInput?: () => void
 }) {
   const prefs = usePrefs()
   // (The main view's colours: the person's terminal scheme, which follows the page's light or dark — read anew on each.)
@@ -78,6 +80,8 @@ export function PaneTerminal({
   onSettledRef.current = onSettled
   const onFallbackRef = useRef(onFallback)
   onFallbackRef.current = onFallback
+  const onInputRef = useRef(onInput)
+  onInputRef.current = onInput
   const liveRef = useRef(live)
   liveRef.current = live
   const activeRef = useRef(active)
@@ -119,6 +123,7 @@ export function PaneTerminal({
     (s: string) => {
       const ws = wsRef.current
       if (!ws || ws.readyState !== WebSocket.OPEN) return
+      if (isUserTerminalInput(s)) onInputRef.current?.()
       const encoded = new TextEncoder().encode(s)
       for (let off = 0; off < encoded.byteLength; off += MAX_INPUT_CHUNK) {
         ws.send(encoded.subarray(off, Math.min(off + MAX_INPUT_CHUNK, encoded.byteLength)))

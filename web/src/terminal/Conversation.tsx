@@ -2580,6 +2580,7 @@ export function ConversationView({
             keys={kActive && termKeep.visible}
             press={dockTerminal.press}
             onSettled={convo.refresh}
+            onInput={dockTerminal.onInput}
             toast={toast}
             live={{
               main: true,

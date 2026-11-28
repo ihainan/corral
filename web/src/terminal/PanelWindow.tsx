@@ -99,7 +99,7 @@ export type PanelLive = { onClose?: () => void; onFull?: () => void; note?: stri
 const PTY_TRIES = 2
 // active: in sight (its screen read, said when old); keys: whether it may take the keys as it comes — not so the side
 // of a split without them (review of 36e1069). Unsaid, as active.
-export function PanelWindow({ sid, active, keys, press, onSettled, toast, live, onFull }: { live?: PanelLive; sid: string; active: boolean; keys?: boolean; press: () => Record<string, unknown>; onSettled: () => void; toast: (s: string, bad?: boolean) => void; onFull?: () => void }) {
+export function PanelWindow({ sid, active, keys, press, onSettled, toast, live, onFull, onInput }: { live?: PanelLive; sid: string; active: boolean; keys?: boolean; press: () => Record<string, unknown>; onSettled: () => void; toast: (s: string, bad?: boolean) => void; onFull?: () => void; onInput?: () => void }) {
   const [screen, setScreen] = useState({ text: '', digest: '' })
   const [loaded, setLoaded] = useState(false)
   const [pumping, setPumping] = useState(false)
@@ -169,6 +169,8 @@ export function PanelWindow({ sid, active, keys, press, onSettled, toast, live, 
   const hasNoticeNow = useRef(false)
   const onNoticeSentNow = useRef(live?.onNoticeSent)
   onNoticeSentNow.current = live?.onNoticeSent
+  const onInputNow = useRef(onInput)
+  onInputNow.current = onInput
   const onBlockerNow = useRef(live?.onBlocker)
   onBlockerNow.current = live?.onBlocker
   const activeNow = useRef(active)
@@ -293,6 +295,7 @@ export function PanelWindow({ sid, active, keys, press, onSettled, toast, live, 
       if (k === 'esc' && (a.escGoing || a.queue.some((x) => x.k === 'esc'))) return
       if (settlesHere(k) && !a.shown) return // (nothing on show yet)
       if (a.queue.length >= QUEUE) return sayKey(t('panel.tooFast', { key: keyWord(k) }), true)
+      onInputNow.current?.()
       a.queue.push({ k, digest: a.shown })
       a.look?.abort() // (a look under way would hold it up behind it)
       void pump()
@@ -426,6 +429,7 @@ export function PanelWindow({ sid, active, keys, press, onSettled, toast, live, 
         backToCard={allowNotice && notice && rawView ? () => setRawView(false) : undefined}
         onSettled={onSettled}
         onFallback={ptyFellBack}
+        onInput={onInput}
       />
     )
   }
