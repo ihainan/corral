@@ -361,8 +361,9 @@ func TestCorraldReview_UninstallMissingBinaryStopsRunningProcess(t *testing.T) {
 	stateDir := filepath.Dir(lockMatches[0])
 	metaPath := filepath.Join(stateDir, "meta.json")
 	origMeta, _ := os.ReadFile(metaPath)
-	// Corrupt start_time in meta.json so fallback cannot kill the wrong process, while real daemon still holds flock!
-	_ = os.WriteFile(metaPath, []byte(`{"pid":999999,"start_time":"99999999"}`), 0o600)
+	// Corrupt pid/start_time and socket_path in meta.json so neither RPC nor PID
+	// match can stop the daemon while the real daemon still holds corrald.lock!
+	_ = os.WriteFile(metaPath, []byte(`{"pid":999999,"start_time":"99999999","socket_path":"/nonexistent/corrald.sock"}`), 0o600)
 
 	mustStatus(t, admin.do("POST", fmt.Sprintf("/api/hosts/%d/corrald/remove", hostID), nil), http.StatusAccepted, "remove with held lock")
 	stFail := waitCorraldState(t, admin, hostID, "error")

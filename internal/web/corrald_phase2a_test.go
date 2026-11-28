@@ -2523,6 +2523,508 @@ func TestCorraldFix8_ConcurrentSameAccountInstall(t *testing.T) {
 	t.Run("late_binding_hosts", func(t *testing.T) { runCase(t, true) })
 }
 
+// Regression test for Fix Round 9 Item #1 [P1]:
+// Manual remove (and host delete) MUST route binaryless hosts through the same
+// locked LibDir reinstall + locked `corrald uninstall` path instead of
+// truncating the tombstone and running an unlocked shell fallback.
+// When binary is missing + valid removing tombstone + run/ is not removable:
+// user retries remove -> tombstone kept, result partial; clearing run/ fault ->
+// later retry recovers cleanly to off with all files removed.
+func TestCorraldFix9_ManualRemoveBinarylessTombstoneRecovery(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("requires linux")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("chmod 0500 does not block root")
+	}
+	v1Dir, _ := buildTestCorraldDist(t)
+	h := newHarness(t, func(c *config.Config) {
+		c.CorraldDir = v1Dir
+		c.GatewayID = "gw-fix9-rm.local"
+	})
+	admin := h.admin()
+	sshSrv, home := startCorraldSSH(t)
+	hostID, _ := createAndPinHost(t, admin, sshSrv, "manual-rm-binless")
+
+	startCorraldInstall(t, admin, hostID)
+	waitCorraldState(t, admin, hostID, gw.StateRunning)
+
+	// Probe exact paths, stop daemon, delete LibDir completely (binaryless),
+	// remove install.json, and leave a valid structured removing tombstone +
+	// read-only run/ directory.
+	sshCl := dialTestSSH(t, sshSrv)
+	defer sshCl.Close()
+	probe, err := gw.ProbeHost(context.Background(), sshCl)
+	if err != nil {
+		t.Fatalf("ProbeHost: %v", err)
+	}
+	stopCmd := exec.Command(probe.CurrentBin, "stop")
+	stopCmd.Env = append(os.Environ(), "HOME="+home)
+	if out, err := stopCmd.CombinedOutput(); err != nil {
+		t.Fatalf("stop daemon: %v (%s)", err, out)
+	}
+	if err := os.RemoveAll(probe.LibDir); err != nil {
+		t.Fatal(err)
+	}
+	_ = os.Remove(probe.InstallJSON)
+	tombPath := probe.TombstonePath
+	tombContent := `{"created_at":"2026-11-28T00:00:00Z","gateway":"gw-fix9-rm.local"}` + "\n"
+	if err := os.WriteFile(tombPath, []byte(tombContent), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runDir := filepath.Join(home, ".local", "state", "corral", "run")
+	if err := os.MkdirAll(runDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(runDir, "corral-send-tmux-_7"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(runDir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(runDir, 0o700) })
+
+	// 1. User triggers manual remove -> must report partial AND keep tombstone!
+	rm1 := admin.do("POST", fmt.Sprintf("/api/hosts/%d/corrald/remove", hostID), nil)
+	mustStatus(t, rm1, http.StatusAccepted, "manual remove #1")
+	st1 := waitCorraldState(t, admin, hostID, gw.StateError)
+	if opMap, _ := st1["op"].(map[string]any); opMap == nil || opMap["error_code"] != "partial" {
+		t.Fatalf("expected partial error on manual remove #1, got %v", st1)
+	}
+	gotTomb, terr := os.ReadFile(tombPath)
+	if terr != nil || len(strings.TrimSpace(string(gotTomb))) == 0 {
+		t.Fatalf("Fix9 Item #1 regression: removing tombstone was truncated or deleted during manual remove! err=%v content=%q", terr, string(gotTomb))
+	}
+
+	// 2. Clear run/ fault -> user retries manual remove -> cleanly recovers to off!
+	if err := os.Chmod(runDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	rm2 := admin.do("POST", fmt.Sprintf("/api/hosts/%d/corrald/remove", hostID), nil)
+	mustStatus(t, rm2, http.StatusAccepted, "manual remove #2")
+	waitCorraldState(t, admin, hostID, gw.StateOff)
+	for _, p := range []string{runDir, probe.StateDir, probe.LibDir, tombPath} {
+		if _, err := os.Lstat(p); !os.IsNotExist(err) {
+			t.Fatalf("expected %s removed after retry, stat err=%v", p, err)
+		}
+	}
+}
+
+// Regression test for Fix Round 9 Item #4 [P2]:
+// If StartInstall fails during DB init (after registering rop in opsByAcct and
+// creating the corrald_ops row), it MUST close rop.done so any queued peer
+// install wakes up immediately, AND must finish its corrald_ops row using a
+// non-cancelled context so no running op row is leaked.
+func TestCorraldFix9_InstallInitFailureWakesPeerAndFinishesOp(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("requires linux")
+	}
+	v1Dir, _ := buildTestCorraldDist(t)
+	distV1, err := gw.LoadDist(v1Dir)
+	if err != nil {
+		t.Fatalf("LoadDist v1: %v", err)
+	}
+	h := newHarness(t, func(c *config.Config) {
+		c.CorraldDir = v1Dir
+		c.GatewayID = "gw-fix9-init.local"
+	})
+	admin := h.admin()
+	adminID := userIDOf(t, admin)
+	sshSrv, _ := startCorraldSSH(t)
+	h1, _ := createAndPinHost(t, admin, sshSrv, "init-fail-1")
+	h2, _ := createAndPinHost(t, admin, sshSrv, "init-fail-2")
+
+	ctx1, cancel1 := context.WithCancel(context.Background())
+	defer cancel1()
+
+	peerStarted := make(chan struct{})
+	peerErrCh := make(chan error, 1)
+	var once sync.Once
+	h.srv.corrald.Close()
+	h.srv.corrald = gw.NewManager(gw.ManagerConfig{
+		Store:     h.store,
+		Dist:      distV1,
+		GatewayID: "gw-fix9-init.local",
+		SSH:       &webSSHProvider{s: h.srv},
+		AfterInstallOpCreate: func(hid int64) {
+			if hid != h1 {
+				return
+			}
+			once.Do(func() {
+				// Queue h2 behind h1's rop while h1 still holds opsByAcct[acct].
+				go func() {
+					_, perr := h.srv.corrald.StartInstall(context.Background(), adminID, h2, "admin", distV1.ManifestHash, false)
+					peerErrCh <- perr
+					close(peerStarted)
+				}()
+				<-peerStarted
+				// Give h2's goroutine a moment to enter waitAndClaimInstallAccount and block on <-rop1.done.
+				time.Sleep(80 * time.Millisecond)
+				// Now cancel h1's caller ctx so h1's UpsertCorraldHost(ctx1, ch) fails!
+				cancel1()
+			})
+		},
+	})
+
+	_, err1 := h.srv.corrald.StartInstall(ctx1, adminID, h1, "admin", distV1.ManifestHash, false)
+	if err1 == nil {
+		t.Fatalf("expected h1 StartInstall to fail after ctx1 cancel")
+	}
+	if perr := <-peerErrCh; perr != nil {
+		t.Fatalf("expected queued h2 StartInstall to be accepted, got %v", perr)
+	}
+
+	// 1. h1's corrald_ops row MUST be finished (NOT left running despite ctx1 being cancelled!).
+	if actOp, actErr := h.srv.store.ActiveCorraldOp(context.Background(), h1); !errors.Is(actErr, store.ErrNotFound) {
+		t.Fatalf("Fix9 Item #4 regression: h1 corrald_ops row left active after cancelled init! op=%+v err=%v", actOp, actErr)
+	}
+	if latestOp, lerr := h.srv.store.LatestCorraldOp(context.Background(), h1); lerr != nil || latestOp.State != gw.OpFailed {
+		t.Fatalf("Fix9 Item #4 regression: expected h1 latest op state=failed, got (%+v, %v)", latestOp, lerr)
+	}
+
+	// 2. h2 MUST wake up immediately (rop1.done closed!) and finish installing to StateRunning!
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		ch2, err := h.srv.store.CorraldHostByID(context.Background(), h2)
+		if err == nil && ch2.State == gw.StateRunning && ch2.ActiveOpID == "" {
+			break
+		}
+		if time.Now().After(deadline) {
+			op2, _ := h.srv.store.LatestCorraldOp(context.Background(), h2)
+			t.Fatalf("Fix9 Item #4 regression: queued peer h2 did not wake up and reach running after h1 init failure! ch2=(%+v, %v) op2=%+v", ch2, err, op2)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// Regression test for Fix Round 9 Item #5 [P2]:
+// A queued install whose binding is discovered only after SSH auth
+// (late-binding) MUST set pendingAcct before blocking on prev.done so an
+// account-level remove cancels it too, and must re-check removal before installing.
+func TestCorraldFix9_LateBindingQueuedInstallCancelledByAccountRemove(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("requires linux")
+	}
+	v1Dir, _ := buildTestCorraldDist(t)
+	distV1, err := gw.LoadDist(v1Dir)
+	if err != nil {
+		t.Fatalf("LoadDist v1: %v", err)
+	}
+	h := newHarness(t, func(c *config.Config) {
+		c.CorraldDir = v1Dir
+		c.GatewayID = "gw-fix9-late.local"
+	})
+	admin := h.admin()
+	adminID := userIDOf(t, admin)
+	sshSrv, home := startCorraldSSH(t)
+	h1, _ := createAndPinHost(t, admin, sshSrv, "late-rm-1")
+	h2, _ := createAndPinHost(t, admin, sshSrv, "late-rm-2")
+
+	// Wrap SSH provider: h1 has known binding; h2 has late binding (HostBinding=""
+	// until AcquireSSH succeeds) and signals h2Acquired when h2's AcquireSSH finishes.
+	h2Acquired := make(chan struct{})
+	var h2Once sync.Once
+	baseSSH := &webSSHProvider{s: h.srv}
+	lateSSH := &selectiveLateBindingSSHProvider{
+		inner:      baseSSH,
+		lateHostID: h2,
+		onLateAcquire: func() {
+			h2Once.Do(func() { close(h2Acquired) })
+		},
+	}
+
+	h1AtStart := make(chan struct{})
+	releaseH1 := make(chan struct{})
+	var h1Once sync.Once
+	h.srv.corrald.Close()
+	h.srv.corrald = gw.NewManager(gw.ManagerConfig{
+		Store:     h.store,
+		Dist:      distV1,
+		GatewayID: "gw-fix9-late.local",
+		SSH:       lateSSH,
+		BeforeInstallStart: func(hid int64, _ string) {
+			if hid == h1 {
+				h1Once.Do(func() { close(h1AtStart) })
+				<-releaseH1
+			}
+		},
+	})
+
+	// 1. Start h1 install; pause it at BeforeInstallStart (holding opsByAcct[acct]).
+	startCorraldInstall(t, admin, h1)
+	select {
+	case <-h1AtStart:
+	case <-time.After(10 * time.Second):
+		t.Fatal("timed out waiting for h1 to reach BeforeInstallStart")
+	}
+
+	// 2. Start late-binding h2 install -> learns binding in AcquireSSH and blocks
+	//    on h1's rop.done inside waitAndClaimInstallAccount.
+	startCorraldInstall(t, admin, h2)
+	select {
+	case <-h2Acquired:
+	case <-time.After(10 * time.Second):
+		t.Fatal("timed out waiting for h2 AcquireSSH")
+	}
+	time.Sleep(100 * time.Millisecond)
+
+	// 3. Trigger account-level remove on h1 while releasing h1's pause hook.
+	//    cancelAndWaitOps MUST find and cancel BOTH h1 AND late-binding queued h2!
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		close(releaseH1)
+	}()
+	rmRes := admin.do("POST", fmt.Sprintf("/api/hosts/%d/corrald/remove", h1), nil)
+	mustStatus(t, rmRes, http.StatusAccepted, "account-level remove on h1")
+
+	if err := h.srv.corrald.WaitOpsIdle(context.Background()); err != nil {
+		t.Fatalf("WaitOpsIdle: %v", err)
+	}
+	waitCorraldState(t, admin, h1, gw.StateOff)
+
+	// h2 MUST NOT have installed over the removal!
+	ch2, err := h.srv.store.CorraldHostByID(context.Background(), h2)
+	if err != nil {
+		t.Fatalf("CorraldHostByID(h2): %v", err)
+	}
+	if ch2.State == gw.StateRunning {
+		t.Fatalf("Fix9 Item #5 regression: late-binding queued install h2 survived account remove and reached StateRunning! ch2=%+v", ch2)
+	}
+	if latest2, lerr := h.srv.store.LatestCorraldOp(context.Background(), h2); lerr == nil && latest2.State == gw.OpDone {
+		t.Fatalf("Fix9 Item #5 regression: h2 install op completed as done despite account remove! op=%+v", latest2)
+	}
+	bin := filepath.Join(home, ".local", "lib", "corral", "corrald")
+	if _, err := os.Lstat(bin); !os.IsNotExist(err) {
+		t.Fatalf("Fix9 Item #5 regression: binary %s still present after account remove (reinstalled by h2?)! stat err=%v", bin, err)
+	}
+	_ = adminID
+}
+
+type selectiveLateBindingSSHProvider struct {
+	inner         gw.SSHProvider
+	lateHostID    int64
+	onLateAcquire func()
+	mu            sync.Mutex
+	acquired      bool
+}
+
+func (p *selectiveLateBindingSSHProvider) AcquireSSH(ctx context.Context, ownerID, hostID int64) (*ssh.Client, func(), string, string, error) {
+	cl, rel, fp, u, err := p.inner.AcquireSSH(ctx, ownerID, hostID)
+	if err == nil && hostID == p.lateHostID {
+		p.mu.Lock()
+		p.acquired = true
+		p.mu.Unlock()
+		if p.onLateAcquire != nil {
+			p.onLateAcquire()
+		}
+	}
+	return cl, rel, fp, u, err
+}
+
+func (p *selectiveLateBindingSSHProvider) HostBinding(ctx context.Context, ownerID, hostID int64) (string, string, error) {
+	if hostID == p.lateHostID {
+		p.mu.Lock()
+		ok := p.acquired
+		p.mu.Unlock()
+		if !ok {
+			return "", "", nil
+		}
+	}
+	return p.inner.HostBinding(ctx, ownerID, hostID)
+}
+
+func (p *selectiveLateBindingSSHProvider) UserLabel(ctx context.Context, userID int64) string {
+	return p.inner.UserLabel(ctx, userID)
+}
+
+// Regression test for Fix Round 9 Item #6 [P2]:
+// If CancelInstall is accepted while tryAttachInstallToLiveConn is in flight
+// (e.g. right after client.Hello), the shared-connection install branch MUST
+// re-check cancellation before committing running/done and settle in off/cancelled.
+func TestCorraldFix9_LiveAttachCancelNeverCommitsRunning(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("requires linux")
+	}
+	v1Dir, _ := buildTestCorraldDist(t)
+	distV1, err := gw.LoadDist(v1Dir)
+	if err != nil {
+		t.Fatalf("LoadDist v1: %v", err)
+	}
+	h := newHarness(t, func(c *config.Config) {
+		c.CorraldDir = v1Dir
+		c.GatewayID = "gw-fix9-cancel.local"
+	})
+	admin := h.admin()
+	sshSrv, _ := startCorraldSSH(t)
+	h1, _ := createAndPinHost(t, admin, sshSrv, "live-cancel-1")
+	h2, _ := createAndPinHost(t, admin, sshSrv, "live-cancel-2")
+
+	cancelRespCh := make(chan resp, 1)
+	var once sync.Once
+	h.srv.corrald.Close()
+	h.srv.corrald = gw.NewManager(gw.ManagerConfig{
+		Store:     h.store,
+		Dist:      distV1,
+		GatewayID: "gw-fix9-cancel.local",
+		SSH:       &webSSHProvider{s: h.srv},
+		AfterLiveAttachHello: func(hid int64) {
+			if hid != h2 {
+				return
+			}
+			once.Do(func() {
+				// Issue CancelInstall concurrently (it marks rop.cancelled=true and
+				// cancels opCtx before waiting on <-rop.done).
+				go func() {
+					cancelRespCh <- admin.do("POST", fmt.Sprintf("/api/hosts/%d/corrald/cancel", h2), nil)
+				}()
+				// Wait briefly so CancelInstall acquires m.mu and sets rop.cancelled=true
+				// before tryAttachInstallToLiveConn proceeds to its commit check.
+				time.Sleep(80 * time.Millisecond)
+			})
+		},
+	})
+
+	// 1. Install h1 so a live sharedConn exists for the account.
+	startCorraldInstall(t, admin, h1)
+	waitCorraldState(t, admin, h1, gw.StateRunning)
+
+	// 2. Start h2 install directly with manifest_hash (avoiding GET /corrald on h2
+	//    which would adopt peer h1 first) -> enters tryAttachInstallToLiveConn ->
+	//    cancelled right after Hello!
+	r2 := admin.do("POST", fmt.Sprintf("/api/hosts/%d/corrald/install", h2), map[string]any{"manifest_hash": distV1.ManifestHash})
+	mustStatus(t, r2, http.StatusAccepted, "start h2 live-attach install")
+	cancelResp := <-cancelRespCh
+	mustStatus(t, cancelResp, http.StatusOK, "cancel during live attach")
+
+	if err := h.srv.corrald.WaitOpsIdle(context.Background()); err != nil {
+		t.Fatalf("WaitOpsIdle: %v", err)
+	}
+
+	ch2, err := h.srv.store.CorraldHostByID(context.Background(), h2)
+	if err != nil {
+		t.Fatalf("CorraldHostByID(h2): %v", err)
+	}
+	if ch2.State != gw.StateOff {
+		t.Fatalf("Fix9 Item #6 regression: cancelled live-attach install committed state=%q (want off)!", ch2.State)
+	}
+	if latest2, lerr := h.srv.store.LatestCorraldOp(context.Background(), h2); lerr != nil || latest2.State != gw.OpCancelled {
+		t.Fatalf("Fix9 Item #6 regression: expected h2 latest op state=cancelled, got (%+v, %v)", latest2, lerr)
+	}
+	// h1 must remain running untouched.
+	ch1, err := h.srv.store.CorraldHostByID(context.Background(), h1)
+	if err != nil || ch1.State != gw.StateRunning {
+		t.Fatalf("expected peer h1 to remain running, got (%+v, %v)", ch1, err)
+	}
+}
+
+// Regression test for Fix Round 9 Item #7 [P2]:
+// When host 2 attaches via tryAttachInstallToLiveConn, it MUST trigger
+// scheduleWatchReconcile(sc) so an existing browser watcher on host 2 receives
+// agent.watch coverage including host 2's registered extra log paths.
+func TestCorraldFix9_LiveAttachReconcilesWatchAndExtraLogs(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("requires linux")
+	}
+	v1Dir, _ := buildTestCorraldDist(t)
+	distV1, err := gw.LoadDist(v1Dir)
+	if err != nil {
+		t.Fatalf("LoadDist v1: %v", err)
+	}
+	h := newHarness(t, func(c *config.Config) {
+		c.CorraldDir = v1Dir
+		c.GatewayID = "gw-fix9-watch.local"
+	})
+	admin := h.admin()
+	adminID := userIDOf(t, admin)
+	sshSrv, home := startCorraldSSH(t)
+	h1, _ := createAndPinHost(t, admin, sshSrv, "live-watch-1")
+	h2, _ := createAndPinHost(t, admin, sshSrv, "live-watch-2")
+
+	type watchEvent struct {
+		hostIDs []int64
+		ev      proto.AgentChangedEventData
+	}
+	evCh := make(chan watchEvent, 16)
+	h.srv.corrald.Close()
+	h.srv.corrald = gw.NewManager(gw.ManagerConfig{
+		Store:     h.store,
+		Dist:      distV1,
+		GatewayID: "gw-fix9-watch.local",
+		SSH:       &webSSHProvider{s: h.srv},
+		OnAgentChanged: func(hostIDs []int64, ev proto.AgentChangedEventData) {
+			evCh <- watchEvent{hostIDs: append([]int64(nil), hostIDs...), ev: ev}
+		},
+	})
+
+	// 1. Install h1 with NO watchers yet -> live sharedConn exists, watch inactive.
+	startCorraldInstall(t, admin, h1)
+	waitCorraldState(t, admin, h1, gw.StateRunning)
+
+	// 2. Create an extra log path for h2, register a browser watcher ONLY for h2,
+	//    and register h2's extra log BEFORE installing h2.
+	logDir := filepath.Join(home, ".claude", "projects", "fix9-watch")
+	if err := os.MkdirAll(logDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	extraLog := filepath.Join(logDir, "session-fix9.jsonl")
+	if err := os.WriteFile(extraLog, []byte("{\"type\":\"init\"}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	watchTok := new(int)
+	h.srv.corrald.SetWatcher(watchTok, adminID, []int64{h2})
+	defer h.srv.corrald.RemoveWatcher(watchTok)
+	h.srv.corrald.AddHostWatchLog(h2, extraLog)
+
+	// 3. Install h2 directly (avoiding GET /corrald adoption so h2 executes the
+	//    tryAttachInstallToLiveConn fast path).
+	r2 := admin.do("POST", fmt.Sprintf("/api/hosts/%d/corrald/install", h2), map[string]any{"manifest_hash": distV1.ManifestHash})
+	mustStatus(t, r2, http.StatusAccepted, "start h2 live-attach install")
+	waitCorraldState(t, admin, h2, gw.StateRunning)
+
+	// 4. h2 MUST become watch-covered (scheduleWatchReconcile sent agent.watch)!
+	deadline := time.Now().Add(5 * time.Second)
+	for !h.srv.corrald.IsWatchCovered(adminID, h2) {
+		if time.Now().After(deadline) {
+			t.Fatalf("Fix9 Item #7 regression: host h2 is NOT watch-covered after live-attach install (scheduleWatchReconcile not called)!")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	// 5. Modify h2's extra log file -> daemon MUST push agent.changed mentioning extraLog for h2!
+	f, err := os.OpenFile(extraLog, os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = f.WriteString("{\"type\":\"update\"}\n")
+	_ = f.Close()
+
+	evDeadline := time.After(5 * time.Second)
+	for {
+		select {
+		case got := <-evCh:
+			hasH2 := false
+			for _, id := range got.hostIDs {
+				if id == h2 {
+					hasH2 = true
+					break
+				}
+			}
+			hasLog := false
+			for _, lp := range got.ev.ChangedLogs {
+				if lp == extraLog {
+					hasLog = true
+					break
+				}
+			}
+			if hasH2 && hasLog {
+				return
+			}
+		case <-evDeadline:
+			t.Fatalf("Fix9 Item #7 regression: did not receive agent.changed for extraLog %s on h2", extraLog)
+		}
+	}
+}
+
 func syscallFlockEx(f *os.File) error {
 	return syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
 }

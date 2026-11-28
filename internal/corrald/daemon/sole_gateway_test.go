@@ -1225,6 +1225,120 @@ func TestCLIUninstallOnlyIfSoleGateway(t *testing.T) {
 			t.Fatalf("expected StateDir removed, stat err=%v", err)
 		}
 	})
+
+	// Regression test for Fix Round 9 Item #2 [P2]:
+	// The removing tombstone MUST be removed LAST, after LibDir, lock files,
+	// StateDir, and StateRoot removals succeed; if removing LibDir or StateDir
+	// fails in Part B, the tombstone MUST remain on disk for retry.
+	t.Run("fix9_item2_tombstone_removed_last_after_dir_removals", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("chmod 0500 does not block root")
+		}
+		// Case A: ~/.local/lib is read-only -> all files inside LibDir/StateDir
+		// delete cleanly in Part A, then os.Remove(LibDir) fails in Part B.
+		t.Run("libdir_rmdir_failure_keeps_tombstone", func(t *testing.T) {
+			home := t.TempDir()
+			mid := randomHexMid(t)
+			env := []string{"CORRALD_TEST_MACHINE_ID=" + mid}
+			installedBin, layout := installAndServe(t, home, mid)
+
+			var h proto.HelloResult
+			if err := callLocalRPC(layout.SocketPath, proto.MethodDaemonHello, proto.HelloParams{
+				Gateway: "gw-a", ProtoMin: 1, ProtoMax: 1, Client: proto.ClientIdentity{CorralUser: "alice", HostID: "1"},
+			}, &h, 2*time.Second); err != nil {
+				t.Fatalf("Hello gw-a: %v", err)
+			}
+
+			libParent := filepath.Dir(layout.LibDir)
+			if err := os.Chmod(libParent, 0o500); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = os.Chmod(libParent, 0o700) })
+
+			out, code := runCLI(t, installedBin, home, env, "uninstall", "--op", "opLibRmdirFail", "--only-if-sole-gateway", "gw-a")
+			if code == 0 || parseKV(out)["result"] != "partial" {
+				t.Fatalf("expected result=partial when LibDir rmdir fails, got code=%d\n%s", code, out)
+			}
+			if !layout.TombstoneExists() {
+				t.Fatalf("Fix9 Item #2 regression: removing tombstone was deleted BEFORE LibDir removal failed!\n%s", out)
+			}
+		})
+
+		// Case B: StateRoot is read-only -> files delete cleanly, then
+		// os.Remove(StateDir) fails in Part B -> tombstone must be restored.
+		t.Run("statedir_rmdir_failure_keeps_tombstone", func(t *testing.T) {
+			home := t.TempDir()
+			mid := randomHexMid(t)
+			env := []string{"CORRALD_TEST_MACHINE_ID=" + mid}
+			installedBin, layout := installAndServe(t, home, mid)
+
+			var h proto.HelloResult
+			if err := callLocalRPC(layout.SocketPath, proto.MethodDaemonHello, proto.HelloParams{
+				Gateway: "gw-a", ProtoMin: 1, ProtoMax: 1, Client: proto.ClientIdentity{CorralUser: "alice", HostID: "1"},
+			}, &h, 2*time.Second); err != nil {
+				t.Fatalf("Hello gw-a: %v", err)
+			}
+
+			if err := os.Chmod(layout.StateRoot, 0o500); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = os.Chmod(layout.StateRoot, 0o700) })
+
+			out, code := runCLI(t, installedBin, home, env, "uninstall", "--op", "opStateRmdirFail", "--only-if-sole-gateway", "gw-a")
+			if code == 0 || parseKV(out)["result"] != "partial" {
+				t.Fatalf("expected result=partial when StateDir rmdir fails, got code=%d\n%s", code, out)
+			}
+			if !layout.TombstoneExists() {
+				t.Fatalf("Fix9 Item #2 regression: removing tombstone was not kept when StateDir rmdir failed!\n%s", out)
+			}
+		})
+	})
+
+	// Regression test for Fix Round 9 Item #3 [P2]:
+	// `corrald install --for-uninstall-recovery` MUST use shouldUpdateSharedSymlink
+	// so recovering with an older gateway binary never downgrades a newer shared symlink.
+	t.Run("fix9_item3_recovery_install_never_downgrades_newer_symlink", func(t *testing.T) {
+		home := t.TempDir()
+		mid := randomHexMid(t)
+		env := []string{"CORRALD_TEST_MACHINE_ID=" + mid}
+		uid := uint32(os.Getuid())
+		layout, err := ResolveLayout(PathOptions{Home: home, UID: &uid, MachineID: mid})
+		if err != nil {
+			t.Fatalf("ResolveLayout: %v", err)
+		}
+
+		// Install v2 (higher release) first so LibDir/corrald points to v2.
+		stageV2 := stageBinary(t, home, mid, "opV2Init", bins.v2)
+		if out, code := runCLI(t, filepath.Join(stageV2, "corrald"), home, env,
+			"install", "--stage", stageV2, "--op", "opV2Init", "--gateway", "gw-a", "--by", "alice"); code != 0 {
+			t.Fatalf("install v2 failed: %s", out)
+		}
+		v2Target, err := os.Readlink(layout.CurrentSymlink)
+		if err != nil {
+			t.Fatalf("Readlink v2: %v", err)
+		}
+
+		// Simulate removing tombstone on this machine while shared LibDir still holds v2.
+		_ = os.Remove(layout.InstallJSON)
+		if err := os.WriteFile(layout.TombstonePath, []byte(`{"created_at":"2026-11-28T00:00:00Z","gateway":"gw-a"}`+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		// Run recovery install with older v1 binary.
+		stageV1 := stageBinary(t, home, mid, "opV1Rec", bins.v1)
+		out, code := runCLI(t, filepath.Join(stageV1, "corrald"), home, env,
+			"install", "--for-uninstall-recovery", "--stage", stageV1, "--op", "opV1Rec", "--gateway", "gw-a")
+		if code != 0 || parseKV(out)["result"] != "ok" {
+			t.Fatalf("recovery install v1 failed: code=%d\n%s", code, out)
+		}
+		gotTarget, err := os.Readlink(layout.CurrentSymlink)
+		if err != nil {
+			t.Fatalf("Readlink after recovery: %v", err)
+		}
+		if gotTarget != v2Target {
+			t.Fatalf("Fix9 Item #3 regression: recovery install downgraded shared symlink from %q to %q!", v2Target, gotTarget)
+		}
+	})
 }
 
 // Regression test for Fix Round 6 F2 [P3]:

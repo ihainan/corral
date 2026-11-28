@@ -193,7 +193,7 @@ func cmdInstall(args []string, build proto.BuildInfo, stdout io.Writer) int {
 		writeErr(stdout, "invalid_args", err.Error())
 		return 2
 	}
-	if *stageDir == "" || *opID == "" || *gateway == "" || (*by == "" && !*forUninstallRecovery) {
+	if *stageDir == "" || *opID == "" || ((*gateway == "" || *by == "") && !*forUninstallRecovery) {
 		writeErr(stdout, "invalid_args", "required flags: --stage, --op, --gateway, --by")
 		return 2
 	}
@@ -237,30 +237,47 @@ func cmdInstall(args []string, build proto.BuildInfo, stdout io.Writer) int {
 	defer opLock.Release()
 
 	if *forUninstallRecovery {
-		// Recovery binary placement for binaryless tombstone uninstall:
+		// Recovery binary placement for binaryless uninstall:
 		//   - Holds SharedLock (creating LibDir) -> OpLock like normal install.
-		//   - Requires a valid removing tombstone belonging to *gateway.
-		//   - Places the binary + symlink in LibDir WITHOUT writing install.json,
-		//     removing the tombstone, or starting the daemon.
-		if fi, terr := os.Lstat(layout.TombstonePath); terr != nil || !fi.Mode().IsRegular() {
-			_ = os.RemoveAll(expectedStage)
-			writeErr(stdout, "no_tombstone", "removing tombstone not present")
-			return 1
-		}
-		tombRec, tombErr := readUninstallTombstone(layout.TombstonePath)
-		if tombErr != nil || tombRec == nil || tombRec.CreatedAt == "" || tombRec.Gateway == "" {
-			_ = os.RemoveAll(expectedStage)
-			detail := "removing tombstone is truncated or missing required fields"
-			if tombErr != nil {
-				detail = tombErr.Error()
+		//   - When --gateway is set (sole-gateway recovery), requires a valid
+		//     removing tombstone belonging to *gateway.
+		//   - When --gateway is empty (explicit manual remove/delete), preserves
+		//     any existing tombstone or install.json untouched; only if neither
+		//     exists yet, records a structured removing tombstone so the ensuing
+		//     locked uninstall cleans up run/ and the recovery binary cleanly.
+		//   - Uses shouldUpdateSharedSymlink (never downgrading a newer link) and
+		//     does NOT write install.json or start the daemon.
+		if *gateway != "" {
+			if fi, terr := os.Lstat(layout.TombstonePath); terr != nil || !fi.Mode().IsRegular() {
+				_ = os.RemoveAll(expectedStage)
+				writeErr(stdout, "no_tombstone", "removing tombstone not present")
+				return 1
 			}
-			writeErr(stdout, "tombstone_unreadable", detail)
-			return 1
-		}
-		if tombRec.Gateway != *gateway {
-			_ = os.RemoveAll(expectedStage)
-			fmt.Fprintf(stdout, "result=other_gateways\n")
-			return 0
+			tombRec, tombErr := readUninstallTombstone(layout.TombstonePath)
+			if tombErr != nil || tombRec == nil || tombRec.CreatedAt == "" || tombRec.Gateway == "" {
+				_ = os.RemoveAll(expectedStage)
+				detail := "removing tombstone is truncated or missing required fields"
+				if tombErr != nil {
+					detail = tombErr.Error()
+				}
+				writeErr(stdout, "tombstone_unreadable", detail)
+				return 1
+			}
+			if tombRec.Gateway != *gateway {
+				_ = os.RemoveAll(expectedStage)
+				fmt.Fprintf(stdout, "result=other_gateways\n")
+				return 0
+			}
+		} else {
+			_, tombErr := os.Lstat(layout.TombstonePath)
+			_, instErr := os.Lstat(layout.InstallJSON)
+			if errors.Is(tombErr, os.ErrNotExist) && errors.Is(instErr, os.ErrNotExist) {
+				if err := WriteFileAtomic(layout.TombstonePath, marshalUninstallTombstone(nil, ""), 0o600); err != nil {
+					_ = os.RemoveAll(expectedStage)
+					writeErr(stdout, "tombstone_failed", err.Error())
+					return 1
+				}
+			}
 		}
 		if err := EnsureSecureDir(expectedStage, layout.UID); err != nil {
 			writeErr(stdout, "invalid_stage", err.Error())
@@ -294,14 +311,29 @@ func cmdInstall(args []string, build proto.BuildInfo, stdout io.Writer) int {
 			writeErr(stdout, "copy_failed", err.Error())
 			return 1
 		}
-		relTarget := filepath.Join(filepath.Base(verDir), "corrald")
-		if err := AtomicSymlink(relTarget, layout.CurrentSymlink); err != nil {
-			writeErr(stdout, "symlink_failed", err.Error())
+		// Fix9 Item #3: Use the same shouldUpdateSharedSymlink check as normal
+		// install so recovery never downgrades a newer shared symlink.
+		updateLink, _, _, serr := shouldUpdateSharedSymlink(layout, build.Release)
+		if serr != nil {
+			writeErr(stdout, "symlink_failed", serr.Error())
 			return 1
+		}
+		outBin := dstBin
+		if updateLink {
+			relTarget, err := filepath.Rel(layout.LibDir, dstBin)
+			if err != nil {
+				writeErr(stdout, "symlink_failed", err.Error())
+				return 1
+			}
+			if err := AtomicSymlink(relTarget, layout.CurrentSymlink); err != nil {
+				writeErr(stdout, "symlink_failed", err.Error())
+				return 1
+			}
+			outBin = layout.CurrentSymlink
 		}
 		_ = os.RemoveAll(expectedStage)
 		fmt.Fprintf(stdout, "result=ok\n")
-		fmt.Fprintf(stdout, "bin=%s\n", layout.CurrentSymlink)
+		fmt.Fprintf(stdout, "bin=%s\n", outBin)
 		return 0
 	}
 
@@ -1602,6 +1634,7 @@ func cmdUninstall(args []string, stdout io.Writer) int {
 		tombstoneExisted      bool
 		tombstoneRec          *uninstallTombstone
 		resumingFromTombstone bool
+		tombPayload           []byte
 	)
 	if stateDirExists {
 		opLock, err = AcquireLockWait(layout.OpLockPath, lockTimeout)
@@ -1759,7 +1792,7 @@ func cmdUninstall(args []string, stdout io.Writer) int {
 				writeErr(stdout, "remove_install_json_failed", err.Error())
 				return 1
 			}
-			tombPayload := marshalUninstallTombstone(installRec, soleGW)
+			tombPayload = marshalUninstallTombstone(installRec, soleGW)
 			if err := WriteFileAtomic(layout.TombstonePath, tombPayload, 0o600); err != nil {
 				if installErr == nil && installRec != nil {
 					_ = WriteInstallRecord(layout.InstallJSON, installRec)
@@ -1870,11 +1903,25 @@ func cmdUninstall(args []string, stdout io.Writer) int {
 	} else if isLast && lastCheckErr == nil && libDirExists {
 		if installErr == nil && installRec != nil {
 			sharedTargets = collectSharedCorraldTargets(layout, installRec)
-			if tombstoneExisted {
-				seenT := make(map[string]struct{}, len(sharedTargets))
-				for _, t := range sharedTargets {
-					seenT[filepath.Clean(t)] = struct{}{}
+			seenT := make(map[string]struct{}, len(sharedTargets)+2)
+			for _, t := range sharedTargets {
+				seenT[filepath.Clean(t)] = struct{}{}
+			}
+			// Always include our own running binary's version dir (if placed in
+			// LibDir by binaryless uninstall recovery while install.json existed).
+			if selfExe, eerr := os.Executable(); eerr == nil {
+				if resolved, rerr := filepath.EvalSymlinks(selfExe); rerr == nil {
+					selfExe = resolved
 				}
+				selfDir := filepath.Clean(filepath.Dir(selfExe))
+				if filepath.Dir(selfDir) == filepath.Clean(layout.LibDir) && strings.HasPrefix(filepath.Base(selfDir), "corrald-") {
+					if _, ok := seenT[selfDir]; !ok {
+						seenT[selfDir] = struct{}{}
+						sharedTargets = append(sharedTargets, selfDir)
+					}
+				}
+			}
+			if tombstoneExisted {
 				for _, p := range listPreservedSharedPaths(layout) {
 					cp := filepath.Clean(p)
 					if _, ok := seenT[cp]; !ok {
@@ -1967,16 +2014,14 @@ func cmdUninstall(args []string, stdout io.Writer) int {
 		}
 	}
 
-	// Fix8 Item #3: Remove the removing tombstone LAST, only when all other
-	// targets and post-checks succeeded (or in Rule 6 missing-install mode
-	// where shared files are intentionally preserved).
-	if stateDirExists && (len(left) == 0 || willPreserveForMissingInstall) {
-		if err := os.Remove(layout.TombstonePath); err != nil && !errors.Is(err, os.ErrNotExist) {
-			addLeft(layout.TombstonePath, err.Error())
-		}
-	}
-
 	if len(left) > 0 {
+		// Rule 6 missing-install mode: shared files are intentionally preserved;
+		// clean up the temporary tombstone written for this attempt.
+		if stateDirExists && willPreserveForMissingInstall {
+			if err := os.Remove(layout.TombstonePath); err != nil && !errors.Is(err, os.ErrNotExist) {
+				addLeft(layout.TombstonePath, err.Error())
+			}
+		}
 		fmt.Fprintf(stdout, "result=partial\n")
 		fmt.Fprintf(stdout, "last_machine=%t\n", isLast)
 		for _, l := range left {
@@ -1985,46 +2030,11 @@ func cmdUninstall(args []string, stdout io.Writer) int {
 		return 1
 	}
 
-	// Part B: Removal succeeded with zero leftovers. While still holding
-	// lifeLock -> opLock -> sharedLock, unlink the lock files and remove any
-	// now-empty Corral-created directories (os.Remove only removes empty dirs).
-	// All lock acquirers verify path inode == locked fd inode after flock, so
-	// unlinking while held cannot create two mutually non-exclusive locks.
-	// B-2: Do NOT ignore non-empty removal failures on corrald-owned dirs.
-	if stateDirExists {
-		if err := os.Remove(layout.LockPath); err != nil && !errors.Is(err, os.ErrNotExist) {
-			addLeft(layout.LockPath, err.Error())
-		}
-		if err := os.Remove(layout.OpLockPath); err != nil && !errors.Is(err, os.ErrNotExist) {
-			addLeft(layout.OpLockPath, err.Error())
-		}
-		if err := os.Remove(layout.StateDir); err != nil && !errors.Is(err, os.ErrNotExist) {
-			if entries, rerr := os.ReadDir(layout.StateDir); rerr == nil && len(entries) > 0 {
-				for _, e := range entries {
-					addLeft(filepath.Join(layout.StateDir, e.Name()), "file still exists in state dir after removal")
-				}
-			} else {
-				addLeft(layout.StateDir, err.Error())
-			}
-		}
-		if err := os.Remove(layout.StateRoot); err != nil && !errors.Is(err, os.ErrNotExist) {
-			if isLast && lastCheckErr == nil {
-				if entries, rerr := os.ReadDir(layout.StateRoot); rerr == nil && len(entries) > 0 {
-					for _, e := range entries {
-						addLeft(filepath.Join(layout.StateRoot, e.Name()), "leftover entry in corrald state root")
-					}
-				} else {
-					addLeft(layout.StateRoot, err.Error())
-				}
-			}
-		}
-		_ = os.Remove(filepath.Dir(layout.StateRoot)) // ~/.local/state/corral (best-effort if empty)
-	}
-	if isLast && lastCheckErr == nil && layout.RunDir != "" {
-		// RunDir was already removed under pane locks above; best-effort clean
-		// its parent ~/.local/state/corral if now empty.
-		_ = os.Remove(filepath.Dir(layout.StateRoot)) // ~/.local/state/corral (best-effort if empty)
-	}
+	// Part B (Fix9 Item #2): While still holding lifeLock -> opLock -> sharedLock
+	// AND keeping the removing tombstone intact on disk, remove LibDir, shared
+	// lock, and state lock files first. Only remove the removing tombstone LAST
+	// once every other removal has succeeded; on any failure, keep (or restore)
+	// the tombstone so a subsequent retry can recover cleanly.
 	if isLast && lastCheckErr == nil && (installErr == nil || resumingFromTombstone) && libDirExists {
 		if err := os.Remove(layout.SharedLockPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 			addLeft(layout.SharedLockPath, err.Error())
@@ -2042,6 +2052,96 @@ func cmdUninstall(args []string, stdout io.Writer) int {
 				addLeft(layout.LibDir, err.Error())
 			}
 		}
+	}
+	if stateDirExists {
+		if err := os.Remove(layout.LockPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			addLeft(layout.LockPath, err.Error())
+		}
+		if err := os.Remove(layout.OpLockPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			addLeft(layout.OpLockPath, err.Error())
+		}
+		if entries, rerr := os.ReadDir(layout.StateDir); rerr == nil {
+			for _, e := range entries {
+				if e.Name() == "removing" {
+					continue
+				}
+				addLeft(filepath.Join(layout.StateDir, e.Name()), "file still exists in state dir after removal")
+			}
+		}
+		if isLast && lastCheckErr == nil {
+			if entries, rerr := os.ReadDir(layout.StateRoot); rerr == nil {
+				for _, e := range entries {
+					if e.Name() == layout.MachineID {
+						continue
+					}
+					addLeft(filepath.Join(layout.StateRoot, e.Name()), "leftover entry in corrald state root")
+				}
+			}
+		}
+	}
+	if isLast && lastCheckErr == nil && layout.RunDir != "" {
+		if _, err := os.Lstat(layout.RunDir); err == nil {
+			addLeft(layout.RunDir, "run dir still exists after removal")
+		}
+	}
+
+	if len(left) > 0 {
+		fmt.Fprintf(stdout, "result=partial\n")
+		fmt.Fprintf(stdout, "last_machine=%t\n", isLast)
+		for _, l := range left {
+			fmt.Fprintf(stdout, "left=%s\t%s\n", l.path, l.reason)
+		}
+		return 1
+	}
+
+	// All other removals succeeded; unlink the removing tombstone LAST, right
+	// before removing the now-empty StateDir and StateRoot.
+	if stateDirExists {
+		if err := os.Remove(layout.TombstonePath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			addLeft(layout.TombstonePath, err.Error())
+		} else {
+			if err := os.Remove(layout.StateDir); err != nil && !errors.Is(err, os.ErrNotExist) {
+				// Restore tombstone inside StateDir so retry remains possible.
+				if len(tombPayload) > 0 {
+					_ = WriteFileAtomic(layout.TombstonePath, tombPayload, 0o600)
+				}
+				if entries, rerr := os.ReadDir(layout.StateDir); rerr == nil && len(entries) > 0 {
+					for _, e := range entries {
+						if e.Name() == "removing" {
+							continue
+						}
+						addLeft(filepath.Join(layout.StateDir, e.Name()), "file still exists in state dir after removal")
+					}
+				}
+				if len(left) == 0 {
+					addLeft(layout.StateDir, err.Error())
+				}
+			} else if err := os.Remove(layout.StateRoot); err != nil && !errors.Is(err, os.ErrNotExist) {
+				if isLast && lastCheckErr == nil {
+					// Best-effort restore StateDir + tombstone if StateRoot could not be removed.
+					if len(tombPayload) > 0 && os.Mkdir(layout.StateDir, 0o700) == nil {
+						_ = WriteFileAtomic(layout.TombstonePath, tombPayload, 0o600)
+					}
+					if entries, rerr := os.ReadDir(layout.StateRoot); rerr == nil && len(entries) > 0 {
+						for _, e := range entries {
+							if e.Name() == layout.MachineID {
+								continue
+							}
+							addLeft(filepath.Join(layout.StateRoot, e.Name()), "leftover entry in corrald state root")
+						}
+					}
+					if len(left) == 0 {
+						addLeft(layout.StateRoot, err.Error())
+					}
+				}
+			}
+			_ = os.Remove(filepath.Dir(layout.StateRoot)) // ~/.local/state/corral (best-effort if empty)
+		}
+	}
+	if isLast && lastCheckErr == nil && layout.RunDir != "" {
+		// RunDir was already removed under pane locks above; best-effort clean
+		// its parent ~/.local/state/corral if now empty.
+		_ = os.Remove(filepath.Dir(layout.StateRoot)) // ~/.local/state/corral (best-effort if empty)
 	}
 
 	if len(left) > 0 {

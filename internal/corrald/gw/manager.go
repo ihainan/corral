@@ -102,6 +102,8 @@ type ManagerConfig struct {
 	BeforePendingCleanupSSH  func(hostID int64)
 	BeforeCleanupUserDBReset func(hostID int64)
 	AfterInstallServe        func(hostID int64, opID string)
+	AfterInstallOpCreate     func(hostID int64)
+	AfterLiveAttachHello     func(hostID int64)
 }
 
 // API view types matching web/src/corraldLogic.ts.
@@ -974,8 +976,12 @@ func (m *Manager) StartInstall(ctx context.Context, userID, hostID int64, corral
 	}
 	if err := m.store.CreateCorraldOp(ctx, op, false); err != nil {
 		m.clearRunningOp(rop)
+		close(rop.done)
 		cancel()
 		return nil, err
+	}
+	if m.cfg.AfterInstallOpCreate != nil {
+		m.cfg.AfterInstallOpCreate(hostID)
 	}
 
 	// Write authorization, binding, and active_op_id immediately when install starts (Item 4, Item 11).
@@ -994,8 +1000,9 @@ func (m *Manager) StartInstall(ctx context.Context, userID, hostID int64, corral
 	if err := m.store.UpsertCorraldHost(ctx, ch); err != nil {
 		op.State = OpFailed
 		op.ErrorCode = "other"
-		_ = m.store.UpdateCorraldOp(ctx, op)
+		_, _ = m.store.UpdateCorraldOpIfActive(context.Background(), op)
 		m.clearRunningOp(rop)
+		close(rop.done)
 		cancel()
 		return nil, err
 	}
@@ -1231,6 +1238,7 @@ func (m *Manager) StartRemove(ctx context.Context, userID, hostID int64) (*OpVie
 	}
 	if err := m.store.CreateCorraldOp(ctx, op, true); err != nil {
 		m.clearRunningOp(rop)
+		close(rop.done)
 		cancel()
 		return nil, err
 	}
@@ -1238,8 +1246,9 @@ func (m *Manager) StartRemove(ctx context.Context, userID, hostID int64) (*OpVie
 	if err := m.store.ClaimCorraldHostForRemove(ctx, hostID, opID); err != nil {
 		op.State = OpFailed
 		op.ErrorCode = "other"
-		_ = m.store.UpdateCorraldOp(ctx, op)
+		_, _ = m.store.UpdateCorraldOpIfActive(context.Background(), op)
 		m.clearRunningOp(rop)
+		close(rop.done)
 		cancel()
 		return nil, err
 	}
@@ -1902,7 +1911,7 @@ func (m *Manager) DeleteHostCleanup(ctx context.Context, userID, hostID int64, c
 	}
 	m.detachHost(hostID)
 
-	out := RunUninstallWithRetry(ctx, sshClient, probe, newHexID(), m.busyRetry, nil)
+	out := RunUninstallWithRetry(ctx, sshClient, m.Dist(), probe, newHexID(), m.busyRetry, nil)
 	switch out.Result {
 	case "removed":
 		_ = m.store.CorraldResetByBinding(ctx, fingerprint, sshUser)
@@ -2172,7 +2181,28 @@ func (m *Manager) runInstallOp(ctx context.Context, rop *runningOp, op *store.Co
 		ch.BoundUsername = sshUser
 		ok, _ := m.store.UpdateCorraldHostIfOp(context.Background(), ch, op.ID, false)
 		if !ok {
+			op.State = OpCancelled
+			_, _ = m.store.UpdateCorraldOpIfActive(context.Background(), op)
 			return // superseded by remove
+		}
+	}
+
+	// Fix9 Item #5: Before attaching or installing (especially after a queued
+	// or late-binding wait), verify neither this host nor any peer on the same
+	// account entered removal/remove_pending while we were waiting.
+	if fresh, ferr := m.store.CorraldHostByID(context.Background(), hostID); ferr != nil || fresh.ActiveOpID != op.ID || fresh.State == StateRemoving || fresh.State == StateRemovePending {
+		op.State = OpCancelled
+		_, _ = m.store.UpdateCorraldOpIfActive(context.Background(), op)
+		return
+	}
+	if acct.valid() {
+		if peers, perr := m.store.CorraldPeersByBinding(context.Background(), acct.Fingerprint, acct.Username); perr == nil {
+			for _, p := range peers {
+				if p.State == StateRemoving || p.State == StateRemovePending {
+					m.finishOpCancelled(op, ch)
+					return
+				}
+			}
 		}
 	}
 
@@ -2181,7 +2211,14 @@ func (m *Manager) runInstallOp(ctx context.Context, rop *runningOp, op *store.Co
 	// running Release >= dist.Release, register this host on the live shared
 	// connection without disrupting the peer or re-uploading.
 	if acct.valid() && !m.AdminDisabled() && !m.isOpCancelled(rop) {
-		if m.tryAttachInstallToLiveConn(ctx, op, ch, dist, userID, hostID, corralUser, acct) {
+		if m.tryAttachInstallToLiveConn(ctx, rop, op, ch, dist, userID, hostID, corralUser, acct) {
+			return
+		}
+		if m.AdminDisabled() {
+			return // outer defer sets remove_pending + finishes op
+		}
+		if m.isOpCancelled(rop) || ctx.Err() != nil {
+			m.finishOpCancelled(op, ch)
 			return
 		}
 	}
@@ -2189,7 +2226,7 @@ func (m *Manager) runInstallOp(ctx context.Context, rop *runningOp, op *store.Co
 	m.runInstallWithSSH(ctx, rop, op, ch, dist, userID, hostID, corralUser, fp, sshUser, sshClient, own)
 }
 
-func (m *Manager) tryAttachInstallToLiveConn(ctx context.Context, op *store.CorraldOp, ch *store.CorraldHost, dist *Dist, userID, hostID int64, corralUser string, key accountKey) bool {
+func (m *Manager) tryAttachInstallToLiveConn(ctx context.Context, rop *runningOp, op *store.CorraldOp, ch *store.CorraldHost, dist *Dist, userID, hostID int64, corralUser string, key accountKey) bool {
 	sc := m.getSharedConn(key)
 	if sc == nil {
 		return false
@@ -2217,6 +2254,19 @@ func (m *Manager) tryAttachInstallToLiveConn(ctx context.Context, op *store.Corr
 	if err != nil || freshHello == nil || freshHello.Release < dist.Release {
 		return false
 	}
+	if m.cfg.AfterLiveAttachHello != nil {
+		m.cfg.AfterLiveAttachHello(hostID)
+	}
+
+	forgetOnAbort := func() {
+		fctx, fcancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer fcancel()
+		_, _ = client.Forget(fctx, proto.ForgetParams{
+			Gateway:    m.gatewayID,
+			CorralUser: corralUser,
+			HostID:     strconv.FormatInt(hostID, 10),
+		})
+	}
 
 	var peerFiles []string
 	if peers, perr := m.store.CorraldPeersByBinding(ctx, key.Fingerprint, key.Username); perr == nil {
@@ -2230,17 +2280,23 @@ func (m *Manager) tryAttachInstallToLiveConn(ctx context.Context, op *store.Corr
 		}
 	}
 
+	// Fix9 Item #6: Re-check BOTH admin disable AND op cancellation/ctx before
+	// committing running/done, and mark rop.step = "start" under m.mu so no
+	// concurrent CancelInstall can be accepted once we commit.
 	m.policyMu.RLock()
 	if m.adminDisabled.Load() {
 		m.policyMu.RUnlock()
+		forgetOnAbort()
 		return false
 	}
 	m.mu.Lock()
-	if m.closed || m.conns[key] != sc {
+	if m.closed || m.conns[key] != sc || rop.cancelled || ctx.Err() != nil {
 		m.mu.Unlock()
 		m.policyMu.RUnlock()
+		forgetOnAbort()
 		return false
 	}
+	rop.step = "start"
 	m.hostConn[hostID] = key
 	m.mu.Unlock()
 
@@ -2271,8 +2327,20 @@ func (m *Manager) tryAttachInstallToLiveConn(ctx context.Context, op *store.Corr
 	ok, _ := m.store.FinalizeCorraldOpWithHost(context.Background(), op, ch)
 	m.policyMu.RUnlock()
 	if !ok {
+		m.mu.Lock()
+		if m.hostConn[hostID] == key {
+			delete(m.hostConn, hostID)
+		}
+		m.mu.Unlock()
+		sc.mu.Lock()
+		delete(sc.hostRefs, hostID)
+		sc.mu.Unlock()
+		forgetOnAbort()
 		return false
 	}
+	// Fix9 Item #7: Reconcile agent.watch (including hostExtraLogs) just like
+	// the normal connect path so browser watchers on this host receive events.
+	m.scheduleWatchReconcile(sc)
 	m.notifyCoverageForConn(sc)
 	return true
 }
@@ -2558,7 +2626,7 @@ func (m *Manager) runRemoveOp(ctx context.Context, rop *runningOp, op *store.Cor
 		return
 	}
 
-	out := RunUninstallWithRetry(ctx, sshClient, probe, op.ID, m.busyRetry, setStep)
+	out := RunUninstallWithRetry(ctx, sshClient, m.Dist(), probe, op.ID, m.busyRetry, setStep)
 	switch out.Result {
 	case "removed":
 		_ = m.store.CorraldResetByBinding(context.Background(), fp, sshUser)
@@ -2640,6 +2708,7 @@ func (m *Manager) launchUpdateOp(ctx context.Context, userID, hostID int64, corr
 	}
 	if err := m.store.CreateCorraldOp(ctx, op, false); err != nil {
 		m.clearRunningOp(rop)
+		close(rop.done)
 		cancel()
 		return nil, err
 	}
@@ -2653,6 +2722,7 @@ func (m *Manager) launchUpdateOp(ctx context.Context, userID, hostID int64, corr
 		}
 		_, _ = m.store.UpdateCorraldOpIfActive(context.Background(), op)
 		m.clearRunningOp(rop)
+		close(rop.done)
 		cancel()
 		if err != nil {
 			return nil, err
@@ -4413,7 +4483,7 @@ func (m *Manager) reconcileHost(
 
 	switch dec.Action {
 	case ReconcileFinishRemove:
-		out := RunUninstallWithRetry(ctx, sshClient, probe, opID, m.busyRetry, nil)
+		out := RunUninstallWithRetry(ctx, sshClient, m.Dist(), probe, opID, m.busyRetry, nil)
 		switch out.Result {
 		case "removed":
 			_ = m.store.CorraldResetByBinding(ctx, fp, sshUser)
@@ -4865,14 +4935,23 @@ func (m *Manager) waitAndClaimInstallAccount(ctx context.Context, rop *runningOp
 			m.mu.Unlock()
 			return errors.New("manager closed")
 		}
-		if rop.cancelled || m.adminDisabled.Load() {
+		// Fix9 Item #5: Record pendingAcct immediately once the binding is
+		// learned (BEFORE waiting on prev.done) so account-level cancel/remove
+		// always discovers and cancels this queued install.
+		if acct.valid() {
+			rop.pendingAcct = acct
+		}
+		if rop.cancelled {
+			m.mu.Unlock()
+			return context.Canceled
+		}
+		if m.adminDisabled.Load() {
 			m.mu.Unlock()
 			return ErrAdminDisabled
 		}
 		prev, exists := m.opsByAcct[acct]
 		if !exists || prev == rop {
 			rop.acct = acct
-			rop.pendingAcct = acct
 			m.opsByAcct[acct] = rop
 			m.mu.Unlock()
 			return nil

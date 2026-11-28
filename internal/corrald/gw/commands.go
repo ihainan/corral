@@ -272,20 +272,26 @@ func ComputeSocketPath(home, uid, mid string) string {
 // directory (0700) step-by-step, refusing any symlink or foreign-owned component
 // along ~/.local/lib/corral and ~/.local/state/corral/corrald/<mid>/stage-<op>.
 func MkStageCommand(home, stateDir, stageDir string) string {
-	return mkStageCommandWithOptions(home, stateDir, stageDir, false)
+	return mkStageCommandWithOptions(home, stateDir, stageDir, false, false)
 }
 
-// MkStageForRecoveryCommand creates the normal stage-<op> directory while
-// requiring a removing tombstone (used when reinstalling the binary into LibDir
-// solely to run locked Go uninstall recovery).
-func MkStageForRecoveryCommand(home, stateDir, stageDir string) string {
-	return mkStageCommandWithOptions(home, stateDir, stageDir, true)
+// MkStageForRecoveryCommand creates the normal stage-<op> directory for
+// binaryless uninstall recovery. When requireTombstone is true (sole-gateway
+// mode), a regular non-symlink removing tombstone must already exist; when
+// false (explicit manual remove/delete), an existing tombstone is preserved
+// untouched and staging succeeds with or without one.
+func MkStageForRecoveryCommand(home, stateDir, stageDir string, requireTombstone bool) string {
+	return mkStageCommandWithOptions(home, stateDir, stageDir, true, requireTombstone)
 }
 
-func mkStageCommandWithOptions(home, stateDir, stageDir string, forRecovery bool) string {
+func mkStageCommandWithOptions(home, stateDir, stageDir string, forRecovery, requireTombstone bool) string {
 	tombCheck := `if [ -e "$ST/removing" ]; then echo "error=removing"; exit 1; fi`
 	if forRecovery {
-		tombCheck = `if [ ! -f "$ST/removing" ] || [ -L "$ST/removing" ]; then echo "error=no_tombstone"; exit 1; fi`
+		if requireTombstone {
+			tombCheck = `if [ ! -f "$ST/removing" ] || [ -L "$ST/removing" ]; then echo "error=no_tombstone"; exit 1; fi`
+		} else {
+			tombCheck = ``
+		}
 	}
 	return shellScript(`umask 077
 ME=$(id -u)
@@ -389,9 +395,15 @@ func InstallCommand(binPath, stageDir, opID, gateway, by string, upgrade bool) s
 // InstallForRecoveryCommand places the staged binary into LibDir under
 // .corrald-shared.lock -> op.lock without writing install.json or removing the
 // removing tombstone, so the subsequent locked `corrald uninstall` can run.
+// When gateway is non-empty (sole-gateway recovery), the binary additionally
+// validates that the removing tombstone belongs to gateway.
 func InstallForRecoveryCommand(binPath, stageDir, opID, gateway string) string {
-	return shellScript(`"$BIN" install --stage "$STAGE" --op "$OP" --gateway "$GW" --for-uninstall-recovery
+	if gateway != "" {
+		return shellScript(`"$BIN" install --stage "$STAGE" --op "$OP" --gateway "$GW" --for-uninstall-recovery
 `, "BIN", binPath, "STAGE", stageDir, "OP", opID, "GW", gateway)
+	}
+	return shellScript(`"$BIN" install --stage "$STAGE" --op "$OP" --for-uninstall-recovery
+`, "BIN", binPath, "STAGE", stageDir, "OP", opID)
 }
 
 // ServeCommand starts corrald detached via `<bin> serve --gateway <gw>`,
@@ -437,28 +449,14 @@ func StopCommand(binPath string) string {
 `, "BIN", binPath)
 }
 
-// WriteTombstoneCommand writes the removing tombstone to block concurrent starts.
-func WriteTombstoneCommand(stateDir string) string {
-	return shellScript(`if [ -d "$ST" ] && [ ! -L "$ST" ]; then
-  : > "$ST/removing" || { echo "error=tombstone_failed"; exit 1; }
-fi
-echo "result=ok"
-`, "ST", stateDir)
-}
-
-// uninstallSystemRunBase is the parent directory of per-UID runtime dirs
-// (/run/user/<uid>), overridable in tests so fallback uninstall tests never
-// depend on host /run/user or hardcoded UIDs.
-var uninstallSystemRunBase = "/run/user"
-
-// UninstallCommand runs `<bin> uninstall [--op <id>]`. If the current symlink
-// and all versioned binaries are missing, the fallback verifies meta.json and
-// corrald.lock, stops any running process (verifying /proc/<pid>/stat start
-// time), and refuses to delete state files (returning error=stop_failed) if
-// the process or lock cannot be stopped. Before deleting ~/.local/state/corral/run
-// on the last machine, it acquires existing pane send locks in the same fixed
-// order as senders (/run/user/<uid> then run/) and returns error=busy if any
-// send lock is held.
+// UninstallCommand runs `<bin> uninstall [--op <id>]` under the host binary's
+// full lock chain (.corrald-shared.lock -> op.lock -> corrald.lock).
+// If no binary is present on the host:
+//   - when no state dir, corrald lib entries, or last-machine run/ dir remain:
+//     reports result=removed;
+//   - otherwise reports error=binary_missing (never truncating an existing
+//     tombstone or running an unlocked shell deletion), so RunUninstallWithRetry
+//     reinstalls the gateway's own corrald into LibDir and runs locked uninstall.
 func UninstallCommand(libDir, stateDir, sockPath, opID string) string {
 	return uninstallCommandWithOptions(libDir, stateDir, sockPath, opID, "")
 }
@@ -478,21 +476,44 @@ func UninstallCommandSoleGateway(libDir, stateDir, sockPath, opID, soleGateway s
 }
 
 func uninstallCommandWithOptions(libDir, stateDir, sockPath, opID, soleGateway string) string {
+	_ = sockPath
+	execBranch := `if [ -x "$BIN" ]; then
+  if [ -n "$OP" ]; then
+    "$BIN" uninstall --op "$OP"
+  else
+    "$BIN" uninstall
+  fi
+  exit $?
+fi`
+	missingBranch := `echo "error=binary_missing"
+echo "detail=corrald binary missing; requires locked Go recovery"
+exit 1`
 	if soleGateway != "" {
-		return shellScript(`BIN="$L/corrald"
-if [ ! -x "$BIN" ]; then
-  for cand in "$L"/corrald-*/corrald; do
-    if [ -x "$cand" ]; then BIN="$cand"; break; fi
-  done
-fi
-if [ -x "$BIN" ]; then
+		execBranch = `if [ -x "$BIN" ]; then
   if [ -n "$OP" ]; then
     "$BIN" uninstall --op "$OP" --only-if-sole-gateway "$GW"
   else
     "$BIN" uninstall --only-if-sole-gateway "$GW"
   fi
   exit $?
+fi`
+		missingBranch = `if [ -f "$ST/removing" ] && [ ! -L "$ST/removing" ]; then
+  echo "error=binary_missing_with_tombstone"
+  echo "detail=corrald binary missing while removing tombstone exists; requires locked Go recovery"
+  exit 1
 fi
+
+echo "error=cannot_verify_exclusivity"
+echo "detail=corrald binary missing; cannot safely verify sole-gateway uninstall"
+exit 1`
+	}
+	return shellScript(`BIN="$L/corrald"
+if [ ! -x "$BIN" ]; then
+  for cand in "$L"/corrald-*/corrald; do
+    if [ -x "$cand" ]; then BIN="$cand"; break; fi
+  done
+fi
+`+execBranch+`
 
 has_corrald_lib() {
   [ -L "$L/corrald" ] || [ -e "$L/corrald" ] && return 0
@@ -520,264 +541,8 @@ if [ ! -e "$ST" ] && ! has_corrald_lib && { [ "$other_machine" -ne 0 ] || [ ! -e
   exit 0
 fi
 
-if [ -f "$ST/removing" ] && [ ! -L "$ST/removing" ]; then
-  echo "error=binary_missing_with_tombstone"
-  echo "detail=corrald binary missing while removing tombstone exists; requires locked Go recovery"
-  exit 1
-fi
-
-echo "error=cannot_verify_exclusivity"
-echo "detail=corrald binary missing; cannot safely verify sole-gateway uninstall"
-exit 1
+`+missingBranch+`
 `, "L", libDir, "ST", stateDir, "OP", opID, "GW", soleGateway)
-	}
-	return shellScript(`BIN="$L/corrald"
-if [ ! -x "$BIN" ]; then
-  for cand in "$L"/corrald-*/corrald; do
-    if [ -x "$cand" ]; then BIN="$cand"; break; fi
-  done
-fi
-if [ -x "$BIN" ]; then
-  if [ -n "$OP" ]; then
-    "$BIN" uninstall --op "$OP"
-  else
-    "$BIN" uninstall
-  fi
-  exit $?
-fi
-# Binary missing: write tombstone, check meta.json + lock, stop verified process first.
-if [ -d "$ST" ] && [ ! -L "$ST" ]; then : > "$ST/removing" 2>/dev/null || true; fi
-
-proc_start() {
-  p="$1"
-  [ -r "/proc/$p/stat" ] || return 1
-  awk '{ i = index($0, ") "); if (i == 0) exit 1; rest = substr($0, i+2); n = split(rest, a, " "); if (n < 20) exit 1; if (a[1] == "Z" || a[1] == "X") exit 1; print a[20] }' "/proc/$p/stat" 2>/dev/null
-}
-
-proc_matches() {
-  p="$1"
-  st="$2"
-  case "$p" in ''|*[!0-9]*) return 1 ;; esac
-  [ "$p" -gt 0 ] 2>/dev/null || return 1
-  kill -0 "$p" 2>/dev/null || return 1
-  cur=$(proc_start "$p") || return 1
-  if [ -n "$st" ]; then
-    [ "$cur" = "$st" ] || return 1
-  fi
-  return 0
-}
-
-stop_verified() {
-  p="$1"
-  st="$2"
-  proc_matches "$p" "$st" || return 0
-  kill -TERM "$p" 2>/dev/null || true
-  i=0
-  while [ $i -lt 30 ]; do
-    proc_matches "$p" "$st" || return 0
-    sleep 0.1
-    i=$((i + 1))
-  done
-  proc_matches "$p" "$st" || return 0
-  kill -KILL "$p" 2>/dev/null || true
-  i=0
-  while [ $i -lt 20 ]; do
-    proc_matches "$p" "$st" || return 0
-    sleep 0.1
-    i=$((i + 1))
-  done
-  proc_matches "$p" "$st" && return 1
-  return 0
-}
-
-meta_pid=0
-meta_st=
-prev_pid=0
-prev_st=
-if [ -f "$ST/meta.json" ] && [ ! -L "$ST/meta.json" ]; then
-  meta_pid=$(sed -n 's/.*"pid"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$ST/meta.json" | head -n 1)
-  meta_st=$(sed -n 's/.*"start_time"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$ST/meta.json" | head -n 1)
-  prev_pid=$(sed -n 's/.*"prev_pid"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$ST/meta.json" | head -n 1)
-  prev_st=$(sed -n 's/.*"prev_start_time"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$ST/meta.json" | head -n 1)
-fi
-
-if [ -n "$meta_pid" ] && [ "$meta_pid" -gt 0 ] 2>/dev/null; then
-  if ! stop_verified "$meta_pid" "$meta_st"; then
-    echo "error=stop_failed"
-    echo "pid=$meta_pid"
-    echo "detail=process did not exit after SIGTERM and SIGKILL"
-    exit 1
-  fi
-fi
-if [ -n "$prev_pid" ] && [ "$prev_pid" -gt 0 ] 2>/dev/null; then
-  if ! stop_verified "$prev_pid" "$prev_st"; then
-    echo "error=stop_failed"
-    echo "pid=$prev_pid"
-    echo "detail=previous process did not exit after SIGTERM and SIGKILL"
-    exit 1
-  fi
-fi
-
-# Verify corrald.lock is no longer held by any live process before deleting state dir.
-if [ -f "$ST/corrald.lock" ] && command -v flock >/dev/null 2>&1; then
-  locked=1
-  i=0
-  while [ $i -lt 10 ]; do
-    if flock -n "$ST/corrald.lock" true 2>/dev/null; then
-      locked=0
-      break
-    fi
-    sleep 0.1
-    i=$((i + 1))
-  done
-  if [ "$locked" = "1" ]; then
-    echo "error=stop_failed"
-    echo "pid=${meta_pid:-0}"
-    echo "detail=corrald.lock is still held by an active process"
-    exit 1
-  fi
-fi
-
-SR=$(dirname "$ST")
-others=0
-if [ -d "$SR" ]; then
-  for d in "$SR"/*; do
-    if [ -d "$d" ] && [ "$d" != "$ST" ] && [ -f "$d/install.json" ]; then others=1; break; fi
-  done
-fi
-SC=$(dirname "$SR")
-if [ "$others" = "0" ] && [ -d "$SC/run" ] && [ ! -L "$SC/run" ] && [ -O "$SC/run" ]; then
-  _u=$(id -u 2>/dev/null)
-  _sysdir=
-  if [ -n "$_u" ] && [ -d "$SRB/$_u" ] && [ ! -L "$SRB/$_u" ] && [ -O "$SRB/$_u" ] && [ ! "$SRB/$_u" -ef "$SC/run" ]; then
-    _sysdir="$SRB/$_u"
-  fi
-  if command -v flock >/dev/null 2>&1; then
-    _pass=0
-    while [ "$_pass" -lt 4 ] && [ -d "$SC/run" ]; do
-      _pass=$((_pass + 1))
-      # Pass A: non-destructive check that no lock in run/ (or matching lock in
-      # /run/user/<uid>) is currently held before unlinking anything.
-      for _f in "$SC/run"/*; do
-        [ -e "$_f" ] || [ -L "$_f" ] || continue
-        [ -L "$_f" ] && continue
-        [ -f "$_f" ] || continue
-        _bn=${_f##*/}
-        if [ -n "$_sysdir" ] && [ -f "$_sysdir/$_bn" ] && [ ! -L "$_sysdir/$_bn" ] && [ -O "$_sysdir/$_bn" ]; then
-          if ! flock -n "$_sysdir/$_bn" true 2>/dev/null; then
-            echo "error=busy"
-            echo "detail=pane send lock is held in run dir"
-            exit 1
-          fi
-        fi
-        if [ -O "$_f" ]; then
-          if ! flock -n "$_f" true 2>/dev/null; then
-            echo "error=busy"
-            echo "detail=pane send lock is held in run dir"
-            exit 1
-          fi
-        fi
-      done
-      # Pass B: lock each entry in fixed order (_sysdir then run/), verify
-      # inode, unlink while locked, then release.
-      for _f in "$SC/run"/*; do
-        [ -e "$_f" ] || [ -L "$_f" ] || continue
-        if [ -L "$_f" ]; then
-          rm -f "$_f" 2>/dev/null || true
-          continue
-        fi
-        [ -f "$_f" ] || continue
-        _bn=${_f##*/}
-        _held9=0
-        if [ -n "$_sysdir" ] && [ -f "$_sysdir/$_bn" ] && [ ! -L "$_sysdir/$_bn" ] && [ -O "$_sysdir/$_bn" ]; then
-          exec 7>&2 2>/dev/null
-          command exec 9>>"$_sysdir/$_bn"
-          _rc=$?
-          exec 2>&7 7>&-
-          if [ "$_rc" -eq 0 ]; then
-            if ! flock -n 9; then
-              exec 9<&- 2>/dev/null || true
-              echo "error=busy"
-              echo "detail=pane send lock is held in run dir"
-              exit 1
-            fi
-            _held9=1
-          fi
-        fi
-        if [ -O "$_f" ]; then
-          exec 7>&2 2>/dev/null
-          command exec 8>>"$_f"
-          _rc=$?
-          exec 2>&7 7>&-
-          if [ "$_rc" -eq 0 ]; then
-            if ! flock -n 8; then
-              exec 8<&- 2>/dev/null || true
-              [ "$_held9" = 1 ] && exec 9<&- 2>/dev/null || true
-              echo "error=busy"
-              echo "detail=pane send lock is held in run dir"
-              exit 1
-            fi
-            if [ ! -L "$_f" ] && [ -f "$_f" ] && [ "$_f" -ef /proc/self/fd/8 ]; then
-              rm -f "$_f" 2>/dev/null || true
-            fi
-            exec 8<&- 2>/dev/null || true
-          fi
-        fi
-        [ "$_held9" = 1 ] && exec 9<&- 2>/dev/null || true
-      done
-      rmdir "$SC/run" 2>/dev/null && break
-    done
-    if [ -d "$SC/run" ]; then
-      # Directory still not empty: check whether a newly created lock is held.
-      for _f in "$SC/run"/*; do
-        [ -f "$_f" ] && [ ! -L "$_f" ] && [ -O "$_f" ] || continue
-        if ! flock -n "$_f" true 2>/dev/null; then
-          echo "error=busy"
-          echo "detail=pane send lock is held in run dir"
-          exit 1
-        fi
-      done
-    fi
-  else
-    for _f in "$SC/run"/*; do
-      [ -f "$_f" ] || [ -L "$_f" ] || continue
-      rm -f "$_f" 2>/dev/null || true
-    done
-    rmdir "$SC/run" 2>/dev/null || true
-  fi
-fi
-
-if [ -n "$SOCK" ]; then rm -f "$SOCK" 2>/dev/null || true; fi
-rm -rf "$ST" 2>/dev/null || true
-if [ "$others" = "0" ]; then
-  rm -rf "$L/corrald" "$L"/corrald-* "$L/README.txt" 2>/dev/null || true
-  rmdir "$SR" 2>/dev/null || true
-  rmdir "$SC" 2>/dev/null || true
-  rmdir "$L" 2>/dev/null || true
-fi
-left_any=0
-if [ -e "$ST" ]; then
-  left_any=1
-  echo "left=$ST	failed to remove"
-fi
-if [ "$others" = "0" ] && [ -d "$SC/run" ] && [ ! -L "$SC/run" ] && [ -O "$SC/run" ]; then
-  left_any=1
-  echo "left=$SC/run	corrald run dir still exists after removal"
-fi
-if [ "$others" = "0" ] && [ -d "$L" ]; then
-  for rem in "$L/corrald" "$L/README.txt" "$L"/corrald-*; do
-    if [ -e "$rem" ] || [ -L "$rem" ]; then
-      left_any=1
-      echo "left=$rem	corrald file still exists after removal"
-    fi
-  done
-fi
-if [ "$left_any" = "1" ]; then
-  echo "result=partial"
-  exit 1
-fi
-echo "result=removed"
-`, "L", libDir, "ST", stateDir, "SOCK", sockPath, "OP", opID, "SRB", uninstallSystemRunBase)
 }
 
 // StartCandidate describes the single authoritative binary chosen by
