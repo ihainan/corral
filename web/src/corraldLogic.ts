@@ -1418,6 +1418,19 @@ export function createCorraldHintController(deps: CorraldHintControllerDeps): Co
         return
       }
 
+      // A poll read before this page's own claim was written (it says
+      // claimed:false) but answered after it: the banner this page claimed
+      // for the same host and generation stays, and nothing is claimed again.
+      if (
+        claimedByPage.has(normalized.host_id) &&
+        displayedHint !== null &&
+        displayedHint.host_id === normalized.host_id &&
+        (displayedHint.generation ?? 0) === (normalized.generation ?? 0)
+      ) {
+        if (changed) notify()
+        return
+      }
+
       // GET returned claimed:false -> hide any previously displayed host and
       // claim this one (unless a claim for it is already in flight).
       if (displayedHint !== null) {
