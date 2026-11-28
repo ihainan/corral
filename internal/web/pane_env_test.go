@@ -389,27 +389,47 @@ func TestIsSensitiveEnvURLAndConnStrings(t *testing.T) {
 		{"query client_secret", "OAUTH_URL", "https://idp.example.com/token?client_secret=s123", true},
 		{"fragment id_token", "FRAG_URL", "https://example.com/app#id_token=abc&state=1", true},
 
-		// Common connection string shapes.
+		// Common connection string shapes (including asymmetric whitespace and colon forms).
 		{"adonet Password;", "CONN_STR", "Server=myServer;Database=myDB;User Id=sa;Password=hunter2;", true},
+		{"adonet space before eq", "CONN_STR", "Server=db;Password =hunter2;Database=app", true},
+		{"adonet space after eq", "CONN_STR", "Server=db;Password= hunter2;Database=app", true},
 		{"odbc PWD=", "CONN_STR", "Driver={ODBC Driver 18};Server=tcp:host,1433;UID=sa;PWD=secret123", true},
 		{"spaced Password =", "CONN_STR", "Server = db; Password = hunter2;", true},
 		{"libpq space-delimited password", "PGCONN", "host=localhost port=5432 user=alice password=hunter2 dbname=app", true},
+		{"libpq spaces around eq", "PGCONN", "host=db password = hunter2 dbname=app", true},
 		{"libpq quoted password", "PGCONN", "host=localhost user=alice password='my secret' dbname=app", true},
+		{"json password colon", "APP_CONFIG", `{"user":"alice","password": "hunter2"}`, true},
+		{"header api key colon", "EXTRA_HEADER", "X-Api-Key: secret123", true},
+		{"yaml token colon", "APP_YAML", "host: db\ntoken: abc123", true},
 		{"azure SharedAccessKey", "SERVICE_BUS", "Endpoint=sb://ns.servicebus.windows.net/;SharedAccessKeyName=Root;SharedAccessKey=abc123=", true},
 		{"azure AccountKey", "STORAGE_CONN", "DefaultEndpointsProtocol=https;AccountName=dev;AccountKey=abc123==", true},
 		{"short PWD=", "SHORT_CONN", "PWD=a", true},
+
+		// Percent-encoded and double-encoded parameter names.
+		{"percent-encoded query password", "DATABASE_URL", "https://example.com/?%70assword=hunter2", true},
+		{"percent-encoded fragment access_token", "CALLBACK_URL", "https://example.com/#access%5Ftoken=abc123", true},
+		{"double-encoded query password", "DATABASE_URL", "https://example.com/?%2570assword=hunter2", true},
+
+		// Fail-closed: unquoted space-delimited "password= dbname=app" is indistinguishable
+		// from "password= foo=bar" (a space-padded password containing '='), so mask it.
+		{"ambiguous unquoted empty libpq password fail-closed", "PGCONN", "host=localhost user=alice password= dbname=app", true},
 
 		// Ordinary non-sensitive values must NOT be misclassified.
 		{"pg url without password", "DATABASE_URL", "postgresql://db.internal:5432/app?sslmode=require&connect_timeout=10", false},
 		{"mongo authSource", "MONGO_URL", "mongodb://db.internal:27017/app?authSource=admin&retryWrites=true", false},
 		{"mongo authMechanism", "MONGO_URL", "mongodb://db.internal:27017/app?authMechanism=SCRAM-SHA-256", false},
 		{"ordinary query params", "DOCS_URL", "https://example.com/docs?page=2&sort=asc&author=alice&design=dark&keyboard=us", false},
+		{"malformed percent sequences", "DOCS_URL", "https://example.com/?foo=100%&bar=%2&baz=%ZZ", false},
 		{"empty password query trailing", "DATABASE_URL", "postgresql://db/app?user=alice&password=", false},
 		{"empty password query mid", "DATABASE_URL", "postgresql://db/app?password=&user=alice", false},
-		{"empty libpq password", "PGCONN", "host=localhost user=alice password= dbname=app", false},
+		{"empty password conn semicolon", "CONN_STR", "Server=db;Password=;Database=app", false},
+		{"empty password conn spaces semicolon", "CONN_STR", "Server=db;Password = ;Database=app", false},
+		{"empty password libpq trailing", "PGCONN", "host=localhost user=alice password=", false},
 		{"empty single-quoted password", "PGCONN", "host=localhost password='' dbname=app", false},
 		{"empty double-quoted password", "CONN_STR", `Server=db;Password="";Database=app`, false},
+		{"empty json password", "APP_CONFIG", `{"user":"alice","password": ""}`, false},
 		{"PWD env var path", "PWD", "/tmp/work/corral", false},
+		{"PATH with auth dir segment", "PATH", "/usr/local/sbin:/opt/auth:/usr/bin", false},
 		{"RUST_LOG value", "RUST_LOG", "info,corral=debug", false},
 		{"cmake flags non-secret", "CMAKE_FLAGS", "-DKEY_SIZE=16 -DSIGNAL=TERM", false},
 		{"azure key name only", "BUS_META", "SharedAccessKeyName=RootManage;Endpoint=sb://ns.example.com/", false},
@@ -442,6 +462,11 @@ func TestTmuxPaneEnvOwnershipCheckAndRename(t *testing.T) {
 	})
 	defer stopOther()
 
+	linkedPID, stopLinked := startPTYChild(t, []string{
+		"CORRAL_LINKED_MARKER=shared-linked-window",
+	})
+	defer stopLinked()
+
 	h := newHarness(t)
 	admin := h.admin()
 
@@ -450,9 +475,11 @@ func TestTmuxPaneEnvOwnershipCheckAndRename(t *testing.T) {
 	if err := os.WriteFile(stateFile, []byte("work\nother\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	// Map pane %1 -> line 1 of stateFile (initially "work"), pane %2 -> "other".
+	// Pane membership table: paneID \t session \t pid.
+	// %1 is only in "work", %2 is only in "other", %3 is a linked window in BOTH "work" and "other".
 	paneFile := filepath.Join(home, "tmux_panes.txt")
-	if err := os.WriteFile(paneFile, []byte(fmt.Sprintf("%%1\twork\t%d\n%%2\tother\t%d\n", ownPID, otherPID)), 0o600); err != nil {
+	paneRows := fmt.Sprintf("%%1\twork\t%d\n%%2\tother\t%d\n%%3\tother\t%d\n%%3\twork\t%d\n", ownPID, otherPID, linkedPID, linkedPID)
+	if err := os.WriteFile(paneFile, []byte(paneRows), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	bin := filepath.Join(home, ".local", "bin")
@@ -513,6 +540,30 @@ case "$cmd" in
     mv "$ptmp" "$PANES"
     exit 0
     ;;
+  list-panes)
+    target=""
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        -s) shift;;
+        -t) target="$2"; shift 2;;
+        -F) shift 2;;
+        *) shift;;
+      esac
+    done
+    want="${target#=}"
+    want="${want%:*}"
+    found_sess=0
+    while IFS= read -r n; do
+      [ "$n" = "$want" ] && found_sess=1
+    done < "$STATE"
+    [ "$found_sess" = 1 ] || exit 1
+    while IFS='	' read -r pid sess ppid; do
+      if [ "$sess" = "$want" ]; then
+        printf '%s\n' "$pid"
+      fi
+    done < "$PANES"
+    exit 0
+    ;;
   display-message)
     target=""
     fmt=""
@@ -525,12 +576,15 @@ case "$cmd" in
     done
     case "$target" in
       %*)
+        # Note: for linked pane %3, first matching row is "other", mirroring real tmux
+        # where display-message on %N only reports one session name.
         while IFS='	' read -r pid sess ppid; do
           if [ "$pid" = "$target" ]; then
             case "$fmt" in
               *'#{session_name}'*'#{pane_pid}'*) printf '%s\t%s\n' "$sess" "$ppid"; exit 0;;
               '#{session_name}') printf '%s\n' "$sess"; exit 0;;
               '#{pane_pid}') printf '%s\n' "$ppid"; exit 0;;
+              *'#{pane_id}|#{pane_pid}'*) printf '%s|%s||sh|0\n' "$pid" "$ppid"; exit 0;;
             esac
           fi
         done < "$PANES"
@@ -541,8 +595,10 @@ case "$cmd" in
         want="${want%:*}"
         while IFS='	' read -r pid sess ppid; do
           if [ "$sess" = "$want" ]; then
-            printf '%s\n' "$ppid"
-            exit 0
+            case "$fmt" in
+              *'#{pane_id}|#{pane_pid}'*) printf '%s|%s||sh|0\n' "$pid" "$ppid"; exit 0;;
+              *) printf '%s\n' "$ppid"; exit 0;;
+            esac
           fi
         done < "$PANES"
         exit 1
@@ -589,7 +645,14 @@ exit 0
 	mustStatus(t, rSess, http.StatusCreated, "open work tmux session")
 	sessID := rSess.json()["id"].(string)
 
-	// 1. Own pane %1 succeeds and masks query-param password in CORRAL_DB_URL.
+	rOtherSess := admin.do("POST", "/api/sessions", map[string]any{
+		"host_id": hostID,
+		"open":    map[string]any{"kind": "tmux", "name": "other"},
+	})
+	mustStatus(t, rOtherSess, http.StatusCreated, "open other tmux session")
+	otherSessID := rOtherSess.json()["id"].(string)
+
+	// 1. Own pane %1 succeeds on both pane-env and pane-inspect, and masks query-param password.
 	rOwn := admin.do("GET", "/api/sessions/"+sessID+"/pane-env?pane=%251", nil)
 	mustStatus(t, rOwn, http.StatusOK, "GET own pane env")
 	if strings.Contains(string(rOwn.Body), "hunter2") {
@@ -615,7 +678,17 @@ exit 0
 		t.Fatalf("expected own marker and masked db url, got %+v", ownResp.Vars)
 	}
 
-	// 2. Foreign pane %2 (belongs to tmux session "other") MUST be rejected on both list and reveal.
+	rOwnInspect := admin.do("GET", "/api/sessions/"+sessID+"/pane-inspect?pane=%251", nil)
+	mustStatus(t, rOwnInspect, http.StatusOK, "GET own pane inspect")
+	var ownInspect paneInspectResponse
+	if err := json.Unmarshal(rOwnInspect.Body, &ownInspect); err != nil {
+		t.Fatal(err)
+	}
+	if ownInspect.Pane != "%1" || ownInspect.ShellPID != ownPID {
+		t.Fatalf("expected own pane inspect %%1/%d, got %+v", ownPID, ownInspect)
+	}
+
+	// 2. Foreign pane %2 (belongs only to tmux session "other") MUST be rejected on pane-env, reveal, and pane-inspect.
 	rForeign := admin.do("GET", "/api/sessions/"+sessID+"/pane-env?pane=%252", nil)
 	mustStatus(t, rForeign, http.StatusOK, "GET foreign pane env")
 	if strings.Contains(string(rForeign.Body), otherSecret) || strings.Contains(string(rForeign.Body), "CORRAL_OTHER_SECRET") {
@@ -638,19 +711,67 @@ exit 0
 		t.Fatalf("unexpected foreign reveal response: %d %s", rRevForeign.Status, rRevForeign.Body)
 	}
 
-	// 3. After renaming tmux session "work" -> "work-renamed", own pane %1 still succeeds
-	//    via CurrentTmuxSession() and foreign pane %2 is still rejected.
+	rForeignInspect := admin.do("GET", "/api/sessions/"+sessID+"/pane-inspect?pane=%252", nil)
+	mustStatus(t, rForeignInspect, http.StatusOK, "GET foreign pane inspect")
+	var foreignInspect paneInspectResponse
+	if err := json.Unmarshal(rForeignInspect.Body, &foreignInspect); err != nil {
+		t.Fatal(err)
+	}
+	if foreignInspect.Pane != "" || foreignInspect.ShellPID != 0 {
+		t.Fatalf("expected empty inspect for foreign pane %%2, got %+v", foreignInspect)
+	}
+
+	// 3. Linked-window pane %3 (in BOTH "work" and "other") MUST succeed from BOTH sessions
+	//    on both pane-env and pane-inspect even though display-message reports only "other".
+	for label, sid := range map[string]string{"work": sessID, "other": otherSessID} {
+		rLinkedEnv := admin.do("GET", "/api/sessions/"+sid+"/pane-env?pane=%253", nil)
+		mustStatus(t, rLinkedEnv, http.StatusOK, "GET linked pane env from "+label)
+		var linkedResp paneEnvResponse
+		if err := json.Unmarshal(rLinkedEnv.Body, &linkedResp); err != nil {
+			t.Fatal(err)
+		}
+		if linkedResp.Reason != "" || linkedResp.PID != linkedPID {
+			t.Fatalf("linked pane env from %s: expected pid=%d reason='', got %+v", label, linkedPID, linkedResp)
+		}
+		foundLinked := false
+		for _, v := range linkedResp.Vars {
+			if v.Name == "CORRAL_LINKED_MARKER" && v.Value == "shared-linked-window" {
+				foundLinked = true
+			}
+		}
+		if !foundLinked {
+			t.Fatalf("linked pane env from %s missing marker: %+v", label, linkedResp.Vars)
+		}
+
+		rLinkedInspect := admin.do("GET", "/api/sessions/"+sid+"/pane-inspect?pane=%253", nil)
+		mustStatus(t, rLinkedInspect, http.StatusOK, "GET linked pane inspect from "+label)
+		var linkedInspect paneInspectResponse
+		if err := json.Unmarshal(rLinkedInspect.Body, &linkedInspect); err != nil {
+			t.Fatal(err)
+		}
+		if linkedInspect.Pane != "%3" || linkedInspect.ShellPID != linkedPID {
+			t.Fatalf("linked pane inspect from %s: expected %%3/%d, got %+v", label, linkedPID, linkedInspect)
+		}
+	}
+
+	// 4. After renaming tmux session "work" -> "work-renamed", own pane %1 and linked pane %3
+	//    still succeed via CurrentTmuxSession() and foreign pane %2 is still rejected.
 	rRen := admin.do("PUT", "/api/sessions/"+sessID+"/name", map[string]any{"name": "work-renamed"})
 	mustStatus(t, rRen, http.StatusOK, "rename tmux session")
 
-	rAfter := admin.do("GET", "/api/sessions/"+sessID+"/pane-env?pane=%251", nil)
-	mustStatus(t, rAfter, http.StatusOK, "GET own pane after rename")
-	var afterResp paneEnvResponse
-	if err := json.Unmarshal(rAfter.Body, &afterResp); err != nil {
-		t.Fatal(err)
-	}
-	if afterResp.Reason != "" || afterResp.PID != ownPID {
-		t.Fatalf("expected own pane to work after rename, got %+v", afterResp)
+	for _, paneQ := range []struct {
+		q   string
+		pid int
+	}{{"%251", ownPID}, {"%253", linkedPID}} {
+		rAfter := admin.do("GET", "/api/sessions/"+sessID+"/pane-env?pane="+paneQ.q, nil)
+		mustStatus(t, rAfter, http.StatusOK, "GET pane after rename "+paneQ.q)
+		var afterResp paneEnvResponse
+		if err := json.Unmarshal(rAfter.Body, &afterResp); err != nil {
+			t.Fatal(err)
+		}
+		if afterResp.Reason != "" || afterResp.PID != paneQ.pid {
+			t.Fatalf("expected pane %s pid=%d after rename, got %+v", paneQ.q, paneQ.pid, afterResp)
+		}
 	}
 
 	rAfterForeign := admin.do("GET", "/api/sessions/"+sessID+"/pane-env?pane=%252", nil)

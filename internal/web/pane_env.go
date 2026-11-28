@@ -119,12 +119,6 @@ var sensitiveValuePrefixes = []string{
 var (
 	// URLs containing embedded username:password@host credentials.
 	credURLRe = regexp.MustCompile(`[a-zA-Z][a-zA-Z0-9+.-]*://[^/\s@]*:[^/\s@]+@`)
-	// URL query or fragment key=value pairs (?k=v, &k=v, #k=v).
-	urlParamRe = regexp.MustCompile(`[?&#]([A-Za-z0-9._-]+)=([^?&#\s]*)`)
-	// Common connection string key=value pairs (e.g. Password=secret;, PWD=secret,
-	// host=db user=alice password=hunter2, AccountKey=...).
-	connStringPairRe   = regexp.MustCompile(`(?:^|[;\s,])([A-Za-z][A-Za-z0-9._-]{0,48})=(?:'([^']*)'|"([^"]*)"|([^\s;,"']*))`)
-	connStringSpacedRe = regexp.MustCompile(`(?:^|[;,])\s*([A-Za-z][A-Za-z0-9._-]{0,48})\s+=\s+(?:'([^']*)'|"([^"]*)"|([^\s;,"'=]*))`)
 	// JWT: three base64url segments starting with eyJ.
 	jwtValueRe = regexp.MustCompile(`^eyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]*$`)
 	// AWS access key IDs (AKIA / ASIA + 16 uppercase alphanumeric chars).
@@ -222,47 +216,153 @@ func isSensitiveParamKey(key string) bool {
 	return sensitiveParamLastSegs[segs[len(segs)-1]]
 }
 
-func hasSensitiveURLParam(v string) bool {
-	if !strings.ContainsAny(v, "?#") || !strings.Contains(v, "=") {
+func fromHexByte(c byte) (byte, bool) {
+	switch {
+	case c >= '0' && c <= '9':
+		return c - '0', true
+	case c >= 'a' && c <= 'f':
+		return c - 'a' + 10, true
+	case c >= 'A' && c <= 'F':
+		return c - 'A' + 10, true
+	default:
+		return 0, false
+	}
+}
+
+// percentDecodeOnce performs best-effort %XX decoding, leaving malformed
+// percent sequences intact so arbitrary input never fails.
+func percentDecodeOnce(s string) (string, bool) {
+	if !strings.ContainsRune(s, '%') {
+		return s, false
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	changed := false
+	for i := 0; i < len(s); i++ {
+		if s[i] == '%' && i+2 < len(s) {
+			hi, ok1 := fromHexByte(s[i+1])
+			lo, ok2 := fromHexByte(s[i+2])
+			if ok1 && ok2 {
+				b.WriteByte(hi<<4 | lo)
+				i += 2
+				changed = true
+				continue
+			}
+		}
+		b.WriteByte(s[i])
+	}
+	if !changed {
+		return s, false
+	}
+	return b.String(), true
+}
+
+func isParamKeyChar(c byte) bool {
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '.'
+}
+
+func isValueTerminator(c byte) bool {
+	switch c {
+	case ';', ',', '&', '#', '?', '\r', '\n', '}', ']':
+		return true
+	}
+	return false
+}
+
+// hasNonEmptyValueAfterSep reports whether s[pos:] begins with a non-empty
+// value after optional horizontal whitespace, failing closed whenever any
+// non-delimiter token follows (except explicit empty quotes "" / ”).
+func hasNonEmptyValueAfterSep(s string, pos int) bool {
+	for pos < len(s) && (s[pos] == ' ' || s[pos] == '\t') {
+		pos++
+	}
+	if pos >= len(s) || isValueTerminator(s[pos]) {
 		return false
 	}
-	for _, m := range urlParamRe.FindAllStringSubmatch(v, -1) {
-		if len(m) < 3 || strings.TrimSpace(m[2]) == "" {
+	if s[pos] == '"' || s[pos] == '\'' {
+		q := s[pos]
+		if pos+1 < len(s) && s[pos+1] == q {
+			after := pos + 2
+			if after >= len(s) || s[after] == ' ' || s[after] == '\t' || isValueTerminator(s[after]) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// scanSensitiveKeyValue scans s fail-closed for any key token followed by
+// optional whitespace, '=' or ':', optional whitespace, and a non-empty value,
+// returning true whenever the key is classified as sensitive.
+func scanSensitiveKeyValue(s string) bool {
+	if !strings.ContainsAny(s, "=:") {
+		return false
+	}
+	for i := 0; i < len(s); {
+		if !isParamKeyChar(s[i]) {
+			i++
 			continue
 		}
-		if isSensitiveParamKey(m[1]) {
+		start := i
+		hasLetter := false
+		for i < len(s) && isParamKeyChar(s[i]) {
+			c := s[i]
+			if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') {
+				hasLetter = true
+			}
+			i++
+		}
+		if !hasLetter {
+			continue
+		}
+		key := s[start:i]
+		j := i
+		// Allow quoted keys such as JSON/YAML `"password": "hunter2"`.
+		if j < len(s) && (s[j] == '"' || s[j] == '\'') && start > 0 && s[start-1] == s[j] {
+			j++
+		}
+		for j < len(s) && (s[j] == ' ' || s[j] == '\t') {
+			j++
+		}
+		if j >= len(s) || (s[j] != '=' && s[j] != ':') {
+			continue
+		}
+		sep := s[j]
+		if sep == ':' {
+			// Skip URL schemes (scheme://) and path/host components preceded by '/'.
+			if j+2 < len(s) && s[j+1] == '/' && s[j+2] == '/' {
+				continue
+			}
+			if start > 0 && s[start-1] == '/' {
+				continue
+			}
+		}
+		if !isSensitiveParamKey(key) {
+			continue
+		}
+		if hasNonEmptyValueAfterSep(s, j+1) {
 			return true
 		}
 	}
 	return false
 }
 
-func hasSensitiveConnString(v string) bool {
-	if !strings.Contains(v, "=") {
-		return false
+// hasSensitiveKeyValue checks both the raw value and up to two passes of
+// best-effort percent-decoding so percent-encoded (and double-encoded) key
+// names and connection strings are masked fail-closed.
+func hasSensitiveKeyValue(v string) bool {
+	if scanSensitiveKeyValue(v) {
+		return true
 	}
-	check := func(re *regexp.Regexp) bool {
-		for _, m := range re.FindAllStringSubmatch(v, -1) {
-			if len(m) < 5 {
-				continue
-			}
-			val := m[2]
-			if val == "" {
-				val = m[3]
-			}
-			if val == "" {
-				val = m[4]
-			}
-			if strings.TrimSpace(val) == "" {
-				continue
-			}
-			if isSensitiveParamKey(m[1]) {
-				return true
-			}
+	if d1, ok := percentDecodeOnce(v); ok {
+		if scanSensitiveKeyValue(d1) {
+			return true
 		}
-		return false
+		if d2, ok := percentDecodeOnce(d1); ok && scanSensitiveKeyValue(d2) {
+			return true
+		}
 	}
-	return check(connStringPairRe) || check(connStringSpacedRe)
+	return false
 }
 
 // isSensitiveEnv reports whether an environment variable should be masked by
@@ -282,7 +382,7 @@ func isSensitiveEnvValue(value string) bool {
 	if len(v) == 0 {
 		return false
 	}
-	if hasSensitiveURLParam(v) || hasSensitiveConnString(v) {
+	if hasSensitiveKeyValue(v) {
 		return true
 	}
 	if len(v) < 6 {
@@ -539,21 +639,28 @@ if [ ! -d /proc/self ]; then
   exit 0
 fi
 if [ -n "$pane" ]; then
-  pane_info=$(tmux -u display-message -p -t "$pane" '#{session_name}	#{pane_pid}' 2>/dev/null)
-  case "$pane_info" in
-    *'	'*)
-      pane_sess=${pane_info%	*}
-      pane_pid=${pane_info##*	}
-      if [ -z "$sess" ] || [ "$pane_sess" != "$sess" ]; then
-        printf 'ERR\tpane_not_in_session\n'
-        exit 0
-      fi
-      ;;
-    *)
-      printf 'ERR\tno_process\n'
-      exit 0
-      ;;
-  esac
+  if [ -z "$sess" ]; then
+    printf 'ERR\tpane_not_in_session\n'
+    exit 0
+  fi
+  if ! panes=$(tmux -u list-panes -s -t "=$sess" -F '#{pane_id}' 2>/dev/null); then
+    printf 'ERR\tno_process\n'
+    exit 0
+  fi
+  in_sess=0
+  while IFS= read -r p; do
+    if [ "$p" = "$pane" ]; then
+      in_sess=1
+      break
+    fi
+  done <<EOF
+$panes
+EOF
+  if [ "$in_sess" != 1 ]; then
+    printf 'ERR\tpane_not_in_session\n'
+    exit 0
+  fi
+  pane_pid=$(tmux -u display-message -p -t "$pane" '#{pane_pid}' 2>/dev/null)
 else
   pane_pid=$(tmux -u display-message -p -t "=$sess:" '#{pane_pid}' 2>/dev/null)
 fi
