@@ -10,6 +10,7 @@ const { outputText } = ts.transpileModule(src, {
 })
 const {
   closeAgentTabs,
+  expandSplitAgentTab,
   migrateAgentTabsKey,
   moveAgentTab,
   normalizeAgentTabs,
@@ -276,6 +277,30 @@ const tabs3 = [
   )
   assert.equal('preview' in clean[0], false)
   assert.equal('preview' in clean[1], false)
+}
+
+// 18. expandSplitAgentTab clears split on front tab and opens secondary as its own independent pinned tab.
+{
+  const start = [
+    { id: 't1', key: '1||p1', s: 's1', pane: 'p1', split: '1||p2', focus: 'secondary' },
+    { id: 't2', key: '1||p3', s: 's1', pane: 'p3', preview: true },
+  ]
+  const live = new Set(['1||p1', '1||p2', '1||p3'])
+  const r = expandSplitAgentTab(start, 't1', { key: '1||p2', s: 's1', pane: 'p2' }, () => 't-expanded', live)
+  assert.equal(r.changed, true)
+  assert.equal(r.existing, null)
+  assert.equal(r.front, 't-expanded')
+  assert.deepEqual(
+    r.tabs.map((x) => ({ id: x.id, key: x.key, split: x.split, focus: x.focus, preview: x.preview })),
+    [
+      { id: 't1', key: '1||p1', split: undefined, focus: undefined, preview: undefined },
+      { id: 't-expanded', key: '1||p2', split: undefined, focus: undefined, preview: undefined },
+      { id: 't2', key: '1||p3', split: undefined, focus: undefined, preview: true },
+    ],
+  )
+  assert.equal('split' in r.tabs[0], false)
+  assert.equal('focus' in r.tabs[0], false)
+  assert.equal('preview' in r.tabs[1], false)
 }
 
 console.log('agentTabPolicy: all tests passed')

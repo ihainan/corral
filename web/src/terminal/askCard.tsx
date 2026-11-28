@@ -171,14 +171,17 @@ type Drive = (run: (now: Screen) => Promise<Screen | null>) => void
 // The steps of an answer, one at a time; a refusal (the screen changed,
 // it no longer waits) reads it anew; one whose fate is not known leaves
 // the card to the screen.
-export function useDrive(screen: Screen | null, set: (s: Screen) => void, reload: () => Promise<void>, onDone: () => void, callId: string) {
+export function useDrive(screen: Screen | null, set: (s: Screen) => void, reload: () => Promise<void>, onDone: () => void, callId: string, onStart?: () => void) {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   // (For the call it was not known on: a later one is answered here again.)
   const [unsureOn, setUnsureOn] = useState('')
   const unsure = !!unsureOn && unsureOn === callId
+  const startRef = useRef(onStart)
+  startRef.current = onStart
   const drive: Drive = (run) => {
     if (!screen || busy || unsure) return
+    startRef.current?.()
     setBusy(true)
     setError('')
     void Promise.resolve()
@@ -269,7 +272,7 @@ async function tickAndGo(target: ReplyTarget, now: Screen, q0: Q, want: Set<numb
 }
 
 // lead: what it said before asking, where only its screen shows it (see screenCall).
-export function AskPanel({ call, index, shown, target, drive, busy, alive, lead }: { call: ConvoTool; index: number; shown: Q; target: ReplyTarget; drive: Drive; busy: boolean; alive: () => boolean; lead?: string[] }) {
+export function AskPanel({ call, index, shown, target, drive, busy, alive, lead, onTyped, onAct }: { call: ConvoTool; index: number; shown: Q; target: ReplyTarget; drive: Drive; busy: boolean; alive: () => boolean; lead?: string[]; onTyped?: () => void; onAct?: () => void }) {
   const ask = call.asks![index]
   // (Ticks not sent yet: kept for the card, as its typed words are.)
   const tickKey = call.id ? `${target.key} ${call.id} ${index}` : undefined
@@ -318,6 +321,7 @@ export function AskPanel({ call, index, shown, target, drive, busy, alive, lead 
                 aria-pressed={ask.multi ? ticked.has(n) : undefined}
                 onClick={() => {
                   if (!ask.multi) return pick(n)
+                  onAct?.()
                   const next = new Set(ticked)
                   if (next.has(n)) next.delete(n)
                   else next.add(n)
@@ -348,7 +352,7 @@ export function AskPanel({ call, index, shown, target, drive, busy, alive, lead 
       )}
       {shown.own !== undefined &&
         (!ask.multi && target.fill ? (
-          <OwnBox label={t('own.answer')} keep={call.id ? `${target.key} ${call.id} ${index} own` : undefined} busy={busy} onGo={(text) => drive((now) => ownWords(target, now, questionOwn(shown.own!), text, alive))} />
+          <OwnBox label={t('own.answer')} keep={call.id ? `${target.key} ${call.id} ${index} own` : undefined} busy={busy} onTyped={onTyped} onGo={(text) => drive((now) => ownWords(target, now, questionOwn(shown.own!), text, alive))} />
         ) : (
           <p className="convo-ask-hint">
             {t('ask.ownInTerminal')}
@@ -390,7 +394,7 @@ function ToTerminal() {
 
 // A line of the person's own, into a row of the prompt that takes it.
 // keep: where what is typed is kept while it is not sent (see cardDrafts).
-export function OwnBox({ label, busy, onGo, hint, keep }: { label: string; busy: boolean; onGo: (text: string) => void; hint?: string; keep?: string }) {
+export function OwnBox({ label, busy, onGo, onTyped, hint, keep }: { label: string; busy: boolean; onGo: (text: string) => void; onTyped?: () => void; hint?: string; keep?: string }) {
   const [text, setTextNow] = useState(() => (keep && cardDrafts.get(keep)) || '')
   const setText = (v: string) => (setTextNow(v), keepDraft(cardDrafts, keep, v))
   // (Another question in the same place: its own words, or none — not the last one's.)
@@ -411,7 +415,19 @@ export function OwnBox({ label, busy, onGo, hint, keep }: { label: string; busy:
         if (ok && !busy) onGo(text)
       }}
     >
-      <input className="input" value={text} placeholder={label} aria-label={label} autoCapitalize="none" autoCorrect="off" onChange={(e) => setText(e.target.value.replace(/[\r\n]+/g, ' '))} />
+      <input
+        className="input"
+        value={text}
+        placeholder={label}
+        aria-label={label}
+        autoCapitalize="none"
+        autoCorrect="off"
+        onChange={(e) => {
+          const v = e.target.value.replace(/[\r\n]+/g, ' ')
+          setText(v)
+          if (v.trim()) onTyped?.()
+        }}
+      />
       <button className="btn" disabled={busy || !ok}>
         {t('own.go')}
       </button>
@@ -457,7 +473,7 @@ export async function pickReview(target: ReplyTarget, now: Screen, n: number, ex
 }
 
 // The page that reviews the answers before they go: as the screen says it.
-export function ReviewPanel({ shown, digest, target, drive, busy, alive }: { shown: Extract<AskScreen, { kind: 'review' }>; digest: string; target: ReplyTarget; drive: Drive; busy: boolean; alive: () => boolean }) {
+export function ReviewPanel({ shown, digest, target, drive, busy, alive, onAct }: { shown: Extract<AskScreen, { kind: 'review' }>; digest: string; target: ReplyTarget; drive: Drive; busy: boolean; alive: () => boolean; onAct?: () => void }) {
   return (
     <div className="convo-ask-structured">
       <div className="convo-ask-q">{t('ask.review')}</div>
@@ -472,14 +488,14 @@ export function ReviewPanel({ shown, digest, target, drive, busy, alive }: { sho
           ))}
         </dl>
       )}
-      <Choices digest={digest} options={shown.options} busy={busy} onPick={(n) => drive((now) => pickReview(withAlive(target, alive), now, n, shown))} />
+      <Choices digest={digest} options={shown.options} busy={busy} onAct={onAct} onPick={(n) => drive((now) => pickReview(withAlive(target, alive), now, n, shown))} />
     </div>
   )
 }
 
 // A plan put to the person: the plan as the log has it, the choices as the
 // screen shows them (one that lasts beyond this: a second tap).
-export function PlanPanel({ call, shown, digest, target, drive, busy, onScreen, alive }: { call: ConvoTool; shown: Extract<AskScreen, { kind: 'plan' }>; digest: string; target: ReplyTarget; drive: Drive; busy: boolean; onScreen: () => void; alive: () => boolean }) {
+export function PlanPanel({ call, shown, digest, target, drive, busy, onScreen, alive, onTyped, onAct }: { call: ConvoTool; shown: Extract<AskScreen, { kind: 'plan' }>; digest: string; target: ReplyTarget; drive: Drive; busy: boolean; onScreen: () => void; alive: () => boolean; onTyped?: () => void; onAct?: () => void }) {
   return (
     <div className="convo-ask-structured">
       <div className="convo-ask-q">{t(target.agent === 'codex' ? 'ask.planCodex' : 'ask.plan')}</div>
@@ -498,13 +514,13 @@ export function PlanPanel({ call, shown, digest, target, drive, busy, onScreen, 
           </button>
         </p>
       )}
-      <Choices digest={digest} options={shown.options.filter((o) => !/^Tell Claude what to change$/i.test(o.label))} busy={busy} onPick={(n) => drive((now) => step(withAlive(target, alive), now, [String(n)], (x) => x.kind !== 'plan'))} />
+      <Choices digest={digest} options={shown.options.filter((o) => !/^Tell Claude what to change$/i.test(o.label))} busy={busy} onAct={onAct} onPick={(n) => drive((now) => step(withAlive(target, alive), now, [String(n)], (x) => x.kind !== 'plan'))} />
       {(() => {
         const change = shown.options.find((o) => /^Tell Claude what to change$/i.test(o.label))
         // (Codex's has no such choice: "No, stay in Plan mode", then a message, is how a change is asked for.)
         if (!change && shown.options.some((o) => /^No, stay in Plan mode$/i.test(o.label))) return <p className="convo-ask-hint">{t('ask.codexPlanChange')}</p>
         return change && target.fill ? (
-          <OwnBox label={t('own.change')} hint={t('own.changeHint')} keep={call.id ? `${target.key} ${call.id} plan` : undefined} busy={busy} onGo={(text) => drive((now) => ownWords(target, now, planChange(change.n), text, alive))} />
+          <OwnBox label={t('own.change')} hint={t('own.changeHint')} keep={call.id ? `${target.key} ${call.id} plan` : undefined} busy={busy} onTyped={onTyped} onGo={(text) => drive((now) => ownWords(target, now, planChange(change.n), text, alive))} />
         ) : (
           <p className="convo-ask-hint">
             {t('ask.changeInTerminal')}
@@ -517,7 +533,7 @@ export function PlanPanel({ call, shown, digest, target, drive, busy, onScreen, 
 }
 
 // Choices as the screen shows them; one that lasts beyond this asks a second tap.
-function Choices({ digest, options, busy, onPick }: { digest: string; options: ScreenOption[]; busy: boolean; onPick: (n: number) => void }) {
+function Choices({ digest, options, busy, onPick, onAct }: { digest: string; options: ScreenOption[]; busy: boolean; onPick: (n: number) => void; onAct?: () => void }) {
   // (Asked again on this screen only: another one read meanwhile asks anew.)
   const [askedOn, setAskedOn] = useState({ n: -1, digest: '' })
   const asked = askedOn.digest === digest ? askedOn.n : -1
@@ -534,6 +550,7 @@ function Choices({ digest, options, busy, onPick }: { digest: string; options: S
             className={'convo-ask-opt' + (asked === o.n ? ' is-confirm' : '')}
             disabled={busy}
             onClick={() => {
+              onAct?.()
               if (lasts && asked !== o.n) return setAsked(o.n)
               setAsked(-1)
               onPick(o.n)

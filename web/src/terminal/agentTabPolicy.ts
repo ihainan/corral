@@ -168,6 +168,32 @@ export function moveAgentTab<T extends AgentTabLike>(
   return { tabs: next, changed: true }
 }
 
+// Expand the secondary split pane of the front tab into its own independent
+// pinned tab: clears `split`/`focus` on the front tab first so opening the
+// expanded target cannot match the old split reference and restore the split.
+export function expandSplitAgentTab<T extends AgentTabLike>(
+  tabs: readonly T[],
+  front: string | null,
+  target: OpenAgentTabTarget,
+  makeId: () => string,
+  liveKeys?: ReadonlySet<string>,
+): OpenAgentTabResult<T> {
+  let clearedChanged = false
+  const cleared = tabs.map((x) => {
+    if (x.id !== front || (x.split === undefined && x.focus === undefined)) return x
+    clearedChanged = true
+    const next = { ...x }
+    delete next.split
+    delete next.focus
+    return next
+  })
+  const res = openAgentTab(cleared, front, target, 'pinned', makeId, liveKeys)
+  return {
+    ...res,
+    changed: clearedChanged || res.changed,
+  }
+}
+
 export type CloseAgentTabsResult<T extends AgentTabLike> = {
   tabs: T[]
   front: string | null

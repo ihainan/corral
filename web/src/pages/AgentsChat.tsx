@@ -63,7 +63,7 @@ import { Rail, StatusBar, StatusItem, useWorkbench } from '../workbench'
 import { CorraldStatusBarItem } from '../components/CorraldStatusBarItem'
 import { isCorraldUnknownResult } from '../corraldLogic'
 import { AgentTabBar, askPickInTab, isTabsKey, newTabId, OPEN_PICKER, readFront, readTabs, takePickInTab, writeFront, writeTabs, type AgentTab, type PickHow, type TabView } from './agentTabs'
-import { AGENT_CLOSED_EVENT, closeAgentTabs, migrateAgentTabsKey, moveAgentTab, openAgentTab, pinAgentTab, pinAgentTabByKey } from '../terminal/agentTabPolicy'
+import { AGENT_CLOSED_EVENT, closeAgentTabs, expandSplitAgentTab, migrateAgentTabsKey, moveAgentTab, openAgentTab, pinAgentTab, pinAgentTabByKey } from '../terminal/agentTabPolicy'
 import { SESSION_RENAMED_EVENT, tmuxEntryKey, type SessionRenamedPayload } from '../terminal/sessionRenamePolicy'
 import { agentMark } from '../terminal/agentIcons'
 import { useComposerFit } from '../terminal/autosize'
@@ -853,9 +853,22 @@ export function AgentsChat({ bar, active = true, onHead }: { bar?: ReactNode; ac
   const expandSplit = () => {
     if (!splitEntry) return
     const target = splitEntry
+    const live = new Set(entries.map((en) => en.key))
+    const res = expandSplitAgentTab(tabsRef.current, frontRef.current, { key: target.key, s: target.s.id, pane: target.pane }, newTabId, live)
+    if (res.changed) putTabs(res.tabs)
+    if (res.existing) return goTab(res.existing, res.focus)
+    putFront(res.front)
+    splitSeen.current = { cur: target.key, split: null }
     setSplitKey(null)
     setFocusedPane('primary')
-    choose(target, 'tab')
+    setPick({ s: target.s.id, pane: target.pane, key: target.key })
+    pickKey.current = { s: target.s.id, pane: target.pane, key: target.key }
+    try {
+      local.set(LAST, JSON.stringify({ s: target.s.id, pane: target.pane, key: target.key }))
+    } catch {
+      /* not kept */
+    }
+    navigate(chatAddress(target), true, history.state)
   }
   const chooseFromList = (e: Entry, how?: PickHow) => {
     if (!how && takePickInTab()) how = 'tab' // (picked in the switcher ⌘T opened)
@@ -1328,7 +1341,7 @@ export function AgentsChat({ bar, active = true, onHead }: { bar?: ReactNode; ac
             if (e.key === cur.key) setFocusedPane('primary')
             else openSplit(e)
           }}
-          onInteract={stack ? undefined : () => pinTabByKey(sk)}
+          onInteract={() => pinTabByKey(sk)}
           active={active}
           keysActive={active && focusedPane === 'secondary'}
           isSecondary
@@ -1369,7 +1382,7 @@ export function AgentsChat({ bar, active = true, onHead }: { bar?: ReactNode; ac
         onOpenTab={stack ? undefined : (e) => choose(e, 'tab')}
         previewTabKey={stack ? null : previewTabKey}
         onPinTab={stack ? undefined : pinTabByKey}
-        onInteract={stack ? undefined : () => pinTabByKey(k)}
+        onInteract={() => pinTabByKey(k)}
         active={active}
         keysActive={active && (!splitEntry || focusedPane === 'primary')}
         splitPane={secondaryNode ? { node: secondaryNode, focused: focusedPane, onFocus: setFocusedPane, dir: splitDir, onDirToggle: toggleSplitDir } : undefined}
@@ -4403,9 +4416,8 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, previewTabKey
       ask={
         !readOnly && waits && replyTo ? (
           // (One a pane, and a process in it: nothing of another's carries over. Not tied to a terminal: no size to wait for.)
-          <InlineReply key={replyTo.key} target={replyTo} resizedAt={0} active={kActive} held={() => false} call={asked} pending={pendingCall} agentVersion={convo.meta?.version} onTyped={onInteract} onAnswered={(yes) => {
+          <InlineReply key={replyTo.key} target={replyTo} resizedAt={0} active={kActive} held={() => false} call={asked} pending={pendingCall} agentVersion={convo.meta?.version} onTyped={onInteract} onAct={onInteract} onAnswered={(yes) => {
             setAnswered(yes)
-            if (yes) onInteract?.()
             // (Answered: not waiting in the list and the title either, at once — not at its next read. 11-14.)
             const pane = cur.pane
             if (yes && pane) expectSession(cur.s.id, (s) => answeredHerdr(s, pane), (s) => !paneWaits(s, pane), 4000)
@@ -4442,6 +4454,7 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, previewTabKey
       onEnter={async (id) => {
         const p = sent.find((q) => q.id === id)
         if (!p) return false
+        onInteract?.()
         const enter = (text: string) => api<{ pressed: boolean }>('POST', `/api/sessions/${sid}/conversation/sent-enter`, { ...pressBody(), text }, { timeoutMs: PRESS_MS })
         // (Several queued, their turn stopped: Codex puts them all back in its
         // input, one after another, one message now — Enter sends them as one.
@@ -4453,7 +4466,6 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, previewTabKey
         const joined = !!all && r.pressed
         if (all && !r.pressed) r = await enter(p.text)
         if (r.pressed) {
-          onInteract?.()
           // (Waited for in the log again, as when it was sent: all of them, as the one they now are.)
           lookedAt.delete(id * 10 + (p.relook ?? 0))
           const others = new Set(joined ? group.filter((q) => q.id !== id).map((q) => q.id) : [])

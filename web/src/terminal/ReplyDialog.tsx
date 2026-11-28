@@ -111,7 +111,7 @@ export function convoTarget(sessionId: string, bind: { pane: string; pid: number
 // pane, so the screen is read again a moment later.
 // onSent: after an answer went through.
 // quiet: no toast once sent (the card in the thread says so in its place).
-export function useReply(target: ReplyTarget, { onLoaded, resizedAt, onSent, quiet }: { onLoaded?: () => void; resizedAt?: number; onSent: () => void; quiet?: boolean }) {
+export function useReply(target: ReplyTarget, { onLoaded, resizedAt, onSent, onStart, quiet }: { onLoaded?: () => void; resizedAt?: number; onSent: () => void; onStart?: () => void; quiet?: boolean }) {
   const toast = useToast()
   const base = target.key
   const targetRef = useRef(target)
@@ -147,6 +147,8 @@ export function useReply(target: ReplyTarget, { onLoaded, resizedAt, onSent, qui
   }, [])
   const loadedRef = useRef(onLoaded)
   loadedRef.current = onLoaded
+  const startRef = useRef(onStart)
+  startRef.current = onStart
 
   const load = async () => {
     const n = ++seq.current
@@ -186,6 +188,7 @@ export function useReply(target: ReplyTarget, { onLoaded, resizedAt, onSent, qui
 
   const send = async (body: { keys: string[] } | { text: string }) => {
     if (!screen || busy) return
+    startRef.current?.()
     setBusy(true)
     setError('')
     seq.current++ // a refresh still on its way must not replace what this answer meets
@@ -405,7 +408,7 @@ export function ReplyDialog({ sessionId, agent, onLoaded, onClose, resizedAt }: 
 // (Of this screen only: another screen's choice of the same number is
 // another choice, asked anew. Enter takes the choice marked on the screen,
 // so it asks as that one does.)
-function useConfirm(screen: { text: string; digest: string } | null, opts: { key: string; label: string; keys?: string[] }[], send: (keys: string[]) => void) {
+function useConfirm(screen: { text: string; digest: string } | null, opts: { key: string; label: string; keys?: string[] }[], send: (keys: string[]) => void, onStart?: () => void) {
   const [asked, setAsked] = useState<{ key: string; digest: string } | null>(null)
   const digest = screen?.digest ?? ''
   useEffect(() => {
@@ -414,6 +417,7 @@ function useConfirm(screen: { text: string; digest: string } | null, opts: { key
     return () => clearTimeout(tm)
   }, [asked])
   const choose = (key: string, given?: string[]) => {
+    onStart?.()
     const o = opts.find((x) => x.key === key)
     const keys = given ?? o?.keys ?? [key] // (a row chosen by the arrows: its own keys — cursorMenu)
     if (o && lasting(o.label) && !(asked?.key === key && asked.digest === digest)) return setAsked({ key, digest })
@@ -424,6 +428,7 @@ function useConfirm(screen: { text: string; digest: string } | null, opts: { key
   // menu is at its end; one before it is of earlier output). None told,
   // where a choice lasts, Enter asks for its second too.
   const enter = () => {
+    onStart?.()
     const marks = screen ? [...screen.text.matchAll(/^[\s│┃|]*❯\s*(\d)[.)]/gm)] : []
     const m = marks.length ? marks[marks.length - 1][1] : null
     if (m && opts.some((o) => o.key === m)) return choose(m, ['enter'])
@@ -616,7 +621,8 @@ function useFreshAsk(id: string): boolean {
   return at.id === id && at.fresh
 }
 
-export function InlineReply({ target, onLoaded, resizedAt, active = true, held, call, pending, onAnswered, onTyped, waitSince, agentVersion }: { target: ReplyTarget; onLoaded?: () => void; resizedAt?: number; active?: boolean; held?: () => boolean; call?: ConvoTool; pending?: ConvoTool; onAnswered?: (yes: boolean) => void; onTyped?: () => void; waitSince?: number; agentVersion?: string }) {
+export function InlineReply({ target, onLoaded, resizedAt, active = true, held, call, pending, onAnswered, onTyped, onAct, waitSince, agentVersion }: { target: ReplyTarget; onLoaded?: () => void; resizedAt?: number; active?: boolean; held?: () => boolean; call?: ConvoTool; pending?: ConvoTool; onAnswered?: (yes: boolean) => void; onTyped?: () => void; onAct?: () => void; waitSince?: number; agentVersion?: string }) {
+  const act = onAct ?? onTyped
   const toast = useToast()
   const showTerminal = useContext(ShowTerminal)
   const [sent, setSent] = useState<string | null>(null) // (the screen answered)
@@ -626,7 +632,7 @@ export function InlineReply({ target, onLoaded, resizedAt, active = true, held, 
   useEffect(() => () => answeredRef.current?.(false), [])
   const [shown, setShown] = useState(false)
   const answered = useRef('')
-  const { screen, setScreen, failed, reading, changed, busy: sending, error: sendError, text, setText, clearIf, load, send, submit, opts } = useReply(target, { onLoaded, resizedAt, onSent: () => setSent(answered.current), quiet: true })
+  const { screen, setScreen, failed, reading, changed, busy: sending, error: sendError, text, setText, clearIf, load, send, submit, opts } = useReply(target, { onLoaded, resizedAt, onStart: act, onSent: () => setSent(answered.current), quiet: true })
   // A permission's amend: the person's words with Yes or No (Tab on it, then
   // the words, then Enter: ownWords). Typed, or Enter perhaps gone, and
   // failed: said so, not offered again on this prompt.
@@ -645,6 +651,7 @@ export function InlineReply({ target, onLoaded, resizedAt, active = true, held, 
   const [amendStuck, setAmendStuck] = useState('')
   const amend = (n: number, yes: boolean, words: string) => {
     if (!screen || amending) return
+    act?.()
     setAmending(true)
     setAmendError('')
     const on = screen.digest
@@ -674,6 +681,7 @@ export function InlineReply({ target, onLoaded, resizedAt, active = true, held, 
     if (!screen || amending) return
     const asked = codexQuestionKey(screen.text)
     if (!asked) return
+    act?.()
     setAmending(true)
     setAmendError('')
     const on = screen.digest
@@ -711,7 +719,7 @@ export function InlineReply({ target, onLoaded, resizedAt, active = true, held, 
   // (Told first by when it began to wait — one wait, one question, known as the card comes,
   // gone back to or not; else by its call, from the log or read off the screen — review2.)
   const fresh = useFreshAsk(target.key + '|' + (waitSince ? '@' + waitSince : (call?.id ?? pending?.id ?? fromScreen?.id ?? '')))
-  const driven = useDrive(screen, setScreen, load, () => setSent(answered.current), logAsks ? (call!.id ?? '') : (fromScreen?.id ?? reviewId ?? (call && !call.done ? (call.id ?? '') : '')))
+  const driven = useDrive(screen, setScreen, load, () => setSent(answered.current), logAsks ? (call!.id ?? '') : (fromScreen?.id ?? reviewId ?? (call && !call.done ? (call.id ?? '') : '')), act)
   const busy = sending || driven.busy || amending
   const error = sendError || driven.error || amendError
   const state = !driven.unsure ? read : ({ kind: 'unknown' } as const)
@@ -822,14 +830,19 @@ export function InlineReply({ target, onLoaded, resizedAt, active = true, held, 
   const [armedFor, setArmedFor] = useState('')
   const arm = () => setArmedFor(screen?.digest ?? '')
   const armed = !!screen && armedFor === screen.digest
-  const confirm = useConfirm(screen, opts, (keys) => void send({ keys }))
+  const confirm = useConfirm(screen, opts, (keys) => void send({ keys }), act)
   // (The card drawn from the log answers by its own steps: no keys here.)
   const ready = sent === null && !!screen && !busy && !failed && armedFor === screen.digest && !structured
   const cardRef = useRef<HTMLDivElement>(null)
   // (Not while the terminal itself is shown for it: its keys are the terminal's
   // — taken here first, a digit or Esc pressed there went nowhere.)
   const shownLive = needScreen && !!target.live && !failed && !structured
-  useAnswerKeys(active && !structured && !shownLive, ready, [...opts.map((o) => o.key), 'esc'], held, cardRef, (k) => (k === 'esc' ? void send({ keys: [k] }) : cxWords ? codexOwn(Number(k), cxWords) : confirm.choose(k)))
+  useAnswerKeys(active && !structured && !shownLive, ready, [...opts.map((o) => o.key), 'esc'], held, cardRef, (k) => {
+    act?.()
+    if (k === 'esc') void send({ keys: [k] })
+    else if (cxWords) codexOwn(Number(k), cxWords)
+    else confirm.choose(k)
+  })
   if (sent !== null) return <p className="convo-ask-sent" role="status">{t('convo.answeredHere')}</p>
   // (What it asks not made out: the terminal itself, with its colours and its
   // layout, keys going to it. Not the words of a screen and two buttons: that
@@ -849,7 +862,10 @@ export function InlineReply({ target, onLoaded, resizedAt, active = true, held, 
             note: t('panel.waiting'),
             onFull: showTerminal,
             canNotice: (target.agent ?? 'claude') === 'claude',
-            onNoticeSent: () => setSent(answered.current || 'notice'),
+            onNoticeSent: () => {
+              act?.()
+              setSent(answered.current || 'notice')
+            },
           }}
         />
       </div>
@@ -859,11 +875,11 @@ export function InlineReply({ target, onLoaded, resizedAt, active = true, held, 
     return (
       <div className={'convo-ask' + (fresh ? ' is-new' : '')} role="group" aria-label={waiting} aria-busy={busy}>
         {state.kind === 'question' && asking ? (
-          <AskPanel key={(asking.id ?? '') + ':' + askAt} call={asking} index={askAt} shown={state} target={target} drive={driven.drive} busy={busy} alive={stillHere} lead={lead} />
+          <AskPanel key={(asking.id ?? '') + ':' + askAt} call={asking} index={askAt} shown={state} target={target} drive={driven.drive} busy={busy} alive={stillHere} lead={lead} onTyped={onTyped} onAct={act} />
         ) : state.kind === 'review' ? (
-          <ReviewPanel shown={state} digest={screen.digest} target={target} drive={driven.drive} busy={busy} alive={stillHere} />
+          <ReviewPanel shown={state} digest={screen.digest} target={target} drive={driven.drive} busy={busy} alive={stillHere} onAct={act} />
         ) : state.kind === 'plan' && call ? (
-          <PlanPanel call={call} shown={state} digest={screen.digest} target={target} drive={driven.drive} busy={busy} onScreen={() => setShown(true)} alive={stillHere} />
+          <PlanPanel call={call} shown={state} digest={screen.digest} target={target} drive={driven.drive} busy={busy} onScreen={() => setShown(true)} alive={stillHere} onTyped={onTyped} onAct={act} />
         ) : null}
         {changed && (
           <p className="reply-changed" role="alert">
@@ -960,8 +976,8 @@ export function InlineReply({ target, onLoaded, resizedAt, active = true, held, 
             return (
               <>
                 {/* (No with words first: the usual way to steer it — workbench 11-23.) */}
-                {no && <OwnBox label={t('own.noWith')} keep={call?.id ? `${target.key} ${call.id} no` : undefined} busy={busy} onGo={(w) => amend(Number(no.key), false, w)} />}
-                {yes && <OwnBox label={t('own.yesWith')} keep={call?.id ? `${target.key} ${call.id} yes` : undefined} busy={busy} onGo={(w) => amend(Number(yes.key), true, w)} />}
+                {no && <OwnBox label={t('own.noWith')} keep={call?.id ? `${target.key} ${call.id} no` : undefined} busy={busy} onTyped={onTyped} onGo={(w) => amend(Number(no.key), false, w)} />}
+                {yes && <OwnBox label={t('own.yesWith')} keep={call?.id ? `${target.key} ${call.id} yes` : undefined} busy={busy} onTyped={onTyped} onGo={(w) => amend(Number(yes.key), true, w)} />}
               </>
             )
           })()}
