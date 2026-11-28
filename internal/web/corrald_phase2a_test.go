@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -1934,4 +1935,294 @@ func TestCorraldFix5_EndToEnd(t *testing.T) {
 			_, _ = stopCmd.CombinedOutput()
 		}
 	})
+}
+
+// Regression tests for Fix Round 7 Items #1, #2, #3, #5, #8:
+//   - Item #1: no-binary tombstone recovery uploads and runs the Go binary under
+//     .corrald-shared.lock -> op.lock -> corrald.lock (serializing with install).
+//   - Item #2: admin disable during an in-flight update leaves remove_pending +
+//     pending flag (or cleans up), never stopped with files and no retry.
+//   - Item #3: existing-install reuse branch disabled right after Hello uses a
+//     non-cancelled context and never ends in off while files/daemon remain.
+//   - Item #5: partial recovery preserves the removing tombstone for retry.
+//   - Item #8: leftovers in ~/.local/state/corral/run report partial (not removed).
+func TestCorraldFix7_EndToEnd(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("requires linux")
+	}
+	v1Dir, v2Dir := buildTestCorraldDist(t)
+	distV1, err := gw.LoadDist(v1Dir)
+	if err != nil {
+		t.Fatalf("LoadDist v1: %v", err)
+	}
+	distV2, err := gw.LoadDist(v2Dir)
+	if err != nil {
+		t.Fatalf("LoadDist v2: %v", err)
+	}
+
+	t.Run("item1_5_8_no_binary_tombstone_recovery_locked_go_and_run_dir", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("chmod 0500 does not block root")
+		}
+		sshSrv, home := startCorraldSSH(t)
+		sshCl := dialTestSSH(t, sshSrv)
+		defer sshCl.Close()
+
+		// Probe the fresh home to get exact libDir/stateDir/machineID.
+		probe, err := gw.ProbeHost(context.Background(), sshCl)
+		if err != nil {
+			t.Fatalf("ProbeHost: %v", err)
+		}
+		libDir := probe.LibDir
+		stateDir := probe.StateDir
+		runDir := filepath.Join(home, ".local", "state", "corral", "run")
+		if err := os.MkdirAll(libDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(stateDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(runDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		// Simulate binaries already removed, leaving valid removing tombstone +
+		// .corrald-shared.lock + a leftover file inside read-only run/.
+		tombPath := filepath.Join(stateDir, "removing")
+		if err := os.WriteFile(tombPath, []byte(`{"created_at":"2026-11-28T00:00:00Z","gateway":"gw-fix7.local"}`+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		sharedLockPath := filepath.Join(libDir, ".corrald-shared.lock")
+		if err := os.WriteFile(sharedLockPath, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		runFile := filepath.Join(runDir, "corral-send-tmux-_0")
+		if err := os.WriteFile(runFile, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		// Lock runDir read-only so first recovery fails partially on run/ (Items #5 & #8).
+		if err := os.Chmod(runDir, 0o500); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(runDir, 0o700) })
+
+		// Hold .corrald-shared.lock concurrently to prove Go recovery blocks on
+		// .corrald-shared.lock (Item #1)!
+		lockFD, err := os.OpenFile(sharedLockPath, os.O_RDWR, 0o600)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := syscallFlockEx(lockFD); err != nil {
+			_ = lockFD.Close()
+			t.Fatalf("flock shared lock: %v", err)
+		}
+
+		outCh := make(chan gw.UninstallOutcome, 1)
+		go func() {
+			outCh <- gw.RunUninstallSoleGatewayWithRetry(context.Background(), sshCl, distV1, probe, "op7rec1", "gw-fix7.local", gw.DefaultBusyRetryPolicy, nil)
+		}()
+
+		select {
+		case out := <-outCh:
+			_ = lockFD.Close()
+			t.Fatalf("Fix7 Item #1 regression: no-binary recovery did NOT wait on .corrald-shared.lock! out=%+v", out)
+		case <-time.After(200 * time.Millisecond):
+		}
+		_ = lockFD.Close()
+
+		// First attempt must report partial because run/ could not be removed (Item #8),
+		// AND must preserve the removing tombstone for retry (Item #5)!
+		out1 := <-outCh
+		if out1.Result != "partial" {
+			t.Fatalf("Fix7 Item #8 regression: expected result=partial when run/ cannot be deleted, got %+v", out1)
+		}
+		if _, err := os.Stat(tombPath); err != nil {
+			t.Fatalf("Fix7 Item #5 regression: removing tombstone was deleted on partial recovery failure: %v", err)
+		}
+
+		// Clear fault -> second retry completes cleanly to result=removed and removes run/ + stateDir + temp recovery dir!
+		if err := os.Chmod(runDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		out2 := gw.RunUninstallSoleGatewayWithRetry(context.Background(), sshCl, distV1, probe, "op7rec2", "gw-fix7.local", gw.DefaultBusyRetryPolicy, nil)
+		if out2.Result != "removed" {
+			t.Fatalf("expected retry to succeed with result=removed, got %+v", out2)
+		}
+		if _, err := os.Lstat(runDir); !os.IsNotExist(err) {
+			t.Fatalf("expected run/ removed, stat err=%v", err)
+		}
+		if _, err := os.Lstat(stateDir); !os.IsNotExist(err) {
+			t.Fatalf("expected stateDir removed, stat err=%v", err)
+		}
+		if _, err := os.Lstat(filepath.Join(home, ".local", "state", "corral", ".rm-op7rec2")); !os.IsNotExist(err) {
+			t.Fatalf("expected temp recovery dir removed, stat err=%v", err)
+		}
+	})
+
+	t.Run("item2_disable_during_inflight_update_never_leaves_stopped_with_files", func(t *testing.T) {
+		h := newHarness(t, func(c *config.Config) {
+			c.CorraldDir = v1Dir
+			c.GatewayID = "gw-fix7-upd.local"
+		})
+		admin := h.admin()
+		adminID := userIDOf(t, admin)
+		sshSrv, home := startCorraldSSH(t)
+		hostID, _ := createAndPinHost(t, admin, sshSrv, "upd-disable")
+		fp := hostFingerprint(t, h, adminID, hostID)
+
+		startCorraldInstall(t, admin, hostID)
+		waitCorraldState(t, admin, hostID, gw.StateRunning)
+
+		// Recreate manager with v2 dist + BeforeUpdateStage hook that disables
+		// corrald while failing probe transiently (so immediate cleanup cannot
+		// complete during update exit — must record remove_pending, NOT stopped!).
+		var failProbe atomic.Bool
+		var once sync.Once
+		h.srv.corrald.Close()
+		h.srv.corrald = gw.NewManager(gw.ManagerConfig{
+			Store:     h.store,
+			Dist:      distV2,
+			GatewayID: "gw-fix7-upd.local",
+			SSH:       &webSSHProvider{s: h.srv},
+			ProbeOverride: func(ctx context.Context, c *ssh.Client) (*gw.HostProbe, error) {
+				if failProbe.Load() {
+					return nil, errors.New("simulated transient probe failure during update disable")
+				}
+				return gw.ProbeHost(ctx, c)
+			},
+			BeforeUpdateStage: func(hid int64, _ string) {
+				once.Do(func() {
+					failProbe.Store(true)
+					h.srv.corrald.SetAdminDisabled(context.Background(), true)
+				})
+			},
+		})
+
+		// Trigger update explicitly via POST /api/hosts/{id}/corrald/update.
+		st := admin.do("GET", fmt.Sprintf("/api/hosts/%d/corrald", hostID), nil)
+		mustStatus(t, st, http.StatusOK, "status before update")
+		mhash, _ := st.json()["manifest_hash"].(string)
+		ur := admin.do("POST", fmt.Sprintf("/api/hosts/%d/corrald/update", hostID), map[string]any{"manifest_hash": mhash})
+		mustStatus(t, ur, http.StatusAccepted, "start update")
+
+		// Host MUST settle in StateRemovePending (NEVER StateStopped!).
+		deadline := time.Now().Add(10 * time.Second)
+		for {
+			ch, err := h.srv.store.CorraldHostByID(context.Background(), hostID)
+			if err == nil && ch.State == gw.StateRemovePending && ch.ActiveOpID == "" {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("Fix7 Item #2 regression: expected StateRemovePending after disable during in-flight update, got (%+v, %v)", ch, err)
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+
+		// Once transient probe error clears, existing-conn retry cleans up cleanly to off!
+		failProbe.Store(false)
+		existingSSH := dialTestSSH(t, sshSrv)
+		defer existingSSH.Close()
+		h.srv.corrald.MaybeRetryPendingCleanup(adminID, hostID, "admin", existingSSH)
+
+		bin := filepath.Join(home, ".local", "lib", "corral", "corrald")
+		deadline = time.Now().Add(10 * time.Second)
+		for {
+			ch, err := h.srv.store.CorraldHostByID(context.Background(), hostID)
+			_, binErr := os.Stat(bin)
+			if err == nil && ch.State == gw.StateOff && os.IsNotExist(binErr) {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("expected retry after update-disable to clean up to off; ch=(%+v,%v) binErr=%v", ch, err, binErr)
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+		_ = fp
+	})
+
+	t.Run("item3_existing_install_reuse_disable_after_hello_never_writes_off_with_files", func(t *testing.T) {
+		h := newHarness(t, func(c *config.Config) {
+			c.CorraldDir = v1Dir
+			c.GatewayID = "gw-fix7-reuse.local"
+		})
+		admin := h.admin()
+		sshSrv, home := startCorraldSSH(t)
+		hostID, _ := createAndPinHost(t, admin, sshSrv, "reuse-disable")
+
+		// Pre-install and start corrald v1 directly on host (NO local DB row yet,
+		// so StartInstall hits the existing-install reuse branch at manager.go:2173!).
+		v1Bin := filepath.Join(v1Dir, "linux-"+runtime.GOARCH, "corrald")
+		stOut, err := func() ([]byte, error) {
+			cmd := exec.Command(v1Bin, "selftest")
+			cmd.Env = append(os.Environ(), "HOME="+home)
+			return cmd.CombinedOutput()
+		}()
+		if err != nil {
+			t.Fatalf("selftest: %v (%s)", err, stOut)
+		}
+		stDir := gw.ParseKeyValues(stOut)["state_dir"]
+		stageDir := filepath.Join(stDir, "stage-pre0001")
+		_ = os.MkdirAll(stageDir, 0o700)
+		b1, _ := os.ReadFile(v1Bin)
+		_ = os.WriteFile(filepath.Join(stageDir, "corrald"), b1, 0o700)
+		instCmd := exec.Command(filepath.Join(stageDir, "corrald"), "install", "--stage", stageDir, "--op", "pre0001", "--gateway", "gw-fix7-reuse.local", "--by", "admin")
+		instCmd.Env = append(os.Environ(), "HOME="+home)
+		if out, err := instCmd.CombinedOutput(); err != nil {
+			t.Fatalf("pre-install: %v (%s)", err, out)
+		}
+		installedBin := filepath.Join(home, ".local", "lib", "corral", "corrald")
+		serveCmd := exec.Command(installedBin, "serve", "--gateway", "gw-fix7-reuse.local")
+		serveCmd.Env = append(os.Environ(), "HOME="+home)
+		if out, err := serveCmd.CombinedOutput(); err != nil {
+			t.Fatalf("pre-serve: %v (%s)", err, out)
+		}
+
+		// Trigger SetAdminDisabled(true) right after Hello inside attachAndHello
+		// (which cancels install's opCtx!) while also failing probe transiently
+		// so immediate uninstall cannot finish -> MUST end in StateRemovePending
+		// (NEVER StateOff while binary/daemon remain on host!).
+		var failProbe atomic.Bool
+		var once sync.Once
+		h.srv.corrald.Close()
+		h.srv.corrald = gw.NewManager(gw.ManagerConfig{
+			Store:     h.store,
+			Dist:      distV1,
+			GatewayID: "gw-fix7-reuse.local",
+			SSH:       &webSSHProvider{s: h.srv},
+			ProbeOverride: func(ctx context.Context, c *ssh.Client) (*gw.HostProbe, error) {
+				if failProbe.Load() {
+					return nil, errors.New("simulated transient probe failure after hello")
+				}
+				return gw.ProbeHost(ctx, c)
+			},
+			AfterAttachHello: func(hid int64) {
+				once.Do(func() {
+					failProbe.Store(true)
+					h.srv.corrald.SetAdminDisabled(context.Background(), true)
+				})
+			},
+		})
+
+		startCorraldInstall(t, admin, hostID)
+
+		deadline := time.Now().Add(10 * time.Second)
+		for {
+			ch, err := h.srv.store.CorraldHostByID(context.Background(), hostID)
+			if err == nil && ch.State == gw.StateRemovePending && ch.ActiveOpID == "" {
+				break
+			}
+			if err == nil && ch.State == gw.StateOff {
+				if _, statErr := os.Stat(installedBin); statErr == nil {
+					t.Fatalf("Fix7 Item #3 regression: host transitioned to StateOff while binary %s still exists!", installedBin)
+				}
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("Fix7 Item #3 regression: expected StateRemovePending when reuse-install disabled after Hello, got (%+v, %v)", ch, err)
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+	})
+}
+
+func syscallFlockEx(f *os.File) error {
+	return syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
 }

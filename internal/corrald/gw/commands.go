@@ -437,10 +437,83 @@ func UninstallCommand(libDir, stateDir, sockPath, opID string) string {
 
 // UninstallCommandSoleGateway runs host-side uninstall ONLY when soleGateway is
 // confirmed as the sole gateway under .corrald-shared.lock -> op.lock ->
-// corrald.lock. If the host binary is missing or is an older version that does
-// not support --only-if-sole-gateway, it fails closed without deleting files.
+// corrald.lock. If no binary is present on the host:
+//   - when no state dir, corrald lib entries, or last-machine run/ dir remain:
+//     reports result=removed;
+//   - when a removing tombstone exists without a binary: reports
+//     error=binary_missing_with_tombstone so the gateway can upload a temporary
+//     Go corrald binary and execute the locked Go uninstall path instead of
+//     running an unlocked shell fallback;
+//   - otherwise fails closed with error=cannot_verify_exclusivity.
 func UninstallCommandSoleGateway(libDir, stateDir, sockPath, opID, soleGateway string) string {
 	return uninstallCommandWithOptions(libDir, stateDir, sockPath, opID, soleGateway)
+}
+
+// MkRecoveryDirCommand safely creates a private 0700 temporary directory under
+// ~/.local/state/corral/ for uploading a temporary corrald binary when
+// recovering from a leftover removing tombstone whose host binary was already
+// deleted.
+func MkRecoveryDirCommand(home, recoveryDir string) string {
+	return shellScript(`umask 077
+ME=$(id -u)
+check_or_mk() {
+  p="$1"
+  mode="$2"
+  if [ -L "$p" ]; then
+    echo "error=unsafe_path"
+    echo "detail=symlink at $p"
+    exit 1
+  fi
+  if [ -e "$p" ]; then
+    if [ ! -d "$p" ]; then
+      echo "error=unsafe_path"
+      echo "detail=not a directory: $p"
+      exit 1
+    fi
+  else
+    mkdir "$p" || { echo "error=mkdir"; exit 1; }
+  fi
+  if [ -L "$p" ] || [ ! -d "$p" ]; then
+    echo "error=unsafe_path"
+    exit 1
+  fi
+  own=$(stat -c %u "$p" 2>/dev/null || echo "")
+  if [ -n "$own" ] && [ "$own" != "$ME" ]; then
+    echo "error=unsafe_path"
+    echo "detail=unexpected owner $own on $p"
+    exit 1
+  fi
+  if [ -n "$mode" ]; then
+    chmod "$mode" "$p" || { echo "error=chmod"; exit 1; }
+  fi
+}
+H="${HOME_DIR%/}"
+check_or_mk "$H/.local" ""
+check_or_mk "$H/.local/state" ""
+check_or_mk "$H/.local/state/corral" ""
+check_or_mk "$RDIR" "700"
+echo "result=ok"
+`, "HOME_DIR", home, "RDIR", recoveryDir)
+}
+
+// RmRecoveryDirCommand removes a temporary recovery binary directory and
+// best-effort removes ~/.local/state/corral if now empty.
+func RmRecoveryDirCommand(recoveryDir string) string {
+	return shellScript(`rm -rf -- "$RDIR"
+rmdir -- "$(dirname -- "$RDIR")" 2>/dev/null || true
+echo "result=ok"
+`, "RDIR", recoveryDir)
+}
+
+// RunBinaryUninstallSoleGatewayCommand executes a specific uploaded corrald
+// binary's `uninstall --only-if-sole-gateway` subcommand.
+func RunBinaryUninstallSoleGatewayCommand(binPath, opID, soleGateway string) string {
+	return shellScript(`if [ -n "$OP" ]; then
+  "$BIN" uninstall --op "$OP" --only-if-sole-gateway "$GW"
+else
+  "$BIN" uninstall --only-if-sole-gateway "$GW"
+fi
+`, "BIN", binPath, "OP", opID, "GW", soleGateway)
 }
 
 func uninstallCommandWithOptions(libDir, stateDir, sockPath, opID, soleGateway string) string {
@@ -470,98 +543,32 @@ has_corrald_lib() {
   return 1
 }
 
-if [ ! -e "$ST" ] && ! has_corrald_lib; then
+st_root=$(dirname -- "$ST")
+run_dir="$(dirname -- "$st_root")/run"
+other_machine=0
+if [ -d "$st_root" ]; then
+  for m in "$st_root"/*; do
+    [ -d "$m" ] || continue
+    [ "$m" = "$ST" ] && continue
+    if [ -e "$m/install.json" ]; then other_machine=1; break; fi
+  done
+fi
+
+if [ ! -e "$ST" ] && ! has_corrald_lib && { [ "$other_machine" -ne 0 ] || [ ! -e "$run_dir" ]; }; then
   echo "result=removed"
   exit 0
 fi
 
-# Reentrant recovery when binaries in LibDir were already deleted by an earlier
-# uninstall attempt, leaving the removing tombstone (and/or lock files/empty dirs)
-# behind. Never bypass exclusivity when no removing tombstone exists.
 if [ -f "$ST/removing" ] && [ ! -L "$ST/removing" ]; then
-  # Verify no daemon is still holding corrald.lock.
-  if [ -e "$ST/corrald.lock" ] && command -v flock >/dev/null 2>&1; then
-    if ! flock -n "$ST/corrald.lock" true 2>/dev/null; then
-      echo "error=stop_failed"
-      echo "pid=0"
-      echo "detail=corrald.lock is still held"
-      exit 1
-    fi
-  fi
-  # If clients.json somehow still exists alongside a tombstone without a binary,
-  # fail closed unless we can confirm no other gateway is registered.
-  if [ -e "$ST/clients.json" ]; then
-    echo "error=cannot_verify_exclusivity"
-    echo "detail=clients.json present without binary"
-    exit 1
-  fi
-  # If tombstone recorded an owning gateway, verify it matches GW.
-  tomb_gw=$(sed -n 's/.*"gateway"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$ST/removing" 2>/dev/null | head -n 1)
-  if [ -n "$tomb_gw" ] && [ "$tomb_gw" != "$GW" ]; then
-    echo "result=other_gateways"
-    exit 0
-  fi
-
-  left=""
-  add_left() {
-    left="${left}left=$1	$2
-"
-  }
-  if [ -n "$SOCK" ] && [ -e "$SOCK" ]; then
-    rm -f -- "$SOCK" 2>/dev/null || add_left "$SOCK" "remove failed"
-  fi
-  if [ -n "$SOCK" ]; then
-    sock_dir=$(dirname -- "$SOCK")
-    if [ "$sock_dir" != "$ST" ] && [ -d "$sock_dir" ]; then
-      rmdir -- "$sock_dir" 2>/dev/null || true
-    fi
-  fi
-  # Clean remaining state entries including tombstone and locks.
-  for entry in "$ST"/* "$ST"/.*; do
-    base=$(basename -- "$entry")
-    case "$base" in .|..|'*'|'.*') continue ;; esac
-    [ -e "$entry" ] || [ -L "$entry" ] || continue
-    rm -rf -- "$entry" 2>/dev/null || add_left "$entry" "remove failed"
-  done
-  if [ -z "$left" ]; then
-    rmdir -- "$ST" 2>/dev/null || true
-    st_root=$(dirname -- "$ST")
-    # Check whether any other machine still has install.json under state root.
-    other_machine=0
-    if [ -d "$st_root" ]; then
-      for m in "$st_root"/*; do
-        [ -d "$m" ] || continue
-        [ "$m" = "$ST" ] && continue
-        if [ -e "$m/install.json" ]; then other_machine=1; break; fi
-      done
-    fi
-    rmdir -- "$st_root" 2>/dev/null || true
-    rmdir -- "$(dirname -- "$st_root")" 2>/dev/null || true
-    if [ "$other_machine" -eq 0 ] && [ -d "$L" ]; then
-      for p in "$L/corrald" "$L/README.txt" "$L/.corrald-shared.lock" "$L"/corrald-[0-9]*; do
-        [ -e "$p" ] || [ -L "$p" ] || continue
-        rm -rf -- "$p" 2>/dev/null || add_left "$p" "remove failed"
-      done
-      rmdir -- "$L" 2>/dev/null || true
-    fi
-  fi
-  if [ -n "$left" ] || [ -e "$ST" ] || { [ "${other_machine:-1}" -eq 0 ] && has_corrald_lib; }; then
-    echo "result=partial"
-    if [ -n "$left" ]; then
-      printf '%s' "$left"
-    else
-      echo "left=$ST	leftover files remain"
-    fi
-    exit 1
-  fi
-  echo "result=removed"
-  exit 0
+  echo "error=binary_missing_with_tombstone"
+  echo "detail=corrald binary missing while removing tombstone exists; requires locked Go recovery"
+  exit 1
 fi
 
 echo "error=cannot_verify_exclusivity"
 echo "detail=corrald binary missing; cannot safely verify sole-gateway uninstall"
 exit 1
-`, "L", libDir, "ST", stateDir, "SOCK", sockPath, "OP", opID, "GW", soleGateway)
+`, "L", libDir, "ST", stateDir, "OP", opID, "GW", soleGateway)
 	}
 	return shellScript(`BIN="$L/corrald"
 if [ ! -x "$BIN" ]; then

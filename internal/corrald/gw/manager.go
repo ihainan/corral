@@ -1000,6 +1000,13 @@ func (m *Manager) StartInstall(ctx context.Context, userID, hostID int64, corral
 		defer close(rop.done)
 		defer m.clearRunningOp(rop)
 		defer func() {
+			if m.AdminDisabled() {
+				op.State = OpCancelled
+				if ok, _ := m.store.ReleaseCorraldHostOpAndFinish(context.Background(), hostID, op, StateRemovePending); ok {
+					m.markPendingCleanup()
+				}
+				return
+			}
 			op.State = OpFailed
 			if op.ErrorCode == "" {
 				op.ErrorCode = "other"
@@ -2076,7 +2083,7 @@ func (m *Manager) CleanupUserHosts(ctx context.Context, userID int64, corralUser
 		if rop != nil {
 			opID = rop.opID
 		}
-		out := RunUninstallSoleGatewayWithRetry(ctx, sshClient, probe, opID, m.gatewayID, m.busyRetry, nil)
+		out := RunUninstallSoleGatewayWithRetry(ctx, sshClient, m.Dist(), probe, opID, m.gatewayID, m.busyRetry, nil)
 		release()
 		switch out.Result {
 		case "removed":
@@ -2267,7 +2274,7 @@ func (m *Manager) runInstallWithSSH(ctx context.Context, rop *runningOp, op *sto
 		// Cancelled right before start: uninstall ONLY if confirmed sole gateway
 		// under host-side locks; never delete another gateway's installation.
 		if m.gatewayID != "" {
-			out := RunUninstallSoleGatewayWithRetry(context.Background(), sshClient, probe, op.ID, m.gatewayID, m.busyRetry, nil)
+			out := RunUninstallSoleGatewayWithRetry(context.Background(), sshClient, m.Dist(), probe, op.ID, m.gatewayID, m.busyRetry, nil)
 			switch out.Result {
 			case "removed":
 				m.finishOpCancelled(op, ch)
@@ -2534,7 +2541,9 @@ func (m *Manager) launchUpdateOp(ctx context.Context, userID, hostID int64, corr
 		defer func() {
 			if m.AdminDisabled() {
 				op.State = OpCancelled
-				_, _ = m.store.ReleaseCorraldHostOpAndFinish(context.Background(), hostID, op, StateStopped)
+				if ok, _ := m.store.ReleaseCorraldHostOpAndFinish(context.Background(), hostID, op, StateRemovePending); ok {
+					m.markPendingCleanup()
+				}
 				return
 			}
 			op.State = OpFailed
@@ -2572,6 +2581,17 @@ func (m *Manager) runUpdateOp(ctx context.Context, rop *runningOp, op *store.Cor
 	}
 	own := newSSHOwnership(release)
 	defer own.releaseIfOwned()
+	// Item #2: If admin disabled corrald during an in-flight update and this
+	// update op still owns the host row, run safe sole-gateway cleanup while we
+	// still hold the account op lock and live SSH (fallback in StartUpdate's
+	// outer defer records remove_pending if cleanup could not complete).
+	defer func() {
+		if m.AdminDisabled() {
+			if fresh, ferr := m.store.CorraldHostByID(context.Background(), hostID); ferr == nil && fresh.ActiveOpID == op.ID {
+				m.handleAdminDisabledWhileHoldingOp(context.Background(), userID, hostID, corralUser, fp, sshUser, sshClient, ch, op.ID)
+			}
+		}
+	}()
 
 	probe, err := m.probeHost(ctx, sshClient)
 	if err != nil {
@@ -3252,10 +3272,13 @@ func (m *Manager) attachAndHello(
 	}
 	refList := []*hostRef{{HostID: hostID, OwnerID: userID, CorralUser: corralUser}}
 	if m.AdminDisabled() {
-		exclusive := m.enforceAdminDisableOnClient(ctx, client, hello, refList, []int64{hostID}, key, 0, opID)
+		// Item #3: Use a non-cancelled context (ctx may be the cancelled install/update
+		// opCtx) so Health/ShutdownConditional and immediate uninstall can execute.
+		bgCtx := context.Background()
+		exclusive := m.enforceAdminDisableOnClient(bgCtx, client, hello, refList, []int64{hostID}, key, 0, opID)
 		_ = client.Close()
 		if exclusive {
-			m.tryImmediateAdminUninstall(ctx, key, refList, []int64{hostID}, sshClient, 0, opID)
+			m.tryImmediateAdminUninstall(bgCtx, key, refList, []int64{hostID}, sshClient, 0, opID)
 		}
 		return ErrAdminDisabled
 	}
@@ -3291,10 +3314,11 @@ func (m *Manager) attachAndHello(
 	m.policyMu.RLock()
 	if m.adminDisabled.Load() {
 		m.policyMu.RUnlock()
-		exclusive := m.enforceAdminDisableOnClient(ctx, client, hello, refList, []int64{hostID}, key, 0, opID)
+		bgCtx := context.Background()
+		exclusive := m.enforceAdminDisableOnClient(bgCtx, client, hello, refList, []int64{hostID}, key, 0, opID)
 		_ = client.Close()
 		if exclusive {
-			m.tryImmediateAdminUninstall(ctx, key, refList, []int64{hostID}, sshClient, 0, opID)
+			m.tryImmediateAdminUninstall(bgCtx, key, refList, []int64{hostID}, sshClient, 0, opID)
 		}
 		return ErrAdminDisabled
 	}
@@ -3626,10 +3650,11 @@ func (m *Manager) reconnectSharedConn(ctx context.Context, sc *sharedConn, overr
 		for _, r := range refs {
 			hostIDs = append(hostIDs, r.HostID)
 		}
-		exclusive := m.enforceAdminDisableOnClient(ctx, newClient, hello, refs, hostIDs, sc.key, 0, "")
+		bgCtx := context.Background()
+		exclusive := m.enforceAdminDisableOnClient(bgCtx, newClient, hello, refs, hostIDs, sc.key, 0, "")
 		_ = newClient.Close()
 		if exclusive {
-			m.tryImmediateAdminUninstall(ctx, sc.key, refs, hostIDs, sshClient, 0, "")
+			m.tryImmediateAdminUninstall(bgCtx, sc.key, refs, hostIDs, sshClient, 0, "")
 		}
 		return ErrAdminDisabled
 	}

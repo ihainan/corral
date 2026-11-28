@@ -162,7 +162,14 @@ func cmdSelftest(stdout io.Writer) int {
 	_ = ln.Close()
 	_ = os.Remove(probeSock)
 	if layout.SocketUsesTmpDir {
-		_ = os.Remove(layout.SocketDir)
+		// Item #7: Only remove the /tmp socket dir while holding corrald.lock so
+		// selftest can never race a daemon that already passed EnsureSocketDir
+		// and is about to bind corrald.sock (ENOENT). If a daemon holds the lock,
+		// skip removal without blocking.
+		if lifeLk, lerr := AcquireLock(layout.LockPath); lerr == nil {
+			_ = os.Remove(layout.SocketDir)
+			_ = lifeLk.Release()
+		}
 	}
 
 	fmt.Fprintf(stdout, "result=ok\n")
@@ -1542,14 +1549,25 @@ func cmdUninstall(args []string, stdout io.Writer) int {
 			installRec, installErr = ReadInstallRecord(layout.InstallJSON)
 
 			// Check if an earlier uninstall already committed a removing tombstone.
+			var tombErr error
 			if fi, terr := os.Lstat(layout.TombstonePath); terr == nil && fi.Mode().IsRegular() {
 				tombstoneExisted = true
-				tombstoneRec = readUninstallTombstone(layout.TombstonePath)
+				tombstoneRec, tombErr = readUninstallTombstone(layout.TombstonePath)
 			}
 			if errors.Is(installErr, os.ErrNotExist) && tombstoneExisted {
+				// Item #6: A truncated, unreadable, or incomplete tombstone MUST fail
+				// closed rather than granting permission to delete shared files.
+				if tombErr != nil || tombstoneRec == nil || tombstoneRec.CreatedAt == "" || (soleGW != "" && tombstoneRec.Gateway == "") {
+					detail := "removing tombstone is truncated or missing required fields"
+					if tombErr != nil {
+						detail = tombErr.Error()
+					}
+					writeErr(stdout, "tombstone_unreadable", detail)
+					return 1
+				}
 				// Reentrant retry of an interrupted uninstall that already removed
-				// install.json and wrote the removing tombstone.
-				if tombstoneRec != nil && len(tombstoneRec.Files) > 0 {
+				// install.json and wrote a valid structured removing tombstone.
+				if len(tombstoneRec.Files) > 0 {
 					installRec = &InstallRecord{
 						Gateway: tombstoneRec.Gateway,
 						Files:   tombstoneRec.Files,
@@ -1845,6 +1863,11 @@ func cmdUninstall(args []string, stdout io.Writer) int {
 			}
 		}
 	}
+	if isLast && lastCheckErr == nil && !willPreserveForMissingInstall && layout.RunDir != "" {
+		if _, err := os.Lstat(layout.RunDir); err == nil {
+			addLeft(layout.RunDir, "run dir still exists after removal")
+		}
+	}
 	if isLast && ((installErr == nil && installRec != nil) || resumingFromTombstone) {
 		for _, target := range sharedTargets {
 			if _, err := os.Lstat(target); err == nil {
@@ -2093,10 +2116,12 @@ func marshalUninstallTombstone(installRec *InstallRecord, soleGW string) []byte 
 		CreatedAt: time.Now().UTC().Format(time.RFC3339),
 	}
 	if installRec != nil {
-		t.Gateway = installRec.Gateway
 		t.Files = installRec.Files
+		t.Gateway = installRec.Gateway
 	}
-	if t.Gateway == "" && soleGW != "" {
+	// Item #4: Record the uninstalling gateway (not the original installer) so
+	// retries by the same uninstalling gateway after clients.json is gone match.
+	if soleGW != "" {
 		t.Gateway = soleGW
 	}
 	b, err := json.Marshal(t)
@@ -2106,16 +2131,16 @@ func marshalUninstallTombstone(installRec *InstallRecord, soleGW string) []byte 
 	return append(b, '\n')
 }
 
-func readUninstallTombstone(path string) *uninstallTombstone {
+func readUninstallTombstone(path string) (*uninstallTombstone, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	var t uninstallTombstone
 	if err := json.Unmarshal(b, &t); err != nil {
-		return nil
+		return nil, err
 	}
-	return &t
+	return &t, nil
 }
 
 // callLocalSoleShutdown checks daemon capabilities (HelloResult.Features) and

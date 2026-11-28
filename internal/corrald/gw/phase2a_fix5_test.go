@@ -8,9 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"strings"
 	"sync/atomic"
-	"syscall"
 	"testing"
 	"time"
 
@@ -198,12 +196,12 @@ func TestFix5_Item2_ConditionalResetNeverClobbersActiveInstall(t *testing.T) {
 	}
 }
 
-// Regression test for Fix Round 5 Item #4 [P2] (shell fallback reentrancy):
-// When binaries in LibDir were already deleted by an earlier uninstall attempt
-// and only StateDir/removing (+ locks / empty dirs) remain, UninstallCommandSoleGateway
-// MUST recover to result=removed instead of returning error=cannot_verify_exclusivity
-// forever, while STILL failing closed when no tombstone exists, another gateway
-// owns the tombstone, or corrald.lock is held.
+// Regression test for Fix Round 7 Items #1, #5, #6, #8:
+// UninstallCommandSoleGateway must NOT perform unlocked shell deletion when the
+// host binary is missing; instead it reports error=binary_missing_with_tombstone
+// so RunUninstallSoleGatewayWithRetry uploads and runs the locked Go binary,
+// fails closed without a tombstone, and refuses to report removed if run/ has
+// leftovers on the last machine.
 func TestFix5_Item4_ShellSoleGatewayUninstallRecoversFromLeftoverTombstoneWithoutBinary(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("requires linux")
@@ -215,7 +213,7 @@ func TestFix5_Item4_ShellSoleGatewayUninstallRecoversFromLeftoverTombstoneWithou
 		return cmd.CombinedOutput()
 	}
 
-	t.Run("recovers_matching_tombstone_without_binary", func(t *testing.T) {
+	t.Run("tombstone_without_binary_requests_locked_go_recovery_without_deleting", func(t *testing.T) {
 		base := t.TempDir()
 		libDir := filepath.Join(base, "lib", "corral")
 		stateDir := filepath.Join(base, "state", "corral", "corrald", "aabbcc112233")
@@ -225,57 +223,56 @@ func TestFix5_Item4_ShellSoleGatewayUninstallRecoversFromLeftoverTombstoneWithou
 		if err := os.MkdirAll(stateDir, 0o700); err != nil {
 			t.Fatal(err)
 		}
-		// Simulate binaries already removed, leaving tombstone + lock files + sibling tool.
-		if err := os.WriteFile(filepath.Join(stateDir, "removing"), []byte(`{"created_at":"2026-11-28T00:00:00Z","gateway":"gw-a.local"}`+"\n"), 0o600); err != nil {
+		tombPath := filepath.Join(stateDir, "removing")
+		if err := os.WriteFile(tombPath, []byte(`{"created_at":"2026-11-28T00:00:00Z","gateway":"gw-a.local"}`+"\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(filepath.Join(stateDir, "op.lock"), nil, 0o600); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(stateDir, "corrald.lock"), nil, 0o600); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(libDir, ".corrald-shared.lock"), nil, 0o600); err != nil {
-			t.Fatal(err)
-		}
-		// Unrelated sibling tool in LibDir MUST be preserved!
-		sibling := filepath.Join(libDir, "code-server-keep")
-		if err := os.WriteFile(sibling, []byte("keep"), 0o600); err != nil {
+		sharedLock := filepath.Join(libDir, ".corrald-shared.lock")
+		if err := os.WriteFile(sharedLock, nil, 0o600); err != nil {
 			t.Fatal(err)
 		}
 
 		script := UninstallCommandSoleGateway(libDir, stateDir, filepath.Join(stateDir, "corrald.sock"), "op-retry1", "gw-a.local")
 		out, err := runShell(t, script)
-		kv := ParseKeyValues(out)
-		if err != nil || kv["result"] != "removed" {
-			t.Fatalf("expected reentrant recovery result=removed, got err=%v\n%s", err, out)
+		if err == nil || ParseKeyValues(out)["error"] != "binary_missing_with_tombstone" {
+			t.Fatalf("Fix7 Item #1 regression: expected error=binary_missing_with_tombstone, got err=%v\n%s", err, out)
 		}
-		if _, statErr := os.Lstat(stateDir); !os.IsNotExist(statErr) {
-			t.Fatalf("expected stateDir removed, stat err=%v", statErr)
+		// Shell MUST NOT delete anything unlocked!
+		if _, statErr := os.Stat(tombPath); statErr != nil {
+			t.Fatalf("tombstone must remain untouched for locked Go recovery: %v", statErr)
 		}
-		if _, statErr := os.Lstat(filepath.Join(libDir, ".corrald-shared.lock")); !os.IsNotExist(statErr) {
-			t.Fatalf("expected .corrald-shared.lock removed, stat err=%v", statErr)
-		}
-		if _, statErr := os.Stat(sibling); statErr != nil {
-			t.Fatalf("unrelated sibling tool in LibDir was deleted: %v", statErr)
+		if _, statErr := os.Stat(sharedLock); statErr != nil {
+			t.Fatalf("shared lock must remain untouched for locked Go recovery: %v", statErr)
 		}
 	})
 
-	t.Run("refuses_when_tombstone_owned_by_other_gateway", func(t *testing.T) {
+	t.Run("clean_state_without_run_leftovers_reports_removed", func(t *testing.T) {
 		base := t.TempDir()
 		libDir := filepath.Join(base, "lib", "corral")
 		stateDir := filepath.Join(base, "state", "corral", "corrald", "aabbcc112234")
 		_ = os.MkdirAll(libDir, 0o700)
-		_ = os.MkdirAll(stateDir, 0o700)
-		_ = os.WriteFile(filepath.Join(stateDir, "removing"), []byte(`{"created_at":"2026-11-28T00:00:00Z","gateway":"gw-other.local"}`+"\n"), 0o600)
+		// Unrelated sibling tool in LibDir does not block removed.
+		_ = os.WriteFile(filepath.Join(libDir, "code-server-keep"), []byte("keep"), 0o600)
 
 		script := UninstallCommandSoleGateway(libDir, stateDir, filepath.Join(stateDir, "corrald.sock"), "op-retry2", "gw-a.local")
 		out, err := runShell(t, script)
-		if err != nil || ParseKeyValues(out)["result"] != "other_gateways" {
-			t.Fatalf("expected result=other_gateways for another gateway's tombstone, got err=%v\n%s", err, out)
+		if err != nil || ParseKeyValues(out)["result"] != "removed" {
+			t.Fatalf("expected result=removed when no corrald files remain, got err=%v\n%s", err, out)
 		}
-		if _, statErr := os.Stat(filepath.Join(stateDir, "removing")); statErr != nil {
-			t.Fatalf("other gateway's tombstone must be preserved: %v", statErr)
+	})
+
+	t.Run("run_dir_leftover_on_last_machine_does_not_report_removed", func(t *testing.T) {
+		base := t.TempDir()
+		libDir := filepath.Join(base, "lib", "corral")
+		stateDir := filepath.Join(base, "state", "corral", "corrald", "aabbcc112237")
+		runDir := filepath.Join(base, "state", "corral", "run")
+		_ = os.MkdirAll(runDir, 0o700)
+		_ = os.WriteFile(filepath.Join(runDir, "corral-send-tmux-_0"), nil, 0o600)
+
+		script := UninstallCommandSoleGateway(libDir, stateDir, filepath.Join(stateDir, "corrald.sock"), "op-retry8", "gw-a.local")
+		out, err := runShell(t, script)
+		if err == nil || ParseKeyValues(out)["result"] == "removed" {
+			t.Fatalf("Fix7 Item #8 regression: must NOT report result=removed when run/ has leftovers; got err=%v\n%s", err, out)
 		}
 	})
 
@@ -294,33 +291,6 @@ func TestFix5_Item4_ShellSoleGatewayUninstallRecoversFromLeftoverTombstoneWithou
 		}
 		if _, statErr := os.Stat(filepath.Join(stateDir, "install.json")); statErr != nil {
 			t.Fatalf("install.json must be preserved without tombstone: %v", statErr)
-		}
-	})
-
-	t.Run("fails_closed_when_corrald_lock_held", func(t *testing.T) {
-		if _, err := exec.LookPath("flock"); err != nil {
-			t.Skip("flock binary not installed")
-		}
-		base := t.TempDir()
-		libDir := filepath.Join(base, "lib", "corral")
-		stateDir := filepath.Join(base, "state", "corral", "corrald", "aabbcc112236")
-		_ = os.MkdirAll(libDir, 0o700)
-		_ = os.MkdirAll(stateDir, 0o700)
-		_ = os.WriteFile(filepath.Join(stateDir, "removing"), []byte(`{"created_at":"2026-11-28T00:00:00Z","gateway":"gw-a.local"}`+"\n"), 0o600)
-		lockFile, err := os.OpenFile(filepath.Join(stateDir, "corrald.lock"), os.O_CREATE|os.O_RDWR, 0o600)
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer lockFile.Close()
-		if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-			t.Fatalf("flock: %v", err)
-		}
-		defer syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
-
-		script := UninstallCommandSoleGateway(libDir, stateDir, filepath.Join(stateDir, "corrald.sock"), "op-retry4", "gw-a.local")
-		out, runErr := runShell(t, script)
-		if runErr == nil || !strings.Contains(string(out), "error=stop_failed") {
-			t.Fatalf("expected error=stop_failed when corrald.lock is held, got err=%v\n%s", runErr, out)
 		}
 	})
 }

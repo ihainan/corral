@@ -649,12 +649,18 @@ func RunServeWithRetry(ctx context.Context, c *ssh.Client, binPath, gatewayID, m
 // (--only-if-sole-gateway) without writing a premature tombstone before the
 // host confirms exclusivity under .corrald-shared.lock -> op.lock -> corrald.lock.
 //
+// If the host binary was already deleted during an earlier partial uninstall
+// leaving a removing tombstone behind (error=binary_missing_with_tombstone) and
+// dist is available, it uploads the matching Go corrald binary to a private
+// temporary directory and runs the full locked Go uninstall path instead of an
+// unlocked shell fallback.
+//
 // Possible Result values:
 //   - "removed": confirmed sole gateway and files removed
 //   - "other_gateways": confirmed another gateway is connected/registered (files preserved)
 //   - "unsupported": host binary/daemon does not support conditional shutdown/uninstall (files preserved)
 //   - "partial" / "stop_failed" / "pending": transient or incomplete failure (caller keeps remove_pending)
-func RunUninstallSoleGatewayWithRetry(ctx context.Context, c *ssh.Client, probe *HostProbe, opID, soleGateway string, busyRetry BusyRetryPolicy, onStep func(step string)) UninstallOutcome {
+func RunUninstallSoleGatewayWithRetry(ctx context.Context, c *ssh.Client, dist *Dist, probe *HostProbe, opID, soleGateway string, busyRetry BusyRetryPolicy, onStep func(step string)) UninstallOutcome {
 	if soleGateway == "" {
 		return UninstallOutcome{Result: "pending", Detail: "gateway_id is empty"}
 	}
@@ -679,9 +685,83 @@ func RunUninstallSoleGatewayWithRetry(ctx context.Context, c *ssh.Client, probe 
 		}
 		break
 	}
+
+	if f["error"] == "binary_missing_with_tombstone" {
+		if dist == nil {
+			return UninstallOutcome{Result: "pending", Detail: firstNonEmpty(f["detail"], f["error"])}
+		}
+		return runTempBinarySoleGatewayUninstall(ctx, c, dist, probe, opID, soleGateway, busyRetry, onStep)
+	}
+
 	if onStep != nil {
 		onStep("verify")
 	}
+	return parseSoleGatewayUninstallOutcome(res, err, f)
+}
+
+func runTempBinarySoleGatewayUninstall(ctx context.Context, c *ssh.Client, dist *Dist, probe *HostProbe, opID, soleGateway string, busyRetry BusyRetryPolicy, onStep func(step string)) UninstallOutcome {
+	bin, vfail := ValidateProbe(probe, dist)
+	if vfail != nil {
+		return UninstallOutcome{Result: "pending", Detail: firstNonEmpty(vfail.Detail, vfail.Code)}
+	}
+	if opID == "" {
+		opID = newHexID()
+	}
+	home := strings.TrimRight(probe.Home, "/")
+	if home == "" {
+		return UninstallOutcome{Result: "pending", Detail: "probe home is empty"}
+	}
+	tempDir := home + "/.local/state/corral/.rm-" + opID
+	tempBin := tempDir + "/corrald"
+
+	mkRes, mkErr := runSSH(ctx, c, MkRecoveryDirCommand(probe.Home, tempDir), 4096, sshx.ExecOptions{})
+	mkFields := ParseKeyValues(mkRes.Out)
+	if mkErr != nil || mkFields["result"] != "ok" {
+		return UninstallOutcome{Result: "pending", Detail: firstNonEmpty(mkFields["detail"], mkFields["error"], errStr(mkErr))}
+	}
+	defer func() {
+		cctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_, _ = runSSH(cctx, c, RmRecoveryDirCommand(tempDir), 4096, sshx.ExecOptions{})
+	}()
+
+	if err := sftpUploadBinarySecure(ctx, c, bin.Path, probe.Home, probe.UIDInt64(), probe.LibDir, tempDir, tempBin); err != nil {
+		return UninstallOutcome{Result: "pending", Detail: err.Error()}
+	}
+	gotSHA, rerr := sftpReadbackSHA256(ctx, c, tempBin)
+	if rerr != nil || !strings.EqualFold(gotSHA, bin.SHA256) {
+		detail := "recovery binary checksum mismatch"
+		if rerr != nil {
+			detail = rerr.Error()
+		}
+		return UninstallOutcome{Result: "pending", Detail: detail}
+	}
+
+	iv, maxRetries := busyRetry.effective()
+	var res sshx.ExecResult
+	var err error
+	var f map[string]string
+	for attempt := 0; ; attempt++ {
+		res, err = runSSH(ctx, c, RunBinaryUninstallSoleGatewayCommand(tempBin, opID, soleGateway), 64<<10, sshx.ExecOptions{})
+		if err != nil && !res.Ended {
+			return UninstallOutcome{Result: "pending", Detail: err.Error()}
+		}
+		f = ParseKeyValues(res.Out)
+		if f["error"] == proto.ErrBusy && attempt < maxRetries {
+			if waitBusyRetry(ctx, iv, nil) {
+				continue
+			}
+			return UninstallOutcome{Result: "pending", Detail: firstNonEmpty(f["detail"], "busy")}
+		}
+		break
+	}
+	if onStep != nil {
+		onStep("verify")
+	}
+	return parseSoleGatewayUninstallOutcome(res, err, f)
+}
+
+func parseSoleGatewayUninstallOutcome(res sshx.ExecResult, err error, f map[string]string) UninstallOutcome {
 	switch {
 	case f["result"] == "removed":
 		return UninstallOutcome{Result: "removed", LastMachine: f["last_machine"] == "true"}

@@ -963,6 +963,104 @@ func TestCLIUninstallOnlyIfSoleGateway(t *testing.T) {
 			t.Fatalf("binary must be preserved when daemon is unreachable: %v", err)
 		}
 	})
+
+	// Regression test for Fix Round 7 Item #4 [P2]:
+	// Tombstone must record the UNINSTALLING gateway (gw-b), NOT the original
+	// installer (gw-a), so after clients.json is deleted during a partial
+	// failure, gw-b's retry succeeds instead of returning other_gateways forever.
+	t.Run("fix7_item4_tombstone_records_uninstalling_gateway_not_installer", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("chmod 0500 does not block root")
+		}
+		home := t.TempDir()
+		mid := randomHexMid(t)
+		env := []string{"CORRALD_TEST_MACHINE_ID=" + mid}
+		// Originally installed by gw-a.
+		installedBin, layout := installAndServe(t, home, mid)
+
+		// Now ONLY gw-b is registered in clients.json (gw-a left).
+		if _, _, err := StopDaemon(layout); err != nil {
+			t.Fatalf("StopDaemon: %v", err)
+		}
+		if err := os.WriteFile(layout.ClientsJSON, []byte(`[{"gateway":"gw-b","corral_user":"bob"}]`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		// Force a partial failure on gw-b's first uninstall by locking version dir.
+		entries, err := os.ReadDir(layout.LibDir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var verDir string
+		for _, e := range entries {
+			if e.IsDir() && strings.HasPrefix(e.Name(), "corrald-") {
+				verDir = filepath.Join(layout.LibDir, e.Name())
+				break
+			}
+		}
+		if verDir == "" {
+			t.Fatalf("version dir not found in %s", layout.LibDir)
+		}
+		if err := os.Chmod(verDir, 0o500); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(verDir, 0o700) })
+
+		out, code := runCLI(t, installedBin, home, env, "uninstall", "--op", "opGwB1", "--only-if-sole-gateway", "gw-b")
+		if code == 0 || parseKV(out)["result"] != "partial" {
+			t.Fatalf("expected partial on locked verDir, got code=%d\n%s", code, out)
+		}
+		if !layout.TombstoneExists() {
+			t.Fatal("expected removing tombstone preserved on partial")
+		}
+		// Clear fault -> gw-b retries after clients.json is gone!
+		if err := os.Chmod(verDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		retryBin := filepath.Join(verDir, "corrald")
+		out, code = runCLI(t, retryBin, home, env, "uninstall", "--op", "opGwB2", "--only-if-sole-gateway", "gw-b")
+		if code != 0 || parseKV(out)["result"] != "removed" {
+			t.Fatalf("Fix7 Item #4 regression: gw-b retry failed (tombstone recorded wrong gateway?): code=%d\n%s", code, out)
+		}
+	})
+
+	// Regression test for Fix Round 7 Item #6 [P2]:
+	// A truncated, unreadable, or gateway-less removing tombstone when
+	// install.json is missing MUST fail closed with error=tombstone_unreadable
+	// and preserve all files.
+	t.Run("fix7_item6_truncated_or_incomplete_tombstone_fails_closed", func(t *testing.T) {
+		for _, tc := range []struct {
+			name    string
+			content string
+		}{
+			{"truncated_json", `{"created_at":"2026-11-28`},
+			{"plain_timestamp", "2026-11-28T00:00:00Z\n"},
+			{"missing_gateway", `{"created_at":"2026-11-28T00:00:00Z"}` + "\n"},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				home := t.TempDir()
+				mid := randomHexMid(t)
+				env := []string{"CORRALD_TEST_MACHINE_ID=" + mid}
+				installedBin, layout := installAndServe(t, home, mid)
+				if _, _, err := StopDaemon(layout); err != nil {
+					t.Fatalf("StopDaemon: %v", err)
+				}
+				_ = os.Remove(layout.InstallJSON)
+				_ = os.Remove(layout.ClientsJSON)
+				if err := os.WriteFile(layout.TombstonePath, []byte(tc.content), 0o600); err != nil {
+					t.Fatal(err)
+				}
+
+				out, code := runCLI(t, installedBin, home, env, "uninstall", "--op", "opBadTomb", "--only-if-sole-gateway", "gw-a")
+				if code == 0 || parseKV(out)["error"] != "tombstone_unreadable" {
+					t.Fatalf("Fix7 Item #6 regression (%s): expected error=tombstone_unreadable, got code=%d\n%s", tc.name, code, out)
+				}
+				if _, err := os.Stat(installedBin); err != nil {
+					t.Fatalf("binary must be preserved when tombstone is %s: %v", tc.name, err)
+				}
+			})
+		}
+	})
 }
 
 // Regression test for Fix Round 6 F2 [P3]:
@@ -990,13 +1088,33 @@ func TestCleanStopAndSelftestRemoveTmpSocketDir(t *testing.T) {
 		_ = os.RemoveAll(layout.SocketDir)
 	})
 
-	// 1. selftest must clean up its own tmp socket dir before exiting.
+	// 1. selftest must clean up its own tmp socket dir before exiting when unlocked.
 	if out, code := runCLI(t, bins.v1, home, env, "selftest"); code != 0 {
 		t.Fatalf("selftest failed: %s", out)
 	}
 	if _, err := os.Lstat(layout.SocketDir); !os.IsNotExist(err) {
 		t.Fatalf("F2 regression: selftest leaked tmp socket dir %s (lstat err=%v)", layout.SocketDir, err)
 	}
+
+	// 1b. Fix7 Item #7 [P2]: when corrald.lock is ALREADY held (e.g. a daemon
+	// passed EnsureSocketDir and is about to bind corrald.sock), selftest MUST
+	// NOT remove the tmp socket dir!
+	if err := layout.EnsureSocketDir(); err != nil {
+		t.Fatalf("EnsureSocketDir: %v", err)
+	}
+	heldLock, err := AcquireLock(layout.LockPath)
+	if err != nil {
+		t.Fatalf("AcquireLock: %v", err)
+	}
+	if out, code := runCLI(t, bins.v1, home, env, "selftest"); code != 0 {
+		_ = heldLock.Release()
+		t.Fatalf("selftest while lock held failed: %s", out)
+	}
+	if _, err := os.Stat(layout.SocketDir); err != nil {
+		_ = heldLock.Release()
+		t.Fatalf("Fix7 Item #7 regression: selftest removed tmp socket dir %s while corrald.lock was held: %v", layout.SocketDir, err)
+	}
+	_ = heldLock.Release()
 
 	// 2. serve creates the tmp socket dir; clean stop removes it.
 	stage := stageBinary(t, home, mid, "opF2", bins.v1)

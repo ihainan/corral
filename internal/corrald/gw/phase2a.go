@@ -314,13 +314,29 @@ func (m *Manager) enforceAdminDisableOnClient(ctx context.Context, client *Clien
 		return true
 	}
 
+	markCheckFailed := func() {
+		if heldOpID != "" {
+			// Item #3: When called from an in-flight install/update op (holding
+			// heldOpID), never leave the host row in 'installing' with active_op_id
+			// dangling (where outer defer would reset it to 'off') or drop retry:
+			// record remove_pending and arm hasPendingCleanup.
+			if writeIfActive(func() {
+				_ = m.store.MarkCorraldHostsRemovePendingIfOp(context.Background(), hostIDs, key.Fingerprint, key.Username, heldOpID)
+			}) {
+				m.markPendingCleanup()
+			}
+			return
+		}
+		writeIfActive(func() {
+			_ = m.store.MarkCorraldHostsStoppedIfOp(context.Background(), hostIDs, key.Fingerprint, key.Username, heldOpID)
+		})
+	}
+
 	if !m.isAdminDisableGen(gen) {
 		return false
 	}
 	if client == nil || client.Closed() || m.gatewayID == "" {
-		writeIfActive(func() {
-			_ = m.store.MarkCorraldHostsStoppedIfOp(context.Background(), hostIDs, key.Fingerprint, key.Username, heldOpID)
-		})
+		markCheckFailed()
 		return false
 	}
 
@@ -332,9 +348,7 @@ func (m *Manager) enforceAdminDisableOnClient(ctx context.Context, client *Clien
 		return false
 	}
 	if herr != nil || h == nil {
-		writeIfActive(func() {
-			_ = m.store.MarkCorraldHostsStoppedIfOp(context.Background(), hostIDs, key.Fingerprint, key.Username, heldOpID)
-		})
+		markCheckFailed()
 		return false
 	}
 	if h.ConnectedGateways > 1 {
@@ -373,9 +387,7 @@ func (m *Manager) enforceAdminDisableOnClient(ctx context.Context, client *Clien
 			return false
 		}
 		if err != nil || freshHello == nil {
-			writeIfActive(func() {
-				_ = m.store.MarkCorraldHostsStoppedIfOp(context.Background(), hostIDs, key.Fingerprint, key.Username, heldOpID)
-			})
+			markCheckFailed()
 			return false
 		}
 		hello = freshHello
@@ -544,7 +556,7 @@ func (m *Manager) tryImmediateAdminUninstall(
 		}
 	}
 
-	out := RunUninstallSoleGatewayWithRetry(uctx, activeSSH, probe, opID, m.gatewayID, m.busyRetry, nil)
+	out := RunUninstallSoleGatewayWithRetry(uctx, activeSSH, m.Dist(), probe, opID, m.gatewayID, m.busyRetry, nil)
 	m.applySoleGatewayUninstallOutcome(key.Fingerprint, key.Username, hostIDs, true, out, gen, heldOpID)
 }
 
@@ -1008,7 +1020,7 @@ func (m *Manager) runSafeCleanupLocked(
 	// Host-side atomic sole-gateway uninstall under .corrald-shared.lock ->
 	// op.lock -> corrald.lock. Refuses without modifying files if another
 	// gateway is connected/registered or if the host binary/daemon is too old.
-	out := RunUninstallSoleGatewayWithRetry(ctx, sshClient, probe, opID, m.gatewayID, m.busyRetry, nil)
+	out := RunUninstallSoleGatewayWithRetry(ctx, sshClient, m.Dist(), probe, opID, m.gatewayID, m.busyRetry, nil)
 	m.applySoleGatewayUninstallOutcome(fp, sshUser, []int64{hostID}, wasPending, out, 0, heldOpID)
 }
 
