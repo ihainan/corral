@@ -510,6 +510,12 @@ if [ -f "$ST/removing" ] && [ ! -L "$ST/removing" ]; then
   if [ -n "$SOCK" ] && [ -e "$SOCK" ]; then
     rm -f -- "$SOCK" 2>/dev/null || add_left "$SOCK" "remove failed"
   fi
+  if [ -n "$SOCK" ]; then
+    sock_dir=$(dirname -- "$SOCK")
+    if [ "$sock_dir" != "$ST" ] && [ -d "$sock_dir" ]; then
+      rmdir -- "$sock_dir" 2>/dev/null || true
+    fi
+  fi
   # Clean remaining state entries including tombstone and locks.
   for entry in "$ST"/* "$ST"/.*; do
     base=$(basename -- "$entry")

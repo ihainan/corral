@@ -117,6 +117,17 @@ func getTestBinaries(t *testing.T) builtBinaries {
 
 func runCLI(t *testing.T, bin string, home string, extraEnv []string, args ...string) (string, int) {
 	t.Helper()
+	var mid string
+	for _, kv := range extraEnv {
+		if v, ok := strings.CutPrefix(kv, "CORRALD_TEST_MACHINE_ID="); ok {
+			mid = v
+		}
+	}
+	uid := uint32(os.Getuid())
+	if layout, err := ResolveLayout(PathOptions{Home: home, UID: &uid, MachineID: mid}); err == nil && layout.SocketUsesTmpDir {
+		sockDir := layout.SocketDir
+		t.Cleanup(func() { _ = os.RemoveAll(sockDir) })
+	}
 	cmd := exec.Command(bin, args...)
 	env := []string{
 		"HOME=" + home,

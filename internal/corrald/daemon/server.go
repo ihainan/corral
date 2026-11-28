@@ -466,6 +466,9 @@ func (s *Server) Serve(parentCtx context.Context) error {
 
 	if !s.HandedOff() {
 		_ = os.Remove(s.layout.SocketPath)
+		if s.layout.SocketUsesTmpDir {
+			_ = os.Remove(s.layout.SocketDir)
+		}
 		_ = os.Remove(s.layout.MetaJSON)
 		s.log.Info("corrald stopped", "pid", os.Getpid())
 	} else {

@@ -17,6 +17,7 @@ import (
 	"golang.org/x/crypto/ssh"
 
 	"github.com/ihainan/corral/internal/config"
+	"github.com/ihainan/corral/internal/corrald/daemon"
 	"github.com/ihainan/corral/internal/corrald/gw"
 	"github.com/ihainan/corral/internal/corrald/proto"
 	"github.com/ihainan/corral/internal/store"
@@ -105,6 +106,18 @@ func startCorraldSSH(t *testing.T, extraEnv ...string) (*testutil.SSHServer, str
 			c := exec.Command(bin, "stop")
 			c.Env = append(os.Environ(), "HOME="+home)
 			_ = c.Run()
+		}
+		// Clean up only this test's own /tmp/corrald-<uid>-<hash> fallback socket
+		// directory (if one was created for home). Never touches other runs' dirs.
+		var mid string
+		for _, kv := range extraEnv {
+			if v, ok := strings.CutPrefix(kv, "CORRALD_TEST_MACHINE_ID="); ok {
+				mid = v
+			}
+		}
+		uid := uint32(os.Getuid())
+		if layout, err := daemon.ResolveLayout(daemon.PathOptions{Home: home, UID: &uid, MachineID: mid}); err == nil && layout.SocketUsesTmpDir {
+			_ = os.RemoveAll(layout.SocketDir)
 		}
 	})
 	return srv, home

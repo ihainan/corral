@@ -39,6 +39,9 @@ func startTestServerForSoleGW(t *testing.T, home, mid string) (*Server, *Layout,
 	if err := layout.EnsureStateDir(); err != nil {
 		t.Fatalf("EnsureStateDir: %v", err)
 	}
+	if layout.SocketUsesTmpDir {
+		t.Cleanup(func() { _ = os.RemoveAll(layout.SocketDir) })
+	}
 	srv, err := NewServer(ServerConfig{
 		Layout:              layout,
 		Build:               proto.BuildInfo{Version: "0.3.2", Release: 2000, Commit: "test"},
@@ -735,4 +738,283 @@ func TestCLIUninstallOnlyIfSoleGateway(t *testing.T) {
 			t.Fatalf("expected state dir removed on retry, stat err=%v", err)
 		}
 	})
+
+	// Regression tests for Fix Round 6 F1 [P1]:
+	// When CLI sole-gateway uninstall runs while the daemon is already inside its
+	// 15ms pre-exit window (answering daemon.hello with ErrShuttingDown, or closing
+	// its socket right before releasing corrald.lock), CLI MUST wait for corrald.lock
+	// and let the authoritative clients.json re-check under SharedLock -> OpLock ->
+	// lifeLock decide removed vs other_gateways (never failing transiently with
+	// daemon_unreachable, and never deleting files needed by another gateway).
+	t.Run("f1_shutting_down_window_sole_gateway_waits_and_removes", func(t *testing.T) {
+		home := t.TempDir()
+		mid := randomHexMid(t)
+		env := []string{"CORRALD_TEST_MACHINE_ID=" + mid}
+		stage := stageBinary(t, home, mid, "opF1a", bins.v1)
+		if out, code := runCLI(t, filepath.Join(stage, "corrald"), home, env,
+			"install", "--stage", stage, "--op", "opF1a", "--gateway", "gw-a", "--by", "alice"); code != 0 {
+			t.Fatalf("install: %s", out)
+		}
+		installedBin := filepath.Join(home, ".local", "lib", "corral", "corrald")
+		uid := uint32(os.Getuid())
+		layout, err := ResolveLayout(PathOptions{Home: home, UID: &uid, MachineID: mid})
+		if err != nil {
+			t.Fatalf("ResolveLayout: %v", err)
+		}
+		if err := os.WriteFile(layout.ClientsJSON, []byte(`[{"gateway":"gw-a","corral_user":"alice"}]`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		lifeLock, err := AcquireLock(layout.LockPath)
+		if err != nil {
+			t.Fatalf("AcquireLock: %v", err)
+		}
+		if err := os.MkdirAll(filepath.Dir(layout.SocketPath), 0o700); err != nil {
+			_ = lifeLock.Release()
+			t.Fatal(err)
+		}
+		if layout.SocketUsesTmpDir {
+			t.Cleanup(func() { _ = os.RemoveAll(layout.SocketDir) })
+		}
+		_ = os.Remove(layout.SocketPath)
+		ln, err := net.ListenUnix("unix", &net.UnixAddr{Name: layout.SocketPath, Net: "unix"})
+		if err != nil {
+			_ = lifeLock.Release()
+			t.Fatalf("ListenUnix: %v", err)
+		}
+		defer ln.Close()
+
+		// Fake daemon inside its shutting-down window: rejects daemon.hello with
+		// ErrShuttingDown, then exits (closes socket + releases corrald.lock) 80ms later.
+		go func() {
+			conn, aerr := ln.Accept()
+			if aerr != nil {
+				return
+			}
+			var req proto.Request
+			if rerr := proto.ReadJSON(conn, &req); rerr == nil {
+				_ = proto.WriteJSON(conn, proto.Response{
+					ID:    req.ID,
+					Error: &proto.RPCError{Code: proto.ErrShuttingDown, Message: "daemon is shutting down"},
+				})
+			}
+			_ = conn.Close()
+			time.Sleep(80 * time.Millisecond)
+			_ = ln.Close()
+			_ = os.Remove(layout.SocketPath)
+			_ = lifeLock.Release()
+		}()
+
+		out, code := runCLI(t, installedBin, home, env, "uninstall", "--op", "opRmF1a", "--only-if-sole-gateway", "gw-a")
+		if code != 0 || parseKV(out)["result"] != "removed" {
+			t.Fatalf("F1 regression: expected uninstall during ErrShuttingDown window to wait and return result=removed, got code=%d\n%s", code, out)
+		}
+		if _, err := os.Lstat(installedBin); !os.IsNotExist(err) {
+			t.Fatalf("expected binary removed, stat err=%v", err)
+		}
+		if layout.SocketUsesTmpDir {
+			if _, err := os.Lstat(layout.SocketDir); !os.IsNotExist(err) {
+				t.Fatalf("F2 regression: expected tmp socket dir %s removed after uninstall, stat err=%v", layout.SocketDir, err)
+			}
+		}
+	})
+
+	t.Run("f1_shutting_down_window_with_other_gateway_in_clients_json_preserves_files", func(t *testing.T) {
+		home := t.TempDir()
+		mid := randomHexMid(t)
+		env := []string{"CORRALD_TEST_MACHINE_ID=" + mid}
+		stage := stageBinary(t, home, mid, "opF1b", bins.v1)
+		if out, code := runCLI(t, filepath.Join(stage, "corrald"), home, env,
+			"install", "--stage", stage, "--op", "opF1b", "--gateway", "gw-a", "--by", "alice"); code != 0 {
+			t.Fatalf("install: %s", out)
+		}
+		installedBin := filepath.Join(home, ".local", "lib", "corral", "corrald")
+		uid := uint32(os.Getuid())
+		layout, err := ResolveLayout(PathOptions{Home: home, UID: &uid, MachineID: mid})
+		if err != nil {
+			t.Fatalf("ResolveLayout: %v", err)
+		}
+		// Another gateway gw-b is registered in clients.json! Even though the daemon
+		// is shutting down (e.g. from an unconditional stop or idle exit), CLI MUST
+		// re-check clients.json under SharedLock -> OpLock -> lifeLock and preserve files.
+		if err := os.WriteFile(layout.ClientsJSON, []byte(`[{"gateway":"gw-a","corral_user":"alice"},{"gateway":"gw-b","corral_user":"bob"}]`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		lifeLock, err := AcquireLock(layout.LockPath)
+		if err != nil {
+			t.Fatalf("AcquireLock: %v", err)
+		}
+		if err := os.MkdirAll(filepath.Dir(layout.SocketPath), 0o700); err != nil {
+			_ = lifeLock.Release()
+			t.Fatal(err)
+		}
+		if layout.SocketUsesTmpDir {
+			t.Cleanup(func() { _ = os.RemoveAll(layout.SocketDir) })
+		}
+		_ = os.Remove(layout.SocketPath)
+		ln, err := net.ListenUnix("unix", &net.UnixAddr{Name: layout.SocketPath, Net: "unix"})
+		if err != nil {
+			_ = lifeLock.Release()
+			t.Fatalf("ListenUnix: %v", err)
+		}
+		defer ln.Close()
+
+		go func() {
+			conn, aerr := ln.Accept()
+			if aerr != nil {
+				return
+			}
+			var req proto.Request
+			if rerr := proto.ReadJSON(conn, &req); rerr == nil {
+				_ = proto.WriteJSON(conn, proto.Response{
+					ID:    req.ID,
+					Error: &proto.RPCError{Code: proto.ErrShuttingDown, Message: "daemon is shutting down"},
+				})
+			}
+			_ = conn.Close()
+			time.Sleep(80 * time.Millisecond)
+			_ = ln.Close()
+			_ = os.Remove(layout.SocketPath)
+			_ = lifeLock.Release()
+		}()
+
+		out, code := runCLI(t, installedBin, home, env, "uninstall", "--op", "opRmF1b", "--only-if-sole-gateway", "gw-a")
+		if code != 0 || parseKV(out)["result"] != "other_gateways" {
+			t.Fatalf("F1 safety regression: expected result=other_gateways when gw-b is in clients.json, got code=%d\n%s", code, out)
+		}
+		if _, err := os.Stat(installedBin); err != nil {
+			t.Fatalf("binary must be preserved for gw-b: %v", err)
+		}
+		if _, err := os.Stat(layout.InstallJSON); err != nil {
+			t.Fatalf("install.json must be preserved for gw-b: %v", err)
+		}
+		if layout.TombstoneExists() {
+			t.Fatal("tombstone must NOT be created when gw-b is in clients.json")
+		}
+	})
+
+	t.Run("f1_socket_closed_before_lock_release_waits_and_removes", func(t *testing.T) {
+		home := t.TempDir()
+		mid := randomHexMid(t)
+		env := []string{"CORRALD_TEST_MACHINE_ID=" + mid}
+		stage := stageBinary(t, home, mid, "opF1c", bins.v1)
+		if out, code := runCLI(t, filepath.Join(stage, "corrald"), home, env,
+			"install", "--stage", stage, "--op", "opF1c", "--gateway", "gw-a", "--by", "alice"); code != 0 {
+			t.Fatalf("install: %s", out)
+		}
+		installedBin := filepath.Join(home, ".local", "lib", "corral", "corrald")
+		uid := uint32(os.Getuid())
+		layout, err := ResolveLayout(PathOptions{Home: home, UID: &uid, MachineID: mid})
+		if err != nil {
+			t.Fatalf("ResolveLayout: %v", err)
+		}
+		if layout.SocketUsesTmpDir {
+			t.Cleanup(func() { _ = os.RemoveAll(layout.SocketDir) })
+		}
+		if err := os.WriteFile(layout.ClientsJSON, []byte(`[{"gateway":"gw-a","corral_user":"alice"}]`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		// Hold corrald.lock with no listening socket (daemon already closed socket
+		// during exit), then release corrald.lock after 100ms.
+		lifeLock, err := AcquireLock(layout.LockPath)
+		if err != nil {
+			t.Fatalf("AcquireLock: %v", err)
+		}
+		go func() {
+			time.Sleep(100 * time.Millisecond)
+			_ = lifeLock.Release()
+		}()
+
+		out, code := runCLI(t, installedBin, home, env, "uninstall", "--op", "opRmF1c", "--only-if-sole-gateway", "gw-a")
+		if code != 0 || parseKV(out)["result"] != "removed" {
+			t.Fatalf("expected uninstall to succeed after daemon released lock shortly after socket close, got code=%d\n%s", code, out)
+		}
+	})
+
+	t.Run("f1_unreachable_live_daemon_holding_lock_still_fails_closed", func(t *testing.T) {
+		home := t.TempDir()
+		mid := randomHexMid(t)
+		env := []string{"CORRALD_TEST_MACHINE_ID=" + mid}
+		stage := stageBinary(t, home, mid, "opF1d", bins.v1)
+		if out, code := runCLI(t, filepath.Join(stage, "corrald"), home, env,
+			"install", "--stage", stage, "--op", "opF1d", "--gateway", "gw-a", "--by", "alice"); code != 0 {
+			t.Fatalf("install: %s", out)
+		}
+		installedBin := filepath.Join(home, ".local", "lib", "corral", "corrald")
+		uid := uint32(os.Getuid())
+		layout, err := ResolveLayout(PathOptions{Home: home, UID: &uid, MachineID: mid})
+		if err != nil {
+			t.Fatalf("ResolveLayout: %v", err)
+		}
+		if layout.SocketUsesTmpDir {
+			t.Cleanup(func() { _ = os.RemoveAll(layout.SocketDir) })
+		}
+		// Hold corrald.lock for the entire duration with no socket -> must fail closed!
+		lifeLock, err := AcquireLock(layout.LockPath)
+		if err != nil {
+			t.Fatalf("AcquireLock: %v", err)
+		}
+		defer lifeLock.Release()
+
+		out, code := runCLI(t, installedBin, home, env, "uninstall", "--op", "opRmF1d", "--only-if-sole-gateway", "gw-a")
+		if code == 0 || parseKV(out)["error"] != "daemon_unreachable" {
+			t.Fatalf("expected error=daemon_unreachable when lock remains held with unreachable socket, got code=%d\n%s", code, out)
+		}
+		if _, err := os.Stat(installedBin); err != nil {
+			t.Fatalf("binary must be preserved when daemon is unreachable: %v", err)
+		}
+	})
+}
+
+// Regression test for Fix Round 6 F2 [P3]:
+// Verify selftest and clean daemon stop remove their /tmp/corrald-<uid>-<hash>
+// fallback socket directory so tests and long-HOME hosts do not leak empty dirs.
+func TestCleanStopAndSelftestRemoveTmpSocketDir(t *testing.T) {
+	bins := getTestBinaries(t)
+	// Ensure a long HOME path so layout.SocketUsesTmpDir is guaranteed true.
+	home := filepath.Join(t.TempDir(), "nested-long-home-dir-for-tmp-socket-fallback-test-0123456789abcdef")
+	if err := os.MkdirAll(home, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	mid := randomHexMid(t)
+	env := []string{"CORRALD_TEST_MACHINE_ID=" + mid}
+	uid := uint32(os.Getuid())
+	layout, err := ResolveLayout(PathOptions{Home: home, UID: &uid, MachineID: mid})
+	if err != nil {
+		t.Fatalf("ResolveLayout: %v", err)
+	}
+	if !layout.SocketUsesTmpDir {
+		t.Fatalf("expected SocketUsesTmpDir=true for long home %q", home)
+	}
+	t.Cleanup(func() {
+		_, _, _ = StopDaemon(layout)
+		_ = os.RemoveAll(layout.SocketDir)
+	})
+
+	// 1. selftest must clean up its own tmp socket dir before exiting.
+	if out, code := runCLI(t, bins.v1, home, env, "selftest"); code != 0 {
+		t.Fatalf("selftest failed: %s", out)
+	}
+	if _, err := os.Lstat(layout.SocketDir); !os.IsNotExist(err) {
+		t.Fatalf("F2 regression: selftest leaked tmp socket dir %s (lstat err=%v)", layout.SocketDir, err)
+	}
+
+	// 2. serve creates the tmp socket dir; clean stop removes it.
+	stage := stageBinary(t, home, mid, "opF2", bins.v1)
+	if out, code := runCLI(t, filepath.Join(stage, "corrald"), home, env,
+		"install", "--stage", stage, "--op", "opF2", "--gateway", "gw-f2", "--by", "alice"); code != 0 {
+		t.Fatalf("install failed: %s", out)
+	}
+	installedBin := filepath.Join(home, ".local", "lib", "corral", "corrald")
+	if out, code := runCLI(t, installedBin, home, env, "serve", "--gateway", "gw-f2"); code != 0 {
+		t.Fatalf("serve failed: %s", out)
+	}
+	if _, err := os.Stat(layout.SocketDir); err != nil {
+		t.Fatalf("expected tmp socket dir %s to exist while serving: %v", layout.SocketDir, err)
+	}
+	if out, code := runCLI(t, installedBin, home, env, "stop"); code != 0 {
+		t.Fatalf("stop failed: %s", out)
+	}
+	if _, err := os.Lstat(layout.SocketDir); !os.IsNotExist(err) {
+		t.Fatalf("F2 regression: clean daemon stop leaked tmp socket dir %s (lstat err=%v)", layout.SocketDir, err)
+	}
 }

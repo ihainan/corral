@@ -161,6 +161,9 @@ func cmdSelftest(stdout io.Writer) int {
 	}
 	_ = ln.Close()
 	_ = os.Remove(probeSock)
+	if layout.SocketUsesTmpDir {
+		_ = os.Remove(layout.SocketDir)
+	}
 
 	fmt.Fprintf(stdout, "result=ok\n")
 	fmt.Fprintf(stdout, "mid=%s\n", layout.MachineID)
@@ -1454,6 +1457,9 @@ func cleanupStoppedArtifacts(layout *Layout, sockPath string) {
 	if layout.SocketPath != "" && layout.SocketPath != sockPath {
 		_ = os.Remove(layout.SocketPath)
 	}
+	if layout.SocketUsesTmpDir {
+		_ = os.Remove(layout.SocketDir)
+	}
 	_ = os.Remove(layout.MetaJSON)
 }
 
@@ -1572,24 +1578,53 @@ func cmdUninstall(args []string, stdout io.Writer) int {
 					// own probe connection is never seen as an "other gateway".
 					// Never unconditionally kill.
 					hres, sres, ferr, cerr := callLocalSoleShutdown(sockCheck, soleGW, 3*time.Second)
-					if cerr != nil {
-						writeErr(stdout, "daemon_unreachable", cerr.Error())
-						return 1
-					}
 					if ferr != "" {
 						writeErr(stdout, ferr, "running daemon does not support conditional shutdown")
 						return 1
 					}
-					if sres.OtherGateways || !sres.OK {
-						fmt.Fprintf(stdout, "result=other_gateways\n")
-						return 0
-					}
-					ll, lerr = AcquireLockWait(layout.LockPath, 5*time.Second)
-					if lerr != nil {
-						fmt.Fprintf(stdout, "error=stop_failed\n")
-						fmt.Fprintf(stdout, "pid=%d\n", hres.PID)
-						fmt.Fprintf(stdout, "detail=%s\n", strings.ReplaceAll(lerr.Error(), "\n", " "))
-						return 1
+					if cerr != nil {
+						var rpcErr *proto.RPCError
+						if errors.As(cerr, &rpcErr) && rpcErr.Code == proto.ErrShuttingDown {
+							// Daemon is already shutting down (e.g. inside its 15ms
+							// exit window after gateway's ShutdownConditional). Wait
+							// for corrald.lock to be released, then let the
+							// authoritative clients.json re-check under
+							// SharedLock -> OpLock -> lifeLock decide removed vs
+							// other_gateways.
+							ll, lerr = AcquireLockWait(layout.LockPath, 5*time.Second)
+							if lerr != nil {
+								pid := 0
+								if metaBefore != nil {
+									pid = metaBefore.PID
+								}
+								fmt.Fprintf(stdout, "error=stop_failed\n")
+								fmt.Fprintf(stdout, "pid=%d\n", pid)
+								fmt.Fprintf(stdout, "detail=%s\n", strings.ReplaceAll(lerr.Error(), "\n", " "))
+								return 1
+							}
+						} else {
+							// Daemon may have closed/unlinked its socket right
+							// before releasing corrald.lock. Wait briefly for the
+							// lock; if it is still held by a live/unreachable
+							// daemon, fail closed with daemon_unreachable.
+							ll, lerr = AcquireLockWait(layout.LockPath, 500*time.Millisecond)
+							if lerr != nil {
+								writeErr(stdout, "daemon_unreachable", cerr.Error())
+								return 1
+							}
+						}
+					} else {
+						if sres.OtherGateways || !sres.OK {
+							fmt.Fprintf(stdout, "result=other_gateways\n")
+							return 0
+						}
+						ll, lerr = AcquireLockWait(layout.LockPath, 5*time.Second)
+						if lerr != nil {
+							fmt.Fprintf(stdout, "error=stop_failed\n")
+							fmt.Fprintf(stdout, "pid=%d\n", hres.PID)
+							fmt.Fprintf(stdout, "detail=%s\n", strings.ReplaceAll(lerr.Error(), "\n", " "))
+							return 1
+						}
 					}
 				}
 				lifeLock = ll
