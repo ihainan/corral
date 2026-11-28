@@ -2,19 +2,15 @@
 // (tested directly in web/scripts/test-peer-sender.mjs).
 //
 // Display rule: the backend decides whether a peer's verified (pid, proc_start)
-// matches a currently-selected Corral agent in the latest locate scan. The
-// frontend does no identity matching — it only names the backend-matched
-// (session_id, pane) using the sidebar's own naming function (peerTitles /
-// sidebarHerdrTitle) so sidebar and peer sender names cannot drift. If refresh
-// is failing or peer data is older than PEER_SLOT_MAX_AGE_MS, or if the
+// matches a currently-selected Corral agent in the latest locate scan (and
+// enforces the 10-minute slot age limit on every poll). The frontend does no
+// identity matching — it only names the backend-matched (session_id, pane)
+// using the sidebar's own naming function (peerTitles / sidebarHerdrTitle) so
+// sidebar and peer sender names cannot drift. If refresh is failing, or if the
 // backend did not supply a complete Corral target, show the message's own
 // sender name + "Not in Corral".
 
 export type PeerPickHow = 'tab' | 'split'
-
-// Maximum age of peer-resolution data before links are withheld (matches Go
-// peerSlotMaxAge in internal/web/convo_peers.go).
-export const PEER_SLOT_MAX_AGE_MS = 10 * 60 * 1000
 
 // Canonical target key for looking up a sidebar row title by (sessionId, pane).
 export function peerTargetKey(sessionId: string, pane?: string): string {
@@ -50,14 +46,64 @@ export function sidebarHerdrTitle(p: {
   return own || ws
 }
 
-// Whether conversation peer data is fresh enough to render live links.
-export function peerFresh(opts: { failing?: boolean; okAt?: number; now?: number }): boolean {
-  if (opts.failing) return false
-  if (opts.okAt !== undefined) {
-    const now = opts.now ?? Date.now()
-    if (opts.okAt <= 0 || now - opts.okAt > PEER_SLOT_MAX_AGE_MS) return false
+// Whether conversation peer data may render live links: withhold only while
+// refreshes are failing. The server already enforces the 10-minute slot age
+// limit on every poll, whereas healthy unchanged polls intentionally keep the
+// prior state (and its okAt) without re-rendering.
+export function peerFresh(opts: { failing?: boolean }): boolean {
+  return !opts.failing
+}
+
+// Normalize a poll answer's peers map and reuse prev only when deeply equal,
+// so healthy unchanged polls do not re-render while any peer addition, removal,
+// or field change produces a new reference that updates conversation state.
+export function nextConvoPeers(
+  prev: Record<string, ConvoPeerInfo> | undefined,
+  incoming: Record<string, ConvoPeerInfo> | undefined,
+): Record<string, ConvoPeerInfo> | undefined {
+  if (!incoming || !Object.keys(incoming).length) return undefined
+  return JSON.stringify(incoming) === JSON.stringify(prev) ? prev : incoming
+}
+
+// Build the (sessionId, pane) -> sidebar row title map for peer sender naming.
+// Includes both live herdr panes and tmux entries, and registers each sidebar
+// row's title under every session connection merged into that deduped row.
+export function buildPeerTitles<S extends { id: string; persistence?: string }>(
+  entries: ReadonlyArray<{
+    key: string
+    sessionId: string
+    pane?: string
+    isHerdr: boolean
+    lost?: boolean
+    title: string
+  }>,
+  allSessions: ReadonlyArray<S>,
+  keyFor: {
+    herdr: (s: S, pane: string) => string
+    tmux: (s: S) => string
+  },
+): Map<string, string> {
+  const map = new Map<string, string>()
+  for (const e of entries) {
+    if (!e.title) continue
+    if (e.isHerdr) {
+      if (e.lost || !e.pane) continue
+      map.set(peerTargetKey(e.sessionId, e.pane), e.title)
+      for (const s of allSessions) {
+        if (s.persistence === 'herdr' && keyFor.herdr(s, e.pane) === e.key) {
+          map.set(peerTargetKey(s.id, e.pane), e.title)
+        }
+      }
+    } else {
+      map.set(peerTargetKey(e.sessionId), e.title)
+      for (const s of allSessions) {
+        if (s.persistence === 'tmux' && keyFor.tmux(s) === e.key) {
+          map.set(peerTargetKey(s.id), e.title)
+        }
+      }
+    }
   }
-  return true
+  return map
 }
 
 // Mirrors internal/convo/convo.go PeerInfo.
@@ -131,7 +177,8 @@ export function peerLocation(
   if (host) parts.push(host)
   if (sess && sess !== title) parts.push(sess)
   else if (ws && ws !== '~' && ws !== title) parts.push(ws)
-  return parts.join(' · ')
+  const loc = parts.join(' · ')
+  return loc === title ? '' : loc
 }
 
 export function resolvePeerSender(input: {
@@ -141,11 +188,9 @@ export function resolvePeerSender(input: {
   peers?: Record<string, ConvoPeerInfo>
   peerTitles?: ReadonlyMap<string, string>
   failing?: boolean
-  okAt?: number
-  now?: number
 }): ResolvedPeer {
   const rawFrom = sanitizePeerText(input.from)
-  if (!peerFresh({ failing: input.failing, okAt: input.okAt, now: input.now })) {
+  if (!peerFresh({ failing: input.failing })) {
     return { kind: 'unknown', name: rawFrom || '?' }
   }
   const key = peerRefKey(input.peerPid, input.peerStart)

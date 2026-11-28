@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api, ApiError, authGen } from '../api'
 import type { RowCmds } from './agentOrder'
 import { knownSession } from './agents'
-import { PEER_SLOT_MAX_AGE_MS, type ConvoPeerInfo } from './peerSender'
+import { nextConvoPeers, type ConvoPeerInfo } from './peerSender'
 import { isPushHostCovered, onPushConvo, onPushStateChange, watchPushHosts } from './pushEvents'
 import { CONVO_POLL_COVERED, convoNextPollDelay, matchesConvoHint, type ConvoRequestSource } from './pushEventsLogic'
 
@@ -585,7 +585,7 @@ export function useConversation(sessionId: string, enabled: boolean, pane: strin
             const fresh = cmdsOf(a)
             const bgCmds = fresh && JSON.stringify(fresh) === JSON.stringify(c.bgCmds) ? c.bgCmds : fresh
             const bgAgents = a.bg_agent_list?.length ? (JSON.stringify(a.bg_agent_list) === JSON.stringify(c.bgAgents) ? c.bgAgents : a.bg_agent_list) : undefined
-            const peers = a.peers && Object.keys(a.peers).length ? (JSON.stringify(a.peers) === JSON.stringify(c.peers) ? c.peers : a.peers) : undefined
+            const peers = nextConvoPeers(c.peers, a.peers)
             const quietAt = told !== undefined && c.quietAt !== undefined && Math.abs(told - c.quietAt) < 3000 ? c.quietAt : told
             if (!entries && c.of === key && c.status === 'ready' && c.quietAt === quietAt && c.gen === a.gen && c.older === older && c.olderCut === olderCut && c.loadingOlder === loadingOlder && sameBind(c.bind, a.bind) && c.agentStatus === a.agent_status && c.waitingFor === a.waiting_for && c.bgCmds === bgCmds && c.bgAgents === bgAgents && c.title === a.title && c.tasks === tasks && c.meta === meta && c.queued === queued && c.running === running && c.peers === peers && !c.failing && c.defaultChanged === a.default_changed) return c
             return { ...initial(key), status: 'ready', entries: entries ?? c.entries, older, olderCut, loadingOlder, gen: a.gen, bind: a.bind, agentStatus: a.agent_status, waitingFor: a.waiting_for, bgCmds, bgAgents, quietAt, title: a.title || undefined, tasks, meta, queued, running, peers, failing: false, okAt: now, changedAt: entries ? now : c.changedAt, of: key, defaultChanged: a.default_changed }
@@ -654,7 +654,7 @@ export function useConversation(sessionId: string, enabled: boolean, pane: strin
         else {
           const entries = [...byseq.values()].sort((x, y) => x.seq - y.seq)
           const older = !!k.older || entries.length === MAX
-          const freshPeers = now - was.at <= PEER_SLOT_MAX_AGE_MS && k.peers && Object.keys(k.peers).length ? k.peers : undefined
+          const freshPeers = now - was.at <= 10 * 60 * 1000 ? nextConvoPeers(undefined, k.peers) : undefined
           setConvo({ ...initial(key), status: 'ready', entries, older, olderCut: older && (!!k.older_cut || entries.length === MAX), gen, bind: k.bind, agentStatus: k.agent_status, waitingFor: k.waiting_for, bgCmds: cmdsOf(k), bgAgents: k.bg_agent_list?.length ? k.bg_agent_list : undefined, title: k.title || undefined, tasks: k.tasks?.length ? k.tasks : undefined, meta: k.meta, queued: k.queued?.length ? k.queued : undefined, running: k.running?.length ? k.running : undefined, peers: freshPeers, failing: false, okAt: now, changedAt: now, of: key })
         }
       } else {

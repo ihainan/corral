@@ -58,7 +58,7 @@ import {
   type TerminalBlockerState,
 } from '../terminal/liveTerminalPolicy'
 import { agentKey, sessionWhich } from '../terminal/sessionName'
-import { peerHref, peerTargetKey, sidebarHerdrTitle, type PeerPickHow } from '../terminal/peerSender'
+import { buildPeerTitles, peerHref, sidebarHerdrTitle, type PeerPickHow } from '../terminal/peerSender'
 import { firstShown, hideBox, keptBox, KeptPart, KeptView, letGoBox, modalShown, useEffectOnChange, useShownAt, useWhenGone, type KeptBox } from '../shown'
 import { Rail, StatusBar, StatusItem, useWorkbench } from '../workbench'
 import { CorraldStatusBarItem } from '../components/CorraldStatusBarItem'
@@ -2134,20 +2134,29 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
     return placedAs ? out.map((r) => (r.current ? { ...r, placeAs: placedAs } : r)) : out
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [entries, cur, agent, reconciled, liveConvoRunning, convoWorkingSince, convoTitle, all, titles, onPick, placedAs, pins, splitKey, isSecondary])
-  const peerTitles = useMemo(() => {
-    const map = new Map<string, string>()
-    for (let i = 0; i < entries.length; i++) {
-      const e = entries[i]
-      const row = rows[i]
-      if (e.row && !e.row.lost && row?.title) {
-        map.set(peerTargetKey(e.s.id, e.pane), row.title)
-      }
-    }
-    return map
-  }, [entries, rows])
+  const peerTitles = useMemo(
+    () =>
+      buildPeerTitles(
+        entries.map((e, i) => ({
+          key: e.key,
+          sessionId: e.s.id,
+          pane: e.pane,
+          isHerdr: !!e.row,
+          lost: e.row?.lost,
+          title: rows[i]?.title ?? '',
+        })),
+        all,
+        { herdr: agentKey, tmux: tmuxKey },
+      ),
+    [entries, rows, all],
+  )
   const openPeer = useCallback(
     (sessionId: string, pane: string | undefined, how?: PeerPickHow) => {
-      const target = entries.find((e) => e.s.id === sessionId && (e.pane ?? '') === (pane ?? ''))
+      const sess = all.find((x) => x.id === sessionId)
+      const target =
+        entries.find((e) => e.s.id === sessionId && (e.pane ?? '') === (pane ?? '')) ??
+        (sess?.persistence === 'herdr' && pane ? entries.find((e) => e.key === agentKey(sess, pane)) : undefined) ??
+        (sess?.persistence === 'tmux' && !pane ? entries.find((e) => !e.pane && e.key === tmuxKey(sess)) : undefined)
       if (target) {
         onPick(target, how)
         return
@@ -2157,7 +2166,7 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
       if (how === 'tab') window.open(href, '_blank', 'noopener')
       else window.location.assign(href)
     },
-    [entries, onPick],
+    [all, entries, onPick],
   )
   const shown = rows.find((r) => r.current)
   const known = !!shown && shown.status !== 'unknown'

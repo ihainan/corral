@@ -1900,7 +1900,6 @@ export function ConversationView({
               peers: convo.peers,
               peerTitles,
               failing: convo.failing,
-              okAt: convo.okAt,
             })
             const head = formatPeerPlain(resolved, {
               from: (name) => t('convo.peerFrom', { name }),
@@ -3246,8 +3245,8 @@ function Queue({ items, onSendNow, said }: { items: ConvoQueued[]; onSendNow?: (
 }
 
 function PeerSenderHead({ from, peerPid, peerStart }: { from?: string; peerPid?: number; peerStart?: number }) {
-  const { peers, peerTitles, failing, okAt, onOpenPeer } = useContext(PeerCtx)
-  const resolved = resolvePeerSender({ from, peerPid, peerStart, peers, peerTitles, failing, okAt })
+  const { peers, peerTitles, failing, onOpenPeer } = useContext(PeerCtx)
+  const resolved = resolvePeerSender({ from, peerPid, peerStart, peers, peerTitles, failing })
   if (resolved.kind === 'live') {
     const tip = [resolved.name, resolved.where, t('convo.peerOpenHint')].filter(Boolean).join(' · ')
     return (
