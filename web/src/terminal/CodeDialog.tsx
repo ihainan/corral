@@ -4,6 +4,7 @@ import { Code2 } from 'lucide-react'
 import { api, ApiError, errorText } from '../api'
 import { getLang, hasKey, t } from '../i18n'
 import { Dialog, useToast } from '../components/ui'
+import { AppLink } from '../components/AppLink'
 
 // VS Code in the browser (code-server on the host). Starting can take minutes
 // the first time (download and unpack), so the server works in the
@@ -185,9 +186,9 @@ export function useCode() {
             </button>
           )}
           {job.readyUrl ? (
-            <a className="btn btn-primary" href={job.readyUrl} target="_blank" rel="noopener noreferrer" onClick={() => setJob(null)}>
+            <AppLink className="btn btn-primary" href={job.readyUrl} newTab onClick={() => setJob(null)}>
               {t('code.openNow')}
-            </a>
+            </AppLink>
           ) : (
             <button className={'btn' + (failed ? ' btn-primary' : '')} onClick={close}>
               {failed ? t('common.close') : t('code.stopWaiting')}

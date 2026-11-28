@@ -79,6 +79,9 @@ html.term-mode body { position: fixed; inset: 0; }
   --term-syn-type: #ffa657; --term-syn-attr: #79c0ff; --term-syn-comment: #8b949e;
   --term-line-strong: #3b4350; --term-pop: #1b1f26; --term-row-hover: rgba(255, 255, 255, 0.04); --term-row-current: rgba(255, 255, 255, 0.09); --term-add-bg: #17271f; --term-del-bg: #2a1b1d;
   --term-input: #1d222a; --term-input-line: #343b46;
+  --wb-hint-bg: #262b36; --wb-hint-fg: #f4f6fa; --wb-hint-border: #4d5566;
+  --wb-hint-shadow: 0 6px 20px rgba(0, 0, 0, 0.65), 0 1px 4px rgba(0, 0, 0, 0.45);
+  --wb-hint-kbd-bg: #3b68dc; --wb-hint-kbd-fg: #ffffff;
   color-scheme: dark;
 }
 .term-root.light, .term-vars.light {
@@ -91,6 +94,9 @@ html.term-mode body { position: fixed; inset: 0; }
   --term-syn-type: #953800; --term-syn-attr: #0550ae; --term-syn-comment: #6e7781;
   --term-line-strong: #c7ced8; --term-pop: #ffffff; --term-row-hover: #f1f3f6; --term-row-current: #edf0f4; --term-add-bg: #e6f4ea; --term-del-bg: #fdecea; --term-user: #f1f3f6;
   --term-input: #ffffff; --term-input-line: #e7e9ed;
+  --wb-hint-bg: #181c24; --wb-hint-fg: #f4f6fa; --wb-hint-border: #2e3440;
+  --wb-hint-shadow: 0 4px 14px rgba(15, 18, 24, 0.28), 0 1px 3px rgba(15, 18, 24, 0.18);
+  --wb-hint-kbd-bg: #3b68dc; --wb-hint-kbd-fg: #ffffff;
   color-scheme: light;
 }
 .term-root .icon-btn { color: var(--term-fg-2); }

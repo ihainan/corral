@@ -2,8 +2,9 @@ import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
 import { CheckCircle2, ChevronLeft, ChevronRight, FileKey, KeyRound, PlugZap, TriangleAlert, Upload } from 'lucide-react'
 import { api, ApiError, errorText, type Host, type KeyCred } from '../api'
 import { hasKey, t } from '../i18n'
-import { linkHandler, navigate } from '../router'
+import { navigate } from '../router'
 import { CopyButton, Dialog, Field, LoadError, useToast } from '../components/ui'
+import { AppLink } from '../components/AppLink'
 import { checkText, hostFormErrors, type HostCheck } from './pageText'
 import { AskHookRow, BellHookRow } from '../terminal/askHook'
 import { CorraldSection } from '../components/CorraldSection'
@@ -290,9 +291,9 @@ export function HostEditPage({ id }: { id?: number }) {
   return (
     <main className="page page-form">
       <div className="page-head">
-        <a className="icon-btn" href="/" onClick={linkHandler('/')} aria-label={t('common.back')}>
+        <AppLink className="icon-btn" href="/" aria-label={t('common.back')}>
           <ChevronLeft size={20} />
-        </a>
+        </AppLink>
         <h1>{editing ? t('host.editTitle') : t('host.newTitle')}</h1>
       </div>
       <form className="form" onSubmit={submit} noValidate>
@@ -435,7 +436,7 @@ export function HostEditPage({ id }: { id?: number }) {
           </div>
         )}
         <div className="form-actions">
-          <a className="btn" href="/" onClick={linkHandler('/')}>{t('common.cancel')}</a>
+          <AppLink className="btn" href="/">{t('common.cancel')}</AppLink>
           <button type="button" className="btn" onClick={testOnly} disabled={busy || checking || generating}>
             <PlugZap size={16} />
             {t('host.test')}

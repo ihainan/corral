@@ -3,18 +3,24 @@ import { Bot, Film, KeyRound, LogOut, ScrollText, Search, Server, Settings, Squa
 import { openPalette, PALETTE_KEY } from './palette'
 import { signOut, useSession } from './app'
 import { t } from './i18n'
-import { linkHandler, navigate, usePath } from './router'
+import { navigate, usePath } from './router'
+import { AppLink } from './components/AppLink'
+import { isPlainPrimaryClick } from './linkPolicy'
 import { countedAgents, rowTitle, useWaitingCount } from './terminal/agents'
 import { AgentIcon } from './terminal/agentIcons'
 import { MenuLayer, useToast, type MenuItem } from './components/ui'
 import { Avatar } from './components/Avatar'
 import { getPrefs } from './prefs'
 import { modalShown } from './shown'
-import { onMac, railKey, railKeyName, RAIL_KEYS, takenFromTerminal, terminalHasKeys } from './terminal/pageKeys'
+import { onMac, railKeyName, RAIL_KEYS, takenFromTerminal } from './terminal/pageKeys'
+import { decideRailKey, RAIL_HOLD_MS, railHoldTransition } from './terminal/railKeys'
 
 // A field one types in: not a terminal's (its own textarea: the terminal's keys are terminalHasKeys').
 const typedIn = (t: EventTarget | null) =>
   t instanceof HTMLElement && !t.classList.contains('xterm-helper-textarea') && (t.isContentEditable || t.tagName === 'TEXTAREA' || (t.tagName === 'INPUT' && !['checkbox', 'radio', 'button', 'submit', 'range', 'color', 'file'].includes((t as HTMLInputElement).type)))
+const inTerminal = (t: EventTarget | null) => t instanceof Element && !!t.closest('.xterm')
+const isRailVisible = (nav: HTMLElement | null) =>
+  !!nav && nav.getClientRects().length > 0 && !nav.closest('.inactive, [inert]') && getComputedStyle(nav).visibility !== 'hidden'
 import { isDesktopSettings, openSettingsModal } from './pages/Settings'
 
 // The workbench: one frame round every page on a desktop or tablet (760 and
@@ -43,10 +49,7 @@ export const useDeskPages = (): boolean => useMedia(DESK_QUERY)
 
 export type RailKey = 'agents' | 'terminals' | 'hosts' | 'keys' | 'settings' | 'recordings' | 'users' | 'audit'
 
-// How long Alt is held before the rail shows its numbers (RAIL_KEYS): longer than a shortcut's press.
-const RAIL_HOLD_MS = 450
-
-export function Rail({ active }: { active?: RailKey }) {
+export function Rail({ active, shown = true }: { active?: RailKey; shown?: boolean }) {
   const { me, setMe, boot } = useSession()
   const toast = useToast()
   const path = usePath()
@@ -61,62 +64,99 @@ export function Rail({ active }: { active?: RailKey }) {
   // ⌥1 went to herdr, which has the same keys, and nothing said why). Let go, gone. A quick Alt+n is as before.
   const [held, setHeld] = useState(false)
   const heldRef = useRef(false)
+  const shownRef = useRef(shown)
+  shownRef.current = shown
   useEffect(() => {
     let timer: ReturnType<typeof setTimeout> | undefined
-    const drop = () => {
-      clearTimeout(timer)
-      timer = undefined
-      heldRef.current = false
-      setHeld(false)
+    const cancelTimer = () => {
+      if (timer !== undefined) {
+        clearTimeout(timer)
+        timer = undefined
+      }
     }
-    const down = (e: KeyboardEvent) => {
-      if (e.key !== 'Alt') {
-        // (Another key with it before the moment is up: a shortcut of its own, Alt+↑ say — no names.)
-        if (!heldRef.current) clearTimeout(timer)
+    const drop = () => {
+      cancelTimer()
+      if (heldRef.current) {
+        heldRef.current = false
+        setHeld(false)
+      }
+    }
+    const contextFor = (target: EventTarget | null) => ({
+      railActive: shownRef.current && isRailVisible(navRef.current),
+      modalOpen: modalShown(),
+      mac: onMac(),
+      inTextField: typedIn(target),
+      inTerminal: inTerminal(target),
+      keysFirst: getPrefs().keysFirst,
+    })
+    const onKeyDown = (e: KeyboardEvent) => {
+      const ctx = contextFor(e.target)
+      const holdAct = railHoldTransition('keydown', e, { pending: timer !== undefined, shown: heldRef.current }, ctx)
+      if (holdAct === 'start-timer') {
+        timer = setTimeout(() => {
+          timer = undefined
+          if (!shownRef.current || !isRailVisible(navRef.current) || modalShown()) return
+          heldRef.current = true
+          setHeld(true)
+        }, RAIL_HOLD_MS)
         return
       }
-      if (e.repeat || timer || heldRef.current || e.ctrlKey || e.metaKey || e.shiftKey) return
-      // (Not over a dialog, nor on a Mac in a field one types in: ⌥ held there is for its characters, ⌥8 •.)
-      if (modalShown() || (onMac() && typedIn(e.target)) || !navRef.current?.getClientRects().length) return
-      timer = setTimeout(() => {
-        heldRef.current = true
-        setHeld(true)
-      }, RAIL_HOLD_MS)
-    }
-    const up = (e: KeyboardEvent) => e.key === 'Alt' && drop()
-    window.addEventListener('keydown', down, true)
-    window.addEventListener('keyup', up, true)
-    window.addEventListener('blur', drop)
-    return () => {
-      drop()
-      window.removeEventListener('keydown', down, true)
-      window.removeEventListener('keyup', up, true)
-      window.removeEventListener('blur', drop)
-    }
-  }, [])
-  // Alt+1…9: its pages, as they go down (railKey). Every page's rail listens; the one shown goes.
-  // Not under a dialog; a terminal focused and it first, the program's (as ⌥↑↓); before the
-  // terminal's own listener (capture), as it stops the key once it sends it. On a Mac, not
-  // in a field one types in: ⌥ and a digit type there (⌥8 •, ⌥2 ™).
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      const n = railKey(e)
+      if (holdAct === 'cancel') cancelTimer()
+      else if (holdAct === 'hide') drop()
+
       const nav = navRef.current
-      if (!n || !nav || !nav.getClientRects().length || e.defaultPrevented || modalShown()) return
-      // (Held or not, a field on a Mac types it: Alt held first, then a field clicked into — review, 11-26.)
-      if (onMac() && typedIn(e.target)) return
-      if (!heldRef.current && terminalHasKeys(e, getPrefs().keysFirst)) return
-      const to = nav.querySelectorAll<HTMLAnchorElement>('a[data-rail-key]')[n - 1]
+      if (!nav) return
+      const links = nav.querySelectorAll<HTMLAnchorElement>('a[data-rail-key]')
+      let currentIndex = -1
+      links.forEach((a, idx) => {
+        if (a.getAttribute('aria-current') === 'page') currentIndex = idx
+      })
+      const decision = decideRailKey(e, {
+        ...ctx,
+        hintsShown: heldRef.current,
+        itemCount: links.length,
+        currentIndex,
+      })
+      if (decision.action === 'ignore') return
+      const to = links[decision.index]
       if (!to) return
       e.preventDefault()
       e.stopPropagation()
-      if (e.repeat) return
-      if (!heldRef.current) takenFromTerminal(e, RAIL_KEYS, (m) => toast(m), (key) => t('keys.taken', { key }))
-      if (to.getAttribute('aria-current') !== 'page') to.click()
+      if (decision.hideHints) drop()
+      if (decision.action === 'navigate') {
+        if (decision.notifyTakenFromTerminal) takenFromTerminal(e, RAIL_KEYS, (m) => toast(m), (key) => t('keys.taken', { key }))
+        to.click()
+      }
     }
-    window.addEventListener('keydown', onKey, true)
-    return () => window.removeEventListener('keydown', onKey, true)
-  }, [toast])
+    const onKeyUp = (e: KeyboardEvent) => {
+      const act = railHoldTransition('keyup', e, { pending: timer !== undefined, shown: heldRef.current }, contextFor(e.target))
+      if (act === 'hide') drop()
+    }
+    const onFocusIn = (e: FocusEvent) => {
+      const act = railHoldTransition('focus-text', null, { pending: timer !== undefined, shown: heldRef.current }, contextFor(e.target))
+      if (act === 'hide') drop()
+    }
+    const onVisibility = () => {
+      if (document.hidden) drop()
+    }
+    if (!shown) {
+      drop()
+      return
+    }
+    window.addEventListener('keydown', onKeyDown, true)
+    window.addEventListener('keyup', onKeyUp, true)
+    window.addEventListener('blur', drop)
+    document.addEventListener('focusin', onFocusIn, true)
+    document.addEventListener('visibilitychange', onVisibility)
+    return () => {
+      drop()
+      window.removeEventListener('keydown', onKeyDown, true)
+      window.removeEventListener('keyup', onKeyUp, true)
+      window.removeEventListener('blur', drop)
+      document.removeEventListener('focusin', onFocusIn, true)
+      document.removeEventListener('visibilitychange', onVisibility)
+    }
+  }, [shown, toast])
   const items: { key: RailKey; href: string; label: string; icon: ReactNode }[] = [
     { key: 'agents', href: '/agents', label: t('nav.agents'), icon: <Bot size={19} strokeWidth={1.75} /> },
     // (The terminals' page, apart from the agents' since 11-24: the terminal last in front there.)
@@ -140,11 +180,10 @@ export function Rail({ active }: { active?: RailKey }) {
       </button>
       <span className="wb-rail-sep" aria-hidden="true" />
       {items.map((i, at) => (
-        <a
+        <AppLink
           key={i.key}
           className="wb-rail-item"
           href={i.href}
-          onClick={linkHandler(i.href)}
           aria-current={i.key === active ? 'page' : undefined}
           data-rail-key
           title={at < 9 ? `${i.label} (${railKeyName(at + 1)})` : i.label}
@@ -163,26 +202,24 @@ export function Rail({ active }: { active?: RailKey }) {
               {n > 99 ? '99+' : n}
             </span>
           )}
-        </a>
+        </AppLink>
       ))}
       <span className="wb-rail-gap" />
-      <a
+      <AppLink
         className="wb-rail-item"
         href="/settings"
         aria-current={active === 'settings' ? 'page' : undefined}
         title={t('nav.settings') + ' (' + (/Mac|iPhone|iPad/.test(navigator.platform) ? '⌘,' : 'Ctrl+,') + ')'}
         aria-label={t('nav.settings')}
         onClick={(e) => {
-          if (!e.metaKey && !e.ctrlKey && !e.shiftKey && e.button === 0 && isDesktopSettings() && path !== '/settings') {
+          if (isPlainPrimaryClick(e) && isDesktopSettings() && path !== '/settings') {
             e.preventDefault()
             openSettingsModal(active === 'agents' ? 'chat' : undefined) // (from the conversations: their own part)
-            return
           }
-          linkHandler('/settings')(e)
         }}
       >
         <Settings size={19} strokeWidth={1.75} />
-      </a>
+      </AppLink>
       <button
         type="button"
         ref={meBtn}

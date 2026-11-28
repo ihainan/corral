@@ -4,7 +4,7 @@ import { api, ApiError, errorText, type Host, type KeyCred } from '../api'
 import { relTime, t } from '../i18n'
 import { Confirm, CopyButton, Dialog, EmptyState, Field, LoadError, Menu, copyText } from '../components/ui'
 import { deskRowKey, useDeskPages } from '../workbench'
-import { linkHandler } from '../router'
+import { AppLink } from '../components/AppLink'
 
 // "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5…Jk0q4"
 function shortKey(k: string) {
@@ -239,7 +239,7 @@ export function KeysPage() {
                         <ul className="desk-aside-links">
                           {usedBy(chosen.id).map((h) => (
                             <li key={h.id}>
-                              <a href={`/hosts/${h.id}/edit`} onClick={linkHandler(`/hosts/${h.id}/edit`)}>{h.name}</a>
+                              <AppLink href={`/hosts/${h.id}/edit`}>{h.name}</AppLink>
                             </li>
                           ))}
                         </ul>

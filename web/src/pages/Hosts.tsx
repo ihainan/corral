@@ -2,8 +2,9 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { Check, ChevronDown, CircleStop, Code2, MoreHorizontal, Pencil, Plus, Search, Server, SquareTerminal, Trash2, X, Eye } from 'lucide-react'
 import { api, authGen, type Host, type SessionInfo, type SharedSession } from '../api'
 import { relTime, t } from '../i18n'
-import { linkHandler, navigate } from '../router'
+import { navigate } from '../router'
 import { Confirm, EmptyState, LoadError, Menu } from '../components/ui'
+import { AppLink } from '../components/AppLink'
 import { DeleteHostAlert } from '../components/CorraldDialogs'
 import { useConnect } from '../connect'
 import { useFlip } from '../flip'
@@ -202,12 +203,12 @@ export function HostsPage() {
           <ul className="rows">
             {shared.map((s) => (
               <li className="row row-session" key={s.id}>
-                <a className="row-main" href={'/w/' + s.id} onClick={linkHandler('/w/' + s.id)}>
+                <AppLink className="row-main" href={'/w/' + s.id}>
                   <Eye className="row-icon" size={18} strokeWidth={1.75} />
                   <span className="row-title">{s.host_name}{s.title ? ' · ' + s.title : ''}</span>
                   <span className="row-meta" title={new Date(s.created_at * 1000).toLocaleString()}>{t('hosts.startedAgo', { when: relTime(s.created_at) })}</span>
                   <span className="row-sub">{t('watch.sharedBy', { owner: s.owner_name })}</span>
-                </a>
+                </AppLink>
               </li>
             ))}
           </ul>
@@ -242,10 +243,10 @@ export function HostsPage() {
             </label>
           )}
           {!empty && (
-            <a className="btn desk-btn" href="/hosts/new" onClick={linkHandler('/hosts/new')}>
+            <AppLink className="btn desk-btn" href="/hosts/new">
               <Plus size={15} />
               {t('hosts.add')}
-            </a>
+            </AppLink>
           )}
         </div>
         {running.length > 0 && (
@@ -268,10 +269,10 @@ export function HostsPage() {
               title={t('hosts.empty.title')}
               body={t('hosts.empty.body')}
               action={
-                <a className="btn btn-primary" href="/hosts/new" onClick={linkHandler('/hosts/new')}>
+                <AppLink className="btn btn-primary" href="/hosts/new">
                   <Plus size={16} />
                   {t('hosts.add')}
-                </a>
+                </AppLink>
               }
             />
           )}
@@ -392,10 +393,10 @@ export function HostsPage() {
         )}
         {!empty && (
           // (Outlined: what is going on, below, is what is to be seen first — 11-05.)
-          <a className="btn" href="/hosts/new" onClick={linkHandler('/hosts/new')}>
+          <AppLink className="btn" href="/hosts/new">
             <Plus size={16} />
             {t('hosts.add')}
-          </a>
+          </AppLink>
         )}
       </div>
 
@@ -418,10 +419,10 @@ export function HostsPage() {
           title={t('hosts.empty.title')}
           body={t('hosts.empty.body')}
           action={
-            <a className="btn btn-primary" href="/hosts/new" onClick={linkHandler('/hosts/new')}>
+            <AppLink className="btn btn-primary" href="/hosts/new">
               <Plus size={16} />
               {t('hosts.add')}
-            </a>
+            </AppLink>
           }
         />
       )}
@@ -578,7 +579,7 @@ function LiveCard({ s, all, stale, hue, onClose, pill }: { s: SessionInfo; all: 
   const dot = unknown ? 'unknown' : waiting > 0 ? 'warn' : 'ok'
   return (
     <li className={'live-row' + (pill ? ' is-pill' : '')} data-flip={'l:' + s.id} data-flip-in="">
-      <a className="live-link" href={'/t/' + s.id} onClick={linkHandler('/t/' + s.id)} aria-label={`${s.host_name}：${label}`} aria-describedby={'ld-' + s.id} title={s.title || undefined}>
+      <AppLink className="live-link" href={'/t/' + s.id} aria-label={`${s.host_name}：${label}`} aria-describedby={'ld-' + s.id} title={s.title || undefined}>
         <span className="live-info">
           {/* (A session, not a host: a terminal's mark, the session named first, its
               host after it in its hue — 11-16, the two read alike at a glance.) */}
@@ -599,7 +600,7 @@ function LiveCard({ s, all, stale, hue, onClose, pill }: { s: SessionInfo; all: 
             {detail}
           </span>
         </span>
-      </a>
+      </AppLink>
       <button className="icon-btn live-close" aria-label={t('hosts.closeNamed', { name: `${s.host_name}：${label}` })} title={t('hosts.closeSession')} onClick={() => onClose(label)}>
         <X size={16} />
       </button>

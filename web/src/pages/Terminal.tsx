@@ -5,6 +5,7 @@ import { FitAddon } from '@xterm/addon-fit'
 import { fitToEdge } from '../terminal/fit'
 import { Unicode11Addon } from '@xterm/addon-unicode11'
 import { WebLinksAddon } from '@xterm/addon-web-links'
+import { openTerminalLink } from '../components/AppLink'
 import { WebglAddon } from '@xterm/addon-webgl'
 import { ArrowUp, Bot, Check, ChevronDown, ChevronLeft, CircleStop, Code2, CornerDownLeft, Eye, FolderOpen, Globe, History, ImagePlus, MessageCircleReply, MessagesSquare, MoreVertical, Minus, Palette, Paperclip, Plus, TextSelect, Keyboard as KeyboardIcon, Power, RotateCw, Server, SquarePen, X } from 'lucide-react'
 import { api, ApiError, choiceOf, errorText, uploadFile, type HerdrAgent, type HerdrSummary, type Host, type OpenChoice, type SessionInfo, probeBootstrap } from '../api'
@@ -490,7 +491,7 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
   const [schemesOpen, setSchemesOpen] = useState(false)
   const scheme = termScheme()
   // Links to localhost in the terminal open through port forwarding.
-  const linkTarget = useRef<(uri: string) => void>(() => {})
+  const linkTarget = useRef<(uri: string, e?: MouseEvent) => void>(() => {})
 
   // Latest modifier state for the xterm data callback.
   const openComposerRef = useRef<() => void>(() => {})
@@ -565,14 +566,14 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
       macOptionIsMeta: p.optionIsMeta,
       rescaleOverlappingGlyphs: true,
       theme: termScheme().theme,
-      linkHandler: { activate: (_e, uri) => linkTarget.current(uri) },
+      linkHandler: { activate: (e, uri) => linkTarget.current(uri, e) },
     })
     term.loadAddon(new Unicode11Addon())
     term.unicode.activeVersion = '11'
     const fit = new FitAddon()
     term.loadAddon(fit)
     fitToEdge(fit, term)
-    term.loadAddon(new WebLinksAddon((_e, uri) => linkTarget.current(uri)))
+    term.loadAddon(new WebLinksAddon((e, uri) => linkTarget.current(uri, e)))
     term.open(el)
     // The DOM renderer is the default: it is correct at every pixel ratio.
     // WebGL is faster on desktops with real GPUs and is opt-in.
@@ -2248,15 +2249,20 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
     setCopyText(lines.join('\n'))
   }
 
-  linkTarget.current = (uri: string) => {
+  linkTarget.current = (uri: string, e?: MouseEvent) => {
     if (!/^https?:\/\//i.test(uri)) return
-    const u = new URL(uri)
+    let u: URL
+    try {
+      u = new URL(uri)
+    } catch {
+      return
+    }
     const local = ['localhost', '127.0.0.1', '0.0.0.0', '[::1]'].includes(u.hostname)
     const hostId = info?.host_id
     if (local && boot.forwarding && hostId) {
       void openForward(hostId, Number(u.port || (u.protocol === 'https:' ? 443 : 80)), u.pathname + u.search, toast, u.hash)
     } else {
-      window.open(uri, '_blank', 'noopener,noreferrer')
+      openTerminalLink(uri, e)
     }
   }
 
@@ -2994,7 +3000,7 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
           {fresh.dialogs}
         </>
       )}
-      {wbOn && <Rail active="terminals" />}
+      {wbOn && <Rail active="terminals" shown={active} />}
       {wbOn && (
         <StatusBar>
           <StatusItem mark={statusClass === 's-open' ? 'on' : statusClass === 's-ended' ? 'off' : 'trouble'} title={statusText}>

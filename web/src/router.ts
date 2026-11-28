@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { isPlainPrimaryClick } from './linkPolicy'
 
 // A minimal history router: the app has a handful of flat routes.
 
@@ -50,7 +51,7 @@ export function match(pattern: string, path: string): Record<string, string> | n
 
 export function linkHandler(to: string) {
   return (e: React.MouseEvent) => {
-    if (e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return
+    if (!isPlainPrimaryClick(e)) return
     e.preventDefault()
     navigate(to)
   }
