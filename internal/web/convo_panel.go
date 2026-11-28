@@ -84,8 +84,9 @@ func (s *Server) convoPanelScreen(w http.ResponseWriter, ctx context.Context, se
 	// gate reads it the same way, colours and all.)
 	text, _, _ := screenOf(res.Out)
 	digest := panelDigest(res.Out)
+	blocker := inspectScreenBlocker(agent, string(res.Out), false)
 	w.Header().Set("Cache-Control", "no-store")
-	writeJSON(w, http.StatusOK, map[string]any{"text": text, "digest": digest, "look": lookDigest(res.Out)})
+	writeJSON(w, http.StatusOK, map[string]any{"text": text, "digest": digest, "look": lookDigest(res.Out), "blocker": blocker})
 }
 
 // herdrReadPanelANSI reads the pane with ANSI colours directly over herdr's
@@ -122,8 +123,8 @@ func herdrReadPanelANSI(ctx context.Context, sess *term.Session, socket, pane st
 // convoHerdrPanelScreen serves panel_screen directly over herdr's Unix socket,
 // avoiding the full-host /proc scan and SSH shell spawn on every poll.
 // Returns false when the socket cannot be reached so the caller can fall back.
-func (s *Server) convoHerdrPanelScreen(w http.ResponseWriter, ctx context.Context, sess *term.Session, pane, socket string, agy bool, outcome, reason *string, release func()) bool {
-	raw, dialed, err := herdrReadPanelANSI(ctx, sess, socket, pane, agy)
+func (s *Server) convoHerdrPanelScreen(w http.ResponseWriter, ctx context.Context, sess *term.Session, pane, socket, agent string, waiting bool, outcome, reason *string, release func()) bool {
+	raw, dialed, err := herdrReadPanelANSI(ctx, sess, socket, pane, agent == "agy")
 	if !dialed {
 		return false
 	}
@@ -139,8 +140,9 @@ func (s *Server) convoHerdrPanelScreen(w http.ResponseWriter, ctx context.Contex
 	}
 	*outcome = "looked"
 	text, _, _ := screenOf(raw)
+	blocker := inspectScreenBlocker(agent, string(raw), waiting)
 	w.Header().Set("Cache-Control", "no-store")
-	writeJSON(w, http.StatusOK, map[string]any{"text": text, "digest": panelDigest(raw), "look": lookDigest(raw)})
+	writeJSON(w, http.StatusOK, map[string]any{"text": text, "digest": panelDigest(raw), "look": lookDigest(raw), "blocker": blocker})
 	return true
 }
 

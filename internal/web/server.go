@@ -50,18 +50,19 @@ type Route struct {
 }
 
 type Server struct {
-	hostGate keyedGate // per host: opens, edits and forwarding dials take turns
-	cfg      *config.Config
-	store    *store.Store
-	auth     *auth.Service
-	oidc     *auth.OIDC // single sign-on (nil: not set up)
-	vault    *vault.Vault
-	guard    *netguard.Guard
-	terms    *term.Manager
-	log      *slog.Logger
-	mux      *http.ServeMux
-	routes   []Route
-	static   fs.FS
+	hostGate      keyedGate  // per host: opens, edits and forwarding dials take turns
+	herdrRenameMu keyedMutex // per (owner, host): serializes herdr display name checks and writes
+	cfg           *config.Config
+	store         *store.Store
+	auth          *auth.Service
+	oidc          *auth.OIDC // single sign-on (nil: not set up)
+	vault         *vault.Vault
+	guard         *netguard.Guard
+	terms         *term.Manager
+	log           *slog.Logger
+	mux           *http.ServeMux
+	routes        []Route
+	static        fs.FS
 
 	herdrSocks             herdrSockets
 	herdrSeenSync          sync.Map         // herdr server key → *sync.Mutex (serializes Chat→CLI seen focus sync)
@@ -92,19 +93,21 @@ type Server struct {
 	translateClient        *http.Client // test hook; nil uses translateDefaultClient
 	translateClientOnce    sync.Once
 	translateDefaultClient *http.Client
-	complete               completions     // the composer's completion listings, per session and folder
-	convos                 convoStates     // the conversation view's logs being read, per session
-	subConvos              convoStates     // and the logs of subagents opened from them
-	subScans               subScanSeen     // what their logs said last (convo_subscan.go)
-	quotaRuns              quotaRuns       // when Claude Code was last asked for its quota (convo_quota.go)
-	claudePlan             claudePlanCache // cached Claude Code subscription tier from `claude auth status`
-	agyQuota               agyQuotaPoller  // background periodic & stale-while-revalidate Antigravity quota cache
-	turns                  turnIndexes     // the person's turns in those logs, for the page's panel of them (convo_turns.go)
-	newAgents              newAgents       // agents being started from the conversation page
-	claudeLists            sessionLists    // Claude Code's sessions of a folder, as last listed
-	histLocks              histLocks       // one reading of a session's input history at a time
-	convoScans             convoScans      // scans of a host's processes, shared by its panes for a moment
-	askHook                askHooks        // Claude Code's question hook in hosts' settings: changes under way, what was read (askhook.go)
+	complete               completions                                                                                      // the composer's completion listings, per session and folder
+	convos                 convoStates                                                                                      // the conversation view's logs being read, per session
+	subConvos              convoStates                                                                                      // and the logs of subagents opened from them
+	subScans               subScanSeen                                                                                      // what their logs said last (convo_subscan.go)
+	quotaRuns              quotaRuns                                                                                        // when Claude Code was last asked for its quota (convo_quota.go)
+	claudePlan             claudePlanCache                                                                                  // cached Claude Code subscription tier from `claude auth status`
+	agyQuota               agyQuotaPoller                                                                                   // background periodic & stale-while-revalidate Antigravity quota cache
+	codexQuotaSeen         codexQuotaRecorded                                                                               // deduplicates passive Codex rollout quota writes to SQLite
+	subscriptionRefreshFn  func(ctx context.Context, ownerID int64, provider, accountKey string) (quotaInfo, string, error) // test hook; nil uses real SSH refresh
+	turns                  turnIndexes                                                                                      // the person's turns in those logs, for the page's panel of them (convo_turns.go)
+	newAgents              newAgents                                                                                        // agents being started from the conversation page
+	claudeLists            sessionLists                                                                                     // Claude Code's sessions of a folder, as last listed
+	histLocks              histLocks                                                                                        // one reading of a session's input history at a time
+	convoScans             convoScans                                                                                       // scans of a host's processes, shared by its panes for a moment
+	askHook                askHooks                                                                                         // Claude Code's question hook in hosts' settings: changes under way, what was read (askhook.go)
 
 	sockMu   sync.Mutex
 	socks    map[int64]map[*liveSocket]struct{} // open WebSockets per user, closed on sign-out
@@ -280,6 +283,7 @@ func (s *Server) registerRoutes() {
 
 	s.handle("GET /api/sessions", SignedIn, s.apiListSessions)
 	s.handle("POST /api/sessions", SignedIn, s.apiOpenSession)
+	s.handle("PUT /api/sessions/{id}/name", SignedIn, s.apiRenameSession)
 	s.handle("DELETE /api/sessions/{id}", SignedIn, s.apiCloseSession)
 	s.handle("GET /api/sessions/{id}/ws", SignedIn, s.apiSessionSocket)
 	s.handle("GET /api/sessions/{id}/pane-ws", SignedIn, s.apiPaneSocket)
@@ -309,6 +313,7 @@ func (s *Server) registerRoutes() {
 	s.handle("POST /api/sessions/{id}/conversation/sent-missing", SignedIn, s.apiConversationSentMissing)
 	s.handle("POST /api/sessions/{id}/conversation/sent-enter", SignedIn, s.apiConversationSentEnter)
 	s.handle("POST /api/sessions/{id}/conversation/card", SignedIn, s.apiConversationCard)
+	s.handle("POST /api/sessions/{id}/conversation/box-draft", SignedIn, s.apiConversationBoxDraft)
 	s.handle("POST /api/sessions/{id}/conversation/suggestion", SignedIn, s.apiConversationSuggestion)
 	s.handle("POST /api/sessions/{id}/conversation/screen", SignedIn, s.apiConversationScreen)
 	s.handle("POST /api/sessions/{id}/conversation/reply", SignedIn, s.apiConversationReply)
@@ -338,6 +343,10 @@ func (s *Server) registerRoutes() {
 	s.handle("GET /api/sessions/{id}/git/pr", SignedIn, s.apiGitPR)
 	s.handle("GET /api/sessions/{id}/git/changes", SignedIn, s.apiGitChanges)
 	s.handle("GET /api/sessions/{id}/pane-inspect", SignedIn, s.apiPaneInspect)
+	s.handle("GET /api/sessions/{id}/pane-env", SignedIn, s.apiPaneEnv)
+	s.handle("POST /api/sessions/{id}/pane-env/reveal", SignedIn, s.apiPaneEnvReveal)
+	s.handle("GET /api/subscriptions", SignedIn, s.apiListSubscriptions)
+	s.handle("POST /api/subscriptions/refresh", SignedIn, s.apiRefreshSubscription)
 	s.handle("GET /api/sessions/{id}/files/download", SignedIn, s.apiFilesDownload)
 	s.handle("GET /api/sessions/{id}/files/view", SignedIn, s.apiFilesView)
 	s.handle("GET /api/sessions/{id}/files/text", SignedIn, s.apiFilesText)

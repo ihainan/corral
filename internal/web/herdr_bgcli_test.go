@@ -692,13 +692,13 @@ func TestUpgradeRunningWithCLIsStrictExactAndUnique(t *testing.T) {
 
 // Round 4 #3 & #4: End-to-end test through the real convo.Codex parser and
 // Monitor host-scan parser:
-// 1. A 301..4096-byte Codex background command populates Running.Cmd with
-//    CmdCut=false and upgrades 1-to-1 (never relying on 300-byte r.What).
-// 2. An oversized (> 4 KiB) Codex background command sets Running.CmdCut=true
-//    on the parser side AND matchCut=true on the host side, so it is NOT
-//    upgraded and NOT promoted to BgAgentList (zero plain + CLI duplication).
-// 3. A Monitor (> 400 bytes, <= 4 KiB) command upgrades 1-to-1, while a > 4 KiB
-//    Monitor command stays plain and never matches a truncated prefix.
+//  1. A 301..4096-byte Codex background command populates Running.Cmd with
+//     CmdCut=false and upgrades 1-to-1 (never relying on 300-byte r.What).
+//  2. An oversized (> 4 KiB) Codex background command sets Running.CmdCut=true
+//     on the parser side AND matchCut=true on the host side, so it is NOT
+//     upgraded and NOT promoted to BgAgentList (zero plain + CLI duplication).
+//  3. A Monitor (> 400 bytes, <= 4 KiB) command upgrades 1-to-1, while a > 4 KiB
+//     Monitor command stays plain and never matches a truncated prefix.
 func TestOversizedCodexAndMonitorRealParserNoUpgradeNoDuplicate(t *testing.T) {
 	const (
 		parentThread = "01a1dd7f-4856-7042-8ad2-f46c56372e85"
@@ -836,10 +836,10 @@ func TestOversizedCodexAndMonitorRealParserNoUpgradeNoDuplicate(t *testing.T) {
 }
 
 // Round 3 review #2 & #5:
-// - On sshx.ErrOutputTooLarge, cmdProber.run keeps the previous cmds & subs
-//   lists instead of wiping them out.
-// - When > maxCmdsShown plain commands exist, decorate emits BgCmdTasks with
-//   all plain task IDs so the frontend can safely adjust overflow counts.
+//   - On sshx.ErrOutputTooLarge, cmdProber.run keeps the previous cmds & subs
+//     lists instead of wiping them out.
+//   - When > maxCmdsShown plain commands exist, decorate emits BgCmdTasks with
+//     all plain task IDs so the frontend can safely adjust overflow counts.
 func TestCmdProberOverflowKeepsPrevious(t *testing.T) {
 	const agySID = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeee99"
 	agyLog := "/home/u/.gemini/antigravity-cli/brain/" + agySID + "/.system_generated/logs/transcript_full.jsonl"
@@ -939,15 +939,15 @@ func TestCmdProberOverflowKeepsPrevious(t *testing.T) {
 }
 
 // End-to-end real script test on Linux /proc:
-// 1. Spawns a fake `claude` parent whose background task runs a fake `agy`
-//    executable script holding conversations/<uuid>.db open with a matching
-//    brain/<uuid>/.system_generated/logs/transcript_full.jsonl, runs the real
-//    `sh -c cmdScanCommand(...)`, and verifies parseCmdScan discovers the agy
-//    CLI subagent (deleting `scan_cmd_tree` fails this test).
-// 2. Verifies CLI byte budget cap (cmdScanCommandWithBudget) drops CLI lines
-//    when exceeded without emitting `more` or losing plain `cmd` lines.
-// 3. Verifies a log path containing a literal tab is never rewritten to spaces
-//    to alias onto another directory.
+//  1. Spawns a fake `claude` parent whose background task runs a fake `agy`
+//     executable script holding conversations/<uuid>.db open with a matching
+//     brain/<uuid>/.system_generated/logs/transcript_full.jsonl, runs the real
+//     `sh -c cmdScanCommand(...)`, and verifies parseCmdScan discovers the agy
+//     CLI subagent (deleting `scan_cmd_tree` fails this test).
+//  2. Verifies CLI byte budget cap (cmdScanCommandWithBudget) drops CLI lines
+//     when exceeded without emitting `more` or losing plain `cmd` lines.
+//  3. Verifies a log path containing a literal tab is never rewritten to spaces
+//     to alias onto another directory.
 func TestCmdScanRealFakeAgyProcess(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("reads /proc")
@@ -1133,11 +1133,11 @@ func TestCmdScanRealFakeAgyProcess(t *testing.T) {
 }
 
 // Round 4 #5 & #6: Standalone real-script test for subagent budget & candidate cap:
-// 1. Omitting ONLY subagent description text still counts as complete (whole=true, budgetCut=false).
-// 2. Dropping a required sub line emits "budget" (whole=false, budgetCut=true).
-// 3. Candidates are scanned newest-first by mtime (20 -> newest 16 with whole=true).
-// 4. Hitting subCandPerSession emits "budget" (whole=false, budgetCut=true) so
-//    cmdProber retains previous lists instead of treating unscanned active subagents as done.
+//  1. Omitting ONLY subagent description text still counts as complete (whole=true, budgetCut=false).
+//  2. Dropping a required sub line emits "budget" (whole=false, budgetCut=true).
+//  3. Candidates are scanned newest-first by mtime (20 -> newest 16 with whole=true).
+//  4. Hitting subCandPerSession emits "budget" (whole=false, budgetCut=true) so
+//     cmdProber retains previous lists instead of treating unscanned active subagents as done.
 func TestCmdScanSubagentBudgetAndCap(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("reads /proc")
@@ -1445,10 +1445,10 @@ func TestCmdScanTreeLimitMarksBudgetCut(t *testing.T) {
 }
 
 // HTTP + SFTP integration test for GET /api/sessions/{id}/conversation/subagent:
-// - First-level scan-registered background CLIs (agy, claude, codex) return 200 OK.
-// - Unregistered UUIDs return 404 Not Found.
-// - Any request carrying cli_parent or cli_chain is rejected with 400 Bad Request
-//   (nested CLI subagent traversal is intentionally unsupported).
+//   - First-level scan-registered background CLIs (agy, claude, codex) return 200 OK.
+//   - Unregistered UUIDs return 404 Not Found.
+//   - Any request carrying cli_parent or cli_chain is rejected with 400 Bad Request
+//     (nested CLI subagent traversal is intentionally unsupported).
 func TestApiConversationSubagentBgCLI(t *testing.T) {
 	h := newHarness(t)
 	admin := h.admin()
@@ -1569,5 +1569,254 @@ func TestApiConversationSubagentBgCLI(t *testing.T) {
 	} {
 		res400 := admin.do("GET", "/api/sessions/"+sessID+"/conversation/subagent?"+tc.q, nil)
 		mustStatus(t, res400, http.StatusBadRequest, tc.name)
+	}
+}
+
+// TestScanDetachedReparentedAgySubagents builds real detached / reparented
+// processes (setsid + double-fork reparented away from any Claude process, and
+// stdout redirected away from tasks/*.output) and runs the real host scan script
+// to verify inherited CLAUDE_CODE_SESSION_ID links them while independent or
+// forged-env processes are ignored.
+func TestScanDetachedReparentedAgySubagents(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("Linux /proc required")
+	}
+	if _, err := os.Stat("/proc/self/fd"); err != nil {
+		t.Skip("/proc/self/fd unavailable")
+	}
+	tmp := t.TempDir()
+	const (
+		parentSID = "a1111111-2222-4333-8444-555555555501"
+		childA    = "b2222222-3333-4444-8555-666666666601"
+		childB    = "b2222222-3333-4444-8555-666666666602"
+		soloSID   = "c3333333-4444-4555-8666-777777777703"
+		forgedSID = "d4444444-5555-4666-8777-888888888804"
+	)
+
+	// Fake `agy` binary: a tiny shell wrapper that holds open its target file on
+	// fd 3 and sleeps until killed. (No hardcoded HOME/uid/username.)
+	binDir := filepath.Join(tmp, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	fakeAgy := filepath.Join(binDir, "agy")
+	if err := os.WriteFile(fakeAgy, []byte("#!/bin/sh\nexec 3<\"$FAKE_OPEN\"\nprintf '%s\\n' \"$$\" >\"$FAKE_PIDFILE\"\nwhile :; do sleep 30; done\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	makeAgyFiles := func(sid string) (dbPath, logPath string) {
+		base := filepath.Join(tmp, ".gemini", "antigravity-cli")
+		convDir := filepath.Join(base, "conversations")
+		logsDir := filepath.Join(base, "brain", sid, ".system_generated", "logs")
+		for _, d := range []string{convDir, logsDir} {
+			if err := os.MkdirAll(d, 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		dbPath = filepath.Join(convDir, sid+".db")
+		logPath = filepath.Join(logsDir, "transcript_full.jsonl")
+		if err := os.WriteFile(dbPath, []byte("sqlite"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(logPath, []byte("{}\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return dbPath, logPath
+	}
+
+	dbA, logA := makeAgyFiles(childA)
+	_, logB := makeAgyFiles(childB) // Child B opens transcript_full.jsonl directly (no .db open)
+	dbSolo, _ := makeAgyFiles(soloSID)
+	dbForged, _ := makeAgyFiles(forgedSID)
+
+	var pids []int
+	t.Cleanup(func() {
+		for _, pid := range pids {
+			_ = syscall.Kill(pid, syscall.SIGKILL)
+		}
+	})
+
+	spawnDetached := func(tag, openFile string, extraEnv []string, args ...string) int {
+		pidFile := filepath.Join(tmp, tag+".pid")
+		outFile := filepath.Join(tmp, tag+".out")
+		// Double-fork + setsid via a short-lived shell that exits immediately,
+		// so the fake `agy` is reparented to init/subreaper with redirected stdout.
+		launcher := exec.Command("sh", "-c", `setsid "$@" >"$FAKE_OUT" 2>&1 </dev/null &`, "sh")
+		launcher.Args = append(launcher.Args, fakeAgy)
+		launcher.Args = append(launcher.Args, args...)
+		launcher.Env = append([]string{
+			"PATH=" + os.Getenv("PATH"),
+			"HOME=" + tmp,
+			"FAKE_OPEN=" + openFile,
+			"FAKE_PIDFILE=" + pidFile,
+			"FAKE_OUT=" + outFile,
+		}, extraEnv...)
+		if err := launcher.Run(); err != nil {
+			t.Fatalf("spawn %s: %v", tag, err)
+		}
+		deadline := time.Now().Add(5 * time.Second)
+		for time.Now().Before(deadline) {
+			b, err := os.ReadFile(pidFile)
+			if err == nil {
+				if pid, perr := strconv.Atoi(strings.TrimSpace(string(b))); perr == nil && pid > 0 {
+					pids = append(pids, pid)
+					return pid
+				}
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+		t.Fatalf("timed out waiting for %s pidfile", tag)
+		return 0
+	}
+
+	// 1. Detached setsid agy -p holding conversations/<id>.db, inheriting CLAUDE_CODE_SESSION_ID.
+	spawnDetached("a", dbA, []string{
+		"CLAUDE_CODE_SESSION_ID=" + parentSID,
+		"HERDR_PANE_ID=w2:p1",
+		"HERDR_SOCKET_PATH=/tmp/test-herdr.sock",
+	}, "-p", "WP-p14l-a")
+
+	// 2. Detached agy -p holding transcript_full.jsonl directly (no .db / no presence lock).
+	spawnDetached("b", logB, []string{
+		"CLAUDE_CODE_SESSION_ID=" + parentSID,
+		"HERDR_PANE_ID=w2:p1",
+		"HERDR_SOCKET_PATH=/tmp/test-herdr.sock",
+	}, "-p", "WP-p14l-b")
+
+	// 3. Independent agy -p without any parent session env: must NOT attach.
+	spawnDetached("solo", dbSolo, nil, "-p", "independent")
+
+	// 4. Forged newline env smuggling CLAUDE_CODE_SESSION_ID inside another var: must NOT attach.
+	spawnDetached("forged", dbForged, []string{
+		"OTHER=x\nCLAUDE_CODE_SESSION_ID=" + parentSID,
+	}, "-p", "forged")
+
+	// Wait briefly until both detached agy processes have fd 3 open in /proc.
+	time.Sleep(80 * time.Millisecond)
+
+	cmd := exec.Command("sh", "-c", cmdScanCommand())
+	cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + tmp}
+	raw, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("cmdScanCommand failed: %v", err)
+	}
+	parsed, whole := parseCmdScan(string(raw))
+	if !whole {
+		t.Fatalf("expected whole=true, output:\n%s", raw)
+	}
+	list := parsed[parentSID]
+	_, cliAgents := splitBgCmds(list)
+	gotSIDs := map[string]bgAgent{}
+	for _, a := range cliAgents {
+		gotSIDs[a.ID] = a
+	}
+	if _, ok := gotSIDs[childA]; !ok {
+		t.Fatalf("detached setsid agy childA not linked to parent; got=%+v raw:\n%s", cliAgents, raw)
+	}
+	if gotSIDs[childA].log != logA {
+		t.Errorf("childA log = %q, want %q", gotSIDs[childA].log, logA)
+	}
+	if _, ok := gotSIDs[childB]; !ok {
+		t.Fatalf("detached transcript-fd agy childB not linked to parent; got=%+v", cliAgents)
+	}
+	if gotSIDs[childB].log != logB {
+		t.Errorf("childB log = %q, want %q", gotSIDs[childB].log, logB)
+	}
+	if _, ok := gotSIDs[soloSID]; ok {
+		t.Fatalf("independent agy without parent env was wrongly linked: %+v", cliAgents)
+	}
+	if _, ok := gotSIDs[forgedSID]; ok {
+		t.Fatalf("forged newline env agy was wrongly linked: %+v", cliAgents)
+	}
+
+	// Verify detached env CLIs appear while the parent Claude Code pane is working
+	// (quiet: true), not only after the parent becomes done/idle.
+	p := newCmdSubProber(nil)
+	p.at = time.Now()
+	p.cmds = parsed
+	p.consider("w2:p1", "claude", "working", parentSID)
+	p.at = time.Now()
+	sum := herdrSummary{
+		Workspaces: []herdrWorkspace{{
+			Agents: []herdrAgent{{PaneID: "w2:p1", Agent: "claude", Status: "working", Session: parentSID}},
+		}},
+	}
+	p.decorate(&sum)
+	if len(sum.Workspaces[0].Agents[0].BgAgentList) != 2 {
+		t.Fatalf("expected 2 detached CLI subagents while parent is working, got %+v", sum.Workspaces[0].Agents[0].BgAgentList)
+	}
+}
+
+func TestParseCmdScanEnvCLIAndLivePaneDedup(t *testing.T) {
+	const (
+		parentSID = "11111111-2222-4333-8444-555555555599"
+		agySID1   = "22222222-3333-4444-8555-666666666691"
+		agySID2   = "22222222-3333-4444-8555-666666666692"
+		agySID3   = "22222222-3333-4444-8555-666666666693"
+		sock      = "/run/herdr/test.sock"
+		otherSock = "/run/herdr/other.sock"
+	)
+	agyLog1 := "/home/u/.gemini/antigravity-cli/brain/" + agySID1 + "/.system_generated/logs/transcript_full.jsonl"
+	agyLog2 := "/home/u/.gemini/antigravity-cli/brain/" + agySID2 + "/.system_generated/logs/transcript_full.jsonl"
+	agyLog3 := "/home/u/.gemini/antigravity-cli/brain/" + agySID3 + "/.system_generated/logs/transcript_full.jsonl"
+	argv := func(parts ...string) string { return strings.Join(parts, "\x01") + "\x01" }
+
+	out := strings.Join([]string{
+		"clock\t1700000000\t100",
+		// Detached CLI running in parent's own pane (headless bg) -> shown in BgAgentList.
+		"envcli\t401\t5000\tclaude:" + parentSID + "\tagy\t/home/u/.local/bin/agy\t" + agySID1 + "\t" + agyLog1 + "\tw1:p1\t" + sock + "\t" + argv("agy", "-p", "p14l-a"),
+		// CLI running in its OWN live herdr pane w1:p9 on the SAME socket -> NOT duplicated in BgAgentList, exposed via envPaneLinks.
+		"envcli\t402\t5100\tclaude:" + parentSID + "\tagy\t/home/u/.local/bin/agy\t" + agySID2 + "\t" + agyLog2 + "\tw1:p9\t" + sock + "\t" + argv("agy", "-p", "p14l-b"),
+		// CLI running in pane w1:p9 on a DIFFERENT herdr socket -> must NOT be hidden by live pane w1:p9 on sock!
+		"envcli\t404\t5150\tclaude:" + parentSID + "\tagy\t/home/u/.local/bin/agy\t" + agySID3 + "\t" + agyLog3 + "\tw1:p9\t" + otherSock + "\t" + argv("agy", "-p", "p14l-c"),
+		// Self-reference (child sid == parent sid) -> ignored.
+		"envcli\t403\t5200\tclaude:" + parentSID + "\tclaude\t/home/u/.local/bin/claude\t" + parentSID + "\t/home/u/.claude/projects/-x/" + parentSID + ".jsonl\tw1:p1\t" + sock + "\t" + argv("claude"),
+	}, "\n") + "\n"
+
+	parsed, whole := parseCmdScan(out)
+	if !whole {
+		t.Fatal("expected whole=true")
+	}
+	p := newCmdSubProber(nil)
+	p.setSocket(sock)
+	p.cmds = parsed
+	p.consider("w1:p1", "claude", "working", parentSID)
+	p.at = time.Now()
+
+	// Verify envPaneLinks surfaces w1:p9 -> parentSID for lineageTracker on sock.
+	links := p.envPaneLinks(sock)
+	foundLink := false
+	for _, l := range links {
+		if l.ChildPane == "w1:p9" && l.ParentSession == parentSID {
+			foundLink = true
+		}
+	}
+	if !foundLink {
+		t.Fatalf("expected envPaneLink for w1:p9 -> %s, got %+v", parentSID, links)
+	}
+
+	// Decorate when w1:p9 IS a live herdr pane on sock:
+	// - agySID1 (in parent's own pane w1:p1) appears in BgAgentList
+	// - agySID2 (in live pane w1:p9 on SAME sock) is deduplicated from BgAgentList
+	// - agySID3 (in pane w1:p9 on OTHER sock) MUST remain visible in BgAgentList!
+	sum := herdrSummary{
+		Workspaces: []herdrWorkspace{{
+			Agents: []herdrAgent{
+				{PaneID: "w1:p1", Agent: "claude", Status: "working", Session: parentSID},
+				{PaneID: "w1:p9", Agent: "agy", Status: "working", Session: agySID2},
+			},
+		}},
+	}
+	p.decorate(&sum)
+	parent := sum.Workspaces[0].Agents[0]
+	if parent.BgCmds != 0 {
+		t.Fatalf("live-pane envcli must not demote to BgCmds: %+v", parent)
+	}
+	gotIDs := map[string]bool{}
+	for _, a := range parent.BgAgentList {
+		gotIDs[a.ID] = true
+	}
+	if len(parent.BgAgentList) != 2 || !gotIDs[agySID1] || !gotIDs[agySID3] || gotIDs[agySID2] {
+		t.Fatalf("expected agySID1 and cross-socket agySID3 (and not same-socket agySID2) in BgAgentList, got %+v", parent.BgAgentList)
 	}
 }

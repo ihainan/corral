@@ -1437,10 +1437,11 @@ func (s *Server) apiConversationRewind(w http.ResponseWriter, r *http.Request) {
 		tLoc := time.Now()
 		var locOut []byte
 		var lerr error
-		if cout, ok := s.tryCorraldLocate(ctx, sess, proto.AgentLocateParams{Mode: sess.Persistence, TmuxName: sess.TmuxSession, TmuxPane: tmuxTarget}); ok {
+		tmuxName := sess.CurrentTmuxSession()
+		if cout, ok := s.tryCorraldLocate(ctx, sess, proto.AgentLocateParams{Mode: sess.Persistence, TmuxName: tmuxName, TmuxPane: tmuxTarget}); ok {
 			locOut = cout
 		} else {
-			locOut, lerr = claudeRewindExec(ctx, sess, &running, convoLocateCommand(sess.Persistence, sess.TmuxSession, tmuxTarget), convoLocateMax, 2*time.Second)
+			locOut, lerr = claudeRewindExec(ctx, sess, &running, convoLocateCommand(sess.Persistence, tmuxName, tmuxTarget), convoLocateMax, 2*time.Second)
 		}
 		if lerr != nil {
 			s.perfLocate("locate.full", tLoc, lerr, 0, sess.HostID)

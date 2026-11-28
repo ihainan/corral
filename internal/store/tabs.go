@@ -179,6 +179,63 @@ func (s *Store) DeleteTab(ctx context.Context, ownerID int64, id string) error {
 	return err
 }
 
+// RenameTab updates the recorded mux session name of an open tab (after a
+// remote tmux rename-session) so gateway restart restores the new name.
+func (s *Store) RenameTab(ctx context.Context, ownerID int64, id, name string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE open_tabs SET name = ? WHERE session_id = ? AND owner_id = ?`, name, id, ownerID)
+	return err
+}
+
+// SessionDisplayName returns the saved Corral display name for a host's
+// remote session under hostConfig, or "" if none is saved.
+func (s *Store) SessionDisplayName(ctx context.Context, ownerID, hostID int64, hostConfig, kind, muxSession string) (string, error) {
+	var name string
+	err := s.db.QueryRowContext(ctx, `SELECT display_name FROM session_names WHERE owner_id = ? AND host_id = ? AND host_config = ? AND kind = ? AND mux_session = ?`,
+		ownerID, hostID, hostConfig, kind, muxSession).Scan(&name)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	return name, err
+}
+
+// ListSessionDisplayNames returns all saved Corral display names for a host,
+// hostConfig, and session kind, keyed by mux_session.
+func (s *Store) ListSessionDisplayNames(ctx context.Context, ownerID, hostID int64, hostConfig, kind string) (map[string]string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT mux_session, display_name FROM session_names WHERE owner_id = ? AND host_id = ? AND host_config = ? AND kind = ?`,
+		ownerID, hostID, hostConfig, kind)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]string{}
+	for rows.Next() {
+		var k, v string
+		if err := rows.Scan(&k, &v); err != nil {
+			return nil, err
+		}
+		out[k] = v
+	}
+	return out, rows.Err()
+}
+
+// SetSessionDisplayName saves (or replaces) the Corral display name for a
+// host's remote session under hostConfig.
+func (s *Store) SetSessionDisplayName(ctx context.Context, ownerID, hostID int64, hostConfig, kind, muxSession, displayName string) error {
+	_, err := s.db.ExecContext(ctx, `INSERT INTO session_names (owner_id, host_id, host_config, kind, mux_session, display_name, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(owner_id, host_id, host_config, kind, mux_session) DO UPDATE SET display_name = excluded.display_name, updated_at = excluded.updated_at`,
+		ownerID, hostID, hostConfig, kind, muxSession, displayName, s.unix())
+	return err
+}
+
+// DeleteSessionDisplayName removes any saved display name override for a
+// host's remote session under hostConfig.
+func (s *Store) DeleteSessionDisplayName(ctx context.Context, ownerID, hostID int64, hostConfig, kind, muxSession string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM session_names WHERE owner_id = ? AND host_id = ? AND host_config = ? AND kind = ? AND mux_session = ?`,
+		ownerID, hostID, hostConfig, kind, muxSession)
+	return err
+}
+
 // ClearTabs removes every record (opening again turned off).
 func (s *Store) ClearTabs(ctx context.Context) error {
 	_, err := s.db.ExecContext(ctx, `DELETE FROM open_tabs`)

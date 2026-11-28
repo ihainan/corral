@@ -135,7 +135,61 @@ func TestPickerHerdrStoppedAndNew(t *testing.T) {
 	if r.json()["mux_session"] != "corral-root-3" {
 		t.Fatalf("second new herdr session: %s", r.Body)
 	}
-	mustStatus(t, admin.do("POST", "/api/sessions", map[string]any{"host_id": id, "open": map[string]any{"kind": "herdr_new", "name": "x"}}), 400, "named new")
+	// Named new herdr session succeeds when unused, rejects duplicates and invalid names.
+	r = admin.do("POST", "/api/sessions", map[string]any{"host_id": id, "open": map[string]any{"kind": "herdr_new", "name": "api-dev"}})
+	mustStatus(t, r, 201, "named new herdr")
+	if r.json()["persistence"] != "herdr" || r.json()["mux_session"] != "api-dev" {
+		t.Fatalf("named new herdr: %s", r.Body)
+	}
+	r = admin.do("POST", "/api/sessions", map[string]any{"host_id": id, "open": map[string]any{"kind": "herdr_new", "name": "api-dev"}})
+	if r.Status != 409 || r.code() != "session_name_taken" {
+		t.Fatalf("duplicate herdr_new: %d %s", r.Status, r.Body)
+	}
+	r = admin.do("POST", "/api/sessions", map[string]any{"host_id": id, "open": map[string]any{"kind": "herdr_new", "name": "default"}})
+	if r.Status != 409 || r.code() != "session_name_taken" {
+		t.Fatalf("duplicate default herdr_new: %d %s", r.Status, r.Body)
+	}
+	r = admin.do("POST", "/api/sessions", map[string]any{"host_id": id, "open": map[string]any{"kind": "herdr_new", "name": "bad.name"}})
+	if r.Status != 400 || r.code() != "invalid_session_name" {
+		t.Fatalf("invalid herdr_new name: %d %s", r.Status, r.Body)
+	}
+}
+
+func TestPickerNamedNewTmuxSession(t *testing.T) {
+	h := newHarness(t)
+	admin := h.admin()
+	_, id := pickerHost(t, h, admin, true, "password")
+
+	// Probe first so we also test pending token preservation on duplicate error.
+	r := admin.do("POST", "/api/sessions", map[string]any{"host_id": id, "open": nil})
+	mustStatus(t, r, 200, "probe")
+	pending, _ := r.json()["pending"].(string)
+
+	// Duplicate with existing remote tmux session "work": 409 and returns fresh pending token.
+	r = admin.do("POST", "/api/sessions", map[string]any{"host_id": id, "pending": pending, "open": map[string]any{"kind": "tmux_new", "name": "work"}})
+	if r.Status != 409 || r.code() != "session_name_taken" {
+		t.Fatalf("duplicate tmux_new: %d %s", r.Status, r.Body)
+	}
+	extra, _ := r.json()["extra"].(map[string]any)
+	nextPending, _ := extra["pending"].(string)
+	if nextPending == "" {
+		t.Fatalf("expected pending token for retry: %s", r.Body)
+	}
+
+	// Invalid names ('.' and ':') rejected with 400 invalid_session_name.
+	for _, bad := range []string{"bad.name", "bad:name", "with space", strings.Repeat("a", 65)} {
+		r = admin.do("POST", "/api/sessions", map[string]any{"host_id": id, "open": map[string]any{"kind": "tmux_new", "name": bad}})
+		if r.Status != 400 || r.code() != "invalid_session_name" {
+			t.Fatalf("bad tmux_new %q: %d %s", bad, r.Status, r.Body)
+		}
+	}
+
+	// Valid unique name succeeds using the preserved pending token.
+	r = admin.do("POST", "/api/sessions", map[string]any{"host_id": id, "pending": nextPending, "open": map[string]any{"kind": "tmux_new", "name": "my-feature_1"}})
+	mustStatus(t, r, 201, "named new tmux")
+	if r.json()["persistence"] != "tmux" || r.json()["mux_session"] != "my-feature_1" {
+		t.Fatalf("named new tmux: %s", r.Body)
+	}
 }
 
 func TestPickerSkippedWithoutTmuxOrHerdr(t *testing.T) {

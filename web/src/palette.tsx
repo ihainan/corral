@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { Bot, KeyRound, Plus, Search, Server, Settings, SquareTerminal } from 'lucide-react'
+import { Bot, Command, Gauge, KeyRound, Plus, Server, Settings, SquareTerminal } from 'lucide-react'
 import { api, type Host } from './api'
 import { t } from './i18n'
 import { navigate, usePath } from './router'
@@ -118,6 +118,7 @@ function Palette({ onClose, onHost }: { onClose: () => void; onHost: (h: Host) =
       ...(matchMedia('(min-width: 700px)').matches ? [{ key: 'c terms', group: 'commands', icon: <SquareTerminal size={16} strokeWidth={1.75} aria-hidden="true" />, title: t('palette.toTerminals'), go: go(() => navigate('/t')) }] : []),
       { key: 'c hosts', group: 'commands', icon: <Server size={16} strokeWidth={1.75} aria-hidden="true" />, title: t('palette.toHosts'), go: go(() => navigate('/')) },
       { key: 'c keys', group: 'commands', icon: <KeyRound size={16} strokeWidth={1.75} aria-hidden="true" />, title: t('palette.toKeys'), go: go(() => navigate('/keys')) },
+      { key: 'c subscriptions', group: 'commands', icon: <Gauge size={16} strokeWidth={1.75} aria-hidden="true" />, title: t('palette.subscriptions'), go: go(() => openSettingsModal('subscriptions')) },
       { key: 'c settings', group: 'commands', icon: <Settings size={16} strokeWidth={1.75} aria-hidden="true" />, title: t('palette.settings'), hint: mac ? '⌘,' : 'Ctrl+,', go: go(() => openSettingsModal()) },
       ] as Item[]
     ).filter((c) => matchQuery(q, c.title))
@@ -143,7 +144,7 @@ function Palette({ onClose, onHost }: { onClose: () => void; onHost: (h: Host) =
   return (
     <Dialog title={t('palette.title')} onClose={onClose} sheet={false} hideTitle className="palette">
       <label className="palette-search">
-        <Search size={16} aria-hidden="true" />
+        <Command size={16} aria-hidden="true" />
         {/* (Focused by the dialog's trap, which first notes where the focus was, to give it back.) */}
         <input
           value={q}

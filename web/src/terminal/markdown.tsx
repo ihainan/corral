@@ -2,6 +2,7 @@ import { createContext, Fragment, useContext, useLayoutEffect, useRef, useState,
 import { Code } from './Code'
 import { t } from '../i18n'
 import { Check } from 'lucide-react'
+import { AppLink } from '../components/AppLink'
 
 // A small Markdown renderer for an agent's answers in the conversation view:
 // headings, paragraphs, lists (nested by indent), fenced code, quotes, GFM
@@ -343,9 +344,9 @@ const spans: { re: RegExp; make: (m: RegExpExecArray, key: number) => ReactNode 
 
 function link(href: string, children: ReactNode, key: number) {
   return (
-    <a key={key} href={href} target="_blank" rel="noopener noreferrer">
+    <AppLink key={key} href={href}>
       {children}
-    </a>
+    </AppLink>
   )
 }
 

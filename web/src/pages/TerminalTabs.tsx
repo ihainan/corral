@@ -1,15 +1,18 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { modalShown } from '../shown'
-import { ArrowLeftToLine, ArrowRightToLine, Bot, ChevronLeft, ExternalLink, Link2, Plus, Server, SquareTerminal, X } from 'lucide-react'
+import { ArrowLeftToLine, ArrowRightToLine, Bot, ChevronLeft, ExternalLink, Link2, Plus, Server, SquareTerminal, TextCursorInput, X } from 'lucide-react'
 import { AgentsChat } from './AgentsChat'
 import { api, authGen, choiceOf, probeBootstrap, type OpenChoice, type SessionInfo } from '../api'
 import { sessionWhich } from '../terminal/sessionName'
+import { renameOrderEntries, SESSION_RENAMED_EVENT, type SessionRenamedPayload } from '../terminal/sessionRenamePolicy'
+import { RenameSessionDialog } from '../terminal/RenameSessionDialog'
 import { HIDDEN_EVERY, markRead, noteSessions, readAt, waitingAgents, waitingTitle } from '../terminal/agents'
 import { t } from '../i18n'
 import { local } from '../storage'
 import { navigate } from '../router'
 import { agentsAddress, takeTabs } from '../notifyopen'
 import { Confirm, copyText, isCoarse, MenuLayer, useToast, type MenuItem } from '../components/ui'
+import { openInNewTab } from '../components/AppLink'
 import { estimateSize, useConnect } from '../connect'
 import type { TabInfo } from './Terminal'
 import { TerminalPage } from './lazyPages'
@@ -512,8 +515,49 @@ export function TerminalTabs({ current }: { current: string }) {
   const [closing, setClosing] = useState<SessionInfo | null>(null)
   // (Several at once, from a tab's menu: the others, or those to its right.)
   const [closingMany, setClosingMany] = useState<{ keep: SessionInfo; list: SessionInfo[] } | null>(null)
+  const [renaming, setRenaming] = useState<SessionInfo | null>(null)
+
+  // Keep tab order, lastTerminal, and displayed names in sync immediately when
+  // any terminal session is renamed (from the tab menu or the terminal menu).
+  useEffect(() => {
+    const onRenamed = (e: Event) => {
+      const d = (e as CustomEvent<SessionRenamedPayload>).detail
+      if (!d) return
+      if (d.persistence === 'tmux' && d.oldMuxSession && d.newMuxSession && d.oldMuxSession !== d.newMuxSession) {
+        const res = renameOrderEntries(readOrder(), d.host_id, 'tmux', d.oldMuxSession, d.newMuxSession)
+        if (res.changed) writeOrder(res.order)
+        const oldPrefix = `${d.host_id}|tmux|${d.oldMuxSession}`
+        const newPrefix = `${d.host_id}|tmux|${d.newMuxSession}`
+        if (lastTerminal === oldPrefix) lastTerminal = newPrefix
+        else if (lastTerminal?.startsWith(oldPrefix + '#')) lastTerminal = newPrefix + lastTerminal.slice(oldPrefix.length)
+      }
+      setSessions((list) =>
+        list
+          ? list.map((s) => {
+              if (s.id === d.id) return { ...s, mux_session: d.newMuxSession, display_name: d.newDisplayName || undefined }
+              if (d.persistence === 'tmux' && s.host_id === d.host_id && s.persistence === 'tmux' && s.mux_session === d.oldMuxSession) {
+                return { ...s, mux_session: d.newMuxSession }
+              }
+              if (
+                d.persistence === 'herdr' &&
+                s.host_id === d.host_id &&
+                s.persistence === 'herdr' &&
+                sameMuxName('herdr', s.mux_session ?? '', d.oldMuxSession)
+              ) {
+                return { ...s, display_name: d.newDisplayName || undefined }
+              }
+              return s
+            })
+          : list,
+      )
+      loadRef.current()
+    }
+    window.addEventListener(SESSION_RENAMED_EVENT, onRenamed)
+    return () => window.removeEventListener(SESSION_RENAMED_EVENT, onRenamed)
+  }, [])
+
   // (The agents' page draws its own tabs, its conversations': from here only the way to the terminals' page.)
-  const bar = agents ? <PageSwitch agentsPage waiting={waitingAgents(tabs)} /> : <TabBar tabs={tabs} current={current} infos={infos} onNew={() => setNewOpen(true)} onMove={move} onClose={setClosing} onCloseMany={(keep, list) => setClosingMany({ keep, list })} />
+  const bar = agents ? <PageSwitch agentsPage waiting={waitingAgents(tabs)} /> : <TabBar tabs={tabs} current={current} infos={infos} onNew={() => setNewOpen(true)} onMove={move} onRename={setRenaming} onClose={setClosing} onCloseMany={(keep, list) => setClosingMany({ keep, list })} />
   // (The tab shown is drawn in the same frame as the one left goes: not a
   // frame later, once the effect above has mounted it — a frame of neither,
   // the page's own background, flashed between them.)
@@ -556,6 +600,7 @@ export function TerminalTabs({ current }: { current: string }) {
           }}
         />
       )}
+      {renaming && <RenameSessionDialog session={renaming} onClose={() => setRenaming(null)} />}
       {closing && (
         <Confirm
           title={t('term.closeSession')}
@@ -573,11 +618,11 @@ export function TerminalTabs({ current }: { current: string }) {
   )
 }
 
-function TabBar(p: { tabs: SessionInfo[]; current: string; infos: Record<string, TabInfo>; onNew: () => void; onMove: (id: string, to: number) => void; onClose: (s: SessionInfo) => void; onCloseMany: (keep: SessionInfo, list: SessionInfo[]) => void }) {
+function TabBar(p: { tabs: SessionInfo[]; current: string; infos: Record<string, TabInfo>; onNew: () => void; onMove: (id: string, to: number) => void; onRename: (s: SessionInfo) => void; onClose: (s: SessionInfo) => void; onCloseMany: (keep: SessionInfo, list: SessionInfo[]) => void }) {
   const toast = useToast()
   // A tab's own menu, at a right click (or the menu key) — as a browser's
   // tabs have one (11-15): open it in a window of its own, copy its link, a
-  // new session, move it to either end, close it or the others. Closing
+  // new session, rename, move it to either end, close it or the others. Closing
   // ends sessions: asked first, as the close is.
   const [menu, setMenu] = useState<{ id: string; anchor: DOMRect } | null>(null)
   const menuItems = (s: SessionInfo): MenuItem[] => {
@@ -587,7 +632,8 @@ function TabBar(p: { tabs: SessionInfo[]; current: string; infos: Record<string,
     const right = at < 0 ? [] : open.slice(at + 1)
     const url = location.origin + '/t/' + s.id
     return [
-      { label: t('tabs.menu.window'), icon: <ExternalLink size={16} />, onSelect: () => window.open(url, '_blank', 'noopener') },
+      { label: t('tabs.menu.rename'), icon: <TextCursorInput size={16} />, onSelect: () => p.onRename(s) },
+      { label: t('tabs.menu.window'), icon: <ExternalLink size={16} />, separator: true, onSelect: () => openInNewTab(url) },
       { label: t('tabs.menu.copyLink'), icon: <Link2 size={16} />, onSelect: () => void copyText(url).then((ok) => toast(ok ? t('tabs.menu.copied') : url)) },
       { label: t('tabs.new'), icon: <Plus size={16} />, onSelect: p.onNew },
       { label: t('tabs.menu.first'), icon: <ArrowLeftToLine size={16} />, separator: true, disabled: at <= 0, onSelect: () => p.onMove(s.id, 0) },

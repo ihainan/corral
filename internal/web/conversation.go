@@ -1917,7 +1917,8 @@ func (s *Server) refreshCodexClaims(sess *term.Session) {
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		defer cancel()
 		tScan := time.Now()
-		out, _, _, shared, err := s.runConvoScan(ctx, sess, proto.AgentLocateParams{Mode: sess.Persistence, TmuxName: sess.TmuxSession}, convoLocateCommand(sess.Persistence, sess.TmuxSession, ""), time.Time{})
+		tmuxName := sess.CurrentTmuxSession()
+		out, _, _, shared, err := s.runConvoScan(ctx, sess, proto.AgentLocateParams{Mode: sess.Persistence, TmuxName: tmuxName}, convoLocateCommand(sess.Persistence, tmuxName, ""), time.Time{})
 		if err != nil {
 			s.perfLocate(locateOp("locate.full", shared), tScan, err, 0, sess.HostID)
 			return
@@ -2682,6 +2683,9 @@ func (s *Server) apiConversation(w http.ResponseWriter, r *http.Request) {
 	ans.Title, ans.Tasks = st.parser.Title(), st.parser.Tasks()
 	if m := st.meta(); m != (convo.Meta{}) {
 		ans.Meta = &m
+		if st.agent == "codex" && m.Quota != nil {
+			s.recordCodexQuotaSnapshot(sess, m.Quota)
+		}
 	}
 	ans.Queued = st.parser.Queued()
 	if st.agent == "agy" && len(ans.Queued) == 0 && len(st.agyQueued) > 0 && (st.status == "busy" || st.status == "") {
@@ -2920,13 +2924,14 @@ func (s *Server) locateScan(ctx context.Context, sess *term.Session, st *convoSt
 		}
 	} else {
 		var shared bool
-		fullParams := proto.AgentLocateParams{Mode: sess.Persistence, TmuxName: sess.TmuxSession}
+		tmuxName := sess.CurrentTmuxSession()
+		fullParams := proto.AgentLocateParams{Mode: sess.Persistence, TmuxName: tmuxName}
 		params := fullParams
-		cmd := convoLocateCommand(sess.Persistence, sess.TmuxSession, "")
+		cmd := convoLocateCommand(sess.Persistence, tmuxName, "")
 		base := "locate.full"
 		if ocOnly {
 			params.Only = "opencode"
-			cmd = convoLocateOpenCodeCommand(sess.Persistence, sess.TmuxSession)
+			cmd = convoLocateOpenCodeCommand(sess.Persistence, tmuxName)
 			base = "locate.fast"
 		}
 		tScan := time.Now()
@@ -2937,7 +2942,7 @@ func (s *Server) locateScan(ctx context.Context, sess *term.Session, st *convoSt
 			s.perfLocate(locateOp(base, shared), tScan, err, 0, sess.HostID)
 			ocOnly, base = false, "locate.full"
 			tScan = time.Now()
-			out, at, looked, shared, err = s.runConvoScan(ctx, sess, fullParams, convoLocateCommand(sess.Persistence, sess.TmuxSession, ""), after)
+			out, at, looked, shared, err = s.runConvoScan(ctx, sess, fullParams, convoLocateCommand(sess.Persistence, tmuxName, ""), after)
 		}
 		// (The script ends with exit 0: an error is a scan cut short, by its size
 		// or a failure, which may leave out the agent started last. What was
@@ -2950,7 +2955,7 @@ func (s *Server) locateScan(ctx context.Context, sess *term.Session, st *convoSt
 		if ocOnly && !l.noProc && !ocPaneOwn(l.procs, pane, socket) {
 			ocOnly = false
 			tFull := time.Now()
-			if out, at, looked, shared, err = s.runConvoScan(ctx, sess, fullParams, convoLocateCommand(sess.Persistence, sess.TmuxSession, ""), after); err != nil {
+			if out, at, looked, shared, err = s.runConvoScan(ctx, sess, fullParams, convoLocateCommand(sess.Persistence, tmuxName, ""), after); err != nil {
 				s.perfLocate(locateOp("locate.full", shared), tFull, err, 0, sess.HostID)
 				return err
 			}
@@ -4584,6 +4589,8 @@ var convoKeys = map[string]struct {
 	"sent_enter": {"convo.sent_enter", nil, nil},
 	// A key of Claude Code's card above its box (see convo_card.go).
 	"card": {"convo.card", nil, nil},
+	// Send or clear unsent text in the agent's terminal input box (see convo_box_draft.go).
+	"box_draft": {"convo.box_draft", nil, nil},
 	// Claude Code's suggestion of the next message: nothing is pressed, the
 	// screen is read with its colours (see convo_suggest.go).
 	"suggest": {"convo.suggest", nil, nil},
@@ -4791,6 +4798,8 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 		// (card: its key, and the card as the page shows it.)
 		Key  string     `json:"key"`
 		Card *convoCard `json:"card"`
+		// (box_draft: "send" or "clear", with the digest of the box/screen shown.)
+		Action string `json:"action"`
 		// (sent_missing: how long ago it was sent (ms, by the page's clock),
 		// and "log" to look only in the subagents' logs for where it went,
 		// not at the screen.)
@@ -4807,6 +4816,12 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 	if what == "panel" {
 		textOK = b.Text == "" && panelOK(b.Keys, b.Digest)
 	}
+	if what == "box_draft" {
+		textOK = b.Text == "" && (b.Action == "send" || b.Action == "clear") && hexDigest.MatchString(b.Digest)
+	}
+	if b.Action != "" && what != "box_draft" {
+		textOK = false
+	}
 	if what == "reply" {
 		textOK = replyOK(b.Digest, b.Keys, b.Text) // (keys, or a line: its own rules)
 		if b.Fill {
@@ -4820,7 +4835,7 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 	if b.Live && what != "panel" {
 		textOK = false
 	}
-	if what != "reply" && what != "panel" && (b.Digest != "" || len(b.Keys) > 0) {
+	if what != "reply" && what != "panel" && what != "box_draft" && (b.Digest != "" || len(b.Keys) > 0) {
 		textOK = false
 	}
 	if what == "model" && (b.Model == "" || len(b.Model) > 128 || strings.ContainsFunc(b.Model, func(r rune) bool { return r < 0x20 || r == 0x7f })) {
@@ -4990,7 +5005,9 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 		if what == "panel_screen" {
 			release := turn
 			turn = func() {}
-			if s.convoHerdrPanelScreen(w, ctx, sess, b.Pane, socket, agyPane, &outcome, &reason, release) {
+			agentKind := herdrAgentKind(hp.Agent, agyPane)
+			waiting := hasPane && hp.AgentStatus == "blocked"
+			if s.convoHerdrPanelScreen(w, ctx, sess, b.Pane, socket, agentKind, waiting, &outcome, &reason, release) {
 				return
 			}
 			turn = release
@@ -5043,16 +5060,17 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 		wantSID := s.herdrSocks.sid(sess.ID, b.Pane)
 		var l convoLocated
 		for attempt := 0; attempt < 2; attempt++ {
-			params := proto.AgentLocateParams{Mode: sess.Persistence, TmuxName: sess.TmuxSession, TmuxPane: tmuxTarget}
-			cmd := convoLocateCommand(sess.Persistence, sess.TmuxSession, tmuxTarget)
+			tmuxName := sess.CurrentTmuxSession()
+			params := proto.AgentLocateParams{Mode: sess.Persistence, TmuxName: tmuxName, TmuxPane: tmuxTarget}
+			cmd := convoLocateCommand(sess.Persistence, tmuxName, tmuxTarget)
 			fastTry := attempt == 0 && plan.mode != herdrFastFull
 			if fastTry {
 				if plan.mode == herdrFastPIDs {
 					params = proto.AgentLocateParams{Mode: "herdr", ShellPID: plan.shellPID, PIDs: plan.pids}
 					cmd = convoLocatePidsCommand(plan.shellPID, plan.pids)
 				} else {
-					params = proto.AgentLocateParams{Mode: sess.Persistence, TmuxName: sess.TmuxSession, Only: "opencode"}
-					cmd = convoLocateOpenCodeCommand(sess.Persistence, sess.TmuxSession)
+					params = proto.AgentLocateParams{Mode: sess.Persistence, TmuxName: tmuxName, Only: "opencode"}
+					cmd = convoLocateOpenCodeCommand(sess.Persistence, tmuxName)
 				}
 			}
 			op := "locate.full"
@@ -5226,7 +5244,7 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 		writeError(w, http.StatusBadRequest, "bad_request", "not a command of Claude Code's")
 		return
 	}
-	codexLook := front.agent == "codex" && (what == "sent_missing" || what == "sent_enter" || what == "suggest") // (its input told apart: codexInputArea; its screen's word of what it does: convo_codex_note.go)
+	codexLook := front.agent == "codex" && (what == "sent_missing" || what == "sent_enter" || what == "suggest" || what == "box_draft") // (its input told apart: codexInputArea; its screen's word of what it does: convo_codex_note.go)
 	// (OpenCode's terminal, shown here as it is where a message to it was
 	// refused: its screen, and keys pressed there only on the screen shown —
 	// the "look" gate, whoever's the screen is.)
@@ -5324,6 +5342,17 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 		release := turn
 		turn = func() {} // (given back once its commands have ended on the host)
 		s.cardPress(w, ctx, sess, b.Pane, socket, b.PID, b.Start, b.Session, b.Key, b.Card, &outcome, &reason, release)
+		return
+	}
+	if what == "box_draft" {
+		if front.agent != "claude" && front.agent != "codex" {
+			outcome, reason = "refused", "unsupported"
+			writeError(w, http.StatusConflict, "unsupported", "not for this agent")
+			return
+		}
+		release := turn
+		turn = func() {}
+		s.boxDraftAction(w, ctx, sess, b.Pane, socket, front.agent, b.PID, b.Start, b.Session, b.Action, b.Digest, &outcome, &reason, release)
 		return
 	}
 	if what == "sent_missing" {
@@ -5472,9 +5501,17 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 		res, err := sshx.Exec(sctx, sess.Client(), convoColorScreenCommand(sess.Persistence, b.Pane, socket), 512<<10, sshx.ExecOptions{Interactive: true, AwaitSlot: pressSlotWait(what)})
 		scancel()
 		if err == nil {
-			if codexHasDraft(strings.ReplaceAll(string(res.Out), "\r", "")) {
+			norm := strings.ReplaceAll(string(res.Out), "\r", "")
+			if codexHasDraft(norm) {
 				ended.Done()
 				reason = "draft"
+				if d, ok := codexDraftText(norm); ok {
+					plain := sgr.ReplaceAllString(norm, "")
+					if _, dig, _ := screenOf([]byte(plain)); dig != "" {
+						writeErrorExtra(w, http.StatusConflict, "draft", "its input holds words typed in the terminal", map[string]any{"draft": clip(d, 200), "digest": dig})
+						return
+					}
+				}
 				writeError(w, http.StatusConflict, "draft", "its input holds words typed in the terminal")
 				return
 			}
@@ -5546,7 +5583,13 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 		shown, digest, _ := screenOf(res.Out)
 		switch err := codexIdleInput(shown); {
 		case errors.Is(err, errDraft):
-			refuse(http.StatusConflict, "draft", err.Error())
+			ended.Done()
+			reason = "draft"
+			if d, ok := codexDraftText(shown); ok && digest != "" {
+				writeErrorExtra(w, http.StatusConflict, "draft", err.Error(), map[string]any{"draft": clip(d, 200), "digest": digest})
+				return
+			}
+			writeError(w, http.StatusConflict, "draft", err.Error())
 			return
 		case errors.Is(err, errBusyAgent):
 			refuse(http.StatusConflict, "working", err.Error())
@@ -5606,7 +5649,11 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 				} else {
 					ended.Done()
 					outcome, reason = "refused", "box_draft"
-					writeErrorExtra(w, http.StatusConflict, "box_draft", "its input holds other words: sent after them, the two would go as one", map[string]any{"draft": clip(d, 200)})
+					extra := map[string]any{"draft": clip(d, 200)}
+					if dig := boxDigest(plain); dig != "" {
+						extra["digest"] = dig
+					}
+					writeErrorExtra(w, http.StatusConflict, "box_draft", "its input holds other words: sent after them, the two would go as one", extra)
 					return
 				}
 			}
@@ -5679,7 +5726,7 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 	outBytes, err := s.runGated(ctx, sess, gatedReq{
 		Gate:      gate,
 		Mode:      sess.Persistence,
-		Session:   sess.TmuxSession,
+		Session:   sess.CurrentTmuxSession(),
 		Pane:      b.Pane,
 		Socket:    socket,
 		PID:       b.PID,
@@ -6099,6 +6146,9 @@ func (s *Server) subagentAnswer(w http.ResponseWriter, r *http.Request, sess *te
 	ans.Running = st.parser.Running() // (what it set going in turn)
 	if m := st.meta(); m != (convo.Meta{}) {
 		ans.Meta = &m
+		if st.agent == "codex" && m.Quota != nil {
+			s.recordCodexQuotaSnapshot(sess, m.Quota)
+		}
 	}
 	writeJSONCompressed(w, r, http.StatusOK, ans)
 }

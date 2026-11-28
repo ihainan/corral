@@ -4,10 +4,12 @@ import { shouldIgnorePanelPollError } from './busyCode'
 import { api, ApiError, errorText } from '../api'
 import { t, type I18nKey } from '../i18n'
 import { isCoarse } from '../components/ui'
+import { AppLink } from '../components/AppLink'
 import { ansiLines, type AnsiRun } from './ansi'
 import { readNoticeDialog, type NoticeAction } from './noticeDialog'
 import { PaneTerminal } from './PaneTerminal'
 import { claimPaneTerminal } from './termViewKeep'
+import type { ScreenBlocker } from './liveTerminalPolicy'
 
 // A panel of Claude Code's own (/rewind, /resume, /mcp, /config…), which it
 // draws on its screen and tells its log nothing of till it is shut: the
@@ -61,9 +63,9 @@ function renderLinked(text: string) {
   const parts = text.split(URL_PART)
   return parts.map((p, i) =>
     i % 2 === 1 ? (
-      <a key={i} href={p} target="_blank" rel="noopener noreferrer">
+      <AppLink key={i} href={p}>
         {p}
-      </a>
+      </AppLink>
     ) : (
       <Fragment key={i}>{p}</Fragment>
     ),
@@ -93,7 +95,7 @@ const runStyle = (r: AnsiRun): React.CSSProperties => {
 // (onLeave: where F6 takes the focus from its screen — the dock's tabs; none: its own head's first button.)
 // (who: the program the keys go to, as named to the person ("Claude Code"); onComposer: the message box, gone back to.)
 // (main: the conversation's whole place, its terminal view — no head of its own, the person's terminal scheme and size. UI 14, 11-25.)
-export type PanelLive = { onClose?: () => void; onFull?: () => void; note?: string; letters?: boolean; onLeave?: () => void; who?: string; onComposer?: () => void; canNotice?: boolean; onNoticeSent?: () => void; main?: boolean; bare?: boolean }
+export type PanelLive = { onClose?: () => void; onFull?: () => void; note?: string; letters?: boolean; onLeave?: () => void; who?: string; onComposer?: () => void; canNotice?: boolean; onNoticeSent?: () => void; onBlocker?: (b: ScreenBlocker | null) => void; main?: boolean; bare?: boolean }
 const PTY_TRIES = 2
 // active: in sight (its screen read, said when old); keys: whether it may take the keys as it comes — not so the side
 // of a split without them (review of 36e1069). Unsaid, as active.
@@ -167,6 +169,8 @@ export function PanelWindow({ sid, active, keys, press, onSettled, toast, live, 
   const hasNoticeNow = useRef(false)
   const onNoticeSentNow = useRef(live?.onNoticeSent)
   onNoticeSentNow.current = live?.onNoticeSent
+  const onBlockerNow = useRef(live?.onBlocker)
+  onBlockerNow.current = live?.onBlocker
   const activeNow = useRef(active)
   activeNow.current = active
   const pressNow = useRef(press)
@@ -184,7 +188,7 @@ export function PanelWindow({ sid, active, keys, press, onSettled, toast, live, 
     const look = new AbortController()
     a.look = look
     try {
-      const r = await api<{ text: string; digest: string; look?: string }>('POST', `/api/sessions/${sid}/conversation/panel-screen`, pressNow.current(), { timeoutMs: 12000, signal: look.signal })
+      const r = await api<{ text: string; digest: string; look?: string; blocker?: ScreenBlocker }>('POST', `/api/sessions/${sid}/conversation/panel-screen`, pressNow.current(), { timeoutMs: 12000, signal: look.signal })
       if (!a.alive) return
       a.stale = false
       a.fails = 0
@@ -192,6 +196,7 @@ export function PanelWindow({ sid, active, keys, press, onSettled, toast, live, 
       setLoaded(true)
       setLost(false)
       setScreen({ text: r.text, digest: (isLive.current ? r.look : r.digest) ?? r.digest })
+      if (r.blocker !== undefined) onBlockerNow.current?.(r.blocker)
     } catch (e) {
       // (Given up for a key, or another of its presses / SSH channel cap busy: no failure to read.)
       if (shouldIgnorePanelPollError(look.signal.aborted, e instanceof ApiError ? e.code : undefined)) return

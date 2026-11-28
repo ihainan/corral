@@ -3,6 +3,8 @@ import { createPortal } from 'react-dom'
 import { Check, CircleAlert, CircleCheck, CircleHelp, Copy, Info, TriangleAlert, X } from 'lucide-react'
 import { errorText } from '../api'
 import { t } from '../i18n'
+import { isPlainPrimaryClick } from '../linkPolicy'
+import { AppLink } from './AppLink'
 
 export const isCoarse = () => window.matchMedia('(pointer: coarse)').matches
 
@@ -645,7 +647,20 @@ function MenuEntry({ item, close }: { item: MenuItem; close: () => void }) {
           </span>
         </div>
       ) : item.href ? (
-        <a className={cls} role="menuitem" href={item.href} onClick={(e) => { close(); if (item.onSelect) { e.preventDefault(); item.onSelect() } }}>{body}</a>
+        <AppLink
+          className={cls}
+          role="menuitem"
+          href={item.href}
+          onClick={(e) => {
+            close()
+            if (item.onSelect && isPlainPrimaryClick(e)) {
+              e.preventDefault()
+              item.onSelect()
+            }
+          }}
+        >
+          {body}
+        </AppLink>
       ) : (
         <button className={cls} role={item.checked === undefined ? 'menuitem' : 'menuitemcheckbox'} aria-checked={item.checked} disabled={item.disabled} title={item.title} onClick={() => { if (!item.keepOpen) close(); item.onSelect?.() }}>{body}</button>
       )}

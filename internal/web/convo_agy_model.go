@@ -878,7 +878,7 @@ func (s *Server) runAgySlashSwitch(
 	_, err = s.runGated(ctx, sess, gatedReq{
 		Gate:      "afree:" + digest,
 		Mode:      sess.Persistence,
-		Session:   sess.TmuxSession,
+		Session:   sess.CurrentTmuxSession(),
 		Pane:      pane,
 		Socket:    socket,
 		PID:       pid,

@@ -5,6 +5,7 @@ import { relTime, t } from '../i18n'
 import { navigate } from '../router'
 import { local } from '../storage'
 import { Dialog } from '../components/ui'
+import { isDuplicateMuxName, validateMuxSessionName } from '../terminal/sessionRenamePolicy'
 
 // The last thing opened on a host, on this device: it is shown selected the
 // next time.
@@ -29,12 +30,23 @@ const same = (a: OpenChoice | null, b: OpenChoice) => !!a && a.kind === b.kind &
 // ones too: opening one starts it) and tmux sessions, a new tmux or herdr
 // session, or a plain shell. Each group is one list;
 // a row is its name, with what else there is to know on the right.
-export function OpenPicker(props: { host: Host; found: HostChoices; busy: boolean; onClose: () => void; onPick: (c: OpenChoice) => void }) {
+export function OpenPicker(props: {
+  host: Host
+  found: HostChoices
+  busy: boolean
+  error?: string
+  onClearError?: () => void
+  onClose: () => void
+  onPick: (c: OpenChoice) => void
+}) {
   const { host, found } = props
   const c = found.choose
   const last = lastChoice(host.id)
   const lastRef = useRef<HTMLButtonElement | null>(null)
   const [picked, setPicked] = useState<OpenChoice | null>(null) // being opened
+  const [newName, setNewName] = useState('')
+  const [localErr, setLocalErr] = useState('')
+  const nameErr = localErr || props.error || ''
   // Focus starts on the remembered choice, else the first one (not on the
   // close button, which comes first in the dialog). After the dialog's own
   // initial focus, which runs after this component's effects.
@@ -51,10 +63,41 @@ export function OpenPicker(props: { host: Host; found: HostChoices; busy: boolea
   const isOpen = (kind: 'herdr' | 'tmux', name: string, dflt = false) =>
     found.running.some((r) => r.kind === kind && (kind === 'herdr' ? plain(r.name) === plain(name, dflt) : (r.name ?? '') === name))
 
+  const pickChoice = (choice: OpenChoice) => {
+    if (choice.kind === 'tmux_new' || choice.kind === 'herdr_new') {
+      const want = newName
+      if (want) {
+        const bad = validateMuxSessionName(want)
+        if (bad) {
+          setLocalErr(bad === 'too_long' ? t('sessionRename.tooLong') : t('sessionRename.invalidMux'))
+          return
+        }
+        const existing =
+          choice.kind === 'tmux_new'
+            ? [...c.tmux_sessions.map((s) => s.name), ...found.running.filter((r) => r.kind === 'tmux').map((r) => r.name)]
+            : [...c.herdr_sessions.map((s) => s.name), ...found.running.filter((r) => r.kind === 'herdr').map((r) => r.name)]
+        if (isDuplicateMuxName(choice.kind === 'tmux_new' ? 'tmux' : 'herdr', want, existing)) {
+          setLocalErr(t('error.session_name_taken'))
+          return
+        }
+        setLocalErr('')
+        props.onClearError?.()
+        const named: OpenChoice = { kind: choice.kind, name: want }
+        setPicked(named)
+        props.onPick(named)
+        return
+      }
+    }
+    setLocalErr('')
+    props.onClearError?.()
+    setPicked(choice)
+    props.onPick(choice)
+  }
+
   // meta: on the right of the name; sub: a line under it.
   const item = (choice: OpenChoice, icon: React.ReactNode, title: string, meta?: string, sub?: string) => {
     const isLast = same(last, choice)
-    const opening = props.busy && same(picked, choice)
+    const opening = props.busy && picked?.kind === choice.kind && (choice.kind === 'tmux_new' || choice.kind === 'herdr_new' || (picked.name ?? '') === (choice.name ?? ''))
     const right = opening ? t('hosts.connecting') : isLast ? [meta, t('picker.last')].filter(Boolean).join(' · ') : meta
     return (
       <li key={choice.kind + ':' + (choice.name ?? '')}>
@@ -64,10 +107,7 @@ export function OpenPicker(props: { host: Host; found: HostChoices; busy: boolea
           disabled={props.busy}
           ref={isLast ? lastRef : undefined}
           aria-busy={opening || undefined}
-          onClick={() => {
-            setPicked(choice)
-            props.onPick(choice)
-          }}
+          onClick={() => pickChoice(choice)}
         >
           <span className="pick-icon">{icon}</span>
           <span className="pick-main">
@@ -99,7 +139,7 @@ export function OpenPicker(props: { host: Host; found: HostChoices; busy: boolea
           <h3 id="pick-running">{t('picker.running')}</h3>
           <ul className="pick-list">
             {found.running.map((r) => {
-              const what = r.kind === 'shell' ? t('picker.shell') : r.kind + ' · ' + (r.name || t('picker.herdrDefault'))
+              const what = r.display_name || (r.kind === 'shell' ? t('picker.shell') : r.kind + ' · ' + (r.name || t('picker.herdrDefault')))
               const when = relTime(r.created_at)
               return (
                 <li key={r.id}>
@@ -127,8 +167,9 @@ export function OpenPicker(props: { host: Host; found: HostChoices; busy: boolea
               item(
                 { kind: 'herdr', name: s.name },
                 <LayoutGrid size={16} />,
-                s.name,
+                s.display_name || s.name,
                 [s.default ? t('picker.herdrDefault') : '', isOpen('herdr', s.name, s.default) ? t('picker.openAgain') : s.running ? '' : t('picker.herdrStopped')].filter(Boolean).join(' · ') || undefined,
+                s.display_name && s.display_name !== s.name ? s.name : undefined,
               ),
             )}
           </ul>
@@ -151,6 +192,31 @@ export function OpenPicker(props: { host: Host; found: HostChoices; busy: boolea
       )}
       <section className="pick-group" aria-labelledby="pick-new">
         <h3 id="pick-new">{t('picker.new')}</h3>
+        {(c.tmux || c.unknown || c.herdr) && (
+          <div className="pick-new-name">
+            <label className="sr-only" htmlFor="pick-new-name-input">
+              {t('picker.newName')}
+            </label>
+            <input
+              id="pick-new-name-input"
+              className="input"
+              type="text"
+              maxLength={64}
+              autoComplete="off"
+              spellCheck={false}
+              disabled={props.busy}
+              value={newName}
+              placeholder={t('picker.newNamePlaceholder')}
+              aria-invalid={!!nameErr || undefined}
+              onChange={(e) => {
+                setNewName(e.target.value)
+                if (localErr) setLocalErr('')
+                props.onClearError?.()
+              }}
+            />
+            {nameErr && <p className="err">{nameErr}</p>}
+          </div>
+        )}
         <ul className="pick-list">
           {(c.tmux || c.unknown) && item({ kind: 'tmux_new' }, <Plus size={16} />, t('picker.tmuxNew'), undefined, t('picker.tmuxNewHint'))}
           {c.herdr && item({ kind: 'herdr_new' }, <Plus size={16} />, t('picker.herdrNew'), undefined, t('picker.herdrNewHint'))}

@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -20,20 +22,23 @@ const (
 	lineagePruneInterval = time.Hour
 	lineageProbeCooldown = 10 * time.Second
 	lineageProbeTimeout  = 10 * time.Second
-	lineageProbeMaxFiles = 6
+	lineageProbeMaxFiles = 24
 	lineageProbePerFile  = 4 << 20  // 4 MiB tail per candidate parent log (covers heavy Claude/Codex logs)
 	lineageProbeMaxBytes = 12 << 20 // 12 MiB total budget per probe run
 	lineageMetadataTTLMs = 86400000 // 24h (herdr max ttl_ms)
+	lineageLocateCool    = 15 * time.Second
 )
 
 var lineageRetryAfter = []time.Duration{3 * time.Second, 15 * time.Second, 60 * time.Second}
 
 type livePaneInfo struct {
-	PaneID     string
-	TerminalID string
-	Session    string
-	Agent      string
-	Tokens     map[string]string
+	PaneID      string
+	WorkspaceID string
+	TerminalID  string
+	Session     string
+	Agent       string
+	Status      string
+	Tokens      map[string]string
 }
 
 type knownPaneLog struct {
@@ -79,6 +84,10 @@ type lineageTracker struct {
 	probeRunning bool
 	lastProbeAt  time.Time
 	probedSize   map[string]int64 // logPath -> last scanned file size
+	pendingProbe []string         // newly-appeared panes queued during active probe / cooldown
+	pendingTimer *time.Timer
+	onNeedLogs   func(context.Context) // bounded on-demand locate when live parent logs are missing
+	lastNeedLogs time.Time
 }
 
 func (s *Server) newLineageTracker(sess *term.Session, server, socket, herdrSession string) *lineageTracker {
@@ -102,6 +111,12 @@ func (t *lineageTracker) setPoke(fn func()) {
 	t.mu.Lock()
 	t.poke = fn
 	t.mu.Unlock()
+}
+
+func (t *lineageTracker) setNeedLogs(fn func(context.Context)) {
+	t.probeMu.Lock()
+	t.onNeedLogs = fn
+	t.probeMu.Unlock()
 }
 
 func (t *lineageTracker) notify() {
@@ -210,6 +225,9 @@ func (t *lineageTracker) OnSnapshot(ctx context.Context, snap *herdr.Snapshot) {
 		}
 		cur := live[p.ID]
 		cur.PaneID = p.ID
+		if p.WorkspaceID != "" {
+			cur.WorkspaceID = p.WorkspaceID
+		}
 		if p.TerminalID != "" {
 			cur.TerminalID = sanitizeTermID(p.TerminalID)
 		}
@@ -218,6 +236,9 @@ func (t *lineageTracker) OnSnapshot(ctx context.Context, snap *herdr.Snapshot) {
 		}
 		if p.Agent != "" {
 			cur.Agent = p.Agent
+		}
+		if p.AgentStatus != "" {
+			cur.Status = p.AgentStatus
 		}
 		if len(p.Tokens) > 0 {
 			if cur.Tokens == nil {
@@ -740,6 +761,17 @@ func (t *lineageTracker) decorate(sum *herdrSummary) {
 	}
 	byChild := map[string]edge{}
 
+	// Collect live agent panes present in this summary so we never emit a
+	// dangling ParentPane when the parent pane has closed or no longer runs an agent.
+	liveAgentsInSum := map[string]bool{}
+	for wi := range sum.Workspaces {
+		for ai := range sum.Workspaces[wi].Agents {
+			if pid := sum.Workspaces[wi].Agents[ai].PaneID; pid != "" {
+				liveAgentsInSum[pid] = true
+			}
+		}
+	}
+
 	for _, r := range rows {
 		if r.State != store.LineageConfirmed {
 			continue
@@ -750,6 +782,12 @@ func (t *lineageTracker) decorate(sum *herdrSummary) {
 		}
 		// Child identity match.
 		if !sameOccupant(r.ChildTermID, r.ChildSession, childLive.TerminalID, childLive.Session) {
+			continue
+		}
+		// Require the parent pane to still be a live agent in this summary;
+		// keep the persisted SQLite row intact for transient reconnects, but
+		// never publish a dangling parent pointer on a top-level agent.
+		if !liveAgentsInSum[r.ParentPane] {
 			continue
 		}
 		// Symmetric parent identity match (when parent pane is live).
@@ -800,40 +838,78 @@ func (t *lineageTracker) decorate(sum *herdrSummary) {
 	}
 }
 
-// probeCandidateParents performs a strictly bounded SFTP tail scan (zero extra
-// SSH exec calls) over known live parent logs when a newly-appeared agent pane
-// has no lineage yet.
-func (t *lineageTracker) probeCandidateParents(ctx context.Context, newPanes []string) {
-	t.probeMu.Lock()
-	if t.probeRunning || time.Since(t.lastProbeAt) < lineageProbeCooldown {
-		t.probeMu.Unlock()
+// RecordEnvLink records a confirmed parent-child edge when a process running
+// inside childPane inherited a parent agent's session ID in its environment.
+// Only links when a unique live parent pane matches parentSession (never guesses).
+func (t *lineageTracker) RecordEnvLink(ctx context.Context, childPane, parentSession string) {
+	if t == nil || !herdrPaneID.MatchString(childPane) || !convoUUID.MatchString(parentSession) {
 		return
 	}
-	t.probeRunning = true
-	t.lastProbeAt = time.Now()
-	t.probeMu.Unlock()
-
-	defer func() {
-		t.probeMu.Lock()
-		t.probeRunning = false
-		t.probeMu.Unlock()
-	}()
-
-	type candidate struct {
-		pane    string
-		termID  string
-		session string
-		agent   string
-		logPath string
-	}
-
-	newSet := map[string]bool{}
-	for _, p := range newPanes {
-		newSet[p] = true
-	}
-
+	parentSession = strings.ToLower(strings.TrimSpace(parentSession))
 	t.mu.Lock()
-	var cands []candidate
+	childLive, hasChild := t.live[childPane]
+	if !hasChild || t.hasRowForLocked(childPane, childLive.TerminalID) {
+		t.mu.Unlock()
+		return
+	}
+	var match *livePaneInfo
+	ambiguous := false
+	for _, p := range t.live {
+		if p.PaneID == childPane || p.Agent == "" || !strings.EqualFold(p.Session, parentSession) {
+			continue
+		}
+		if match != nil {
+			ambiguous = true
+			break
+		}
+		cp := p
+		match = &cp
+	}
+	t.mu.Unlock()
+	if match == nil || ambiguous {
+		return
+	}
+	t.RecordToolLog(ctx, match.PaneID, match.TerminalID, match.Session, lineageDiscovery{
+		ChildPane:    childPane,
+		ChildTermID:  childLive.TerminalID,
+		ChildSession: childLive.Session,
+		EvidenceKey:  "env:" + parentSession + ":" + childPane,
+		Action:       "env",
+	})
+}
+
+type lineageProbeCandidate struct {
+	pane    string
+	termID  string
+	session string
+	agent   string
+	logPath string
+	sameWS  bool
+	active  bool
+}
+
+// selectProbeCandidates picks up to lineageProbeMaxFiles candidate parent logs
+// deterministically: same-workspace panes first, then active (working/done/blocked)
+// panes, then by pane ID, so large servers (>6 panes) never drop the real parent
+// due to Go map iteration randomization.
+func (t *lineageTracker) selectProbeCandidatesLocked(newSet map[string]bool) (cands []lineageProbeCandidate, missingLogs bool) {
+	newWS := map[string]bool{}
+	for p := range newSet {
+		if info, ok := t.live[p]; ok && info.WorkspaceID != "" {
+			newWS[info.WorkspaceID] = true
+		}
+	}
+	for pane, info := range t.live {
+		if newSet[pane] || info.Agent == "" {
+			continue
+		}
+		if _, ok := t.paneLogs[pane]; !ok {
+			a := strings.ToLower(info.Agent)
+			if strings.Contains(a, "claude") || strings.Contains(a, "codex") || strings.Contains(a, "agy") || strings.Contains(a, "antigravity") {
+				missingLogs = true
+			}
+		}
+	}
 	for pane, kl := range t.paneLogs {
 		if newSet[pane] {
 			continue
@@ -852,17 +928,138 @@ func (t *lineageTracker) probeCandidateParents(ctx context.Context, newPanes []s
 		if sess == "" {
 			sess = kl.session
 		}
-		cands = append(cands, candidate{
+		active := info.Status == herdr.StatusWorking || info.Status == herdr.StatusDone || info.Status == herdr.StatusBlocked
+		cands = append(cands, lineageProbeCandidate{
 			pane:    pane,
 			termID:  info.TerminalID,
 			session: sess,
 			agent:   kl.agent,
 			logPath: kl.logPath,
+			sameWS:  info.WorkspaceID != "" && newWS[info.WorkspaceID],
+			active:  active,
 		})
-		if len(cands) >= lineageProbeMaxFiles {
-			break
+	}
+	sort.Slice(cands, func(i, j int) bool {
+		if cands[i].sameWS != cands[j].sameWS {
+			return cands[i].sameWS
+		}
+		if cands[i].active != cands[j].active {
+			return cands[i].active
+		}
+		return cands[i].pane < cands[j].pane
+	})
+	if len(cands) > lineageProbeMaxFiles {
+		cands = cands[:lineageProbeMaxFiles]
+	}
+	return cands, missingLogs
+}
+
+func appendUniquePanes(dst, src []string) []string {
+	seen := make(map[string]bool, len(dst))
+	for _, p := range dst {
+		seen[p] = true
+	}
+	for _, p := range src {
+		if p != "" && !seen[p] {
+			seen[p] = true
+			dst = append(dst, p)
 		}
 	}
+	return dst
+}
+
+// probeCandidateParents performs a strictly bounded SFTP tail scan (zero extra
+// SSH exec calls) over known live parent logs when a newly-appeared agent pane
+// has no lineage yet.
+func (t *lineageTracker) probeCandidateParents(ctx context.Context, newPanes []string) {
+	t.probeMu.Lock()
+	if t.probeRunning {
+		t.pendingProbe = appendUniquePanes(t.pendingProbe, newPanes)
+		t.probeMu.Unlock()
+		return
+	}
+	if since := time.Since(t.lastProbeAt); since < lineageProbeCooldown {
+		t.pendingProbe = appendUniquePanes(t.pendingProbe, newPanes)
+		if t.pendingTimer == nil {
+			wait := lineageProbeCooldown - since
+			t.pendingTimer = time.AfterFunc(wait, func() {
+				if ctx.Err() != nil {
+					return
+				}
+				t.probeMu.Lock()
+				t.pendingTimer = nil
+				queued := t.pendingProbe
+				t.pendingProbe = nil
+				t.probeMu.Unlock()
+				if len(queued) > 0 {
+					t.probeCandidateParents(ctx, queued)
+				}
+			})
+		}
+		t.probeMu.Unlock()
+		return
+	}
+	if len(t.pendingProbe) > 0 {
+		newPanes = appendUniquePanes(newPanes, t.pendingProbe)
+		t.pendingProbe = nil
+	}
+	if t.pendingTimer != nil {
+		t.pendingTimer.Stop()
+		t.pendingTimer = nil
+	}
+	t.probeRunning = true
+	t.lastProbeAt = time.Now()
+	needLogsFn := t.onNeedLogs
+	canNeedLogs := needLogsFn != nil && (t.lastNeedLogs.IsZero() || time.Since(t.lastNeedLogs) >= lineageLocateCool)
+	t.probeMu.Unlock()
+
+	defer func() {
+		t.probeMu.Lock()
+		t.probeRunning = false
+		queued := t.pendingProbe
+		t.pendingProbe = nil
+		if len(queued) > 0 && t.pendingTimer == nil {
+			t.pendingProbe = queued
+			wait := max(0, lineageProbeCooldown-time.Since(t.lastProbeAt))
+			t.pendingTimer = time.AfterFunc(wait, func() {
+				if ctx.Err() != nil {
+					return
+				}
+				t.probeMu.Lock()
+				t.pendingTimer = nil
+				q := t.pendingProbe
+				t.pendingProbe = nil
+				t.probeMu.Unlock()
+				if len(q) > 0 {
+					t.probeCandidateParents(ctx, q)
+				}
+			})
+		}
+		t.probeMu.Unlock()
+	}()
+
+	newSet := map[string]bool{}
+	for _, p := range newPanes {
+		newSet[p] = true
+	}
+
+	t.mu.Lock()
+	cands, missingLogs := t.selectProbeCandidatesLocked(newSet)
+	t.mu.Unlock()
+
+	if missingLogs && canNeedLogs {
+		t.probeMu.Lock()
+		t.lastNeedLogs = time.Now()
+		t.probeMu.Unlock()
+		lctx, lcancel := context.WithTimeout(ctx, lineageProbeTimeout)
+		needLogsFn(lctx)
+		lcancel()
+		t.mu.Lock()
+		cands, _ = t.selectProbeCandidatesLocked(newSet)
+		t.mu.Unlock()
+	}
+
+	t.mu.Lock()
 	inUse := make(map[string]bool, len(t.paneLogs))
 	for _, kl := range t.paneLogs {
 		inUse[kl.logPath] = true

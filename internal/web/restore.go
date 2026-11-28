@@ -376,6 +376,9 @@ func (s *Server) restoreOne(parent context.Context, t *store.OpenTab) {
 		if !t.HerdrDefault {
 			opts.HerdrSession = t.Name
 		}
+		if dn, err := s.store.SessionDisplayName(ctx, t.OwnerID, t.HostID, t.HostConfig, store.PersistHerdr, herdrDisplayKey(opts.HerdrSession)); err == nil {
+			opts.DisplayName = dn
+		}
 	}
 
 	res, err := s.terms.Reserve(t.OwnerID)

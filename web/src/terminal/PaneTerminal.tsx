@@ -3,6 +3,7 @@ import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { Unicode11Addon } from '@xterm/addon-unicode11'
 import { WebLinksAddon } from '@xterm/addon-web-links'
+import { openTerminalLink } from '../components/AppLink'
 import { t } from '../i18n'
 import { isActiveTerminalStatus, setLeaveGuardTerminal } from '../leaveGuard'
 import { termScheme, usePrefs } from '../prefs'
@@ -122,7 +123,7 @@ export function PaneTerminal({
       for (let off = 0; off < encoded.byteLength; off += MAX_INPUT_CHUNK) {
         ws.send(encoded.subarray(off, Math.min(off + MAX_INPUT_CHUNK, encoded.byteLength)))
       }
-      if (s.includes('\r') || s.includes('\x1b')) scheduleSettle()
+      if (s.includes('\r') || s.includes('\x1b') || s.includes('\x03') || s.includes('\x7f')) scheduleSettle()
     },
     [scheduleSettle],
   )
@@ -151,12 +152,13 @@ export function PaneTerminal({
       allowProposedApi: true,
       macOptionIsMeta: prefs.optionIsMeta,
       theme: main ? termScheme().theme : PANEL_THEME,
+      linkHandler: { activate: (e, uri) => openTerminalLink(uri, e) },
     })
     appliedPrefsRef.current = { fontSize, optionIsMeta: prefs.optionIsMeta, schemeId }
     const fit = new FitAddon()
     const uni = new Unicode11Addon()
-    const links = new WebLinksAddon((_e, uri) => {
-      window.open(uri, '_blank', 'noopener,noreferrer')
+    const links = new WebLinksAddon((e, uri) => {
+      openTerminalLink(uri, e)
     })
     term.loadAddon(fit)
     term.loadAddon(uni)

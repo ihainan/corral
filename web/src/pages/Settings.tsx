@@ -1,13 +1,14 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react'
-import { ArrowLeft, Bot, Brain, ChevronDown, ChevronRight, Film, Keyboard, KeyRound, Languages, LogOut, Minus, Plus, ScrollText, Search, SlidersHorizontal, SquareTerminal, User, Users, X } from 'lucide-react'
+import { ArrowLeft, Bot, Brain, ChevronDown, ChevronRight, Film, Gauge, Keyboard, KeyRound, Languages, LogOut, Minus, Plus, ScrollText, Search, SlidersHorizontal, SquareTerminal, User, Users, X } from 'lucide-react'
 import { disablePush, enablePush, pushState, syncPush, type PushState } from '../push'
 import { api, ApiError, authGen, errorText, type Me } from '../api'
 import { getLang, hasKey, setLang, t, type I18nKey, type Lang } from '../i18n'
 import { reloadPage } from '../leaveGuard'
 import { setPrefs, usePrefs } from '../prefs'
-import { linkHandler, navigate } from '../router'
+import { navigate } from '../router'
 import { rememberSettingsScroll, signOut, takeSettingsScroll, useSession } from '../app'
 import { Confirm, Dialog, DialogHead, Field, isCoarse, LoadError, useToast } from '../components/ui'
+import { AppLink } from '../components/AppLink'
 import { CurrentScheme, SchemeDialog } from '../terminal/SchemePicker'
 import { TwoStepSetting } from './TwoStep'
 import { ssoErrorText } from './Auth'
@@ -17,6 +18,7 @@ import { setScreenReader, useScreenReader } from '../terminal/screenReader'
 import { saveTranslateConfig, testTranslateConfig, TRANSLATE_LANGS, useTranslateConfig, type TranslateConfig, type TranslateMode } from '../terminal/thoughtTranslate'
 import { Markdown } from '../terminal/markdown'
 import { Avatar, AvatarTooLarge, squareAvatar } from '../components/Avatar'
+import { SubscriptionsSection } from './Subscriptions'
 
 // Desktop Settings modal event: opens the two-column native-style Settings
 // dialog over the current workspace (preserving live agents & terminals).
@@ -27,7 +29,7 @@ export function isDesktopSettings(): boolean {
 }
 export function openSettingsModal(cat?: SettingsCatId) {
   if (isDesktopSettings()) window.dispatchEvent(new CustomEvent(OPEN_SETTINGS, { detail: { cat } }))
-  else navigate('/settings')
+  else navigate(cat === 'subscriptions' ? '/subscriptions' : '/settings')
 }
 
 function useDesktopSettings(): boolean {
@@ -41,7 +43,7 @@ function useDesktopSettings(): boolean {
   return ok
 }
 
-export type SettingsCatId = 'general' | 'chat' | 'terminal' | 'touch' | 'account'
+export type SettingsCatId = 'general' | 'chat' | 'terminal' | 'touch' | 'account' | 'subscriptions'
 interface SettingsCatDef {
   id: SettingsCatId
   group: 'general' | 'terminal' | 'account'
@@ -56,6 +58,7 @@ const SETTINGS_CATS: SettingsCatDef[] = [
   { id: 'terminal', group: 'terminal', labelKey: 'settings.cat.terminal', keywords: 'terminal theme scheme color font size webgl screen reader clipboard option meta alt 终端 配色 字体 剪贴板 读屏', icon: (p) => <SquareTerminal {...p} /> },
   { id: 'touch', group: 'terminal', labelKey: 'settings.cat.touch', keywords: 'touch keybar keyboard custom keys macro 触控 键栏 按键 自定义 快捷键', icon: (p) => <Keyboard {...p} /> },
   { id: 'account', group: 'account', labelKey: 'settings.cat.account', keywords: 'account profile display name password sso oidc 2fa totp two step sign out logout notices 账户 密码 登录 两步验证 退出 声明', icon: (p) => <User {...p} /> },
+  { id: 'subscriptions', group: 'account', labelKey: 'settings.cat.subscriptions', keywords: 'subscriptions quota usage limit plan claude codex antigravity gemini weekly five hour reset 订阅 额度 用量 套餐 重置', icon: (p) => <Gauge {...p} /> },
 ]
 const SETTINGS_GROUPS: { id: 'general' | 'terminal' | 'account'; labelKey: I18nKey }[] = [
   { id: 'general', labelKey: 'settings.group.general' },
@@ -431,10 +434,10 @@ function SettingsWorkbench({ modal, initialCat, onClose }: { modal?: boolean; in
                   checked={prefs.confirmLeave}
                   onChange={(v) => setPrefs({ confirmLeave: v })}
                 />
-                <a className="setting setting-link" href="/THIRD-PARTY-NOTICES.txt" target="_blank" rel="noopener">
+                <AppLink className="setting setting-link" href="/THIRD-PARTY-NOTICES.txt" newTab>
                   <span className="setting-label"><span>{t('settings.notices')}</span></span>
                   <ChevronRight size={15} className="chev" aria-hidden="true" />
-                </a>
+                </AppLink>
               </div>
             </section>
           </>
@@ -564,6 +567,8 @@ function SettingsWorkbench({ modal, initialCat, onClose }: { modal?: boolean; in
             </div>
           </>
         )
+      case 'subscriptions':
+        return <SubscriptionsSection />
       case 'account':
         return (
           <>
@@ -632,7 +637,7 @@ function SettingsWorkbench({ modal, initialCat, onClose }: { modal?: boolean; in
               aria-label={t('settings.searchPlaceholder')}
             />
             {query ? (
-              <button type="button" className="icon-btn sm-search-clear" onClick={() => setQuery('')} aria-label={t('convo.searchClear')}>
+              <button type="button" className="icon-btn sm-search-clear" onClick={() => setQuery('')} aria-label={t('settings.searchClear')}>
                 <X size={13} aria-hidden="true" />
               </button>
             ) : (
@@ -720,9 +725,8 @@ export function SettingsPage() {
     const y = takeSettingsScroll()
     if (y) window.scrollTo(0, y)
   }, [desktop])
-  const morePage = (href: string) => (e: React.MouseEvent) => {
+  const morePage = () => {
     rememberSettingsScroll()
-    linkHandler(href)(e)
   }
   const stepFont = (d: number) => setPrefs({ fontSize: Math.min(FONT_MAX, Math.max(FONT_MIN, prefs.fontSize + d)) })
 
@@ -745,24 +749,24 @@ export function SettingsPage() {
           <h2>{t('settings.more')}</h2>
           <div className="settings-group">
             {boot.recordings && (
-              <a className="setting setting-link" href="/recordings" onClick={morePage('/recordings')}>
+              <AppLink className="setting setting-link" href="/recordings" onClick={morePage}>
                 <Film size={18} strokeWidth={1.75} className="row-icon" />
                 <span className="setting-label">{t('nav.recordings')}</span>
                 <ChevronRight size={16} className="chev" />
-              </a>
+              </AppLink>
             )}
             {me?.role === 'admin' && (
               <>
-                <a className="setting setting-link" href="/admin/users" onClick={morePage('/admin/users')}>
+                <AppLink className="setting setting-link" href="/admin/users" onClick={morePage}>
                   <Users size={18} strokeWidth={1.75} className="row-icon" />
                   <span className="setting-label">{t('nav.users')}</span>
                   <ChevronRight size={16} className="chev" />
-                </a>
-                <a className="setting setting-link" href="/admin/audit" onClick={morePage('/admin/audit')}>
+                </AppLink>
+                <AppLink className="setting setting-link" href="/admin/audit" onClick={morePage}>
                   <ScrollText size={18} strokeWidth={1.75} className="row-icon" />
                   <span className="setting-label">{t('nav.audit')}</span>
                   <ChevronRight size={16} className="chev" />
-                </a>
+                </AppLink>
               </>
             )}
           </div>
@@ -910,6 +914,14 @@ export function SettingsPage() {
       <section className="section">
         <h2>{t('settings.account')}</h2>
         <div className="settings-group">
+          <AppLink className="setting setting-link" href="/subscriptions" onClick={morePage}>
+            <Gauge size={18} strokeWidth={1.75} className="row-icon" />
+            <span className="setting-label">
+              {t('nav.subscriptions')}
+              <span className="hint">{t('subs.entryHint')}</span>
+            </span>
+            <ChevronRight size={16} className="chev" />
+          </AppLink>
           <AvatarSetting preview />
           <ProfileSetting onDirty={setProfileDirty} />
           <PasswordSetting />
@@ -928,7 +940,7 @@ export function SettingsPage() {
       </section>
 
       <p className="notices">
-        <a href="/THIRD-PARTY-NOTICES.txt" target="_blank" rel="noopener">{t('settings.notices')}</a>
+        <AppLink href="/THIRD-PARTY-NOTICES.txt" newTab>{t('settings.notices')}</AppLink>
       </p>
     </main>
   )

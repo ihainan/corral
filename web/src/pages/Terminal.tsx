@@ -5,8 +5,9 @@ import { FitAddon } from '@xterm/addon-fit'
 import { fitToEdge } from '../terminal/fit'
 import { Unicode11Addon } from '@xterm/addon-unicode11'
 import { WebLinksAddon } from '@xterm/addon-web-links'
+import { openTerminalLink } from '../components/AppLink'
 import { WebglAddon } from '@xterm/addon-webgl'
-import { ArrowUp, Bot, Check, ChevronDown, ChevronLeft, CircleStop, Code2, CornerDownLeft, Eye, FolderOpen, Globe, History, ImagePlus, MessageCircleReply, MessagesSquare, MoreVertical, Minus, Palette, Paperclip, Plus, TextSelect, Keyboard as KeyboardIcon, Power, RotateCw, Server, SquarePen, X } from 'lucide-react'
+import { ArrowUp, Bot, Check, ChevronDown, ChevronLeft, CircleStop, Code2, CornerDownLeft, Eye, FolderOpen, Globe, History, ImagePlus, MessageCircleReply, MessagesSquare, MoreVertical, Minus, Palette, Paperclip, Plus, TextCursorInput, TextSelect, Keyboard as KeyboardIcon, Power, RotateCw, Server, SquarePen, X } from 'lucide-react'
 import { api, ApiError, choiceOf, errorText, uploadFile, type HerdrAgent, type HerdrSummary, type Host, type OpenChoice, type SessionInfo, probeBootstrap } from '../api'
 import { t } from '../i18n'
 import { navigate } from '../router'
@@ -37,7 +38,10 @@ import { agentsAddress, onOpenRequest, takeTabs } from '../notifyopen'
 import { offerAlerts } from '../push'
 import { adoptComposer, composerWasOpen, rememberComposer } from '../terminal/composerOpen'
 import { promptSuggestion } from '../terminal/suggestion'
-import { sessionWhich } from '../terminal/sessionName'
+import { agentKey, sessionWhich } from '../terminal/sessionName'
+import { notifyAgentClosed } from '../terminal/agentTabPolicy'
+import { SESSION_RENAMED_EVENT, type SessionRenamedPayload } from '../terminal/sessionRenamePolicy'
+import { RenameSessionDialog } from '../terminal/RenameSessionDialog'
 import { paneName, sessionAgents, waitingAgents } from '../terminal/agents'
 import { NewTabDialog } from '../terminal/NewSessionDialog'
 import { screenReaderOn, useScreenReader } from '../terminal/screenReader'
@@ -490,7 +494,7 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
   const [schemesOpen, setSchemesOpen] = useState(false)
   const scheme = termScheme()
   // Links to localhost in the terminal open through port forwarding.
-  const linkTarget = useRef<(uri: string) => void>(() => {})
+  const linkTarget = useRef<(uri: string, e?: MouseEvent) => void>(() => {})
 
   // Latest modifier state for the xterm data callback.
   const openComposerRef = useRef<() => void>(() => {})
@@ -546,6 +550,35 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
     const t = setInterval(() => document.visibilityState === 'visible' && loadInfo(), 30000)
     return () => clearInterval(t)
   }, [loadInfo])
+  // Sync local session info immediately when renamed from tab menu or terminal menu.
+  useEffect(() => {
+    if (watch) return
+    const onRenamed = (e: Event) => {
+      const d = (e as CustomEvent<SessionRenamedPayload>).detail
+      if (!d) return
+      setInfo((cur) => {
+        if (!cur) return cur
+        const match =
+          cur.id === d.id ||
+          (d.persistence === 'tmux' && cur.host_id === d.host_id && cur.persistence === 'tmux' && cur.mux_session === d.oldMuxSession) ||
+          (d.persistence === 'herdr' &&
+            cur.host_id === d.host_id &&
+            cur.persistence === 'herdr' &&
+            ((cur.mux_session ?? '') === 'default' ? '' : (cur.mux_session ?? '')) === (d.oldMuxSession === 'default' ? '' : d.oldMuxSession))
+        if (!match) return cur
+        const next: SessionInfo = {
+          ...cur,
+          mux_session: d.persistence === 'tmux' ? d.newMuxSession : cur.mux_session,
+          display_name: d.persistence === 'tmux' ? cur.display_name : d.newDisplayName || undefined,
+        }
+        const c = choiceOf(next)
+        if (c) local.set('corral.sessOpen.' + cur.id, JSON.stringify(c))
+        return next
+      })
+    }
+    window.addEventListener(SESSION_RENAMED_EVENT, onRenamed)
+    return () => window.removeEventListener(SESSION_RENAMED_EVENT, onRenamed)
+  }, [watch])
 
   // Terminal + connection lifecycle.
   useEffect(() => {
@@ -565,14 +598,14 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
       macOptionIsMeta: p.optionIsMeta,
       rescaleOverlappingGlyphs: true,
       theme: termScheme().theme,
-      linkHandler: { activate: (_e, uri) => linkTarget.current(uri) },
+      linkHandler: { activate: (e, uri) => linkTarget.current(uri, e) },
     })
     term.loadAddon(new Unicode11Addon())
     term.unicode.activeVersion = '11'
     const fit = new FitAddon()
     term.loadAddon(fit)
     fitToEdge(fit, term)
-    term.loadAddon(new WebLinksAddon((_e, uri) => linkTarget.current(uri)))
+    term.loadAddon(new WebLinksAddon((e, uri) => linkTarget.current(uri, e)))
     term.open(el)
     // The DOM renderer is the default: it is correct at every pixel ratio.
     // WebGL is faster on desktops with real GPUs and is opt-in.
@@ -2248,15 +2281,20 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
     setCopyText(lines.join('\n'))
   }
 
-  linkTarget.current = (uri: string) => {
+  linkTarget.current = (uri: string, e?: MouseEvent) => {
     if (!/^https?:\/\//i.test(uri)) return
-    const u = new URL(uri)
+    let u: URL
+    try {
+      u = new URL(uri)
+    } catch {
+      return
+    }
     const local = ['localhost', '127.0.0.1', '0.0.0.0', '[::1]'].includes(u.hostname)
     const hostId = info?.host_id
     if (local && boot.forwarding && hostId) {
       void openForward(hostId, Number(u.port || (u.protocol === 'https:' ? 443 : 80)), u.pathname + u.search, toast, u.hash)
     } else {
-      window.open(uri, '_blank', 'noopener,noreferrer')
+      openTerminalLink(uri, e)
     }
   }
 
@@ -2492,6 +2530,7 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
     ]
   }
   const [newOpen, setNewOpen] = useState(false)
+  const [renaming, setRenaming] = useState<SessionInfo | null>(null)
   // (Its own: what it opens is a new page in the history, not this one replaced.)
   const fresh = useConnect((s) => {
     setNewOpen(false)
@@ -2519,6 +2558,7 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
     { label: t('term.upload'), icon: <ImagePlus size={16} />, onSelect: () => fileRef.current?.click() },
     ended ? null : { label: t('files.menu'), icon: <FolderOpen size={16} />, onSelect: openFiles },
     ended ? null : { label: t('share.title'), icon: <Eye size={16} />, onSelect: () => setShareOpen(true) },
+    !ended && info ? { label: t('tabs.menu.rename'), icon: <TextCursorInput size={16} />, onSelect: () => setRenaming(info) } : null,
     { label: t('term.copyMode'), icon: <TextSelect size={16} />, onSelect: openCopyMode },
     boot.forwarding && info ? { label: t('ports.title'), icon: <Globe size={16} />, onSelect: () => setPortsOpen(true) } : null,
     boot.code && info ? { label: t('code.open'), icon: <Code2 size={16} />, onSelect: () => code.open(info.host_id, info.host_name) } : null,
@@ -2757,7 +2797,7 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
               }}
             >
               <span className="term-host">
-                <span className="term-host-name">{info?.host_name ?? ''}</span>
+                <span className="term-host-name">{info ? `${info.host_name} · ${sessionWhich(info, sessions ?? [info])}` : ''}</span>
                 <ChevronDown size={12} strokeWidth={2.25} aria-hidden="true" />
               </span>
               <span className={'term-status ' + statusClass} aria-live="polite">
@@ -2958,10 +2998,12 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
                 } catch (e) {
                   throw { human: herdrFailed(e) }
                 }
+                if (info) notifyAgentClosed(agentKey(info, closingPane))
               }}
               onClose={() => setClosingPane(null)}
             />
           )}
+          {renaming && <RenameSessionDialog session={renaming} onClose={() => setRenaming(null)} />}
           {portsOpen && info && <PortsDialog hostId={info.host_id} onClose={() => setPortsOpen(false)} />}
           {shareOpen && !ended && <ShareDialog sessionId={id} onClose={() => setShareOpen(false)} />}
           {filesOpen && !ended && (
@@ -2994,12 +3036,11 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
           {fresh.dialogs}
         </>
       )}
-      {wbOn && <Rail active="terminals" />}
+      {wbOn && <Rail active="terminals" shown={active} />}
       {wbOn && (
         <StatusBar>
           <StatusItem mark={statusClass === 's-open' ? 'on' : statusClass === 's-ended' ? 'off' : 'trouble'} title={statusText}>
-            {info?.host_name ?? ''}
-            {info?.persistence && info.persistence !== 'none' ? ' · ' + info.persistence : ''}
+            {info ? `${info.host_name} · ${sessionWhich(info, [info])}` : ''}
           </StatusItem>
           {info?.host_id ? <CorraldStatusBarItem hostId={info.host_id} hostName={info.host_name} /> : null}
           {statusClass !== 's-open' && <span>{statusText}</span>}

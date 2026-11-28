@@ -10,16 +10,32 @@
 // is asked of the agent, in words put in the composer for the person to send
 // (the agent knows where its work stands; a commit from here could take a
 // half-made change, or meet the agent's own git).
-import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
-import { Activity, Bot, ChevronDown, ChevronRight, Cpu, FolderOpen, GitBranch, GitCommitHorizontal, GitPullRequest, Gauge, ListTodo, Maximize2, MessageSquareText, SquareTerminal, Terminal } from 'lucide-react'
+import { AppLink } from '../components/AppLink'
+import { Activity, Bot, Check, ChevronDown, ChevronRight, Copy, Cpu, Eye, EyeOff, FolderOpen, Gauge, GitBranch, GitCommitHorizontal, GitPullRequest, KeyRound, ListTodo, Maximize2, MessageSquareText, Search, SquareTerminal, Terminal, X } from 'lucide-react'
 import { api, ApiError } from '../api'
 import { t } from '../i18n'
-import { Dialog, DialogHead } from '../components/ui'
+import { copyText, Dialog, DialogHead } from '../components/ui'
 import { duration } from './convoTime'
 import { AgentIcon } from './agentIcons'
 import type { ConvoTask } from './conversation'
 import type { RowCmds } from './agentOrder'
+import {
+  createPaneEnvRevealState,
+  envCopyValue,
+  envDisplayValue,
+  envReasonKey,
+  failPaneEnvReveal,
+  filterPaneEnvVars,
+  finishPaneEnvReveal,
+  hidePaneEnvVar,
+  resetPaneEnvReveal,
+  startPaneEnvReveal,
+  type PaneEnvResponse,
+  type PaneEnvRevealState,
+  type PaneEnvVar,
+} from './paneEnv'
 
 type GitInfo = {
   repo: boolean
@@ -147,6 +163,103 @@ function usePaneInspect(sid: string, pane: string, enabled: boolean) {
   return { inspect, loading }
 }
 
+// Reads environment variables of the pane's foreground process strictly on
+// demand when the user expands the Environment Variables section (never
+// pre-fetched or polled). Cleared when collapsed or switched to another pane.
+function usePaneEnv(sid: string, pane: string, enabled: boolean) {
+  const [env, setEnv] = useState<PaneEnvResponse | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState('')
+  const [revealState, setRevealState] = useState<PaneEnvRevealState>(() => createPaneEnvRevealState())
+  const revealStateRef = useRef<PaneEnvRevealState>(revealState)
+  const revealCtlsRef = useRef<Map<string, AbortController>>(new Map())
+  const [again, setAgain] = useState(0)
+
+  const updateReveal = (fn: (cur: PaneEnvRevealState) => PaneEnvRevealState) => {
+    const next = fn(revealStateRef.current)
+    revealStateRef.current = next
+    setRevealState(next)
+  }
+
+  const abortAllReveals = () => {
+    for (const ctl of revealCtlsRef.current.values()) ctl.abort()
+    revealCtlsRef.current.clear()
+  }
+
+  useEffect(() => {
+    abortAllReveals()
+    updateReveal(resetPaneEnvReveal)
+    if (!enabled) {
+      return
+    }
+    const ctl = new AbortController()
+    const q = pane ? '?pane=' + encodeURIComponent(pane) : ''
+    setLoading(true)
+    setError('')
+    api<PaneEnvResponse>('GET', `/api/sessions/${sid}/pane-env${q}`, undefined, { signal: ctl.signal, timeoutMs: 12000 })
+      .then((res) => !ctl.signal.aborted && setEnv(res))
+      .catch((e) => {
+        if (ctl.signal.aborted) return
+        setError(e instanceof ApiError && e.code === 'ssh_channels_busy' ? t('card.envBusy') : t('card.envReasonFailed'))
+      })
+      .finally(() => !ctl.signal.aborted && setLoading(false))
+    return () => {
+      ctl.abort()
+      abortAllReveals()
+      updateReveal(resetPaneEnvReveal)
+    }
+  }, [sid, pane, enabled, again])
+
+  const reveal = async (name: string) => {
+    const { state: next, token } = startPaneEnvReveal(revealStateRef.current, name)
+    if (!token) return
+    revealStateRef.current = next
+    setRevealState(next)
+    const ctl = new AbortController()
+    revealCtlsRef.current.set(name, ctl)
+    try {
+      const res = await api<{ name: string; value: string }>(
+        'POST',
+        `/api/sessions/${sid}/pane-env/reveal`,
+        { pane, name },
+        { signal: ctl.signal, timeoutMs: 12000 },
+      )
+      if (!ctl.signal.aborted) {
+        updateReveal((cur) => finishPaneEnvReveal(cur, name, token, res.value))
+      }
+    } catch {
+      if (!ctl.signal.aborted) {
+        updateReveal((cur) => failPaneEnvReveal(cur, name, token))
+      }
+    } finally {
+      if (revealCtlsRef.current.get(name) === ctl) {
+        revealCtlsRef.current.delete(name)
+      }
+    }
+  }
+
+  const hide = (name: string) => {
+    const ctl = revealCtlsRef.current.get(name)
+    if (ctl) {
+      ctl.abort()
+      revealCtlsRef.current.delete(name)
+    }
+    updateReveal((cur) => hidePaneEnvVar(cur, name))
+  }
+
+  return {
+    env,
+    loading,
+    error,
+    revealed: revealState.revealed,
+    revealing: revealState.revealing,
+    revealErr: revealState.error ? t('card.envRevealFailed') : '',
+    reveal,
+    hide,
+    retry: () => setAgain((n) => n + 1),
+  }
+}
+
 // (more: it opens a view of its own, the Changes view — a chevron says so.)
 function Row({ icon, children, sub, onClick, title, more }: { icon: ReactNode; children: ReactNode; sub?: ReactNode; onClick?: () => void; title?: string; more?: boolean }) {
   const body = (
@@ -182,6 +295,20 @@ export function CardBody({ data, acts, close }: { data: CardData; acts: CardActs
   const { git, pr, error, retry } = useGit(data.sid, data.pane)
   const [inspectOpen, setInspectOpen] = useState(false)
   const { inspect, loading: inspectLoading } = usePaneInspect(data.sid, data.pane, inspectOpen)
+  const [envOpen, setEnvOpen] = useState(false)
+  const [envQuery, setEnvQuery] = useState('')
+  const [copiedEnv, setCopiedEnv] = useState('')
+  const { env, loading: envLoading, error: envError, revealed, revealing, revealErr, reveal, hide, retry: retryEnv } = usePaneEnv(data.sid, data.pane, envOpen)
+  const filteredEnv = useMemo(() => (env?.vars ? filterPaneEnvVars(env.vars, revealed, envQuery) : []), [env?.vars, revealed, envQuery])
+  const copyEnvVar = (v: PaneEnvVar) => {
+    const val = envCopyValue(v, revealed)
+    if (val === undefined) return
+    void copyText(val).then((ok) => {
+      if (!ok) return
+      setCopiedEnv(v.name)
+      window.setTimeout(() => setCopiedEnv((cur) => (cur === v.name ? '' : cur)), 1500)
+    })
+  }
   const [cliMsg, setCliMsg] = useState('')
   const runCliAct = (action: 'zoom_pane_toggle' | 'focus_pane', doneKey: 'card.cliZoomDone' | 'card.cliFocusDone') => {
     if (!data.pane) return
@@ -266,7 +393,7 @@ export function CardBody({ data, acts, close }: { data: CardData; acts: CardActs
               </Row>
             )}
             {pr?.pr && (
-              <a className="scard-row is-act" href={pr.pr.url} target="_blank" rel="noreferrer" title={pr.pr.url}>
+              <AppLink className="scard-row is-act" href={pr.pr.url} title={pr.pr.url}>
                 <span className="scard-ic" aria-hidden="true">
                   <GitPullRequest size={16} />
                 </span>
@@ -276,7 +403,7 @@ export function CardBody({ data, acts, close }: { data: CardData; acts: CardActs
                   </span>
                   <span className="scard-sub">{t(pr.pr.draft ? 'card.prDraft' : pr.pr.state === 'MERGED' ? 'card.prMerged' : pr.pr.state === 'CLOSED' ? 'card.prClosed' : 'card.prOpen')}</span>
                 </span>
-              </a>
+              </AppLink>
             )}
           </>
         )}
@@ -437,6 +564,107 @@ export function CardBody({ data, acts, close }: { data: CardData; acts: CardActs
                 </button>
                 {cliMsg && <span className="scard-hint">{cliMsg}</span>}
               </div>
+            )}
+          </div>
+        )}
+      </section>
+
+      <section className="scard-sec">
+        <button type="button" className="scard-toggle" aria-expanded={envOpen} onClick={() => setEnvOpen((v) => !v)}>
+          <KeyRound size={14} aria-hidden="true" />
+          <span>{t('card.env')}</span>
+          {envOpen ? <ChevronDown size={14} className="scard-chev" aria-hidden="true" /> : <ChevronRight size={14} className="scard-chev" aria-hidden="true" />}
+        </button>
+        {envOpen && (
+          <div className="scard-env">
+            {envLoading && !env && <p className="scard-note">{t('card.envLoading')}</p>}
+            {envError && (
+              <p className="scard-note">
+                {envError}{' '}
+                <button type="button" className="link-btn" onClick={retryEnv}>
+                  {t('common.retry')}
+                </button>
+              </p>
+            )}
+            {env?.reason && !envError && <p className="scard-note">{t(envReasonKey(env.reason))}</p>}
+            {env && !env.reason && !envError && (
+              <>
+                <div className="scard-env-meta">
+                  {(env.process || env.pid) && (
+                    <span className="scard-chip is-mono">
+                      {[env.process, env.pid ? `PID ${env.pid}` : ''].filter(Boolean).join(' · ')}
+                    </span>
+                  )}
+                  <span className="scard-dim">
+                    {envQuery.trim()
+                      ? t('card.envCountMatch', { shown: filteredEnv.length, total: env.vars.length })
+                      : t('card.envCount', { n: env.vars.length })}
+                  </span>
+                </div>
+                {env.truncated && <p className="scard-hint">{t('card.envTruncated')}</p>}
+                {revealErr && <p className="scard-env-err" role="alert">{revealErr}</p>}
+                {env.vars.length > 0 && (
+                  <label className="scard-env-search">
+                    <Search size={13} aria-hidden="true" />
+                    <input
+                      type="text"
+                      value={envQuery}
+                      onChange={(e) => setEnvQuery(e.target.value)}
+                      placeholder={t('card.envSearch')}
+                      aria-label={t('card.envSearch')}
+                    />
+                    {envQuery && (
+                      <button type="button" className="icon-btn scard-env-clear" onClick={() => setEnvQuery('')} aria-label={t('convo.searchClear')}>
+                        <X size={12} aria-hidden="true" />
+                      </button>
+                    )}
+                  </label>
+                )}
+                {filteredEnv.length === 0 ? (
+                  <p className="scard-note">{t(env.vars.length === 0 ? 'card.envEmpty' : 'card.envNoMatch')}</p>
+                ) : (
+                  <ul className="scard-env-list">
+                    {filteredEnv.map((v) => {
+                      const disp = envDisplayValue(v, revealed)
+                      const busy = !!revealing[v.name]
+                      const canCopy = !disp.masked
+                      return (
+                        <li key={v.name} className="scard-env-item">
+                          <div className="scard-env-row">
+                            <code className="scard-env-name">{v.name}</code>
+                            <div className="scard-env-acts">
+                              {v.sensitive && (
+                                <button
+                                  type="button"
+                                  className="scard-env-btn"
+                                  disabled={busy}
+                                  onClick={() => (disp.revealed ? hide(v.name) : void reveal(v.name))}
+                                >
+                                  {disp.revealed ? <EyeOff size={12} aria-hidden="true" /> : <Eye size={12} aria-hidden="true" />}
+                                  <span>{t(busy ? 'card.envRevealing' : disp.revealed ? 'card.envHide' : 'card.envReveal')}</span>
+                                </button>
+                              )}
+                              <button
+                                type="button"
+                                className="scard-env-btn"
+                                disabled={!canCopy}
+                                title={canCopy ? t('card.envCopy') : t('card.envCopyNeedReveal')}
+                                aria-label={canCopy ? t('card.envCopy') : t('card.envCopyNeedReveal')}
+                                onClick={() => copyEnvVar(v)}
+                              >
+                                {copiedEnv === v.name ? <Check size={12} aria-hidden="true" /> : <Copy size={12} aria-hidden="true" />}
+                              </button>
+                            </div>
+                          </div>
+                          <code className={'scard-env-val' + (disp.masked ? ' is-masked' : '')}>
+                            {disp.text !== '' ? disp.text : t('card.envEmptyVal')}
+                          </code>
+                        </li>
+                      )
+                    })}
+                  </ul>
+                )}
+              </>
             )}
           </div>
         )}

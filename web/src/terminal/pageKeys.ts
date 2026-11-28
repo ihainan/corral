@@ -5,6 +5,7 @@
 // meaning for and the web commonly takes (/, ⌥↑↓, ⌘K: see the help).
 
 import { local } from '../storage'
+import { railDigit } from './railKeys'
 
 export interface KeyLike {
   key: string
@@ -66,9 +67,7 @@ export function switchKey(e: KeyLike): -1 | 0 | 1 {
 // item 15, 11-25); 0 for any other key. By the key's place, not what it types
 // (a Mac's ⌥1 types "¡"); Ctrl with Alt is AltGr (see shortcutHeld).
 export function railKey(e: KeyLike & { code: string }): number {
-  if (composing(e) || !e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return 0
-  const m = /^Digit([1-9])$/.exec(e.code)
-  return m ? Number(m[1]) : 0
+  return railDigit(e)
 }
 export const RAIL_KEYS = onMac() ? '⌥1–9' : 'Alt+1–9'
 

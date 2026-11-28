@@ -54,7 +54,9 @@ func (s *Server) suggestion(w http.ResponseWriter, ctx context.Context, sess *te
 	if agent == "codex" {
 		// (A Codex: no suggestion of its own here; what it does that its log
 		// does not say — compacting, a request tried again.)
-		compacting, retry, review := codexWorkNoteAll(sgr.ReplaceAllString(string(res.Out), ""))
+		norm := strings.ReplaceAll(string(res.Out), "\r", "")
+		plain := sgr.ReplaceAllString(norm, "")
+		compacting, retry, review := codexWorkNoteAll(plain)
 		if compacting {
 			out["compacting"] = true
 		}
@@ -64,24 +66,35 @@ func (s *Server) suggestion(w http.ResponseWriter, ctx context.Context, sess *te
 		if review != "" {
 			out["reviewing"] = review
 		}
-		if g := codexGoalOnScreen(sgr.ReplaceAllString(string(res.Out), "")); g != "" {
+		if g := codexGoalOnScreen(plain); g != "" {
 			out["goal"] = g // (its goal, as its footer says: its log says nothing of how it goes, 0.167)
 		}
-		if codexPlanPrompt(sgr.ReplaceAllString(string(res.Out), "")) {
+		if codexPlanPrompt(plain) {
 			out["plan_asked"] = true // (it asks whether to carry its plan out: answered from the page as any question)
+		}
+		if d, ok := codexDraftText(norm); ok {
+			if _, dig, _ := screenOf([]byte(plain)); dig != "" {
+				out["box_draft"] = map[string]any{"text": clip(d, 200), "digest": dig}
+			}
 		}
 		writeJSON(w, http.StatusOK, out)
 		return
 	}
-	if claudeOwner(sgr.ReplaceAllString(string(res.Out), ""), false) == "main" {
+	plain := sgr.ReplaceAllString(string(res.Out), "")
+	if claudeOwner(plain, false) == "main" {
 		out["suggestion"] = suggestionOf(string(res.Out))
 		// (Claude Code's card above its box, if one is there: read off the same screen.)
 		if c := cardOf(string(res.Out)); c != nil {
 			out["card"] = c
 		}
+		if ls, ok := boxDraftLines(string(res.Out)); ok && len(ls) > 0 {
+			if dig := boxDigest(plain); dig != "" {
+				out["box_draft"] = map[string]any{"text": clip(strings.Join(ls, " "), 200), "digest": dig}
+			}
+		}
 		// (Compacting: its log says nothing till it is done, a minute or two
 		// on; the screen says so all along.)
-		if compactingOn(sgr.ReplaceAllString(string(res.Out), "")) {
+		if compactingOn(plain) {
 			out["compacting"] = true
 		}
 	}

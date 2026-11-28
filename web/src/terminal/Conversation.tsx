@@ -2,7 +2,7 @@ import { askTask, taskTaken, TASK_ASK_FOR, type TaskAsked } from './bgTaskOpen'
 import { DRAFTS_EVENT, hasAgentDraft } from './drafts'
 import { createContext, Fragment, memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
-import { Activity, ArrowDown, History, ArrowDownAZ, ArrowUp, ArrowUpDown, Bot, Check, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, ChevronsDownUp, ChevronsUpDown, Clock, Columns2, Copy, Cpu, Download, Eye, FilePen, FileText, Folder, FolderOpen, Gauge as GaugeIcon, PencilLine, GitBranch, GitFork, Hand, Image as ImageIcon, ImageOff, Info, Keyboard, ListChecks, ListOrdered, Loader, LogOut, MessageCircleQuestion, MessagesSquare, MoreHorizontal, MoreVertical, PanelLeft, PanelRight, Pin, Plus, Radar, RotateCcw, RotateCw, Search, Server, Settings, ShieldOff, Sparkles, SquarePlus, SquareTerminal, Target, TextCursorInput, TriangleAlert, WifiOff, X } from 'lucide-react'
+import { Activity, ArrowDown, History, ArrowDownAZ, ArrowUp, ArrowUpDown, Bot, Check, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, ChevronsDownUp, ChevronsUpDown, Clock, Columns2, Copy, Cpu, Download, Eye, FilePen, FileText, Folder, FolderOpen, Gauge as GaugeIcon, PencilLine, GitBranch, GitFork, Hand, Image as ImageIcon, ImageOff, Info, Keyboard, ListChecks, ListFilter, ListOrdered, Loader, LogOut, MessageCircleQuestion, MessagesSquare, MoreHorizontal, MoreVertical, PanelLeft, PanelRight, Pin, Plus, Radar, RotateCcw, RotateCw, Search, Server, Settings, ShieldOff, Sparkles, SquarePlus, SquareTerminal, Target, TextCursorInput, TriangleAlert, WifiOff, X } from 'lucide-react'
 import { t, getLang, type I18nKey } from '../i18n'
 import { api } from '../api'
 import { setPrefs, usePrefs } from '../prefs'
@@ -235,6 +235,12 @@ function useRunWhileSeen(el: HTMLElement | null, on: boolean) {
 
 // (Where the side list was scrolled to, across the views made for each agent: see ConversationView.)
 let sideScrolled = 0
+let sideScrollHold = false
+// Hold the sidebar scroll position across the next tab switch / view mount
+// (used when closing a tab or agent so the list does not jump to another row).
+export function holdSideScroll() {
+  sideScrollHold = true
+}
 
 export interface ConvoLineageBar {
   parent?: { key: string; title: string; status: ConvoListRow['status']; onPick: () => void }
@@ -570,13 +576,17 @@ export function ConversationView({
     if (!sideShown || !sideBox) return
     const scroller = sideBox.querySelector<HTMLElement>('.convo-list-groups') ?? sideBox
     scroller.scrollTop = sideScrolled
-    const row = sideBox.querySelector<HTMLElement>('.convo-list-row[aria-current="true"]')
+    const hold = sideScrollHold
+    sideScrollHold = false
+    const row = hold ? null : sideBox.querySelector<HTMLElement>('.convo-list-row[aria-current="true"]')
     if (row) {
       const r = row.getBoundingClientRect()
       const box = scroller.getBoundingClientRect()
       if (r.top < box.top || r.bottom > box.bottom) row.scrollIntoView({ block: 'nearest' })
     }
-    const keep = () => void (sideScrolled = scroller.scrollTop)
+    const keep = () => {
+      if (scroller.clientHeight > 0) sideScrolled = scroller.scrollTop
+    }
     keep()
     scroller.addEventListener('scroll', keep, { passive: true })
     return () => scroller.removeEventListener('scroll', keep)
@@ -4402,7 +4412,7 @@ export function QuotaChip({ of }: { of: QuotaOf }) {
     [at ? t('wb.quotaAt', { at: quotaClock(at) }) : '', failed ? t('quota.failed') : ''].filter(Boolean).join(' · '),
   ].filter(Boolean).join('\n')
   return (
-    <StatusItem title={title}>
+    <StatusItem title={title} onClick={() => openSettingsModal('subscriptions')}>
       <span className={'wb-quota' + (failed ? ' is-stale' : '')}>
         <span className="wb-quota-label">
           {t('wb.quotaLabel')}
@@ -5866,7 +5876,7 @@ export function ListSearch({ value, onChange, focus, onLeft, hint, onNav }: { va
   return (
     <div className="list-search" role="search">
       <span className="list-search-icon" aria-hidden="true">
-        <Search size={15} />
+        <ListFilter size={15} />
       </span>
       <input
         ref={ref}
@@ -6010,7 +6020,208 @@ function Picker({ rows, onClose, searchFirst }: { rows: ConvoListRow[]; onClose:
   )
 }
 
-// "New agent", as a row of the list it heads: its plus where the agents'
+// Persistent agent sidebar used when no conversation view is mounted (no tabs
+// open, or the front tab's agent ended). Shares width, fold state, scroll
+// position and keyboard shortcuts (⌘B, ⌘P, ⌘T) with ConversationView so the
+// sidebar never disappears, shifts, collapses or loses scroll position.
+export function AgentSidePane({
+  rows,
+  query,
+  onQuery,
+  active,
+  onShownChange,
+}: {
+  rows: ConvoListRow[]
+  query: string
+  onQuery: (q: string) => void
+  active: boolean
+  onShownChange?: (shown: boolean) => void
+}) {
+  const anchorEl = useRef<HTMLSpanElement>(null)
+  const sideEl = useRef<HTMLElement>(null)
+  const [sideW, setSideW] = useState(() => Number(local.get(SIDE_W_KEY)) || SIDE_W)
+  const [folded, setFoldedState] = useState(() => local.get(SIDE_KEY) === '0')
+  const [wide, setWide] = useState(() => (typeof window !== 'undefined' ? window.innerWidth >= SIDE_MIN : true))
+  const [viewW, setViewW] = useState(() => (typeof window !== 'undefined' ? window.innerWidth : SIDE_MIN))
+  const [searchAsked, setSearchAsked] = useState(0)
+  const [picking, setPicking] = useState<boolean | 'search'>(false)
+
+  const sideWidth = sideWidthOf(sideW, viewW || SIDE_MIN)
+  const sideShown = wide && !folded
+  const sideShownNow = useRef(sideShown)
+  sideShownNow.current = sideShown
+  const wideNow = useRef(wide)
+  wideNow.current = wide
+  const pickingNow = useRef(picking)
+  pickingNow.current = picking
+
+  useEffect(() => {
+    onShownChange?.(sideShown)
+  }, [sideShown, onShownChange])
+
+  useEffect(() => {
+    const sync = () => {
+      const nextW = Number(local.get(SIDE_W_KEY)) || SIDE_W
+      setSideW((curW) => (curW === nextW ? curW : nextW))
+      const nextF = local.get(SIDE_KEY) === '0'
+      setFoldedState((curF) => (curF === nextF ? curF : nextF))
+    }
+    sync()
+    window.addEventListener(SIDE_CHANGE_EVENT, sync)
+    return () => window.removeEventListener(SIDE_CHANGE_EVENT, sync)
+  }, [])
+
+  useLayoutEffect(() => {
+    const box = anchorEl.current?.closest('.wb-agent-layout') ?? anchorEl.current?.closest('.term-root')
+    if (!box) return
+    const look = () => {
+      setWide(box.clientWidth >= SIDE_MIN)
+      setViewW(box.clientWidth)
+    }
+    look()
+    const ro = new ResizeObserver(look)
+    ro.observe(box)
+    return () => ro.disconnect()
+  }, [])
+
+  useLayoutEffect(() => {
+    const sideBox = sideEl.current
+    if (!sideShown || !sideBox) return
+    const scroller = sideBox.querySelector<HTMLElement>('.convo-list-groups') ?? sideBox
+    scroller.scrollTop = sideScrolled
+    sideScrollHold = false
+    const keep = () => {
+      if (scroller.clientHeight > 0) sideScrolled = scroller.scrollTop
+    }
+    keep()
+    scroller.addEventListener('scroll', keep, { passive: true })
+    return () => scroller.removeEventListener('scroll', keep)
+  }, [sideShown])
+
+  const keepSideW = (w: number) => {
+    const v = sideWidthOf(w, viewW || SIDE_MIN)
+    setSideW(v)
+    if (v === SIDE_W) local.remove(SIDE_W_KEY)
+    else local.set(SIDE_W_KEY, String(v))
+    if (sideEl.current) sideEl.current.style.width = v + 'px'
+    window.dispatchEvent(new Event(SIDE_CHANGE_EVENT))
+    return v
+  }
+  const drag = useRef<{ id: number; x: number; w: number; to: number; frame: number } | null>(null)
+  const endDrag = (keep: boolean) => {
+    const d = drag.current
+    if (!d) return
+    drag.current = null
+    cancelAnimationFrame(d.frame)
+    keepSideW(keep ? d.to : d.w)
+  }
+
+  useEffect(() => {
+    if (!active) return
+    const onKey = (e: KeyboardEvent) => {
+      if (!pickKey(e, mac) || e.defaultPrevented) return
+      e.preventDefault()
+      e.stopPropagation()
+      const others = [...document.querySelectorAll('[aria-modal="true"]')].some((d) => isShown(d) && !d.classList.contains('convo-picker')) || (!pickingNow.current && document.documentElement.classList.contains('modal-open'))
+      if (others) return
+      if (pickingNow.current) setPicking(false)
+      else if (sideShownNow.current) setSearchAsked((n) => n + 1)
+      else setPicking('search')
+    }
+    window.addEventListener('keydown', onKey, true)
+    return () => window.removeEventListener('keydown', onKey, true)
+  }, [active])
+
+  useEffect(() => {
+    if (!active) return
+    const on = () => setPicking('search')
+    window.addEventListener(OPEN_PICKER, on)
+    return () => window.removeEventListener(OPEN_PICKER, on)
+  }, [active])
+
+  useEffect(() => {
+    if (!picking) dropPickInTab()
+  }, [picking])
+
+  useEffect(() => {
+    if (sideShown || !active) setPicking(false)
+  }, [sideShown, active])
+
+  useEffect(() => {
+    if (!active) return
+    const onKey = (e: KeyboardEvent) => {
+      if (!sideKey(e, mac) || underDialog(e) || !wideNow.current) return
+      e.preventDefault()
+      setFoldedState((f) => {
+        local.set(SIDE_KEY, f ? '1' : '0')
+        window.dispatchEvent(new Event(SIDE_CHANGE_EVENT))
+        return !f
+      })
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [active])
+
+  return (
+    <>
+      <span ref={anchorEl} hidden />
+      {sideShown && (
+        <>
+          <nav className="convo-side" aria-label={t('convo.agents')} style={{ width: sideWidth }} ref={sideEl}>
+            <AgentList rows={rows} menus query={query} onQuery={onQuery} search={searchAsked} onSearchLeft={() => setSearchAsked(0)} hint={!isTouchOnly} compact showNew />
+          </nav>
+          <div
+            className="convo-side-grip"
+            role="separator"
+            aria-orientation="vertical"
+            aria-label={t('convo.sideWidth')}
+            title={t('convo.sideWidth')}
+            aria-valuenow={sideWidth}
+            aria-valuemin={SIDE_W_MIN}
+            aria-valuemax={sideWidthMax(viewW || SIDE_MIN)}
+            tabIndex={0}
+            onPointerDown={(e) => {
+              if (e.button !== 0 || drag.current) return
+              e.preventDefault()
+              e.currentTarget.setPointerCapture(e.pointerId)
+              drag.current = { id: e.pointerId, x: e.clientX, w: sideWidth, to: sideWidth, frame: 0 }
+            }}
+            onPointerMove={(e) => {
+              const d = drag.current
+              if (!d || e.pointerId !== d.id) return
+              if (e.pointerType === 'mouse' && e.buttons === 0) return endDrag(true)
+              d.to = sideWidthOf(d.w + e.clientX - d.x, viewW || SIDE_MIN)
+              cancelAnimationFrame(d.frame)
+              d.frame = requestAnimationFrame(() => {
+                if (sideEl.current) sideEl.current.style.width = d.to + 'px'
+              })
+            }}
+            onPointerUp={(e) => {
+              if (drag.current?.id === e.pointerId) endDrag(true)
+            }}
+            onPointerCancel={(e) => {
+              if (drag.current?.id === e.pointerId) endDrag(false)
+            }}
+            onLostPointerCapture={(e) => {
+              if (drag.current?.id === e.pointerId) endDrag(true)
+            }}
+            onDoubleClick={() => keepSideW(SIDE_W)}
+            onKeyDown={(e) => {
+              const step = e.shiftKey ? 48 : 16
+              if (e.key === 'ArrowLeft') keepSideW(sideWidth - step)
+              else if (e.key === 'ArrowRight') keepSideW(sideWidth + step)
+              else if (e.key === 'Home') keepSideW(SIDE_W_MIN)
+              else if (e.key === 'End') keepSideW(SIDE_W_MAX)
+              else return
+              e.preventDefault()
+            }}
+          />
+        </>
+      )}
+      {picking && <Picker rows={rows} searchFirst={picking === 'search'} onClose={() => setPicking(false)} />}
+    </>
+  )
+}
 // icons are, its words where their titles are.
 
 // The agent's task list, over the composer while some of it is left: one

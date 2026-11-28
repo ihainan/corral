@@ -494,7 +494,7 @@ func (s *Server) cardPress(w http.ResponseWriter, ctx context.Context, sess *ter
 	_, err = s.runGated(ctx, sess, gatedReq{
 		Gate:    "card:" + c.digest,
 		Mode:    sess.Persistence,
-		Session: sess.TmuxSession,
+		Session: sess.CurrentTmuxSession(),
 		Pane:    pane,
 		Socket:  socket,
 		PID:     pid,

@@ -9,9 +9,11 @@ import { api, ApiError, bumpAuthGen, setUnauthorizedHandler, type Bootstrap, typ
 import { applyDefaultLanguage, t } from './i18n'
 import { installLeaveGuard, reloadPage } from './leaveGuard'
 import { freezePrefs, getPrefs, resetPrefsSession, sendPendingPrefs, syncPrefsFromServer } from './prefs'
-import { match, navigate, usePath, linkHandler } from './router'
+import { match, navigate, usePath } from './router'
 import { BrandMark, ToastProvider, useToast } from './components/ui'
 import { CorraldUpdateNotices } from './components/CorraldUpdateNotices'
+import { AppLink } from './components/AppLink'
+import { isPlainPrimaryClick } from './linkPolicy'
 import { disablePush, syncPush } from './push'
 import { LoginPage, NewPasswordPage, SetupPage, InvitePage } from './pages/Auth'
 import { AgentsChat } from './pages/AgentsChat'
@@ -19,6 +21,7 @@ import { HostsPage } from './pages/Hosts'
 import { HostEditPage } from './pages/HostEdit'
 import { KeysPage } from './pages/Keys'
 import { isDesktopSettings, OPEN_SETTINGS, openSettingsModal, SettingsDialog, SettingsPage, type SettingsCatId } from './pages/Settings'
+import { SubscriptionsPage } from './pages/Subscriptions'
 import { AdminUsersPage, AdminAuditPage } from './pages/Admin'
 import { preloadTerminal, RecordingPlayerPage, RecordingsPage, TerminalPage } from './pages/lazyPages'
 import { TERMINALS, TerminalTabs, useTabsMode } from './pages/TerminalTabs'
@@ -276,6 +279,7 @@ function route(path: string, boot: Bootstrap, me: Me | null, tabs: boolean): Rea
   if ((m = match('/hosts/:id/edit', path))) return <Shell active="hosts"><HostEditPage id={Number(m.id)} /></Shell>
   if (path === '/keys') return <Shell active="keys"><KeysPage /></Shell>
   if (path === '/settings') return <Shell active="settings"><SettingsPage /></Shell>
+  if (path === '/subscriptions') return <Shell active="settings"><SubscriptionsPage /></Shell>
   if (me.role === 'admin') {
     if (path === '/admin/users') return <Shell active="users"><AdminUsersPage /></Shell>
     if (path === '/admin/audit') return <Shell active="audit"><AdminAuditPage /></Shell>
@@ -365,17 +369,15 @@ function Shell({ active, children }: { active: NavKey; children: ReactNode }) {
   const named = (i: (typeof main)[number]) =>
     i.key === 'agents' && waiting.n ? `${i.label}，${t(waiting.stale ? 'nav.waitingStaleN' : 'nav.waitingN', { n: waiting.n })}` : undefined
   const item = (i: (typeof main)[number]) => (
-    <a
+    <AppLink
       key={i.key}
       className="nav-item"
       href={i.href}
       onClick={(e) => {
-        if (i.key === 'settings' && !e.metaKey && !e.ctrlKey && !e.shiftKey && e.button === 0 && isDesktopSettings() && path !== '/settings') {
+        if (i.key === 'settings' && isPlainPrimaryClick(e) && isDesktopSettings() && path !== '/settings') {
           e.preventDefault()
           openSettingsModal()
-          return
         }
-        linkHandler(i.href)(e)
       }}
       aria-current={i.key === active ? 'page' : undefined}
       title={i.label}
@@ -384,7 +386,7 @@ function Shell({ active, children }: { active: NavKey; children: ReactNode }) {
       {i.icon}
       <span className="label">{i.label}</span>
       {badge(i.key, 'nav-badge')}
-    </a>
+    </AppLink>
   )
   // On phones the admin pages sit under Settings in the tab bar.
   const tabActive = active === 'users' || active === 'audit' || active === 'recordings' ? 'settings' : active
@@ -400,10 +402,10 @@ function Shell({ active, children }: { active: NavKey; children: ReactNode }) {
   return (
     <div className="shell">
       <nav className="sidebar" aria-label={t('nav.main')}>
-        <a className="brand" href="/" onClick={linkHandler('/')} aria-label={t('app.name')}>
+        <AppLink className="brand" href="/" aria-label={t('app.name')}>
           <BrandMark />
           <span className="label">{t('app.name')}</span>
-        </a>
+        </AppLink>
         {side.map(item)}
         {extra.map(item)}
         {admin.length > 0 && <div className="nav-group">{t('nav.admin')}</div>}
@@ -418,13 +420,13 @@ function Shell({ active, children }: { active: NavKey; children: ReactNode }) {
       <div className="content">{children}</div>
       <nav className="tabbar" aria-label={t('nav.main')}>
         {side.map((i) => (
-          <a key={i.key} className="tab" href={i.href} onClick={linkHandler(i.href)} aria-current={i.key === tabActive ? 'page' : undefined} aria-label={named(i)}>
+          <AppLink key={i.key} className="tab" href={i.href} aria-current={i.key === tabActive ? 'page' : undefined} aria-label={named(i)}>
             <span className="tab-icon">
               {i.icon}
               {badge(i.key, 'tab-badge')}
             </span>
             <span>{i.label}</span>
-          </a>
+          </AppLink>
         ))}
       </nav>
     </div>
@@ -452,9 +454,9 @@ export function takeSettingsScroll(): number | null {
 }
 export function PhoneBack() {
   return (
-    <a className="icon-btn phone-back" href="/settings" onClick={linkHandler('/settings')} aria-label={t('common.back')}>
+    <AppLink className="icon-btn phone-back" href="/settings" aria-label={t('common.back')}>
       <ChevronLeft size={20} />
-    </a>
+    </AppLink>
   )
 }
 
