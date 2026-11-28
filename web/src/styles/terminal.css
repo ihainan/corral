@@ -576,7 +576,7 @@ html.kb-open .keybar { padding-bottom: 6px; }
 .term-rec::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
 .term-tab[aria-current="page"] .term-tab-title { color: var(--term-fg-2); }
 .term-tab-name { display: flex; gap: 6px; min-width: 0; flex: 0 1 auto; white-space: nowrap; }
-.agent-tabs .term-tab-name { display: block; flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; } /* (its words alone: cut with an ellipsis as the tab narrows) */
+.agent-tabs .term-tab-name { display: block; flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; text-align: left; } /* (its words alone: cut with an ellipsis as the tab narrows) */
 /* A long name is cut, its host kept longest: the title gives way first,
    then the session's name, then the host (ux1101 T27). */
 .term-tab-host { flex: 0 0 auto; max-width: 100%; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
