@@ -158,12 +158,13 @@ type Session struct {
 	Created  time.Time
 	// The host configuration the session was opened with (see StartOptions).
 	HostConfig string
-	// What the shell runs in, as in StartOptions; TmuxSession and DisplayName
-	// may be updated under mu when the user renames the session.
-	Persistence  string
-	TmuxSession  string
-	HerdrSession string
-	DisplayName  string
+	// What the shell runs in, as in StartOptions; TmuxSession, TmuxSessionID,
+	// and DisplayName may be updated under mu when the session binds or renames.
+	Persistence   string
+	TmuxSession   string
+	TmuxSessionID string
+	HerdrSession  string
+	DisplayName   string
 
 	client *ssh.Client
 	ssh    *ssh.Session
@@ -859,6 +860,20 @@ func (s *Session) CurrentTmuxSession() string {
 func (s *Session) SetTmuxSession(name string) {
 	s.mu.Lock()
 	s.TmuxSession = name
+	s.mu.Unlock()
+}
+
+// CurrentTmuxSessionID returns the bound tmux session ID (e.g. "$0"), if known.
+func (s *Session) CurrentTmuxSessionID() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.TmuxSessionID
+}
+
+// SetTmuxSessionID records tmux's immutable session ID (e.g. "$0") for this session.
+func (s *Session) SetTmuxSessionID(id string) {
+	s.mu.Lock()
+	s.TmuxSessionID = id
 	s.mu.Unlock()
 }
 

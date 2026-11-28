@@ -128,43 +128,45 @@ var (
 // sensitiveParamAnySegs are lowercase segments that mark a URL query/fragment
 // parameter or connection string key as sensitive anywhere in its segmented name.
 var sensitiveParamAnySegs = map[string]bool{
-	"password":     true,
-	"passwd":       true,
-	"passphrase":   true,
-	"pwd":          true,
-	"secret":       true,
-	"token":        true,
-	"apikey":       true,
-	"passkey":      true,
-	"accesskey":    true,
-	"secretkey":    true,
-	"privatekey":   true,
-	"authkey":      true,
-	"appkey":       true,
-	"clientkey":    true,
-	"accesstoken":  true,
-	"authtoken":    true,
-	"refreshtoken": true,
-	"idtoken":      true,
-	"clientsecret": true,
-	"appsecret":    true,
-	"signature":    true,
-	"sig":          true,
-	"credential":   true,
-	"credentials":  true,
-	"jwt":          true,
-	"bearer":       true,
-	"cookie":       true,
+	"password":      true,
+	"passwd":        true,
+	"passphrase":    true,
+	"pwd":           true,
+	"secret":        true,
+	"authorization": true,
+	"apikey":        true,
+	"passkey":       true,
+	"accesskey":     true,
+	"secretkey":     true,
+	"privatekey":    true,
+	"authkey":       true,
+	"appkey":        true,
+	"clientkey":     true,
+	"accesstoken":   true,
+	"authtoken":     true,
+	"refreshtoken":  true,
+	"idtoken":       true,
+	"clientsecret":  true,
+	"appsecret":     true,
+	"signature":     true,
+	"sig":           true,
+	"credential":    true,
+	"credentials":   true,
+	"jwt":           true,
+	"bearer":        true,
+	"cookie":        true,
 }
 
 // sensitiveParamLastSegs are lowercase segments that mark a parameter/key as
 // sensitive when they are the final (or sole) segment (e.g. api_key, key,
-// basic_auth, auth, db_pass, pass), avoiding false positives on words like
-// authSource, SharedAccessKeyName, or KEY_SIZE.
+// access_token, token, basic_auth, auth, db_pass, pass), avoiding false
+// positives on words like authSource, SharedAccessKeyName, KEY_SIZE, or
+// token_budget.
 var sensitiveParamLastSegs = map[string]bool{
-	"key":  true,
-	"auth": true,
-	"pass": true,
+	"key":   true,
+	"token": true,
+	"auth":  true,
+	"pass":  true,
 }
 
 // splitParamSegments splits a parameter/key name into lowercase word segments
@@ -257,43 +259,79 @@ func percentDecodeOnce(s string) (string, bool) {
 	return b.String(), true
 }
 
+// jsonUnicodeDecodeOnce decodes \uXXXX hex escapes (common in JSON keys such as
+// {"pass\u0077ord":"..."}) in a single linear pass, leaving malformed escapes intact.
+func jsonUnicodeDecodeOnce(s string) (string, bool) {
+	if !strings.Contains(s, `\u`) {
+		return s, false
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	changed := false
+	for i := 0; i < len(s); i++ {
+		if s[i] == '\\' && i+5 < len(s) && s[i+1] == 'u' {
+			h0, ok0 := fromHexByte(s[i+2])
+			h1, ok1 := fromHexByte(s[i+3])
+			h2, ok2 := fromHexByte(s[i+4])
+			h3, ok3 := fromHexByte(s[i+5])
+			if ok0 && ok1 && ok2 && ok3 {
+				r := rune(h0)<<12 | rune(h1)<<8 | rune(h2)<<4 | rune(h3)
+				b.WriteRune(r)
+				i += 5
+				changed = true
+				continue
+			}
+		}
+		b.WriteByte(s[i])
+	}
+	if !changed {
+		return s, false
+	}
+	return b.String(), true
+}
+
 func isParamKeyChar(c byte) bool {
 	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '.'
 }
 
-func isValueTerminator(c byte) bool {
-	switch c {
-	case ';', ',', '&', '#', '?', '\r', '\n', '}', ']':
-		return true
-	}
-	return false
+func isASCIIWhitespace(c byte) bool {
+	return c == ' ' || c == '\t' || c == '\r' || c == '\n'
 }
 
-// hasNonEmptyValueAfterSep reports whether s[pos:] begins with a non-empty
-// value after optional horizontal whitespace, failing closed whenever any
-// non-delimiter token follows (except explicit empty quotes "" / ”).
-func hasNonEmptyValueAfterSep(s string, pos int) bool {
+var logLevelTokens = map[string]bool{
+	"trace":   true,
+	"debug":   true,
+	"info":    true,
+	"warn":    true,
+	"warning": true,
+	"error":   true,
+	"off":     true,
+	"fatal":   true,
+}
+
+// isLogLevelValue reports whether s[pos:] begins with a standalone log level
+// token (e.g. RUST_LOG=myapp::auth=debug,sqlx=info).
+func isLogLevelValue(s string, pos int) bool {
 	for pos < len(s) && (s[pos] == ' ' || s[pos] == '\t') {
 		pos++
 	}
-	if pos >= len(s) || isValueTerminator(s[pos]) {
+	start := pos
+	for pos < len(s) && isParamKeyChar(s[pos]) {
+		pos++
+	}
+	if pos == start {
 		return false
 	}
-	if s[pos] == '"' || s[pos] == '\'' {
-		q := s[pos]
-		if pos+1 < len(s) && s[pos+1] == q {
-			after := pos + 2
-			if after >= len(s) || s[after] == ' ' || s[after] == '\t' || isValueTerminator(s[after]) {
-				return false
-			}
-		}
+	if pos < len(s) && s[pos] != ',' && s[pos] != ';' && !isASCIIWhitespace(s[pos]) {
+		return false
 	}
-	return true
+	return logLevelTokens[strings.ToLower(s[start:pos])]
 }
 
-// scanSensitiveKeyValue scans s fail-closed for any key token followed by
-// optional whitespace, '=' or ':', optional whitespace, and a non-empty value,
-// returning true whenever the key is classified as sensitive.
+// scanSensitiveKeyValue scans s fail-closed for any key token (with optional
+// [...] subscript suffixes and optional surrounding quotes) followed by
+// optional whitespace (including newlines), '=' or ':', and any non-whitespace
+// character before the end of the value.
 func scanSensitiveKeyValue(s string) bool {
 	if !strings.ContainsAny(s, "=:") {
 		return false
@@ -316,12 +354,30 @@ func scanSensitiveKeyValue(s string) bool {
 			continue
 		}
 		key := s[start:i]
+		if !isSensitiveParamKey(key) {
+			continue
+		}
 		j := i
+		// Allow subscripted keys such as ?user[password]=x, ?password[]=x, ?credentials[db]=x.
+		if j < len(s) && s[j] == ']' && start > 0 && s[start-1] == '[' {
+			j++
+		}
+		for j < len(s) && s[j] == '[' {
+			k := j + 1
+			for k < len(s) && s[k] != ']' && s[k] != '[' && s[k] != '=' && s[k] != ':' && s[k] != '\n' && s[k] != '\r' {
+				k++
+			}
+			if k < len(s) && s[k] == ']' {
+				j = k + 1
+			} else {
+				break
+			}
+		}
 		// Allow quoted keys such as JSON/YAML `"password": "hunter2"`.
 		if j < len(s) && (s[j] == '"' || s[j] == '\'') && start > 0 && s[start-1] == s[j] {
 			j++
 		}
-		for j < len(s) && (s[j] == ' ' || s[j] == '\t') {
+		for j < len(s) && isASCIIWhitespace(s[j]) {
 			j++
 		}
 		if j >= len(s) || (s[j] != '=' && s[j] != ':') {
@@ -337,28 +393,42 @@ func scanSensitiveKeyValue(s string) bool {
 				continue
 			}
 		}
-		if !isSensitiveParamKey(key) {
+		// Exclude `::`-qualified module paths followed by a log level (e.g. RUST_LOG=myapp::auth=debug).
+		if sep == '=' && start >= 2 && s[start-1] == ':' && s[start-2] == ':' && isLogLevelValue(s, j+1) {
 			continue
 		}
-		if hasNonEmptyValueAfterSep(s, j+1) {
+		k := j + 1
+		for k < len(s) && isASCIIWhitespace(s[k]) {
+			k++
+		}
+		if k < len(s) {
 			return true
 		}
 	}
 	return false
 }
 
-// hasSensitiveKeyValue checks both the raw value and up to two passes of
-// best-effort percent-decoding so percent-encoded (and double-encoded) key
-// names and connection strings are masked fail-closed.
-func hasSensitiveKeyValue(v string) bool {
-	if scanSensitiveKeyValue(v) {
+// hasSensitiveKeyValueOrCredURL checks the raw value, JSON \uXXXX-decoded text,
+// and up to two passes of best-effort percent-decoding for either sensitive
+// key/value pairs or embedded username:password@ URLs.
+func hasSensitiveKeyValueOrCredURL(v string) bool {
+	check := func(s string) bool {
+		return scanSensitiveKeyValue(s) || credURLRe.MatchString(s)
+	}
+	if check(v) {
+		return true
+	}
+	if u, ok := jsonUnicodeDecodeOnce(v); ok && check(u) {
 		return true
 	}
 	if d1, ok := percentDecodeOnce(v); ok {
-		if scanSensitiveKeyValue(d1) {
+		if check(d1) {
 			return true
 		}
-		if d2, ok := percentDecodeOnce(d1); ok && scanSensitiveKeyValue(d2) {
+		if u1, ok := jsonUnicodeDecodeOnce(d1); ok && check(u1) {
+			return true
+		}
+		if d2, ok := percentDecodeOnce(d1); ok && check(d2) {
 			return true
 		}
 	}
@@ -382,7 +452,7 @@ func isSensitiveEnvValue(value string) bool {
 	if len(v) == 0 {
 		return false
 	}
-	if hasSensitiveKeyValue(v) {
+	if hasSensitiveKeyValueOrCredURL(v) {
 		return true
 	}
 	if len(v) < 6 {
@@ -404,9 +474,6 @@ func isSensitiveEnvValue(value string) bool {
 		return true
 	}
 	if jwtValueRe.MatchString(v) {
-		return true
-	}
-	if credURLRe.MatchString(v) {
 		return true
 	}
 	return looksLikeRandomSecret(v)
@@ -633,17 +700,30 @@ func procEnvironByPIDCommand(pid int) string {
 }
 
 const tmuxPaneEnvironScript = `PATH="$HOME/.local/bin:$HOME/bin:$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
-sess=$1 pane=$2
+sess=$1 pane=$2 sess_id=$3
 if [ ! -d /proc/self ]; then
   printf 'ERR\tno_proc\n'
   exit 0
 fi
-if [ -n "$pane" ]; then
-  if [ -z "$sess" ]; then
-    printf 'ERR\tpane_not_in_session\n'
+if [ -z "$sess" ]; then
+  printf 'ERR\tpane_not_in_session\n'
+  exit 0
+fi
+target="=$sess:"
+if [ -n "$sess_id" ]; then
+  cur_id=$(tmux -u display-message -p -t "=$sess:" '#{session_id}' 2>/dev/null)
+  if [ "$cur_id" != "$sess_id" ]; then
+    if [ -n "$cur_id" ] || tmux -u display-message -p -t "$sess_id:" '#{session_id}' >/dev/null 2>&1; then
+      printf 'ERR\tsession_mismatch\n'
+    else
+      printf 'ERR\tno_process\n'
+    fi
     exit 0
   fi
-  if ! panes=$(tmux -u list-panes -s -t "=$sess:" -F '#{pane_id}' 2>/dev/null); then
+  target="$sess_id:"
+fi
+if [ -n "$pane" ]; then
+  if ! panes=$(tmux -u list-panes -s -t "$target" -F '#{pane_id}' 2>/dev/null); then
     printf 'ERR\tno_process\n'
     exit 0
   fi
@@ -662,7 +742,7 @@ EOF
   fi
   pane_pid=$(tmux -u display-message -p -t "$pane" '#{pane_pid}' 2>/dev/null)
 else
-  pane_pid=$(tmux -u display-message -p -t "=$sess:" '#{pane_pid}' 2>/dev/null)
+  pane_pid=$(tmux -u display-message -p -t "$target" '#{pane_pid}' 2>/dev/null)
 fi
 case "$pane_pid" in ''|*[!0-9]*) printf 'ERR\tno_process\n'; exit 0;; esac
 fg=$(sed 's/.*) //' "/proc/$pane_pid/stat" 2>/dev/null | cut -d' ' -f6)
@@ -703,8 +783,11 @@ comm=$(tr '\n\r\t' '   ' <"/proc/$pid/comm" 2>/dev/null | head -c 64)
 printf 'OK\t%s\t%s\n' "$pid" "$comm"
 head -c 262144 "/proc/$pid/environ" 2>/dev/null`
 
-func tmuxPaneEnvironCommand(tmuxSession, pane string) string {
-	return "sh -c " + sshx.QuoteShell(tmuxPaneEnvironScript) + " corral " + sshx.QuoteShell(tmuxSession) + " " + sshx.QuoteShell(pane)
+func tmuxPaneEnvironCommand(tmuxSession, tmuxSessionID, pane string) string {
+	if !tmuxSessionIDRE.MatchString(tmuxSessionID) {
+		tmuxSessionID = ""
+	}
+	return "sh -c " + sshx.QuoteShell(tmuxPaneEnvironScript) + " corral " + sshx.QuoteShell(tmuxSession) + " " + sshx.QuoteShell(pane) + " " + sshx.QuoteShell(tmuxSessionID)
 }
 
 func parseEnvExecOutput(out []byte) (pid int, procName string, vars []rawEnvVar, reason string, truncated bool) {
@@ -765,7 +848,7 @@ func (s *Server) readPaneEnviron(ctx context.Context, sess *term.Session, pane s
 		if pane != "" && !tmuxPaneID.MatchString(pane) {
 			return 0, "", nil, "bad_pane", false, nil
 		}
-		res, execErr := sshx.Exec(ctx, sess.Client(), tmuxPaneEnvironCommand(sess.CurrentTmuxSession(), pane), paneEnvReadMax+512, sshx.ExecOptions{Interactive: true, AwaitSlot: 2 * time.Second})
+		res, execErr := sshx.Exec(ctx, sess.Client(), tmuxPaneEnvironCommand(sess.CurrentTmuxSession(), sess.CurrentTmuxSessionID(), pane), paneEnvReadMax+512, sshx.ExecOptions{Interactive: true, AwaitSlot: 2 * time.Second})
 		if execErr != nil {
 			return 0, "", nil, "", false, execErr
 		}

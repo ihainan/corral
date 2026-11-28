@@ -11,6 +11,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -83,16 +84,46 @@ func herdrDisplayKey(name string) string {
 	return name
 }
 
+var tmuxSessionIDRE = regexp.MustCompile(`^\$[0-9]+$`)
+
+// tmuxSessionIDCommand resolves the immutable tmux #{session_id} (e.g. "$0")
+// for an exact tmux session name (using "=name:" so it never resolves as a
+// window target).
+func tmuxSessionIDCommand(name string) string {
+	script := `PATH="$HOME/.local/bin:$HOME/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"; ` +
+		`command -v tmux >/dev/null 2>&1 || exit 0; ` +
+		`tmux -u display-message -p -t "=$1:" '#{session_id}' 2>/dev/null`
+	return "sh -c " + sshx.QuoteShell(script) + " corral " + sshx.QuoteShell(name)
+}
+
+// lookupTmuxSessionID queries tmux's stable #{session_id} for name. retry is
+// true only when tmux exited non-zero (e.g. a newly started tmux session is
+// still initializing).
+func lookupTmuxSessionID(ctx context.Context, c *ssh.Client, name string) (id string, retry bool) {
+	if c == nil || name == "" {
+		return "", false
+	}
+	res, err := sshx.Exec(ctx, c, tmuxSessionIDCommand(name), 256, sshx.ExecOptions{})
+	if err != nil {
+		return "", true
+	}
+	if out := strings.TrimSpace(string(res.Out)); tmuxSessionIDRE.MatchString(out) {
+		return out, false
+	}
+	return "", false
+}
+
 // tmuxRenameCommand renames an existing tmux session from oldName to newName
 // after verifying newName does not already exist (exact match). Both names
-// must already be validated against tmuxNameRE.
+// must already be validated against tmuxNameRE. On success it prints the
+// session's #{session_id} (if available).
 // Exit code 10 ("duplicate") indicates newName already exists; exit code 11
 // ("missing") indicates oldName was not found or tmux is unavailable.
 func tmuxRenameCommand(oldName, newName string) string {
 	script := `PATH="$HOME/.local/bin:$HOME/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"; ` +
 		`command -v tmux >/dev/null 2>&1 || { echo missing; exit 11; }; ` +
 		`tmux -u has-session -t "=$2" >/dev/null 2>&1 && { echo duplicate; exit 10; }; ` +
-		`out=$(tmux -u rename-session -t "=$1" -- "$2" 2>&1) && exit 0; ` +
+		`out=$(tmux -u rename-session -t "=$1" -- "$2" 2>&1) && { tmux -u display-message -p -t "=$2:" '#{session_id}' 2>/dev/null || true; exit 0; }; ` +
 		`case "$out" in *"duplicate session"*) echo duplicate; exit 10;; *"can't find session"*|*"no server running"*) echo missing; exit 11;; esac; ` +
 		`printf "%s\n" "$out" >&2; exit 1`
 	return "sh -c " + sshx.QuoteShell(script) + " corral " + sshx.QuoteShell(oldName) + " " + sshx.QuoteShell(newName)

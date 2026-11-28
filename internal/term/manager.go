@@ -169,11 +169,12 @@ type Recorder interface {
 
 // StartOptions describes what to run once the SSH connection is up.
 type StartOptions struct {
-	Cols, Rows   int
-	Persistence  string // "none", "tmux" or "herdr"
-	TmuxSession  string // validated by the caller: [A-Za-z0-9_-]{1,64}
-	HerdrSession string // validated by the caller; "" attaches herdr's default session
-	DisplayName  string // optional Corral display name (e.g. saved herdr alias)
+	Cols, Rows    int
+	Persistence   string // "none", "tmux" or "herdr"
+	TmuxSession   string // validated by the caller: [A-Za-z0-9_-]{1,64}
+	TmuxSessionID string // optional tmux #{session_id} (e.g. "$0") bound on open/restore
+	HerdrSession  string // validated by the caller; "" attaches herdr's default session
+	DisplayName   string // optional Corral display name (e.g. saved herdr alias)
 	// TmuxNew starts TmuxSession as a new session: it fails if one of that
 	// name exists, instead of attaching it.
 	TmuxNew bool
@@ -345,7 +346,7 @@ func (m *Manager) Start(ctx context.Context, res *Reservation, owner, hostID int
 		}
 		s := &Session{
 			ID: newID(), OwnerID: owner, HostID: hostID, HostName: hostName, Created: time.Now(), HostConfig: opt.HostConfig,
-			Persistence: opt.Persistence, TmuxSession: opt.TmuxSession, HerdrSession: opt.HerdrSession, DisplayName: opt.DisplayName,
+			Persistence: opt.Persistence, TmuxSession: opt.TmuxSession, TmuxSessionID: opt.TmuxSessionID, HerdrSession: opt.HerdrSession, DisplayName: opt.DisplayName,
 			client: client, ssh: sess, stdin: stdin, input: make(chan []byte, inputQueue),
 			buf: newRing(ringSize), subs: map[*Sub]struct{}{}, state: StateRunning,
 			cols: cols, rows: rows, ptySize: [2]int{cols, rows}, winch: sess.WindowChange, idleSince: time.Now(), finished: make(chan struct{}), uploads: make(chan struct{}, 2),

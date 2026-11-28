@@ -401,6 +401,9 @@ func (s *Server) openSession(ctx context.Context, w http.ResponseWriter, r *http
 	}
 	if sess.Persistence == store.PersistHerdr {
 		go s.watchHerdr(sess, h)
+	} else if sess.Persistence == store.PersistTmux && sess.CurrentTmuxSessionID() == "" {
+		// Off the open path: until the id lands, pane env falls back to the name.
+		go s.bindTmuxSessionID(context.Background(), sess)
 	}
 	{
 		fp := ""
@@ -675,12 +678,21 @@ func (s *Server) apiRenameSession(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			sess.SetTmuxSession(name)
+			renamedID := strings.TrimSpace(string(res.Out))
+			if tmuxSessionIDRE.MatchString(renamedID) {
+				sess.SetTmuxSessionID(renamedID)
+			} else {
+				renamedID = sess.CurrentTmuxSessionID()
+			}
 			if err := s.store.RenameTab(ctx, u.ID, sess.ID, name); err != nil {
 				s.log.Warn("open tabs: rename not recorded", "session", sess.ID, "err", err)
 			}
 			for _, rs := range s.terms.Running(u.ID, sess.HostID) {
 				if rs.ID != sess.ID && rs.HostConfig == sess.HostConfig && rs.Persistence == store.PersistTmux && rs.CurrentTmuxSession() == oldName {
 					rs.SetTmuxSession(name)
+					if renamedID != "" {
+						rs.SetTmuxSessionID(renamedID)
+					}
 					if err := s.store.RenameTab(ctx, u.ID, rs.ID, name); err != nil {
 						s.log.Warn("open tabs: peer rename not recorded", "session", rs.ID, "err", err)
 					}
@@ -1528,6 +1540,52 @@ func (s *Server) removeFileLater(c *sftp.Client, sess *term.Session, full string
 			}
 			return nil
 		})
+	}()
+}
+
+// bindTmuxSessionID records tmux's immutable #{session_id} for a newly opened
+// tmux session so later pane-env/pane-inspect calls cannot be redirected if the
+// session is renamed externally and its old name is reused.
+func (s *Server) bindTmuxSessionID(ctx context.Context, sess *term.Session) {
+	name := sess.CurrentTmuxSession()
+	if name == "" || sess.Client() == nil {
+		return
+	}
+	bctx, bcancel := context.WithTimeout(ctx, 2*time.Second)
+	id, retry := lookupTmuxSessionID(bctx, sess.Client(), name)
+	bcancel()
+	if id != "" {
+		sess.SetTmuxSessionID(id)
+		return
+	}
+	if !retry {
+		return
+	}
+	go func() {
+		for _, delay := range []time.Duration{80 * time.Millisecond, 150 * time.Millisecond, 300 * time.Millisecond, 600 * time.Millisecond, time.Second} {
+			select {
+			case <-sess.Finished():
+				return
+			case <-time.After(delay):
+			}
+			if sess.CurrentTmuxSessionID() != "" {
+				return
+			}
+			curName := sess.CurrentTmuxSession()
+			if curName == "" {
+				return
+			}
+			rctx, rcancel := context.WithTimeout(context.Background(), 2*time.Second)
+			id, retry := lookupTmuxSessionID(rctx, sess.Client(), curName)
+			rcancel()
+			if id != "" {
+				sess.SetTmuxSessionID(id)
+				return
+			}
+			if !retry {
+				return
+			}
+		}
 	}()
 }
 

@@ -73,6 +73,7 @@ assert.equal(envReasonKey('no_process'), 'card.envReasonNoProcess')
 assert.equal(envReasonKey('herdr_unavailable'), 'card.envReasonHerdr')
 assert.equal(envReasonKey('unsupported_mode'), 'card.envReasonUnsupported')
 assert.equal(envReasonKey('pane_not_in_session'), 'card.envReasonPaneNotInSession')
+assert.equal(envReasonKey('session_mismatch'), 'card.envReasonSessionMismatch')
 assert.equal(envReasonKey('unknown_code'), 'card.envReasonFailed')
 
 // Reveal epoch / stale response guard tests:

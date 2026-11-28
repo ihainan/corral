@@ -106,10 +106,16 @@ func parseHerdrExplain(raw json.RawMessage) *paneInspectExplain {
 }
 
 const tmuxPaneInspectScript = `PATH="$HOME/.local/bin:$HOME/bin:$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
-sess=$1 pane=$2
+sess=$1 pane=$2 sess_id=$3
+[ -n "$sess" ] || exit 0
+target="=$sess:"
+if [ -n "$sess_id" ]; then
+  cur_id=$(tmux -u display-message -p -t "=$sess:" '#{session_id}' 2>/dev/null)
+  [ "$cur_id" = "$sess_id" ] || exit 0
+  target="$sess_id:"
+fi
 if [ -n "$pane" ]; then
-  [ -n "$sess" ] || exit 0
-  panes=$(tmux -u list-panes -s -t "=$sess:" -F '#{pane_id}' 2>/dev/null) || exit 0
+  panes=$(tmux -u list-panes -s -t "$target" -F '#{pane_id}' 2>/dev/null) || exit 0
   in_sess=0
   while IFS= read -r p; do
     if [ "$p" = "$pane" ]; then
@@ -122,7 +128,7 @@ EOF
   [ "$in_sess" = 1 ] || exit 0
   line=$(tmux -u display-message -p -t "$pane" '#{pane_id}|#{pane_pid}|#{pane_tty}|#{pane_current_command}|#{window_zoomed_flag}' 2>/dev/null)
 else
-  line=$(tmux -u display-message -p -t "=$sess:" '#{pane_id}|#{pane_pid}|#{pane_tty}|#{pane_current_command}|#{window_zoomed_flag}' 2>/dev/null)
+  line=$(tmux -u display-message -p -t "$target" '#{pane_id}|#{pane_pid}|#{pane_tty}|#{pane_current_command}|#{window_zoomed_flag}' 2>/dev/null)
 fi
 [ -n "$line" ] || exit 0
 printf 'pane\t%s\n' "$line"
@@ -133,8 +139,11 @@ ps -t "$tdev" -o pid=,comm=,args= 2>/dev/null | head -n 16 | while IFS= read -r 
   printf 'proc\t%s\n' "$row"
 done`
 
-func tmuxPaneInspectCommand(tmuxSession, pane string) string {
-	return "sh -c " + sshx.QuoteShell(tmuxPaneInspectScript) + " corral " + sshx.QuoteShell(tmuxSession) + " " + sshx.QuoteShell(pane)
+func tmuxPaneInspectCommand(tmuxSession, tmuxSessionID, pane string) string {
+	if !tmuxSessionIDRE.MatchString(tmuxSessionID) {
+		tmuxSessionID = ""
+	}
+	return "sh -c " + sshx.QuoteShell(tmuxPaneInspectScript) + " corral " + sshx.QuoteShell(tmuxSession) + " " + sshx.QuoteShell(pane) + " " + sshx.QuoteShell(tmuxSessionID)
 }
 
 func parseTmuxPaneInspect(out []byte) paneInspectResponse {
@@ -287,7 +296,7 @@ func (s *Server) apiPaneInspect(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "bad_request", "invalid tmux pane id")
 			return
 		}
-		res, err := sshx.Exec(ctx, sess.Client(), tmuxPaneInspectCommand(sess.CurrentTmuxSession(), pane), 64<<10, sshx.ExecOptions{Interactive: true, AwaitSlot: 2 * time.Second})
+		res, err := sshx.Exec(ctx, sess.Client(), tmuxPaneInspectCommand(sess.CurrentTmuxSession(), sess.CurrentTmuxSessionID(), pane), 64<<10, sshx.ExecOptions{Interactive: true, AwaitSlot: 2 * time.Second})
 		if errors.Is(err, sshx.ErrBusy) {
 			writeSSHChannelsBusy(w)
 			return
