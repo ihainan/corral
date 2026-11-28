@@ -248,25 +248,132 @@ func cmdInstall(args []string, build proto.BuildInfo, stdout io.Writer) int {
 		//   - Uses shouldUpdateSharedSymlink (never downgrading a newer link) and
 		//     does NOT write install.json or start the daemon.
 		if *gateway != "" {
-			if fi, terr := os.Lstat(layout.TombstonePath); terr != nil || !fi.Mode().IsRegular() {
-				_ = os.RemoveAll(expectedStage)
-				writeErr(stdout, "no_tombstone", "removing tombstone not present")
-				return 1
-			}
-			tombRec, tombErr := readUninstallTombstone(layout.TombstonePath)
-			if tombErr != nil || tombRec == nil || tombRec.CreatedAt == "" || tombRec.Gateway == "" {
-				_ = os.RemoveAll(expectedStage)
-				detail := "removing tombstone is truncated or missing required fields"
-				if tombErr != nil {
-					detail = tombErr.Error()
+			if fi, terr := os.Lstat(layout.TombstonePath); terr == nil {
+				if !fi.Mode().IsRegular() {
+					_ = os.RemoveAll(expectedStage)
+					writeErr(stdout, "tombstone_unreadable", "removing tombstone is not a regular file")
+					return 1
 				}
-				writeErr(stdout, "tombstone_unreadable", detail)
-				return 1
-			}
-			if tombRec.Gateway != *gateway {
+				tombRec, tombErr := readUninstallTombstone(layout.TombstonePath)
+				if tombErr != nil || tombRec == nil || tombRec.CreatedAt == "" || tombRec.Gateway == "" {
+					_ = os.RemoveAll(expectedStage)
+					detail := "removing tombstone is truncated or missing required fields"
+					if tombErr != nil {
+						detail = tombErr.Error()
+					}
+					writeErr(stdout, "tombstone_unreadable", detail)
+					return 1
+				}
+				if tombRec.Gateway != *gateway {
+					_ = os.RemoveAll(expectedStage)
+					fmt.Fprintf(stdout, "result=other_gateways\n")
+					return 0
+				}
+			} else if errors.Is(terr, os.ErrNotExist) {
+				// Fix10 Item #5: Binary missing and no tombstone yet, while
+				// install.json / clients.json exist. Verify sole-gateway
+				// exclusivity atomically under SharedLock -> OpLock -> lifeLock
+				// before writing the removing tombstone and placing the binary.
+				ll, lerr := AcquireLock(layout.LockPath)
+				if lerr != nil {
+					if !errors.Is(lerr, ErrLocked) {
+						_ = os.RemoveAll(expectedStage)
+						writeErr(stdout, "lock_failed", lerr.Error())
+						return 1
+					}
+					metaBefore, _ := ReadMetaRecord(layout.MetaJSON)
+					sockCheck := layout.SocketPath
+					if metaBefore != nil && metaBefore.SocketPath != "" {
+						sockCheck = metaBefore.SocketPath
+					}
+					_, sres, ferr, cerr := callLocalSoleShutdown(sockCheck, *gateway, 3*time.Second)
+					if ferr != "" {
+						_ = os.RemoveAll(expectedStage)
+						writeErr(stdout, ferr, "running daemon does not support conditional shutdown")
+						return 1
+					}
+					if cerr != nil {
+						var rpcErr *proto.RPCError
+						waitDur := 500 * time.Millisecond
+						if errors.As(cerr, &rpcErr) && rpcErr.Code == proto.ErrShuttingDown {
+							waitDur = 5 * time.Second
+						}
+						ll, lerr = AcquireLockWait(layout.LockPath, waitDur)
+						if lerr != nil {
+							_ = os.RemoveAll(expectedStage)
+							if waitDur == 5*time.Second {
+								writeErr(stdout, "stop_failed", lerr.Error())
+							} else {
+								writeErr(stdout, "daemon_unreachable", cerr.Error())
+							}
+							return 1
+						}
+					} else {
+						if sres.OtherGateways || !sres.OK {
+							_ = os.RemoveAll(expectedStage)
+							fmt.Fprintf(stdout, "result=other_gateways\n")
+							return 0
+						}
+						ll, lerr = AcquireLockWait(layout.LockPath, 5*time.Second)
+						if lerr != nil {
+							_ = os.RemoveAll(expectedStage)
+							writeErr(stdout, "stop_failed", lerr.Error())
+							return 1
+						}
+					}
+				}
+				defer ll.Release()
+
+				installRec, installErr := ReadInstallRecord(layout.InstallJSON)
+				b, rerr := os.ReadFile(layout.ClientsJSON)
+				if rerr == nil {
+					clients, uerr := parseClientsJSON(b)
+					if uerr != nil {
+						_ = os.RemoveAll(expectedStage)
+						writeErr(stdout, "clients_unreadable", uerr.Error())
+						return 1
+					}
+					for _, c := range clients {
+						if c.Gateway != *gateway {
+							_ = os.RemoveAll(expectedStage)
+							fmt.Fprintf(stdout, "result=other_gateways\n")
+							return 0
+						}
+					}
+				} else if !errors.Is(rerr, os.ErrNotExist) {
+					_ = os.RemoveAll(expectedStage)
+					writeErr(stdout, "clients_unreadable", rerr.Error())
+					return 1
+				} else {
+					if installErr != nil || installRec == nil {
+						_ = os.RemoveAll(expectedStage)
+						writeErr(stdout, "cannot_verify_exclusivity", "neither clients.json nor install.json readable")
+						return 1
+					}
+					if installRec.Gateway != "" && installRec.Gateway != *gateway {
+						_ = os.RemoveAll(expectedStage)
+						fmt.Fprintf(stdout, "result=other_gateways\n")
+						return 0
+					}
+				}
+
+				if err := os.Remove(layout.InstallJSON); err != nil && !errors.Is(err, os.ErrNotExist) {
+					_ = os.RemoveAll(expectedStage)
+					writeErr(stdout, "remove_install_json_failed", err.Error())
+					return 1
+				}
+				if err := WriteFileAtomic(layout.TombstonePath, marshalUninstallTombstone(installRec, *gateway), 0o600); err != nil {
+					if installErr == nil && installRec != nil {
+						_ = WriteInstallRecord(layout.InstallJSON, installRec)
+					}
+					_ = os.RemoveAll(expectedStage)
+					writeErr(stdout, "tombstone_failed", err.Error())
+					return 1
+				}
+			} else {
 				_ = os.RemoveAll(expectedStage)
-				fmt.Fprintf(stdout, "result=other_gateways\n")
-				return 0
+				writeErr(stdout, "tombstone_unreadable", terr.Error())
+				return 1
 			}
 		} else {
 			_, tombErr := os.Lstat(layout.TombstonePath)
@@ -1907,17 +2014,20 @@ func cmdUninstall(args []string, stdout io.Writer) int {
 			for _, t := range sharedTargets {
 				seenT[filepath.Clean(t)] = struct{}{}
 			}
-			// Always include our own running binary's version dir (if placed in
-			// LibDir by binaryless uninstall recovery while install.json existed).
+			// Fix10 Item #1: Only include our own running binary's version dir
+			// if it is directly under LibDir AND strictly passes ParseVersionDirName
+			// (NEVER match by "corrald-" prefix, e.g. corrald-backups!).
 			if selfExe, eerr := os.Executable(); eerr == nil {
 				if resolved, rerr := filepath.EvalSymlinks(selfExe); rerr == nil {
 					selfExe = resolved
 				}
 				selfDir := filepath.Clean(filepath.Dir(selfExe))
-				if filepath.Dir(selfDir) == filepath.Clean(layout.LibDir) && strings.HasPrefix(filepath.Base(selfDir), "corrald-") {
-					if _, ok := seenT[selfDir]; !ok {
-						seenT[selfDir] = struct{}{}
-						sharedTargets = append(sharedTargets, selfDir)
+				if filepath.Dir(selfDir) == filepath.Clean(layout.LibDir) {
+					if _, _, ok := ParseVersionDirName(filepath.Base(selfDir)); ok {
+						if _, seen := seenT[selfDir]; !seen {
+							seenT[selfDir] = struct{}{}
+							sharedTargets = append(sharedTargets, selfDir)
+						}
 					}
 				}
 			}
@@ -1934,15 +2044,14 @@ func cmdUninstall(args []string, stdout io.Writer) int {
 			sharedTargets = listPreservedSharedPaths(layout)
 		}
 		for _, target := range sharedTargets {
-			if err := os.RemoveAll(target); err != nil {
-				addLeft(target, err.Error())
-			}
+			removeOwnedLibTarget(layout, target, addLeft)
 		}
 	}
 
-	// Rule 4: Explicitly delete all non-lock entries inside StateDir, keeping
-	// op.lock, corrald.lock, and removing intact until ALL post-check
-	// verifications (including run/ and LibDir) pass.
+	// Rule 4 + Fix10 Item #1: Explicitly delete ONLY corrald-owned entries inside
+	// StateDir (removing known files then rmdir on known subdirs; never RemoveAll
+	// unknown user files), keeping op.lock, corrald.lock, and removing intact
+	// until ALL post-check verifications pass.
 	if stateDirExists {
 		entries, rerr := os.ReadDir(layout.StateDir)
 		if rerr != nil {
@@ -1953,10 +2062,7 @@ func cmdUninstall(args []string, stdout io.Writer) int {
 				if name == "op.lock" || name == "corrald.lock" || name == "removing" {
 					continue
 				}
-				p := filepath.Join(layout.StateDir, name)
-				if err := os.RemoveAll(p); err != nil {
-					addLeft(p, err.Error())
-				}
+				removeOwnedStateEntry(layout, name, addLeft)
 			}
 		}
 	}
@@ -2030,39 +2136,23 @@ func cmdUninstall(args []string, stdout io.Writer) int {
 		return 1
 	}
 
-	// Part B (Fix9 Item #2): While still holding lifeLock -> opLock -> sharedLock
-	// AND keeping the removing tombstone intact on disk, remove LibDir, shared
-	// lock, and state lock files first. Only remove the removing tombstone LAST
-	// once every other removal has succeeded; on any failure, keep (or restore)
-	// the tombstone so a subsequent retry can recover cleanly.
-	if isLast && lastCheckErr == nil && (installErr == nil || resumingFromTombstone) && libDirExists {
-		if err := os.Remove(layout.SharedLockPath); err != nil && !errors.Is(err, os.ErrNotExist) {
-			addLeft(layout.SharedLockPath, err.Error())
-		}
-		if err := os.Remove(layout.LibDir); err != nil && !errors.Is(err, os.ErrNotExist) {
-			// ~/.local/lib/corral may legitimately hold sibling tools (e.g.
-			// code-server-*) or user directories (corrald-backups). Report
-			// partial if any corrald-owned entry remains OR if rmdir failed
-			// for a reason other than non-empty sibling tools.
-			corraldLeft := listPreservedSharedPaths(layout)
-			for _, p := range corraldLeft {
-				addLeft(p, "corrald file still exists in lib dir after removal")
-			}
-			if len(corraldLeft) == 0 && !errors.Is(err, syscall.ENOTEMPTY) && !errors.Is(err, syscall.EEXIST) {
-				addLeft(layout.LibDir, err.Error())
-			}
-		}
-	}
+	// Part B (Fix9 Item #2 + Fix10 Item #2):
+	// Keep SharedLockPath on disk and held throughout ALL state lock, tombstone,
+	// StateDir, and StateRoot removals so no other gateway can install or
+	// re-create state while state cleanup is still running.
+	// Preflight directory write permissions BEFORE unlinking any lock file or
+	// tombstone so permission failures keep both removing and SharedLockPath intact.
+	willRemoveLibDir := isLast && lastCheckErr == nil && (installErr == nil || resumingFromTombstone) && libDirExists
 	if stateDirExists {
-		if err := os.Remove(layout.LockPath); err != nil && !errors.Is(err, os.ErrNotExist) {
-			addLeft(layout.LockPath, err.Error())
+		if err := checkDirWritable(layout.StateDir); err != nil {
+			addLeft(layout.StateDir, err.Error())
 		}
-		if err := os.Remove(layout.OpLockPath); err != nil && !errors.Is(err, os.ErrNotExist) {
-			addLeft(layout.OpLockPath, err.Error())
+		if err := checkDirWritable(layout.StateRoot); err != nil {
+			addLeft(layout.StateDir, err.Error())
 		}
 		if entries, rerr := os.ReadDir(layout.StateDir); rerr == nil {
 			for _, e := range entries {
-				if e.Name() == "removing" {
+				if e.Name() == "op.lock" || e.Name() == "corrald.lock" || e.Name() == "removing" {
 					continue
 				}
 				addLeft(filepath.Join(layout.StateDir, e.Name()), "file still exists in state dir after removal")
@@ -2084,6 +2174,31 @@ func cmdUninstall(args []string, stdout io.Writer) int {
 			addLeft(layout.RunDir, "run dir still exists after removal")
 		}
 	}
+	if willRemoveLibDir {
+		if err := checkDirWritable(layout.LibDir); err != nil {
+			addLeft(layout.SharedLockPath, err.Error())
+		}
+		corraldLeft := listPreservedSharedPaths(layout)
+		for _, p := range corraldLeft {
+			addLeft(p, "corrald file still exists in lib dir after removal")
+		}
+		// Only require LibDir's parent to be writable if LibDir will become empty
+		// (i.e. contains no non-corrald sibling tools like code-server-*).
+		if entries, rerr := os.ReadDir(layout.LibDir); rerr == nil {
+			hasSiblings := false
+			for _, e := range entries {
+				if e.Name() != filepath.Base(layout.SharedLockPath) {
+					hasSiblings = true
+					break
+				}
+			}
+			if !hasSiblings {
+				if err := checkDirWritable(filepath.Dir(layout.LibDir)); err != nil {
+					addLeft(layout.LibDir, err.Error())
+				}
+			}
+		}
+	}
 
 	if len(left) > 0 {
 		fmt.Fprintf(stdout, "result=partial\n")
@@ -2094,54 +2209,90 @@ func cmdUninstall(args []string, stdout io.Writer) int {
 		return 1
 	}
 
-	// All other removals succeeded; unlink the removing tombstone LAST, right
-	// before removing the now-empty StateDir and StateRoot.
+	// Step B1: Remove state lock files, removing tombstone, StateDir, and
+	// StateRoot while SharedLockPath is STILL on disk and locked (so no other
+	// gateway can acquire SharedLock or re-create state).
 	if stateDirExists {
-		if err := os.Remove(layout.TombstonePath); err != nil && !errors.Is(err, os.ErrNotExist) {
-			addLeft(layout.TombstonePath, err.Error())
-		} else {
-			if err := os.Remove(layout.StateDir); err != nil && !errors.Is(err, os.ErrNotExist) {
-				// Restore tombstone inside StateDir so retry remains possible.
-				if len(tombPayload) > 0 {
-					_ = WriteFileAtomic(layout.TombstonePath, tombPayload, 0o600)
-				}
-				if entries, rerr := os.ReadDir(layout.StateDir); rerr == nil && len(entries) > 0 {
-					for _, e := range entries {
-						if e.Name() == "removing" {
-							continue
-						}
-						addLeft(filepath.Join(layout.StateDir, e.Name()), "file still exists in state dir after removal")
-					}
-				}
-				if len(left) == 0 {
-					addLeft(layout.StateDir, err.Error())
-				}
-			} else if err := os.Remove(layout.StateRoot); err != nil && !errors.Is(err, os.ErrNotExist) {
-				if isLast && lastCheckErr == nil {
-					// Best-effort restore StateDir + tombstone if StateRoot could not be removed.
-					if len(tombPayload) > 0 && os.Mkdir(layout.StateDir, 0o700) == nil {
+		if err := os.Remove(layout.LockPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			addLeft(layout.LockPath, err.Error())
+		}
+		if err := os.Remove(layout.OpLockPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			addLeft(layout.OpLockPath, err.Error())
+		}
+		if len(left) == 0 {
+			if err := os.Remove(layout.TombstonePath); err != nil && !errors.Is(err, os.ErrNotExist) {
+				addLeft(layout.TombstonePath, err.Error())
+			} else {
+				if err := os.Remove(layout.StateDir); err != nil && !errors.Is(err, os.ErrNotExist) {
+					// SharedLockPath is STILL held on disk (when sharedLock != nil),
+					// so no other gateway could have re-created state; restore tombstone.
+					if sharedLock != nil && len(tombPayload) > 0 {
 						_ = WriteFileAtomic(layout.TombstonePath, tombPayload, 0o600)
 					}
-					if entries, rerr := os.ReadDir(layout.StateRoot); rerr == nil && len(entries) > 0 {
+					if entries, rerr := os.ReadDir(layout.StateDir); rerr == nil && len(entries) > 0 {
 						for _, e := range entries {
-							if e.Name() == layout.MachineID {
+							if e.Name() == "removing" {
 								continue
 							}
-							addLeft(filepath.Join(layout.StateRoot, e.Name()), "leftover entry in corrald state root")
+							addLeft(filepath.Join(layout.StateDir, e.Name()), "file still exists in state dir after removal")
 						}
 					}
 					if len(left) == 0 {
-						addLeft(layout.StateRoot, err.Error())
+						addLeft(layout.StateDir, err.Error())
+					}
+				} else if err := os.Remove(layout.StateRoot); err != nil && !errors.Is(err, os.ErrNotExist) {
+					if isLast && lastCheckErr == nil {
+						if sharedLock != nil && len(tombPayload) > 0 && os.Mkdir(layout.StateDir, 0o700) == nil {
+							_ = WriteFileAtomic(layout.TombstonePath, tombPayload, 0o600)
+						}
+						if entries, rerr := os.ReadDir(layout.StateRoot); rerr == nil && len(entries) > 0 {
+							for _, e := range entries {
+								if e.Name() == layout.MachineID {
+									continue
+								}
+								addLeft(filepath.Join(layout.StateRoot, e.Name()), "leftover entry in corrald state root")
+							}
+						}
+						if len(left) == 0 {
+							addLeft(layout.StateRoot, err.Error())
+						}
 					}
 				}
+				_ = os.Remove(filepath.Dir(layout.StateRoot)) // ~/.local/state/corral (best-effort if empty)
 			}
-			_ = os.Remove(filepath.Dir(layout.StateRoot)) // ~/.local/state/corral (best-effort if empty)
 		}
 	}
 	if isLast && lastCheckErr == nil && layout.RunDir != "" {
-		// RunDir was already removed under pane locks above; best-effort clean
-		// its parent ~/.local/state/corral if now empty.
 		_ = os.Remove(filepath.Dir(layout.StateRoot)) // ~/.local/state/corral (best-effort if empty)
+	}
+
+	if len(left) > 0 {
+		fmt.Fprintf(stdout, "result=partial\n")
+		fmt.Fprintf(stdout, "last_machine=%t\n", isLast)
+		for _, l := range left {
+			fmt.Fprintf(stdout, "left=%s\t%s\n", l.path, l.reason)
+		}
+		return 1
+	}
+
+	// Step B2 (Fix10 Item #2): Unlink SharedLockPath VERY LAST, only after every
+	// state lock, tombstone, StateDir, and StateRoot removal succeeded. Never
+	// restore a tombstone past this point.
+	if willRemoveLibDir {
+		if err := os.Remove(layout.SharedLockPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			addLeft(layout.SharedLockPath, err.Error())
+		}
+		if len(left) == 0 {
+			if err := os.Remove(layout.LibDir); err != nil && !errors.Is(err, os.ErrNotExist) {
+				corraldLeft := listPreservedSharedPaths(layout)
+				for _, p := range corraldLeft {
+					addLeft(p, "corrald file still exists in lib dir after removal")
+				}
+				if len(corraldLeft) == 0 && !errors.Is(err, syscall.ENOTEMPTY) && !errors.Is(err, syscall.EEXIST) {
+					addLeft(layout.LibDir, err.Error())
+				}
+			}
+		}
 	}
 
 	if len(left) > 0 {
@@ -2156,6 +2307,132 @@ func cmdUninstall(args []string, stdout io.Writer) int {
 	fmt.Fprintf(stdout, "result=removed\n")
 	fmt.Fprintf(stdout, "last_machine=%t\n", isLast)
 	return 0
+}
+
+func checkDirWritable(dir string) error {
+	if err := syscall.Access(dir, 0x2); err != nil {
+		return fmt.Errorf("remove %s: %w", dir, err)
+	}
+	return nil
+}
+
+// removeOwnedLibTarget removes a single corrald-owned target directly inside
+// layout.LibDir without ever recursively deleting user files or prefix-matched
+// non-version directories (Fix10 Item #1).
+func removeOwnedLibTarget(layout *Layout, target string, addLeft func(path, reason string)) {
+	cleanLib := filepath.Clean(layout.LibDir)
+	clean := filepath.Clean(target)
+	if filepath.Dir(clean) != cleanLib {
+		return
+	}
+	base := filepath.Base(clean)
+	if base == "corrald" || base == "README.txt" {
+		if err := os.Remove(clean); err != nil && !errors.Is(err, os.ErrNotExist) {
+			addLeft(clean, err.Error())
+		}
+		return
+	}
+	if _, _, ok := ParseVersionDirName(base); !ok {
+		return
+	}
+	// Version dir created by corrald: remove ONLY known corrald-created files
+	// inside it ("corrald" and ".corrald.tmp.*"), then rmdir. Any unknown/user
+	// file survives and is reported as a leftover.
+	info, err := os.Lstat(clean)
+	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			addLeft(clean, err.Error())
+		}
+		return
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		if err := os.Remove(clean); err != nil && !errors.Is(err, os.ErrNotExist) {
+			addLeft(clean, err.Error())
+		}
+		return
+	}
+	entries, rerr := os.ReadDir(clean)
+	if rerr != nil {
+		addLeft(clean, rerr.Error())
+		return
+	}
+	for _, e := range entries {
+		name := e.Name()
+		if name == "corrald" || (!e.IsDir() && strings.HasPrefix(name, ".corrald.tmp.")) {
+			p := filepath.Join(clean, name)
+			if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
+				addLeft(p, err.Error())
+			}
+		}
+	}
+	if err := os.Remove(clean); err != nil && !errors.Is(err, os.ErrNotExist) {
+		if rem, rerr := os.ReadDir(clean); rerr == nil && len(rem) > 0 {
+			for _, e := range rem {
+				addLeft(filepath.Join(clean, e.Name()), "unexpected file in corrald version dir preserved")
+			}
+		} else {
+			addLeft(clean, err.Error())
+		}
+	}
+}
+
+// removeOwnedStateEntry removes a known corrald-created file or directory
+// inside layout.StateDir without ever recursively deleting unknown user files.
+func removeOwnedStateEntry(layout *Layout, name string, addLeft func(path, reason string)) {
+	p := filepath.Join(layout.StateDir, name)
+	switch {
+	case name == "install.json" || name == "meta.json" || name == "clients.json" ||
+		name == "failed.json" || name == "corrald.log" || name == "corrald.log.1" ||
+		name == "corrald.sock" ||
+		(strings.HasPrefix(name, ".selftest-") && strings.HasSuffix(name, ".lock")) ||
+		(strings.HasPrefix(name, ".") && strings.Contains(name, ".tmp.")):
+		if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
+			addLeft(p, err.Error())
+		}
+	case name == "ops":
+		entries, err := os.ReadDir(p)
+		if err != nil {
+			if !errors.Is(err, os.ErrNotExist) {
+				addLeft(p, err.Error())
+			}
+			return
+		}
+		for _, e := range entries {
+			en := e.Name()
+			if !e.IsDir() && (strings.HasSuffix(en, ".json") || (strings.HasPrefix(en, ".") && strings.Contains(en, ".tmp."))) {
+				fp := filepath.Join(p, en)
+				if err := os.Remove(fp); err != nil && !errors.Is(err, os.ErrNotExist) {
+					addLeft(fp, err.Error())
+				}
+			}
+		}
+		if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
+			addLeft(p, err.Error())
+		}
+	case strings.HasPrefix(name, "stage-"):
+		if _, err := layout.StageDir(strings.TrimPrefix(name, "stage-")); err != nil {
+			return
+		}
+		entries, err := os.ReadDir(p)
+		if err != nil {
+			if !errors.Is(err, os.ErrNotExist) {
+				addLeft(p, err.Error())
+			}
+			return
+		}
+		for _, e := range entries {
+			en := e.Name()
+			if !e.IsDir() && (en == "corrald" || (strings.HasPrefix(en, ".") && strings.Contains(en, ".tmp."))) {
+				fp := filepath.Join(p, en)
+				if err := os.Remove(fp); err != nil && !errors.Is(err, os.ErrNotExist) {
+					addLeft(fp, err.Error())
+				}
+			}
+		}
+		if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
+			addLeft(p, err.Error())
+		}
+	}
 }
 
 func isLastMachineInStateRoot(stateRoot, currentMID string) (bool, error) {

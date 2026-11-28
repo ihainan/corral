@@ -696,11 +696,11 @@ func RunUninstallSoleGatewayWithRetry(ctx context.Context, c *ssh.Client, dist *
 		break
 	}
 
-	if f["error"] == "binary_missing_with_tombstone" {
+	if f["error"] == "binary_missing_with_tombstone" || f["error"] == "binary_missing" {
 		if dist == nil {
 			return UninstallOutcome{Result: "pending", Detail: firstNonEmpty(f["detail"], f["error"])}
 		}
-		return runLibDirReinstallUninstall(ctx, c, dist, probe, opID, soleGateway, busyRetry, onStep)
+		return runLibDirReinstallUninstall(ctx, c, dist, probe, opID, soleGateway, f["error"] == "binary_missing_with_tombstone", busyRetry, onStep)
 	}
 
 	if onStep != nil {
@@ -716,7 +716,7 @@ func RunUninstallSoleGatewayWithRetry(ctx context.Context, c *ssh.Client, dist *
 // path (creating LibDir and acquiring .corrald-shared.lock -> op.lock without
 // starting the daemon or writing install.json), then runs the normal locked
 // `corrald uninstall`.
-func runLibDirReinstallUninstall(ctx context.Context, c *ssh.Client, dist *Dist, probe *HostProbe, opID, soleGateway string, busyRetry BusyRetryPolicy, onStep func(step string)) UninstallOutcome {
+func runLibDirReinstallUninstall(ctx context.Context, c *ssh.Client, dist *Dist, probe *HostProbe, opID, soleGateway string, requireTombstone bool, busyRetry BusyRetryPolicy, onStep func(step string)) UninstallOutcome {
 	bin, vfail := ValidateProbeForRecovery(probe, dist)
 	if vfail != nil {
 		return UninstallOutcome{Result: "pending", Detail: firstNonEmpty(vfail.Detail, vfail.Code)}
@@ -727,7 +727,7 @@ func runLibDirReinstallUninstall(ctx context.Context, c *ssh.Client, dist *Dist,
 	stageDir := probe.StateDir + "/stage-" + opID
 	stageBin := stageDir + "/corrald"
 
-	mkRes, mkErr := runSSH(ctx, c, MkStageForRecoveryCommand(probe.Home, probe.StateDir, stageDir, soleGateway != ""), 4096, sshx.ExecOptions{})
+	mkRes, mkErr := runSSH(ctx, c, MkStageForRecoveryCommand(probe.Home, probe.StateDir, stageDir, requireTombstone), 4096, sshx.ExecOptions{})
 	mkFields := ParseKeyValues(mkRes.Out)
 	if mkErr != nil || mkFields["result"] != "ok" {
 		return UninstallOutcome{Result: "pending", Detail: firstNonEmpty(mkFields["detail"], mkFields["error"], errStr(mkErr))}
@@ -890,7 +890,7 @@ func RunUninstallWithRetry(ctx context.Context, c *ssh.Client, dist *Dist, probe
 		if dist == nil {
 			return UninstallOutcome{Result: "pending", Detail: firstNonEmpty(f["detail"], f["error"])}
 		}
-		return runLibDirReinstallUninstall(ctx, c, dist, probe, opID, "", busyRetry, onStep)
+		return runLibDirReinstallUninstall(ctx, c, dist, probe, opID, "", false, busyRetry, onStep)
 	}
 	if onStep != nil {
 		onStep("verify")

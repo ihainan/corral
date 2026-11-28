@@ -1339,6 +1339,130 @@ func TestCLIUninstallOnlyIfSoleGateway(t *testing.T) {
 			t.Fatalf("Fix9 Item #3 regression: recovery install downgraded shared symlink from %q to %q!", v2Target, gotTarget)
 		}
 	})
+
+	// Regression test for Fix Round 10 Item #1 [P1]:
+	// Uninstall MUST NEVER remove directories by "corrald-" prefix (e.g.
+	// LibDir/corrald-backups/corrald) and MUST NEVER RemoveAll a directory
+	// holding files corrald did not create.
+	t.Run("fix10_item1_corrald_backups_and_user_files_preserved", func(t *testing.T) {
+		t.Run("binary_under_corrald_backups_preserves_backup_dir_and_user_file", func(t *testing.T) {
+			home := t.TempDir()
+			mid := randomHexMid(t)
+			env := []string{"CORRALD_TEST_MACHINE_ID=" + mid}
+			_, layout := installAndServe(t, home, mid)
+
+			var h proto.HelloResult
+			if err := callLocalRPC(layout.SocketPath, proto.MethodDaemonHello, proto.HelloParams{
+				Gateway: "gw-a", ProtoMin: 1, ProtoMax: 1, Client: proto.ClientIdentity{CorralUser: "alice", HostID: "1"},
+			}, &h, 2*time.Second); err != nil {
+				t.Fatalf("Hello gw-a: %v", err)
+			}
+
+			// Place a copy of corrald AND a user file under LibDir/corrald-backups/.
+			backupDir := filepath.Join(layout.LibDir, "corrald-backups")
+			if err := os.MkdirAll(backupDir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			binBytes, err := os.ReadFile(bins.v1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			backupBin := filepath.Join(backupDir, "corrald")
+			if err := os.WriteFile(backupBin, binBytes, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			userFile := filepath.Join(backupDir, "important-user-data.txt")
+			if err := os.WriteFile(userFile, []byte("do not delete\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			// Execute uninstall directly from LibDir/corrald-backups/corrald!
+			out, code := runCLI(t, backupBin, home, env, "uninstall", "--op", "opBkp1", "--only-if-sole-gateway", "gw-a")
+			if code != 0 || parseKV(out)["result"] != "removed" {
+				t.Fatalf("expected clean uninstall of real corrald while preserving corrald-backups, got code=%d\n%s", code, out)
+			}
+			gotUser, err := os.ReadFile(userFile)
+			if err != nil || string(gotUser) != "do not delete\n" {
+				t.Fatalf("Fix10 Item #1 regression: user file under corrald-backups/ was deleted! err=%v content=%q", err, string(gotUser))
+			}
+			if _, err := os.Stat(backupDir); err != nil {
+				t.Fatalf("Fix10 Item #1 regression: corrald-backups/ dir was deleted: %v", err)
+			}
+			if _, err := os.Stat(backupBin); err != nil {
+				t.Fatalf("Fix10 Item #1 regression: corrald-backups/corrald was deleted: %v", err)
+			}
+		})
+
+		t.Run("extra_user_file_inside_version_dir_survives_and_reports_partial", func(t *testing.T) {
+			home := t.TempDir()
+			mid := randomHexMid(t)
+			env := []string{"CORRALD_TEST_MACHINE_ID=" + mid}
+			installedBin, layout := installAndServe(t, home, mid)
+
+			var h proto.HelloResult
+			if err := callLocalRPC(layout.SocketPath, proto.MethodDaemonHello, proto.HelloParams{
+				Gateway: "gw-a", ProtoMin: 1, ProtoMax: 1, Client: proto.ClientIdentity{CorralUser: "alice", HostID: "1"},
+			}, &h, 2*time.Second); err != nil {
+				t.Fatalf("Hello gw-a: %v", err)
+			}
+
+			resolvedBin, err := filepath.EvalSymlinks(installedBin)
+			if err != nil {
+				t.Fatal(err)
+			}
+			verDir := filepath.Dir(resolvedBin)
+			userNote := filepath.Join(verDir, "user-note.txt")
+			if err := os.WriteFile(userNote, []byte("keep me\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			out, code := runCLI(t, installedBin, home, env, "uninstall", "--op", "opVerUser1", "--only-if-sole-gateway", "gw-a")
+			if code == 0 || parseKV(out)["result"] != "partial" {
+				t.Fatalf("Fix10 Item #1 regression: expected partial when version dir has unknown user file, got code=%d\n%s", code, out)
+			}
+			got, err := os.ReadFile(userNote)
+			if err != nil || string(got) != "keep me\n" {
+				t.Fatalf("Fix10 Item #1 regression: user file inside version dir was deleted! err=%v content=%q", err, string(got))
+			}
+		})
+	})
+
+	// Regression test for Fix Round 10 Item #2 [P2]:
+	// SharedLockPath MUST remain on disk until EVERY state lock, tombstone,
+	// StateDir, and StateRoot removal has succeeded; if StateDir removal fails,
+	// BOTH TombstonePath AND SharedLockPath MUST remain on disk.
+	t.Run("fix10_item2_shared_lock_preserved_until_all_state_removed", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("chmod 0500 does not block root")
+		}
+		home := t.TempDir()
+		mid := randomHexMid(t)
+		env := []string{"CORRALD_TEST_MACHINE_ID=" + mid}
+		installedBin, layout := installAndServe(t, home, mid)
+
+		var h proto.HelloResult
+		if err := callLocalRPC(layout.SocketPath, proto.MethodDaemonHello, proto.HelloParams{
+			Gateway: "gw-a", ProtoMin: 1, ProtoMax: 1, Client: proto.ClientIdentity{CorralUser: "alice", HostID: "1"},
+		}, &h, 2*time.Second); err != nil {
+			t.Fatalf("Hello gw-a: %v", err)
+		}
+
+		if err := os.Chmod(layout.StateRoot, 0o500); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(layout.StateRoot, 0o700) })
+
+		out, code := runCLI(t, installedBin, home, env, "uninstall", "--op", "opSLKeep", "--only-if-sole-gateway", "gw-a")
+		if code == 0 || parseKV(out)["result"] != "partial" {
+			t.Fatalf("expected partial when StateRoot is read-only, got code=%d\n%s", code, out)
+		}
+		if !layout.TombstoneExists() {
+			t.Fatalf("expected tombstone kept when StateDir removal fails:\n%s", out)
+		}
+		if _, err := os.Stat(layout.SharedLockPath); err != nil {
+			t.Fatalf("Fix10 Item #2 regression: .corrald-shared.lock was unlinked before StateDir removal succeeded: %v\n%s", err, out)
+		}
+	})
 }
 
 // Regression test for Fix Round 6 F2 [P3]:

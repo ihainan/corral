@@ -103,6 +103,7 @@ type ManagerConfig struct {
 	BeforeCleanupUserDBReset func(hostID int64)
 	AfterInstallServe        func(hostID int64, opID string)
 	AfterInstallOpCreate     func(hostID int64)
+	AfterRetryOpCreate       func(hostID int64)
 	AfterLiveAttachHello     func(hostID int64)
 }
 
@@ -202,15 +203,16 @@ type hostRef struct {
 }
 
 type runningOp struct {
-	opID        string
-	hostID      int64
-	acct        accountKey
-	pendingAcct accountKey
-	kind        string
-	step        string
-	cancel      context.CancelFunc
-	cancelled   bool
-	done        chan struct{}
+	opID           string
+	hostID         int64
+	acct           accountKey
+	pendingAcct    accountKey
+	startRemoveSeq uint64
+	kind           string
+	step           string
+	cancel         context.CancelFunc
+	cancelled      bool
+	done           chan struct{}
 }
 
 // sshOwnership transfers ownership of an AcquireSSH release callback so an
@@ -372,15 +374,17 @@ type Manager struct {
 	onAgentChanged    func(hostIDs []int64, ev proto.AgentChangedEventData)
 	onCoverageChanged func(hostIDs []int64)
 
-	mu            sync.Mutex
-	conns         map[accountKey]*sharedConn
-	hostConn      map[int64]accountKey
-	watchers      map[any]*watchRegistration
-	hostExtraLogs map[int64]map[string]struct{}
-	opsByHost     map[int64]*runningOp
-	opsByAcct     map[accountKey]*runningOp
-	closed        bool
-	wg            sync.WaitGroup
+	mu             sync.Mutex
+	conns          map[accountKey]*sharedConn
+	hostConn       map[int64]accountKey
+	watchers       map[any]*watchRegistration
+	hostExtraLogs  map[int64]map[string]struct{}
+	opsByHost      map[int64]*runningOp
+	opsByAcct      map[accountKey]*runningOp
+	acctRemoveSeq  uint64
+	acctRemovedSeq map[accountKey]uint64
+	closed         bool
+	wg             sync.WaitGroup
 }
 
 // NewManager creates a corrald gateway Manager.
@@ -466,6 +470,7 @@ func NewManager(cfg ManagerConfig) *Manager {
 		hostExtraLogs:          make(map[int64]map[string]struct{}),
 		opsByHost:              make(map[int64]*runningOp),
 		opsByAcct:              make(map[accountKey]*runningOp),
+		acctRemovedSeq:         make(map[accountKey]uint64),
 	}
 	mgr.adminDisabled.Store(cfg.AdminDisabled)
 	// Startup recovery: clear any orphaned active_op_id left behind if a
@@ -1217,6 +1222,7 @@ func (m *Manager) StartRemove(ctx context.Context, userID, hostID int64) (*OpVie
 
 	// Cancel and WAIT for any active install/update op on this host or account
 	// to exit completely before creating and running the remove op (Item 4).
+	m.recordAccountRemoval(acct)
 	m.cancelAndWaitOps(ctx, hostID, acct, OpInstall, OpUpdate)
 
 	opID := newHexID()
@@ -1463,8 +1469,12 @@ func (m *Manager) Retry(ctx context.Context, userID, hostID int64, corralUser st
 	}
 	if err := m.store.CreateCorraldOp(ctx, op, false); err != nil {
 		m.clearRunningOp(rop)
+		close(rop.done)
 		cancel()
 		return nil, err
+	}
+	if m.cfg.AfterRetryOpCreate != nil {
+		m.cfg.AfterRetryOpCreate(hostID)
 	}
 
 	claimed, err := m.store.ClaimCorraldHostForRetry(ctx, hostID, opID, tr.Next.State)
@@ -1476,6 +1486,7 @@ func (m *Manager) Retry(ctx context.Context, userID, hostID int64, corralUser st
 		}
 		_, _ = m.store.UpdateCorraldOpIfActive(context.Background(), op)
 		m.clearRunningOp(rop)
+		close(rop.done)
 		cancel()
 		if err != nil {
 			return nil, err
@@ -1500,6 +1511,7 @@ func (m *Manager) Retry(ctx context.Context, userID, hostID int64, corralUser st
 				op.ErrorCode = "other"
 			}
 			_, _ = m.store.ReleaseCorraldHostOpAndFinish(context.Background(), hostID, op, StateError)
+			_, _ = m.store.UpdateCorraldOpIfActive(context.Background(), op)
 		}()
 
 		sshClient, release, gotFP, gotUser, err := m.ssh.AcquireSSH(opCtx, userID, hostID)
@@ -1912,6 +1924,7 @@ func (m *Manager) DeleteHostCleanup(ctx context.Context, userID, hostID int64, c
 	m.detachHost(hostID)
 
 	out := RunUninstallWithRetry(ctx, sshClient, m.Dist(), probe, newHexID(), m.busyRetry, nil)
+	m.recordAccountRemoval(accountKey{Fingerprint: fingerprint, Username: sshUser})
 	switch out.Result {
 	case "removed":
 		_ = m.store.CorraldResetByBinding(ctx, fingerprint, sshUser)
@@ -2106,6 +2119,7 @@ func (m *Manager) CleanupUserHosts(ctx context.Context, userID int64, corralUser
 		release()
 		switch out.Result {
 		case "removed":
+			m.recordAccountRemoval(acct)
 			if m.cfg.BeforeCleanupUserDBReset != nil {
 				m.cfg.BeforeCleanupUserDBReset(h.ID)
 			}
@@ -2131,7 +2145,7 @@ func (m *Manager) CleanupUserHosts(ctx context.Context, userID int64, corralUser
 func (m *Manager) runInstallOp(ctx context.Context, rop *runningOp, op *store.CorraldOp, ch *store.CorraldHost, dist *Dist, userID, hostID int64, corralUser string, waitPeer *runningOp, initialAcct accountKey) {
 	if waitPeer != nil && initialAcct.valid() {
 		if err := m.waitAndClaimInstallAccount(ctx, rop, initialAcct); err != nil {
-			if m.isOpCancelled(rop) || m.AdminDisabled() {
+			if m.isOpCancelled(rop) || errors.Is(err, context.Canceled) || m.AdminDisabled() {
 				if m.AdminDisabled() {
 					return // outer defer sets remove_pending + finishes op if host still installing
 				}
@@ -2165,7 +2179,7 @@ func (m *Manager) runInstallOp(ctx context.Context, rop *runningOp, op *store.Co
 	acct := accountKey{Fingerprint: fp, Username: sshUser}
 	if acct.valid() && !rop.acct.valid() {
 		if err := m.waitAndClaimInstallAccount(ctx, rop, acct); err != nil {
-			if m.isOpCancelled(rop) || m.AdminDisabled() {
+			if m.isOpCancelled(rop) || errors.Is(err, context.Canceled) || m.AdminDisabled() {
 				if m.AdminDisabled() {
 					return
 				}
@@ -2175,6 +2189,13 @@ func (m *Manager) runInstallOp(ctx context.Context, rop *runningOp, op *store.Co
 			m.finishOpFail(op, ch, &OpFailure{Code: "other", Detail: err.Error()})
 			return
 		}
+	}
+	// Fix10 Item #3: Re-check per-account removal generation after binding is
+	// known so an install queued before a completed account-level remove stops
+	// cleanly (host off, op cancelled) instead of reinstalling.
+	if acct.valid() && m.accountRemovedSince(acct, rop.startRemoveSeq) {
+		m.finishOpCancelled(op, ch)
+		return
 	}
 	if ch.BoundFingerprint == "" && fp != "" {
 		ch.BoundFingerprint = fp
@@ -2290,7 +2311,7 @@ func (m *Manager) tryAttachInstallToLiveConn(ctx context.Context, rop *runningOp
 		return false
 	}
 	m.mu.Lock()
-	if m.closed || m.conns[key] != sc || rop.cancelled || ctx.Err() != nil {
+	if m.closed || m.conns[key] != sc || rop.cancelled || ctx.Err() != nil || m.acctRemovedSeq[key] > rop.startRemoveSeq {
 		m.mu.Unlock()
 		m.policyMu.RUnlock()
 		forgetOnAbort()
@@ -2627,6 +2648,7 @@ func (m *Manager) runRemoveOp(ctx context.Context, rop *runningOp, op *store.Cor
 	}
 
 	out := RunUninstallWithRetry(ctx, sshClient, m.Dist(), probe, op.ID, m.busyRetry, setStep)
+	m.recordAccountRemoval(accountKey{Fingerprint: fp, Username: sshUser})
 	switch out.Result {
 	case "removed":
 		_ = m.store.CorraldResetByBinding(context.Background(), fp, sshUser)
@@ -4900,6 +4922,29 @@ func (m *Manager) registerRunningOp(rop *runningOp) error {
 	return nil
 }
 
+func (m *Manager) recordAccountRemoval(acct accountKey) {
+	if !acct.valid() {
+		return
+	}
+	m.mu.Lock()
+	m.acctRemoveSeq++
+	if m.acctRemovedSeq == nil {
+		m.acctRemovedSeq = make(map[accountKey]uint64)
+	}
+	m.acctRemovedSeq[acct] = m.acctRemoveSeq
+	m.mu.Unlock()
+}
+
+func (m *Manager) accountRemovedSince(acct accountKey, seq uint64) bool {
+	if !acct.valid() {
+		return false
+	}
+	m.mu.Lock()
+	removed := m.acctRemovedSeq[acct] > seq
+	m.mu.Unlock()
+	return removed
+}
+
 func (m *Manager) registerInstallOp(rop *runningOp) (*runningOp, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -4909,6 +4954,7 @@ func (m *Manager) registerInstallOp(rop *runningOp) (*runningOp, error) {
 	if _, exists := m.opsByHost[rop.hostID]; exists {
 		return nil, store.ErrOpInProgress
 	}
+	rop.startRemoveSeq = m.acctRemoveSeq
 	var waitPeer *runningOp
 	if rop.acct.valid() {
 		if existing, exists := m.opsByAcct[rop.acct]; exists {
@@ -4948,6 +4994,12 @@ func (m *Manager) waitAndClaimInstallAccount(ctx context.Context, rop *runningOp
 		if m.adminDisabled.Load() {
 			m.mu.Unlock()
 			return ErrAdminDisabled
+		}
+		// Fix10 Item #3: If an account-level remove started or completed for
+		// acct after this install was queued, abort cleanly as cancelled.
+		if acct.valid() && m.acctRemovedSeq[acct] > rop.startRemoveSeq {
+			m.mu.Unlock()
+			return context.Canceled
 		}
 		prev, exists := m.opsByAcct[acct]
 		if !exists || prev == rop {

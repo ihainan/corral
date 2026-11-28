@@ -68,3 +68,42 @@ func TestUninstallCommandBinaryMissingNeverDeletesUnlocked(t *testing.T) {
 		t.Fatalf("expected result=removed when nothing remains, err=%v out=%s", errClean, string(outClean))
 	}
 }
+
+// TestUninstallCommandIgnoresCorraldBackupsBinary verifies Fix10 Item #1 on the
+// shell candidate search: a binary placed under LibDir/corrald-backups/corrald
+// MUST NOT be picked by UninstallCommand or treated as a corrald version dir.
+func TestUninstallCommandIgnoresCorraldBackupsBinary(t *testing.T) {
+	sh, err := exec.LookPath("sh")
+	if err != nil {
+		t.Skip("sh not found")
+	}
+
+	home := t.TempDir()
+	libDir := filepath.Join(home, ".local", "lib", "corral")
+	backupDir := filepath.Join(libDir, "corrald-backups")
+	stateDir := filepath.Join(home, ".local", "state", "corral", "corrald", "aa11bb22cc44")
+	for _, d := range []string{backupDir, stateDir} {
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Fake executable inside corrald-backups/ that prints a marker if executed!
+	marker := filepath.Join(backupDir, "ran.txt")
+	fakeBin := filepath.Join(backupDir, "corrald")
+	if err := os.WriteFile(fakeBin, []byte("#!/bin/sh\necho RAN > "+marker+"\necho result=removed\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stateDir, "install.json"), []byte(`{"gateway":"gw-test.local"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command(sh, "-c", UninstallCommand(libDir, stateDir, "", "opBkpShell"))
+	cmd.Env = []string{"HOME=" + home, "PATH=/usr/bin:/bin", "LC_ALL=C"}
+	out, runErr := cmd.CombinedOutput()
+	if runErr == nil || ParseKeyValues(out)["error"] != "binary_missing" {
+		t.Fatalf("Fix10 Item #1 regression: shell candidate search picked corrald-backups/corrald! err=%v out=%s", runErr, string(out))
+	}
+	if _, err := os.Stat(marker); err == nil {
+		t.Fatalf("Fix10 Item #1 regression: corrald-backups/corrald was executed!")
+	}
+}

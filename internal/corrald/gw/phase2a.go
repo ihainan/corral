@@ -1021,6 +1021,9 @@ func (m *Manager) runSafeCleanupLocked(
 	// op.lock -> corrald.lock. Refuses without modifying files if another
 	// gateway is connected/registered or if the host binary/daemon is too old.
 	out := RunUninstallSoleGatewayWithRetry(ctx, sshClient, m.Dist(), probe, opID, m.gatewayID, m.busyRetry, nil)
+	if out.Result == "removed" {
+		m.recordAccountRemoval(accountKey{Fingerprint: fp, Username: sshUser})
+	}
 	m.applySoleGatewayUninstallOutcome(fp, sshUser, []int64{hostID}, wasPending, out, 0, heldOpID)
 }
 

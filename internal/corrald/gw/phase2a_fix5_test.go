@@ -276,7 +276,7 @@ func TestFix5_Item4_ShellSoleGatewayUninstallRecoversFromLeftoverTombstoneWithou
 		}
 	})
 
-	t.Run("fails_closed_without_tombstone", func(t *testing.T) {
+	t.Run("install_json_without_tombstone_requests_locked_go_recovery_without_deleting", func(t *testing.T) {
 		base := t.TempDir()
 		libDir := filepath.Join(base, "lib", "corral")
 		stateDir := filepath.Join(base, "state", "corral", "corrald", "aabbcc112235")
@@ -286,11 +286,26 @@ func TestFix5_Item4_ShellSoleGatewayUninstallRecoversFromLeftoverTombstoneWithou
 
 		script := UninstallCommandSoleGateway(libDir, stateDir, filepath.Join(stateDir, "corrald.sock"), "op-retry3", "gw-a.local")
 		out, err := runShell(t, script)
-		if err == nil || ParseKeyValues(out)["error"] != "cannot_verify_exclusivity" {
-			t.Fatalf("expected fail-closed cannot_verify_exclusivity without tombstone, got err=%v\n%s", err, out)
+		if err == nil || ParseKeyValues(out)["error"] != "binary_missing" {
+			t.Fatalf("Fix10 Item #5: expected error=binary_missing when install.json exists without binary, got err=%v\n%s", err, out)
 		}
 		if _, statErr := os.Stat(filepath.Join(stateDir, "install.json")); statErr != nil {
-			t.Fatalf("install.json must be preserved without tombstone: %v", statErr)
+			t.Fatalf("install.json must be preserved in shell before locked Go recovery: %v", statErr)
+		}
+	})
+
+	t.Run("fails_closed_without_tombstone_or_metadata", func(t *testing.T) {
+		base := t.TempDir()
+		libDir := filepath.Join(base, "lib", "corral")
+		stateDir := filepath.Join(base, "state", "corral", "corrald", "aabbcc112236")
+		_ = os.MkdirAll(libDir, 0o700)
+		_ = os.MkdirAll(stateDir, 0o700)
+		_ = os.WriteFile(filepath.Join(stateDir, "corrald.log"), []byte("log\n"), 0o600)
+
+		script := UninstallCommandSoleGateway(libDir, stateDir, filepath.Join(stateDir, "corrald.sock"), "op-retry4", "gw-a.local")
+		out, err := runShell(t, script)
+		if err == nil || ParseKeyValues(out)["error"] != "cannot_verify_exclusivity" {
+			t.Fatalf("expected fail-closed cannot_verify_exclusivity without tombstone or metadata, got err=%v\n%s", err, out)
 		}
 	})
 }

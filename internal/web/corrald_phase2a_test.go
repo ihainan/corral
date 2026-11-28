@@ -3025,6 +3025,379 @@ func TestCorraldFix9_LiveAttachReconcilesWatchAndExtraLogs(t *testing.T) {
 	}
 }
 
+type blockingLateBindingSSHProvider struct {
+	inner      gw.SSHProvider
+	lateHostID int64
+	onEntering func()
+	releaseCh  <-chan struct{}
+	mu         sync.Mutex
+	acquired   bool
+}
+
+func (p *blockingLateBindingSSHProvider) AcquireSSH(ctx context.Context, ownerID, hostID int64) (*ssh.Client, func(), string, string, error) {
+	if hostID == p.lateHostID {
+		if p.onEntering != nil {
+			p.onEntering()
+		}
+		select {
+		case <-p.releaseCh:
+		case <-ctx.Done():
+			return nil, nil, "", "", ctx.Err()
+		}
+	}
+	cl, rel, fp, u, err := p.inner.AcquireSSH(ctx, ownerID, hostID)
+	if err == nil && hostID == p.lateHostID {
+		p.mu.Lock()
+		p.acquired = true
+		p.mu.Unlock()
+	}
+	return cl, rel, fp, u, err
+}
+
+func (p *blockingLateBindingSSHProvider) HostBinding(ctx context.Context, ownerID, hostID int64) (string, string, error) {
+	if hostID == p.lateHostID {
+		p.mu.Lock()
+		ok := p.acquired
+		p.mu.Unlock()
+		if !ok {
+			return "", "", nil
+		}
+	}
+	return p.inner.HostBinding(ctx, ownerID, hostID)
+}
+
+func (p *blockingLateBindingSSHProvider) UserLabel(ctx context.Context, userID int64) string {
+	return p.inner.UserLabel(ctx, userID)
+}
+
+// Regression test for Fix Round 10 Item #3 [P2]:
+// A queued install whose binding is unknown until SSH auth finishes MUST NOT
+// reinstall corrald after an account-level remove completed while it was
+// waiting: once its binding is learned, it checks the per-account removal
+// generation and exits cleanly (host off, op cancelled).
+func TestCorraldFix10_LateBindingInstallAbortsAfterCompletedAccountRemove(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("requires linux")
+	}
+	v1Dir, _ := buildTestCorraldDist(t)
+	distV1, err := gw.LoadDist(v1Dir)
+	if err != nil {
+		t.Fatalf("LoadDist v1: %v", err)
+	}
+	h := newHarness(t, func(c *config.Config) {
+		c.CorraldDir = v1Dir
+		c.GatewayID = "gw-fix10-gen.local"
+	})
+	admin := h.admin()
+	sshSrv, home := startCorraldSSH(t)
+	h1, _ := createAndPinHost(t, admin, sshSrv, "gen-rm-1")
+	h2, _ := createAndPinHost(t, admin, sshSrv, "gen-rm-2")
+
+	h2InAcquire := make(chan struct{})
+	releaseH2 := make(chan struct{})
+	var h2Once sync.Once
+	h.srv.corrald.Close()
+	h.srv.corrald = gw.NewManager(gw.ManagerConfig{
+		Store:     h.store,
+		Dist:      distV1,
+		GatewayID: "gw-fix10-gen.local",
+		SSH: &blockingLateBindingSSHProvider{
+			inner:      &webSSHProvider{s: h.srv},
+			lateHostID: h2,
+			onEntering: func() { h2Once.Do(func() { close(h2InAcquire) }) },
+			releaseCh:  releaseH2,
+		},
+	})
+
+	// 1. Install h1 -> running.
+	startCorraldInstall(t, admin, h1)
+	waitCorraldState(t, admin, h1, gw.StateRunning)
+
+	// 2. Start late-binding h2 install -> blocks inside AcquireSSH BEFORE
+	//    learning its (fingerprint, username) binding.
+	r2 := admin.do("POST", fmt.Sprintf("/api/hosts/%d/corrald/install", h2), map[string]any{"manifest_hash": distV1.ManifestHash})
+	mustStatus(t, r2, http.StatusAccepted, "start late-binding h2")
+	select {
+	case <-h2InAcquire:
+	case <-time.After(10 * time.Second):
+		t.Fatal("timed out waiting for h2 to enter AcquireSSH")
+	}
+
+	// 3. Complete an account-level remove on h1 while h2 is still blocked in AcquireSSH!
+	rmRes := admin.do("POST", fmt.Sprintf("/api/hosts/%d/corrald/remove", h1), nil)
+	mustStatus(t, rmRes, http.StatusAccepted, "remove h1")
+	waitCorraldState(t, admin, h1, gw.StateOff)
+
+	// 4. Now release h2's AcquireSSH -> h2 learns acct AFTER the remove already completed!
+	close(releaseH2)
+	if err := h.srv.corrald.WaitOpsIdle(context.Background()); err != nil {
+		t.Fatalf("WaitOpsIdle: %v", err)
+	}
+
+	ch2, err := h.srv.store.CorraldHostByID(context.Background(), h2)
+	if err != nil {
+		t.Fatalf("CorraldHostByID(h2): %v", err)
+	}
+	if ch2.State != gw.StateOff {
+		t.Fatalf("Fix10 Item #3 regression: late-binding h2 reinstalled after completed account remove! state=%q", ch2.State)
+	}
+	if latest2, lerr := h.srv.store.LatestCorraldOp(context.Background(), h2); lerr != nil || latest2.State != gw.OpCancelled {
+		t.Fatalf("Fix10 Item #3 regression: expected h2 op state=cancelled, got (%+v, %v)", latest2, lerr)
+	}
+	bin := filepath.Join(home, ".local", "lib", "corral", "corrald")
+	if _, err := os.Lstat(bin); !os.IsNotExist(err) {
+		t.Fatalf("Fix10 Item #3 regression: binary %s was reinstalled by h2 after completed remove! stat err=%v", bin, err)
+	}
+
+	// 5. A fresh install started AFTER the remove must still succeed normally!
+	startCorraldInstall(t, admin, h1)
+	waitCorraldState(t, admin, h1, gw.StateRunning)
+}
+
+// Regression test for Fix Round 10 Item #4 [P2]:
+// Retry's init-failure exits MUST close rop.done (just like StartInstall) so a
+// peer host's StartInstall queued behind Retry wakes up and proceeds.
+func TestCorraldFix10_RetryInitFailureWakesQueuedPeerInstall(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("requires linux")
+	}
+	v1Dir, _ := buildTestCorraldDist(t)
+	distV1, err := gw.LoadDist(v1Dir)
+	if err != nil {
+		t.Fatalf("LoadDist v1: %v", err)
+	}
+	h := newHarness(t, func(c *config.Config) {
+		c.CorraldDir = v1Dir
+		c.GatewayID = "gw-fix10-retry.local"
+	})
+	admin := h.admin()
+	adminID := userIDOf(t, admin)
+	sshSrv, _ := startCorraldSSH(t)
+	h1, _ := createAndPinHost(t, admin, sshSrv, "retry-init-1")
+	h2, _ := createAndPinHost(t, admin, sshSrv, "retry-init-2")
+	fp := hostFingerprint(t, h, adminID, h1)
+
+	// Place h1 in StateError so Retry is allowed.
+	uid := adminID
+	if err := h.srv.store.UpsertCorraldHost(context.Background(), &store.CorraldHost{
+		HostID:           h1,
+		State:            gw.StateError,
+		ConsentBy:        &uid,
+		ConsentAt:        time.Now().Unix(),
+		BoundFingerprint: fp,
+		BoundUsername:    "alice",
+		BoundGateway:     "gw-fix10-retry.local",
+		LastError:        `{"code":"start_failed"}`,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx1, cancel1 := context.WithCancel(context.Background())
+	defer cancel1()
+
+	peerStarted := make(chan struct{})
+	peerErrCh := make(chan error, 1)
+	var once sync.Once
+	h.srv.corrald.Close()
+	h.srv.corrald = gw.NewManager(gw.ManagerConfig{
+		Store:     h.store,
+		Dist:      distV1,
+		GatewayID: "gw-fix10-retry.local",
+		SSH:       &webSSHProvider{s: h.srv},
+		AfterRetryOpCreate: func(hid int64) {
+			if hid != h1 {
+				return
+			}
+			once.Do(func() {
+				go func() {
+					_, perr := h.srv.corrald.StartInstall(context.Background(), adminID, h2, "admin", distV1.ManifestHash, false)
+					peerErrCh <- perr
+					close(peerStarted)
+				}()
+				<-peerStarted
+				time.Sleep(80 * time.Millisecond)
+				cancel1()
+			})
+		},
+	})
+
+	_, err1 := h.srv.corrald.Retry(ctx1, adminID, h1, "admin")
+	if err1 == nil {
+		t.Fatal("expected Retry to fail when ctx1 cancelled before ClaimCorraldHostForRetry")
+	}
+	if perr := <-peerErrCh; perr != nil {
+		t.Fatalf("expected queued peer StartInstall to be accepted, got %v", perr)
+	}
+	if actOp, actErr := h.srv.store.ActiveCorraldOp(context.Background(), h1); !errors.Is(actErr, store.ErrNotFound) {
+		t.Fatalf("expected h1 Retry op row finished, got (%+v, %v)", actOp, actErr)
+	}
+
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		ch2, err := h.srv.store.CorraldHostByID(context.Background(), h2)
+		if err == nil && ch2.State == gw.StateRunning && ch2.ActiveOpID == "" {
+			break
+		}
+		if time.Now().After(deadline) {
+			op2, _ := h.srv.store.LatestCorraldOp(context.Background(), h2)
+			t.Fatalf("Fix10 Item #4 regression: queued peer h2 did not wake up after Retry init failure! ch2=(%+v, %v) op2=%+v", ch2, err, op2)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// Regression test for Fix Round 10 Item #5 [P2]:
+// Account-level sole-gateway cleanup MUST also recover "binary missing, no
+// tombstone" hosts when install.json / clients.json are present: verifies
+// sole-gateway under locks, writes the tombstone, reinstalls into LibDir, runs
+// locked uninstall, and reaches off (while still refusing other_gateways if a
+// foreign gateway is registered).
+func TestCorraldFix10_AdminDisableCleanupRecoversBinarylessNoTombstone(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("requires linux")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("chmod 0500 does not block root")
+	}
+	v1Dir, _ := buildTestCorraldDist(t)
+
+	t.Run("sole_gateway_recovers_with_partial_then_retry_to_off", func(t *testing.T) {
+		h := newHarness(t, func(c *config.Config) {
+			c.CorraldDir = v1Dir
+			c.GatewayID = "gw-fix10-clean.local"
+		})
+		admin := h.admin()
+		adminID := userIDOf(t, admin)
+		sshSrv, home := startCorraldSSH(t)
+		hostID, _ := createAndPinHost(t, admin, sshSrv, "binless-notomb")
+
+		startCorraldInstall(t, admin, hostID)
+		waitCorraldState(t, admin, hostID, gw.StateRunning)
+
+		sshCl := dialTestSSH(t, sshSrv)
+		defer sshCl.Close()
+		probe, err := gw.ProbeHost(context.Background(), sshCl)
+		if err != nil {
+			t.Fatalf("ProbeHost: %v", err)
+		}
+		stopCmd := exec.Command(probe.CurrentBin, "stop")
+		stopCmd.Env = append(os.Environ(), "HOME="+home)
+		if out, err := stopCmd.CombinedOutput(); err != nil {
+			t.Fatalf("stop daemon: %v (%s)", err, out)
+		}
+		// Delete LibDir completely (binaryless), keep install.json & clients.json,
+		// NO removing tombstone, and place a read-only run/ so first cleanup writes
+		// the tombstone and reports partial, then retry reaches off!
+		if err := os.RemoveAll(probe.LibDir); err != nil {
+			t.Fatal(err)
+		}
+		runDir := filepath.Join(home, ".local", "state", "corral", "run")
+		if err := os.MkdirAll(runDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(runDir, "corral-send-tmux-_5"), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(runDir, 0o500); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(runDir, 0o700) })
+
+		// 1. Admin disables corrald and host reconnects over SSH -> first cleanup
+		//    verifies sole gateway, writes tombstone, reinstalls & runs locked
+		//    uninstall -> partial on run/ -> stays remove_pending with tombstone!
+		fp := hostFingerprint(t, h, adminID, hostID)
+		h.srv.corrald.SetAdminDisabled(context.Background(), true)
+		h.srv.corrald.OnHostConnected(context.Background(), adminID, hostID, "admin", fp, "alice", sshCl)
+		deadline := time.Now().Add(10 * time.Second)
+		for {
+			if _, err := os.Stat(probe.TombstonePath); err == nil {
+				break
+			}
+			if time.Now().After(deadline) {
+				ch, _ := h.srv.store.CorraldHostByID(context.Background(), hostID)
+				t.Fatalf("Fix10 Item #5 regression: binaryless no-tombstone cleanup did not write tombstone / start recovery! ch=%+v", ch)
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+
+		// 2. Clear run/ fault and trigger retry -> MUST recover cleanly to StateOff!
+		if err := os.Chmod(runDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		h.srv.corrald.MaybeRetryPendingCleanup(adminID, hostID, "admin", sshCl)
+		deadline = time.Now().Add(10 * time.Second)
+		for {
+			ch, err := h.srv.store.CorraldHostByID(context.Background(), hostID)
+			_, stErr := os.Lstat(probe.StateDir)
+			_, runErr := os.Lstat(runDir)
+			if err == nil && ch.State == gw.StateOff && os.IsNotExist(stErr) && os.IsNotExist(runErr) {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("Fix10 Item #5 regression: retry did not reach StateOff! ch=(%+v,%v) stErr=%v runErr=%v", ch, err, stErr, runErr)
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+	})
+
+	t.Run("foreign_gateway_in_clients_json_preserved_without_tombstone", func(t *testing.T) {
+		h := newHarness(t, func(c *config.Config) {
+			c.CorraldDir = v1Dir
+			c.GatewayID = "gw-fix10-a.local"
+		})
+		admin := h.admin()
+		adminID := userIDOf(t, admin)
+		sshSrv, home := startCorraldSSH(t)
+		hostID, _ := createAndPinHost(t, admin, sshSrv, "binless-foreign")
+		fp := hostFingerprint(t, h, adminID, hostID)
+
+		startCorraldInstall(t, admin, hostID)
+		waitCorraldState(t, admin, hostID, gw.StateRunning)
+
+		sshCl := dialTestSSH(t, sshSrv)
+		defer sshCl.Close()
+		probe, err := gw.ProbeHost(context.Background(), sshCl)
+		if err != nil {
+			t.Fatalf("ProbeHost: %v", err)
+		}
+		stopCmd := exec.Command(probe.CurrentBin, "stop")
+		stopCmd.Env = append(os.Environ(), "HOME="+home)
+		if out, err := stopCmd.CombinedOutput(); err != nil {
+			t.Fatalf("stop daemon: %v (%s)", err, out)
+		}
+		if err := os.RemoveAll(probe.LibDir); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(probe.ClientsJSON, []byte(`[{"gateway":"gw-fix10-a.local","corral_user":"admin"},{"gateway":"gw-other.local","corral_user":"bob"}]`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		// Mark host remove_pending so transitioning to StateStopped proves
+		// OnHostConnected actually executed sole-gateway recovery and got other_gateways!
+		_, _ = h.srv.store.SetCorraldStateIfIdle(context.Background(), hostID, gw.StateRemovePending, gw.StateRunning, gw.StateStopped, gw.StateLost)
+
+		h.srv.corrald.SetAdminDisabled(context.Background(), true)
+		h.srv.corrald.OnHostConnected(context.Background(), adminID, hostID, "admin", fp, "alice", sshCl)
+		deadline := time.Now().Add(10 * time.Second)
+		for {
+			ch, err := h.srv.store.CorraldHostByID(context.Background(), hostID)
+			if err == nil && ch.State == gw.StateStopped {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("expected host marked stopped when foreign gateway present, got (%+v, %v)", ch, err)
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+		if _, err := os.Stat(probe.InstallJSON); err != nil {
+			t.Fatalf("install.json must be preserved when foreign gateway exists: %v", err)
+		}
+		if _, err := os.Lstat(probe.TombstonePath); !os.IsNotExist(err) {
+			t.Fatalf("tombstone must NOT be written when foreign gateway exists, stat err=%v", err)
+		}
+	})
+}
+
 func syscallFlockEx(f *os.File) error {
 	return syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
 }

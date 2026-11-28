@@ -215,11 +215,14 @@ func ParseProbe(out []byte) (*HostProbe, error) {
 		p.FreeKB = n
 	}
 
-	// Collect all version_dir lines.
+	// Collect only strictly validated corrald-<ver>-<rel> version directories
+	// (ignoring unrelated directories like corrald-backups).
 	sc := bufio.NewScanner(strings.NewReader(string(out)))
 	for sc.Scan() {
 		if v, ok := strings.CutPrefix(sc.Text(), "version_dir="); ok && v != "" {
-			p.Versions = append(p.Versions, v)
+			if _, _, _, valid := parseVersionDirInfo(v); valid {
+				p.Versions = append(p.Versions, v)
+			}
 		}
 	}
 
@@ -502,15 +505,36 @@ fi`
   echo "detail=corrald binary missing while removing tombstone exists; requires locked Go recovery"
   exit 1
 fi
+if { [ -f "$ST/install.json" ] && [ ! -L "$ST/install.json" ]; } || { [ -f "$ST/clients.json" ] && [ ! -L "$ST/clients.json" ]; }; then
+  echo "error=binary_missing"
+  echo "detail=corrald binary missing while install/clients metadata exists; requires locked Go recovery"
+  exit 1
+fi
 
 echo "error=cannot_verify_exclusivity"
 echo "detail=corrald binary missing; cannot safely verify sole-gateway uninstall"
 exit 1`
 	}
-	return shellScript(`BIN="$L/corrald"
+	return shellScript(`is_ver_dir() {
+  case "$1" in
+    corrald-*-*)
+      _rest=${1#corrald-}
+      _rel=${_rest##*-}
+      _ver=${_rest%-*}
+      [ -n "$_ver" ] && [ -n "$_rel" ] || return 1
+      case "$_rel" in *[!0-9]*) return 1 ;; esac
+      case "$_ver" in *..*|*[!A-Za-z0-9._+-]*) return 1 ;; esac
+      return 0
+      ;;
+  esac
+  return 1
+}
+
+BIN="$L/corrald"
 if [ ! -x "$BIN" ]; then
   for cand in "$L"/corrald-*/corrald; do
-    if [ -x "$cand" ]; then BIN="$cand"; break; fi
+    _dir=$(basename -- "$(dirname -- "$cand")")
+    if is_ver_dir "$_dir" && [ -x "$cand" ]; then BIN="$cand"; break; fi
   done
 fi
 `+execBranch+`
@@ -519,8 +543,9 @@ has_corrald_lib() {
   [ -L "$L/corrald" ] || [ -e "$L/corrald" ] && return 0
   [ -e "$L/README.txt" ] && return 0
   [ -e "$L/.corrald-shared.lock" ] && return 0
-  for d in "$L"/corrald-[0-9]*; do
-    [ -e "$d" ] && return 0
+  for d in "$L"/corrald-*; do
+    [ -e "$d" ] || continue
+    is_ver_dir "$(basename -- "$d")" && return 0
   done
   return 1
 }
