@@ -85,7 +85,7 @@ type bgProber struct {
 	models map[string]paneModel
 	wake   chan struct{}
 	poke   func() // (the watcher's last summary goes again)
-	read func(ctx context.Context, sessions []string, tail int) (map[string]bgRecord, error)
+	read   func(ctx context.Context, sessions []string, tail int) (map[string]bgRecord, error)
 	// back: told of a pane whose subagents a look of the prober's own found
 	// back, no turn's end told meanwhile (two changes in one snapshot): the
 	// "finished" held back goes.
@@ -416,7 +416,7 @@ func (s *Server) locatedEverywhere(sess *term.Session, pane, sid string, at time
 	}
 	note(sess.ID)
 	socket := s.herdrSocks.get(sess.ID)
-	if socket == "" {
+	if socket == "" || s.terms == nil {
 		return
 	}
 	for _, o := range s.terms.Running(sess.OwnerID, sess.HostID) {

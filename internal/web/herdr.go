@@ -556,9 +556,34 @@ func (h *herdrSockets) setLocated(id, pane, sid string, at time.Time) {
 }
 
 func (h *herdrSockets) locatedOf(id, pane string) string {
+	sid, _ := h.locatedAtOf(id, pane)
+	return sid
+}
+
+func (h *herdrSockets) locatedAtOf(id, pane string) (string, time.Time) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	return h.located[id][pane].sid
+	loc := h.located[id][pane]
+	return loc.sid, loc.at
+}
+
+// recordHerdrLocatedSIDs updates locatedEverywhere for each pane using ONLY the
+// primary process chosen by pickConvoProc (stamped with scan start time scanAt)
+// so a background child Claude CLI in the same pane cannot overwrite its
+// parent's located SID.
+func (s *Server) recordHerdrLocatedSIDs(sess *term.Session, socket string, procs []convoProc, scanAt time.Time) {
+	seenPanes := map[string]struct{}{}
+	for _, p := range procs {
+		if p.herdrSocket != socket || !herdrPane.MatchString(p.herdrPane) {
+			continue
+		}
+		seenPanes[p.herdrPane] = struct{}{}
+	}
+	for pane := range seenPanes {
+		if primary := pickConvoProc(procs, "herdr", pane, socket, "", "", s.herdrSocks.sid(sess.ID, pane)); primary != nil && (primary.agent == "claude" || primary.agent == "agy") && convoUUID.MatchString(primary.sid) {
+			s.locatedEverywhere(sess, pane, primary.sid, scanAt)
+		}
+	}
 }
 
 func (h *herdrSockets) setBg(id string, p *bgProber) {
@@ -834,18 +859,15 @@ func (s *Server) watchHerdr(sess *term.Session, h *store.Host) {
 		if !found.noProc {
 			s.recordLocatedProcs(sess, found, true, "", tLoc)
 		}
-		began := time.UnixMilli(got)
 		for _, p := range found.procs {
 			if p.herdrSocket != socket || !herdrPane.MatchString(p.herdrPane) {
 				continue
-			}
-			if (p.agent == "claude" || p.agent == "agy") && convoUUID.MatchString(p.sid) {
-				s.locatedEverywhere(sess, p.herdrPane, p.sid, began)
 			}
 			if p.log != "" {
 				lineage.notePaneLog(p.herdrPane, p.agent, p.sid, p.log)
 			}
 		}
+		s.recordHerdrLocatedSIDs(sess, socket, found.procs, tLoc)
 		if off, ok := hostClockAhead(string(locOut), got); ok {
 			lineage.noteClock(off)
 		}
@@ -925,15 +947,11 @@ func (s *Server) watchHerdr(sess *term.Session, h *store.Host) {
 					s.recordLocatedProcs(sess, found, true, "", tLoc)
 				}
 				s.perfLocate("locate.times", tLoc, nil, len(found.procs), sess.HostID)
-				began := time.UnixMilli(got)
 				for _, p := range found.procs {
 					// (Of this herdr server: another on the host names
 					// its panes as this one does.)
 					if p.herdrSocket != socket || !herdrPane.MatchString(p.herdrPane) {
 						continue
-					}
-					if (p.agent == "claude" || p.agent == "agy") && convoUUID.MatchString(p.sid) {
-						s.locatedEverywhere(sess, p.herdrPane, p.sid, began)
 					}
 					if p.log != "" {
 						lineage.notePaneLog(p.herdrPane, p.agent, p.sid, p.log)
@@ -942,6 +960,7 @@ func (s *Server) watchHerdr(sess *term.Session, h *store.Host) {
 						at[p.herdrPane] = w
 					}
 				}
+				s.recordHerdrLocatedSIDs(sess, socket, found.procs, tLoc)
 				pctx, pcancel := context.WithTimeout(ctx, 15*time.Second)
 				if panes, perr := s.codexPanes.of(pctx, sess, socket); perr == nil {
 					resumedWrote(at, panes, found.cands)

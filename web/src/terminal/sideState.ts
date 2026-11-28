@@ -549,6 +549,31 @@ export function createSubConvoPoller<E extends { seq: number }, R>(deps: SubPoll
   return { run, stop }
 }
 
+// resolveSubPeers chooses which peer lookup map a subagent panel may use so
+// completed subagents never keep showing links from a frozen historical poll:
+//   - While the subagent is still polling (`going && !subFailed`), merge its
+//     live `subPeers` with the parent conversation's latest live `parentPeers`
+//     (parent wins on shared keys when parent is healthy).
+//   - Once the subagent stops polling (`!going` or `subFailed`), discard the
+//     subagent's frozen `subPeers` snapshot and ONLY follow the parent's latest
+//     live `parentPeers` (or `undefined` when the parent is offline/failing).
+export function resolveSubPeers<P>(opts: {
+  going: boolean
+  subFailed?: boolean
+  subPeers?: Record<string, P>
+  parentPeers?: Record<string, P>
+  parentOkAt: number
+  parentFailing: boolean
+}): Record<string, P> | undefined {
+  const liveParent = !opts.parentFailing && opts.parentOkAt > 0 ? opts.parentPeers : undefined
+  if (!opts.going || opts.subFailed) {
+    return liveParent
+  }
+  if (!opts.subPeers) return liveParent
+  if (!liveParent) return opts.subPeers
+  return { ...opts.subPeers, ...liveParent }
+}
+
 // convoLastUserMs returns the unix-ms timestamp of the latest non-mid, non-gone
 // user message in the conversation (matching the conversation header's timer).
 export function convoLastUserMs(entries: EntryLike[]): number | undefined {

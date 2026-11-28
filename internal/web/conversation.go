@@ -1918,7 +1918,7 @@ func (s *Server) refreshCodexClaims(sess *term.Session) {
 		defer cancel()
 		tScan := time.Now()
 		tmuxName := sess.CurrentTmuxSession()
-		out, _, _, shared, err := s.runConvoScan(ctx, sess, proto.AgentLocateParams{Mode: sess.Persistence, TmuxName: tmuxName}, convoLocateCommand(sess.Persistence, tmuxName, ""), time.Time{})
+		out, _, looked, shared, err := s.runConvoScan(ctx, sess, proto.AgentLocateParams{Mode: sess.Persistence, TmuxName: tmuxName}, convoLocateCommand(sess.Persistence, tmuxName, ""), time.Time{})
 		if err != nil {
 			s.perfLocate(locateOp("locate.full", shared), tScan, err, 0, sess.HostID)
 			return
@@ -1928,6 +1928,7 @@ func (s *Server) refreshCodexClaims(sess *term.Session) {
 		if l.noProc {
 			return
 		}
+		s.recordLocatedProcs(sess, l, true, "", looked)
 		s.convoClaimed.seeAliveOn(hostKey, l, aliveCodex(l), l.now())
 	}()
 }
@@ -5098,6 +5099,13 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 			}
 			_ = err
 			l = parseConvoLocate(string(out))
+			if !l.noProc {
+				if fastTry {
+					s.recordLocatedProcs(sess, l, false, b.Pane, tLoc)
+				} else {
+					s.recordLocatedProcs(sess, l, true, "", tLoc)
+				}
+			}
 			s.perfLocate(op, tLoc, nil, len(l.procs), sess.HostID)
 			if fastTry {
 				if plan.mode == herdrFastPIDs {

@@ -14,6 +14,14 @@ import (
 	"github.com/ihainan/corral/internal/term"
 )
 
+const (
+	// peerSlotMaxAge bounds how long a pane/session slot from a prior locate
+	// scan may be used for peer matching without being refreshed by a newer
+	// scan. Expired slots fall back to "not in Corral" so missed scan paths
+	// never misattribute messages.
+	peerSlotMaxAge = 10 * time.Minute
+)
+
 type peerProcID struct {
 	pid   int64
 	start int64
@@ -50,6 +58,14 @@ type liveSessionPeers struct {
 type peerLocateCache struct {
 	mu     sync.Mutex
 	bySess map[string]*liveSessionPeers
+	nowFn  func() time.Time // test hook; nil uses time.Now
+}
+
+func (c *peerLocateCache) now() time.Time {
+	if c != nil && c.nowFn != nil {
+		return c.nowFn()
+	}
+	return time.Now()
 }
 
 func (c *peerLocateCache) ensureSessLocked(sessID string, ownerID, hostID int64, hostConfig string) *liveSessionPeers {
@@ -455,7 +471,7 @@ func (s *Server) recordLocatedProcs(sess *term.Session, l convoLocated, full boo
 		return
 	}
 	if observedAt.IsZero() {
-		observedAt = time.Now()
+		observedAt = s.peers.now()
 	}
 	hc := peerHostConfig(sess)
 
@@ -580,6 +596,7 @@ func (s *Server) resolveConvoPeers(sess *term.Session, st *convoState) map[strin
 		}
 	}
 
+	now := s.peers.now()
 	out := map[string]convo.PeerInfo{}
 	s.peers.mu.Lock()
 	for _, ref := range refs {
@@ -592,6 +609,9 @@ func (s *Server) resolveConvoPeers(sess *term.Session, st *convoState) map[strin
 			}
 			for _, slot := range cur.panes {
 				if slot == nil || !slot.has || slot.id != id {
+					continue
+				}
+				if slot.scanAt.IsZero() || now.Sub(slot.scanAt) > peerSlotMaxAge {
 					continue
 				}
 				entry := slot.entry
@@ -610,7 +630,7 @@ func (s *Server) resolveConvoPeers(sess *term.Session, st *convoState) map[strin
 					if entry.agentSID != "" && agentSession(hp) != "" && agentSession(hp) != entry.agentSID {
 						continue
 					}
-					if locatedSID := s.herdrSocks.locatedOf(rs.ID, pi.Pane); entry.agentSID != "" && locatedSID != "" && locatedSID != entry.agentSID {
+					if locatedSID, locatedAt := s.herdrSocks.locatedAtOf(rs.ID, pi.Pane); entry.agentSID != "" && locatedSID != "" && !locatedAt.Before(slot.scanAt) && locatedSID != entry.agentSID {
 						continue
 					}
 					if t := peerTitleFromHerdr(wsLabel, hp.Label, hp.Title, hp.Name, entry.cwd, entry.program); t != "" {

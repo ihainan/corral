@@ -182,11 +182,12 @@ type goneItem struct {
 }
 
 type queuedItem struct {
-	from string
-	note bool
-	raw  string // as the log wrote it (a remove names it so)
-	key  string // queueKey(Text), what its arrival is matched by
-	cut  bool   // Text was cut (see cutMatch)
+	from      string
+	note      bool
+	raw       string // as the log wrote it (a remove names it so)
+	matchText string // normalized peer text (handles origin.Body-enqueued items)
+	key       string // queueKey(Text), what its arrival is matched by
+	cut       bool   // Text was cut (see cutMatch)
 	Queued
 }
 
@@ -1220,6 +1221,34 @@ func hasCompletePeerOrigin(o *claudeOrigin) bool {
 	return isPeerOrigin(o) && rawPositiveInt64(o.VerifiedPeerPID) > 0 && rawPositiveInt64(o.VerifiedPeerProcStart) > 0
 }
 
+const peerEnvelopePrefix = "Another Claude session sent a message:"
+
+// crossSessionEnvelope returns the substring beginning at <cross-session-message
+// ONLY when the XML envelope appears at the start of s (allowing leading
+// whitespace, or Claude Code's fixed "Another Claude session sent a message:"
+// header line immediately before it). Mid-body example tags are treated as
+// ordinary text and return ("", false).
+func crossSessionEnvelope(s string) (string, bool) {
+	t := strings.TrimLeftFunc(s, unicode.IsSpace)
+	if strings.HasPrefix(t, "<cross-session-message") {
+		return t, true
+	}
+	if rest, ok := strings.CutPrefix(t, peerEnvelopePrefix); ok {
+		rest = strings.TrimLeftFunc(rest, unicode.IsSpace)
+		if strings.HasPrefix(rest, "<cross-session-message") {
+			return rest, true
+		}
+	}
+	return "", false
+}
+
+func normPeerQueueText(s string) string {
+	if i := strings.Index(s, relayedMark); i >= 0 {
+		s = s[:i]
+	}
+	return clean(blankEnds(strings.TrimSpace(s)))
+}
+
 func extractCrossSessionAttr(re *regexp.Regexp, s string) (string, bool) {
 	m := re.FindStringSubmatch(s)
 	if m == nil {
@@ -1231,18 +1260,18 @@ func extractCrossSessionAttr(re *regexp.Regexp, s string) (string, bool) {
 	return clip(m[2], maxMeta), true
 }
 
-// peerAddrMismatch reports whether an XML <cross-session-message ...> wrapper
-// is present and either lacks a parseable non-empty from attribute or disagrees
-// with origin.from. When true, verified (pid, start) must be discarded.
+// peerAddrMismatch reports whether a leading XML <cross-session-message ...>
+// envelope is present and either lacks a parseable non-empty from attribute or
+// disagrees with origin.from. When true, verified (pid, start) must be discarded.
 func peerAddrMismatch(s string, o *claudeOrigin) bool {
 	if !isPeerOrigin(o) {
 		return false
 	}
-	i := strings.Index(s, "<cross-session-message")
-	if i < 0 {
+	env, ok := crossSessionEnvelope(s)
+	if !ok {
 		return false
 	}
-	xmlAddr, ok := extractCrossSessionAttr(crossSessionAddr, s[i:])
+	xmlAddr, ok := extractCrossSessionAttr(crossSessionAddr, env)
 	if !ok || xmlAddr == "" {
 		return true
 	}
@@ -1446,12 +1475,15 @@ func (c *Claude) queueOp(r *claudeRow) {
 		text, from, note := queuedTextWithOrigin(s, r.Origin)
 		if text != "" && c.ofNow(r.Timestamp) {
 			q := queuedItem{raw: s, from: from, note: note}
+			if note && from != "" {
+				q.matchText = normPeerQueueText(text)
+			}
 			q.Text, q.cut = cut(clean(blankEnds(text)), maxText)
 			q.key = queueKey(q.Text)
 			q.Time = clip(r.Timestamp, 64)
 			// Only attach verified (pid, start) when this queue record itself
-			// carries complete verified peer origin fields and its XML address
-			// (if present) agrees with origin.from.
+			// carries complete verified peer origin fields and its leading XML
+			// envelope address (if present) agrees with origin.from.
 			if hasCompletePeerOrigin(r.Origin) && !peerAddrMismatch(s, r.Origin) {
 				q.PeerPID = rawPositiveInt64(r.Origin.VerifiedPeerPID)
 				q.PeerStart = rawPositiveInt64(r.Origin.VerifiedPeerProcStart)
@@ -1463,8 +1495,37 @@ func (c *Claude) queueOp(r *claudeRow) {
 			}
 		}
 	case "remove":
+		_, envOK := crossSessionEnvelope(s)
+		peerRemove := isPeerOrigin(r.Origin) || envOK
+		var remText, remFrom string
+		if peerRemove {
+			remText, remFrom, _ = queuedTextWithOrigin(s, r.Origin)
+			remText = normPeerQueueText(remText)
+		}
 		for i, q := range c.queue {
-			if q.raw == s || sameCrossSession(q, s) {
+			matched := false
+			if peerRemove {
+				// Peer removals ONLY match peer queue items, never human user
+				// queued messages even when their raw text is identical.
+				if !q.note || q.from == "" {
+					continue
+				}
+				fromOK := remFrom == "" || remFrom == "?" || q.from == remFrom
+				if fromOK {
+					qMatch := q.matchText
+					if qMatch == "" {
+						qMatch = normPeerQueueText(bodyAfterTag(q.raw, "cross-session-message"))
+					}
+					matched = sameCrossSession(q, s) || (remText != "" && qMatch == remText) || (s != "" && q.raw == s)
+				}
+			} else {
+				// Non-peer removals never delete peer queued items.
+				if q.from != "" {
+					continue
+				}
+				matched = q.raw == s
+			}
+			if matched {
 				c.queue = append(c.queue[:i:i], c.queue[i+1:]...)
 				c.gone = append(c.gone, goneItem{q.key, q.cut, clip(r.Timestamp, 64), q.from})
 				if n := len(c.gone) - maxQueue; n > 0 {
@@ -1525,15 +1586,15 @@ func peerWords(s string) (string, bool) {
 func (c *Claude) peerOf(s string, origin *claudeOrigin) *Event {
 	var name, addr, words string
 	var relayed bool
-	if i := strings.Index(s, "<cross-session-message"); i >= 0 {
-		if n, ok := extractCrossSessionAttr(crossSession, s[i:]); ok {
+	if env, ok := crossSessionEnvelope(s); ok {
+		if n, ok := extractCrossSessionAttr(crossSession, env); ok {
 			name = n
 		}
-		if a, ok := extractCrossSessionAttr(crossSessionAddr, s[i:]); ok {
+		if a, ok := extractCrossSessionAttr(crossSessionAddr, env); ok {
 			addr = a
 		}
 		if name != "" || isPeerOrigin(origin) {
-			words, relayed = peerWords(s[i:])
+			words, relayed = peerWords(env)
 		}
 	}
 	mismatch := peerAddrMismatch(s, origin)
@@ -1583,15 +1644,15 @@ func (c *Claude) peerOf(s string, origin *claudeOrigin) *Event {
 
 // queuedTextWithOrigin classifies a queued enqueue row, recognizing peer
 // messages carried by origin.kind=="peer" even when content is plain text
-// without a <cross-session-message> XML wrapper (so they never enter the user
-// queue or show "Send now").
+// without a leading <cross-session-message> XML envelope (so they never enter
+// the user queue or show "Send now").
 func queuedTextWithOrigin(s string, origin *claudeOrigin) (text, from string, note bool) {
 	if isPeerOrigin(origin) {
-		if i := strings.Index(s, "<cross-session-message"); i >= 0 {
-			if n, ok := extractCrossSessionAttr(crossSession, s[i:]); ok {
+		if env, ok := crossSessionEnvelope(s); ok {
+			if n, ok := extractCrossSessionAttr(crossSession, env); ok {
 				from = n
 			}
-			text, _ = peerWords(s[i:])
+			text, _ = peerWords(env)
 		}
 		if from == "" && origin.Name != "" {
 			from = clip(origin.Name, maxMeta)
@@ -1600,7 +1661,7 @@ func queuedTextWithOrigin(s string, origin *claudeOrigin) (text, from string, no
 			from = "?"
 		}
 		if text == "" && origin.Body != "" {
-			text = origin.Body
+			text = strings.TrimSpace(origin.Body)
 			if j := strings.Index(text, relayedMark); j >= 0 {
 				text = strings.TrimSpace(text[:j])
 			}
@@ -1620,11 +1681,13 @@ func queuedTextWithOrigin(s string, origin *claudeOrigin) (text, from string, no
 // (another session's agent) and whether it is a notice rather than anyone's
 // message. "" when it is of none of these.
 func queuedText(s string) (text, from string, note bool) {
-	if n, ok := extractCrossSessionAttr(crossSession, s); ok {
-		// (The envelope says where it came from, down to a socket and the
-		// hops it took: of that, only which session it was.)
-		w, _ := peerWords(s) // (Claude Code's note of words relayed: not the sender's)
-		return w, n, true
+	if env, ok := crossSessionEnvelope(s); ok {
+		if n, ok := extractCrossSessionAttr(crossSession, env); ok {
+			// (The envelope says where it came from, down to a socket and the
+			// hops it took: of that, only which session it was.)
+			w, _ := peerWords(env) // (Claude Code's note of words relayed: not the sender's)
+			return w, n, true
+		}
 	}
 	if strings.HasPrefix(strings.TrimSpace(s), "[Cross-session idle notice]") {
 		return strings.TrimSpace(s), "", true
@@ -1665,14 +1728,15 @@ func (c *Claude) arrived(a arrival) {
 func (c *Claude) metaArrived(s string, origin *claudeOrigin) {
 	text, from := s, ""
 	peer := isPeerOrigin(origin)
-	if i := strings.Index(s, "<cross-session-message"); i >= 0 {
-		n, ok := extractCrossSessionAttr(crossSession, s[i:])
+	env, hasEnv := crossSessionEnvelope(s)
+	if hasEnv {
+		n, ok := extractCrossSessionAttr(crossSession, env)
 		if !ok {
 			if !peer {
 				return
 			}
 		} else {
-			text, from, peer = bodyAfterTag(s[i:], "cross-session-message"), n, true
+			text, from, peer = bodyAfterTag(env, "cross-session-message"), n, true
 		}
 	}
 	if peer {
@@ -1682,7 +1746,7 @@ func (c *Claude) metaArrived(s string, origin *claudeOrigin) {
 		if from == "" {
 			from = "?"
 		}
-		if strings.Index(s, "<cross-session-message") < 0 {
+		if !hasEnv {
 			if origin != nil && origin.Body != "" {
 				text = origin.Body
 			} else {
@@ -1692,6 +1756,10 @@ func (c *Claude) metaArrived(s string, origin *claudeOrigin) {
 	}
 	if text == "" {
 		return
+	}
+	wantNorm := ""
+	if peer {
+		wantNorm = normPeerQueueText(text)
 	}
 	// (The same words first, among the removed and the waiting both; only
 	// then one removed, cut, see cutMatch.)
@@ -1708,11 +1776,22 @@ func (c *Claude) metaArrived(s string, origin *claudeOrigin) {
 		if !peer && q.from != "" {
 			continue
 		}
-		words := q.raw
-		if q.from != "" {
-			words = bodyAfterTag(q.raw, "cross-session-message")
+		if peer {
+			qMatch := q.matchText
+			if qMatch == "" {
+				if qEnv, ok := crossSessionEnvelope(q.raw); ok {
+					qMatch = normPeerQueueText(bodyAfterTag(qEnv, "cross-session-message"))
+				} else {
+					qMatch = normPeerQueueText(q.raw)
+				}
+			}
+			if q.from == from && qMatch == wantNorm {
+				c.queue = append(c.queue[:i:i], c.queue[i+1:]...)
+				return
+			}
+			continue
 		}
-		if q.from == from && words == text {
+		if q.from == from && q.raw == text {
 			c.queue = append(c.queue[:i:i], c.queue[i+1:]...)
 			return
 		}
@@ -1727,8 +1806,19 @@ func sameCrossSession(q queuedItem, s string) bool {
 	if q.from == "" {
 		return false
 	}
-	n, ok := extractCrossSessionAttr(crossSession, s)
-	return ok && n == q.from && bodyAfterTag(s, "cross-session-message") == bodyAfterTag(q.raw, "cross-session-message")
+	env, ok := crossSessionEnvelope(s)
+	if !ok {
+		return false
+	}
+	n, ok := extractCrossSessionAttr(crossSession, env)
+	if !ok || n != q.from {
+		return false
+	}
+	qEnv, qOK := crossSessionEnvelope(q.raw)
+	if !qOK {
+		return false
+	}
+	return bodyAfterTag(env, "cross-session-message") == bodyAfterTag(qEnv, "cross-session-message")
 }
 
 // turnOver: a turn has ended (its "turn_duration" row). A slash command

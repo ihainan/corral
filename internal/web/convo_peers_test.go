@@ -478,6 +478,141 @@ func TestPeerFix3AndFix4Scenarios(t *testing.T) {
 			t.Fatalf("subagent convo peers = %+v, want acme-web", peers)
 		}
 	})
+
+	// Fix5 fallback TTL rule: slots not refreshed for > peerSlotMaxAge (10m)
+	// stop matching (show original name + "not in Corral"), using a fake clock.
+	t.Run("slot_expires_after_10m_without_refresh", func(t *testing.T) {
+		curTime := time.Unix(1_750_000_000, 0)
+		tmuxSess := &term.Session{ID: "s-tmux", OwnerID: 1, HostID: 10, HostName: "devbox", HostConfig: "cfg1", Persistence: "tmux", TmuxSession: "main"}
+		srv := &Server{}
+		srv.peers.nowFn = func() time.Time { return curTime }
+
+		proc := convoProc{pid: 300, start: 1200, agent: "claude", sid: "11111111-1111-1111-1111-111111111111", tmuxPane: "%1", tmuxServerPID: "99", tty: "/dev/pts/1"}
+		srv.recordLocatedProcs(tmuxSess, tmuxLocated("%1", "99", "/dev/pts/1", "✳ worker", proc), true, "", curTime)
+
+		parser := makePeerParser(t, peerMsgLine("u1", 300, 1200, "ai-tm"))
+		cst := &convoState{parser: parser}
+
+		// At 9m59s: still valid.
+		curTime = curTime.Add(peerSlotMaxAge - time.Second)
+		if peers := srv.resolveConvoPeers(tmuxSess, cst); peers["300:1200"].Title != "worker" {
+			t.Fatalf("at 9m59s expected match, got %+v", peers)
+		}
+		// At 10m01s: expired -> must NOT match.
+		curTime = curTime.Add(2 * time.Second)
+		if peers := srv.resolveConvoPeers(tmuxSess, cst); len(peers) != 0 {
+			t.Fatalf("at 10m01s expired slot must not match, got %+v", peers)
+		}
+		// Refreshed by a new scan -> matches again.
+		srv.recordLocatedProcs(tmuxSess, tmuxLocated("%1", "99", "/dev/pts/1", "✳ worker", proc), true, "", curTime)
+		if peers := srv.resolveConvoPeers(tmuxSess, cst); peers["300:1200"].Title != "worker" {
+			t.Fatalf("after refresh expected match, got %+v", peers)
+		}
+	})
+
+	// Fix5 #2: locatedSID from an OLDER scan must NOT veto a newer slot; a
+	// SAME-OR-NEWER scan's locatedSID DOES veto a mismatched slot. Also a
+	// background child Claude in the same pane must not overwrite parent SID.
+	t.Run("locatedSID_veto_respects_scan_time_and_primary_only", func(t *testing.T) {
+		sock := "/tmp/herdr-test/default.sock"
+		oldSID := "11111111-1111-1111-1111-111111111111"
+		newSID := "22222222-2222-2222-2222-222222222222"
+		newerSID := "33333333-3333-3333-3333-333333333333"
+		snap := &herdr.Snapshot{
+			Workspaces: []herdr.Workspace{{ID: "ws1", Label: "acme-web"}},
+			Panes:      []herdr.Pane{{ID: "w1:p1", WorkspaceID: "ws1"}},
+			Agents:     []herdr.Pane{{ID: "w1:p1", WorkspaceID: "ws1", Agent: "claude", TerminalID: "t1"}},
+		}
+		sess := &term.Session{ID: "s-herdr", OwnerID: 1, HostID: 10, HostName: "devbox", HostConfig: "cfg1", Persistence: "herdr"}
+		srv := &Server{herdrSocks: herdrSockets{path: map[string]string{}}}
+		srv.herdrSocks.set(sess.ID, sock)
+		srv.herdrSocks.setServer(sess.ID, "srv-1", 1, func() (*herdr.Snapshot, time.Time) { return snap, time.Now() }, func() {})
+
+		t1 := time.Now().Add(-20 * time.Second)
+		t2 := t1.Add(10 * time.Second)
+		t3 := t2.Add(5 * time.Second)
+
+		// Older locatedSID from t1 (oldSID).
+		srv.herdrSocks.setLocated(sess.ID, "w1:p1", oldSID, t1)
+		// Newer locate scan at t2 selects (200:600, newSID), while a background
+		// child Claude (400:900, childSID) shares the same pane.
+		parentProc := convoProc{pid: 200, start: 600, agent: "claude", sid: newSID, herdrPane: "w1:p1", herdrSocket: sock, anc: herdrAnc()}
+		childProc := convoProc{
+			pid: 400, start: 900, agent: "claude", sid: newerSID, herdrPane: "w1:p1", herdrSocket: sock,
+			anc: []convoAnc{{pid: 390, comm: "bash"}, {pid: 200, comm: "claude"}, {pid: 90, comm: "zsh"}, {pid: 80, comm: "herdr"}},
+		}
+		srv.recordLocatedProcs(sess, convoLocated{procs: []convoProc{parentProc, childProc}}, false, "w1:p1", t2)
+
+		parser := makePeerParser(t, peerMsgLine("u1", 200, 600, "ai-parent"))
+		cst := &convoState{parser: parser}
+		// Older locatedSID (t1 < t2) MUST NOT veto the newer slot (t2).
+		if peers := srv.resolveConvoPeers(sess, cst); peers["200:600"].Title != "acme-web" {
+			t.Fatalf("stale older locatedSID wrongly vetoed newer slot: %+v", peers)
+		}
+
+		// Watcher recording locatedSIDs for [parentProc, childProc] at t2 must
+		// keep parent's newSID (NOT child's newerSID) so parent is NOT vetoed!
+		srv.recordHerdrLocatedSIDs(sess, sock, []convoProc{parentProc, childProc}, t2)
+		if gotSID := srv.herdrSocks.locatedOf(sess.ID, "w1:p1"); gotSID != newSID {
+			t.Fatalf("recordHerdrLocatedSIDs = %q, want parent %q (not child)", gotSID, newSID)
+		}
+		if peers := srv.resolveConvoPeers(sess, cst); peers["200:600"].Title != "acme-web" {
+			t.Fatalf("child Claude in same pane wrongly vetoed parent slot: %+v", peers)
+		}
+
+		// Newer locatedSID (t3 > t2) with different SID MUST veto the stale slot.
+		srv.herdrSocks.setLocated(sess.ID, "w1:p1", newerSID, t3)
+		if peers := srv.resolveConvoPeers(sess, cst); len(peers) != 0 {
+			t.Fatalf("newer mismatched locatedSID should veto slot, got %+v", peers)
+		}
+	})
+
+	// Fix5 #1: a background full scan (like refreshCodexClaims via convoScans)
+	// feeds its parsed locate result into peerLocateCache using the same full
+	// scan entry point and replaces stale panes.
+	t.Run("refreshCodexClaims_feeds_peer_cache", func(t *testing.T) {
+		sock := "/tmp/herdr-test/default.sock"
+		sid := "11111111-1111-1111-1111-111111111111"
+		snap := &herdr.Snapshot{
+			Workspaces: []herdr.Workspace{{ID: "ws1", Label: "codex-bg-ws"}},
+			Panes:      []herdr.Pane{{ID: "w1:p1", WorkspaceID: "ws1"}},
+			Agents:     []herdr.Pane{{ID: "w1:p1", WorkspaceID: "ws1", Agent: "claude", TerminalID: "t1", AgentSession: &herdr.AgentSessionInfo{Value: sid}}},
+		}
+		sess := &term.Session{ID: "s-herdr", OwnerID: 1, HostID: 10, HostName: "devbox", HostConfig: "cfg1", Persistence: "herdr"}
+		srv := &Server{herdrSocks: herdrSockets{path: map[string]string{}}}
+		srv.herdrSocks.set(sess.ID, sock)
+		srv.herdrSocks.setServer(sess.ID, "srv-1", 1, func() (*herdr.Snapshot, time.Time) { return snap, time.Now() }, func() {})
+
+		// Seed convoScans with a completed full scan result so refreshCodexClaims
+		// consumes it synchronously without any SSH/remote command.
+		fullCmd := convoLocateCommand(sess.Persistence, sess.CurrentTmuxSession(), "")
+		scanOut := convoRec(
+			"pid=700", "start=7700", "procstart=7700", "agent=claude",
+			"sid="+sid, "HERDR_PANE_ID=w1:p1", "HERDR_SOCKET_PATH="+sock,
+			"anc=90:zsh,80:herdr",
+		)
+		done := make(chan struct{})
+		close(done)
+		now := time.Now()
+		srv.convoScans.m = map[string]*convoScan{
+			sess.ID + "\x00" + fullCmd: {done: done, out: []byte(scanOut), at: now, began: now},
+		}
+		// Seed an active Codex claim for hostKey so refreshCodexClaims runs.
+		srv.convoClaimed.takeOn(convoClaimHostKey(sess), "codex-sid-1", procID{900, 9900}, 1000, nil, now.UnixMilli(), false)
+
+		srv.refreshCodexClaims(sess)
+		parser := makePeerParser(t, peerMsgLine("u1", 700, 7700, "ai-bg"))
+		cst := &convoState{parser: parser}
+
+		deadline := time.Now().Add(2 * time.Second)
+		for time.Now().Before(deadline) {
+			if peers := srv.resolveConvoPeers(sess, cst); peers["700:7700"].Title == "codex-bg-ws" {
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		t.Fatalf("refreshCodexClaims did not feed full scan result into peer cache: %+v", srv.resolveConvoPeers(sess, cst))
+	})
 }
 
 func TestPeerSanitization(t *testing.T) {

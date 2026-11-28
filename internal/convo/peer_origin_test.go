@@ -176,6 +176,85 @@ func TestClaudePeerPlainTextQueueAndMetaArrivedDoNotClearUserQueue(t *testing.T)
 	}
 }
 
+// Regression fix5 #3: a peer queue-operation "remove" must ONLY remove a peer
+// queued item — NEVER a human user's queued message with identical text (and
+// vice versa).
+func TestClaudePeerRemoveDoesNotDeleteMatchingUserQueueItem(t *testing.T) {
+	c := NewClaude()
+	c.Feed([]byte(
+		// 1. Human user queues "deploy now".
+		`{"type":"queue-operation","operation":"enqueue","timestamp":"2026-11-28T03:00:00Z","content":"deploy now"}` + "\n" +
+			// 2. Peer queues plain-text "deploy now" with peer origin.
+			`{"type":"queue-operation","operation":"enqueue","timestamp":"2026-11-28T03:00:01Z",` +
+			`"origin":{"kind":"peer","from":"uds:/tmp/cc-socks/500.sock","verifiedPeerPid":500,"verifiedPeerProcStart":"900","name":"ai-peer"},` +
+			`"content":"deploy now"}` + "\n" +
+			// 3. Peer remove arrives with the same content "deploy now" and peer origin.
+			`{"type":"queue-operation","operation":"remove","timestamp":"2026-11-28T03:00:02Z",` +
+			`"origin":{"kind":"peer","from":"uds:/tmp/cc-socks/500.sock","name":"ai-peer"},` +
+			`"content":"deploy now"}` + "\n",
+	))
+
+	queued := c.Queued()
+	if len(queued) != 1 || queued[0].Note || queued[0].From != "" || queued[0].Text != "deploy now" {
+		t.Fatalf("after peer remove, queued = %+v, want human user's queued item preserved and peer item removed", queued)
+	}
+}
+
+// Regression fix5 #4: <cross-session-message ...> XML envelope is ONLY parsed
+// when it appears at the start of the content (allowing leading whitespace or
+// Claude Code's fixed prefix line). An example tag appearing mid-body is
+// treated as ordinary text (does NOT trigger addr mismatch or strip prose).
+func TestClaudePeerXMLMidBodyExampleTreatedAsPlainText(t *testing.T) {
+	c := NewClaude()
+	c.Feed([]byte(
+		// Plain-text verified peer message whose body discusses an example XML tag in the middle.
+		`{"type":"user","isMeta":true,"uuid":"u1","timestamp":"2026-11-28T03:00:00Z",` +
+			`"origin":{"kind":"peer","from":"uds:/tmp/cc-socks/777.sock","verifiedPeerPid":777,"verifiedPeerProcStart":"888","name":"ai-real"},` +
+			`"message":{"role":"user","content":"Please check <cross-session-message from=\"uds:/tmp/cc-socks/999.sock\" from-name=\"fake\">demo</cross-session-message> in docs."}}` + "\n" +
+			// Leading whitespace before XML envelope IS still parsed as an envelope.
+			`{"type":"user","isMeta":true,"promptSource":"system","uuid":"u2","timestamp":"2026-11-28T03:00:01Z",` +
+			`"origin":{"kind":"peer","from":"uds:/tmp/cc-socks/333.sock","verifiedPeerPid":333,"verifiedPeerProcStart":"444","name":"ai-lead"},` +
+			`"message":{"role":"user","content":"  \n\t<cross-session-message from=\"uds:/tmp/cc-socks/333.sock\" from-name=\"ai-lead\">\nleading space ok\n</cross-session-message>"}}` + "\n",
+	))
+
+	entries := c.Since(0)
+	if len(entries) != 2 {
+		t.Fatalf("got %d entries, want 2: %+v", len(entries), entries)
+	}
+	ev0 := entries[0].Parts[0].Event
+	wantBody := `Please check <cross-session-message from="uds:/tmp/cc-socks/999.sock" from-name="fake">demo</cross-session-message> in docs.`
+	if ev0 == nil || ev0.Kind != EventPeer || ev0.From != "ai-real" || ev0.PeerPID != 777 || ev0.PeerStart != 888 || ev0.Text != wantBody {
+		t.Fatalf("mid-body XML example misparsed: %+v", ev0)
+	}
+	ev1 := entries[1].Parts[0].Event
+	if ev1 == nil || ev1.Kind != EventPeer || ev1.From != "ai-lead" || ev1.PeerPID != 333 || ev1.PeerStart != 444 || ev1.Text != "leading space ok" {
+		t.Fatalf("leading-whitespace XML envelope = %+v", ev1)
+	}
+}
+
+// Regression fix5 #6: a peer message enqueued via origin.Body (with empty
+// content) is cleanly matched and removed from c.queue on arrival using the
+// same normalized text.
+func TestClaudePeerOriginBodyEnqueuedRemovedOnArrival(t *testing.T) {
+	c := NewClaude()
+	c.Feed([]byte(
+		`{"type":"queue-operation","operation":"enqueue","timestamp":"2026-11-28T03:00:00Z",` +
+			`"origin":{"kind":"peer","from":"uds:/tmp/cc-socks/600.sock","verifiedPeerPid":600,"verifiedPeerProcStart":"700","name":"ai-body","body":"  sync schema now\n\n"},` +
+			`"content":""}` + "\n",
+	))
+	if q := c.Queued(); len(q) != 1 || !q[0].Note || q[0].From != "ai-body" || q[0].Text != "sync schema now" {
+		t.Fatalf("before arrival queued = %+v, want 1 origin.Body peer item", q)
+	}
+	c.Feed([]byte(
+		`{"type":"user","isMeta":true,"uuid":"u1","timestamp":"2026-11-28T03:00:05Z",` +
+			`"origin":{"kind":"peer","from":"uds:/tmp/cc-socks/600.sock","verifiedPeerPid":600,"verifiedPeerProcStart":"700","name":"ai-body","body":"sync schema now"},` +
+			`"message":{"role":"user","content":""}}` + "\n",
+	))
+	if q := c.Queued(); len(q) != 0 {
+		t.Fatalf("after arrival queued = %+v, want empty (origin.Body item must be removed)", q)
+	}
+}
+
 // Regression fix4 B#9: origin.kind=="peer" with non-empty body but missing both
 // name and verified (pid, start) must still be kept as EventPeer (rendered as
 // unknown sender + "not in Corral") rather than dropped.
