@@ -731,7 +731,8 @@ func (m *Manager) MaybeRetryPendingCleanup(userID, hostID int64, corralUser stri
 		if sshUser == "" {
 			sshUser = ch.BoundUsername
 		}
-		if !CheckBinding(toSnapshot(ch), fp, sshUser, m.gatewayID) {
+		if !m.pendingRemoveMatchesBinding(ch, fp, sshUser) {
+			m.dropPendingRemoveOnBindingChange(ctx, hostID, ch)
 			return
 		}
 		key := accountKey{Fingerprint: fp, Username: sshUser}
@@ -848,7 +849,8 @@ func (m *Manager) reconcileRemovePendingOnAllow(gen uint64) {
 			if ferr != nil || (fresh.State != StateRemovePending && fresh.State != StateRemoving) {
 				return
 			}
-			if !CheckBinding(toSnapshot(fresh), fp, sshUser, m.gatewayID) {
+			if !m.pendingRemoveMatchesBinding(fresh, fp, sshUser) {
+				m.dropPendingRemoveOnBindingChange(ctx, it.HostID, fresh)
 				return
 			}
 
@@ -936,58 +938,49 @@ func (m *Manager) handleAdminDisabledWhileHoldingOp(
 	m.runSafeCleanupLocked(ctx, userID, hostID, corralUser, fp, sshUser, sshClient, opID, false, 0, heldOpID)
 }
 
-// isOpRunningInMemory reports whether opID is currently tracked as an active
-// in-memory operation in this Manager process.
-func (m *Manager) isOpRunningInMemory(opID string) bool {
-	if m == nil || opID == "" {
-		return false
+func pendingRemoveTarget(ch *store.CorraldHost) string {
+	if ch == nil {
+		return ""
 	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	for _, r := range m.opsByHost {
-		if r != nil && r.opID == opID {
-			return true
-		}
+	if ch.PendingRemoveAccount != "" {
+		return ch.PendingRemoveAccount
 	}
-	for _, r := range m.opsByAcct {
-		if r != nil && r.opID == opID {
-			return true
-		}
-	}
-	return false
+	return store.CorraldAccountKey(ch.BoundFingerprint, ch.BoundUsername)
 }
 
-// finalizeCrashedHostOp finishes a host's active_op_id (or account-wide
-// pending/running op) left behind in SQLite by a previous gateway process crash
-// so pending cleanup and future operations on ANY peer host sharing the account
-// are not permanently blocked. Callers must already hold acquireCleanupOpLock.
-func (m *Manager) finalizeCrashedHostOp(ctx context.Context, hostID int64, acctKey, activeOpID string) bool {
-	if m == nil || m.store == nil || (activeOpID == "" && acctKey == "") || m.isOpRunningInMemory(activeOpID) {
+// pendingRemoveMatchesBinding reports whether (fp, sshUser) is the exact
+// machine/account that ch's pending removal targets AND matches ch's binding.
+func (m *Manager) pendingRemoveMatchesBinding(ch *store.CorraldHost, fp, sshUser string) bool {
+	if ch == nil || fp == "" || sshUser == "" {
 		return false
 	}
-	if op, err := m.store.ActiveCorraldOpByIDOrAccount(ctx, activeOpID, acctKey); err == nil && op != nil {
-		if m.isOpRunningInMemory(op.ID) {
+	curAcct := store.CorraldAccountKey(fp, sshUser)
+	if target := pendingRemoveTarget(ch); target != "" && target != curAcct {
+		return false
+	}
+	if ch.BoundFingerprint != "" || ch.BoundUsername != "" || ch.BoundGateway != "" {
+		if !CheckBinding(toSnapshot(ch), fp, sshUser, m.gatewayID) {
 			return false
 		}
-		op.State = OpFailed
-		op.ErrorCode = "interrupted"
-		op.Detail = encodeOpDetail(opDetailPayload{Message: "interrupted by gateway restart"})
-		if released, rerr := m.store.ReleaseCorraldOpAcrossAccountAndFinish(ctx, op); rerr == nil && released {
-			return true
-		}
 	}
-	if op, err := m.store.ActiveCorraldOp(ctx, hostID); err == nil && op != nil && (activeOpID == "" || op.ID == activeOpID) {
-		if m.isOpRunningInMemory(op.ID) {
-			return false
-		}
-		op.State = OpFailed
-		op.ErrorCode = "interrupted"
-		op.Detail = encodeOpDetail(opDetailPayload{Message: "interrupted by gateway restart"})
-		if released, rerr := m.store.ReleaseCorraldOpAcrossAccountAndFinish(ctx, op); rerr == nil && released {
-			return true
-		}
+	return true
+}
+
+// dropPendingRemoveOnBindingChange abandons a pending removal for hostID ONLY
+// (leaving peer host rows targeting the old machine intact) when hostID now
+// points to another machine/account, recording a leftover notice in last_error.
+func (m *Manager) dropPendingRemoveOnBindingChange(ctx context.Context, hostID int64, ch *store.CorraldHost) bool {
+	if m == nil || m.store == nil || hostID <= 0 || ch == nil {
+		return false
 	}
-	if cleared, cerr := m.store.ClearStaleCorraldHostOp(ctx, hostID); cerr == nil && cleared {
+	notice := encodeLastError(&OpFailure{
+		Code:   "pending_remove_abandoned",
+		Detail: "host binding changed before previous machine cleanup finished; old host may still have corrald files",
+	})
+	dropped, err := m.store.DropPendingCorraldRemoveOnBindingChange(ctx, hostID, ch.PendingRemoveAccount, notice)
+	if err == nil && dropped {
+		m.detachHost(hostID)
+		m.refreshPendingCleanupFlag()
 		return true
 	}
 	return false
@@ -998,10 +991,11 @@ func (m *Manager) finalizeCrashedHostOp(ctx context.Context, hostID int64, acctK
 //
 // Before any destructive action (including detaching a shared connection), it
 // re-reads the host row from SQLite and verifies:
-//   - binding still matches (fp, sshUser, m.gatewayID),
+//   - binding and pending_remove_account still match (fp, sshUser, m.gatewayID),
 //   - if requirePending is true, DB state is STILL remove_pending/removing
 //     (so a concurrent explicit reinstall is never touched!),
-//   - if allowGen > 0, policyGen has not moved and admin has not re-disabled.
+//   - if allowGen > 0, policyGen has not moved and admin has not re-disabled,
+//   - no other live operation owns active_op_id.
 func (m *Manager) runSafeCleanupLocked(
 	ctx context.Context,
 	userID, hostID int64,
@@ -1023,17 +1017,7 @@ func (m *Manager) runSafeCleanupLocked(
 		m.refreshPendingCleanupFlag()
 		return
 	}
-	acctKey := ""
-	if fp != "" && sshUser != "" {
-		acctKey = fp + "\x00" + sshUser
-	}
-	hasPendingRemoveOp := false
-	if fresh.ActiveOpID != "" && fresh.ActiveOpID != heldOpID {
-		if op, oerr := m.store.ActiveCorraldOpByIDOrAccount(ctx, fresh.ActiveOpID, acctKey); oerr == nil && op != nil && op.Kind == OpRemove {
-			hasPendingRemoveOp = true
-		}
-	}
-	if requirePending && fresh.State != StateRemovePending && fresh.State != StateRemoving && !hasPendingRemoveOp {
+	if requirePending && fresh.State != StateRemovePending && fresh.State != StateRemoving {
 		return
 	}
 	if !requirePending && !m.AdminDisabled() {
@@ -1042,41 +1026,16 @@ func (m *Manager) runSafeCleanupLocked(
 	if allowGen > 0 && (m.AdminDisabled() || m.policyGen.Load() != allowGen) {
 		return
 	}
-	if !CheckBinding(toSnapshot(fresh), fp, sshUser, m.gatewayID) {
+	if fresh.State == StateRemovePending || fresh.State == StateRemoving {
+		if !m.pendingRemoveMatchesBinding(fresh, fp, sshUser) {
+			m.dropPendingRemoveOnBindingChange(ctx, hostID, fresh)
+			return
+		}
+	} else if !CheckBinding(toSnapshot(fresh), fp, sshUser, m.gatewayID) {
 		return
 	}
 	if fresh.ActiveOpID != "" && fresh.ActiveOpID != heldOpID {
-		// Fix12 Item #4 + Fix13 Item #1: When heldOpID == "", the caller holds
-		// acquireCleanupOpLock, which guarantees no in-memory operation is
-		// active for this host or account. If SQLite still has an active_op_id
-		// from a gateway crash mid-remove (including one created on a peer host
-		// record sharing this account), finish that crashed op across the
-		// account so cleanup proceeds and retries/new removes are not blocked.
-		if heldOpID == "" && !m.isOpRunningInMemory(fresh.ActiveOpID) {
-			if m.finalizeCrashedHostOp(ctx, hostID, acctKey, fresh.ActiveOpID) {
-				fresh.ActiveOpID = ""
-			} else {
-				return
-			}
-		} else {
-			return
-		}
-	}
-	if heldOpID == "" {
-		// Also finish any orphaned running remove op row for this host or
-		// account whose active_op_id was already cleared before crash, so
-		// idx_corrald_ops_active_* cannot reject future removes.
-		if op, oerr := m.store.ActiveCorraldOpByIDOrAccount(ctx, "", acctKey); oerr == nil && op != nil && op.Kind == OpRemove && !m.isOpRunningInMemory(op.ID) {
-			op.State = OpFailed
-			op.ErrorCode = "interrupted"
-			op.Detail = encodeOpDetail(opDetailPayload{Message: "interrupted by gateway restart"})
-			_, _ = m.store.ReleaseCorraldOpAcrossAccountAndFinish(ctx, op)
-		} else if op, oerr := m.store.ActiveCorraldOp(ctx, hostID); oerr == nil && op != nil && op.Kind == OpRemove && !m.isOpRunningInMemory(op.ID) {
-			op.State = OpFailed
-			op.ErrorCode = "interrupted"
-			op.Detail = encodeOpDetail(opDetailPayload{Message: "interrupted by gateway restart"})
-			_, _ = m.store.ReleaseCorraldOpAcrossAccountAndFinish(ctx, op)
-		}
+		return
 	}
 
 	wasPending := fresh.State == StateRemovePending || fresh.State == StateRemoving

@@ -4183,6 +4183,332 @@ func TestCorraldFix14_PeerRemoveCrashNormalRunningStates(t *testing.T) {
 	})
 }
 
+// Regression tests for Fix Round 15:
+//  1. One atomic startup sweep finishes EVERY crashed running op before any host
+//     connects and transitions all referencing/same-account rows for a crashed
+//     remove to remove_pending with pending_remove_account set — regardless of
+//     each row's prior state (removing/running, running/off, op cleared on rows
+//     but not finished, remove_pending/remove_pending, or already finished).
+//  2. A pending removal NEVER moves to another machine when a host's binding
+//     changes (via UpdateCorraldFingerprint or hostname/server swap): the row
+//     drops its pending removal to off with a leftover notice, never uninstalls
+//     on the new machine, and peer row A can still finish removing the old host.
+func TestCorraldFix15_StartupSweepAndBindingProtection(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("requires linux")
+	}
+	v1Dir, _ := buildTestCorraldDist(t)
+	distV1, err := gw.LoadDist(v1Dir)
+	if err != nil {
+		t.Fatalf("LoadDist v1: %v", err)
+	}
+
+	setupAB := func(t *testing.T, gwID string) (*harness, *client, int64, int64, int64, string, string, *ssh.Client) {
+		t.Helper()
+		h := newHarness(t, func(c *config.Config) {
+			c.CorraldDir = v1Dir
+			c.GatewayID = gwID
+		})
+		admin := h.admin()
+		adminID := userIDOf(t, admin)
+		sshSrv, home := startCorraldSSH(t)
+		hostA, _ := createAndPinHost(t, admin, sshSrv, "f15-a")
+		hostB, _ := createAndPinHost(t, admin, sshSrv, "f15-b")
+		fp := hostFingerprint(t, h, adminID, hostA)
+
+		startCorraldInstall(t, admin, hostA)
+		waitCorraldState(t, admin, hostA, gw.StateRunning)
+		sshCl := dialTestSSH(t, sshSrv)
+		t.Cleanup(func() { _ = sshCl.Close() })
+		h.srv.corrald.OnHostConnected(context.Background(), adminID, hostB, "admin", fp, "alice", sshCl)
+		waitCorraldState(t, admin, hostB, gw.StateRunning)
+		return h, admin, adminID, hostA, hostB, fp, home, sshCl
+	}
+
+	restartMgr := func(h *harness, gwID string) {
+		h.srv.corrald.Close()
+		h.srv.corrald = gw.NewManager(gw.ManagerConfig{
+			Store:     h.store,
+			Dist:      distV1,
+			GatewayID: gwID,
+			SSH:       &webSSHProvider{s: h.srv},
+		})
+	}
+
+	assertCleanedAndReusable := func(t *testing.T, h *harness, admin *client, hostA, hostB int64, home string, reinstallHost int64) {
+		t.Helper()
+		chA, err := h.store.CorraldHostByID(context.Background(), hostA)
+		if err != nil {
+			t.Fatalf("CorraldHostByID(A): %v", err)
+		}
+		chB, err := h.store.CorraldHostByID(context.Background(), hostB)
+		if err != nil {
+			t.Fatalf("CorraldHostByID(B): %v", err)
+		}
+		if chA.State != gw.StateOff || chA.ActiveOpID != "" {
+			t.Fatalf("Fix15 regression: hostA not cleanly off! state=%q active_op_id=%q", chA.State, chA.ActiveOpID)
+		}
+		if chB.State != gw.StateOff || chB.ActiveOpID != "" {
+			t.Fatalf("Fix15 regression: hostB not cleanly off! state=%q active_op_id=%q", chB.State, chB.ActiveOpID)
+		}
+		if activeA, err := h.store.ActiveCorraldOp(context.Background(), hostA); err == nil && activeA != nil {
+			t.Fatalf("Fix15 regression: op still active on hostA: %+v", activeA)
+		}
+		if activeB, err := h.store.ActiveCorraldOp(context.Background(), hostB); err == nil && activeB != nil {
+			t.Fatalf("Fix15 regression: op still active on hostB: %+v", activeB)
+		}
+		bin := filepath.Join(home, ".local", "lib", "corral", "corrald")
+		if _, err := os.Lstat(bin); !os.IsNotExist(err) {
+			t.Fatalf("Fix15 regression: binary %s still present after recovery! stat err=%v", bin, err)
+		}
+		// A new install via either row must be accepted cleanly.
+		startCorraldInstall(t, admin, reinstallHost)
+		waitCorraldState(t, admin, reinstallHost, gw.StateRunning)
+	}
+
+	t.Run("removing_and_running_b_reconnects", func(t *testing.T) {
+		h, admin, adminID, hostA, hostB, fp, home, sshCl := setupAB(t, "gw-f15-rr.local")
+		acctKey := store.CorraldAccountKey(fp, "alice")
+		const opID = "1501000000000001"
+		if err := h.store.CreateCorraldOp(context.Background(), &store.CorraldOp{
+			ID: opID, HostID: hostA, AccountKey: acctKey, Kind: gw.OpRemove, State: gw.OpRunning, Step: "uninstall",
+		}, true); err != nil {
+			t.Fatal(err)
+		}
+		if err := h.store.ClaimCorraldHostForRemove(context.Background(), hostA, opID); err != nil {
+			t.Fatal(err)
+		}
+
+		restartMgr(h, "gw-f15-rr.local")
+		// Immediately after startup (before any reconnect), op MUST already be finished
+		// and BOTH rows MUST already be remove_pending with active_op_id == "".
+		if op, err := h.store.LatestCorraldOp(context.Background(), hostA); err != nil || op.State != gw.OpFailed || op.ErrorCode != "interrupted" {
+			t.Fatalf("Fix15 regression: startup sweep did not finish crashed remove op: (%+v, %v)", op, err)
+		}
+		h.srv.corrald.OnHostConnected(context.Background(), adminID, hostB, "admin", fp, "alice", sshCl)
+		assertCleanedAndReusable(t, h, admin, hostA, hostB, home, hostB)
+	})
+
+	t.Run("running_and_off_b_reconnects_first", func(t *testing.T) {
+		h, admin, adminID, hostA, hostB, fp, home, sshCl := setupAB(t, "gw-f15-ro.local")
+		acctKey := store.CorraldAccountKey(fp, "alice")
+		// Put B in StateOff (while A is StateRunning) and crash a remove op for the account.
+		if err := h.store.ResetCorraldHostOff(context.Background(), hostB); err != nil {
+			t.Fatal(err)
+		}
+		const opID = "1501000000000002"
+		if err := h.store.CreateCorraldOp(context.Background(), &store.CorraldOp{
+			ID: opID, HostID: hostA, AccountKey: acctKey, Kind: gw.OpRemove, State: gw.OpRunning, Step: "uninstall",
+		}, true); err != nil {
+			t.Fatal(err)
+		}
+
+		restartMgr(h, "gw-f15-ro.local")
+		// Verify startup sweep promoted even the formerly-off B row to remove_pending!
+		chBPost, err := h.store.CorraldHostByID(context.Background(), hostB)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if chBPost.State != gw.StateRemovePending || chBPost.ActiveOpID != "" {
+			t.Fatalf("Fix15 regression: startup sweep did not mark formerly-off B remove_pending! %+v", chBPost)
+		}
+		// ONLY B reconnects first -> must uninstall and bring BOTH A and B to off!
+		h.srv.corrald.OnHostConnected(context.Background(), adminID, hostB, "admin", fp, "alice", sshCl)
+		assertCleanedAndReusable(t, h, admin, hostA, hostB, home, hostA)
+	})
+
+	t.Run("op_cleared_on_rows_but_not_finished", func(t *testing.T) {
+		h, admin, adminID, hostA, hostB, fp, home, sshCl := setupAB(t, "gw-f15-clr.local")
+		acctKey := store.CorraldAccountKey(fp, "alice")
+		const opID = "1501000000000003"
+		// Insert running remove op WITHOUT active_op_id set on A or B (simulating
+		// active_op_id cleared on rows while corrald_ops row stayed running).
+		if err := h.store.CreateCorraldOp(context.Background(), &store.CorraldOp{
+			ID: opID, HostID: hostA, AccountKey: acctKey, Kind: gw.OpRemove, State: gw.OpRunning, Step: "uninstall",
+		}, false); err != nil {
+			t.Fatal(err)
+		}
+
+		restartMgr(h, "gw-f15-clr.local")
+		// Startup sweep must finish the op AND mark both A and B remove_pending.
+		if op, err := h.store.LatestCorraldOp(context.Background(), hostA); err != nil || op.State != gw.OpFailed || op.ErrorCode != "interrupted" {
+			t.Fatalf("Fix15 regression: startup sweep missed op with cleared active_op_id: (%+v, %v)", op, err)
+		}
+		h.srv.corrald.OnHostConnected(context.Background(), adminID, hostB, "admin", fp, "alice", sshCl)
+		assertCleanedAndReusable(t, h, admin, hostA, hostB, home, hostB)
+	})
+
+	t.Run("remove_pending_and_remove_pending", func(t *testing.T) {
+		h, admin, adminID, hostA, hostB, fp, home, sshCl := setupAB(t, "gw-f15-pp.local")
+		acctKey := store.CorraldAccountKey(fp, "alice")
+		if err := h.store.MarkCorraldHostsRemovePending(context.Background(), []int64{hostA, hostB}, fp, "alice"); err != nil {
+			t.Fatal(err)
+		}
+		const opID = "1501000000000004"
+		if err := h.store.CreateCorraldOp(context.Background(), &store.CorraldOp{
+			ID: opID, HostID: hostA, AccountKey: acctKey, Kind: gw.OpRemove, State: gw.OpRunning, Step: "uninstall",
+		}, true); err != nil {
+			t.Fatal(err)
+		}
+
+		restartMgr(h, "gw-f15-pp.local")
+		h.srv.corrald.OnHostConnected(context.Background(), adminID, hostB, "admin", fp, "alice", sshCl)
+		assertCleanedAndReusable(t, h, admin, hostA, hostB, home, hostA)
+	})
+
+	t.Run("after_successful_finish_nothing_to_do", func(t *testing.T) {
+		h, admin, adminID, hostA, hostB, fp, home, sshCl := setupAB(t, "gw-f15-done.local")
+		// Perform a normal successful remove on A -> op finishes as done, both off.
+		rRm := admin.do("POST", fmt.Sprintf("/api/hosts/%d/corrald/remove", hostA), nil)
+		mustStatus(t, rRm, http.StatusAccepted, "normal remove")
+		waitCorraldState(t, admin, hostA, gw.StateOff)
+
+		// Restart gateway: startup sweep must be a no-op (keep done op and off state).
+		restartMgr(h, "gw-f15-done.local")
+		if op, err := h.store.LatestCorraldOp(context.Background(), hostA); err != nil || op.State != gw.OpDone {
+			t.Fatalf("expected completed remove op to remain done after restart, got (%+v, %v)", op, err)
+		}
+		h.srv.corrald.OnHostConnected(context.Background(), adminID, hostB, "admin", fp, "alice", sshCl)
+		assertCleanedAndReusable(t, h, admin, hostA, hostB, home, hostB)
+	})
+
+	t.Run("binding_changed_never_uninstalls_new_machine_and_a_finishes_old", func(t *testing.T) {
+		h := newHarness(t, func(c *config.Config) {
+			c.CorraldDir = v1Dir
+			c.GatewayID = "gw-f15-bind.local"
+		})
+		admin := h.admin()
+		adminID := userIDOf(t, admin)
+
+		// Two distinct machines: sshOld (hosts A and B initially) and sshNew (where B moves).
+		sshOld, homeOld := startCorraldSSH(t)
+		sshNew, homeNew := startCorraldSSH(t)
+		hostA, _ := createAndPinHost(t, admin, sshOld, "bind-a")
+		hostB, _ := createAndPinHost(t, admin, sshOld, "bind-b")
+		hostNewRef, _ := createAndPinHost(t, admin, sshNew, "bind-new-ref")
+		fpOld := hostFingerprint(t, h, adminID, hostA)
+		fpNew := hostFingerprint(t, h, adminID, hostNewRef)
+		if fpOld == fpNew {
+			t.Fatalf("expected distinct host fingerprints for old and new machines")
+		}
+
+		// Install corrald on BOTH sshOld (via A, shared with B) AND sshNew (via hostNewRef).
+		startCorraldInstall(t, admin, hostA)
+		waitCorraldState(t, admin, hostA, gw.StateRunning)
+		sshClOld := dialTestSSH(t, sshOld)
+		defer sshClOld.Close()
+		h.srv.corrald.OnHostConnected(context.Background(), adminID, hostB, "admin", fpOld, "alice", sshClOld)
+		waitCorraldState(t, admin, hostB, gw.StateRunning)
+
+		startCorraldInstall(t, admin, hostNewRef)
+		waitCorraldState(t, admin, hostNewRef, gw.StateRunning)
+
+		// Start remove from A and crash -> restart sweeps both A and B to remove_pending for fpOld.
+		acctOld := store.CorraldAccountKey(fpOld, "alice")
+		const opID = "1502000000000001"
+		if err := h.store.CreateCorraldOp(context.Background(), &store.CorraldOp{
+			ID: opID, HostID: hostA, AccountKey: acctOld, Kind: gw.OpRemove, State: gw.OpRunning, Step: "uninstall",
+		}, true); err != nil {
+			t.Fatal(err)
+		}
+		if err := h.store.ClaimCorraldHostForRemove(context.Background(), hostA, opID); err != nil {
+			t.Fatal(err)
+		}
+
+		restartMgr(h, "gw-f15-bind.local")
+
+		// Now host B's binding moves to sshNew (user accepted new host key / new address)!
+		hostBRow, err := h.store.Host(context.Background(), adminID, hostB)
+		if err != nil {
+			t.Fatal(err)
+		}
+		hostNewRow, err := h.store.Host(context.Background(), adminID, hostNewRef)
+		if err != nil {
+			t.Fatal(err)
+		}
+		hostBRow.Address = hostNewRow.Address
+		hostBRow.Port = hostNewRow.Port
+		if err := h.store.UpdateHost(context.Background(), hostBRow, true); err != nil {
+			t.Fatal(err)
+		}
+		newKey, err := h.store.HostKey(context.Background(), adminID, hostNewRef)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := h.store.ReplaceHostKey(context.Background(), adminID, hostB, fpOld, newKey); err != nil {
+			t.Fatal(err)
+		}
+
+		// Case 1: Host B reconnects to sshNew WITHOUT calling UpdateCorraldFingerprint first
+		// (simulating DNS/hostname now reaching another machine).
+		sshClNew := dialTestSSH(t, sshNew)
+		defer sshClNew.Close()
+		h.srv.corrald.OnHostConnected(context.Background(), adminID, hostB, "admin", fpNew, "alice", sshClNew)
+
+		// Verify:
+		// 1. NO uninstall ran on sshNew (binary on homeNew still exists!).
+		binNew := filepath.Join(homeNew, ".local", "lib", "corral", "corrald")
+		if _, err := os.Lstat(binNew); err != nil {
+			t.Fatalf("Fix15 Item #2 regression: pending removal uninstalled corrald on NEW machine %s! err=%v", binNew, err)
+		}
+		// 2. Host B dropped pending removal to StateOff with leftover notice, NOT stuck.
+		chB, err := h.store.CorraldHostByID(context.Background(), hostB)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if chB.State != gw.StateOff || chB.ActiveOpID != "" {
+			t.Fatalf("Fix15 Item #2 regression: hostB stuck after binding change! state=%q op=%q", chB.State, chB.ActiveOpID)
+		}
+		if !strings.Contains(chB.LastError, "pending_remove_abandoned") {
+			t.Fatalf("Fix15 Item #2 regression: expected leftover notice on hostB, got last_error=%q", chB.LastError)
+		}
+
+		// Case 2: Also verify UpdateCorraldFingerprint directly drops a pending removal
+		// for a row whose key changed (without touching peer row A).
+		if err := h.store.UpsertCorraldHost(context.Background(), &store.CorraldHost{
+			HostID: hostB, State: gw.StateRemovePending, BoundFingerprint: fpOld, BoundUsername: "alice",
+			BoundGateway: "gw-f15-bind.local",
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := h.store.UpdateCorraldFingerprint(context.Background(), hostB, fpNew, true); err != nil {
+			t.Fatal(err)
+		}
+		chB2, err := h.store.CorraldHostByID(context.Background(), hostB)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if chB2.State != gw.StateOff || !strings.Contains(chB2.LastError, "pending_remove_abandoned") {
+			t.Fatalf("Fix15 Item #2 regression: UpdateCorraldFingerprint did not drop pending removal on B! %+v", chB2)
+		}
+
+		// 3. Peer host A (still bound to sshOld) MUST still have remove_pending and
+		//    finish uninstalling corrald on sshOld when A reconnects!
+		chAPre, err := h.store.CorraldHostByID(context.Background(), hostA)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if chAPre.State != gw.StateRemovePending {
+			t.Fatalf("Fix15 Item #2 regression: dropping B's pending removal disturbed peer A! state=%q", chAPre.State)
+		}
+		h.srv.corrald.OnHostConnected(context.Background(), adminID, hostA, "admin", fpOld, "alice", sshClOld)
+		chA, err := h.store.CorraldHostByID(context.Background(), hostA)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if chA.State != gw.StateOff {
+			t.Fatalf("Fix15 Item #2 regression: hostA could not finish old removal! state=%q", chA.State)
+		}
+		binOld := filepath.Join(homeOld, ".local", "lib", "corral", "corrald")
+		if _, err := os.Lstat(binOld); !os.IsNotExist(err) {
+			t.Fatalf("expected old machine binary %s removed by A, stat err=%v", binOld, err)
+		}
+		if _, err := os.Lstat(binNew); err != nil {
+			t.Fatalf("expected new machine binary %s still untouched, stat err=%v", binNew, err)
+		}
+	})
+}
+
 func syscallFlockEx(f *os.File) error {
 	return syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
 }

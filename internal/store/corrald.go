@@ -25,33 +25,34 @@ func CorraldAccountKey(fingerprint, username string) string {
 // CorraldHost persists the gateway's view of corrald consent, binding, and state
 // for a single Corral host record.
 type CorraldHost struct {
-	HostID            int64
-	State             string
-	ConsentBy         *int64
-	ConsentAt         int64
-	BoundFingerprint  string
-	BoundUsername     string
-	BoundGateway      string
-	ManifestJSON      string
-	Version           string
-	Release           int64
-	MachineID         string
-	SocketPath        string
-	Files             []string
-	PausedUsers       []int64
-	FailedReleases    []int64
-	ActiveOpID        string
-	UpdatedFromVer    string
-	UpdatedFromRel    int64
-	UpdatedFromTarget string
-	UpdateTargetVer   string
-	UpdateTargetRel   int64
-	UpdateReadyAt     int64
-	UpdateCrashCount  int
-	LastOKAt          int64
-	LastError         string
-	RestartCount      int
-	UpdatedAt         int64
+	HostID               int64
+	State                string
+	ConsentBy            *int64
+	ConsentAt            int64
+	BoundFingerprint     string
+	BoundUsername        string
+	BoundGateway         string
+	ManifestJSON         string
+	Version              string
+	Release              int64
+	MachineID            string
+	SocketPath           string
+	Files                []string
+	PausedUsers          []int64
+	FailedReleases       []int64
+	ActiveOpID           string
+	PendingRemoveAccount string
+	UpdatedFromVer       string
+	UpdatedFromRel       int64
+	UpdatedFromTarget    string
+	UpdateTargetVer      string
+	UpdateTargetRel      int64
+	UpdateReadyAt        int64
+	UpdateCrashCount     int
+	LastOKAt             int64
+	LastError            string
+	RestartCount         int
+	UpdatedAt            int64
 }
 
 // CorraldOp persists a single install/update/pause/resume/remove operation.
@@ -82,12 +83,12 @@ type CorraldPeerHost struct {
 
 const corraldHostCols = `host_id, state, consent_by, consent_at, bound_fingerprint, bound_username, bound_gateway,
 	manifest_json, version, release, machine_id, socket_path, files_json, paused_users_json, failed_releases_json,
-	active_op_id, updated_from_ver, updated_from_rel, updated_from_target, update_target_ver, update_target_rel,
+	active_op_id, pending_remove_account, updated_from_ver, updated_from_rel, updated_from_target, update_target_ver, update_target_rel,
 	update_ready_at, update_crash_count, last_ok_at, last_error, restart_count, updated_at`
 
 const corraldHostQualifiedCols = `ch.host_id, ch.state, ch.consent_by, ch.consent_at, ch.bound_fingerprint, ch.bound_username, ch.bound_gateway,
 	ch.manifest_json, ch.version, ch.release, ch.machine_id, ch.socket_path, ch.files_json, ch.paused_users_json, ch.failed_releases_json,
-	ch.active_op_id, ch.updated_from_ver, ch.updated_from_rel, ch.updated_from_target, ch.update_target_ver, ch.update_target_rel,
+	ch.active_op_id, ch.pending_remove_account, ch.updated_from_ver, ch.updated_from_rel, ch.updated_from_target, ch.update_target_ver, ch.update_target_rel,
 	ch.update_ready_at, ch.update_crash_count, ch.last_ok_at, ch.last_error, ch.restart_count, ch.updated_at`
 
 func scanCorraldHost(row interface{ Scan(...any) error }) (*CorraldHost, error) {
@@ -99,7 +100,7 @@ func scanCorraldHost(row interface{ Scan(...any) error }) (*CorraldHost, error) 
 		&ch.BoundFingerprint, &ch.BoundUsername, &ch.BoundGateway,
 		&ch.ManifestJSON, &ch.Version, &ch.Release,
 		&ch.MachineID, &ch.SocketPath, &filesJSON, &pausedJSON, &failedJSON,
-		&ch.ActiveOpID, &ch.UpdatedFromVer, &ch.UpdatedFromRel, &ch.UpdatedFromTarget,
+		&ch.ActiveOpID, &ch.PendingRemoveAccount, &ch.UpdatedFromVer, &ch.UpdatedFromRel, &ch.UpdatedFromTarget,
 		&ch.UpdateTargetVer, &ch.UpdateTargetRel, &ch.UpdateReadyAt, &ch.UpdateCrashCount,
 		&ch.LastOKAt, &ch.LastError, &ch.RestartCount, &ch.UpdatedAt,
 	)
@@ -224,9 +225,9 @@ func (s *Store) UpsertCorraldHost(ctx context.Context, ch *CorraldHost) error {
 		INSERT INTO corrald_hosts (
 			host_id, state, consent_by, consent_at, bound_fingerprint, bound_username, bound_gateway,
 			manifest_json, version, release, machine_id, socket_path, files_json, paused_users_json, failed_releases_json,
-			active_op_id, updated_from_ver, updated_from_rel, updated_from_target, update_target_ver, update_target_rel,
+			active_op_id, pending_remove_account, updated_from_ver, updated_from_rel, updated_from_target, update_target_ver, update_target_rel,
 			update_ready_at, update_crash_count, last_ok_at, last_error, restart_count, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(host_id) DO UPDATE SET
 			state = excluded.state,
 			consent_by = excluded.consent_by,
@@ -243,6 +244,7 @@ func (s *Store) UpsertCorraldHost(ctx context.Context, ch *CorraldHost) error {
 			paused_users_json = excluded.paused_users_json,
 			failed_releases_json = excluded.failed_releases_json,
 			active_op_id = excluded.active_op_id,
+			pending_remove_account = excluded.pending_remove_account,
 			updated_from_ver = excluded.updated_from_ver,
 			updated_from_rel = excluded.updated_from_rel,
 			updated_from_target = excluded.updated_from_target,
@@ -258,7 +260,7 @@ func (s *Store) UpsertCorraldHost(ctx context.Context, ch *CorraldHost) error {
 		ch.BoundFingerprint, ch.BoundUsername, ch.BoundGateway,
 		ch.ManifestJSON, ch.Version, ch.Release,
 		ch.MachineID, ch.SocketPath, filesJSON, pausedJSON, failedJSON,
-		ch.ActiveOpID, ch.UpdatedFromVer, ch.UpdatedFromRel, ch.UpdatedFromTarget,
+		ch.ActiveOpID, ch.PendingRemoveAccount, ch.UpdatedFromVer, ch.UpdatedFromRel, ch.UpdatedFromTarget,
 		ch.UpdateTargetVer, ch.UpdateTargetRel, ch.UpdateReadyAt, ch.UpdateCrashCount,
 		ch.LastOKAt, ch.LastError, ch.RestartCount, now,
 	)
@@ -304,6 +306,7 @@ func (s *Store) UpdateCorraldHostIfOp(ctx context.Context, ch *CorraldHost, expe
 			paused_users_json = ?,
 			failed_releases_json = ?,
 			active_op_id = ?,
+			pending_remove_account = ?,
 			updated_from_ver = ?,
 			updated_from_rel = ?,
 			updated_from_target = ?,
@@ -320,7 +323,7 @@ func (s *Store) UpdateCorraldHostIfOp(ctx context.Context, ch *CorraldHost, expe
 		ch.BoundFingerprint, ch.BoundUsername, ch.BoundGateway,
 		ch.ManifestJSON, ch.Version, ch.Release,
 		ch.MachineID, ch.SocketPath, filesJSON, pausedJSON, failedJSON,
-		nextOpID, ch.UpdatedFromVer, ch.UpdatedFromRel, ch.UpdatedFromTarget,
+		nextOpID, ch.PendingRemoveAccount, ch.UpdatedFromVer, ch.UpdatedFromRel, ch.UpdatedFromTarget,
 		ch.UpdateTargetVer, ch.UpdateTargetRel, ch.UpdateReadyAt, ch.UpdateCrashCount,
 		ch.LastOKAt, ch.LastError, ch.RestartCount, now,
 		ch.HostID, expectedOpID,
@@ -429,6 +432,7 @@ func (s *Store) finalizeCorraldOpWithHost(ctx context.Context, op *CorraldOp, ch
 			paused_users_json = ?,
 			failed_releases_json = ?,
 			active_op_id = '',
+			pending_remove_account = ?,
 			updated_from_ver = ?,
 			updated_from_rel = ?,
 			updated_from_target = ?,
@@ -445,7 +449,7 @@ func (s *Store) finalizeCorraldOpWithHost(ctx context.Context, op *CorraldOp, ch
 		ch.BoundFingerprint, ch.BoundUsername, ch.BoundGateway,
 		ch.ManifestJSON, ch.Version, ch.Release,
 		ch.MachineID, ch.SocketPath, filesJSON, pausedJSON, failedJSON,
-		ch.UpdatedFromVer, ch.UpdatedFromRel, ch.UpdatedFromTarget,
+		ch.PendingRemoveAccount, ch.UpdatedFromVer, ch.UpdatedFromRel, ch.UpdatedFromTarget,
 		ch.UpdateTargetVer, ch.UpdateTargetRel, ch.UpdateReadyAt, ch.UpdateCrashCount,
 		ch.LastOKAt, ch.LastError, ch.RestartCount, now,
 		ch.HostID, op.ID,
@@ -565,45 +569,208 @@ func (s *Store) ReleaseCorraldHostOpAndFinish(ctx context.Context, hostID int64,
 	return n > 0, nil
 }
 
-// ReleaseCorraldOpAcrossAccountAndFinish atomically finalizes a pending/running
-// corrald_ops row and clears active_op_id = ” on EVERY corrald_hosts row
-// referencing that op.ID (e.g. peer host records sharing an account after a
-// gateway crash mid-remove).
-func (s *Store) ReleaseCorraldOpAcrossAccountAndFinish(ctx context.Context, op *CorraldOp) (bool, error) {
-	if op == nil || op.ID == "" {
-		return false, nil
-	}
+const (
+	crashedOpDetailJSON = `{"message":"interrupted by gateway restart"}`
+	// pendingRemoveAbandonedErrJSON records a leftover notice on a host row
+	// whose binding changed before a pending removal could run on the old host.
+	pendingRemoveAbandonedErrJSON = `{"code":"pending_remove_abandoned","detail":"host binding changed before previous machine cleanup finished; old host may still have corrald files"}`
+)
+
+// RecoverCrashedCorraldOps sweeps all pending/running corrald_ops left behind
+// by a dead gateway process in ONE transaction at startup (before any host
+// connects):
+//   - marks every pending/running op as failed/interrupted;
+//   - for each interrupted remove op, clears active_op_id and marks every
+//     referencing or same-account host row remove_pending with
+//     pending_remove_account set to the op's account (regardless of prior row
+//     state, including off and running);
+//   - for each interrupted install/update op, clears active_op_id and puts the
+//     row back to its failure/disconnected state (stopped for update; error when
+//     bound or off when unbound for install);
+//   - clears any orphaned active_op_id, normalizes any leftover removing state
+//     to remove_pending, and backfills pending_remove_account where empty.
+func (s *Store) RecoverCrashedCorraldOps(ctx context.Context) (int64, error) {
 	now := s.unix()
-	op.UpdatedAt = now
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return false, err
+		return 0, err
 	}
 	defer tx.Rollback()
 
-	opRes, err := tx.ExecContext(ctx, `
-		UPDATE corrald_ops SET state = ?, step = ?, error_code = ?, detail = ?, updated_at = ?
-		WHERE id = ? AND state IN ('pending', 'running')`,
-		op.State, op.Step, op.ErrorCode, op.Detail, now, op.ID)
+	rows, err := tx.QueryContext(ctx, `
+		SELECT id, host_id, account_key, kind
+		FROM corrald_ops
+		WHERE state IN ('pending', 'running')
+		ORDER BY created_at ASC, rowid ASC`)
 	if err != nil {
-		return false, err
+		return 0, err
 	}
-	nOps, _ := opRes.RowsAffected()
+	type crashedOp struct {
+		id         string
+		hostID     int64
+		accountKey string
+		kind       string
+	}
+	var ops []crashedOp
+	for rows.Next() {
+		var o crashedOp
+		if err := rows.Scan(&o.id, &o.hostID, &o.accountKey, &o.kind); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		ops = append(ops, o)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return 0, err
+	}
+	rows.Close()
 
-	hostRes, err := tx.ExecContext(ctx, `
+	if len(ops) > 0 {
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE corrald_ops
+			SET state = 'failed', error_code = 'interrupted', detail = ?, updated_at = ?
+			WHERE state IN ('pending', 'running')`,
+			crashedOpDetailJSON, now); err != nil {
+			return 0, err
+		}
+	}
+
+	const interruptedInstallErrJSON = `{"code":"interrupted","detail":"interrupted by gateway restart"}`
+	for _, o := range ops {
+		switch o.kind {
+		case "remove":
+			targetAcct := o.accountKey
+			if targetAcct == "" && o.hostID > 0 {
+				var fp, user string
+				if err := tx.QueryRowContext(ctx,
+					`SELECT bound_fingerprint, bound_username FROM corrald_hosts WHERE host_id = ?`, o.hostID).
+					Scan(&fp, &user); err == nil {
+					targetAcct = CorraldAccountKey(fp, user)
+				}
+			}
+			fp, user, hasAcct := strings.Cut(targetAcct, "\x00")
+			if hasAcct && fp != "" && user != "" {
+				if _, err := tx.ExecContext(ctx, `
+					UPDATE corrald_hosts
+					SET state = 'remove_pending',
+					    active_op_id = '',
+					    pending_remove_account = ?,
+					    updated_at = ?
+					WHERE active_op_id = ? OR host_id = ? OR (bound_fingerprint = ? AND bound_username = ?)`,
+					targetAcct, now, o.id, o.hostID, fp, user); err != nil {
+					return 0, err
+				}
+			} else {
+				if _, err := tx.ExecContext(ctx, `
+					UPDATE corrald_hosts
+					SET state = 'remove_pending',
+					    active_op_id = '',
+					    pending_remove_account = CASE
+					        WHEN ? != '' THEN ?
+					        WHEN bound_fingerprint != '' AND bound_username != '' THEN bound_fingerprint || char(0) || bound_username
+					        ELSE pending_remove_account
+					    END,
+					    updated_at = ?
+					WHERE active_op_id = ? OR host_id = ?`,
+					targetAcct, targetAcct, now, o.id, o.hostID); err != nil {
+					return 0, err
+				}
+			}
+		case "update":
+			if _, err := tx.ExecContext(ctx, `
+				UPDATE corrald_hosts
+				SET state = CASE WHEN state IN ('updating', 'installing') THEN 'stopped' ELSE state END,
+				    active_op_id = '',
+				    updated_at = ?
+				WHERE active_op_id = ? OR (host_id = ? AND state = 'updating')`,
+				now, o.id, o.hostID); err != nil {
+				return 0, err
+			}
+		default: // install and any other op
+			if _, err := tx.ExecContext(ctx, `
+				UPDATE corrald_hosts
+				SET state = CASE
+				        WHEN state = 'installing' AND bound_fingerprint != '' AND bound_username != '' THEN 'error'
+				        WHEN state = 'installing' THEN 'off'
+				        WHEN state = 'updating' THEN 'stopped'
+				        ELSE state
+				    END,
+				    last_error = CASE WHEN state = 'installing' THEN ? ELSE last_error END,
+				    active_op_id = '',
+				    updated_at = ?
+				WHERE active_op_id = ? OR (host_id = ? AND state = 'installing')`,
+				interruptedInstallErrJSON, now, o.id, o.hostID); err != nil {
+				return 0, err
+			}
+		}
+	}
+
+	// Clear any remaining orphaned active_op_id referencing finished/missing ops.
+	if _, err := tx.ExecContext(ctx, `
 		UPDATE corrald_hosts
 		SET active_op_id = '', updated_at = ?
-		WHERE active_op_id = ?`,
-		now, op.ID)
+		WHERE active_op_id != ''
+		  AND NOT EXISTS (
+		      SELECT 1 FROM corrald_ops o
+		      WHERE o.id = corrald_hosts.active_op_id AND o.state IN ('pending', 'running')
+		  )`, now); err != nil {
+		return 0, err
+	}
+
+	// Normalize any remaining removing row (no op is live at startup) to
+	// remove_pending and backfill pending_remove_account where empty.
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE corrald_hosts
+		SET state = 'remove_pending',
+		    active_op_id = '',
+		    pending_remove_account = CASE
+		        WHEN pending_remove_account != '' THEN pending_remove_account
+		        WHEN bound_fingerprint != '' AND bound_username != '' THEN bound_fingerprint || char(0) || bound_username
+		        ELSE ''
+		    END,
+		    updated_at = ?
+		WHERE state IN ('removing', 'remove_pending')
+		  AND (state = 'removing' OR active_op_id != '' OR (pending_remove_account = '' AND bound_fingerprint != '' AND bound_username != ''))`,
+		now); err != nil {
+		return 0, err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return int64(len(ops)), nil
+}
+
+// DropPendingCorraldRemoveOnBindingChange drops a pending removal for hostID
+// ONLY (never touching peer host rows that still point at the old machine)
+// when hostID's binding changed to another machine. Transitions hostID to 'off'
+// with a leftover notice in last_error so the new machine is never uninstalled.
+func (s *Store) DropPendingCorraldRemoveOnBindingChange(ctx context.Context, hostID int64, expectedPendingAcct, lastError string) (bool, error) {
+	if hostID <= 0 {
+		return false, nil
+	}
+	if lastError == "" {
+		lastError = pendingRemoveAbandonedErrJSON
+	}
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE corrald_hosts
+		SET state = 'off', version = '', release = 0, socket_path = '', files_json = '[]',
+		    paused_users_json = '[]', failed_releases_json = '[]', active_op_id = '',
+		    pending_remove_account = '',
+		    bound_fingerprint = '', bound_username = '', bound_gateway = '',
+		    updated_from_ver = '', updated_from_rel = 0, updated_from_target = '',
+		    update_target_ver = '', update_target_rel = 0, update_ready_at = 0, update_crash_count = 0,
+		    last_error = ?, restart_count = 0, updated_at = ?
+		WHERE host_id = ?
+		  AND state IN ('remove_pending', 'removing')
+		  AND (? = '' OR pending_remove_account = '' OR pending_remove_account = ?)`,
+		lastError, s.unix(), hostID, expectedPendingAcct, expectedPendingAcct)
 	if err != nil {
 		return false, err
 	}
-	nHosts, _ := hostRes.RowsAffected()
-
-	if err := tx.Commit(); err != nil {
-		return false, err
-	}
-	return nOps > 0 || nHosts > 0, nil
+	n, _ := res.RowsAffected()
+	return n > 0, nil
 }
 
 // ClearStaleCorraldHostOps clears active_op_id on all corrald_hosts rows whose
@@ -1064,7 +1231,7 @@ func (s *Store) UpdateCorraldHostForReconcile(ctx context.Context, ch *CorraldHo
 		ch.BoundFingerprint, ch.BoundUsername, ch.BoundGateway,
 		ch.ManifestJSON, ch.Version, ch.Release,
 		ch.MachineID, ch.SocketPath, filesJSON, pausedJSON, failedJSON,
-		ch.UpdatedFromVer, ch.UpdatedFromRel, ch.UpdatedFromTarget,
+		ch.PendingRemoveAccount, ch.UpdatedFromVer, ch.UpdatedFromRel, ch.UpdatedFromTarget,
 		ch.UpdateTargetVer, ch.UpdateTargetRel, ch.UpdateReadyAt, ch.UpdateCrashCount,
 		ch.LastOKAt, ch.LastError, ch.RestartCount, now,
 		ch.HostID,
@@ -1097,6 +1264,7 @@ func (s *Store) UpdateCorraldHostForReconcile(ctx context.Context, ch *CorraldHo
 			paused_users_json = ?,
 			failed_releases_json = ?,
 			active_op_id = '',
+			pending_remove_account = ?,
 			updated_from_ver = ?,
 			updated_from_rel = ?,
 			updated_from_target = ?,
@@ -1133,10 +1301,30 @@ func (s *Store) UpdateCorraldHostForReconcile(ctx context.Context, ch *CorraldHo
 }
 
 // UpdateCorraldFingerprint updates bound_fingerprint on host key rotation, or marks
-// the host as rebind when keepAuth is false. Only acts if a corrald_hosts row exists
-// and is not off/removing/remove_pending.
+// the host as rebind when keepAuth is false. If the row is in removing/remove_pending
+// for a DIFFERENT fingerprint, drops the pending removal for this row only (to off
+// with a leftover notice) so the removal never moves to the new machine.
 func (s *Store) UpdateCorraldFingerprint(ctx context.Context, hostID int64, newFingerprint string, keepAuth bool) error {
 	now := s.unix()
+	// Fix15 Item #2: Never carry a pending removal onto a different host key.
+	if _, err := s.db.ExecContext(ctx, `
+		UPDATE corrald_hosts
+		SET state = 'off', version = '', release = 0, socket_path = '', files_json = '[]',
+		    paused_users_json = '[]', failed_releases_json = '[]', active_op_id = '',
+		    pending_remove_account = '',
+		    bound_fingerprint = '', bound_username = '', bound_gateway = '',
+		    updated_from_ver = '', updated_from_rel = 0, updated_from_target = '',
+		    update_target_ver = '', update_target_rel = 0, update_ready_at = 0, update_crash_count = 0,
+		    last_error = ?, restart_count = 0, updated_at = ?
+		WHERE host_id = ?
+		  AND state IN ('removing', 'remove_pending')
+		  AND (
+		      (bound_fingerprint != '' AND bound_fingerprint != ?)
+		      OR (pending_remove_account != '' AND pending_remove_account NOT LIKE ? || char(0) || '%')
+		  )`,
+		pendingRemoveAbandonedErrJSON, now, hostID, newFingerprint, newFingerprint); err != nil {
+		return err
+	}
 	if keepAuth {
 		_, err := s.db.ExecContext(ctx,
 			`UPDATE corrald_hosts SET bound_fingerprint = ?, updated_at = ?
@@ -1151,12 +1339,29 @@ func (s *Store) UpdateCorraldFingerprint(ctx context.Context, hostID int64, newF
 	return err
 }
 
-// MarkCorraldRebind transitions an enabled host to rebind (e.g. when endpoint or username changed).
+// MarkCorraldRebind transitions an enabled host to rebind (e.g. when endpoint or
+// username changed). If the row is in removing/remove_pending, drops the pending
+// removal for this row only (to off with a leftover notice) so the removal never
+// moves to a different machine/account.
 func (s *Store) MarkCorraldRebind(ctx context.Context, hostID int64) error {
+	now := s.unix()
+	if _, err := s.db.ExecContext(ctx, `
+		UPDATE corrald_hosts
+		SET state = 'off', version = '', release = 0, socket_path = '', files_json = '[]',
+		    paused_users_json = '[]', failed_releases_json = '[]', active_op_id = '',
+		    pending_remove_account = '',
+		    bound_fingerprint = '', bound_username = '', bound_gateway = '',
+		    updated_from_ver = '', updated_from_rel = 0, updated_from_target = '',
+		    update_target_ver = '', update_target_rel = 0, update_ready_at = 0, update_crash_count = 0,
+		    last_error = ?, restart_count = 0, updated_at = ?
+		WHERE host_id = ? AND state IN ('removing', 'remove_pending')`,
+		pendingRemoveAbandonedErrJSON, now, hostID); err != nil {
+		return err
+	}
 	_, err := s.db.ExecContext(ctx,
 		`UPDATE corrald_hosts SET state = 'rebind', updated_at = ?
 		 WHERE host_id = ? AND state NOT IN ('off', 'removing', 'remove_pending', 'rebind')`,
-		s.unix(), hostID)
+		now, hostID)
 	return err
 }
 
@@ -1193,20 +1398,23 @@ func (s *Store) CorraldPeersByBinding(ctx context.Context, fingerprint, username
 }
 
 // CorraldResetByBinding resets all corrald_hosts rows sharing (fingerprint, username)
-// to 'off' after an uninstall removes the shared daemon on the host.
+// or pending removal for that account to 'off' after an uninstall removes the shared
+// daemon on the host.
 func (s *Store) CorraldResetByBinding(ctx context.Context, fingerprint, username string) error {
 	if fingerprint == "" || username == "" {
 		return nil
 	}
+	acctKey := CorraldAccountKey(fingerprint, username)
 	_, err := s.db.ExecContext(ctx, `
 		UPDATE corrald_hosts
 		SET state = 'off', version = '', release = 0, socket_path = '', files_json = '[]',
 		    paused_users_json = '[]', failed_releases_json = '[]', active_op_id = '',
+		    pending_remove_account = '',
 		    updated_from_ver = '', updated_from_rel = 0, updated_from_target = '',
 		    update_target_ver = '', update_target_rel = 0, update_ready_at = 0, update_crash_count = 0,
 		    last_error = '', restart_count = 0, updated_at = ?
-		WHERE bound_fingerprint = ? AND bound_username = ?`,
-		s.unix(), fingerprint, username)
+		WHERE (bound_fingerprint = ? AND bound_username = ?) OR pending_remove_account = ?`,
+		s.unix(), fingerprint, username, acctKey)
 	return err
 }
 
@@ -1315,7 +1523,7 @@ func (s *Store) ListUserCorraldHosts(ctx context.Context, userID int64) ([]*Host
 			&ch.BoundFingerprint, &ch.BoundUsername, &ch.BoundGateway,
 			&ch.ManifestJSON, &ch.Version, &ch.Release,
 			&ch.MachineID, &ch.SocketPath, &filesJSON, &pausedJSON, &failedJSON,
-			&ch.ActiveOpID, &ch.UpdatedFromVer, &ch.UpdatedFromRel, &ch.UpdatedFromTarget,
+			&ch.ActiveOpID, &ch.PendingRemoveAccount, &ch.UpdatedFromVer, &ch.UpdatedFromRel, &ch.UpdatedFromTarget,
 			&ch.UpdateTargetVer, &ch.UpdateTargetRel, &ch.UpdateReadyAt, &ch.UpdateCrashCount,
 			&ch.LastOKAt, &ch.LastError, &ch.RestartCount, &ch.UpdatedAt,
 		); err != nil {
@@ -1504,37 +1712,6 @@ func (s *Store) ActiveCorraldOp(ctx context.Context, hostID int64) (*CorraldOp, 
 		return nil, notFound(err)
 	}
 	return op, nil
-}
-
-// ActiveCorraldOpByIDOrAccount returns a pending/running operation matching
-// opID (if non-empty) or accountKey (if non-empty), or ErrNotFound. Used by
-// crash recovery when a peer host sharing the same account reconnects first.
-func (s *Store) ActiveCorraldOpByIDOrAccount(ctx context.Context, opID, accountKey string) (*CorraldOp, error) {
-	if opID != "" {
-		op := &CorraldOp{}
-		err := s.db.QueryRowContext(ctx, `
-			SELECT id, host_id, account_key, kind, state, step, error_code, detail, created_by, created_at, updated_at
-			FROM corrald_ops WHERE id = ? AND state IN ('pending', 'running') LIMIT 1`, opID).
-			Scan(&op.ID, &op.HostID, &op.AccountKey, &op.Kind, &op.State, &op.Step, &op.ErrorCode, &op.Detail, &op.CreatedBy, &op.CreatedAt, &op.UpdatedAt)
-		if err == nil {
-			return op, nil
-		}
-		if !errors.Is(err, sql.ErrNoRows) {
-			return nil, err
-		}
-	}
-	if accountKey != "" {
-		op := &CorraldOp{}
-		err := s.db.QueryRowContext(ctx, `
-			SELECT id, host_id, account_key, kind, state, step, error_code, detail, created_by, created_at, updated_at
-			FROM corrald_ops WHERE account_key = ? AND state IN ('pending', 'running') LIMIT 1`, accountKey).
-			Scan(&op.ID, &op.HostID, &op.AccountKey, &op.Kind, &op.State, &op.Step, &op.ErrorCode, &op.Detail, &op.CreatedBy, &op.CreatedAt, &op.UpdatedAt)
-		if err != nil {
-			return nil, notFound(err)
-		}
-		return op, nil
-	}
-	return nil, ErrNotFound
 }
 
 // SetCorraldUserPaused adds or removes userID in paused_users_json for hostID

@@ -473,10 +473,12 @@ func NewManager(cfg ManagerConfig) *Manager {
 		acctRemovedSeq:         make(map[accountKey]uint64),
 	}
 	mgr.adminDisabled.Store(cfg.AdminDisabled)
-	// Startup recovery: clear any orphaned active_op_id left behind if a
-	// previous gateway process crashed after finalizing corrald_ops.
+	// Startup sweep (Fix15): this gateway owns this SQLite DB exclusively, so
+	// every pending/running corrald_ops row at startup was left by a dead
+	// process. Finish them all in one atomic transaction before any host
+	// connects, marking interrupted removes remove_pending across all peer rows.
 	if cfg.Store != nil {
-		_, _ = cfg.Store.ClearStaleCorraldHostOps(context.Background())
+		_, _ = cfg.Store.RecoverCrashedCorraldOps(context.Background())
 		if has, err := cfg.Store.HasCorraldHostsInStates(context.Background(), StateRemovePending, StateRemoving); err == nil && has {
 			mgr.hasPendingCleanup.Store(true)
 		}
@@ -792,11 +794,19 @@ func (m *Manager) Status(ctx context.Context, userID, hostID int64) (*StatusResp
 		}
 	}
 
-	res.State = EffectiveUserState(toSnapshot(ch), userID)
 	if ch.State == StateRemovePending || ch.State == StateRemoving {
-		m.markPendingCleanup()
-		m.MaybeRetryPendingCleanup(userID, hostID, "", nil)
+		if fp != "" && sshUser != "" && !m.pendingRemoveMatchesBinding(ch, fp, sshUser) {
+			if m.dropPendingRemoveOnBindingChange(ctx, hostID, ch) {
+				if fresh, ferr := m.store.CorraldHostByID(ctx, hostID); ferr == nil {
+					ch = fresh
+				}
+			}
+		} else {
+			m.markPendingCleanup()
+			m.MaybeRetryPendingCleanup(userID, hostID, "", nil)
+		}
 	}
+	res.State = EffectiveUserState(toSnapshot(ch), userID)
 	res.Version = ch.Version
 	res.Release = ch.Release
 	res.LastOKAt = ch.LastOKAt
@@ -1218,6 +1228,17 @@ func (m *Manager) StartRemove(ctx context.Context, userID, hostID int64) (*OpVie
 	if sshUser == "" {
 		sshUser = ch.BoundUsername
 	}
+	// Fix15 Item #2: Never start a remove op whose account differs from the
+	// row's pending removal account or current binding.
+	if (ch.State == StateRemovePending || ch.State == StateRemoving) && fp != "" && sshUser != "" && !m.pendingRemoveMatchesBinding(ch, fp, sshUser) {
+		m.dropPendingRemoveOnBindingChange(ctx, hostID, ch)
+		return nil, ErrInvalidState
+	}
+	if ch.BoundFingerprint != "" && ch.BoundUsername != "" && fp != "" && sshUser != "" &&
+		(fp != ch.BoundFingerprint || sshUser != ch.BoundUsername) {
+		m.markRebindIfMismatch(ctx, hostID, ch.BoundFingerprint, ch.BoundUsername, ch.BoundGateway, fp, sshUser, false, "start_remove")
+		return nil, ErrInvalidState
+	}
 	acct := accountKey{Fingerprint: fp, Username: sshUser}
 
 	// Cancel and WAIT for any active install/update op on this host or account
@@ -1521,6 +1542,13 @@ func (m *Manager) Retry(ctx context.Context, userID, hostID int64, corralUser st
 		}
 		own := newSSHOwnership(release)
 		defer own.releaseIfOwned()
+		// Fix15 Item #2: Refuse to run retry op against a different machine/account.
+		if !CheckBinding(toSnapshot(ch), gotFP, gotUser, m.gatewayID) ||
+			(op.AccountKey != "" && gotFP != "" && gotUser != "" && store.CorraldAccountKey(gotFP, gotUser) != op.AccountKey) {
+			op.ErrorCode = "binding_changed"
+			m.markRebindIfMismatch(context.Background(), hostID, ch.BoundFingerprint, ch.BoundUsername, ch.BoundGateway, gotFP, gotUser, true, "retry")
+			return
+		}
 
 		probe, err := m.probeHost(opCtx, sshClient)
 		if err != nil {
@@ -1596,7 +1624,16 @@ func (m *Manager) onHostConnectedOwned(ctx context.Context, userID, hostID int64
 
 	if m.AdminDisabled() {
 		switch ch.State {
-		case StateRemovePending, StateRemoving, StateRunning, StateStopped, StateLost, StateError, StatePaused, StateUpdating, StateInstalling, StateIncompatible:
+		case StateRemovePending, StateRemoving:
+			if !m.pendingRemoveMatchesBinding(ch, fingerprint, sshUser) {
+				m.dropPendingRemoveOnBindingChange(ctx, hostID, ch)
+				return
+			}
+			acct := accountKey{Fingerprint: fingerprint, Username: sshUser}
+			if !m.hasRunningOp(hostID, acct) {
+				m.handleAdminDisabledOnConnect(ctx, userID, hostID, corralUser, fingerprint, sshUser, sshClient, ch)
+			}
+		case StateRunning, StateStopped, StateLost, StateError, StatePaused, StateUpdating, StateInstalling, StateIncompatible:
 			if CheckBinding(toSnapshot(ch), fingerprint, sshUser, m.gatewayID) {
 				acct := accountKey{Fingerprint: fingerprint, Username: sshUser}
 				if !m.hasRunningOp(hostID, acct) {
@@ -1638,24 +1675,12 @@ func (m *Manager) onHostConnectedOwned(ctx context.Context, userID, hostID int64
 		}
 	}
 
-	acctKey := ""
-	if fingerprint != "" && sshUser != "" {
-		acctKey = fingerprint + "\x00" + sshUser
-	}
 	activeOp, activeErr := m.store.ActiveCorraldOp(ctx, hostID)
-	// Fix14 [P1]: Before branching on ch.State, check whether ch.ActiveOpID
-	// points to an unfinished remove op (including one started on a peer host
-	// record sharing this account whose ClaimCorraldHostForRemove moved only
-	// that peer to StateRemoving while leaving this row in StateRunning).
-	hasPendingRemoveOp := false
-	if ch.ActiveOpID != "" {
-		if op, oerr := m.store.ActiveCorraldOpByIDOrAccount(ctx, ch.ActiveOpID, acctKey); oerr == nil && op != nil && op.Kind == OpRemove {
-			hasPendingRemoveOp = true
-		}
-	}
-	if ch.State == StateRemovePending || ch.State == StateRemoving || hasPendingRemoveOp {
-		if CheckBinding(toSnapshot(ch), fingerprint, sshUser, m.gatewayID) {
+	if ch.State == StateRemovePending || ch.State == StateRemoving {
+		if m.pendingRemoveMatchesBinding(ch, fingerprint, sshUser) {
 			m.handleAdminDisabledOnConnect(ctx, userID, hostID, corralUser, fingerprint, sshUser, sshClient, ch)
+		} else {
+			m.dropPendingRemoveOnBindingChange(ctx, hostID, ch)
 		}
 		return
 	}
@@ -1765,6 +1790,20 @@ func (m *Manager) onHostConnectedOwned(ctx context.Context, userID, hostID int64
 	if probe.HasTombstone {
 		m.reconcileHost(ctx, userID, hostID, corralUser, fingerprint, sshUser, sshClient, ch, nil)
 		return
+	}
+	// If startup sweep interrupted this host's own install/update op, clean
+	// ONLY that interrupted op's stage-<opID> directory on first reconnect.
+	if len(probe.Stages) > 0 && probe.HasSymlink {
+		if latestOp, lerr := m.store.LatestCorraldOp(ctx, hostID); lerr == nil && latestOp != nil &&
+			latestOp.State == OpFailed && latestOp.ErrorCode == "interrupted" &&
+			(latestOp.Kind == OpInstall || latestOp.Kind == OpUpdate) {
+			wantSuffix := "/stage-" + latestOp.ID
+			for _, stage := range probe.Stages {
+				if strings.HasSuffix(stage, wantSuffix) {
+					_, _ = runSSH(ctx, sshClient, CleanStageCommand(probe.CurrentBin, "", stage, latestOp.ID), 4096, sshx.ExecOptions{})
+				}
+			}
+		}
 	}
 	if !probe.HasSymlink {
 		_, _ = m.store.SetCorraldStateIfIdle(ctx, hostID, StateOff, StateRunning, StateStopped, StateLost, StateError, StateIncompatible)
@@ -2648,6 +2687,17 @@ func (m *Manager) runRemoveOp(ctx context.Context, rop *runningOp, op *store.Cor
 	if sshUser == "" {
 		sshUser = ch.BoundUsername
 	}
+	// Fix15 Item #2: Never run uninstall against a machine whose identity
+	// differs from the row's binding or op.AccountKey.
+	if !m.pendingRemoveMatchesBinding(ch, fp, sshUser) ||
+		(op.AccountKey != "" && fp != "" && sshUser != "" && store.CorraldAccountKey(fp, sshUser) != op.AccountKey) {
+		op.State = OpFailed
+		op.ErrorCode = "binding_changed"
+		op.Detail = encodeOpDetail(opDetailPayload{Message: "host binding changed; removal aborted to protect new host"})
+		_, _ = m.store.UpdateCorraldOpIfActive(context.Background(), op)
+		m.dropPendingRemoveOnBindingChange(context.Background(), hostID, ch)
+		return
+	}
 
 	// Close any active gateway connection to the daemon before uninstalling.
 	if sc := m.sharedConnForHost(hostID, fp, sshUser); sc != nil {
@@ -2709,6 +2759,11 @@ func (m *Manager) runRemoveOp(ctx context.Context, rop *runningOp, op *store.Cor
 
 func (m *Manager) markRemovePending(op *store.CorraldOp, ch *store.CorraldHost, reason string) {
 	ch.State = StateRemovePending
+	if op != nil && op.AccountKey != "" {
+		ch.PendingRemoveAccount = op.AccountKey
+	} else if ch.PendingRemoveAccount == "" {
+		ch.PendingRemoveAccount = store.CorraldAccountKey(ch.BoundFingerprint, ch.BoundUsername)
+	}
 	ch.LastError = ""
 	op.State = OpUnknown
 	op.ErrorCode = ""
@@ -2827,6 +2882,17 @@ func (m *Manager) runUpdateOp(ctx context.Context, rop *runningOp, op *store.Cor
 	}
 	own := newSSHOwnership(release)
 	defer own.releaseIfOwned()
+	// Fix15 Item #2: Never run update/replace against a machine whose identity
+	// differs from the row's binding or op.AccountKey.
+	if !CheckBinding(toSnapshot(ch), fp, sshUser, m.gatewayID) ||
+		(op.AccountKey != "" && fp != "" && sshUser != "" && store.CorraldAccountKey(fp, sshUser) != op.AccountKey) {
+		op.State = OpFailed
+		op.ErrorCode = "binding_changed"
+		op.Detail = encodeOpDetail(opDetailPayload{Message: "host binding changed; update aborted"})
+		_, _ = m.store.ReleaseCorraldHostOpAndFinish(context.Background(), hostID, op, "")
+		m.markRebindIfMismatch(context.Background(), hostID, ch.BoundFingerprint, ch.BoundUsername, ch.BoundGateway, fp, sshUser, true, "update")
+		return
+	}
 	// Item #2: If admin disabled corrald during an in-flight update and this
 	// update op still owns the host row, run safe sole-gateway cleanup while we
 	// still hold the account op lock and live SSH (fallback in StartUpdate's
