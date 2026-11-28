@@ -3028,7 +3028,20 @@ button.convo-queue-row.is-note:last-child { border-radius: 0 0 var(--r-lg) var(-
 .convo-panelwin-statline { padding-top: 0; padding-bottom: 0; }
 .convo-panelwin-statline:has(.convo-panelwin-stat:empty) { height: 0; overflow: hidden; }
 .convo-panelwin-line { min-height: 1.35em; }
-.convo-panelwin-note { margin: 0; padding: 6px 12px; color: var(--term-fg-2); font-size: 13px; }
+.convo-panelwin-note { margin: 0; padding: 8px 12px; border-top: 1px solid var(--term-line); background: var(--term-bg); color: var(--term-fg); font-size: var(--fs-sub); line-height: var(--lh-sub); }
+/* Native card for unsent text detected in the agent's terminal input box (DraftCard.tsx). */
+.convo-draft-card { display: flex; flex-direction: column; gap: 8px; margin: 0 0 8px; padding: 12px 14px; border: 1px solid var(--term-line); border-radius: var(--r-lg); background: var(--term-bg); font-family: var(--font-ui); animation: fade 0.1s var(--ease); }
+.convo-draft-card-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px 12px; }
+.convo-draft-card-tag { font-size: var(--fs-note); line-height: var(--lh-note); font-weight: 600; color: var(--term-fg-2); }
+.convo-draft-card-links { display: flex; align-items: center; gap: 12px; }
+.term-root .convo-draft-card-link { font-size: var(--fs-note); line-height: var(--lh-note); color: var(--term-fg-2); }
+.convo-draft-card-lead { margin: 0; font-size: var(--fs-sub); line-height: var(--lh-sub); color: var(--term-fg-2); }
+.convo-draft-card-quote { margin: 0; padding: 8px 10px; border: 1px solid var(--term-line); border-radius: var(--r); background: var(--term-chrome); color: var(--term-fg); font-size: var(--fs-sub); line-height: var(--lh-sub); white-space: pre-wrap; overflow-wrap: anywhere; max-height: 120px; overflow-y: auto; }
+.convo-draft-card-acts { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding-top: 2px; }
+.convo-draft-card-act.btn-ghost { border: 1px solid var(--term-line); color: var(--term-fg); }
+.convo-draft-card-stat { margin: 0; font-size: var(--fs-note); line-height: var(--lh-note); color: var(--term-fg-2); }
+.convo-draft-card-stat.is-bad { color: var(--term-warn-text); }
+@media (pointer: coarse) { .convo-draft-card-act { min-height: 40px; padding: 8px 14px; } }
 .convo-panelwin-keys { display: flex; flex-wrap: wrap; gap: 6px; padding: 8px; }
 .convo-panelwin-key { flex: 1 0 calc(25% - 6px); min-height: 44px; border: 1px solid var(--term-line); border-radius: var(--r); background: var(--term-key, var(--term-chrome)); color: var(--term-fg); font-size: 14px; cursor: pointer; }
 .convo-panelwin-key:active { background: var(--term-hover); }

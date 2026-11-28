@@ -18,6 +18,7 @@ import { geminiPath, shellPath, type LineSpan } from '../terminal/paths'
 import type { DockSink } from '../terminal/dock'
 import { useCompletion } from '../terminal/Completion'
 import { PanelWindow } from '../terminal/PanelWindow'
+import { DraftCard } from '../terminal/DraftCard'
 import { convoTarget, herdrTarget, InlineReply } from '../terminal/ReplyDialog'
 import { SessionOpDialog, type SessionOp } from '../terminal/sessionOps'
 import { NEW_AGENT, NewAgentDialog, takeNewAgentAsk, type NewSubagentParent } from '../terminal/newAgent'
@@ -42,7 +43,20 @@ import { conversationReadable, prefetchConversation } from '../terminal/conversa
 import { holdTermMode, tmuxKey } from '../terminal/chatSend'
 import { camesAfter, containedInMessage, isCommand, pairSent, sameMessage, squeezed, type Submission } from '../terminal/sentSeen'
 import { viewRefusal } from '../terminal/sendView'
-import { decideLiveTerminal, liveFor, shouldClearLiveTerminal } from '../terminal/liveTerminalPolicy'
+import {
+  composerBlockKey,
+  decideLiveTerminal,
+  isLiveReason,
+  liveFor,
+  liveTerminalNoteKey,
+  normalizeLiveReason,
+  reduceBlockerOnScreen,
+  sameBlockerReason,
+  shouldClearLiveTerminal,
+  type BlockerObservation,
+  type ScreenBlocker,
+  type TerminalBlockerState,
+} from '../terminal/liveTerminalPolicy'
 import { agentKey, sessionWhich } from '../terminal/sessionName'
 import { firstShown, hideBox, keptBox, KeptPart, KeptView, letGoBox, modalShown, useEffectOnChange, useShownAt, useWhenGone, type KeptBox } from '../shown'
 import { Rail, StatusBar, StatusItem, useWorkbench } from '../workbench'
@@ -2147,22 +2161,73 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
     return () => clearTimeout(timer)
   }, [said])
   const liveUiNow = useRef({ waits: false, panelOpen: false })
-  const applyLive = (code: string | undefined, agentKind?: string): ToastAction | undefined => {
+  const dismissedLiveRef = useRef<Map<string, string>>(new Map())
+  const endSeqNow = useRef(0)
+  const agentStatusNow = useRef<string | undefined>(undefined)
+  const agentKindNow = useRef<string | undefined>(undefined)
+  const activeBlockerNow = useRef<TerminalBlockerState | null>(null)
+  const checkBlockerNow = useRef<(() => void) | null>(null)
+  const applyLive = (code: string | undefined, agentKind?: string, extra?: Record<string, unknown>): { action?: ToastAction; decision: ReturnType<typeof decideLiveTerminal> } => {
+    const draftText = typeof extra?.draft === 'string' ? extra.draft : undefined
+    const digest = typeof extra?.digest === 'string' ? extra.digest : undefined
+    const dismissedReason = dismissedLiveRef.current.get(bindKey) ?? null
     const decision = decideLiveTerminal({
       code,
       agent: agentKind,
       hasBind: !!convo.bind,
       waits: liveUiNow.current.waits,
       panelOpen: liveUiNow.current.panelOpen,
+      draft: draftText,
+      digest,
+      dismissedReason,
     })
     if (decision === 'refresh') convo.refresh()
-    else if (decision === 'open') setLiveOf(bindKey)
-    else if (decision === 'hint') return { label: t('convo.showTerminal'), run: () => setLiveOf(bindKey) }
-    return undefined
+    else if (decision === 'draft_card' && isLiveReason(code)) {
+      setDraftCardError('')
+      setBlocker({
+        bind: bindKey,
+        reason: code,
+        mode: 'draft_card',
+        draft: draftText,
+        digest,
+        openedEndSeq: endSeqNow.current,
+      })
+    } else if (decision === 'open' && isLiveReason(code)) {
+      setBlocker({
+        bind: bindKey,
+        reason: code,
+        mode: 'terminal',
+        draft: draftText,
+        digest,
+        openedEndSeq: endSeqNow.current,
+      })
+    } else if (decision === 'hint') {
+      if (isLiveReason(code) && sameBlockerReason(dismissedReason, code)) {
+        setBlocker((cur) =>
+          cur && cur.bind === bindKey && sameBlockerReason(cur.reason, code)
+            ? cur
+            : { bind: bindKey, reason: code, mode: 'dismissed', draft: draftText, digest, openedEndSeq: endSeqNow.current },
+        )
+      }
+      return {
+        decision,
+        action: {
+          label: t('convo.showTerminal'),
+          run: () => {
+            if (activeBlockerNow.current && activeBlockerNow.current.bind === bindKey) {
+              setBlocker((cur) => (cur && cur.bind === bindKey ? { ...cur, mode: 'terminal' } : cur))
+            } else {
+              setLiveOf(bindKey)
+            }
+          },
+        },
+      }
+    }
+    return { decision }
   }
   const refusal = (e: unknown, apply = true) => {
     if (!(e instanceof ApiError)) return errorText(e)
-    if (apply) applyLive(e.code, convo.bind?.agent)
+    if (apply) applyLive(e.code, convo.bind?.agent, e.extra)
     // (Claude Code's input box not this conversation's: said what to do in the terminal.)
     const v = viewRefusal(e.code)
     if (v) return v
@@ -2188,8 +2253,9 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
     return errorText(e)
   }
   const toastRefusal = (e: unknown) => {
-    const action = e instanceof ApiError ? applyLive(e.code, convo.bind?.agent) : undefined
-    toast(refusal(e, false), true, action)
+    const res = e instanceof ApiError ? applyLive(e.code, convo.bind?.agent, e.extra) : undefined
+    if (res?.decision === 'draft_card') return
+    toast(refusal(e, false), true, res?.action)
   }
   const press = (what: 'stop' | 'now') => {
     const b = convo.bind
@@ -2324,8 +2390,13 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
   const panelWanted = !!agent?.dialog && !!convo.bind && ownPicker === 0
   const [panelOpen, setPanelOpen] = useState(false)
   const panelShutAt = useRef(0)
-  // (The terminal as it is, shown here: a message refused, or asked for. Of this agent, till closed.)
+  // (The terminal as it is, shown here manually when asked for. Of this agent, till closed.)
   const [liveOf, setLiveOf] = useState<string | null>(null)
+  // Auto-triggered terminal blocker (native DraftCard when the terminal input draft
+  // is recognized, or inline PanelWindow with explanation + auto-close when not).
+  const [blocker, setBlocker] = useState<TerminalBlockerState | null>(null)
+  const [draftActionBusy, setDraftActionBusy] = useState<'' | 'send' | 'clear'>('')
+  const [draftCardError, setDraftCardError] = useState('')
   // (Before what waits on it reads it, below: effects run in order.)
   const panelHad = useRef(false)
   useEffect(() => {
@@ -2384,10 +2455,10 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
       .catch((e) => {
         // (Said in the menu as well as in the toast: left on "reading" it
         // would look as though the picker were still being waited for.)
-        const action = e instanceof ApiError ? applyLive(e.code, convo.bind?.agent) : undefined
+        const liveRes = e instanceof ApiError ? applyLive(e.code, convo.bind?.agent, e.extra) : undefined
         const why = refusal(e, false)
         setModels((m) => (m?.bind === bind ? { list: null, bind, unread: true, error: why } : m))
-        toast(why, true, action)
+        if (liveRes?.decision !== 'draft_card') toast(why, true, liveRes?.action)
       })
       .finally(() => setModelBusy(false))
   }
@@ -3017,9 +3088,153 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
   }, [lookPlan, bindKey, sid])
   const waits = waitsFor || (lookPlan && planAsked)
   liveUiNow.current = { waits, panelOpen }
+  endSeqNow.current = endSeq
+  agentStatusNow.current = agent?.status
+  agentKindNow.current = convo.bind?.agent
+  const activeBlocker = blocker && blocker.bind === bindKey && !panelOpen && !waits ? blocker : null
+  activeBlockerNow.current = activeBlocker
+  const showDraftCard = activeBlocker?.mode === 'draft_card' && !!activeBlocker.draft && !!activeBlocker.digest
+  const showBlockerTerminal = activeBlocker?.mode === 'terminal'
+  const showManualTerminal = !panelOpen && !waits && !showDraftCard && !showBlockerTerminal && liveOf === bindKey
+  const showInlineLive = showBlockerTerminal || showManualTerminal
+
+  const applyBlockerObs = useCallback(
+    (obs: BlockerObservation) => {
+      setBlocker((cur) => {
+        if (!cur || cur.bind !== bindKey) return cur
+        const res = reduceBlockerOnScreen(cur, agentKindNow.current, obs)
+        if (res.resolved) {
+          dismissedLiveRef.current.delete(bindKey)
+          setDraftCardError('')
+        }
+        return res.next
+      })
+    },
+    [bindKey],
+  )
+  const dismissBlocker = () => {
+    if (!activeBlocker) return
+    const norm = normalizeLiveReason(activeBlocker.reason)
+    if (norm) dismissedLiveRef.current.set(bindKey, norm)
+    setBlocker((cur) => (cur && cur.bind === bindKey ? { ...cur, mode: 'dismissed' } : cur))
+  }
+  const actOnDraft = (action: 'send' | 'clear') => {
+    const b = convo.bind
+    const cur = activeBlocker
+    if (!b || !cur || !cur.digest || draftActionBusy) return
+    setDraftActionBusy(action)
+    setDraftCardError('')
+    api<{ ok?: boolean }>('POST', `/api/sessions/${sid}/conversation/box-draft`, { ...pressBody(), action, digest: cur.digest }, { timeoutMs: PRESS_MS })
+      .then(() => {
+        dismissedLiveRef.current.delete(bindKey)
+        setBlocker((prev) => (prev && prev.bind === bindKey ? null : prev))
+        toast(t(action === 'send' ? 'draftCard.sent' : 'draftCard.cleared'))
+        if (action === 'send') {
+          convo.refresh()
+          setTimeout(() => convo.refresh(), 1500)
+          setTimeout(() => convo.refresh(), 4000)
+        }
+      })
+      .catch((e) => {
+        if (e instanceof ApiError && e.code === 'draft_gone') {
+          dismissedLiveRef.current.delete(bindKey)
+          setBlocker((prev) => (prev && prev.bind === bindKey ? null : prev))
+          toast(t('draftCard.alreadyGone'))
+          return
+        }
+        if (e instanceof ApiError && e.code === 'screen_changed') {
+          const nextDraft = typeof e.extra.draft === 'string' ? e.extra.draft : ''
+          const nextDigest = typeof e.extra.digest === 'string' ? e.extra.digest : ''
+          if (nextDraft && nextDigest) {
+            setBlocker((prev) => (prev && prev.bind === bindKey ? { ...prev, draft: nextDraft, digest: nextDigest } : prev))
+          } else {
+            checkBlockerNow.current?.()
+          }
+          setDraftCardError(t('draftCard.changed'))
+          return
+        }
+        if (e instanceof ApiError) {
+          const liveRes = applyLive(e.code, b.agent, e.extra)
+          const msg = refusal(e, false)
+          setDraftCardError(msg)
+          if (liveRes.decision !== 'draft_card') toast(msg, true, liveRes.action)
+          return
+        }
+        const msg = errorText(e)
+        setDraftCardError(msg)
+        toast(msg, true)
+      })
+      .finally(() => setDraftActionBusy(''))
+  }
   useEffect(() => {
-    if (shouldClearLiveTerminal({ waits, panelOpen }) && liveOf === bindKey) setLiveOf(null)
-  }, [waits, panelOpen, liveOf, bindKey])
+    if (shouldClearLiveTerminal({ waits, panelOpen })) {
+      if (liveOf === bindKey) setLiveOf(null)
+      if (blocker?.bind === bindKey) setBlocker(null)
+    }
+  }, [waits, panelOpen, liveOf, blocker?.bind, bindKey])
+  useEffect(() => {
+    if (!activeBlocker) return
+    const logAdvanced = endSeq > activeBlocker.openedEndSeq
+    applyBlockerObs({ waits, panelOpen, agentStatus: agent?.status, logAdvanced })
+    if (logAdvanced) checkBlockerNow.current?.()
+  }, [activeBlocker, waits, panelOpen, agent?.status, endSeq, applyBlockerObs])
+  const blockerWatchMode = activeBlocker && active && bound ? activeBlocker.mode : null
+  useEffect(() => {
+    if (!blockerWatchMode) {
+      checkBlockerNow.current = null
+      return
+    }
+    let alive = true
+    let busy = false
+    let fails = 0
+    const gone = new AbortController()
+    const check = () => {
+      if (!alive || busy || document.hidden || !convo.bind) return
+      busy = true
+      api<{ blocker?: ScreenBlocker }>('POST', `/api/sessions/${sid}/conversation/panel-screen`, compactNow.current.body(), { timeoutMs: 12000, signal: gone.signal })
+        .then(
+          (r) => {
+            if (!alive) return
+            fails = 0
+            const cur = activeBlockerNow.current
+            const logAdvanced = !!cur && endSeqNow.current > cur.openedEndSeq
+            applyBlockerObs({
+              waits: liveUiNow.current.waits,
+              panelOpen: liveUiNow.current.panelOpen,
+              agentStatus: agentStatusNow.current,
+              logAdvanced,
+              screenChecked: true,
+              screenBlocker: r.blocker ?? { code: '' },
+            })
+          },
+          () => {
+            if (!alive) return
+            fails++
+            // Never permanently lock the composer if screen reads fail repeatedly after manual dismiss.
+            if (blockerWatchMode === 'dismissed' && fails >= 3) {
+              setBlocker((cur) => (cur && cur.bind === bindKey && cur.mode === 'dismissed' ? null : cur))
+            }
+          },
+        )
+        .finally(() => {
+          busy = false
+        })
+    }
+    checkBlockerNow.current = check
+    const onVisible = () => {
+      if (!document.hidden) check()
+    }
+    document.addEventListener('visibilitychange', onVisible)
+    const timer = setInterval(check, blockerWatchMode === 'dismissed' ? 2500 : 1500)
+    return () => {
+      alive = false
+      if (checkBlockerNow.current === check) checkBlockerNow.current = null
+      document.removeEventListener('visibilitychange', onVisible)
+      clearInterval(timer)
+      gone.abort()
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [blockerWatchMode, bindKey, sid, applyBlockerObs])
   useEffect(() => {
     if (!askKey) return
     let a = suggestAsks.get(askKey)
@@ -3058,10 +3273,31 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
             if (!at.text) [...at.views][0]?.next() // (any left: looked for again, by a view still there)
           }
           const card = claudeCard.shared() // (the card above its box, read off the same screen)
-          api<{ suggestion: string; card?: ClaudeCard }>('POST', `/api/sessions/${sid}/conversation/suggestion`, pressBody(), { timeoutMs: PRESS_MS }).then(
+          api<{ suggestion: string; card?: ClaudeCard; box_draft?: { text: string; digest: string } }>('POST', `/api/sessions/${sid}/conversation/suggestion`, pressBody(), { timeoutMs: PRESS_MS }).then(
             (r) => {
               card?.took(r.card ?? null)
               done(r.suggestion)
+              if (!live) return
+              if (r.box_draft?.text && r.box_draft?.digest) {
+                const dismissed = dismissedLiveRef.current.get(bindKey) ?? null
+                if (!sameBlockerReason(dismissed, 'box_draft') && !liveUiNow.current.waits && !liveUiNow.current.panelOpen) {
+                  setBlocker((cur) => {
+                    if (cur && cur.bind === bindKey && cur.mode === 'terminal') return cur
+                    if (cur && cur.bind === bindKey && cur.mode === 'draft_card' && cur.draft === r.box_draft!.text && cur.digest === r.box_draft!.digest) return cur
+                    setDraftCardError('')
+                    return { bind: bindKey, reason: 'box_draft', mode: 'draft_card', draft: r.box_draft!.text, digest: r.box_draft!.digest, openedEndSeq: endSeqNow.current }
+                  })
+                }
+              } else {
+                setBlocker((cur) => {
+                  if (cur && cur.bind === bindKey && (cur.reason === 'box_draft' || cur.reason === 'draft')) {
+                    dismissedLiveRef.current.delete(bindKey)
+                    setDraftCardError('')
+                    return null
+                  }
+                  return cur
+                })
+              }
             },
             () => {
               card?.failed()
@@ -3111,6 +3347,7 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
   // question, or of a permission it asks: the answer first.)
   // (A Devin bound: read only, for good — not a moment's wait to write through.)
   const readOnly = bound && devin && !agent?.other
+  const blockerMsg = activeBlocker ? t(composerBlockKey(activeBlocker.reason)) : null
   const blocked = agent?.other
     ? t('convo.otherAgent', { agent: agent.other })
     : !bound
@@ -3121,7 +3358,7 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
         ? t(waits ? 'agents.answerAbove' : 'agents.answerFirst') // (its card over the composer, or the terminal only)
         : agent?.dialog
           ? t('agents.dialogOpen') // (a message's Enter would go to it: the host refuses it too)
-          : null
+          : blockerMsg
   // Send and stop are one button while it works: send with something to
   // send, else stop. Not stop for a moment after a send, though: the box
   // empties as it goes, and a second tap meant as send would stop it.
@@ -3217,7 +3454,8 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
           drop()
           return
         }
-        const liveHint = e instanceof ApiError ? applyLive(e.code, b.agent) : undefined
+        const liveRes = e instanceof ApiError ? applyLive(e.code, b.agent, e.extra) : undefined
+        const liveHint = liveRes?.action
         // Whether it went is not known (the gateway lost the host on the way,
         // or the answer was lost on its way here): it is looked for as one
         // sent, the draft staying until it is seen.
@@ -3244,6 +3482,7 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
         } else {
           putBack() // (it never went: what was typed comes back, to be sent again)
           drop()
+          if (liveRes?.decision === 'draft_card') return
           // (A Codex read with no log, which has begun one since — its first
           // message: not typed to the one it began, which the page has not
           // read yet; read now, to be sent again there.)
@@ -3252,7 +3491,7 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
             return toast(t('agents.codexBegun'), true)
           }
           // (Words typed in its terminal input: not sent onto them — what to do, said.)
-          if (e instanceof ApiError && e.code === 'draft' && (b.agent === 'codex' || b.agent === 'agy')) return toast(t('agents.codexDraft'), true)
+          if (e instanceof ApiError && e.code === 'draft' && (b.agent === 'codex' || b.agent === 'agy')) return toast(t('agents.codexDraft'), true, liveHint)
           // (Another agent in the pane now: the page reads it at once — the
           // gateway looks again for it — to be seen before sending there.)
           if (e instanceof ApiError && e.code === 'agent_changed') {
@@ -3297,6 +3536,21 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
               {t('agents.closeDialog')}
             </button>
           )}
+          {blocked === blockerMsg && activeBlocker?.mode === 'dismissed' && (
+            <button
+              type="button"
+              className="link-btn agents-chat-why-act"
+              onClick={() =>
+                setBlocker((cur) =>
+                  cur && cur.bind === bindKey
+                    ? { ...cur, mode: cur.draft && cur.digest && (cur.reason === 'box_draft' || cur.reason === 'draft') ? 'draft_card' : 'terminal' }
+                    : cur,
+                )
+              }
+            >
+              {t('convo.showTerminal')}
+            </button>
+          )}
           {readOnly && (
             <button type="button" className="link-btn agents-chat-why-act" onClick={() => openTerminal()}>
               {t('convo.showTerminal')}
@@ -3307,7 +3561,47 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
       {/* (Something written while it works: what will become of it, said while it is typed — the placeholder that said so is gone by then.) */}
       {!blocked && draft.trim() && agent?.status === 'working' && <p className="agents-chat-why is-note">{t(steers ? 'convo.steerNote' : 'convo.queueNote')}</p>}
       {panelOpen && <PanelWindow key={bindKey} sid={sid} active={active} press={pressBody} onSettled={convo.refresh} onFull={() => openTerminal()} toast={toast} />}
-      {!panelOpen && !waits && liveOf === bindKey && <PanelWindow key={'live ' + bindKey} sid={sid} active={active} press={pressBody} onSettled={convo.refresh} toast={toast} live={{ onClose: () => setLiveOf(null), onFull: () => openTerminal(), letters: convo.bind?.agent === 'codex' }} />}
+      {showDraftCard && activeBlocker?.draft && (
+        <DraftCard
+          draft={activeBlocker.draft}
+          busy={draftActionBusy}
+          error={draftCardError}
+          onSend={() => actOnDraft('send')}
+          onClear={() => actOnDraft('clear')}
+          onTerminal={() => setBlocker((cur) => (cur && cur.bind === bindKey ? { ...cur, mode: 'terminal' } : cur))}
+          onClose={dismissBlocker}
+        />
+      )}
+      {showInlineLive && (
+        <PanelWindow
+          key={'live ' + bindKey}
+          sid={sid}
+          active={active}
+          press={pressBody}
+          onSettled={() => {
+            convo.refresh()
+            checkBlockerNow.current?.()
+          }}
+          toast={toast}
+          live={{
+            note: showBlockerTerminal && activeBlocker ? t(liveTerminalNoteKey(activeBlocker.reason)) : undefined,
+            onClose: showBlockerTerminal ? dismissBlocker : () => setLiveOf(null),
+            onFull: () => openTerminal(),
+            onBlocker: showBlockerTerminal
+              ? (b) =>
+                  applyBlockerObs({
+                    waits: liveUiNow.current.waits,
+                    panelOpen: liveUiNow.current.panelOpen,
+                    agentStatus: agentStatusNow.current,
+                    logAdvanced: !!activeBlockerNow.current && endSeqNow.current > activeBlockerNow.current.openedEndSeq,
+                    screenChecked: true,
+                    screenBlocker: b ?? { code: '' },
+                  })
+              : undefined,
+            letters: convo.bind?.agent === 'codex',
+          }}
+        />
+      )}
       {/* (Devin's is only read here: no box to write in, the terminal for that.) */}
       {!readOnly && (
       <div className="composer-box">
@@ -3555,8 +3849,8 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
       (e) => {
         // (Another agent in the pane: read at once, as for a send — the dialog says why.)
         if (e instanceof ApiError && e.code === 'agent_changed') convo.refresh()
-        // (Refused for a confirmed terminal blocker: open the inline terminal.)
-        if (e instanceof ApiError) applyLive(e.code, b.agent)
+        // (Refused for a confirmed terminal blocker: open DraftCard or inline terminal.)
+        if (e instanceof ApiError) applyLive(e.code, b.agent, e.extra)
         throw e
       },
     )
@@ -4131,7 +4425,7 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
       onShowTerminal={openTerminal}
       dockSink={dockSink}
       dockTerminal={{ can: liveFor(convo.bind?.agent) && !!convo.bind, press: pressBody, onFull: openTerminal, letters: convo.bind?.agent === 'codex' }}
-      inlinePanel={panelOpen || (!waits && liveOf === bindKey)}
+      inlinePanel={panelOpen || showInlineLive}
       // (herdr's only: its pane's terminal is had live, tmux's not — review of c2ae00c.)
       viewOf={cur.s.persistence === 'herdr' ? cur.key : undefined}
       onLook={liveFor(convo.bind?.agent) && convo.bind ? () => setLiveOf(bindKey) : undefined}
