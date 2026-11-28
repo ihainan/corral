@@ -297,11 +297,15 @@ export function SubscriptionsSection({ heading = true }: { heading?: boolean } =
         provider: item.provider,
         account_key: item.account_key,
       }, { timeoutMs: 40000 })
-      setItems((prev) =>
-        (prev ?? []).map((cur) =>
-          cur.provider === item.provider && cur.account_key === item.account_key ? res.item : cur,
-        ),
-      )
+      if (res.item.account_key !== item.account_key) {
+        void load()
+      } else {
+        setItems((prev) =>
+          (prev ?? []).map((cur) =>
+            cur.provider === item.provider && cur.account_key === item.account_key ? res.item : cur,
+          ),
+        )
+      }
       setNowSec(Math.floor(Date.now() / 1000))
       toast(t('subs.refreshed'))
     } catch (err) {

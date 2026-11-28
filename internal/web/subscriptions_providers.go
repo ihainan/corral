@@ -2,6 +2,8 @@ package web
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,55 +18,123 @@ import (
 )
 
 const (
-	devinQuotaReadMax   = 32 << 10
-	devinQuotaPassive   = 5 * time.Minute
-	devinQuotaTimeout   = 10 * time.Second
-	opencodeQuotaMax    = 64 << 10
-	opencodeHostSeenTTL = 10 * time.Minute
+	devinQuotaReadMax          = 32 << 10
+	devinQuotaPassive          = 5 * time.Minute
+	devinQuotaTimeout          = 10 * time.Second
+	opencodeQuotaMax           = 64 << 10
+	opencodeHostSeenTTL        = 10 * time.Minute
+	opencodeNotRunningExitCode = 75 // sentinel exit code when opencode service is not running on host
 )
+
+var errOpenCodeNotRunning = errors.New("opencode service is not running on this host")
 
 // devinQuotaReadScript passively reads the newest regular non-symlink
 // user_status.*.bin cache file written by Devin CLI itself under
-// ${XDG_CACHE_HOME:-$HOME/.cache}/devin/cli/. It never reads credentials.toml
-// or any token/cookie/auth file, and extracts only non-secret account metadata
-// and PlanStatus quota fields on the host so the model catalog and everything
-// else stay on the host.
-const devinQuotaReadScript = `import base64, glob, json, os, struct, sys
+// ${XDG_CACHE_HOME}/devin/cli and ~/.cache/devin/cli. Every directory step and
+// the target file itself are opened with O_NOFOLLOW (via dir_fd), verified via
+// fstat (regular file, size within CAP), and read from that exact descriptor up
+// to CAP bytes so no symlink can be followed at any step. Only numeric/boolean
+// plan & quota fields plus email and user_id leave the host; all other strings
+// and fields stay on the host.
+const devinQuotaReadScript = `import base64, json, os, stat, struct, sys
 
-dirs = []
+CAP = 4 * 1024 * 1024
+O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
+O_NONBLOCK = getattr(os, "O_NONBLOCK", 0)
+
+def open_dir_nofollow(base, parts):
+    if not base or not os.path.isabs(base):
+        return -1
+    try:
+        fd = os.open(base, os.O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
+    except OSError:
+        return -1
+    for comp in parts:
+        try:
+            nfd = os.open(comp, os.O_RDONLY | O_DIRECTORY | O_NOFOLLOW, dir_fd=fd)
+        except OSError:
+            os.close(fd)
+            return -1
+        os.close(fd)
+        fd = nfd
+    return fd
+
+roots = []
 xdg = os.environ.get("XDG_CACHE_HOME")
-if xdg:
-    dirs.append(os.path.join(xdg, "devin", "cli"))
-default_dir = os.path.join(os.path.expanduser("~"), ".cache", "devin", "cli")
-if default_dir not in dirs:
-    dirs.append(default_dir)
+if xdg and os.path.isabs(xdg):
+    roots.append((xdg, ("devin", "cli")))
+home = os.path.expanduser("~")
+if home and os.path.isabs(home):
+    roots.append((home, (".cache", "devin", "cli")))
 
-cands = []
-seen = set()
-for cache_dir in dirs:
-    if not os.path.isdir(cache_dir) or os.path.islink(cache_dir):
+best_mtime = None
+best_fd = -1
+seen_dev_ino = set()
+
+for base, parts in roots:
+    dfd = open_dir_nofollow(base, parts)
+    if dfd < 0:
         continue
-    for pat in ("user_status.*.bin", "user_status.bin"):
-        for p in glob.glob(os.path.join(cache_dir, pat)):
-            if p in seen or os.path.islink(p) or not os.path.isfile(p):
+    try:
+        try:
+            names = os.listdir(dfd)
+        except OSError:
+            names = []
+        for name in names:
+            if not (name == "user_status.bin" or (name.startswith("user_status.") and name.endswith(".bin"))):
                 continue
-            seen.add(p)
             try:
-                st = os.stat(p)
+                ffd = os.open(name, os.O_RDONLY | O_NOFOLLOW | O_NONBLOCK, dir_fd=dfd)
             except OSError:
                 continue
-            if st.st_size <= 0 or st.st_size > 4 * 1024 * 1024:
-                continue
-            cands.append((st.st_mtime, p))
-if not cands:
+            try:
+                st = os.fstat(ffd)
+                if not stat.S_ISREG(st.st_mode) or st.st_size <= 0 or st.st_size > CAP:
+                    os.close(ffd)
+                    continue
+                key = (st.st_dev, st.st_ino)
+                if key in seen_dev_ino:
+                    os.close(ffd)
+                    continue
+                seen_dev_ino.add(key)
+                if best_mtime is None or st.st_mtime > best_mtime:
+                    if best_fd >= 0:
+                        os.close(best_fd)
+                    best_mtime = st.st_mtime
+                    best_fd = ffd
+                else:
+                    os.close(ffd)
+            except OSError:
+                os.close(ffd)
+    finally:
+        os.close(dfd)
+
+if best_fd < 0:
     print("{}")
     sys.exit(0)
-cands.sort(reverse=True)
-path = cands[0][1]
 
 try:
-    with open(path, "r", encoding="utf-8") as fh:
-        wrapper = json.load(fh)
+    chunks = []
+    total = 0
+    while total <= CAP:
+        chunk = os.read(best_fd, min(65536, CAP + 1 - total))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        total += len(chunk)
+finally:
+    os.close(best_fd)
+
+if total <= 0 or total > CAP:
+    print("{}")
+    sys.exit(0)
+
+try:
+    wrapper = json.loads(b"".join(chunks).decode("utf-8"))
+    if not isinstance(wrapper, dict):
+        print("{}")
+        sys.exit(0)
     payload_b64 = wrapper.get("payload")
     if not isinstance(payload_b64, str) or not payload_b64:
         print("{}")
@@ -161,8 +231,8 @@ if plan_status_raw:
     for f, w, v in iter_pb(plan_status_raw):
         if f == 1 and w == 2:
             for pf, pw, pv in iter_pb(v):
-                if pf == 2 and pw == 2:
-                    out["plan_name"] = safe_str(pv)
+                if pf == 1 and pw == 0:
+                    out["teams_tier"] = int(pv)
                 elif pf == 34 and pw == 0:
                     out["is_devin"] = bool(pv)
                 elif pf == 36 and pw == 0:
@@ -194,10 +264,13 @@ print(json.dumps(out, ensure_ascii=False, separators=(",", ":")))
 `
 
 // devinQuotaReadCommand builds the fixed read-only host command that extracts
-// non-secret quota fields from Devin CLI's own user_status.*.bin cache.
+// non-secret quota fields from Devin CLI's own user_status.*.bin cache. Runs
+// python3 in isolated mode (-I: ignores PYTHONPATH, user site, and script dir)
+// from a fixed safe cwd (/) so planted local modules on the host cannot run.
 func devinQuotaReadCommand() string {
-	script := `command -v python3 >/dev/null 2>&1 || { echo '{}'; exit 0; }
-exec python3 -c ` + sshx.QuoteShell(devinQuotaReadScript) + ` </dev/null 2>/dev/null`
+	script := `cd / || exit 1
+command -v python3 >/dev/null 2>&1 || { echo '{}'; exit 0; }
+exec python3 -I -c ` + sshx.QuoteShell(devinQuotaReadScript) + ` </dev/null 2>/dev/null`
 	return "sh -c " + sshx.QuoteShell(script)
 }
 
@@ -221,40 +294,85 @@ func validFiniteNonNeg(p *float64) (float64, bool) {
 	return *p, true
 }
 
+// devinPlanName maps numeric PlanInfo.teams_tier enum values to display plan
+// labels purely in Go so no arbitrary plan string ever leaves the host.
+func devinPlanName(teamsTier int, isDevin bool) string {
+	switch teamsTier {
+	case 12:
+		return "Devin Enterprise"
+	case 14, 15:
+		return "Devin Teams"
+	case 16:
+		return "Devin Pro"
+	case 17:
+		return "Devin Max"
+	case 19:
+		return "Devin Free"
+	case 20:
+		return "Devin Trial"
+	case 1:
+		if isDevin {
+			return "Devin Teams"
+		}
+		return "Teams"
+	case 2:
+		if isDevin {
+			return "Devin Pro"
+		}
+		return "Pro"
+	case 3, 5, 10, 11:
+		if isDevin {
+			return "Devin Enterprise"
+		}
+		return "Enterprise"
+	case 7:
+		return "Teams Ultimate"
+	case 8:
+		return "Pro Ultimate"
+	case 9:
+		if isDevin {
+			return "Devin Trial"
+		}
+		return "Trial"
+	case 18:
+		if isDevin {
+			return "Devin Max"
+		}
+		return "Max"
+	default:
+		return ""
+	}
+}
+
 // quotaOfDevinStatus parses the non-secret JSON emitted by devinQuotaReadCommand.
 // Unknown/missing/garbled fields are ignored so partial payloads degrade safely.
 func quotaOfDevinStatus(raw []byte, now time.Time) (q quotaInfo, accountKey, accountLabel string, ok bool) {
 	var doc struct {
-		FetchedAt             int64    `json:"fetched_at"`
-		UserID                string   `json:"user_id"`
-		Email                 string   `json:"email"`
-		PlanName              string   `json:"plan_name"`
-		IsDevin               bool     `json:"is_devin"`
-		HideDailyQuota        bool     `json:"hide_daily_quota"`
-		HideWeeklyQuota       bool     `json:"hide_weekly_quota"`
-		HasDailyRemaining     bool     `json:"has_daily_remaining"`
-		DailyRemainingPercent int      `json:"daily_remaining_percent"`
-		DailyResetAt          int64    `json:"daily_reset_at"`
-		HasWeeklyRemaining    bool     `json:"has_weekly_remaining"`
-		WeeklyRemainingPercent int     `json:"weekly_remaining_percent"`
-		WeeklyResetAt         int64    `json:"weekly_reset_at"`
-		PlanEnd               int64    `json:"plan_end"`
-		ACUConsumed           *float64 `json:"acu_consumed"`
-		ACULimit              *float64 `json:"acu_limit"`
-		DollarsConsumed       *float64 `json:"dollars_consumed"`
-		DollarsLimit          *float64 `json:"dollars_limit"`
+		FetchedAt              int64    `json:"fetched_at"`
+		UserID                 string   `json:"user_id"`
+		Email                  string   `json:"email"`
+		TeamsTier              int      `json:"teams_tier"`
+		IsDevin                bool     `json:"is_devin"`
+		HideDailyQuota         bool     `json:"hide_daily_quota"`
+		HideWeeklyQuota        bool     `json:"hide_weekly_quota"`
+		HasDailyRemaining      bool     `json:"has_daily_remaining"`
+		DailyRemainingPercent  int      `json:"daily_remaining_percent"`
+		DailyResetAt           int64    `json:"daily_reset_at"`
+		HasWeeklyRemaining     bool     `json:"has_weekly_remaining"`
+		WeeklyRemainingPercent int      `json:"weekly_remaining_percent"`
+		WeeklyResetAt          int64    `json:"weekly_reset_at"`
+		PlanEnd                int64    `json:"plan_end"`
+		ACUConsumed            *float64 `json:"acu_consumed"`
+		ACULimit               *float64 `json:"acu_limit"`
+		DollarsConsumed        *float64 `json:"dollars_consumed"`
+		DollarsLimit           *float64 `json:"dollars_limit"`
 	}
 	if json.Unmarshal(raw, &doc) != nil {
 		return quotaInfo{}, "", "", false
 	}
 	accountKey = cleanAccountKey(doc.UserID)
 	accountLabel = cleanPlanName(doc.Email)
-
-	plan := cleanPlanName(doc.PlanName)
-	if plan != "" && doc.IsDevin && !strings.HasPrefix(strings.ToLower(plan), "devin") {
-		plan = "Devin " + plan
-	}
-	q.Plan = plan
+	q.Plan = devinPlanName(doc.TeamsTier, doc.IsDevin)
 	if doc.FetchedAt > 0 && doc.FetchedAt < 1e12 {
 		q.UpdatedAt = doc.FetchedAt
 	}
@@ -314,17 +432,42 @@ func quotaOfDevinStatus(raw []byte, now time.Time) (q quotaInfo, accountKey, acc
 	return q, accountKey, accountLabel, true
 }
 
-// opencodeQuotaCommand runs OpenCode's own CLI `opencode api experimental.usage.limits`
-// (falling back to `--standalone` only when the background service is not running).
-// Invoked strictly on manual user Refresh (5-minute SQLite cooldown). Fixed script.
+// opencodeQuotaCommand queries OpenCode's already-running background service
+// via `opencode api experimental.usage.limits`. It never starts a standalone
+// or background server: if `opencode service status` does not report a live
+// URL, it exits 75 immediately. When coreutils `timeout` is available on the
+// host, both commands are bounded (`timeout -k 5 30`) so a hung CLI is killed
+// on the host rather than orphaned when SSH closes. Fixed script.
 func opencodeQuotaCommand() string {
 	script := `PATH="$HOME/.opencode/bin:$HOME/.local/bin:$HOME/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
-command -v opencode >/dev/null 2>&1 || exit 127
-case "$(opencode service status </dev/null 2>/dev/null)" in
-  http://*|https://*) exec opencode api experimental.usage.limits </dev/null 2>/dev/null ;;
-  *) exec opencode api --standalone experimental.usage.limits </dev/null 2>/dev/null ;;
+command -v opencode >/dev/null 2>&1 || exit 75
+t=
+if command -v timeout >/dev/null 2>&1 && timeout -k 1 1 true >/dev/null 2>&1; then
+  t="timeout -k 5 30"
+fi
+st=$($t opencode service status </dev/null 2>/dev/null) || exit 75
+case "$st" in
+  http://*|https://*) exec $t opencode api experimental.usage.limits </dev/null 2>/dev/null ;;
+  *) exit 75 ;;
 esac`
 	return "sh -c " + sshx.QuoteShell(script)
+}
+
+// opencodeWorkspaceKey hashes OpenCode's workspace.id into an opaque snapshot
+// key ("ws:<16 hex>") so workspaces never collide or overwrite each other and
+// the raw workspace ID never needs to be displayed.
+func opencodeWorkspaceKey(wsID string) string {
+	wsID = strings.TrimSpace(wsID)
+	if wsID == "" || utf8.RuneCountInString(wsID) > 256 {
+		return ""
+	}
+	for _, r := range wsID {
+		if r < 0x20 || r == 0x7f {
+			return ""
+		}
+	}
+	sum := sha256.Sum256([]byte(wsID))
+	return "ws:" + hex.EncodeToString(sum[:8])
 }
 
 func parseOpenCodeMeter(raw json.RawMessage) *quotaWindow {
@@ -333,6 +476,7 @@ func parseOpenCodeMeter(raw json.RawMessage) *quotaWindow {
 	}
 	var m struct {
 		Percent  *float64 `json:"percent"`
+		Limited  bool     `json:"limited"`
 		ResetsAt *float64 `json:"resetsAt"`
 	}
 	if json.Unmarshal(raw, &m) != nil || m.Percent == nil {
@@ -353,14 +497,17 @@ func parseOpenCodeMeter(raw json.RawMessage) *quotaWindow {
 	}
 	return &quotaWindow{
 		Used:     math.Round(pct*10) / 10,
+		Limited:  m.Limited,
 		ResetsAt: resetSec,
 	}
 }
 
-// quotaOfOpenCodeUsage parses `opencode api experimental.usage.limits` JSON output,
-// keeping only OpenCode Go usage numbers (5-hour rolling, weekly, monthly) and the
-// non-secret workspace display label. Everything else in the output is ignored.
-func quotaOfOpenCodeUsage(raw []byte, now time.Time) (q quotaInfo, label string, ok bool) {
+// quotaOfOpenCodeUsage parses `opencode api experimental.usage.limits` JSON
+// output, keeping ONLY Go usage numbers (percent, limited flag, resetsAt for
+// rolling/weekly/monthly) and deriving an opaque hashed workspace key from
+// workspace.id. All other fields (including workspace.name, location, usageURL,
+// budgets) are ignored. When workspace.id is missing, nothing is returned.
+func quotaOfOpenCodeUsage(raw []byte, now time.Time) (q quotaInfo, wsKey string, ok bool) {
 	var root struct {
 		Data json.RawMessage `json:"data"`
 	}
@@ -379,14 +526,17 @@ func quotaOfOpenCodeUsage(raw []byte, now time.Time) (q quotaInfo, label string,
 	}
 	if len(data.Workspace) > 0 {
 		var ws struct {
-			Name string `json:"name"`
+			ID string `json:"id"`
 		}
 		if json.Unmarshal(data.Workspace, &ws) == nil {
-			label = cleanPlanName(ws.Name)
+			wsKey = opencodeWorkspaceKey(ws.ID)
 		}
 	}
+	if wsKey == "" {
+		return quotaInfo{}, "", true
+	}
 	if len(data.Go) == 0 || string(data.Go) == "null" {
-		return quotaInfo{}, label, true
+		return quotaInfo{}, wsKey, true
 	}
 	var goLim struct {
 		Rolling json.RawMessage `json:"rolling"`
@@ -394,7 +544,7 @@ func quotaOfOpenCodeUsage(raw []byte, now time.Time) (q quotaInfo, label string,
 		Monthly json.RawMessage `json:"monthly"`
 	}
 	if json.Unmarshal(data.Go, &goLim) != nil {
-		return quotaInfo{}, label, false
+		return quotaInfo{}, wsKey, false
 	}
 	q.FiveHour = parseOpenCodeMeter(goLim.Rolling)
 	q.Weekly = parseOpenCodeMeter(goLim.Weekly)
@@ -404,7 +554,7 @@ func quotaOfOpenCodeUsage(raw []byte, now time.Time) (q quotaInfo, label string,
 		q.Plan = "OpenCode Go"
 		q.UpdatedAt = now.Unix()
 	}
-	return q, label, true
+	return q, wsKey, true
 }
 
 // hostThrottle deduplicates passive host probes and SQLite host-seen writes.
@@ -481,24 +631,52 @@ func (s *Server) recordOpenCodeHostSeen(sess *term.Session) {
 	}()
 }
 
-// fetchOpenCodeQuota executes OpenCode's own CLI command on the host during a
-// user-initiated manual Refresh and persists the parsed Go usage snapshot.
-func (s *Server) fetchOpenCodeQuota(ctx context.Context, sess *term.Session, expectedAccountKey string) error {
+// fetchOpenCodeQuota executes OpenCode's own CLI command against an already
+// running OpenCode service during a user-initiated manual Refresh and persists
+// the parsed Go usage snapshot under the hashed workspace key ("ws:<16 hex>").
+// Returns the resolved workspace account key on success.
+func (s *Server) fetchOpenCodeQuota(ctx context.Context, sess *term.Session, expectedAccountKey string) (string, error) {
 	if sess == nil || sess.State() != term.StateRunning {
-		return errors.New("session not running")
+		return "", errors.New("session not running")
 	}
 	res, err := sshx.Exec(ctx, sess.Client(), opencodeQuotaCommand(), opencodeQuotaMax, sshx.ExecOptions{})
 	if err != nil {
-		return err
+		var exitErr *sshx.ExitError
+		if errors.As(err, &exitErr) && exitErr.Status == opencodeNotRunningExitCode {
+			return "", errOpenCodeNotRunning
+		}
+		return "", err
 	}
-	q, label, ok := quotaOfOpenCodeUsage(res.Out, time.Now())
-	if !ok || !q.Known {
-		return errors.New("opencode go usage unavailable")
+	q, wsKey, ok := quotaOfOpenCodeUsage(res.Out, time.Now())
+	if !ok || !q.Known || wsKey == "" {
+		return "", errors.New("opencode go usage unavailable")
 	}
-	accKey := strings.TrimSpace(expectedAccountKey)
-	if accKey == "" {
-		accKey = fmt.Sprintf("host:%d", sess.HostID)
+	// Label the card by the host name the gateway already knows; never store workspace.name.
+	label := strings.TrimSpace(sess.HostName)
+	cooldownSec := int64(subscriptionRefreshCooldown / time.Second)
+
+	if strings.HasPrefix(expectedAccountKey, "host:") {
+		// Promote the unfetched host placeholder to the real workspace key.
+		s.recordSubscriptionSnapshot(sess.OwnerID, "opencode", wsKey, label, sess.HostID, sess.HostName, q)
+		if s.store != nil {
+			rctx, rcancel := context.WithTimeout(context.Background(), 3*time.Second)
+			_, _, _, _ = s.store.TryClaimSubscriptionRefresh(rctx, sess.OwnerID, "opencode", wsKey, cooldownSec)
+			_ = s.store.DeleteSubscriptionSnapshot(rctx, sess.OwnerID, "opencode", expectedAccountKey)
+			rcancel()
+		}
+		return wsKey, nil
 	}
-	s.recordSubscriptionSnapshot(sess.OwnerID, "opencode", accKey, label, sess.HostID, sess.HostName, q)
-	return nil
+	if wsKey != expectedAccountKey {
+		// Host switched to a different workspace: never overwrite expectedAccountKey.
+		// Record the active workspace under its own key and report account_changed.
+		s.recordSubscriptionSnapshot(sess.OwnerID, "opencode", wsKey, label, sess.HostID, sess.HostName, q)
+		if s.store != nil {
+			rctx, rcancel := context.WithTimeout(context.Background(), 3*time.Second)
+			_, _, _, _ = s.store.TryClaimSubscriptionRefresh(rctx, sess.OwnerID, "opencode", wsKey, cooldownSec)
+			rcancel()
+		}
+		return "", errSubscriptionAccountChanged
+	}
+	s.recordSubscriptionSnapshot(sess.OwnerID, "opencode", wsKey, label, sess.HostID, sess.HostName, q)
+	return wsKey, nil
 }

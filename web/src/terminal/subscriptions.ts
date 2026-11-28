@@ -5,6 +5,7 @@
 export interface SubQuotaWindow {
   used: number
   resets_at: number
+  limited?: boolean
 }
 
 export interface SubQuotaScopedLimit {
@@ -170,7 +171,7 @@ export function subscriptionWindowState(
   if (stale || expired) {
     return { usedPct, expired, tone: 'stale' }
   }
-  const tone: WindowTone = usedPct >= 95 ? 'danger' : usedPct >= 80 ? 'warn' : ''
+  const tone: WindowTone = w.limited || usedPct >= 95 ? 'danger' : usedPct >= 80 ? 'warn' : ''
   return { usedPct, expired: false, tone }
 }
 
@@ -242,7 +243,7 @@ export function sortSubscriptions(items: readonly SubscriptionItem[], nowSec: nu
   })
 }
 
-export type SubscriptionRefreshErrorKey = 'subs.hostOfflineHint' | 'subs.accountChanged'
+export type SubscriptionRefreshErrorKey = 'subs.hostOfflineHint' | 'subs.accountChanged' | 'subs.opencodeNotRunning'
 
 // Maps subscription-specific manual refresh error codes to dedicated i18n keys.
 export function subscriptionRefreshErrorKey(code?: string): SubscriptionRefreshErrorKey | null {
@@ -251,6 +252,8 @@ export function subscriptionRefreshErrorKey(code?: string): SubscriptionRefreshE
       return 'subs.hostOfflineHint'
     case 'account_changed':
       return 'subs.accountChanged'
+    case 'opencode_not_running':
+      return 'subs.opencodeNotRunning'
     default:
       return null
   }

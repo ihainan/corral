@@ -232,6 +232,73 @@ func (s *Store) EnsureSubscriptionHost(ctx context.Context, ownerID int64, provi
 		ownerID, provider, accountKey,
 	).Scan(&exHostsJSON, &exSeenAt)
 	if errors.Is(err, sql.ErrNoRows) {
+		// If this is a host placeholder for a workspace-keyed provider (e.g. OpenCode)
+		// and a real workspace snapshot already references this host, touch that row
+		// instead of recreating a stale host:<id> placeholder.
+		if hostID > 0 && strings.HasPrefix(accountKey, "host:") {
+			rows, qerr := tx.QueryContext(ctx,
+				`SELECT account_key, host_id, hosts_json, seen_at
+				 FROM subscription_snapshots
+				 WHERE owner_id = ? AND provider = ? AND account_key NOT LIKE 'host:%'`,
+				ownerID, provider,
+			)
+			if qerr != nil {
+				return qerr
+			}
+			var matchedKey, matchedHostsJSON string
+			var matchedSeenAt int64
+			for rows.Next() {
+				var k, hj string
+				var hid, sa int64
+				if serr := rows.Scan(&k, &hid, &hj, &sa); serr != nil {
+					rows.Close()
+					return serr
+				}
+				found := hid == hostID
+				if !found && hj != "" {
+					var hs []SubscriptionHost
+					_ = json.Unmarshal([]byte(hj), &hs)
+					for _, h := range hs {
+						if h.HostID == hostID {
+							found = true
+							break
+						}
+					}
+				}
+				if found {
+					matchedKey, matchedHostsJSON, matchedSeenAt = k, hj, sa
+					break
+				}
+			}
+			if rerr := rows.Err(); rerr != nil {
+				rows.Close()
+				return rerr
+			}
+			rows.Close()
+			if matchedKey != "" {
+				var existingHosts []SubscriptionHost
+				_ = json.Unmarshal([]byte(matchedHostsJSON), &existingHosts)
+				mergedHosts := mergeSubscriptionHosts(existingHosts, hostID, hostName, now)
+				hostsBytes, merr := json.Marshal(mergedHosts)
+				if merr != nil {
+					return merr
+				}
+				finalSeenAt := matchedSeenAt
+				if now > finalSeenAt {
+					finalSeenAt = now
+				}
+				_, uerr := tx.ExecContext(ctx,
+					`UPDATE subscription_snapshots
+					 SET hosts_json = ?, seen_at = ?
+					 WHERE owner_id = ? AND provider = ? AND account_key = ?`,
+					string(hostsBytes), finalSeenAt, ownerID, provider, matchedKey,
+				)
+				if uerr != nil {
+					return uerr
+				}
+				return tx.Commit()
+			}
+		}
 		hosts := mergeSubscriptionHosts(nil, hostID, hostName, now)
 		hostsBytes, err := json.Marshal(hosts)
 		if err != nil {
@@ -377,6 +444,17 @@ func (s *Store) ResetSubscriptionRefresh(ctx context.Context, ownerID int64, pro
 		 SET last_refresh_at = ?
 		 WHERE owner_id = ? AND provider = ? AND account_key = ? AND last_refresh_at = ?`,
 		restoreTo, ownerID, provider, accountKey, claimedAt,
+	)
+	return err
+}
+
+// DeleteSubscriptionSnapshot deletes a single snapshot row (used when an
+// unfetched host:<id> placeholder is promoted to a workspace-keyed snapshot).
+func (s *Store) DeleteSubscriptionSnapshot(ctx context.Context, ownerID int64, provider, accountKey string) error {
+	_, err := s.db.ExecContext(ctx,
+		`DELETE FROM subscription_snapshots
+		 WHERE owner_id = ? AND provider = ? AND account_key = ?`,
+		ownerID, provider, accountKey,
 	)
 	return err
 }

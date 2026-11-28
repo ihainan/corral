@@ -40,8 +40,9 @@ const (
 )
 
 type quotaWindow struct {
-	Used     float64 `json:"used"`      // percent (0..100)
-	ResetsAt int64   `json:"resets_at"` // unix seconds
+	Used     float64 `json:"used"`              // percent (0..100)
+	ResetsAt int64   `json:"resets_at"`         // unix seconds
+	Limited  bool    `json:"limited,omitempty"` // whether provider marks this window as limited
 }
 
 type quotaScopedLimit struct {

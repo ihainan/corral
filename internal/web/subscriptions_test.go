@@ -3,6 +3,7 @@ package web
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -369,15 +370,36 @@ func TestSubscriptionsDevinOpenCodeAndClaudeScopedFlows(t *testing.T) {
 	}
 
 	now := time.Now()
-	var opencodeCalls atomic.Int32
+	var (
+		mu              sync.Mutex
+		curWSID         = "wrk_alpha"
+		curWSName       = "SECRET-WORKSPACE-NAME"
+		curWeeklyPct    = 36.0
+		curExitStatus   = byte(0)
+		opencodeCalls   atomic.Int32
+	)
 	srv := h.sshServer(t.TempDir())
 	srv.HandleExec(func(cmd string) func(ssh.Channel) {
 		if strings.Contains(cmd, "experimental.usage.limits") {
 			opencodeCalls.Add(1)
 			return func(ch ssh.Channel) {
+				mu.Lock()
+				wsID, wsName, weeklyPct, exitCode := curWSID, curWSName, curWeeklyPct, curExitStatus
+				mu.Unlock()
+				if exitCode != 0 {
+					ch.CloseWrite()
+					ch.SendRequest("exit-status", false, []byte{0, 0, 0, exitCode})
+					return
+				}
+				wsJSON := fmt.Sprintf(`{"id":%q,"name":%q}`, wsID, wsName)
+				if wsID == "" {
+					wsJSON = fmt.Sprintf(`{"name":%q}`, wsName)
+				}
 				out := fmt.Sprintf(
-					`{"location":{"directory":"/home/alice"},"data":{"workspace":{"id":"wrk_1","name":"Default"},"go":{"rolling":{"percent":10,"limited":false,"resetsAt":%d},"weekly":{"percent":36,"limited":false,"resetsAt":%d},"monthly":{"percent":38,"limited":false,"resetsAt":%d}},"budgets":[]}}`,
+					`{"location":{"directory":"/home/alice"},"data":{"workspace":%s,"go":{"rolling":{"percent":10,"limited":false,"resetsAt":%d},"weekly":{"percent":%.1f,"limited":false,"resetsAt":%d},"monthly":{"percent":38,"limited":false,"resetsAt":%d}},"budgets":[]}}`,
+					wsJSON,
 					now.Add(2*time.Hour).UnixMilli(),
+					weeklyPct,
 					now.Add(24*time.Hour).UnixMilli(),
 					now.Add(15*24*time.Hour).UnixMilli(),
 				)
@@ -416,8 +438,8 @@ func TestSubscriptionsDevinOpenCodeAndClaudeScopedFlows(t *testing.T) {
 		Plan:      "Devin Max",
 		Weekly:    &quotaWindow{Used: 100, ResetsAt: now.Add(18 * time.Hour).Unix()},
 	})
-	ocKey := fmt.Sprintf("host:%d", hostID)
-	if err := h.store.EnsureSubscriptionHost(context.Background(), aliceUser.ID, "opencode", ocKey, hostID, "oc-box"); err != nil {
+	ocPlaceholder := fmt.Sprintf("host:%d", hostID)
+	if err := h.store.EnsureSubscriptionHost(context.Background(), aliceUser.ID, "opencode", ocPlaceholder, hostID, "oc-box"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -455,35 +477,139 @@ func TestSubscriptionsDevinOpenCodeAndClaudeScopedFlows(t *testing.T) {
 	})
 	mustStatus(t, rDevinRef, http.StatusBadRequest, "devin refresh unsupported")
 
-	// 4. Manual refresh on OpenCode runs `opencode api experimental.usage.limits`, persists windows, and enforces cooldown.
+	// 4. Fix 2 [P1]: When OpenCode service is not running (exit 75), Refresh returns 409 opencode_not_running
+	//    and rolls back cooldown so user can retry once OpenCode starts. Fails on 3a6a603.
+	mu.Lock()
+	curExitStatus = opencodeNotRunningExitCode
+	mu.Unlock()
+	rNotRun := alice.do("POST", "/api/subscriptions/refresh", map[string]any{
+		"provider":    "opencode",
+		"account_key": ocPlaceholder,
+	})
+	mustStatus(t, rNotRun, http.StatusConflict, "opencode not running")
+	if rNotRun.code() != "opencode_not_running" {
+		t.Fatalf("expected error=opencode_not_running, got %s", rNotRun.Body)
+	}
+	snPlaceholder, err := h.store.GetSubscriptionSnapshot(context.Background(), aliceUser.ID, "opencode", ocPlaceholder)
+	if err != nil || snPlaceholder.LastRefreshAt != 0 {
+		t.Fatalf("expected placeholder cooldown rolled back to 0, got err=%v last=%d", err, snPlaceholder.LastRefreshAt)
+	}
+
+	// 5. Fix 3 [P1]: When OpenCode returns output without workspace.id, nothing is stored. Fails on 3a6a603.
+	mu.Lock()
+	curExitStatus = 0
+	curWSID = ""
+	mu.Unlock()
+	rNoWS := alice.do("POST", "/api/subscriptions/refresh", map[string]any{
+		"provider":    "opencode",
+		"account_key": ocPlaceholder,
+	})
+	mustStatus(t, rNoWS, http.StatusBadGateway, "opencode missing workspace id fails")
+	// Reset placeholder cooldown manually for next step of test.
+	_ = h.store.ResetSubscriptionRefresh(context.Background(), aliceUser.ID, "opencode", ocPlaceholder, snPlaceholder.LastRefreshAt, 0)
+	// Ensure no ws:* row was stored.
+	snapsAfterNoWS, _ := h.store.ListSubscriptionSnapshots(context.Background(), aliceUser.ID)
+	for _, sn := range snapsAfterNoWS {
+		if sn.Provider == "opencode" && strings.HasPrefix(sn.AccountKey, "ws:") {
+			t.Fatalf("must not store opencode snapshot without workspace.id, found %+v", sn)
+		}
+	}
+
+	// 6. Fix 3 & Fix 5 [P1]: Valid Refresh promotes host placeholder to ws:<sha256[:16]>,
+	//    drops workspace.name, labels card with host name ("oc-box"), and enforces per-workspace cooldown.
+	//    Fails on 3a6a603.
+	mu.Lock()
+	curWSID = "wrk_alpha"
+	curWSName = "SECRET-WORKSPACE-NAME"
+	curWeeklyPct = 36
+	mu.Unlock()
+	// Re-seed fresh placeholder with 0 cooldown so we can test promotion cleanly.
+	_ = h.store.DeleteSubscriptionSnapshot(context.Background(), aliceUser.ID, "opencode", ocPlaceholder)
+	_ = h.store.EnsureSubscriptionHost(context.Background(), aliceUser.ID, "opencode", ocPlaceholder, hostID, "oc-box")
+
 	rOC := alice.do("POST", "/api/subscriptions/refresh", map[string]any{
 		"provider":    "opencode",
-		"account_key": ocKey,
+		"account_key": ocPlaceholder,
 	})
 	mustStatus(t, rOC, http.StatusOK, "opencode manual refresh")
-	if opencodeCalls.Load() != 1 {
-		t.Fatalf("expected 1 opencode CLI call, got %d", opencodeCalls.Load())
+	if strings.Contains(string(rOC.Body), "SECRET-WORKSPACE-NAME") || strings.Contains(string(rOC.Body), "wrk_alpha") {
+		t.Fatalf("workspace name/raw id must not appear in response: %s", rOC.Body)
 	}
 	var refResp subscriptionRefreshResponse
 	if err := json.Unmarshal(rOC.Body, &refResp); err != nil {
 		t.Fatal(err)
 	}
-	if !refResp.Item.Quota.Known || refResp.Item.Plan != "OpenCode Go" || refResp.Item.AccountLabel != "Default" {
-		t.Fatalf("unexpected opencode refreshed item: %+v", refResp.Item)
+	wantAlphaKey := opencodeWorkspaceKey("wrk_alpha")
+	if refResp.Item.AccountKey != wantAlphaKey || refResp.Item.AccountLabel != "oc-box" || refResp.Item.Plan != "OpenCode Go" {
+		t.Fatalf("unexpected promoted opencode item: %+v (want key=%q label=oc-box)", refResp.Item, wantAlphaKey)
 	}
 	if refResp.Item.Quota.FiveHour == nil || refResp.Item.Quota.FiveHour.Used != 10 ||
 		refResp.Item.Quota.Weekly == nil || refResp.Item.Quota.Weekly.Used != 36 ||
 		refResp.Item.Quota.Monthly == nil || refResp.Item.Quota.Monthly.Used != 38 {
 		t.Fatalf("unexpected opencode windows: %+v", refResp.Item.Quota)
 	}
+	// Placeholder must be removed after promotion.
+	if _, err := h.store.GetSubscriptionSnapshot(context.Background(), aliceUser.ID, "opencode", ocPlaceholder); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("expected host placeholder to be deleted after promotion, got err=%v", err)
+	}
 
-	// Immediate second refresh hits 5-min cooldown without calling SSH again.
+	// Immediate second refresh on ws:<alpha> hits 5-min per-workspace cooldown without running CLI.
+	callsBefore := opencodeCalls.Load()
 	rOC2 := alice.do("POST", "/api/subscriptions/refresh", map[string]any{
 		"provider":    "opencode",
-		"account_key": ocKey,
+		"account_key": wantAlphaKey,
 	})
-	mustStatus(t, rOC2, http.StatusTooManyRequests, "opencode cooldown enforced")
-	if opencodeCalls.Load() != 1 {
-		t.Fatalf("rate-limited opencode refresh must not run CLI again, got %d calls", opencodeCalls.Load())
+	mustStatus(t, rOC2, http.StatusTooManyRequests, "opencode per-workspace cooldown enforced")
+	if opencodeCalls.Load() != callsBefore {
+		t.Fatalf("rate-limited opencode refresh must not run CLI again")
+	}
+
+	// 7. Fix 3 [P1]: Host switches to workspace B (wrk_beta). Refreshing workspace A (after cooldown cleared)
+	//    must NOT overwrite A; it stores B under ws:<beta>, rolls back A's cooldown, and returns 409 account_changed.
+	snAlpha, err := h.store.GetSubscriptionSnapshot(context.Background(), aliceUser.ID, "opencode", wantAlphaKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = h.store.ResetSubscriptionRefresh(context.Background(), aliceUser.ID, "opencode", wantAlphaKey, snAlpha.LastRefreshAt, 0)
+	mu.Lock()
+	curWSID = "wrk_beta"
+	curWSName = "OTHER-SECRET-WS"
+	curWeeklyPct = 77
+	mu.Unlock()
+
+	rSwitch := alice.do("POST", "/api/subscriptions/refresh", map[string]any{
+		"provider":    "opencode",
+		"account_key": wantAlphaKey,
+	})
+	mustStatus(t, rSwitch, http.StatusConflict, "workspace switch returns account_changed")
+	if rSwitch.code() != "account_changed" {
+		t.Fatalf("expected error=account_changed, got %s", rSwitch.Body)
+	}
+	// Workspace A must remain untouched at 36% with cooldown rolled back to 0.
+	snAlphaAfter, err := h.store.GetSubscriptionSnapshot(context.Background(), aliceUser.ID, "opencode", wantAlphaKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snAlphaAfter.LastRefreshAt != 0 {
+		t.Fatalf("workspace A cooldown should be rolled back to 0, got %d", snAlphaAfter.LastRefreshAt)
+	}
+	var qAlpha quotaInfo
+	_ = json.Unmarshal(snAlphaAfter.QuotaJSON, &qAlpha)
+	if qAlpha.Weekly == nil || qAlpha.Weekly.Used != 36 {
+		t.Fatalf("workspace A was overwritten! got %+v", qAlpha)
+	}
+	// Workspace B must be saved under its own key ws:<beta> with host label and cooldown claimed.
+	wantBetaKey := opencodeWorkspaceKey("wrk_beta")
+	snBeta, err := h.store.GetSubscriptionSnapshot(context.Background(), aliceUser.ID, "opencode", wantBetaKey)
+	if err != nil {
+		t.Fatalf("expected workspace B saved under %q: %v", wantBetaKey, err)
+	}
+	if snBeta.AccountLabel != "oc-box" || snBeta.LastRefreshAt == 0 {
+		t.Fatalf("unexpected workspace B metadata: %+v", snBeta)
+	}
+	var qBeta quotaInfo
+	_ = json.Unmarshal(snBeta.QuotaJSON, &qBeta)
+	if qBeta.Weekly == nil || qBeta.Weekly.Used != 77 {
+		t.Fatalf("unexpected workspace B quota: %+v", qBeta)
 	}
 }

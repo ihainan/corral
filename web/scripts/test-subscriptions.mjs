@@ -135,6 +135,14 @@ assert.deepEqual(
 // Manual refresh error code mapping.
 assert.equal(subscriptionRefreshErrorKey('account_changed'), 'subs.accountChanged')
 assert.equal(subscriptionRefreshErrorKey('host_offline'), 'subs.hostOfflineHint')
+assert.equal(subscriptionRefreshErrorKey('opencode_not_running'), 'subs.opencodeNotRunning')
 assert.equal(subscriptionRefreshErrorKey('refresh_failed'), null)
+
+// Limited flag escalates window tone to danger when not expired or stale.
+assert.deepEqual(subscriptionWindowState({ used: 50, resets_at: now + 3600, limited: true }, now, false), {
+  usedPct: 50,
+  expired: false,
+  tone: 'danger',
+})
 
 console.log('subscriptions: all tests passed')

@@ -90,7 +90,7 @@ func (c *codexQuotaRecorded) changed(key, sig string) bool {
 
 func shortAccountLabel(accountKey string) string {
 	k := strings.TrimSpace(accountKey)
-	if k == "" || strings.HasPrefix(k, "host:") {
+	if k == "" || strings.HasPrefix(k, "host:") || strings.HasPrefix(k, "ws:") {
 		return ""
 	}
 	if len(k) > 12 {
@@ -207,7 +207,11 @@ func (s *Server) subscriptionItemOf(sn *store.SubscriptionSnapshot, ownerID, now
 	}
 	label := sn.AccountLabel
 	if label == "" {
-		label = shortAccountLabel(sn.AccountKey)
+		if sn.Provider == "opencode" {
+			label = strings.TrimSpace(sn.HostName)
+		} else {
+			label = shortAccountLabel(sn.AccountKey)
+		}
 	}
 	item := subscriptionItem{
 		Provider:     sn.Provider,
@@ -345,6 +349,7 @@ func (s *Server) apiRefreshSubscription(w http.ResponseWriter, r *http.Request) 
 	ctx, cancel := context.WithTimeout(r.Context(), subscriptionManualTimeout)
 	defer cancel()
 
+	resolvedKey := req.AccountKey
 	var refreshErr error
 	if s.subscriptionRefreshFn != nil {
 		var q quotaInfo
@@ -354,7 +359,7 @@ func (s *Server) apiRefreshSubscription(w http.ResponseWriter, r *http.Request) 
 			s.recordSubscriptionSnapshot(u.ID, req.Provider, req.AccountKey, label, sn.HostID, sn.HostName, q)
 		}
 	} else {
-		refreshErr = s.refreshSubscriptionOnSession(ctx, sess, req.Provider, req.AccountKey)
+		resolvedKey, refreshErr = s.refreshSubscriptionOnSession(ctx, sess, req.Provider, req.AccountKey)
 	}
 	if refreshErr != nil {
 		if errors.Is(refreshErr, errSubscriptionAccountChanged) {
@@ -362,6 +367,13 @@ func (s *Server) apiRefreshSubscription(w http.ResponseWriter, r *http.Request) 
 			_ = s.store.ResetSubscriptionRefresh(rctx, u.ID, req.Provider, req.AccountKey, claimedAt, prevRefreshAt)
 			rcancel()
 			writeError(w, http.StatusConflict, "account_changed", "another account is currently signed in on this host")
+			return
+		}
+		if errors.Is(refreshErr, errOpenCodeNotRunning) {
+			rctx, rcancel := context.WithTimeout(context.Background(), 3*time.Second)
+			_ = s.store.ResetSubscriptionRefresh(rctx, u.ID, req.Provider, req.AccountKey, claimedAt, prevRefreshAt)
+			rcancel()
+			writeError(w, http.StatusConflict, "opencode_not_running", "OpenCode is not running on this host")
 			return
 		}
 		if errors.Is(refreshErr, context.Canceled) {
@@ -375,7 +387,10 @@ func (s *Server) apiRefreshSubscription(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	updated, err := s.store.GetSubscriptionSnapshot(r.Context(), u.ID, req.Provider, req.AccountKey)
+	if resolvedKey == "" {
+		resolvedKey = req.AccountKey
+	}
+	updated, err := s.store.GetSubscriptionSnapshot(r.Context(), u.ID, req.Provider, resolvedKey)
 	if err != nil {
 		s.internalError(w, r, err)
 		return
@@ -388,17 +403,17 @@ func (s *Server) apiRefreshSubscription(w http.ResponseWriter, r *http.Request) 
 	})
 }
 
-func (s *Server) refreshSubscriptionOnSession(ctx context.Context, sess *term.Session, provider, expectedAccountKey string) error {
+func (s *Server) refreshSubscriptionOnSession(ctx context.Context, sess *term.Session, provider, expectedAccountKey string) (string, error) {
 	now := time.Now()
 	switch provider {
 	case "agy":
 		q, err := s.fetchAgyQuota(ctx, sess)
 		if err != nil {
-			return err
+			return "", err
 		}
 		cacheKey := fmt.Sprintf("%d\x00%d", sess.OwnerID, sess.HostID)
 		s.agyQuota.putCached(cacheKey, q, now)
-		return nil
+		return expectedAccountKey, nil
 
 	case "opencode":
 		return s.fetchOpenCodeQuota(ctx, sess, expectedAccountKey)
@@ -437,11 +452,11 @@ func (s *Server) refreshSubscriptionOnSession(ctx context.Context, sess *term.Se
 
 		q, accUUID, signedIn, err := readClaude()
 		if err != nil {
-			return err
+			return "", err
 		}
 		if !accountMatches(accUUID, signedIn) {
 			recordOtherAccount(q, accUUID, signedIn)
-			return errSubscriptionAccountChanged
+			return "", errSubscriptionAccountChanged
 		}
 		// Respect Claude Code's 15-minute minimum cadence both in gateway memory
 		// and on-host (~/.cache/corral/usage-asked) before invoking `claude -p /usage`.
@@ -454,7 +469,7 @@ func (s *Server) refreshSubscriptionOnSession(ctx context.Context, sess *term.Se
 		}
 		if !accountMatches(accUUID, signedIn) {
 			recordOtherAccount(q, accUUID, signedIn)
-			return errSubscriptionAccountChanged
+			return "", errSubscriptionAccountChanged
 		}
 		var email string
 		if signedIn {
@@ -470,8 +485,8 @@ func (s *Server) refreshSubscriptionOnSession(ctx context.Context, sess *term.Se
 		if q.Known && accountKey != "" {
 			s.recordSubscriptionSnapshot(sess.OwnerID, "claude", accountKey, email, sess.HostID, sess.HostName, q)
 		}
-		return nil
+		return expectedAccountKey, nil
 	default:
-		return errors.New("unsupported provider")
+		return "", errors.New("unsupported provider")
 	}
 }

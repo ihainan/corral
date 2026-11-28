@@ -333,4 +333,32 @@ func TestEnsureSubscriptionHostPlaceholderAndPreserveExisting(t *testing.T) {
 	if got.Plan != "OpenCode Go" || got.UpdatedAt == 0 || len(got.Hosts) != 2 {
 		t.Fatalf("EnsureSubscriptionHost clobbered existing snapshot: %+v", got)
 	}
+
+	// Workspace-keyed snapshot referencing host 20 prevents EnsureSubscriptionHost("host:20") from recreating a placeholder.
+	if err := s.UpsertSubscriptionSnapshot(ctx, SubscriptionSnapshot{
+		OwnerID:      u.ID,
+		Provider:     "opencode",
+		AccountKey:   "ws:0123456789abcdef",
+		AccountLabel: "box-20",
+		Plan:         "OpenCode Go",
+		HostID:       20,
+		HostName:     "box-20",
+		QuotaJSON:    json.RawMessage(`{"known":true,"weekly":{"used":12,"resets_at":1795996800}}`),
+		UpdatedAt:    now.Unix(),
+		SeenAt:       now.Unix(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.EnsureSubscriptionHost(ctx, u.ID, "opencode", "host:20", 20, "box-20"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.GetSubscriptionSnapshot(ctx, u.ID, "opencode", "host:20"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected no host:20 placeholder when ws:* already owns host 20, got err=%v", err)
+	}
+	if err := s.DeleteSubscriptionSnapshot(ctx, u.ID, "opencode", "host:10"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.GetSubscriptionSnapshot(ctx, u.ID, "opencode", "host:10"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected host:10 deleted, got err=%v", err)
+	}
 }
