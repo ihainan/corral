@@ -378,3 +378,65 @@ func TestOpIDGenerateAndParse(t *testing.T) {
 		t.Fatalf("unexpected OpDedupWindow: %v", OpDedupWindow)
 	}
 }
+
+func TestHelloFeaturesAndConditionalShutdownCompat(t *testing.T) {
+	// 1. New daemon HelloResult advertises FeatureConditionalShutdown.
+	newHello := HelloResult{
+		Version:  "0.3.2",
+		Release:  2000,
+		Protocol: Protocol,
+		Features: DefaultFeatures(),
+	}
+	b, err := json.Marshal(newHello)
+	if err != nil {
+		t.Fatalf("marshal new HelloResult: %v", err)
+	}
+	var decodedNew HelloResult
+	if err := json.Unmarshal(b, &decodedNew); err != nil {
+		t.Fatalf("unmarshal new HelloResult: %v", err)
+	}
+	if !decodedNew.HasFeature(FeatureConditionalShutdown) {
+		t.Fatalf("new daemon HelloResult must advertise %q, got %v", FeatureConditionalShutdown, decodedNew.Features)
+	}
+
+	// 2. Old daemon JSON without "features" field must decode cleanly and report false.
+	oldJSON := `{"version":"0.3.1","release":1000,"protocol":1,"pid":4242}`
+	var decodedOld HelloResult
+	if err := json.Unmarshal([]byte(oldJSON), &decodedOld); err != nil {
+		t.Fatalf("unmarshal old HelloResult: %v", err)
+	}
+	if decodedOld.HasFeature(FeatureConditionalShutdown) {
+		t.Fatalf("old daemon without features field must report HasFeature(%q)=false", FeatureConditionalShutdown)
+	}
+	var nilHello *HelloResult
+	if nilHello.HasFeature(FeatureConditionalShutdown) {
+		t.Fatal("nil HelloResult must report HasFeature=false")
+	}
+
+	// 3. ShutdownParams / ShutdownResult conditional fields round-trip cleanly.
+	sp := ShutdownParams{Reason: "admin_disabled", OnlyIfSoleGateway: "gw-a.local"}
+	sb, err := json.Marshal(sp)
+	if err != nil {
+		t.Fatalf("marshal ShutdownParams: %v", err)
+	}
+	var spGot ShutdownParams
+	if err := json.Unmarshal(sb, &spGot); err != nil {
+		t.Fatalf("unmarshal ShutdownParams: %v", err)
+	}
+	if spGot != sp {
+		t.Fatalf("ShutdownParams mismatch: got %+v, want %+v", spGot, sp)
+	}
+
+	sr := ShutdownResult{OK: false, OtherGateways: true}
+	rb, err := json.Marshal(sr)
+	if err != nil {
+		t.Fatalf("marshal ShutdownResult: %v", err)
+	}
+	var srGot ShutdownResult
+	if err := json.Unmarshal(rb, &srGot); err != nil {
+		t.Fatalf("unmarshal ShutdownResult: %v", err)
+	}
+	if srGot != sr {
+		t.Fatalf("ShutdownResult mismatch: got %+v, want %+v", srGot, sr)
+	}
+}

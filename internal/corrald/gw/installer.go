@@ -645,6 +645,61 @@ func RunServeWithRetry(ctx context.Context, c *ssh.Client, binPath, gatewayID, m
 	}
 }
 
+// RunUninstallSoleGatewayWithRetry runs host-side atomic sole-gateway uninstall
+// (--only-if-sole-gateway) without writing a premature tombstone before the
+// host confirms exclusivity under .corrald-shared.lock -> op.lock -> corrald.lock.
+//
+// Possible Result values:
+//   - "removed": confirmed sole gateway and files removed
+//   - "other_gateways": confirmed another gateway is connected/registered (files preserved)
+//   - "unsupported": host binary/daemon does not support conditional shutdown/uninstall (files preserved)
+//   - "partial" / "stop_failed" / "pending": transient or incomplete failure (caller keeps remove_pending)
+func RunUninstallSoleGatewayWithRetry(ctx context.Context, c *ssh.Client, probe *HostProbe, opID, soleGateway string, busyRetry BusyRetryPolicy, onStep func(step string)) UninstallOutcome {
+	if soleGateway == "" {
+		return UninstallOutcome{Result: "pending", Detail: "gateway_id is empty"}
+	}
+	if onStep != nil {
+		onStep("remove")
+	}
+	iv, maxRetries := busyRetry.effective()
+	var res sshx.ExecResult
+	var err error
+	var f map[string]string
+	for attempt := 0; ; attempt++ {
+		res, err = runSSH(ctx, c, UninstallCommandSoleGateway(probe.LibDir, probe.StateDir, probe.SocketPath, opID, soleGateway), 64<<10, sshx.ExecOptions{})
+		if err != nil && !res.Ended {
+			return UninstallOutcome{Result: "pending", Detail: err.Error()}
+		}
+		f = ParseKeyValues(res.Out)
+		if f["error"] == proto.ErrBusy && attempt < maxRetries {
+			if waitBusyRetry(ctx, iv, nil) {
+				continue
+			}
+			return UninstallOutcome{Result: "pending", Detail: firstNonEmpty(f["detail"], "busy")}
+		}
+		break
+	}
+	if onStep != nil {
+		onStep("verify")
+	}
+	switch {
+	case f["result"] == "removed":
+		return UninstallOutcome{Result: "removed", LastMachine: f["last_machine"] == "true"}
+	case f["result"] == "other_gateways":
+		return UninstallOutcome{Result: "other_gateways", Detail: f["detail"]}
+	case f["error"] == "unsupported_conditional_shutdown" || f["error"] == "invalid_args":
+		return UninstallOutcome{Result: "unsupported", Detail: firstNonEmpty(f["detail"], f["error"])}
+	case f["error"] == "stop_failed":
+		pid, _ := strconv.Atoi(f["pid"])
+		return UninstallOutcome{Result: "stop_failed", PID: pid, Detail: f["detail"]}
+	case f["result"] == "partial":
+		return UninstallOutcome{Result: "partial", Left: ParseLeftLines(res.Out), LastMachine: f["last_machine"] == "true"}
+	default:
+		detail := firstNonEmpty(f["detail"], f["error"], errStr(err))
+		return UninstallOutcome{Result: "pending", Detail: detail}
+	}
+}
+
 // RunUninstall writes the removing tombstone and executes corrald uninstall.
 func RunUninstall(ctx context.Context, c *ssh.Client, probe *HostProbe, opID string, onStep func(step string)) UninstallOutcome {
 	return RunUninstallWithRetry(ctx, c, probe, opID, DefaultBusyRetryPolicy, onStep)

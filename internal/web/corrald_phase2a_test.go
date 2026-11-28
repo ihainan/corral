@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -820,8 +821,8 @@ func TestCorraldAdminDisableReconnectChecksExclusivity(t *testing.T) {
 			t.Fatalf("corrald binary must be preserved when clients.json is unreadable: %v", err)
 		}
 		chAfter, _ := h.srv.store.CorraldHostByID(context.Background(), hostID)
-		if chAfter.State != gw.StateStopped {
-			t.Fatalf("expected host DB state stopped when clients.json unreadable, got %q", chAfter.State)
+		if chAfter.State != gw.StateRemovePending {
+			t.Fatalf("expected host DB state remove_pending when clients.json unreadable, got %q", chAfter.State)
 		}
 	})
 }
@@ -1357,4 +1358,397 @@ func TestCorraldAdminDisableImmediateCleanupOnPooledSSH(t *testing.T) {
 			t.Fatalf("re-allowing must NOT auto-reinstall corrald; stat err=%v", statErr)
 		}
 	})
+}
+
+// Regression tests for Fix Round 4 end-to-end host/gateway interactions:
+//   - Item #1 (CleanupUserHosts): uses atomic sole-gateway uninstall so another
+//     gateway on the host is never killed or removed.
+//   - Item #2: cancelled install (admin disable at install->start boundary)
+//     uses sole-gateway uninstall and preserves another gateway's installation.
+//   - Item #3: background allow-cleanup acquires per-account op lock and
+//     re-reads DB state before touching SSH, so a concurrent explicit reinstall
+//     is never disrupted; account-level dedup spans multiple host records.
+//   - Item #8: admin-disabled OnHostConnected handles StateIncompatible hosts.
+//   - Item #9: real attachAndHello publication synchronized with Close() under -race.
+func TestCorraldFix4_EndToEndSafeCleanup(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("requires linux")
+	}
+	v1Dir, _ := buildTestCorraldDist(t)
+	distV1, err := gw.LoadDist(v1Dir)
+	if err != nil {
+		t.Fatalf("LoadDist: %v", err)
+	}
+
+	t.Run("item2_cancelled_install_preserves_other_gateway_installation", func(t *testing.T) {
+		h := newHarness(t, func(c *config.Config) {
+			c.CorraldDir = v1Dir
+			c.GatewayID = "gw-cancel-a.local"
+		})
+		admin := h.admin()
+		adminID := userIDOf(t, admin)
+		sshSrv, home := startCorraldSSH(t)
+		hostID, _ := createAndPinHost(t, admin, sshSrv, "cancel-shared")
+
+		var once atomic.Bool
+		h.srv.corrald.Close()
+		h.srv.corrald = gw.NewManager(gw.ManagerConfig{
+			Store:     h.store,
+			Dist:      distV1,
+			GatewayID: "gw-cancel-a.local",
+			SSH:       &webSSHProvider{s: h.srv},
+			BeforeInstallStart: func(hid int64, _ string) {
+				if !once.CompareAndSwap(false, true) {
+					return
+				}
+				// Right after install completes and before serve starts, another
+				// gateway starts using the installation (writes clients.json with gw-b).
+				bin := filepath.Join(home, ".local", "lib", "corral", "corrald")
+				serveCmd := exec.Command(bin, "serve", "--gateway", "gw-cancel-b.local")
+				serveCmd.Env = append(os.Environ(), "HOME="+home)
+				if out, err := serveCmd.CombinedOutput(); err != nil {
+					t.Errorf("other gw serve: %v (%s)", err, string(out))
+					return
+				}
+				stCmd := exec.Command(bin, "status")
+				stCmd.Env = append(os.Environ(), "HOME="+home)
+				stOut, _ := stCmd.CombinedOutput()
+				sock := gw.ParseKeyValues(stOut)["socket"]
+				if sock != "" {
+					otherSSH := dialTestSSH(t, sshSrv)
+					defer otherSSH.Close()
+					if otherCl, derr := gw.Dial(context.Background(), otherSSH, sock, nil); derr == nil {
+						_, _ = otherCl.Hello(context.Background(), proto.HelloParams{
+							Gateway:        "gw-cancel-b.local",
+							GatewayVersion: "0.3.2",
+							ProtoMin:       1,
+							ProtoMax:       1,
+							Client:         proto.ClientIdentity{CorralUser: "bob", HostID: "99"},
+						})
+						_ = otherCl.Close()
+					}
+				}
+				// Now admin disables corrald on gw-a -> sets rop.cancelled = true!
+				h.srv.corrald.SetAdminDisabled(context.Background(), true)
+			},
+		})
+
+		startCorraldInstall(t, admin, hostID)
+
+		deadline := time.Now().Add(10 * time.Second)
+		for {
+			ch, err := h.srv.store.CorraldHostByID(context.Background(), hostID)
+			if err == nil && ch.State == gw.StateStopped {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("expected cancelled install with other gateway to mark stopped, got (%+v, %v)", ch, err)
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+
+		// Other gateway's binary and running daemon MUST still be intact!
+		bin := filepath.Join(home, ".local", "lib", "corral", "corrald")
+		if _, err := os.Stat(bin); err != nil {
+			t.Fatalf("Item #2 regression: cancelled install deleted other gateway's binary: %v", err)
+		}
+		stCmd := exec.Command(bin, "status")
+		stCmd.Env = append(os.Environ(), "HOME="+home)
+		stOut, _ := stCmd.CombinedOutput()
+		if !strings.Contains(string(stOut), "state=running") {
+			t.Fatalf("Item #2 regression: cancelled install stopped other gateway's daemon; status=%s", string(stOut))
+		}
+		_ = adminID
+	})
+
+	t.Run("item3_background_allow_cleanup_never_deletes_reinstalled_daemon", func(t *testing.T) {
+		h := newHarness(t, func(c *config.Config) {
+			c.CorraldDir = v1Dir
+			c.GatewayID = "gw-reenable.local"
+		})
+		admin := h.admin()
+		adminID := userIDOf(t, admin)
+		sshSrv, home := startCorraldSSH(t)
+		hostID, _ := createAndPinHost(t, admin, sshSrv, "reenable-box")
+		hostID2, _ := createAndPinHost(t, admin, sshSrv, "reenable-box-peer")
+		fp := hostFingerprint(t, h, adminID, hostID)
+
+		startCorraldInstall(t, admin, hostID)
+		waitCorraldState(t, admin, hostID, gw.StateRunning)
+
+		// Put hostID into remove_pending while disabled (hostID2 remains off on the same SSH account).
+		bin := filepath.Join(home, ".local", "lib", "corral", "corrald")
+		uCmd := exec.Command(bin, "uninstall")
+		uCmd.Env = append(os.Environ(), "HOME="+home)
+		_, _ = uCmd.CombinedOutput()
+		if err := h.srv.store.ResetCorraldHostOff(context.Background(), hostID2); err != nil {
+			t.Fatalf("ResetCorraldHostOff(hostID2): %v", err)
+		}
+		if err := h.srv.store.MarkCorraldHostsRemovePending(context.Background(), []int64{hostID}, fp, "alice"); err != nil {
+			t.Fatalf("MarkCorraldHostsRemovePending: %v", err)
+		}
+
+		// Pause the allow-cleanup worker at BeforePendingCleanupSSH, verify it
+		// holds the per-account op lock (StartInstall on hostID2 sharing the
+		// same SSH account returns 409 Conflict while held), then simulate
+		// another path resetting hostID to running BEFORE the worker reaches
+		// SSH, and verify the resumed worker aborts without touching the new
+		// installation!
+		entered := make(chan struct{}, 1)
+		release := make(chan struct{})
+		var hookOnce atomic.Bool
+		h.srv.corrald.Close()
+		h.srv.corrald = gw.NewManager(gw.ManagerConfig{
+			Store:         h.store,
+			Dist:          distV1,
+			GatewayID:     "gw-reenable.local",
+			AdminDisabled: true,
+			SSH:           &webSSHProvider{s: h.srv},
+			BeforePendingCleanupSSH: func(hid int64) {
+				if hookOnce.CompareAndSwap(false, true) {
+					entered <- struct{}{}
+					<-release
+				}
+			},
+		})
+
+		mustStatus(t, admin.do("PUT", "/api/admin/corrald", map[string]any{"allowed": true}), http.StatusOK, "admin allow")
+		select {
+		case <-entered:
+		case <-time.After(5 * time.Second):
+			t.Fatal("allow-cleanup worker did not reach BeforePendingCleanupSSH")
+		}
+
+		// While cleanup holds the per-account op lock, StartInstall on hostID2
+		// (same SSH account, currently StateOff) MUST conflict with 409!
+		st2 := admin.do("GET", fmt.Sprintf("/api/hosts/%d/corrald", hostID2), nil)
+		mustStatus(t, st2, http.StatusOK, "status hostID2")
+		mhash, _ := st2.json()["manifest_hash"].(string)
+		enableResp := admin.do("POST", fmt.Sprintf("/api/hosts/%d/corrald/install", hostID2), map[string]any{"manifest_hash": mhash})
+		if enableResp.Status != http.StatusConflict {
+			close(release)
+			t.Fatalf("Item #3 regression: expected 409 Conflict while cleanup holds per-account op lock, got %d (%s)", enableResp.Status, enableResp.Body)
+		}
+
+		// Simulate state already having transitioned to StateRunning (e.g. a new
+		// installation succeeded) while this allow worker was waiting.
+		if err := h.srv.store.UpsertCorraldHost(context.Background(), &store.CorraldHost{
+			HostID:           hostID,
+			State:            gw.StateRunning,
+			BoundFingerprint: fp,
+			BoundUsername:    "alice",
+			BoundGateway:     "gw-reenable.local",
+			Version:          distV1.Version,
+			Release:          distV1.Release,
+		}); err != nil {
+			close(release)
+			t.Fatalf("UpsertCorraldHost: %v", err)
+		}
+		// Place a sentinel file at binary path to verify resumed worker does NOT uninstall it.
+		if err := os.MkdirAll(filepath.Dir(bin), 0o700); err != nil {
+			close(release)
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(bin, []byte("new-install"), 0o700); err != nil {
+			close(release)
+			t.Fatal(err)
+		}
+
+		close(release)
+		time.Sleep(300 * time.Millisecond)
+
+		chAfter, err := h.srv.store.CorraldHostByID(context.Background(), hostID)
+		if err != nil || chAfter.State != gw.StateRunning {
+			t.Fatalf("Item #3 regression: resumed allow-cleanup altered StateRunning host to (%+v, %v)", chAfter, err)
+		}
+		if _, err := os.Stat(bin); err != nil {
+			t.Fatalf("Item #3 regression: resumed allow-cleanup deleted new installation: %v", err)
+		}
+	})
+
+	t.Run("item8_admin_disabled_connect_cleans_incompatible_host", func(t *testing.T) {
+		h := newHarness(t, func(c *config.Config) {
+			c.CorraldDir = v1Dir
+			c.GatewayID = "gw-incompat.local"
+		})
+		admin := h.admin()
+		adminID := userIDOf(t, admin)
+		sshSrv, home := startCorraldSSH(t)
+		hostID, _ := createAndPinHost(t, admin, sshSrv, "incompat-box")
+		fp := hostFingerprint(t, h, adminID, hostID)
+
+		startCorraldInstall(t, admin, hostID)
+		waitCorraldState(t, admin, hostID, gw.StateRunning)
+
+		// Stop daemon, mark host as StateIncompatible in DB, and restart Manager
+		// with AdminDisabled=true.
+		bin := filepath.Join(home, ".local", "lib", "corral", "corrald")
+		stopCmd := exec.Command(bin, "stop")
+		stopCmd.Env = append(os.Environ(), "HOME="+home)
+		_, _ = stopCmd.CombinedOutput()
+		waitDaemonStopped(t, home)
+
+		h.srv.corrald.Close()
+		if err := h.srv.store.UpsertCorraldHost(context.Background(), &store.CorraldHost{
+			HostID:           hostID,
+			State:            gw.StateIncompatible,
+			BoundFingerprint: fp,
+			BoundUsername:    "alice",
+			BoundGateway:     "gw-incompat.local",
+			Version:          "9.9.9",
+			Release:          999999,
+		}); err != nil {
+			t.Fatalf("UpsertCorraldHost incompatible: %v", err)
+		}
+		h.srv.corrald = gw.NewManager(gw.ManagerConfig{
+			Store:         h.store,
+			Dist:          distV1,
+			GatewayID:     "gw-incompat.local",
+			AdminDisabled: true,
+			SSH:           &webSSHProvider{s: h.srv},
+		})
+
+		sshCl := dialTestSSH(t, sshSrv)
+		defer sshCl.Close()
+		h.srv.corrald.OnHostConnected(context.Background(), adminID, hostID, "admin", fp, "alice", sshCl)
+
+		chAfter, err := h.srv.store.CorraldHostByID(context.Background(), hostID)
+		if err != nil || chAfter.State != gw.StateOff {
+			t.Fatalf("Item #8 regression: expected StateIncompatible host cleaned up to off on disabled connect, got (%+v, %v)", chAfter, err)
+		}
+		if _, statErr := os.Stat(bin); !os.IsNotExist(statErr) {
+			t.Fatalf("Item #8 regression: expected incompatible host binary removed, stat err=%v", statErr)
+		}
+	})
+
+	t.Run("item9_real_attach_publish_synchronized_with_close", func(t *testing.T) {
+		h := newHarness(t, func(c *config.Config) {
+			c.CorraldDir = v1Dir
+			c.GatewayID = "gw-close9.local"
+		})
+		admin := h.admin()
+		adminID := userIDOf(t, admin)
+		sshSrv, _ := startCorraldSSH(t)
+		hostID, _ := createAndPinHost(t, admin, sshSrv, "close9-box")
+
+		startCorraldInstall(t, admin, hostID)
+		waitCorraldState(t, admin, hostID, gw.StateRunning)
+
+		// Pause host so Resume acquires an owned SSH connection and enters
+		// onHostConnectedOwned -> attachAndHello with a non-nil release func.
+		mustStatus(t, admin.do("POST", fmt.Sprintf("/api/hosts/%d/corrald/pause", hostID), nil), http.StatusOK, "pause")
+		waitCorraldState(t, admin, hostID, gw.StatePaused)
+
+		hookHit := make(chan struct{}, 1)
+		closeGo := make(chan struct{})
+		var once atomic.Bool
+		var acquireCalls atomic.Int32
+		var releaseCalls atomic.Int32
+		countingSSH := &countingSSHProvider{
+			base: &webSSHProvider{s: h.srv},
+			onAcquire: func() {
+				acquireCalls.Add(1)
+			},
+			onRelease: func() {
+				releaseCalls.Add(1)
+			},
+		}
+
+		h.srv.corrald.Close()
+		mgr := gw.NewManager(gw.ManagerConfig{
+			Store:     h.store,
+			Dist:      distV1,
+			GatewayID: "gw-close9.local",
+			SSH:       countingSSH,
+			AfterAttachConnsInsert: func(hid int64) {
+				if once.CompareAndSwap(false, true) {
+					hookHit <- struct{}{}
+					<-closeGo
+				}
+			},
+		})
+		h.srv.corrald = mgr
+
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			_ = mgr.Resume(context.Background(), adminID, hostID, "admin")
+		}()
+		go func() {
+			defer wg.Done()
+			select {
+			case <-hookHit:
+				close(closeGo)
+				mgr.Close()
+			case <-time.After(8 * time.Second):
+				t.Error("timed out waiting for AfterAttachConnsInsert hook")
+			}
+		}()
+		wg.Wait()
+
+		if acq, rel := acquireCalls.Load(), releaseCalls.Load(); acq == 0 || acq != rel {
+			t.Fatalf("Item #9 regression: SSH acquire/release mismatch during attach/Close race: acquired=%d released=%d", acq, rel)
+		}
+	})
+
+	t.Run("item1_cleanup_user_hosts_uses_sole_gateway_uninstall", func(t *testing.T) {
+		h := newHarness(t, func(c *config.Config) {
+			c.CorraldDir = v1Dir
+			c.GatewayID = "gw-cu1.local"
+		})
+		admin := h.admin()
+		alice := h.member(admin, "alice")
+		aliceID := userIDOf(t, alice)
+		sshSrv, home := startCorraldSSH(t)
+		hostID, _ := createAndPinHost(t, alice, sshSrv, "cu-sole")
+
+		startCorraldInstall(t, alice, hostID)
+		waitCorraldState(t, alice, hostID, gw.StateRunning)
+
+		res := h.srv.CorraldManager().CleanupUserHosts(context.Background(), aliceID, "alice")
+		if res[hostID] != "removed" {
+			t.Fatalf("expected sole-gateway CleanupUserHosts to remove host, got %v", res)
+		}
+		bin := filepath.Join(home, ".local", "lib", "corral", "corrald")
+		if _, err := os.Stat(bin); !os.IsNotExist(err) {
+			t.Fatalf("expected binary removed after sole-gateway CleanupUserHosts, stat err=%v", err)
+		}
+	})
+}
+
+type countingSSHProvider struct {
+	base      gw.SSHProvider
+	onAcquire func()
+	onRelease func()
+}
+
+func (p *countingSSHProvider) AcquireSSH(ctx context.Context, ownerID, hostID int64) (*ssh.Client, func(), string, string, error) {
+	cl, rel, fp, u, err := p.base.AcquireSSH(ctx, ownerID, hostID)
+	if err != nil {
+		return nil, nil, "", "", err
+	}
+	if p.onAcquire != nil {
+		p.onAcquire()
+	}
+	var once sync.Once
+	wrappedRel := func() {
+		once.Do(func() {
+			if rel != nil {
+				rel()
+			}
+			if p.onRelease != nil {
+				p.onRelease()
+			}
+		})
+	}
+	return cl, wrappedRel, fp, u, nil
+}
+
+func (p *countingSSHProvider) HostBinding(ctx context.Context, ownerID, hostID int64) (string, string, error) {
+	return p.base.HostBinding(ctx, ownerID, hostID)
+}
+
+func (p *countingSSHProvider) UserLabel(ctx context.Context, userID int64) string {
+	return p.base.UserLabel(ctx, userID)
 }

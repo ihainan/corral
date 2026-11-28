@@ -321,9 +321,9 @@ func (s *Store) MarkCorraldHostsRemovePending(ctx context.Context, hostIDs []int
 	return tx.Commit()
 }
 
-// MarkCorraldHostsStopped transitions active or pending-removal hosts for a
-// disconnected account to stopped (preserving consent and files when another
-// gateway keeps using corrald or exclusivity cannot be confirmed).
+// MarkCorraldHostsStopped transitions active hosts for a disconnected account
+// to stopped without downgrading hosts that are already in remove_pending or
+// removing (transient check/cleanup failures must keep remove_pending for retry).
 func (s *Store) MarkCorraldHostsStopped(ctx context.Context, hostIDs []int64, fingerprint, username string) error {
 	now := s.unix()
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -339,7 +339,7 @@ func (s *Store) MarkCorraldHostsStopped(ctx context.Context, hostIDs []int64, fi
 		if _, err := tx.ExecContext(ctx, `
 			UPDATE corrald_hosts
 			SET state = 'stopped', active_op_id = '', updated_at = ?
-			WHERE host_id = ? AND state IN ('running', 'lost', 'updating', 'remove_pending', 'removing')`, now, id); err != nil {
+			WHERE host_id = ? AND state IN ('running', 'lost', 'updating', 'incompatible')`, now, id); err != nil {
 			return err
 		}
 	}
@@ -347,7 +347,40 @@ func (s *Store) MarkCorraldHostsStopped(ctx context.Context, hostIDs []int64, fi
 		if _, err := tx.ExecContext(ctx, `
 			UPDATE corrald_hosts
 			SET state = 'stopped', active_op_id = '', updated_at = ?
-			WHERE bound_fingerprint = ? AND bound_username = ? AND state IN ('running', 'lost', 'updating', 'remove_pending', 'removing')`, now, fingerprint, username); err != nil {
+			WHERE bound_fingerprint = ? AND bound_username = ? AND state IN ('running', 'lost', 'updating', 'incompatible')`, now, fingerprint, username); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+// MarkCorraldHostsPreservedOtherGateway transitions active OR remove_pending /
+// removing hosts to stopped ONLY when another gateway is confirmed to be using
+// corrald (or an older daemon cannot support safe conditional shutdown/uninstall).
+func (s *Store) MarkCorraldHostsPreservedOtherGateway(ctx context.Context, hostIDs []int64, fingerprint, username string) error {
+	now := s.unix()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	for _, id := range hostIDs {
+		if id <= 0 {
+			continue
+		}
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE corrald_hosts
+			SET state = 'stopped', active_op_id = '', updated_at = ?
+			WHERE host_id = ? AND state IN ('running', 'lost', 'updating', 'incompatible', 'remove_pending', 'removing')`, now, id); err != nil {
+			return err
+		}
+	}
+	if fingerprint != "" && username != "" {
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE corrald_hosts
+			SET state = 'stopped', active_op_id = '', updated_at = ?
+			WHERE bound_fingerprint = ? AND bound_username = ? AND state IN ('running', 'lost', 'updating', 'incompatible', 'remove_pending', 'removing')`, now, fingerprint, username); err != nil {
 			return err
 		}
 	}

@@ -432,6 +432,42 @@ var uninstallSystemRunBase = "/run/user"
 // order as senders (/run/user/<uid> then run/) and returns error=busy if any
 // send lock is held.
 func UninstallCommand(libDir, stateDir, sockPath, opID string) string {
+	return uninstallCommandWithOptions(libDir, stateDir, sockPath, opID, "")
+}
+
+// UninstallCommandSoleGateway runs host-side uninstall ONLY when soleGateway is
+// confirmed as the sole gateway under .corrald-shared.lock -> op.lock ->
+// corrald.lock. If the host binary is missing or is an older version that does
+// not support --only-if-sole-gateway, it fails closed without deleting files.
+func UninstallCommandSoleGateway(libDir, stateDir, sockPath, opID, soleGateway string) string {
+	return uninstallCommandWithOptions(libDir, stateDir, sockPath, opID, soleGateway)
+}
+
+func uninstallCommandWithOptions(libDir, stateDir, sockPath, opID, soleGateway string) string {
+	if soleGateway != "" {
+		return shellScript(`BIN="$L/corrald"
+if [ ! -x "$BIN" ]; then
+  for cand in "$L"/corrald-*/corrald; do
+    if [ -x "$cand" ]; then BIN="$cand"; break; fi
+  done
+fi
+if [ -x "$BIN" ]; then
+  if [ -n "$OP" ]; then
+    "$BIN" uninstall --op "$OP" --only-if-sole-gateway "$GW"
+  else
+    "$BIN" uninstall --only-if-sole-gateway "$GW"
+  fi
+  exit $?
+fi
+if [ ! -e "$ST" ] && [ ! -e "$L" ]; then
+  echo "result=removed"
+  exit 0
+fi
+echo "error=cannot_verify_exclusivity"
+echo "detail=corrald binary missing; cannot safely verify sole-gateway uninstall"
+exit 1
+`, "L", libDir, "ST", stateDir, "OP", opID, "GW", soleGateway)
+	}
 	return shellScript(`BIN="$L/corrald"
 if [ ! -x "$BIN" ]; then
   for cand in "$L"/corrald-*/corrald; do

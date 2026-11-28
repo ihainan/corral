@@ -12,7 +12,6 @@ import (
 	"golang.org/x/crypto/ssh"
 
 	"github.com/ihainan/corral/internal/corrald/proto"
-	"github.com/ihainan/corral/internal/sshx"
 	"github.com/ihainan/corral/internal/store"
 )
 
@@ -119,55 +118,49 @@ func clientsHaveOtherGateway(clients []proto.ClientInfo, gatewayID string) bool 
 
 // SetAdminDisabled updates the administrator policy at runtime and returns
 // immediately; per-host shutdown/cleanup runs asynchronously with bounded
-// concurrency (adminDisableConcurrency = 4).
-//
-// When disabled becomes true, it takes effect immediately:
-//   - All capability routing (ClientForCap, watch) immediately falls back to SSH.
-//   - Any in-progress install/update operations are cancelled and active
-//     connections are detached immediately.
-//   - For each previously connected host, a background worker verifies
-//     exclusivity (live Health + Hello):
-//   - If confirmed sole gateway, it stops corrald via daemon.shutdown and
-//     immediately borrows the existing SSH connection to uninstall files
-//     (transitioning directly to off). Only if immediate cleanup fails does the
-//     host remain in remove_pending for retry on next connection or next host use.
-//   - If another gateway is connected/registered OR live checks fail, only this
-//     gateway disconnects — the daemon keeps running and files are preserved
-//     (host marked stopped).
-//
-// When disabled becomes false, previously cleaned hosts remain off (never
-// auto-reinstalled); any hosts still in remove_pending are reconciled in the
-// background (reset to off if files are already gone or exclusive cleanup
-// finishes, or marked stopped if another gateway is using them).
+// concurrency (adminDisableConcurrency = 4). Same-value updates are idempotent
+// so repeated "disable" requests never invalidate in-flight cleanup workers.
 func (m *Manager) SetAdminDisabled(ctx context.Context, disabled bool) {
 	if m == nil {
 		return
 	}
-	gen := m.policyGen.Add(1)
 	if !disabled {
 		m.policyMu.Lock()
+		if !m.adminDisabled.Load() {
+			m.policyMu.Unlock()
+			return
+		}
+		gen := m.policyGen.Add(1)
 		m.adminDisabled.Store(false)
+		m.mu.Lock()
+		closed := m.closed
+		launch := !closed && m.store != nil
+		if launch {
+			m.wg.Add(1)
+		}
+		m.mu.Unlock()
 		m.policyMu.Unlock()
 
-		m.mu.Lock()
-		if !m.closed && m.store != nil {
-			m.wg.Add(1)
-			m.mu.Unlock()
+		if launch {
 			go func() {
 				defer m.wg.Done()
 				m.reconcileRemovePendingOnAllow(gen)
 			}()
-		} else {
-			m.mu.Unlock()
 		}
 		return
 	}
 
-	// Mark disabled first so new starts/attaches bail immediately, then take
-	// policyMu.Lock to wait for any in-flight publish+DB-running section to
-	// finish before snapshotting and draining active connections.
-	m.adminDisabled.Store(true)
+	// Acquire policyMu.Lock first so idempotency check, policyGen increment,
+	// adminDisabled flip, and draining m.conns are atomic with respect to
+	// in-flight attach/reconnect/rollback writes and duplicate SetAdminDisabled.
 	m.policyMu.Lock()
+	if m.adminDisabled.Load() {
+		m.policyMu.Unlock()
+		return
+	}
+	gen := m.policyGen.Add(1)
+	m.adminDisabled.Store(true)
+
 	m.mu.Lock()
 	closed := m.closed
 	for _, op := range m.opsByHost {
@@ -270,7 +263,7 @@ func (m *Manager) enforceAdminDisableOnConn(ctx context.Context, sc *sharedConn,
 		return
 	}
 
-	// Close the daemon RPC stream before uninstalling so the daemon can exit cleanly.
+	// Close the daemon RPC stream before uninstalling so the daemon exits cleanly.
 	if client != nil {
 		_ = client.Close()
 	}
@@ -279,81 +272,146 @@ func (m *Manager) enforceAdminDisableOnConn(ctx context.Context, sc *sharedConn,
 	}
 
 	// Immediately borrow the existing SSH connection (sc.sshClient or pooled SSH
-	// from m.ssh) and uninstall files so the host transitions straight to off
-	// instead of remaining stuck in remove_pending on pooled connections.
+	// from m.ssh) and run host-side atomic sole-gateway uninstall under lock.
 	m.tryImmediateAdminUninstall(ctx, key, refs, hostIDs, sshClient, gen)
 }
 
-// enforceAdminDisableOnClient applies the shared-daemon safety rule to a live
-// client: it ONLY calls daemon.shutdown and marks remove_pending when a fresh
-// Health RPC succeeds with connected_gateways <= 1 and no other gateway is
-// registered (verified against both hello and live ClientRegistry). If Health
-// fails or cannot confirm exclusivity, it NEVER falls back to cached health —
-// it leaves the daemon running and marks hosts stopped.
-// Returns true iff exclusivity was confirmed and daemon.shutdown was sent.
+// enforceAdminDisableOnClient atomically requests conditional shutdown on the
+// daemon (ShutdownParams.OnlyIfSoleGateway) ONLY after confirming the daemon
+// advertises proto.FeatureConditionalShutdown in HelloResult.Features.
+//
+//   - Old daemons without FeatureConditionalShutdown: never sent unconditional
+//     Shutdown; marked stopped (files preserved).
+//   - Live Health failure or conditional Shutdown RPC error: never falls back
+//     to cached health or unconditional shutdown; leaves daemon running.
+//   - Confirmed other gateway (Health.ConnectedGateways > 1 or ShutdownResult.OtherGateways):
+//     marked stopped (files preserved).
+//   - Confirmed sole gateway (atomic ShutdownConditional OK): daemon enters
+//     shuttingDown (rejecting new Hello) and host is marked remove_pending.
 func (m *Manager) enforceAdminDisableOnClient(ctx context.Context, client *Client, hello *proto.HelloResult, refs []*hostRef, hostIDs []int64, key accountKey) bool {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	otherGateways := true
-	if client != nil && !client.Closed() && m.gatewayID != "" {
-		hctx, cancel := context.WithTimeout(ctx, 3*time.Second)
-		h, err := client.Health(hctx)
-		cancel()
-		if err == nil && h != nil {
-			otherGateways = h.ConnectedGateways > 1
-			if !otherGateways && hello != nil && clientsHaveOtherGateway(hello.Clients, m.gatewayID) {
-				otherGateways = true
-			}
-			// Also refresh the live registered client list via daemon.hello so
-			// another gateway that registered after our initial Hello (even if
-			// currently disconnected) is never missed.
-			if !otherGateways {
-				var ident proto.ClientIdentity
-				if len(refs) > 0 {
-					ident = proto.ClientIdentity{
-						CorralUser: refs[0].CorralUser,
-						HostID:     strconv.FormatInt(refs[0].HostID, 10),
-					}
-				}
-				helloCtx, helloCancel := context.WithTimeout(ctx, 3*time.Second)
-				freshHello, herr := client.Hello(helloCtx, proto.HelloParams{
-					Gateway:        m.gatewayID,
-					GatewayVersion: m.gatewayVersion,
-					ProtoMin:       m.protoMin,
-					ProtoMax:       m.protoMax,
-					Client:         ident,
-				})
-				helloCancel()
-				if herr != nil || freshHello == nil || clientsHaveOtherGateway(freshHello.Clients, m.gatewayID) {
-					otherGateways = true
-				}
-			}
+	if client == nil || client.Closed() || m.gatewayID == "" {
+		if m.store != nil {
+			_ = m.store.MarkCorraldHostsStopped(context.Background(), hostIDs, key.Fingerprint, key.Username)
 		}
+		return false
 	}
 
-	if !otherGateways {
-		if client != nil && !client.Closed() {
-			sctx, cancel := context.WithTimeout(ctx, 3*time.Second)
-			_, _ = client.Shutdown(sctx, "admin_disabled")
-			cancel()
-		}
+	// Verify live daemon health first (never fall back to cached sc.health).
+	hctx, hcancel := context.WithTimeout(ctx, 3*time.Second)
+	h, herr := client.Health(hctx)
+	hcancel()
+	if herr != nil || h == nil {
 		if m.store != nil {
-			_ = m.store.MarkCorraldHostsRemovePending(context.Background(), hostIDs, key.Fingerprint, key.Username)
-			m.hasPendingCleanup.Store(true)
+			_ = m.store.MarkCorraldHostsStopped(context.Background(), hostIDs, key.Fingerprint, key.Username)
 		}
-		return true
+		return false
 	}
+	if h.ConnectedGateways > 1 {
+		if m.store != nil {
+			_ = m.store.MarkCorraldHostsPreservedOtherGateway(context.Background(), hostIDs, key.Fingerprint, key.Username)
+			m.refreshPendingCleanupFlag()
+		}
+		return false
+	}
+
+	// Verify daemon supports conditional shutdown via HelloResult.Features.
+	// If hello was not cached yet, fetch it once without downgrading to
+	// unconditional shutdown on older daemons.
+	if hello == nil {
+		var ident proto.ClientIdentity
+		if len(refs) > 0 {
+			ident = proto.ClientIdentity{
+				CorralUser: refs[0].CorralUser,
+				HostID:     strconv.FormatInt(refs[0].HostID, 10),
+			}
+		}
+		helloCtx, helloCancel := context.WithTimeout(ctx, 3*time.Second)
+		freshHello, err := client.Hello(helloCtx, proto.HelloParams{
+			Gateway:        m.gatewayID,
+			GatewayVersion: m.gatewayVersion,
+			ProtoMin:       m.protoMin,
+			ProtoMax:       m.protoMax,
+			Client:         ident,
+		})
+		helloCancel()
+		if err != nil || freshHello == nil {
+			if m.store != nil {
+				_ = m.store.MarkCorraldHostsStopped(context.Background(), hostIDs, key.Fingerprint, key.Username)
+			}
+			return false
+		}
+		hello = freshHello
+	}
+	if !hello.HasFeature(proto.FeatureConditionalShutdown) {
+		// Older daemon cannot perform atomic sole-gateway shutdown: only
+		// disconnect, mark stopped, and preserve files.
+		if m.store != nil {
+			_ = m.store.MarkCorraldHostsPreservedOtherGateway(context.Background(), hostIDs, key.Fingerprint, key.Username)
+			m.refreshPendingCleanupFlag()
+		}
+		return false
+	}
+
+	// Atomically check exclusivity AND enter shuttingDown inside the daemon
+	// under clientGateMu.
+	sctx, scancel := context.WithTimeout(ctx, 3*time.Second)
+	sres, serr := client.ShutdownConditional(sctx, "admin_disabled", m.gatewayID)
+	scancel()
+	if serr != nil || sres == nil {
+		if m.store != nil {
+			_ = m.store.MarkCorraldHostsStopped(context.Background(), hostIDs, key.Fingerprint, key.Username)
+		}
+		return false
+	}
+	if sres.OtherGateways || !sres.OK {
+		if m.store != nil {
+			_ = m.store.MarkCorraldHostsPreservedOtherGateway(context.Background(), hostIDs, key.Fingerprint, key.Username)
+			m.refreshPendingCleanupFlag()
+		}
+		return false
+	}
+
 	if m.store != nil {
-		_ = m.store.MarkCorraldHostsStopped(context.Background(), hostIDs, key.Fingerprint, key.Username)
+		_ = m.store.MarkCorraldHostsRemovePending(context.Background(), hostIDs, key.Fingerprint, key.Username)
+		m.markPendingCleanup()
 	}
-	return false
+	return true
+}
+
+// acquireCleanupOpLock registers an exclusive per-account OpRemove operation
+// lock so background cleanup never races with install, update, remove, or
+// another cleanup on any host record sharing the same (fingerprint, sshUser).
+func (m *Manager) acquireCleanupOpLock(hostID int64, acct accountKey) (*runningOp, bool) {
+	opID := newHexID()
+	rop := &runningOp{
+		opID:   opID,
+		hostID: hostID,
+		acct:   acct,
+		kind:   OpRemove,
+		step:   "remove",
+		done:   make(chan struct{}),
+	}
+	if err := m.registerRunningOp(rop); err != nil {
+		return nil, false
+	}
+	return rop, true
+}
+
+func (m *Manager) releaseCleanupOpLock(rop *runningOp) {
+	if rop == nil {
+		return
+	}
+	close(rop.done)
+	m.clearRunningOp(rop)
 }
 
 // tryImmediateAdminUninstall borrows an existing SSH connection (preferring
 // scSSH, falling back to m.acquireMatchingSSH which reuses open terminal pool
-// sessions first) to remove corrald files immediately after Shutdown.
-// On failure, hosts stay in remove_pending for retry on next connection or use.
+// sessions first) and runs host-side atomic sole-gateway uninstall under the
+// per-account operation lock.
 func (m *Manager) tryImmediateAdminUninstall(
 	ctx context.Context,
 	key accountKey,
@@ -365,6 +423,16 @@ func (m *Manager) tryImmediateAdminUninstall(
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	primaryHostID := int64(0)
+	if len(hostIDs) > 0 {
+		primaryHostID = hostIDs[0]
+	}
+	rop, ok := m.acquireCleanupOpLock(primaryHostID, key)
+	if !ok {
+		return
+	}
+	defer m.releaseCleanupOpLock(rop)
+
 	uctx, cancel := context.WithTimeout(ctx, 25*time.Second)
 	defer cancel()
 
@@ -395,34 +463,48 @@ func (m *Manager) tryImmediateAdminUninstall(
 		}
 	}
 	if activeSSH == nil || probe == nil {
-		return
-	}
-
-	files := ReadHostStateFiles(uctx, activeSSH, probe, "")
-	hasOnHost := probe.HasSymlink || probe.HasInstall || probe.HasTombstone ||
-		len(probe.Versions) > 0 || len(probe.Stages) > 0 ||
-		files.Install != nil || files.Meta != nil
-	if !hasOnHost {
-		m.resetHostsOff(key.Fingerprint, key.Username, hostIDs)
-		return
-	}
-
-	// Re-verify clients.json on disk before removing files so another gateway
-	// that registered in the narrow window after Shutdown is never disrupted.
-	if !files.ClientsLoaded || clientsHaveOtherGateway(files.Clients, m.gatewayID) {
-		if m.store != nil {
-			_ = m.store.MarkCorraldHostsStopped(context.Background(), hostIDs, key.Fingerprint, key.Username)
-		}
-		m.refreshPendingCleanupFlag()
+		// Transient SSH/probe failure: keep remove_pending for retry.
 		return
 	}
 	if !m.isAdminDisableGen(gen) {
 		return
 	}
 
-	out := RunUninstallWithRetry(uctx, activeSSH, probe, newHexID(), m.busyRetry, nil)
-	if out.Result == "removed" {
-		m.resetHostsOff(key.Fingerprint, key.Username, hostIDs)
+	// Re-check DB state/binding right before running host-side uninstall.
+	if m.store != nil && primaryHostID > 0 {
+		fresh, err := m.store.CorraldHostByID(uctx, primaryHostID)
+		if err != nil || fresh.State == StateOff || !CheckBinding(toSnapshot(fresh), key.Fingerprint, key.Username, m.gatewayID) {
+			return
+		}
+	}
+
+	out := RunUninstallSoleGatewayWithRetry(uctx, activeSSH, probe, rop.opID, m.gatewayID, m.busyRetry, nil)
+	m.applySoleGatewayUninstallOutcome(key.Fingerprint, key.Username, hostIDs, true, out)
+}
+
+// applySoleGatewayUninstallOutcome updates DB state after host-side atomic
+// sole-gateway uninstall, strictly distinguishing confirmed other_gateways /
+// unsupported (marked stopped, files preserved) from transient failures
+// (which preserve remove_pending for retry).
+func (m *Manager) applySoleGatewayUninstallOutcome(fp, sshUser string, hostIDs []int64, wasPending bool, out UninstallOutcome) {
+	if m.store == nil {
+		return
+	}
+	switch out.Result {
+	case "removed":
+		m.resetHostsOff(fp, sshUser, hostIDs)
+	case "other_gateways", "unsupported":
+		_ = m.store.MarkCorraldHostsPreservedOtherGateway(context.Background(), hostIDs, fp, sshUser)
+		m.refreshPendingCleanupFlag()
+	default:
+		// Transient/incomplete failure (pending, partial, stop_failed, busy):
+		// keep remove_pending so subsequent connections or host uses retry.
+		if wasPending {
+			m.markPendingCleanup()
+		} else {
+			_ = m.store.MarkCorraldHostsRemovePending(context.Background(), hostIDs, fp, sshUser)
+			m.markPendingCleanup()
+		}
 	}
 }
 
@@ -440,52 +522,100 @@ func (m *Manager) resetHostsOff(fp, sshUser string, hostIDs []int64) {
 	m.refreshPendingCleanupFlag()
 }
 
+// markPendingCleanup atomically advances the pending-flag generation and marks
+// hasPendingCleanup = true so a concurrent stale refresh cannot clear it.
+func (m *Manager) markPendingCleanup() {
+	if m == nil {
+		return
+	}
+	m.pendingFlagMu.Lock()
+	m.pendingFlagGen++
+	m.hasPendingCleanup.Store(true)
+	m.pendingFlagMu.Unlock()
+}
+
+// refreshPendingCleanupFlag queries SQLite and publishes the result ONLY if no
+// newer markPendingCleanup() occurred while the query was in flight.
 func (m *Manager) refreshPendingCleanupFlag() {
 	if m == nil || m.store == nil {
 		return
 	}
+	m.pendingFlagMu.Lock()
+	gen := m.pendingFlagGen
+	m.pendingFlagMu.Unlock()
+
 	has, err := m.store.HasCorraldHostsInStates(context.Background(), StateRemovePending, StateRemoving)
-	if err == nil {
+	if err != nil {
+		return
+	}
+	m.pendingFlagMu.Lock()
+	if m.pendingFlagGen == gen {
 		m.hasPendingCleanup.Store(has)
 	}
+	m.pendingFlagMu.Unlock()
 }
 
 // MaybeRetryPendingCleanup triggers a rate-limited background cleanup retry for
-// hostID when any host is still in remove_pending/removing, reusing sshClient
-// (or borrowing an open pooled SSH connection) so cleanup does not wait for a
-// brand-new SSH connection.
+// hostID's account when any host is still in remove_pending/removing, reusing
+// sshClient (or borrowing an open pooled SSH connection). Deduplication is
+// scoped by (fingerprint, sshUser) account and acquires the per-account op lock.
 func (m *Manager) MaybeRetryPendingCleanup(userID, hostID int64, corralUser string, sshClient *ssh.Client) {
 	if m == nil || m.store == nil || hostID <= 0 || !m.hasPendingCleanup.Load() {
 		return
 	}
+
+	// Resolve account key for account-level dedup (fallback to hostID if unknown).
+	var acct accountKey
+	if m.ssh != nil && userID > 0 {
+		if u, fp, err := m.ssh.HostBinding(context.Background(), userID, hostID); err == nil && fp != "" && u != "" {
+			acct = accountKey{Fingerprint: fp, Username: u}
+		}
+	}
+
 	now := time.Now()
 	m.pendingRetryMu.Lock()
-	if m.pendingRetryActive[hostID] || (!m.pendingRetryAt[hostID].IsZero() && now.Sub(m.pendingRetryAt[hostID]) < pendingCleanupRetryCooldown) {
-		m.pendingRetryMu.Unlock()
-		return
+	if acct.valid() {
+		if m.pendingRetryAcctActive[acct] || (!m.pendingRetryAcctAt[acct].IsZero() && now.Sub(m.pendingRetryAcctAt[acct]) < pendingCleanupRetryCooldown) {
+			m.pendingRetryMu.Unlock()
+			return
+		}
+		m.pendingRetryAcctActive[acct] = true
+		m.pendingRetryAcctAt[acct] = now
+	} else {
+		if m.pendingRetryActive[hostID] || (!m.pendingRetryAt[hostID].IsZero() && now.Sub(m.pendingRetryAt[hostID]) < pendingCleanupRetryCooldown) {
+			m.pendingRetryMu.Unlock()
+			return
+		}
+		m.pendingRetryActive[hostID] = true
+		m.pendingRetryAt[hostID] = now
 	}
-	m.pendingRetryActive[hostID] = true
-	m.pendingRetryAt[hostID] = now
 	m.pendingRetryMu.Unlock()
 
+	clearDedup := func() {
+		m.pendingRetryMu.Lock()
+		if acct.valid() {
+			delete(m.pendingRetryAcctActive, acct)
+		} else {
+			delete(m.pendingRetryActive, hostID)
+		}
+		m.pendingRetryMu.Unlock()
+	}
+
+	m.policyMu.RLock()
 	m.mu.Lock()
 	if m.closed {
 		m.mu.Unlock()
-		m.pendingRetryMu.Lock()
-		delete(m.pendingRetryActive, hostID)
-		m.pendingRetryMu.Unlock()
+		m.policyMu.RUnlock()
+		clearDedup()
 		return
 	}
 	m.wg.Add(1)
 	m.mu.Unlock()
+	m.policyMu.RUnlock()
 
 	go func() {
 		defer m.wg.Done()
-		defer func() {
-			m.pendingRetryMu.Lock()
-			delete(m.pendingRetryActive, hostID)
-			m.pendingRetryMu.Unlock()
-		}()
+		defer clearDedup()
 
 		baseCtx := m.bgCtx
 		if baseCtx == nil {
@@ -516,9 +646,15 @@ func (m *Manager) MaybeRetryPendingCleanup(userID, hostID int64, corralUser stri
 		if !CheckBinding(toSnapshot(ch), fp, sshUser, m.gatewayID) {
 			return
 		}
-		acct := accountKey{Fingerprint: fp, Username: sshUser}
-		if m.hasRunningOp(hostID, acct) {
+		key := accountKey{Fingerprint: fp, Username: sshUser}
+		rop, ok := m.acquireCleanupOpLock(hostID, key)
+		if !ok {
 			return
+		}
+		defer m.releaseCleanupOpLock(rop)
+
+		if m.cfg.BeforePendingCleanupSSH != nil {
+			m.cfg.BeforePendingCleanupSSH(hostID)
 		}
 
 		activeSSH := sshClient
@@ -546,15 +682,15 @@ func (m *Manager) MaybeRetryPendingCleanup(userID, hostID int64, corralUser stri
 		if corralUser == "" && m.ssh != nil && userID > 0 {
 			corralUser = m.ssh.UserLabel(ctx, userID)
 		}
-		m.handleAdminDisabledOnConnect(ctx, userID, hostID, corralUser, fp, sshUser, activeSSH, ch)
+		m.runSafeCleanupLocked(ctx, userID, hostID, corralUser, fp, sshUser, activeSSH, rop.opID, true, 0)
 	}()
 }
 
 // reconcileRemovePendingOnAllow runs in the background (concurrency cap 4)
-// after the administrator switches the policy back to "allowed": any host still
-// in remove_pending/removing is checked over SSH — if files are already removed
-// (or exclusive cleanup finishes), state resets to off; if another gateway is
-// using corrald, state becomes stopped (files preserved). Never auto-reinstalls.
+// after the administrator switches the policy back to "allowed": each
+// remove_pending/removing host acquires the per-account op lock and re-reads
+// DB state before touching SSH so a newly re-enabled installation is never
+// disrupted. Never auto-reinstalls.
 func (m *Manager) reconcileRemovePendingOnAllow(gen uint64) {
 	if m == nil || m.store == nil || m.ssh == nil {
 		return
@@ -569,9 +705,24 @@ func (m *Manager) reconcileRemovePendingOnAllow(gen uint64) {
 		return
 	}
 
+	// Deduplicate by account so multiple host records for the same account do
+	// not contend needlessly.
+	seenAcct := make(map[accountKey]struct{})
+	var unique []store.CorraldHostWithOwner
+	for _, it := range items {
+		k := accountKey{Fingerprint: it.Host.BoundFingerprint, Username: it.Host.BoundUsername}
+		if k.valid() {
+			if _, dup := seenAcct[k]; dup {
+				continue
+			}
+			seenAcct[k] = struct{}{}
+		}
+		unique = append(unique, it)
+	}
+
 	sem := make(chan struct{}, adminDisableConcurrency)
 	var wg sync.WaitGroup
-	for _, item := range items {
+	for _, item := range unique {
 		if m.AdminDisabled() || m.policyGen.Load() != gen {
 			break
 		}
@@ -593,13 +744,26 @@ func (m *Manager) reconcileRemovePendingOnAllow(gen uint64) {
 			if sshUser == "" {
 				sshUser = it.Host.BoundUsername
 			}
-			if !CheckBinding(toSnapshot(it.Host), fp, sshUser, m.gatewayID) {
+			key := accountKey{Fingerprint: fp, Username: sshUser}
+			rop, ok := m.acquireCleanupOpLock(it.HostID, key)
+			if !ok {
 				return
 			}
-			acct := accountKey{Fingerprint: fp, Username: sshUser}
-			if m.hasRunningOp(it.HostID, acct) {
+			defer m.releaseCleanupOpLock(rop)
+
+			if m.cfg.BeforePendingCleanupSSH != nil {
+				m.cfg.BeforePendingCleanupSSH(it.HostID)
+			}
+
+			// Re-verify fresh DB state BEFORE dialing SSH.
+			fresh, ferr := m.store.CorraldHostByID(ctx, it.HostID)
+			if ferr != nil || (fresh.State != StateRemovePending && fresh.State != StateRemoving) {
 				return
 			}
+			if !CheckBinding(toSnapshot(fresh), fp, sshUser, m.gatewayID) {
+				return
+			}
+
 			c, rel, gotFP, gotUser, aerr := m.ssh.AcquireSSH(ctx, it.OwnerID, it.HostID)
 			if aerr != nil || c == nil {
 				return
@@ -612,23 +776,20 @@ func (m *Manager) reconcileRemovePendingOnAllow(gen uint64) {
 			if (gotFP != "" && fp != "" && gotFP != fp) || (gotUser != "" && sshUser != "" && gotUser != sshUser) {
 				return
 			}
-			m.handleAdminDisabledOnConnect(ctx, it.OwnerID, it.HostID, it.CorralUser, fp, sshUser, c, it.Host)
+			if m.AdminDisabled() || m.policyGen.Load() != gen {
+				return
+			}
+			m.runSafeCleanupLocked(ctx, it.OwnerID, it.HostID, it.CorralUser, fp, sshUser, c, rop.opID, true, gen)
 		}(item)
 	}
 	wg.Wait()
 	m.refreshPendingCleanupFlag()
 }
 
-// handleAdminDisabledOnConnect enforces the administrator disable policy when
-// an SSH connection arrives for a host while corrald is disabled. It handles
-// both previously marked remove_pending/removing hosts and hosts that were
-// disconnected (running/stopped/lost/etc.) when the policy was switched.
-//
-// Safety invariant: before stopping corrald or uninstalling files, it re-checks
-// exclusivity over this SSH connection (live daemon Health+Hello if running,
-// otherwise clients.json after confirming the daemon is stopped). Whenever
-// another gateway is present or exclusivity cannot be confirmed, it preserves
-// the daemon and files and marks the host stopped.
+// handleAdminDisabledOnConnect enforces safe host-side sole-gateway cleanup
+// when an SSH connection arrives while corrald is disabled (or for a host
+// remaining in remove_pending/removing). It acquires the per-account op lock
+// and delegates to runSafeCleanupLocked.
 func (m *Manager) handleAdminDisabledOnConnect(
 	ctx context.Context,
 	userID, hostID int64,
@@ -642,8 +803,63 @@ func (m *Manager) handleAdminDisabledOnConnect(
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	key := accountKey{Fingerprint: fp, Username: sshUser}
+	rop, ok := m.acquireCleanupOpLock(hostID, key)
+	if !ok {
+		return
+	}
+	defer m.releaseCleanupOpLock(rop)
 
-	// Ensure this gateway has no lingering shared connection for this host.
+	requirePending := !m.AdminDisabled()
+	m.runSafeCleanupLocked(ctx, userID, hostID, corralUser, fp, sshUser, sshClient, rop.opID, requirePending, 0)
+}
+
+// runSafeCleanupLocked executes the host-side atomic sole-gateway uninstall
+// flow while the caller holds the per-account runningOp lock.
+//
+// Before any destructive action (including detaching a shared connection), it
+// re-reads the host row from SQLite and verifies:
+//   - binding still matches (fp, sshUser, m.gatewayID),
+//   - if requirePending is true, DB state is STILL remove_pending/removing
+//     (so a concurrent explicit reinstall is never touched!),
+//   - if allowGen > 0, policyGen has not moved and admin has not re-disabled.
+func (m *Manager) runSafeCleanupLocked(
+	ctx context.Context,
+	userID, hostID int64,
+	corralUser, fp, sshUser string,
+	sshClient *ssh.Client,
+	opID string,
+	requirePending bool,
+	allowGen uint64,
+) {
+	if m == nil || sshClient == nil || m.store == nil {
+		return
+	}
+	fresh, err := m.store.CorraldHostByID(ctx, hostID)
+	if err != nil {
+		return
+	}
+	if fresh.State == StateOff {
+		m.refreshPendingCleanupFlag()
+		return
+	}
+	if requirePending && fresh.State != StateRemovePending && fresh.State != StateRemoving {
+		return
+	}
+	if !requirePending && !m.AdminDisabled() {
+		return
+	}
+	if allowGen > 0 && (m.AdminDisabled() || m.policyGen.Load() != allowGen) {
+		return
+	}
+	if !CheckBinding(toSnapshot(fresh), fp, sshUser, m.gatewayID) {
+		return
+	}
+
+	wasPending := fresh.State == StateRemovePending || fresh.State == StateRemoving
+
+	// Detach any lingering gateway connection for this host before uninstalling
+	// (only AFTER confirming state is still eligible for cleanup!).
 	if sc := m.sharedConnForHost(hostID, fp, sshUser); sc != nil {
 		m.mu.Lock()
 		if m.conns[sc.key] == sc {
@@ -656,12 +872,14 @@ func (m *Manager) handleAdminDisabledOnConnect(
 		m.detachHost(hostID)
 	}
 
-	probe, err := m.probeHost(ctx, sshClient)
-	if err != nil || probe == nil {
-		// Cannot reach/probe host to confirm exclusivity -> preserve files.
-		if m.store != nil {
-			_ = m.store.MarkCorraldHostsStopped(context.Background(), []int64{hostID}, fp, sshUser)
+	probe, perr := m.probeHost(ctx, sshClient)
+	if perr != nil || probe == nil {
+		// Transient probe failure: keep remove_pending if already pending;
+		// otherwise mark remove_pending so future connections/uses retry safely.
+		if !wasPending {
+			_ = m.store.MarkCorraldHostsRemovePending(context.Background(), []int64{hostID}, fp, sshUser)
 		}
+		m.markPendingCleanup()
 		return
 	}
 
@@ -670,141 +888,15 @@ func (m *Manager) handleAdminDisabledOnConnect(
 		len(probe.Versions) > 0 || len(probe.Stages) > 0 ||
 		files.Install != nil || files.Meta != nil
 	if !hasOnHost {
-		if m.store != nil {
-			_ = m.store.CorraldResetByBinding(context.Background(), fp, sshUser)
-			if ch.State != StateOff {
-				ch.State = StateOff
-				ch.Version = ""
-				ch.Release = 0
-				ch.Files = []string{}
-				ch.ActiveOpID = ""
-				ch.LastError = ""
-				activeOp, _ := m.store.ActiveCorraldOp(ctx, hostID)
-				if activeOp != nil {
-					activeOp.State = OpDone
-					activeOp.Detail = encodeOpDetail(opDetailPayload{Result: "removed"})
-				}
-				_, _ = m.store.UpdateCorraldHostForReconcile(ctx, ch, activeOp, ch.ActiveOpID)
-			}
-		}
+		m.resetHostsOff(fp, sshUser, []int64{hostID})
 		return
 	}
 
-	exclusive := m.confirmExclusiveAndStopOnHost(ctx, hostID, corralUser, sshClient, probe, files)
-	if !exclusive {
-		// Another gateway is registered/connected or exclusivity could not be
-		// confirmed: preserve daemon & files, mark stopped, and disconnect.
-		if m.store != nil {
-			_ = m.store.MarkCorraldHostsStopped(context.Background(), []int64{hostID}, fp, sshUser)
-			m.refreshPendingCleanupFlag()
-		}
-		return
-	}
-
-	// Confirmed this gateway is the sole user and daemon is stopped: mark
-	// remove_pending and run the existing reconcileHost uninstall flow.
-	if m.store != nil {
-		_ = m.store.MarkCorraldHostsRemovePending(context.Background(), []int64{hostID}, fp, sshUser)
-		m.hasPendingCleanup.Store(true)
-	}
-	ch.State = StateRemovePending
-	activeOp, _ := m.store.ActiveCorraldOp(ctx, hostID)
-	m.reconcileHost(ctx, userID, hostID, corralUser, fp, sshUser, sshClient, ch, activeOp)
-	m.refreshPendingCleanupFlag()
-}
-
-// confirmExclusiveAndStopOnHost verifies over sshClient that no gateway other
-// than m.gatewayID uses the host's corrald installation. If the daemon is
-// running and exclusive, it stops it via daemon.shutdown before returning true.
-// On any ambiguity (unreachable daemon, unreadable/corrupt clients.json, status
-// failure, empty gatewayID), it returns false.
-func (m *Manager) confirmExclusiveAndStopOnHost(
-	ctx context.Context,
-	hostID int64,
-	corralUser string,
-	sshClient *ssh.Client,
-	probe *HostProbe,
-	files HostStateFiles,
-) bool {
-	if m.gatewayID == "" || sshClient == nil || probe == nil {
-		return false
-	}
-
-	sock := probe.SocketPath
-	if files.Meta != nil && files.Meta.SocketPath != "" {
-		sock = files.Meta.SocketPath
-	}
-
-	// 1. If a socket path is known, try connecting directly to check live state.
-	if sock != "" {
-		dctx, dcancel := context.WithTimeout(ctx, 5*time.Second)
-		tmpClient, derr := Dial(dctx, sshClient, sock, nil)
-		dcancel()
-		if derr == nil {
-			defer tmpClient.Close()
-
-			hctx, hcancel := context.WithTimeout(ctx, 3*time.Second)
-			hello, herr := tmpClient.Hello(hctx, proto.HelloParams{
-				Gateway:        m.gatewayID,
-				GatewayVersion: m.gatewayVersion,
-				ProtoMin:       m.protoMin,
-				ProtoMax:       m.protoMax,
-				Client: proto.ClientIdentity{
-					CorralUser: corralUser,
-					HostID:     strconv.FormatInt(hostID, 10),
-				},
-			})
-			hcancel()
-			if herr != nil || hello == nil {
-				return false
-			}
-
-			healthCtx, healthCancel := context.WithTimeout(ctx, 3*time.Second)
-			health, healthErr := tmpClient.Health(healthCtx)
-			healthCancel()
-			if healthErr != nil || health == nil {
-				return false
-			}
-
-			if health.ConnectedGateways > 1 || clientsHaveOtherGateway(hello.Clients, m.gatewayID) {
-				return false
-			}
-
-			// Confirmed sole gateway on live daemon: stop it cleanly.
-			sctx, scancel := context.WithTimeout(ctx, 3*time.Second)
-			_, serr := tmpClient.Shutdown(sctx, "admin_disabled")
-			scancel()
-			if serr != nil {
-				return false
-			}
-			return true
-		}
-	}
-
-	// 2. Could not connect to a live daemon; confirm it is actually stopped
-	// before trusting clients.json on disk.
-	if probe.HasSymlink {
-		sctx, scancel := context.WithTimeout(ctx, 5*time.Second)
-		sres, serr := runSSH(sctx, sshClient, StatusCommand(probe.CurrentBin), 8192, sshx.ExecOptions{})
-		scancel()
-		if serr != nil && !sres.Ended {
-			return false
-		}
-		sf := ParseKeyValues(sres.Out)
-		if sf["state"] != proto.StateStopped && sf["state"] != "not_installed" {
-			return false
-		}
-	}
-
-	// 3. Daemon is not running: require a readable clients.json (or confirmed
-	// absence) with no other gateway registered.
-	if !files.ClientsLoaded {
-		return false
-	}
-	if clientsHaveOtherGateway(files.Clients, m.gatewayID) {
-		return false
-	}
-	return true
+	// Host-side atomic sole-gateway uninstall under .corrald-shared.lock ->
+	// op.lock -> corrald.lock. Refuses without modifying files if another
+	// gateway is connected/registered or if the host binary/daemon is too old.
+	out := RunUninstallSoleGatewayWithRetry(ctx, sshClient, probe, opID, m.gatewayID, m.busyRetry, nil)
+	m.applySoleGatewayUninstallOutcome(fp, sshUser, []int64{hostID}, wasPending, out)
 }
 
 // Changelog returns the filtered release notes for userID, showing the current

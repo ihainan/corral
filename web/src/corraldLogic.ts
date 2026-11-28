@@ -854,6 +854,10 @@ export interface CorraldNoticeFetcherDeps {
   markSeen: (ids: number[]) => Promise<void> | void
   onNotices: (grouped: GroupedCorraldUpdateNotices) => void
   onError?: (err: unknown) => void
+  // Optional synchronous reader for the latest rendered userId (e.g. from a
+  // React render-time ref) so responses resolving after an account switch
+  // render but before useEffect runs are still rejected immediately.
+  getCurrentUserId?: () => number | undefined
 }
 
 export interface CorraldNoticeFetcher {
@@ -891,8 +895,8 @@ export function createCorraldNoticeFetcher(deps: CorraldNoticeFetcherDeps): Corr
     },
 
     async check() {
-      const reqUser = activeUserId
-      if (!reqUser) return
+      const reqUser = deps.getCurrentUserId ? deps.getCurrentUserId() : activeUserId
+      if (!reqUser || reqUser !== activeUserId) return
       if (activeController && activeReqUser === reqUser) return
 
       abortActive()
@@ -901,9 +905,15 @@ export function createCorraldNoticeFetcher(deps: CorraldNoticeFetcherDeps): Corr
       activeController = ctl
       activeReqUser = reqUser
 
+      const isStale = () =>
+        ctl.signal.aborted ||
+        activeUserId !== reqUser ||
+        generation !== reqGen ||
+        (deps.getCurrentUserId !== undefined && deps.getCurrentUserId() !== reqUser)
+
       try {
         const raw = await deps.fetchNotices(ctl.signal)
-        if (ctl.signal.aborted || activeUserId !== reqUser || generation !== reqGen) {
+        if (isStale()) {
           return
         }
         const fresh = raw.filter((n) => !shownIds.has(n.id))
@@ -918,7 +928,7 @@ export function createCorraldNoticeFetcher(deps: CorraldNoticeFetcherDeps): Corr
         void Promise.resolve(deps.markSeen(grouped.allIds)).catch(() => {})
         deps.onNotices(grouped)
       } catch (err) {
-        if (ctl.signal.aborted || activeUserId !== reqUser || generation !== reqGen) {
+        if (isStale()) {
           return
         }
         deps.onError?.(err)

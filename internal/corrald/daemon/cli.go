@@ -1461,11 +1461,13 @@ func cmdUninstall(args []string, stdout io.Writer) int {
 	fs := flag.NewFlagSet("uninstall", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	opID := fs.String("op", "", "optional operation identifier")
+	onlyIfSoleGW := fs.String("only-if-sole-gateway", "", "only stop and uninstall if this gateway is the sole user")
 	if err := fs.Parse(args); err != nil {
 		writeErr(stdout, "invalid_args", err.Error())
 		return 2
 	}
 	_ = opID
+	soleGW := strings.TrimSpace(*onlyIfSoleGW)
 
 	layout, err := resolveDefaultLayout()
 	if err != nil {
@@ -1530,6 +1532,71 @@ func cmdUninstall(args []string, stdout io.Writer) int {
 			metaBefore, _ = ReadMetaRecord(layout.MetaJSON)
 			installRec, installErr = ReadInstallRecord(layout.InstallJSON)
 
+			// Atomic sole-gateway check under SharedLock -> OpLock BEFORE
+			// removing install.json, writing tombstone, or stopping any daemon.
+			if soleGW != "" {
+				sockCheck := layout.SocketPath
+				if metaBefore != nil && metaBefore.SocketPath != "" {
+					sockCheck = metaBefore.SocketPath
+				}
+				ll, lerr := AcquireLock(layout.LockPath)
+				if lerr != nil {
+					if !errors.Is(lerr, ErrLocked) {
+						writeErr(stdout, "lock_failed", lerr.Error())
+						return 1
+					}
+					// Daemon is running: over a SINGLE local Unix connection, check
+					// Hello features and issue atomic conditional shutdown so our
+					// own probe connection is never seen as an "other gateway".
+					// Never unconditionally kill.
+					hres, sres, ferr, cerr := callLocalSoleShutdown(sockCheck, soleGW, 3*time.Second)
+					if cerr != nil {
+						writeErr(stdout, "daemon_unreachable", cerr.Error())
+						return 1
+					}
+					if ferr != "" {
+						writeErr(stdout, ferr, "running daemon does not support conditional shutdown")
+						return 1
+					}
+					if sres.OtherGateways || !sres.OK {
+						fmt.Fprintf(stdout, "result=other_gateways\n")
+						return 0
+					}
+					ll, lerr = AcquireLockWait(layout.LockPath, 5*time.Second)
+					if lerr != nil {
+						fmt.Fprintf(stdout, "error=stop_failed\n")
+						fmt.Fprintf(stdout, "pid=%d\n", hres.PID)
+						fmt.Fprintf(stdout, "detail=%s\n", strings.ReplaceAll(lerr.Error(), "\n", " "))
+						return 1
+					}
+				}
+				lifeLock = ll
+				defer lifeLock.Release()
+
+				// Holding SharedLock + OpLock + lifeLock (no daemon running and
+				// no install/serve/handoff can start): re-read clients.json.
+				b, rerr := os.ReadFile(layout.ClientsJSON)
+				if rerr == nil {
+					clients, uerr := parseClientsJSON(b)
+					if uerr != nil {
+						writeErr(stdout, "clients_unreadable", uerr.Error())
+						return 1
+					}
+					for _, c := range clients {
+						if c.Gateway != soleGW {
+							fmt.Fprintf(stdout, "result=other_gateways\n")
+							return 0
+						}
+					}
+				} else if !errors.Is(rerr, os.ErrNotExist) {
+					writeErr(stdout, "clients_unreadable", rerr.Error())
+					return 1
+				} else if installRec != nil && installRec.Gateway != "" && installRec.Gateway != soleGW {
+					fmt.Fprintf(stdout, "result=other_gateways\n")
+					return 0
+				}
+			}
+
 			// Rule 4: Under OpLock, first remove install.json, then write the
 			// removing tombstone. If either step fails, abort before stopping the
 			// running daemon or touching other files.
@@ -1551,24 +1618,27 @@ func cmdUninstall(args []string, stdout io.Writer) int {
 		sockPath = metaBefore.SocketPath
 	}
 
-	// Stop running daemon (and any draining predecessor) and confirm lock is free.
-	_, pid, stopErr := StopDaemon(layout)
-	if stopErr != nil {
-		fmt.Fprintf(stdout, "error=stop_failed\n")
-		fmt.Fprintf(stdout, "pid=%d\n", pid)
-		fmt.Fprintf(stdout, "detail=%s\n", strings.ReplaceAll(stopErr.Error(), "\n", " "))
-		return 1
-	}
-
-	if stateDirExists {
-		lifeLock, err = AcquireLock(layout.LockPath)
-		if err != nil {
+	// Stop running daemon (and any draining predecessor) and confirm lock is free
+	// (skipped when sole-gateway mode already stopped it and holds lifeLock).
+	if lifeLock == nil {
+		_, pid, stopErr := StopDaemon(layout)
+		if stopErr != nil {
 			fmt.Fprintf(stdout, "error=stop_failed\n")
-			fmt.Fprintf(stdout, "pid=0\n")
-			fmt.Fprintf(stdout, "detail=%s\n", strings.ReplaceAll(err.Error(), "\n", " "))
+			fmt.Fprintf(stdout, "pid=%d\n", pid)
+			fmt.Fprintf(stdout, "detail=%s\n", strings.ReplaceAll(stopErr.Error(), "\n", " "))
 			return 1
 		}
-		defer lifeLock.Release()
+
+		if stateDirExists {
+			lifeLock, err = AcquireLock(layout.LockPath)
+			if err != nil {
+				fmt.Fprintf(stdout, "error=stop_failed\n")
+				fmt.Fprintf(stdout, "pid=0\n")
+				fmt.Fprintf(stdout, "detail=%s\n", strings.ReplaceAll(err.Error(), "\n", " "))
+				return 1
+			}
+			defer lifeLock.Release()
+		}
 	}
 
 	type leftover struct {
@@ -1913,4 +1983,86 @@ func callLocalRPC(sockPath, method string, params any, dst any, timeout time.Dur
 		}
 		return nil
 	}
+}
+
+func parseClientsJSON(b []byte) ([]proto.ClientInfo, error) {
+	var arr []proto.ClientInfo
+	if err := json.Unmarshal(b, &arr); err == nil {
+		return arr, nil
+	}
+	var wrapped struct {
+		Clients []proto.ClientInfo `json:"clients"`
+	}
+	if err := json.Unmarshal(b, &wrapped); err != nil {
+		return nil, err
+	}
+	return wrapped.Clients, nil
+}
+
+// callLocalSoleShutdown checks daemon capabilities (HelloResult.Features) and
+// sends conditional daemon.shutdown over ONE Unix connection so the probe
+// connection itself is excluded as caller in Server.handleShutdown.
+func callLocalSoleShutdown(sockPath, soleGW string, timeout time.Duration) (proto.HelloResult, proto.ShutdownResult, string, error) {
+	var (
+		hres proto.HelloResult
+		sres proto.ShutdownResult
+	)
+	d := net.Dialer{Timeout: timeout}
+	conn, err := d.Dial("unix", sockPath)
+	if err != nil {
+		return hres, sres, "", err
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(timeout))
+
+	sendRecv := func(id uint64, method string, params any, dst any) error {
+		var rawParams json.RawMessage
+		if params != nil {
+			b, err := json.Marshal(params)
+			if err != nil {
+				return err
+			}
+			rawParams = b
+		}
+		if err := proto.WriteJSON(conn, proto.Request{
+			ID:     id,
+			Method: method,
+			Params: rawParams,
+		}); err != nil {
+			return err
+		}
+		for {
+			var env proto.Envelope
+			if err := proto.ReadJSON(conn, &env); err != nil {
+				return err
+			}
+			if env.IsEvent() || env.ID != id {
+				continue
+			}
+			if env.Error != nil {
+				return env.Error
+			}
+			if dst != nil && len(env.Result) > 0 {
+				return json.Unmarshal(env.Result, dst)
+			}
+			return nil
+		}
+	}
+
+	if err := sendRecv(1, proto.MethodDaemonHello, proto.HelloParams{
+		ProtoMin: proto.ProtoMin,
+		ProtoMax: proto.ProtoMax,
+	}, &hres); err != nil {
+		return hres, sres, "", err
+	}
+	if !hres.HasFeature(proto.FeatureConditionalShutdown) {
+		return hres, sres, "unsupported_conditional_shutdown", nil
+	}
+	if err := sendRecv(2, proto.MethodDaemonShutdown, proto.ShutdownParams{
+		Reason:            "uninstall",
+		OnlyIfSoleGateway: soleGW,
+	}, &sres); err != nil {
+		return hres, sres, "", err
+	}
+	return hres, sres, "", nil
 }

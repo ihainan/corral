@@ -574,4 +574,53 @@ function baseStatus(overrides = {}) {
   assert.equal(emitted.length, 1, 'signed-out late response must NOT emit toast')
 }
 
+// 11. Fix Round 4 Item #11: render-before-effect account switch window.
+//     If the rendered userId changes BEFORE useEffect/useLayoutEffect invokes
+//     setUser(newId), getCurrentUserId() catches the switch synchronously so
+//     the old user's resolving response is discarded (no toast, no markSeen).
+{
+  const pending = []
+  const seenCalls = []
+  const emitted = []
+  let renderedUserId = 1
+
+  const fetcher = createCorraldNoticeFetcher({
+    getCurrentUserId: () => renderedUserId,
+    fetchNotices: (signal) =>
+      new Promise((resolve, reject) => {
+        pending.push({ signal, resolve, reject })
+      }),
+    markSeen: (ids) => {
+      seenCalls.push(ids)
+    },
+    onNotices: (grouped) => {
+      emitted.push(grouped)
+    },
+  })
+
+  fetcher.setUser(1)
+  const p1 = fetcher.check()
+  assert.equal(pending.length, 1)
+
+  // Account switches during React render, BEFORE setUser(2) runs in effect.
+  renderedUserId = 2
+  pending[0].resolve([
+    { id: 301, host_id: 1, host_name: 'u1-secret-host', old_version: '0.3.1', new_version: '0.3.2', new_release: 2000, success: true, created_at: 100 },
+  ])
+  await p1
+  assert.equal(seenCalls.length, 0, 'pre-effect switched user response must NOT call markSeen')
+  assert.equal(emitted.length, 0, 'pre-effect switched user response must NOT emit toast')
+
+  // Same for sign-out during render (renderedUserId becomes undefined before effect).
+  fetcher.setUser(2)
+  const p2 = fetcher.check()
+  renderedUserId = undefined
+  pending[1].resolve([
+    { id: 302, host_id: 2, host_name: 'u2-secret-host', old_version: '0.3.1', new_version: '0.3.2', new_release: 2000, success: false, created_at: 200 },
+  ])
+  await p2
+  assert.equal(seenCalls.length, 0, 'pre-effect signed-out response must NOT call markSeen')
+  assert.equal(emitted.length, 0, 'pre-effect signed-out response must NOT emit toast')
+}
+
 console.log('test-corrald.mjs: all assertions passed')

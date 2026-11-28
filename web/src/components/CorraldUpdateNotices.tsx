@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { ApiError } from '../api'
 import {
   CORRALD_NOTICES_EVENT,
@@ -23,12 +23,17 @@ export function CorraldUpdateNotices({ userId }: { userId?: number }) {
   const [changelogVersion, setChangelogVersion] = useState<string | null>(null)
   const toastRef = useRef(toast)
   toastRef.current = toast
+  // Synchronously updated during render so any in-flight response from a
+  // previous account that resolves before effects run is rejected immediately.
+  const latestUserIdRef = useRef<number | undefined>(userId)
+  latestUserIdRef.current = userId
   const fetcherRef = useRef<CorraldNoticeFetcher | null>(null)
 
   if (!fetcherRef.current) {
     fetcherRef.current = createCorraldNoticeFetcher({
       fetchNotices: (signal) => getCorraldNotices(signal),
       markSeen: (ids) => markCorraldNoticesSeen(ids),
+      getCurrentUserId: () => latestUserIdRef.current,
       onNotices: (grouped: GroupedCorraldUpdateNotices) => {
         if (grouped.mergedSuccess) {
           const ver = grouped.mergedSuccess.version
@@ -61,10 +66,14 @@ export function CorraldUpdateNotices({ userId }: { userId?: number }) {
     })
   }
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const fetcher = fetcherRef.current!
     fetcher.setUser(userId)
     setChangelogVersion(null)
+  }, [userId])
+
+  useEffect(() => {
+    const fetcher = fetcherRef.current!
     if (!userId) return
 
     void fetcher.check()
