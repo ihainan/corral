@@ -941,6 +941,8 @@ details.adv > .form { margin-top: 16px; }
 .pick-head .icon-btn { margin: -6px -8px 0 0; flex: none; }
 .pick-group { display: flex; flex-direction: column; gap: 6px; }
 .pick-group h3 { font-size: var(--fs-note); line-height: var(--lh-note); font-weight: 600; color: var(--fg-2); margin: 0; }
+.pick-new-name { display: flex; flex-direction: column; gap: 4px; }
+.pick-new-name .err { margin: 0; }
 .pick-list { list-style: none; margin: 0; padding: 0; border: 1px solid var(--line); border-radius: var(--r-lg); overflow: hidden; }
 .pick-list li + li { border-top: 1px solid var(--line); }
 .pick-item {

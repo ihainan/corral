@@ -873,10 +873,11 @@ func (s *Server) watchHerdr(sess *term.Session, h *store.Host) {
 			tLoc := time.Now()
 			var locOut []byte
 			var locErr error
-			if cout, ok := s.tryCorraldLocate(lctx, sess, proto.AgentLocateParams{Mode: sess.Persistence, TmuxName: sess.TmuxSession, Times: true}); ok {
+			tmuxName := sess.CurrentTmuxSession()
+			if cout, ok := s.tryCorraldLocate(lctx, sess, proto.AgentLocateParams{Mode: sess.Persistence, TmuxName: tmuxName, Times: true}); ok {
 				locOut = cout
 			} else {
-				out, err := sshx.Output(lctx, sess.Client(), convoLocateTimesCommand(sess.Persistence, sess.TmuxSession)+"; "+hostNowCommand, convoLocateMax)
+				out, err := sshx.Output(lctx, sess.Client(), convoLocateTimesCommand(sess.Persistence, tmuxName)+"; "+hostNowCommand, convoLocateMax)
 				locOut, locErr = out, err
 			}
 			out, err := locOut, locErr

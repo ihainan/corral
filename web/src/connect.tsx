@@ -16,7 +16,7 @@ export function estimateSize() {
 type Pending =
   | { kind: 'password'; host: Host; accept?: string; keepCorrald?: boolean; choice?: OpenChoice }
   | { kind: 'hostkey'; host: Host; expected: string; got: string; corraldEnabled?: boolean; password?: string; choice?: OpenChoice }
-  | { kind: 'choose'; host: Host; found: HostChoices }
+  | { kind: 'choose'; host: Host; found: HostChoices; error?: string }
   | null
 
 // useConnect opens a session to a host and resolves the interactive cases
@@ -115,6 +115,15 @@ export function useConnect(onOpen: (s: SessionInfo) => void): {
           toast(e.human, true)
           return 'retry-password'
         }
+        if (e.code === 'session_name_taken' || e.code === 'invalid_session_name') {
+          const nextPending = typeof e.extra.pending === 'string' && e.extra.pending ? e.extra.pending : undefined
+          setPending((cur) =>
+            cur?.kind === 'choose'
+              ? { ...cur, found: nextPending ? { ...cur.found, pending: nextPending } : cur.found, error: e.human }
+              : null,
+          )
+          return 'done'
+        }
         const key = 'connect.reason.' + String(e.extra.reason ?? '')
         toast(hasKey(key) ? e.human + ' ' + t(key) : e.human, true)
       } else toast(errorText(e), true)
@@ -196,6 +205,8 @@ export function useConnect(onOpen: (s: SessionInfo) => void): {
         host={p.host}
         found={p.found}
         busy={busyHost === p.host.id}
+        error={p.error}
+        onClearError={() => setPending((cur) => (cur?.kind === 'choose' && cur.error ? { ...cur, error: undefined } : cur))}
         onClose={cancel}
         onPick={(choice) => void open(p.host, undefined, undefined, choice, p.found.pending)}
       />

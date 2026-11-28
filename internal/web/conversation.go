@@ -1917,7 +1917,8 @@ func (s *Server) refreshCodexClaims(sess *term.Session) {
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		defer cancel()
 		tScan := time.Now()
-		out, _, _, shared, err := s.runConvoScan(ctx, sess, proto.AgentLocateParams{Mode: sess.Persistence, TmuxName: sess.TmuxSession}, convoLocateCommand(sess.Persistence, sess.TmuxSession, ""), time.Time{})
+		tmuxName := sess.CurrentTmuxSession()
+		out, _, _, shared, err := s.runConvoScan(ctx, sess, proto.AgentLocateParams{Mode: sess.Persistence, TmuxName: tmuxName}, convoLocateCommand(sess.Persistence, tmuxName, ""), time.Time{})
 		if err != nil {
 			s.perfLocate(locateOp("locate.full", shared), tScan, err, 0, sess.HostID)
 			return
@@ -2920,13 +2921,14 @@ func (s *Server) locateScan(ctx context.Context, sess *term.Session, st *convoSt
 		}
 	} else {
 		var shared bool
-		fullParams := proto.AgentLocateParams{Mode: sess.Persistence, TmuxName: sess.TmuxSession}
+		tmuxName := sess.CurrentTmuxSession()
+		fullParams := proto.AgentLocateParams{Mode: sess.Persistence, TmuxName: tmuxName}
 		params := fullParams
-		cmd := convoLocateCommand(sess.Persistence, sess.TmuxSession, "")
+		cmd := convoLocateCommand(sess.Persistence, tmuxName, "")
 		base := "locate.full"
 		if ocOnly {
 			params.Only = "opencode"
-			cmd = convoLocateOpenCodeCommand(sess.Persistence, sess.TmuxSession)
+			cmd = convoLocateOpenCodeCommand(sess.Persistence, tmuxName)
 			base = "locate.fast"
 		}
 		tScan := time.Now()
@@ -2937,7 +2939,7 @@ func (s *Server) locateScan(ctx context.Context, sess *term.Session, st *convoSt
 			s.perfLocate(locateOp(base, shared), tScan, err, 0, sess.HostID)
 			ocOnly, base = false, "locate.full"
 			tScan = time.Now()
-			out, at, looked, shared, err = s.runConvoScan(ctx, sess, fullParams, convoLocateCommand(sess.Persistence, sess.TmuxSession, ""), after)
+			out, at, looked, shared, err = s.runConvoScan(ctx, sess, fullParams, convoLocateCommand(sess.Persistence, tmuxName, ""), after)
 		}
 		// (The script ends with exit 0: an error is a scan cut short, by its size
 		// or a failure, which may leave out the agent started last. What was
@@ -2950,7 +2952,7 @@ func (s *Server) locateScan(ctx context.Context, sess *term.Session, st *convoSt
 		if ocOnly && !l.noProc && !ocPaneOwn(l.procs, pane, socket) {
 			ocOnly = false
 			tFull := time.Now()
-			if out, at, looked, shared, err = s.runConvoScan(ctx, sess, fullParams, convoLocateCommand(sess.Persistence, sess.TmuxSession, ""), after); err != nil {
+			if out, at, looked, shared, err = s.runConvoScan(ctx, sess, fullParams, convoLocateCommand(sess.Persistence, tmuxName, ""), after); err != nil {
 				s.perfLocate(locateOp("locate.full", shared), tFull, err, 0, sess.HostID)
 				return err
 			}
@@ -5016,16 +5018,17 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 		wantSID := s.herdrSocks.sid(sess.ID, b.Pane)
 		var l convoLocated
 		for attempt := 0; attempt < 2; attempt++ {
-			params := proto.AgentLocateParams{Mode: sess.Persistence, TmuxName: sess.TmuxSession, TmuxPane: tmuxTarget}
-			cmd := convoLocateCommand(sess.Persistence, sess.TmuxSession, tmuxTarget)
+			tmuxName := sess.CurrentTmuxSession()
+			params := proto.AgentLocateParams{Mode: sess.Persistence, TmuxName: tmuxName, TmuxPane: tmuxTarget}
+			cmd := convoLocateCommand(sess.Persistence, tmuxName, tmuxTarget)
 			fastTry := attempt == 0 && plan.mode != herdrFastFull
 			if fastTry {
 				if plan.mode == herdrFastPIDs {
 					params = proto.AgentLocateParams{Mode: "herdr", ShellPID: plan.shellPID, PIDs: plan.pids}
 					cmd = convoLocatePidsCommand(plan.shellPID, plan.pids)
 				} else {
-					params = proto.AgentLocateParams{Mode: sess.Persistence, TmuxName: sess.TmuxSession, Only: "opencode"}
-					cmd = convoLocateOpenCodeCommand(sess.Persistence, sess.TmuxSession)
+					params = proto.AgentLocateParams{Mode: sess.Persistence, TmuxName: tmuxName, Only: "opencode"}
+					cmd = convoLocateOpenCodeCommand(sess.Persistence, tmuxName)
 				}
 			}
 			op := "locate.full"
@@ -5652,7 +5655,7 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 	outBytes, err := s.runGated(ctx, sess, gatedReq{
 		Gate:      gate,
 		Mode:      sess.Persistence,
-		Session:   sess.TmuxSession,
+		Session:   sess.CurrentTmuxSession(),
 		Pane:      b.Pane,
 		Socket:    socket,
 		PID:       b.PID,

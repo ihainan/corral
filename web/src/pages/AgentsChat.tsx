@@ -25,7 +25,7 @@ import { type CodexRewind, ForkDialog, LinkParentDialog, type LinkPane, RenameDi
 import { isRewindIdle } from '../terminal/rewindIdle'
 import { rewindEditedFiles } from '../terminal/rewindFiles'
 import { agentWho, ChimeCounter, chime, countsOf } from '../terminal/chime'
-import { AgentList, CODEX_EFFORTS, ComposerModelSlot, ConversationView, glanceOf, type ConvoAgent, type ConvoLineageBar, type ConvoListRow, type ConvoPending, type ConvoSplitPane, type ConvoWent, type FileActs, type ModelOpt } from '../terminal/Conversation'
+import { AgentList, AgentSidePane, CODEX_EFFORTS, ComposerModelSlot, ConversationView, glanceOf, holdSideScroll, type ConvoAgent, type ConvoLineageBar, type ConvoListRow, type ConvoPending, type ConvoSplitPane, type ConvoWent, type FileActs, type ModelOpt } from '../terminal/Conversation'
 import { saveTranslateConfig, useTranslateConfig } from '../terminal/thoughtTranslate'
 import { FilesDialog } from '../terminal/FilesDialog'
 import { PortsDialog } from '../terminal/PortsDialog'
@@ -44,12 +44,13 @@ import { camesAfter, containedInMessage, isCommand, pairSent, sameMessage, squee
 import { viewRefusal } from '../terminal/sendView'
 import { decideLiveTerminal, liveFor, shouldClearLiveTerminal } from '../terminal/liveTerminalPolicy'
 import { agentKey, sessionWhich } from '../terminal/sessionName'
-import { pickKey as isPickKey } from '../terminal/pageKeys'
 import { firstShown, hideBox, keptBox, KeptPart, KeptView, letGoBox, modalShown, useEffectOnChange, useShownAt, useWhenGone, type KeptBox } from '../shown'
 import { Rail, StatusBar, StatusItem, useWorkbench } from '../workbench'
 import { CorraldStatusBarItem } from '../components/CorraldStatusBarItem'
 import { isCorraldUnknownResult } from '../corraldLogic'
 import { AgentTabBar, askPickInTab, isTabsKey, newTabId, OPEN_PICKER, readFront, readTabs, takePickInTab, writeFront, writeTabs, type AgentTab, type PickHow, type TabView } from './agentTabs'
+import { AGENT_CLOSED_EVENT, closeAgentTabs, migrateAgentTabsKey } from '../terminal/agentTabPolicy'
+import { SESSION_RENAMED_EVENT, tmuxEntryKey, type SessionRenamedPayload } from '../terminal/sessionRenamePolicy'
 import { agentMark } from '../terminal/agentIcons'
 import { useComposerFit } from '../terminal/autosize'
 import { keyboardIsUp } from '../keyboard'
@@ -644,6 +645,7 @@ export function AgentsChat({ bar, active = true, onHead }: { bar?: ReactNode; ac
   // Tabs closed (their agents go on): the one in front closed, the next to its
   // right comes, else the one to its left; none left, an empty page.
   const closeTabs = (ids: ReadonlySet<string>) => {
+    holdSideScroll()
     const l = tabsRef.current
     const at = l.findIndex((x) => x.id === frontRef.current)
     putTabs(l.filter((x) => !ids.has(x.id)))
@@ -657,6 +659,72 @@ export function AgentsChat({ bar, active = true, onHead }: { bar?: ReactNode; ac
     pickKey.current = null
     if (activeRef.current) navigate('/agents', true, history.state)
   }
+  // An agent actively closed by the user in Corral (sidebar menu, header menu,
+  // or terminal shortcut): close its tab directly (same as clicking × on the
+  // tab) and keep the sidebar scroll position intact.
+  const handleAgentClosedRef = useRef<(key: string) => void>(() => {})
+  const handleAgentClosed = (key: string) => {
+    setGone((g) => new Set(g).add(key))
+    if (splitKey === key) closeSplit()
+    if (stack) {
+      if (lastCur.current?.key === key) toList()
+      return
+    }
+    holdSideScroll()
+    const res = closeAgentTabs(tabsRef.current, frontRef.current, key)
+    if (!res.changed) return
+    putTabs(res.tabs)
+    if (!res.closedFront) return
+    if (res.nextTab) return goTab(res.nextTab)
+    putFront(null)
+    setSplitKey(null)
+    setFocusedPane('primary')
+    setPick(null)
+    pickKey.current = null
+    if (activeRef.current) navigate('/agents', true, history.state)
+  }
+  handleAgentClosedRef.current = handleAgentClosed
+  useEffect(() => {
+    const onClosedEv = (e: Event) => {
+      const key = (e as CustomEvent<{ key?: string }>).detail?.key
+      if (key) handleAgentClosedRef.current(key)
+    }
+    window.addEventListener(AGENT_CLOSED_EVENT, onClosedEv)
+    return () => window.removeEventListener(AGENT_CLOSED_EVENT, onClosedEv)
+  }, [])
+  // When a tmux session is renamed, migrate open agent tabs, current pick,
+  // split key, and pinned agent keys so associations stay intact.
+  const onSessionRenamedRef = useRef<(d: SessionRenamedPayload) => void>(() => {})
+  onSessionRenamedRef.current = (d) => {
+    if (d.persistence === 'tmux' && d.oldMuxSession && d.newMuxSession && d.oldMuxSession !== d.newMuxSession) {
+      const oldKey = tmuxEntryKey(d.host_id, d.oldMuxSession)
+      const newKey = tmuxEntryKey(d.host_id, d.newMuxSession)
+      const migrated = migrateAgentTabsKey(tabsRef.current, oldKey, newKey)
+      if (migrated.changed) putTabs(migrated.tabs)
+      if (splitKey === oldKey) setSplitKey(newKey)
+      if (pickKey.current?.key === oldKey) pickKey.current = { ...pickKey.current, key: newKey }
+      setPick((p) => (p && p.key === oldKey ? { ...p, key: newKey } : p))
+      if (shownKey.current === oldKey) shownKey.current = newKey
+      try {
+        const last = JSON.parse(local.get(LAST) ?? 'null')
+        if (last && last.key === oldKey) local.set(LAST, JSON.stringify({ ...last, key: newKey }))
+      } catch {
+        /* ignore */
+      }
+      if (prefs.pinnedAgents.includes(oldKey)) {
+        setPrefs({ pinnedAgents: prefs.pinnedAgents.map((k) => (k === oldKey ? newKey : k)) })
+      }
+    }
+    readSessionsNow()
+  }
+  useEffect(() => {
+    const onRenamed = (e: Event) => {
+      const detail = (e as CustomEvent<SessionRenamedPayload>).detail
+      if (detail) onSessionRenamedRef.current(detail)
+    }
+    window.addEventListener(SESSION_RENAMED_EVENT, onRenamed)
+    return () => window.removeEventListener(SESSION_RENAMED_EVENT, onRenamed)
+  }, [])
   const moveTab = (id: string, to: number) => {
     const l = [...tabsRef.current]
     const from = l.findIndex((x) => x.id === id)
@@ -685,8 +753,6 @@ export function AgentsChat({ bar, active = true, onHead }: { bar?: ReactNode; ac
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [active, unresolved, pickIsFront])
-  // A new tab: the quick switcher, its pick opened in one (none shown, the page's list is there already).
-  const pickList = useRef<HTMLDivElement>(null)
   type Drawn = { el: ReactNode; key: string; seen: number; box: KeptBox }
   // (The kept views as last put on the page. A drawing works out the next from it — what stays, what is let go —
   // and only its commit makes them so: a drawing left unfinished, as React may, lets nothing go — review 8.)
@@ -714,10 +780,12 @@ export function AgentsChat({ bar, active = true, onHead }: { bar?: ReactNode; ac
     [],
   )
   const newTab = () => {
-    if (!cur) {
-      // (None shown: the page's list is the switcher — its first row focused (↑↓ and Return), its pick in this tab.)
-      pickList.current?.querySelector<HTMLElement>('input, .convo-list-row')?.focus()
-      return
+    if (!cur && !frontTab) {
+      const sideInput = rootRef.current?.querySelector<HTMLElement>('.convo-side .list-search input, .convo-side .convo-list-row')
+      if (sideInput && sideInput.getClientRects().length > 0) {
+        sideInput.focus()
+        return
+      }
     }
     askPickInTab()
     window.dispatchEvent(new Event(OPEN_PICKER))
@@ -1068,36 +1136,126 @@ export function AgentsChat({ bar, active = true, onHead }: { bar?: ReactNode; ac
     window.addEventListener('keydown', onKey, true)
     return () => window.removeEventListener('keydown', onKey, true)
   })
-  // ⌘P / Ctrl+P with none shown (no tab, or its agent ended): the page's list
-  // is the switcher, its first row focused (the conversation's own key is gone with it).
-  useEffect(() => {
-    if (!active || stack || cur) return
-    const onKey = (e: KeyboardEvent) => {
-      if (!isPickKey(e, isMac) || e.defaultPrevented || modalShown()) return
-      const box = pickList.current?.querySelector<HTMLElement>('input, .convo-list-row')
-      if (!box) return
-      e.preventDefault()
-      box.focus()
+  // Sidebar rows & close confirmation used when no conversation view is mounted
+  // (no open tab, or front tab ended unexpectedly), so the left sidebar stays
+  // mounted, interactive, and in the exact same position.
+  const [fallbackSideShown, setFallbackSideShown] = useState(true)
+  const [fallbackClosing, setFallbackClosing] = useState<Entry | null>(null)
+  const fallbackRows = useMemo((): ConvoListRow[] => {
+    if (cur || stack || sessions === null) return []
+    const hosts = hostCount(entries)
+    const pins = prefs.pinnedAgents
+    const pinAt = (key: string) => (pins.includes(key) ? pins.indexOf(key) : undefined)
+    const wsByKey = new Map<string, string>()
+    for (const e of entries) if (e.row) wsByKey.set(e.key, e.row.wsId)
+    const rowMenuOf = (e: Entry): (MenuItem | null)[] => {
+      const pinnedNow = pins.includes(e.key)
+      const canClose = e.s.persistence === 'herdr' && !!e.row && !e.row.lost
+      return [
+        { label: t('agentTabs.newTab'), icon: <Plus size={16} />, onSelect: () => choose(e, 'tab') },
+        { label: t('convo.showTerminal'), icon: <SquareTerminal size={16} />, onSelect: () => navigate(`/t/${e.s.id}` + (e.pane ? '?pane=' + encodeURIComponent(e.pane) : '')) },
+        {
+          label: t(pinnedNow ? 'agents.unpin' : 'agents.pin'),
+          icon: pinnedNow ? <PinOff size={16} /> : <Pin size={16} />,
+          onSelect: () => {
+            if (pinnedNow) return setPrefs({ pinnedAgents: pins.filter((k) => k !== e.key) })
+            const here = new Set(entries.map((x) => x.key))
+            const shown = pins.filter((k) => here.has(k))
+            if (shown.length >= maxPinned) return toast(t('agents.pinFull', { n: maxPinned }), true)
+            setPrefs({ pinnedAgents: makeRoom(pins, here, maxPinned - 1).concat(e.key) })
+          },
+        },
+        canClose ? { label: t('agents.close'), icon: <Power size={16} />, danger: true, separator: true, onSelect: () => setFallbackClosing(e) } : null,
+      ]
     }
-    window.addEventListener('keydown', onKey, true)
-    return () => window.removeEventListener('keydown', onKey, true)
-  })
+    return entries.map((e): ConvoListRow => {
+      if (e.row) {
+        const r = e.row
+        const named = ((isCodex(r.a.agent) || isAgy(r.a.agent)) && r.a.thread_title) || keptTitle(titles.current, e) || paneName(r.a)
+        const said = named || dirName(r.a.cwd) || r.a.agent
+        const parentKey = r.lost || !r.a.parent_pane ? undefined : agentKey(e.s, r.a.parent_pane)
+        const sameWsParent = !!parentKey && wsByKey.get(parentKey) === r.wsId
+        return {
+          key: e.key,
+          ...labelOf(e, said, hosts, !!named, sameWsParent),
+          now: r.lost || r.bg || r.status !== 'blocked' ? undefined : glanceOf(e.s.id, e.pane, r.status, r.a.since) || undefined,
+          program: r.a.agent,
+          status: r.status,
+          liveStatus: r.status,
+          lost: r.lost,
+          lastStatus: r.lost && r.last && r.last !== 'unknown' ? r.last : undefined,
+          lostAt: r.lost ? r.lostAt : undefined,
+          bg: r.lost ? undefined : r.bg,
+          failed: failedOf(r, r.status),
+          model: r.lost ? undefined : r.a.model,
+          glance: r.lost || r.bg ? undefined : () => glanceOf(e.s.id, e.pane, r.status, r.a.since),
+          cmds: cmdsOf(r),
+          tasks: tasksOf(r),
+          since: r.lost ? r.a.since : r.bg ? r.a.bg_since : r.a.since,
+          current: false,
+          pinned: pinAt(e.key),
+          projectKey: normalizeProjectPath(r.a.cwd),
+          sessionGroup: sessionGroupOf(e, sessions),
+          parentKey,
+          lineageSource: r.lost ? undefined : r.a.lineage_source,
+          onPick: (how) => chooseFromList(e, how),
+          menu: () => rowMenuOf(e),
+        }
+      }
+      const title = keptTitle(titles.current, e) || `${e.s.host_name} · ${sessionWhich(e.s, sessions)}`
+      const tmuxBg = tmuxBgOf(e)
+      return {
+        key: e.key,
+        title,
+        where: whereOf(e, hosts),
+        status: 'unknown',
+        cmds: tmuxBg.cmds,
+        tasks: rowTasks(tmuxBg.agents, tmuxBg.cmds),
+        current: false,
+        pinned: pinAt(e.key),
+        sessionGroup: sessionGroupOf(e, sessions),
+        onPick: (how) => chooseFromList(e, how),
+        menu: () => rowMenuOf(e),
+      }
+    })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cur, stack, sessions, entries, prefs.pinnedAgents])
+
   let body: ReactNode
   if (stack && screen === 'list' && sessions !== null && entries.length)
     body = <PhoneList entries={entries} all={sessions} titles={titles.current} query={sideQuery} onQuery={setSideQuery} onPick={choose} />
-  else if (!cur && !stack && sessions !== null && !waiting && !holding && entries.length && (ended || (hadTabs.current && !frontTab)))
-    // No tab open, or the one in front's agent ended: said so, the list to open one from (its pick: in this tab).
+  else if (!cur && !stack && sessions !== null && !waiting && !holding && ended && frontTab)
+    // Agent in the front tab ended unexpectedly (not closed by the user in Corral):
+    // show a compact status notice and a Close tab button while keeping the sidebar intact.
     body = (
-      <div className="agents-chat-pick" ref={pickList}>
-        <div className="agents-chat-pick-note">
-          <p>{t(ended ? 'agentTabs.endedNote' : 'agentTabs.closedNote')}</p>
-          {ended && frontTab && (
-            <button type="button" className="btn btn-ghost" onClick={() => closeTabs(new Set([frontTab.id]))}>
-              {t('agentTabs.close')}
-            </button>
-          )}
-        </div>
-        <PhoneList entries={entries} all={sessions} titles={titles.current} query={sideQuery} onQuery={setSideQuery} onPick={choose} />
+      <div className="agents-chat-empty">
+        <p>{t('agentTabs.endedShort')}</p>
+        <button type="button" className="btn btn-primary" onClick={() => closeTabs(new Set([frontTab.id]))}>
+          {t('agentTabs.close')}
+        </button>
+      </div>
+    )
+  else if (!cur && !stack && sessions !== null && !waiting && !holding && entries.length && hadTabs.current && !frontTab)
+    // All tabs closed: show the normal quiet empty center area while keeping the sidebar intact.
+    body = (
+      <div className="agents-chat-empty">
+        <p>{t('agentTabs.emptyNote')}</p>
+        {!fallbackSideShown && (
+          <button
+            type="button"
+            className="btn btn-ghost"
+            onClick={() => {
+              if (window.innerWidth >= 900) {
+                local.set('corral.convoSide', '1')
+                window.dispatchEvent(new Event('corral:convo-side'))
+              } else {
+                window.dispatchEvent(new Event(OPEN_PICKER))
+              }
+            }}
+          >
+            {t('convo.openSide')}
+          </button>
+        )}
       </div>
     )
   else if (!cur || (stack && screen === 'list')) {
@@ -1163,10 +1321,7 @@ export function AgentsChat({ bar, active = true, onHead }: { bar?: ReactNode; ac
           query={sideQuery}
           onQuery={setSideQuery}
           onStarted={started}
-          onClosed={(key) => {
-            setGone((g) => new Set(g).add(key))
-            if (splitKey === key) closeSplit()
-          }}
+          onClosed={handleAgentClosed}
         />
         </KeptPart>
       )
@@ -1204,12 +1359,7 @@ export function AgentsChat({ bar, active = true, onHead }: { bar?: ReactNode; ac
         query={sideQuery}
         onQuery={setSideQuery}
         onStarted={started}
-        onClosed={(key) => {
-          setGone((g) => new Set(g).add(key))
-          if (splitKey === key) closeSplit()
-          // (A phone: back to the list, if it is still the one in front; else the next is shown.)
-          if (stack && lastCur.current?.key === key) toList()
-        }}
+        onClosed={handleAgentClosed}
         lead={
           stack ? (
             <button type="button" className="icon-btn agents-chat-back" onClick={toList} aria-label={t('agents.backToList')} title={t('agents.backToList')}>
@@ -1362,10 +1512,31 @@ export function AgentsChat({ bar, active = true, onHead }: { bar?: ReactNode; ac
           onClose={() => setNewAgent(false)}
         />
       )}
+      {fallbackClosing?.row && (
+        <Confirm
+          title={t('agents.closeTitleNamed', { name: fallbackRows.find((r) => r.key === fallbackClosing.key)?.title ?? '' })}
+          body={t((entries.find((e) => e.key === fallbackClosing.key)?.row ?? fallbackClosing.row).status === 'working' ? 'agents.closeBodyWorking' : 'agents.closeBody')}
+          confirm={t('agents.closeConfirm')}
+          danger
+          onConfirm={async () => {
+            try {
+              await api('POST', `/api/sessions/${fallbackClosing.s.id}/herdr`, { action: 'close_pane', target: fallbackClosing.row!.a.pane_id })
+            } catch (e) {
+              throw { human: e instanceof ApiError && e.code === 'herdr_busy' ? t('herdr.busy') : t('sc.herdrFailed') }
+            }
+            handleAgentClosed(fallbackClosing.key)
+          }}
+          onClose={() => setFallbackClosing(null)}
+        />
+      )}
       {/* (On the workbench: the sidebar runs full-height on the left beside the rail, and the tab bar sits over the conversation area on the right.) */}
       {wbOn ? (
         <div className="wb-agent-layout">
-          <div className="wb-side-slot" />
+          <div className="wb-side-slot">
+            {!cur && sessions !== null && (
+              <AgentSidePane rows={fallbackRows} query={sideQuery} onQuery={setSideQuery} active={active} onShownChange={setFallbackSideShown} />
+            )}
+          </div>
           <div className="wb-agent-main">
             {headerBar}
             {banners}
@@ -1374,6 +1545,9 @@ export function AgentsChat({ bar, active = true, onHead }: { bar?: ReactNode; ac
         </div>
       ) : (
         <>
+          {!cur && !stack && sessions !== null && (
+            <AgentSidePane rows={fallbackRows} query={sideQuery} onQuery={setSideQuery} active={active} onShownChange={setFallbackSideShown} />
+          )}
           {headerBar}
           {banners}
           {termBody}
@@ -1385,7 +1559,7 @@ export function AgentsChat({ bar, active = true, onHead }: { bar?: ReactNode; ac
           {cur && (
             <StatusItem mark={failed ? 'trouble' : 'on'} title={failed ? t('agents.failed') : undefined}>
               {cur.s.host_name}
-              {cur.s.persistence && cur.s.persistence !== 'none' ? ' · ' + cur.s.persistence : ''}
+              {cur.s.display_name ? ' · ' + cur.s.display_name : cur.s.persistence && cur.s.persistence !== 'none' ? ' · ' + cur.s.persistence : ''}
             </StatusItem>
           )}
           {cur && <CorraldStatusBarItem hostId={cur.s.host_id} hostName={cur.s.host_name} />}

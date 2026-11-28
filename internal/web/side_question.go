@@ -333,8 +333,9 @@ func (s *Server) apiConversationSide(w http.ResponseWriter, r *http.Request) {
 	}
 	var front *convoProc
 	for attempt := 0; attempt < 2; attempt++ {
-		params := proto.AgentLocateParams{Mode: sess.Persistence, TmuxName: sess.TmuxSession, TmuxPane: tmuxTarget}
-		cmd := convoLocateCommand(sess.Persistence, sess.TmuxSession, tmuxTarget)
+		tmuxName := sess.CurrentTmuxSession()
+		params := proto.AgentLocateParams{Mode: sess.Persistence, TmuxName: tmuxName, TmuxPane: tmuxTarget}
+		cmd := convoLocateCommand(sess.Persistence, tmuxName, tmuxTarget)
 		fastTry := attempt == 0 && fastPlan.mode == herdrFastPIDs
 		if fastTry {
 			params = proto.AgentLocateParams{Mode: "herdr", ShellPID: fastPlan.shellPID, PIDs: fastPlan.pids}

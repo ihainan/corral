@@ -158,6 +158,10 @@ func (s *Server) openSession(ctx context.Context, w http.ResponseWriter, r *http
 	cfg := hostConfig(h)
 	var choice *openChoice
 	if b.Open != nil {
+		if (b.Open.Kind == openTmuxNew || b.Open.Kind == openHerdrNew) && b.Open.Name != "" && !tmuxNameRE.MatchString(b.Open.Name) {
+			writeError(w, http.StatusBadRequest, "invalid_session_name", "session name may only contain letters, digits, dashes and underscores (1–64 characters)")
+			return
+		}
 		if !b.Open.valid() {
 			writeError(w, http.StatusBadRequest, "bad_request", "unknown choice of what to open")
 			return
@@ -210,10 +214,21 @@ func (s *Server) openSession(ctx context.Context, w http.ResponseWriter, r *http
 		if !hc.any() {
 			choice = &openChoice{Kind: openShell}
 		} else {
+			if aliases, err := s.store.ListSessionDisplayNames(ctx, u.ID, h.ID, store.PersistHerdr); err == nil && len(aliases) > 0 {
+				for i := range hc.HerdrList {
+					key := herdrDisplayKey(hc.HerdrList[i].Name)
+					if hc.HerdrList[i].Default {
+						key = "default"
+					}
+					if dn := aliases[key]; dn != "" {
+						hc.HerdrList[i].DisplayName = dn
+					}
+				}
+			}
 			running := []runningChoice{}
 			for _, rs := range s.terms.Running(u.ID, h.ID) {
 				in := rs.Info()
-				running = append(running, runningChoice{ID: in.ID, Kind: sessionKind(in.Persistence), Name: in.MuxSession, Title: in.Title, CreatedAt: in.CreatedAt})
+				running = append(running, runningChoice{ID: in.ID, Kind: sessionKind(in.Persistence), Name: in.MuxSession, DisplayName: in.DisplayName, Title: in.Title, CreatedAt: in.CreatedAt})
 			}
 			token := s.picks.put(u.ID, h.ID, cfg, loginHash(r), client)
 			// Signed out meanwhile (the drop on sign-out may have run before
@@ -230,6 +245,16 @@ func (s *Server) openSession(ctx context.Context, w http.ResponseWriter, r *http
 		}
 	}
 	opts := term.StartOptions{Cols: b.Cols, Rows: b.Rows, Persistence: store.PersistNone, HostConfig: cfg}
+	keepForRetry := func() string {
+		tok := s.picks.put(u.ID, h.ID, cfg, loginHash(r), client)
+		if _, err := s.auth.CheckLogin(ctx, loginHash(r)); err != nil {
+			if c := s.picks.take(tok, u.ID, h.ID, cfg, loginHash(r)); c != nil {
+				c.Close()
+			}
+			return ""
+		}
+		return tok
+	}
 	switch choice.Kind {
 	case openTmux:
 		opts.Persistence, opts.TmuxSession = store.PersistTmux, choice.Name
@@ -244,10 +269,33 @@ func (s *Server) openSession(ctx context.Context, w http.ResponseWriter, r *http
 			writeError(w, http.StatusBadGateway, "tmux_list_failed", "could not list the tmux sessions on the host; try again")
 			return
 		}
+		for _, rs := range s.terms.Running(u.ID, h.ID) {
+			if rs.Persistence == store.PersistTmux {
+				taken = append(taken, tmuxSession{Name: rs.CurrentTmuxSession()})
+			}
+		}
+		name := choice.Name
+		if name != "" {
+			for _, t := range taken {
+				if t.Name == name {
+					extra := map[string]any{}
+					if tok := keepForRetry(); tok != "" {
+						extra["pending"] = tok
+					}
+					writeErrorExtra(w, http.StatusConflict, "session_name_taken", "a tmux session with that name already exists", extra)
+					return
+				}
+			}
+		} else {
+			name = newTmuxName(u.Username, taken)
+		}
 		// (Started as new: one of that name made meanwhile is not attached.)
-		opts.Persistence, opts.TmuxSession, opts.TmuxNew = store.PersistTmux, newTmuxName(u.Username, taken), true
+		opts.Persistence, opts.TmuxSession, opts.TmuxNew = store.PersistTmux, name, true
 	case openHerdr:
 		opts.Persistence, opts.HerdrSession = store.PersistHerdr, choice.Name
+		if dn, err := s.store.SessionDisplayName(ctx, u.ID, h.ID, store.PersistHerdr, herdrDisplayKey(choice.Name)); err == nil {
+			opts.DisplayName = dn
+		}
 	case openHerdrNew:
 		// Named after all its sessions, as for tmux. Without herdr on the
 		// host, the command falls back to a plain shell (as tmux's does).
@@ -266,7 +314,25 @@ func (s *Server) openSession(ctx context.Context, w http.ResponseWriter, r *http
 				taken = append(taken, herdr.SessionInfo{Name: rs.Info().MuxSession})
 			}
 		}
-		opts.Persistence, opts.HerdrSession = store.PersistHerdr, newHerdrName(u.Username, taken)
+		name := choice.Name
+		if name != "" {
+			for _, t := range taken {
+				if sameMux(openHerdr, t.Name, name) {
+					extra := map[string]any{}
+					if tok := keepForRetry(); tok != "" {
+						extra["pending"] = tok
+					}
+					writeErrorExtra(w, http.StatusConflict, "session_name_taken", "a herdr session with that name already exists", extra)
+					return
+				}
+			}
+		} else {
+			name = newHerdrName(u.Username, taken)
+		}
+		opts.Persistence, opts.HerdrSession = store.PersistHerdr, name
+		if dn, err := s.store.SessionDisplayName(ctx, u.ID, h.ID, store.PersistHerdr, herdrDisplayKey(name)); err == nil {
+			opts.DisplayName = dn
+		}
 	}
 	// A terminal slot is taken only to start one (choosing needs none).
 	res, err := s.terms.Reserve(u.ID)
@@ -344,7 +410,11 @@ func (s *Server) openSession(ctx context.Context, w http.ResponseWriter, r *http
 		s.notifyCorraldConnected(u.ID, h.ID, u.Username, h.Username, fp, sess.Client())
 	}
 	_ = s.store.TouchHostConnected(r.Context(), u.ID, h.ID)
-	s.audit(r, "session.open", hostTarget(h), map[string]any{"session": sess.ID, "open": choice.Kind})
+	openDetail := map[string]any{"session": sess.ID, "open": choice.Kind}
+	if mux := sess.Info().MuxSession; mux != "" {
+		openDetail["name"] = mux
+	}
+	s.audit(r, "session.open", hostTarget(h), openDetail)
 	writeJSON(w, http.StatusCreated, sess.Info())
 }
 
@@ -516,6 +586,207 @@ func (s *Server) apiCloseSession(w http.ResponseWriter, r *http.Request) {
 	}
 	s.audit(r, "session.close", id, nil)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// PUT /api/sessions/{id}/name {"name": "..."}
+// Renames a running terminal session. For tmux, renames the remote tmux
+// session via rename-session and updates open_tabs. For herdr (which has no
+// session rename command or RPC), saves a per-user Corral display name in
+// session_names so it persists across reconnects and gateway restarts.
+func (s *Server) apiRenameSession(w http.ResponseWriter, r *http.Request) {
+	u := currentUser(r)
+	var b struct {
+		Name string `json:"name"`
+	}
+	if err := readJSON(r, &b); err != nil {
+		writeError(w, http.StatusBadRequest, "bad_request", err.Error())
+		return
+	}
+	if _, err := s.auth.CheckLogin(r.Context(), loginHash(r)); err != nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized", "please sign in")
+		return
+	}
+	id := r.PathValue("id")
+	sess, err := s.terms.Get(u.ID, id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "not_found", "no such session")
+		return
+	}
+	if sess.State() != term.StateRunning {
+		writeError(w, http.StatusConflict, "ended", "the session has ended")
+		return
+	}
+	switch sess.Persistence {
+	case store.PersistTmux:
+		name := b.Name
+		if !tmuxNameRE.MatchString(name) {
+			writeError(w, http.StatusBadRequest, "invalid_session_name", "session name may only contain letters, digits, dashes and underscores (1–64 characters)")
+			return
+		}
+		expiry, err := s.auth.LoginExpiry(r.Context(), loginHash(r))
+		if err != nil {
+			writeError(w, http.StatusUnauthorized, "unauthorized", "please sign in")
+			return
+		}
+		ctx, cancel := context.WithDeadline(r.Context(), expiry)
+		defer cancel()
+		resp, err := s.underHostGate(ctx, u.ID, sess.HostID, func(w http.ResponseWriter) {
+			if _, err := s.auth.CheckLogin(ctx, loginHash(r)); err != nil {
+				writeError(w, http.StatusUnauthorized, "unauthorized", "please sign in")
+				return
+			}
+			if sess.State() != term.StateRunning {
+				writeError(w, http.StatusConflict, "ended", "the session has ended")
+				return
+			}
+			oldName := sess.CurrentTmuxSession()
+			if name == oldName {
+				writeJSON(w, http.StatusOK, sess.Info())
+				return
+			}
+			for _, rs := range s.terms.Running(u.ID, sess.HostID) {
+				if rs.ID != sess.ID && rs.Persistence == store.PersistTmux && rs.CurrentTmuxSession() == name {
+					writeError(w, http.StatusConflict, "session_name_taken", "a tmux session with that name already exists")
+					return
+				}
+			}
+			rctx, rcancel := context.WithTimeout(ctx, probeTimeout)
+			res, err := sshx.Exec(rctx, sess.Client(), tmuxRenameCommand(oldName, name), 4096, sshx.ExecOptions{Interactive: true, AwaitSlot: 2 * time.Second})
+			rcancel()
+			if err != nil {
+				var xe *sshx.ExitError
+				if errors.As(err, &xe) {
+					out := strings.TrimSpace(string(res.Out))
+					switch {
+					case xe.Status == 10 || out == "duplicate":
+						writeError(w, http.StatusConflict, "session_name_taken", "a tmux session with that name already exists")
+					case xe.Status == 11 || out == "missing":
+						writeError(w, http.StatusConflict, "session_not_found", "the tmux session was not found on the host")
+					default:
+						writeError(w, http.StatusBadGateway, "rename_failed", "could not rename the tmux session on the host")
+					}
+					return
+				}
+				if errors.Is(err, sshx.ErrBusy) {
+					writeError(w, http.StatusTooManyRequests, "busy", "the host is busy; try again in a moment")
+					return
+				}
+				writeError(w, http.StatusBadGateway, "rename_failed", "could not rename the tmux session on the host")
+				return
+			}
+			sess.SetTmuxSession(name)
+			if err := s.store.RenameTab(ctx, u.ID, sess.ID, name); err != nil {
+				s.log.Warn("open tabs: rename not recorded", "session", sess.ID, "err", err)
+			}
+			for _, rs := range s.terms.Running(u.ID, sess.HostID) {
+				if rs.ID != sess.ID && rs.Persistence == store.PersistTmux && rs.CurrentTmuxSession() == oldName {
+					rs.SetTmuxSession(name)
+					if err := s.store.RenameTab(ctx, u.ID, rs.ID, name); err != nil {
+						s.log.Warn("open tabs: peer rename not recorded", "session", rs.ID, "err", err)
+					}
+				}
+			}
+			s.audit(r, "session.rename", sess.HostName, map[string]any{
+				"session": sess.ID, "persistence": sess.Persistence, "from": oldName, "to": name, "remote": true,
+			})
+			writeJSON(w, http.StatusOK, sess.Info())
+		})
+		switch {
+		case errors.Is(err, errGateBusy):
+			writeError(w, http.StatusTooManyRequests, "busy", "this host is busy; try again in a moment")
+		case err != nil && r.Context().Err() == nil:
+			writeError(w, http.StatusUnauthorized, "unauthorized", "please sign in")
+		case err == nil:
+			resp.writeTo(w)
+		}
+	case store.PersistHerdr:
+		name := strings.TrimSpace(b.Name)
+		if !validSessionDisplayName(name) {
+			writeError(w, http.StatusBadRequest, "invalid_session_name", "enter a session name (1–64 characters, no control characters)")
+			return
+		}
+		muxKey := herdrDisplayKey(sess.HerdrSession)
+		oldDisplay := sess.CurrentDisplayName()
+		if oldDisplay == "" {
+			oldDisplay = sess.HerdrSession
+		}
+		aliases, err := s.store.ListSessionDisplayNames(r.Context(), u.ID, sess.HostID, store.PersistHerdr)
+		if err != nil {
+			s.internalError(w, r, err)
+			return
+		}
+		for k, v := range aliases {
+			if k != muxKey && v == name {
+				writeError(w, http.StatusConflict, "session_name_taken", "another session on this host already uses that name")
+				return
+			}
+		}
+		for _, rs := range s.terms.Running(u.ID, sess.HostID) {
+			if rs.Persistence != store.PersistHerdr {
+				continue
+			}
+			rk := herdrDisplayKey(rs.HerdrSession)
+			if rk == muxKey {
+				continue
+			}
+			other := rs.CurrentDisplayName()
+			if other == "" {
+				other = rs.HerdrSession
+			}
+			if other == name || (rs.CurrentDisplayName() == "" && rk == name) {
+				writeError(w, http.StatusConflict, "session_name_taken", "another session on this host already uses that name")
+				return
+			}
+		}
+		// Best-effort check against remote herdr sessions so display names do not
+		// collide with unopened sessions on the same host.
+		if c := sess.Client(); c != nil {
+			dctx, dcancel := context.WithTimeout(r.Context(), 3*time.Second)
+			remote, derr := herdr.Discover(dctx, c)
+			dcancel()
+			if derr == nil {
+				for _, si := range remote {
+					rk := herdrDisplayKey(si.Name)
+					if si.Default {
+						rk = "default"
+					}
+					if rk == muxKey {
+						continue
+					}
+					if aliases[rk] == "" && si.Name == name {
+						writeError(w, http.StatusConflict, "session_name_taken", "another session on this host already uses that name")
+						return
+					}
+				}
+			}
+		}
+		if err := s.store.SetSessionDisplayName(r.Context(), u.ID, sess.HostID, store.PersistHerdr, muxKey, name); err != nil {
+			s.internalError(w, r, err)
+			return
+		}
+		sess.SetDisplayName(name)
+		for _, rs := range s.terms.Running(u.ID, sess.HostID) {
+			if rs.ID != sess.ID && rs.Persistence == store.PersistHerdr && herdrDisplayKey(rs.HerdrSession) == muxKey {
+				rs.SetDisplayName(name)
+			}
+		}
+		s.audit(r, "session.rename", sess.HostName, map[string]any{
+			"session": sess.ID, "persistence": sess.Persistence, "mux_session": muxKey, "from": oldDisplay, "to": name, "remote": false,
+		})
+		writeJSON(w, http.StatusOK, sess.Info())
+	default:
+		name := strings.TrimSpace(b.Name)
+		if !validSessionDisplayName(name) {
+			writeError(w, http.StatusBadRequest, "invalid_session_name", "enter a session name (1–64 characters, no control characters)")
+			return
+		}
+		oldDisplay := sess.CurrentDisplayName()
+		sess.SetDisplayName(name)
+		s.audit(r, "session.rename", sess.HostName, map[string]any{
+			"session": sess.ID, "persistence": sess.Persistence, "from": oldDisplay, "to": name, "remote": false,
+		})
+		writeJSON(w, http.StatusOK, sess.Info())
+	}
 }
 
 // Screen previews -----------------------------------------------------------

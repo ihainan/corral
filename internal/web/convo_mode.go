@@ -148,7 +148,7 @@ func (s *Server) convoModeTo(w http.ResponseWriter, ctx context.Context, sess *t
 		outBytes, err := s.runGated(ctx, sess, gatedReq{
 			Gate:    gate,
 			Mode:    sess.Persistence,
-			Session: sess.TmuxSession,
+			Session: sess.CurrentTmuxSession(),
 			Pane:    pane,
 			Socket:  socket,
 			PID:     pid,

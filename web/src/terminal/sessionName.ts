@@ -5,6 +5,7 @@ import { t } from '../i18n'
 // tmux's or herdr's own name; a plain shell is numbered among the host's
 // plain shells (of `all`) only when there are several.
 export function sessionWhich(s: SessionInfo, all: SessionInfo[]): string {
+  if (s.display_name) return s.display_name
   if (s.persistence === 'tmux') return s.mux_session || 'tmux'
   if (s.persistence === 'herdr') return s.mux_session && s.mux_session !== 'default' ? 'herdr ' + s.mux_session : 'herdr'
   // (Numbered as they were opened, not by where their tabs are: a tab moved

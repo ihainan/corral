@@ -715,7 +715,7 @@ func (s *Server) convoModelLine(w http.ResponseWriter, ctx context.Context, sess
 	}
 	wrote, _ := json.Marshal(arg)
 	rec := store.SettingsPending{Account: account, OwnerID: sess.OwnerID, HostID: sess.HostID, Had: had, Was: was, Wrote: wrote,
-		Mode: sess.Persistence, TmuxName: sess.TmuxSession, Pane: pane, Socket: socket, PID: pid, Start: start, SID: sid, Log: log, LogOff: off, CreatedAt: time.Now().Unix()}
+		Mode: sess.Persistence, TmuxName: sess.CurrentTmuxSession(), Pane: pane, Socket: socket, PID: pid, Start: start, SID: sid, Log: log, LogOff: off, CreatedAt: time.Now().Unix()}
 	if err = s.store.PutSettingsPending(ctx, rec); err == nil {
 		pendingMem.Delete(account) // (what the store could not be told of a line before this one: this one's row is there now)
 	}
@@ -743,7 +743,7 @@ func (s *Server) convoModelLine(w http.ResponseWriter, ctx context.Context, sess
 				_, err := s.runGated(ctx, sess, gatedReq{
 					Gate:    "free",
 					Mode:    mode,
-					Session: sess.TmuxSession,
+					Session: sess.CurrentTmuxSession(),
 					Pane:    pane,
 					Socket:  socket,
 					PID:     pid,
@@ -773,7 +773,7 @@ func (s *Server) convoModelLine(w http.ResponseWriter, ctx context.Context, sess
 				_, err := s.runGated(ctx, sess, gatedReq{
 					Gate:    "panel:" + digest,
 					Mode:    mode,
-					Session: sess.TmuxSession,
+					Session: sess.CurrentTmuxSession(),
 					Pane:    pane,
 					Socket:  socket,
 					PID:     pid,

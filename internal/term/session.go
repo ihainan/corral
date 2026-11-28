@@ -130,6 +130,9 @@ type Info struct {
 	// tmux or herdr session it is attached to ("" for herdr's default).
 	Persistence string `json:"persistence"`
 	MuxSession  string `json:"mux_session"`
+	// Optional Corral display name (used when the remote multiplexer does not
+	// support renaming sessions, e.g. herdr, or for plain shells).
+	DisplayName string `json:"display_name,omitempty"`
 	Watching    int    `json:"watching"` // windows of other users watching, read-only
 	// Side information such as the herdr summary, as last published.
 	Meta json.RawMessage `json:"meta,omitempty"`
@@ -155,10 +158,12 @@ type Session struct {
 	Created  time.Time
 	// The host configuration the session was opened with (see StartOptions).
 	HostConfig string
-	// What the shell runs in, as in StartOptions; fixed for the session's life.
+	// What the shell runs in, as in StartOptions; TmuxSession and DisplayName
+	// may be updated under mu when the user renames the session.
 	Persistence  string
 	TmuxSession  string
 	HerdrSession string
+	DisplayName  string
 
 	client *ssh.Client
 	ssh    *ssh.Session
@@ -282,7 +287,7 @@ func (s *Session) Info() Info {
 	}
 	return Info{ID: s.ID, HostID: s.HostID, HostName: s.HostName, State: s.state, CreatedAt: s.Created.Unix(),
 		Viewers: own, Watching: watching, Cols: s.cols, Rows: s.rows, Title: s.title, Recording: s.rec != nil && s.rec.Active(),
-		Persistence: s.Persistence, MuxSession: s.muxSession(),
+		Persistence: s.Persistence, MuxSession: s.muxSession(), DisplayName: s.DisplayName,
 		Meta: append(json.RawMessage(nil), s.meta...), PreviewRev: s.prevRev}
 }
 
@@ -832,7 +837,7 @@ func (s *Session) scanTitle(p []byte) {
 	}
 }
 
-// muxSession is the tmux or herdr session the shell is attached to.
+// muxSession is the tmux or herdr session the shell is attached to; called with mu held.
 func (s *Session) muxSession() string {
 	switch s.Persistence {
 	case "tmux":
@@ -841,4 +846,32 @@ func (s *Session) muxSession() string {
 		return s.HerdrSession
 	}
 	return ""
+}
+
+// CurrentTmuxSession returns the session's current tmux session name safely.
+func (s *Session) CurrentTmuxSession() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.TmuxSession
+}
+
+// SetTmuxSession updates the session's tmux session name after a remote rename.
+func (s *Session) SetTmuxSession(name string) {
+	s.mu.Lock()
+	s.TmuxSession = name
+	s.mu.Unlock()
+}
+
+// CurrentDisplayName returns the session's Corral display name override, if any.
+func (s *Session) CurrentDisplayName() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.DisplayName
+}
+
+// SetDisplayName updates the session's Corral display name override.
+func (s *Session) SetDisplayName(name string) {
+	s.mu.Lock()
+	s.DisplayName = name
+	s.mu.Unlock()
 }

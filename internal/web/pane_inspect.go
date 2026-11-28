@@ -275,7 +275,7 @@ func (s *Server) apiPaneInspect(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "bad_request", "invalid tmux pane id")
 			return
 		}
-		res, err := sshx.Exec(ctx, sess.Client(), tmuxPaneInspectCommand(sess.TmuxSession, pane), 64<<10, sshx.ExecOptions{Interactive: true, AwaitSlot: 2 * time.Second})
+		res, err := sshx.Exec(ctx, sess.Client(), tmuxPaneInspectCommand(sess.CurrentTmuxSession(), pane), 64<<10, sshx.ExecOptions{Interactive: true, AwaitSlot: 2 * time.Second})
 		if errors.Is(err, sshx.ErrBusy) {
 			writeSSHChannelsBusy(w)
 			return

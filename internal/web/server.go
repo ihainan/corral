@@ -278,6 +278,7 @@ func (s *Server) registerRoutes() {
 
 	s.handle("GET /api/sessions", SignedIn, s.apiListSessions)
 	s.handle("POST /api/sessions", SignedIn, s.apiOpenSession)
+	s.handle("PUT /api/sessions/{id}/name", SignedIn, s.apiRenameSession)
 	s.handle("DELETE /api/sessions/{id}", SignedIn, s.apiCloseSession)
 	s.handle("GET /api/sessions/{id}/ws", SignedIn, s.apiSessionSocket)
 	s.handle("GET /api/sessions/{id}/pane-ws", SignedIn, s.apiPaneSocket)

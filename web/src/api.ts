@@ -81,6 +81,7 @@ export interface SessionInfo {
   meta?: HerdrSummary // last side information published by the session
   persistence?: 'none' | 'tmux' | 'herdr' // what the shell runs in
   mux_session?: string // the tmux or herdr session ('' for herdr's default)
+  display_name?: string // optional Corral display name (e.g. herdr alias or plain shell name)
   preview_rev?: number // counts the screens windows sent (see SessionPreview)
 }
 
@@ -104,10 +105,10 @@ export interface HostChoices {
     tmux: boolean
     tmux_sessions: { name: string; windows: number; attached: boolean }[]
     herdr: boolean
-    herdr_sessions: { name: string; default: boolean; running: boolean }[]
+    herdr_sessions: { name: string; display_name?: string; default: boolean; running: boolean }[]
     unknown?: boolean
   }
-  running: { id: string; kind: 'shell' | 'tmux' | 'herdr'; name: string; title: string; created_at: number }[]
+  running: { id: string; kind: 'shell' | 'tmux' | 'herdr'; name: string; display_name?: string; title: string; created_at: number }[]
   pending: string
 }
 

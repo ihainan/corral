@@ -982,7 +982,7 @@ func (s *Server) convoModel(w http.ResponseWriter, ctx context.Context, sess *te
 		outBytes, err := s.runGated(ctx, sess, gatedReq{
 			Gate:    gate,
 			Mode:    sess.Persistence,
-			Session: sess.TmuxSession,
+			Session: sess.CurrentTmuxSession(),
 			Pane:    pane,
 			Socket:  socket,
 			PID:     pid,

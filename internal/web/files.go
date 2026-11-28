@@ -743,9 +743,10 @@ func (s *Server) paneCwdInteractive(ctx context.Context, sess *term.Session, pan
 	case "tmux":
 		// (A pane of its own named — the conversation's, "%3" — that pane's, where it is
 		// of this session; none: its active one. Never another's for it: review 11-15.)
-		cmd := tmuxCwdCommand(sess.TmuxSession)
+		tmuxName := sess.CurrentTmuxSession()
+		cmd := tmuxCwdCommand(tmuxName)
 		if tmuxPaneID.MatchString(pane) {
-			cmd = tmuxPaneCwdCommand(sess.TmuxSession, pane)
+			cmd = tmuxPaneCwdCommand(tmuxName, pane)
 		}
 		var await time.Duration
 		if interactive {
@@ -1351,7 +1352,7 @@ func (s *Server) pathPrefix(ctx context.Context, sess *term.Session) string {
 			}
 		}
 	case "tmux":
-		res, err := sshx.Exec(ctx, sess.Client(), tmuxForegroundCommand(sess.TmuxSession), 4096, sshx.ExecOptions{Interactive: true, AwaitSlot: 2 * time.Second})
+		res, err := sshx.Exec(ctx, sess.Client(), tmuxForegroundCommand(sess.CurrentTmuxSession()), 4096, sshx.ExecOptions{Interactive: true, AwaitSlot: 2 * time.Second})
 		if err != nil {
 			return ""
 		}

@@ -97,6 +97,7 @@ function matchSessionTokens(s: OldSession, q: string): boolean {
 }
 
 function sessionOptionLabel(s: SessionInfo): string {
+  if (s.display_name) return `${s.host_name} · ${s.display_name}`
   const raw = s.mux_session ?? ''
   const name = !raw || raw === 'default' ? t('newAgent.sessionDefault') : /^\d+$/.test(raw) ? t('newAgent.sessionNumbered', { n: raw }) : raw
   return `${s.host_name} · ${s.persistence === 'tmux' ? 'tmux' : 'herdr'} ${name}`

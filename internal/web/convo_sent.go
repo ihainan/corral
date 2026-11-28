@@ -175,7 +175,7 @@ func (s *Server) sentEnter(w http.ResponseWriter, ctx context.Context, sess *ter
 	_, err = s.runGated(ctx, sess, gatedReq{
 		Gate:    freeGate,
 		Mode:    sess.Persistence,
-		Session: sess.TmuxSession,
+		Session: sess.CurrentTmuxSession(),
 		Pane:    pane,
 		Socket:  socket,
 		PID:     pid,

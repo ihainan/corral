@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"golang.org/x/crypto/ssh"
 
@@ -41,14 +42,60 @@ type openChoice struct {
 
 func (c *openChoice) valid() bool {
 	switch c.Kind {
-	case openShell, openTmuxNew, openHerdrNew:
+	case openShell:
 		return c.Name == ""
+	case openTmuxNew, openHerdrNew:
+		return c.Name == "" || tmuxNameRE.MatchString(c.Name)
 	case openTmux:
 		return tmuxNameRE.MatchString(c.Name)
 	case openHerdr:
 		return c.Name == "" || tmuxNameRE.MatchString(c.Name)
 	}
 	return false
+}
+
+// validSessionDisplayName reports whether s is an acceptable Corral display
+// name for a session whose remote multiplexer cannot be renamed (e.g. herdr)
+// or a plain shell: 1..64 visible runes, no control characters.
+func validSessionDisplayName(s string) bool {
+	if s == "" || !utf8.ValidString(s) {
+		return false
+	}
+	n := 0
+	for _, r := range s {
+		if r < 0x20 || r == 0x7f || (r >= 0x80 && r < 0xa0) {
+			return false
+		}
+		n++
+		if n > 64 {
+			return false
+		}
+	}
+	return n > 0
+}
+
+// herdrDisplayKey normalizes a herdr session name for session_names lookups:
+// herdr's default session is stored under "default".
+func herdrDisplayKey(name string) string {
+	if name == "" {
+		return "default"
+	}
+	return name
+}
+
+// tmuxRenameCommand renames an existing tmux session from oldName to newName
+// after verifying newName does not already exist (exact match). Both names
+// must already be validated against tmuxNameRE.
+// Exit code 10 ("duplicate") indicates newName already exists; exit code 11
+// ("missing") indicates oldName was not found or tmux is unavailable.
+func tmuxRenameCommand(oldName, newName string) string {
+	script := `PATH="$HOME/.local/bin:$HOME/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"; ` +
+		`command -v tmux >/dev/null 2>&1 || { echo missing; exit 11; }; ` +
+		`tmux -u has-session -t "=$2" >/dev/null 2>&1 && { echo duplicate; exit 10; }; ` +
+		`out=$(tmux -u rename-session -t "=$1" -- "$2" 2>&1) && exit 0; ` +
+		`case "$out" in *"duplicate session"*) echo duplicate; exit 10;; *"can't find session"*|*"no server running"*) echo missing; exit 11;; esac; ` +
+		`printf "%s\n" "$out" >&2; exit 1`
+	return "sh -c " + sshx.QuoteShell(script) + " corral " + sshx.QuoteShell(oldName) + " " + sshx.QuoteShell(newName)
 }
 
 // What a host has to choose from.
@@ -59,9 +106,10 @@ type tmuxSession struct {
 }
 
 type herdrChoice struct {
-	Name    string `json:"name"`
-	Default bool   `json:"default"`
-	Running bool   `json:"running"` // a stopped one starts again when opened
+	Name        string `json:"name"`
+	DisplayName string `json:"display_name,omitempty"`
+	Default     bool   `json:"default"`
+	Running     bool   `json:"running"` // a stopped one starts again when opened
 }
 
 type hostChoices struct {
@@ -344,11 +392,12 @@ func (o *openSlots) release(user int64) {
 
 // runningChoice is a Corral terminal of the host that is running now.
 type runningChoice struct {
-	ID        string `json:"id"`
-	Kind      string `json:"kind"` // what it runs in: shell, tmux or herdr
-	Name      string `json:"name"`
-	Title     string `json:"title"`
-	CreatedAt int64  `json:"created_at"`
+	ID          string `json:"id"`
+	Kind        string `json:"kind"` // what it runs in: shell, tmux or herdr
+	Name        string `json:"name"`
+	DisplayName string `json:"display_name,omitempty"`
+	Title       string `json:"title"`
+	CreatedAt   int64  `json:"created_at"`
 }
 
 // sameMux is true for two names of one tmux or herdr session: for herdr, ""
