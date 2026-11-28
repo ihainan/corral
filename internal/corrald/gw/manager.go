@@ -96,6 +96,7 @@ type ManagerConfig struct {
 	BeforeUpdateStage  func(hostID int64, opID string)
 	BeforeRebindMark   func(hostID int64, source string)
 	AfterScopeClaim    func(hostID int64, opID string)
+	AfterAttachHello   func(hostID int64)
 }
 
 // API view types matching web/src/corraldLogic.ts.
@@ -332,6 +333,7 @@ type Manager struct {
 	gatewayID           string
 	gatewayVersion      string
 	adminDisabled       atomic.Bool
+	policyMu            sync.RWMutex
 	healthInterval      time.Duration
 	restartBackoffs     []time.Duration
 	crashWindow         time.Duration
@@ -1519,12 +1521,12 @@ func (m *Manager) onHostConnectedOwned(ctx context.Context, userID, hostID int64
 	}
 
 	if m.AdminDisabled() {
-		if ch.State == StateRemovePending || ch.State == StateRemoving {
+		switch ch.State {
+		case StateRemovePending, StateRemoving, StateRunning, StateStopped, StateLost, StateError, StatePaused, StateUpdating, StateInstalling:
 			if CheckBinding(toSnapshot(ch), fingerprint, sshUser, m.gatewayID) {
 				acct := accountKey{Fingerprint: fingerprint, Username: sshUser}
 				if !m.hasRunningOp(hostID, acct) {
-					activeOp, _ := m.store.ActiveCorraldOp(ctx, hostID)
-					m.reconcileHost(ctx, userID, hostID, corralUser, fingerprint, sshUser, sshClient, ch, activeOp)
+					m.handleAdminDisabledOnConnect(ctx, userID, hostID, corralUser, fingerprint, sshUser, sshClient, ch)
 				}
 			}
 		}
@@ -1600,7 +1602,7 @@ func (m *Manager) onHostConnectedOwned(ctx context.Context, userID, hostID int64
 		stateDir := sc.stateDir
 		cachedFailed := slices.Clone(sc.failedReleases)
 		sc.mu.Unlock()
-		if live {
+		if live && !m.AdminDisabled() {
 			hello, err := client.Hello(ctx, proto.HelloParams{
 				Gateway:        m.gatewayID,
 				GatewayVersion: m.gatewayVersion,
@@ -1624,21 +1626,39 @@ func (m *Manager) onHostConnectedOwned(ctx context.Context, userID, hostID int64
 						}
 					}
 				}
-				sc.mu.Lock()
-				sc.hello = hello
-				sc.hostRefs[hostID] = &hostRef{HostID: hostID, OwnerID: userID, CorralUser: corralUser}
-				sc.mu.Unlock()
+				m.policyMu.RLock()
+				if m.adminDisabled.Load() {
+					m.policyMu.RUnlock()
+					m.handleAdminDisabledOnConnect(ctx, userID, hostID, corralUser, fingerprint, sshUser, sshClient, ch)
+					return
+				}
 				m.mu.Lock()
-				m.hostConn[hostID] = key
+				stillActive := m.conns[key] == sc
+				if stillActive {
+					m.hostConn[hostID] = key
+				}
 				m.mu.Unlock()
-				_, _ = m.store.UpdateCorraldRunningIfIdle(
-					ctx, hostID, fingerprint, sshUser, m.gatewayID,
-					hello.Version, hello.Release, "", "", nil, time.Now().Unix(), false, nil,
-				)
-				m.scheduleWatchReconcile(sc)
-				m.notifyCoverageChanged([]int64{hostID})
-				m.evaluateUpdateAfterConnect(ctx, userID, hostID, corralUser, fingerprint, sshUser, nil, mergeReleaseLists(failedRec.ReleaseList(), cachedFailed, ch.FailedReleases))
-				return
+				if !stillActive {
+					m.policyMu.RUnlock()
+					if m.AdminDisabled() {
+						m.handleAdminDisabledOnConnect(ctx, userID, hostID, corralUser, fingerprint, sshUser, sshClient, ch)
+						return
+					}
+				} else {
+					sc.mu.Lock()
+					sc.hello = hello
+					sc.hostRefs[hostID] = &hostRef{HostID: hostID, OwnerID: userID, CorralUser: corralUser}
+					sc.mu.Unlock()
+					_, _ = m.store.UpdateCorraldRunningIfIdle(
+						ctx, hostID, fingerprint, sshUser, m.gatewayID,
+						hello.Version, hello.Release, "", "", nil, time.Now().Unix(), false, nil,
+					)
+					m.policyMu.RUnlock()
+					m.scheduleWatchReconcile(sc)
+					m.notifyCoverageChanged([]int64{hostID})
+					m.evaluateUpdateAfterConnect(ctx, userID, hostID, corralUser, fingerprint, sshUser, nil, mergeReleaseLists(failedRec.ReleaseList(), cachedFailed, ch.FailedReleases))
+					return
+				}
 			}
 		}
 	}
@@ -1673,9 +1693,16 @@ func (m *Manager) onHostConnectedOwned(ctx context.Context, userID, hostID int64
 
 	// Try connecting directly first; if not listening, start via `corrald serve`.
 	if err := m.attachAndHello(ctx, userID, hostID, corralUser, fingerprint, sshUser, sshClient, own, probe, sock, ch, ""); err != nil {
+		if errors.Is(err, ErrAdminDisabled) {
+			return
+		}
 		var rpcErr *proto.RPCError
 		if errors.As(err, &rpcErr) && rpcErr.Code == proto.ErrProtoMismatch {
 			return // already transitioned to StateIncompatible
+		}
+		if m.AdminDisabled() {
+			m.handleAdminDisabledOnConnect(ctx, userID, hostID, corralUser, fingerprint, sshUser, sshClient, ch)
+			return
 		}
 		probe, cand, allFailed, selErr := m.resolveStartBinary(ctx, sshClient, probe, hostID, fingerprint, sshUser, ch, nil, StartSelectOptions{})
 		if selErr != nil {
@@ -1683,6 +1710,10 @@ func (m *Manager) onHostConnectedOwned(ctx context.Context, userID, hostID int64
 			return
 		}
 		ch.FailedReleases = allFailed
+		if m.AdminDisabled() {
+			m.handleAdminDisabledOnConnect(ctx, userID, hostID, corralUser, fingerprint, sshUser, sshClient, ch)
+			return
+		}
 		_, startedSock, fail := RunServeWithRetry(ctx, sshClient, cand.Path, m.gatewayID, probe.MachineID, probe.OS, probe.Arch, m.busyRetry)
 		if fail != nil {
 			if fail.Code == proto.ErrRemoving {
@@ -1692,10 +1723,17 @@ func (m *Manager) onHostConnectedOwned(ctx context.Context, userID, hostID int64
 			_, _ = m.store.SetCorraldErrorIfIdle(ctx, hostID, encodeLastError(fail))
 			return
 		}
+		if m.AdminDisabled() {
+			m.handleAdminDisabledOnConnect(ctx, userID, hostID, corralUser, fingerprint, sshUser, sshClient, ch)
+			return
+		}
 		if startedSock != "" {
 			sock = startedSock
 		}
 		if err := m.attachAndHello(ctx, userID, hostID, corralUser, fingerprint, sshUser, sshClient, own, probe, sock, ch, ""); err != nil {
+			if errors.Is(err, ErrAdminDisabled) {
+				return
+			}
 			if !errors.As(err, &rpcErr) || rpcErr.Code != proto.ErrProtoMismatch {
 				_, _ = m.store.SetCorraldErrorIfIdle(ctx, hostID, encodeLastError(&OpFailure{Code: "start_failed", Detail: err.Error(), MachineID: probe.MachineID}))
 			}
@@ -2124,6 +2162,11 @@ func (m *Manager) runInstallWithSSH(ctx context.Context, rop *runningOp, op *sto
 
 	// Step: start (no longer cancellable past this point).
 	// Re-probe so SelectStartBinary observes the freshly installed symlink & version dirs.
+	if m.AdminDisabled() {
+		m.handleAdminDisabledOnConnect(context.Background(), userID, hostID, corralUser, fp, sshUser, sshClient, ch)
+		m.finishOpCancelled(op, ch)
+		return
+	}
 	setStep("start")
 	freshProbe, cand, _, selErr := m.resolveStartBinary(ctx, sshClient, nil, hostID, fp, sshUser, ch, nil, StartSelectOptions{})
 	if selErr != nil {
@@ -2141,10 +2184,21 @@ func (m *Manager) runInstallWithSSH(ctx context.Context, rop *runningOp, op *sto
 	if freshProbe != nil {
 		probe = freshProbe
 	}
+	if m.AdminDisabled() {
+		m.handleAdminDisabledOnConnect(context.Background(), userID, hostID, corralUser, fp, sshUser, sshClient, ch)
+		m.finishOpCancelled(op, ch)
+		return
+	}
 	_, sock, serveFail := RunServeWithRetry(ctx, sshClient, cand.Path, m.gatewayID, probe.MachineID, probe.OS, probe.Arch, m.busyRetry)
 	if serveFail != nil {
 		ch.MachineID = probe.MachineID
 		m.finishOpFail(op, ch, serveFail)
+		return
+	}
+	if m.AdminDisabled() {
+		m.handleAdminDisabledOnConnect(context.Background(), userID, hostID, corralUser, fp, sshUser, sshClient, ch)
+		op.State = OpCancelled
+		_, _ = m.store.UpdateCorraldOpIfActive(context.Background(), op)
 		return
 	}
 	if sock == "" {
@@ -2160,6 +2214,11 @@ func (m *Manager) runInstallWithSSH(ctx context.Context, rop *runningOp, op *sto
 	}
 
 	if err := m.attachAndHello(ctx, userID, hostID, corralUser, fp, sshUser, sshClient, own, probe, sock, ch, op.ID); err != nil {
+		if errors.Is(err, ErrAdminDisabled) {
+			op.State = OpCancelled
+			_, _ = m.store.UpdateCorraldOpIfActive(context.Background(), op)
+			return
+		}
 		var rpcErr *proto.RPCError
 		if errors.As(err, &rpcErr) && rpcErr.Code == proto.ErrProtoMismatch {
 			op.State = OpFailed
@@ -2333,6 +2392,11 @@ func (m *Manager) launchUpdateOp(ctx context.Context, userID, hostID int64, corr
 		defer close(rop.done)
 		defer m.clearRunningOp(rop)
 		defer func() {
+			if m.AdminDisabled() {
+				op.State = OpCancelled
+				_, _ = m.store.ReleaseCorraldHostOpAndFinish(context.Background(), hostID, op, StateStopped)
+				return
+			}
 			op.State = OpFailed
 			if op.ErrorCode == "" {
 				op.ErrorCode = "other"
@@ -2353,7 +2417,7 @@ func (m *Manager) runUpdateOp(ctx context.Context, rop *runningOp, op *store.Cor
 		op.Step = step
 		_, _ = m.store.UpdateCorraldOpIfActive(context.Background(), op)
 	}
-	isCancelled := func() bool { return m.isOpCancelled(rop) }
+	isCancelled := func() bool { return m.isOpCancelled(rop) || m.AdminDisabled() }
 
 	prevVer := ch.Version
 	prevRel := ch.Release
@@ -2430,6 +2494,9 @@ func (m *Manager) runUpdateOp(ctx context.Context, rop *runningOp, op *store.Cor
 		if freshProbe != nil {
 			probe = freshProbe
 		}
+		if isCancelled() {
+			return
+		}
 		_, sock, serveFail := RunServeWithRetry(ctx, sshClient, cand.Path, m.gatewayID, probe.MachineID, probe.OS, probe.Arch, m.busyRetry)
 		if serveFail != nil {
 			if isCancelled() {
@@ -2442,12 +2509,18 @@ func (m *Manager) runUpdateOp(ctx context.Context, rop *runningOp, op *store.Cor
 			_, _ = m.store.FinalizeCorraldOpWithHost(context.Background(), op, ch)
 			return
 		}
+		if isCancelled() {
+			if m.AdminDisabled() {
+				m.handleAdminDisabledOnConnect(context.Background(), userID, hostID, corralUser, fp, sshUser, sshClient, ch)
+			}
+			return
+		}
 		setStep("verify")
 		if sock == "" {
 			sock = probe.SocketPath
 		}
 		if err := m.attachAndHello(ctx, userID, hostID, corralUser, fp, sshUser, sshClient, own, probe, sock, ch, op.ID); err != nil {
-			if isCancelled() {
+			if isCancelled() || errors.Is(err, ErrAdminDisabled) {
 				return
 			}
 			ch.State = StateError
@@ -2550,6 +2623,9 @@ func (m *Manager) runUpdateOp(ctx context.Context, rop *runningOp, op *store.Cor
 			m.finishUpdateFailKeepPrev(op, ch, rbVer, rbRel, attemptedVer, primaryErr)
 		}
 
+		if isCancelled() {
+			return
+		}
 		_, sock, serveFail := RunServeWithRetry(ctx, sshClient, cand.Path, m.gatewayID, probe.MachineID, probe.OS, probe.Arch, m.busyRetry)
 		if serveFail != nil {
 			// B-4: Attribute failure to the ACTUAL started release (cand.Release),
@@ -2569,11 +2645,20 @@ func (m *Manager) runUpdateOp(ctx context.Context, rop *runningOp, op *store.Cor
 			tryColdRollback(serveFail.Error(), cand.Release, false)
 			return
 		}
+		if isCancelled() {
+			if m.AdminDisabled() {
+				m.handleAdminDisabledOnConnect(context.Background(), userID, hostID, corralUser, fp, sshUser, sshClient, ch)
+			}
+			return
+		}
 		setStep("verify")
 		if sock == "" {
 			sock = probe.SocketPath
 		}
 		if err := m.attachAndHello(ctx, userID, hostID, corralUser, fp, sshUser, sshClient, own, probe, sock, ch, op.ID); err != nil {
+			if errors.Is(err, ErrAdminDisabled) || isCancelled() {
+				return
+			}
 			tryColdRollback(err.Error(), cand.Release, true)
 			return
 		}
@@ -2757,15 +2842,21 @@ func (m *Manager) runUpdateOp(ctx context.Context, rop *runningOp, op *store.Cor
 	}
 
 	// Step: verify — reconnect to the new process and confirm its Release.
+	if isCancelled() {
+		return
+	}
 	setStep("verify")
 	if !alreadyAtTarget {
 		if err := m.reconnectSharedConn(ctx, sc, sshClient, own); err != nil {
-			if isCancelled() {
+			if isCancelled() || errors.Is(err, ErrAdminDisabled) {
 				return
 			}
 			m.finishUpdateFailKeepPrev(op, ch, prevVer, prevRel, dist.Version, err.Error())
 			return
 		}
+	}
+	if isCancelled() {
+		return
 	}
 
 	readyTime := time.Now()
@@ -2896,17 +2987,17 @@ func (m *Manager) attachAndHello(
 	ch *store.CorraldHost,
 	opID string,
 ) error {
+	if m.AdminDisabled() {
+		return ErrAdminDisabled
+	}
 	key := accountKey{Fingerprint: fp, Username: sshUser}
 
-	var sc *sharedConn
 	m.mu.Lock()
-	sc = m.conns[key]
+	sc := m.conns[key]
+	m.mu.Unlock()
 	if sc == nil {
 		sc = newSharedConn(key)
-		m.conns[key] = sc
 	}
-	m.hostConn[hostID] = key
-	m.mu.Unlock()
 
 	onEv := func(ev proto.Event) {
 		m.handleDaemonEvent(sc, ev)
@@ -2956,6 +3047,15 @@ func (m *Manager) attachAndHello(
 		return &proto.RPCError{Code: proto.ErrProtoMismatch, Message: "daemon protocol out of gateway range"}
 	}
 
+	if m.cfg.AfterAttachHello != nil {
+		m.cfg.AfterAttachHello(hostID)
+	}
+	if m.AdminDisabled() {
+		m.enforceAdminDisableOnClient(ctx, client, hello, []int64{hostID}, key)
+		_ = client.Close()
+		return ErrAdminDisabled
+	}
+
 	// Subscribe to events via daemon.resume.
 	sc.mu.Lock()
 	prevEpoch, prevSeq := sc.epoch, sc.lastSeq
@@ -2979,6 +3079,33 @@ func (m *Manager) attachAndHello(
 	}
 
 	health, _ := client.Health(ctx)
+
+	// Publish connection and transition DB to running under policyMu.RLock so
+	// concurrent SetAdminDisabled(true) is strictly ordered either before (we
+	// see adminDisabled==true and close immediately) or after (SetAdminDisabled
+	// snapshots this conn and overwrites DB after us).
+	m.policyMu.RLock()
+	if m.adminDisabled.Load() {
+		m.policyMu.RUnlock()
+		m.enforceAdminDisableOnClient(ctx, client, hello, []int64{hostID}, key)
+		_ = client.Close()
+		return ErrAdminDisabled
+	}
+
+	m.mu.Lock()
+	if m.closed {
+		m.mu.Unlock()
+		m.policyMu.RUnlock()
+		_ = client.Close()
+		return errors.New("manager closed")
+	}
+	if existing := m.conns[key]; existing != nil {
+		sc = existing
+	} else {
+		m.conns[key] = sc
+	}
+	m.hostConn[hostID] = key
+	m.mu.Unlock()
 
 	// Transfer SSH release ownership to sc now that Dial+Hello succeeded (Item 2).
 	newRelease := own.take()
@@ -3033,13 +3160,6 @@ func (m *Manager) attachAndHello(
 		sc.hostRefs[hostID] = &hostRef{HostID: hostID, OwnerID: userID, CorralUser: corralUser}
 	})
 
-	if oldClient != nil && oldClient != client {
-		_ = oldClient.Close()
-	}
-	if oldRelease != nil && oldSSH != sshClient {
-		oldRelease()
-	}
-
 	now := time.Now().Unix()
 	if opID != "" {
 		ch.State = StateRunning
@@ -3063,6 +3183,14 @@ func (m *Manager) attachAndHello(
 			context.Background(), hostID, fp, sshUser, m.gatewayID,
 			hello.Version, hello.Release, socketPath, mid, ch.Files, now, true, nil,
 		)
+	}
+	m.policyMu.RUnlock()
+
+	if oldClient != nil && oldClient != client {
+		_ = oldClient.Close()
+	}
+	if oldRelease != nil && oldSSH != sshClient {
+		oldRelease()
 	}
 
 	// Start monitor loop for this client generation.
@@ -3094,6 +3222,9 @@ func (m *Manager) handleDaemonEvent(sc *sharedConn, ev proto.Event) {
 
 	switch ev.Event {
 	case proto.EventDaemonReconnect:
+		if m.AdminDisabled() {
+			return
+		}
 		// Hot-update handoff completed: reconnect immediately unless runUpdateOp is already doing it.
 		sc.mu.Lock()
 		already := sc.reconnecting || sc.updating
@@ -3131,6 +3262,9 @@ func (m *Manager) handleDaemonEvent(sc *sharedConn, ev proto.Event) {
 }
 
 func (m *Manager) reconnectSharedConn(ctx context.Context, sc *sharedConn, overrideSSH *ssh.Client, overrideOwn *sshOwnership) error {
+	if m.AdminDisabled() {
+		return ErrAdminDisabled
+	}
 	sc.mu.Lock()
 	sock := sc.socketPath
 	oldClient := sc.client
@@ -3269,6 +3403,28 @@ func (m *Manager) reconnectSharedConn(ctx context.Context, sc *sharedConn, overr
 		}
 	}
 
+	// Re-check policy under policyMu.RLock before publishing the reconnected
+	// client so a concurrent SetAdminDisabled(true) cannot be bypassed.
+	m.policyMu.RLock()
+	if m.adminDisabled.Load() {
+		m.policyMu.RUnlock()
+		hostIDs := make([]int64, 0, len(refs))
+		for _, r := range refs {
+			hostIDs = append(hostIDs, r.HostID)
+		}
+		m.enforceAdminDisableOnClient(ctx, newClient, hello, hostIDs, sc.key)
+		_ = newClient.Close()
+		return ErrAdminDisabled
+	}
+	m.mu.Lock()
+	stillRegistered := !m.closed && m.conns[sc.key] == sc
+	m.mu.Unlock()
+	if !stillRegistered {
+		m.policyMu.RUnlock()
+		_ = newClient.Close()
+		return ErrNotConnected
+	}
+
 	// Transfer SSH ownership to sc so caller does not close the live SSH conn (Item 2).
 	newRelease := own.take()
 
@@ -3306,6 +3462,7 @@ func (m *Manager) reconnectSharedConn(ctx context.Context, sc *sharedConn, overr
 			sc.watchLogsSig = newWatchSig
 		}
 	})
+	m.policyMu.RUnlock()
 
 	if oldClient != nil && oldClient != newClient {
 		_ = oldClient.Close()
@@ -3383,6 +3540,9 @@ func (m *Manager) monitorConn(sc *sharedConn, client *Client) {
 }
 
 func (m *Manager) handleUnexpectedDisconnect(sc *sharedConn) {
+	if m.AdminDisabled() {
+		return
+	}
 	sc.mu.Lock()
 	if sc.recovering || sc.intentionalClose {
 		sc.mu.Unlock()
@@ -3463,14 +3623,23 @@ func (m *Manager) handleUnexpectedDisconnect(sc *sharedConn) {
 
 	// Attempt automatic restart up to MaxAutoRestarts (3) with increasing backoff.
 	for attempt := 0; attempt < MaxAutoRestarts; attempt++ {
+		if m.AdminDisabled() {
+			return
+		}
 		wait := m.restartBackoffs[min(attempt, len(m.restartBackoffs)-1)]
 		select {
 		case <-sc.stopCh:
 			return
 		case <-time.After(wait):
 		}
+		if m.AdminDisabled() {
+			return
+		}
 
 		if m.tryRestartSharedConn(sc, refs) {
+			if m.AdminDisabled() {
+				return
+			}
 			recovered = true
 			sc.mu.Lock()
 			var restartVer string
@@ -3480,6 +3649,11 @@ func (m *Manager) handleUnexpectedDisconnect(sc *sharedConn) {
 				restartRel = sc.hello.Release
 			}
 			sc.mu.Unlock()
+			m.policyMu.RLock()
+			if m.adminDisabled.Load() {
+				m.policyMu.RUnlock()
+				return
+			}
 			now := time.Now().Unix()
 			for _, ref := range refs {
 				_, _ = m.store.UpdateCorraldRunningIfIdle(
@@ -3487,8 +3661,12 @@ func (m *Manager) handleUnexpectedDisconnect(sc *sharedConn) {
 					restartVer, restartRel, "", "", nil, now, false, nil,
 				)
 			}
+			m.policyMu.RUnlock()
 			m.scheduleWatchReconcile(sc)
 			m.notifyCoverageForConn(sc)
+			return
+		}
+		if m.AdminDisabled() {
 			return
 		}
 		for _, ref := range refs {
@@ -3579,9 +3757,18 @@ func (m *Manager) attemptPostUpdateRollback(
 		}
 	}
 
+	if m.AdminDisabled() {
+		return false
+	}
 	_, _ = runSSH(rctx, sshClient, StopCommand(rbCand.Path), 4096, sshx.ExecOptions{})
+	if m.AdminDisabled() {
+		return false
+	}
 	_, startedSock, sfail := RunServeWithRetry(rctx, sshClient, rbCand.Path, m.gatewayID, machineID, "Linux", "", m.busyRetry)
 	if sfail != nil {
+		return false
+	}
+	if m.AdminDisabled() {
 		return false
 	}
 	if startedSock != "" {
@@ -3633,6 +3820,9 @@ func (m *Manager) attemptPostUpdateRollback(
 }
 
 func (m *Manager) tryRestartSharedConn(sc *sharedConn, refs []*hostRef) bool {
+	if m.AdminDisabled() {
+		return false
+	}
 	rctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
@@ -3643,9 +3833,14 @@ func (m *Manager) tryRestartSharedConn(sc *sharedConn, refs []*hostRef) bool {
 	own := newSSHOwnership(relFn)
 	defer own.releaseIfOwned()
 
+	if m.AdminDisabled() {
+		return false
+	}
 	// Try direct reconnect first (e.g. transient SSH blip while daemon kept running).
 	if err := m.reconnectSharedConn(rctx, sc, sshClient, own); err == nil {
 		return true
+	} else if errors.Is(err, ErrAdminDisabled) {
+		return false
 	}
 
 	firstHostID := int64(0)
@@ -3668,8 +3863,19 @@ func (m *Manager) tryRestartSharedConn(sc *sharedConn, refs []*hostRef) bool {
 	sc.machineID = probe.MachineID
 	sc.mu.Unlock()
 
+	if m.AdminDisabled() {
+		return false
+	}
 	_, sock, fail := RunServeWithRetry(rctx, sshClient, cand.Path, m.gatewayID, probe.MachineID, probe.OS, probe.Arch, m.busyRetry)
 	if fail != nil {
+		return false
+	}
+	if m.AdminDisabled() {
+		if len(refs) > 0 && m.store != nil {
+			if ch, cerr := m.store.CorraldHostByID(rctx, refs[0].HostID); cerr == nil {
+				m.handleAdminDisabledOnConnect(rctx, refs[0].OwnerID, refs[0].HostID, refs[0].CorralUser, sc.key.Fingerprint, sc.key.Username, sshClient, ch)
+			}
+		}
 		return false
 	}
 	if sock != "" {

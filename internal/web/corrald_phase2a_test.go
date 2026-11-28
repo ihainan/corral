@@ -3,6 +3,7 @@ package web
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -10,6 +11,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -132,16 +134,24 @@ func TestCorraldPerfDailyFlushPruneAndThresholds(t *testing.T) {
 		t.Fatalf("RecordSSHVerified: %v", err)
 	}
 	consentUnder24h := fixedNow.Add(-23 * time.Hour).Unix()
-	consentOver24h := fixedNow.Add(-48 * time.Hour).Unix()
+	// Enabled just over 24 hours ago (consentDay = 2026-11-27, fixedNow = 2026-11-28 12:00 UTC).
+	consentOver24h := fixedNow.Add(-(24*time.Hour + time.Minute)).Unix()
 
-	// Seed 20 before-SSH (within 30d) and 20 after-corrald for "send",
-	// plus only 19 before-SSH and 25 after-corrald for "card" (below threshold),
-	// plus 30 SSH samples from 40 days before consent (must NOT be included in before window).
-	oldBeforeDay := time.Unix(consentOver24h, 0).UTC().AddDate(0, 0, -40).Format("2006-01-02")
-	validBeforeDay := time.Unix(consentOver24h, 0).UTC().AddDate(0, 0, -5).Format("2006-01-02")
-	afterDay := time.Unix(consentOver24h, 0).UTC().AddDate(0, 0, 1).Format("2006-01-02")
+	// Seed:
+	// - 30 SSH card samples from 40 days before consent (outside 30d window -> excluded)
+	// - 25 SSH card samples ON consentDay itself (Review Item #6: enable day excluded from before!)
+	// - 25 corrald card samples ON consentDay itself (Review Item #6: enable day excluded from after!)
+	// - 20 before-SSH (consentDay-1) and 20 after-corrald (consentDay+1) for "send" -> qualifies
+	// - 19 before-SSH (consentDay-1) and 25 after-corrald (consentDay+1) for "card" -> below threshold (<20)
+	consentTime := time.Unix(consentOver24h, 0).UTC()
+	oldBeforeDay := consentTime.AddDate(0, 0, -40).Format("2006-01-02")
+	validBeforeDay := consentTime.AddDate(0, 0, -1).Format("2006-01-02")
+	consentDay := consentTime.Format("2006-01-02")
+	afterDay := consentTime.AddDate(0, 0, 1).Format("2006-01-02")
 	if err := h.srv.store.AddCorraldPerfDailyBatch(context.Background(), []store.CorraldPerfDailyDelta{
 		{HostID: hostID, Day: oldBeforeDay, Op: "card", Via: "ssh", Count: 30, TotalUs: 90_000_000},
+		{HostID: hostID, Day: consentDay, Op: "card", Via: "ssh", Count: 25, TotalUs: 50_000_000},
+		{HostID: hostID, Day: consentDay, Op: "card", Via: "corrald", Count: 25, TotalUs: 7_500_000},
 		{HostID: hostID, Day: validBeforeDay, Op: "send", Via: "ssh", Count: 20, TotalUs: 38_000_000}, // avg 1900ms
 		{HostID: hostID, Day: afterDay, Op: "send", Via: "corrald", Count: 20, TotalUs: 6_000_000},    // avg 300ms
 		{HostID: hostID, Day: validBeforeDay, Op: "card", Via: "ssh", Count: 19, TotalUs: 38_000_000}, // <20
@@ -174,20 +184,23 @@ func TestCorraldPerfDailyFlushPruneAndThresholds(t *testing.T) {
 		t.Fatalf("expected no perf_comparison under 24h, got %v", raw)
 	}
 
-	// Enabled >= 24h: only "send" qualifies ("card" only has 19 samples in 30d window).
+	// Enabled >= 24h (24h+1m): only "send" qualifies ("card" has only 19 samples strictly
+	// before consentDay; its 25 SSH samples ON consentDay must NOT be counted).
 	setHostConsent(consentOver24h)
 	r2 := admin.do("GET", fmt.Sprintf("/api/hosts/%d/corrald", hostID), nil)
 	mustStatus(t, r2, http.StatusOK, "status over 24h")
 	cmpList, ok := r2.json()["perf_comparison"].([]any)
 	if !ok || len(cmpList) != 1 {
-		t.Fatalf("expected 1 perf_comparison item (send only), got %#v", r2.json()["perf_comparison"])
+		t.Fatalf("expected 1 perf_comparison item (send only; consentDay excluded), got %#v", r2.json()["perf_comparison"])
 	}
 	item := cmpList[0].(map[string]any)
 	if item["op"] != "send" || item["before_ms"].(float64) != 1900 || item["after_ms"].(float64) != 300 {
 		t.Fatalf("unexpected send comparison item: %#v", item)
 	}
 
-	// Adding 1 more SSH card sample brings card to 20 -> now both send and card appear.
+	// Adding 1 more SSH card sample on consentDay-1 brings card to 20 -> now both send and card appear.
+	// Card's before_n must be 20 (excluding 25 SSH samples on consentDay and 30 from -40d), and
+	// card's after_n must be 26 (25 seeded on afterDay + 1 flushed earlier on fixedNow, excluding 25 on consentDay).
 	if err := h.srv.store.AddCorraldPerfDailyBatch(context.Background(), []store.CorraldPerfDailyDelta{
 		{HostID: hostID, Day: validBeforeDay, Op: "card", Via: "ssh", Count: 1, TotalUs: 2_000_000},
 	}); err != nil {
@@ -198,6 +211,10 @@ func TestCorraldPerfDailyFlushPruneAndThresholds(t *testing.T) {
 	cmpList2, ok := r3.json()["perf_comparison"].([]any)
 	if !ok || len(cmpList2) != 2 {
 		t.Fatalf("expected 2 perf_comparison items (send + card), got %#v", r3.json()["perf_comparison"])
+	}
+	cardItem := cmpList2[1].(map[string]any)
+	if cardItem["op"] != "card" || cardItem["before_ms"].(float64) != 2000 || cardItem["before_n"].(float64) != 20 || cardItem["after_n"].(float64) != 26 {
+		t.Fatalf("expected card comparison to exclude consentDay (before=2000ms before_n=20 after_n=26), got %#v", cardItem)
 	}
 }
 
@@ -578,4 +595,497 @@ func TestCorraldAdminPolicyEnvOverride(t *testing.T) {
 			t.Fatalf("expected env off -> (true, false), got (%v, %v)", cfg.CorraldAdminDisabledEnv, cfg.CorraldAdminDisabled)
 		}
 	})
+}
+
+func waitDaemonStopped(t *testing.T, home string) {
+	t.Helper()
+	bin := filepath.Join(home, ".local", "lib", "corral", "corrald")
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		c := exec.Command(bin, "status")
+		c.Env = append(os.Environ(), "HOME="+home)
+		out, _ := c.CombinedOutput()
+		if strings.Contains(string(out), "state=stopped") {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for corrald to stop; status=%s", string(out))
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+func findClientsJSON(t *testing.T, home string) string {
+	t.Helper()
+	matches, err := filepath.Glob(filepath.Join(home, ".local", "state", "corral", "corrald", "*", "clients.json"))
+	if err != nil || len(matches) == 0 {
+		t.Fatalf("expected clients.json under %s, glob=(%v, %v)", home, matches, err)
+	}
+	return matches[0]
+}
+
+// Regression test for Review Item #1 [P1]:
+// Before cleaning up a remove_pending host on next SSH connection while
+// admin-disabled, gateway MUST re-check exclusivity over SSH (live daemon or
+// clients.json). If another gateway is active/registered or clients.json cannot
+// be read, it MUST NOT uninstall — it must mark the host stopped and preserve files.
+func TestCorraldAdminDisableReconnectChecksExclusivity(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("requires linux")
+	}
+	v1Dir, _ := buildTestCorraldDist(t)
+
+	t.Run("live_other_gateway_prevents_cleanup_of_remove_pending", func(t *testing.T) {
+		h := newHarness(t, func(c *config.Config) {
+			c.CorraldDir = v1Dir
+			c.GatewayID = "gw-a.local"
+		})
+		admin := h.admin()
+		adminID := userIDOf(t, admin)
+		sshSrv, home := startCorraldSSH(t)
+		hostID, _ := createAndPinHost(t, admin, sshSrv, "recheck-live")
+		fp := hostFingerprint(t, h, adminID, hostID)
+
+		startCorraldInstall(t, admin, hostID)
+		waitCorraldState(t, admin, hostID, gw.StateRunning)
+
+		// Disable on gateway A while sole gateway -> daemon stops, DB becomes remove_pending.
+		mustStatus(t, admin.do("PUT", "/api/admin/corrald", map[string]any{"allowed": false}), http.StatusOK, "disable")
+		waitDaemonStopped(t, home)
+		chMid, _ := h.srv.store.CorraldHostByID(context.Background(), hostID)
+		if chMid.State != gw.StateRemovePending {
+			t.Fatalf("expected remove_pending, got %q", chMid.State)
+		}
+
+		// Before gateway A reconnects, gateway B starts the shared daemon and connects!
+		bin := filepath.Join(home, ".local", "lib", "corral", "corrald")
+		serveCmd := exec.Command(bin, "serve", "--gateway", "gw-b.example.com")
+		serveCmd.Env = append(os.Environ(), "HOME="+home)
+		out, err := serveCmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("gw-b corrald serve failed: %v (%s)", err, string(out))
+		}
+		kv := gw.ParseKeyValues(out)
+		sock := kv["socket"]
+		if sock == "" {
+			t.Fatalf("expected socket from corrald serve, got %s", string(out))
+		}
+		sshB := dialTestSSH(t, sshSrv)
+		defer sshB.Close()
+		clB, err := gw.Dial(context.Background(), sshB, sock, nil)
+		if err != nil {
+			t.Fatalf("gw-b Dial: %v", err)
+		}
+		defer clB.Close()
+		if _, err := clB.Hello(context.Background(), proto.HelloParams{
+			Gateway:        "gw-b.example.com",
+			GatewayVersion: "0.3.1",
+			ProtoMin:       1,
+			ProtoMax:       1,
+			Client:         proto.ClientIdentity{CorralUser: "bob", HostID: "99"},
+		}); err != nil {
+			t.Fatalf("gw-b Hello: %v", err)
+		}
+
+		// Now gateway A reconnects while still disabled -> MUST NOT stop or uninstall gw-b's daemon!
+		sshA := dialTestSSH(t, sshSrv)
+		defer sshA.Close()
+		h.srv.corrald.OnHostConnected(context.Background(), adminID, hostID, "admin", fp, "alice", sshA)
+
+		if _, err := clB.Health(context.Background()); err != nil {
+			t.Fatalf("gw-b daemon must still be alive after gw-a reconnect: %v", err)
+		}
+		if _, err := os.Stat(bin); err != nil {
+			t.Fatalf("corrald binary must be preserved when gw-b is active: %v", err)
+		}
+		chAfter, _ := h.srv.store.CorraldHostByID(context.Background(), hostID)
+		if chAfter.State != gw.StateStopped {
+			t.Fatalf("expected host DB state stopped (files preserved), got %q", chAfter.State)
+		}
+	})
+
+	t.Run("stopped_daemon_with_other_gateway_in_clients_json_preserves_files", func(t *testing.T) {
+		h := newHarness(t, func(c *config.Config) {
+			c.CorraldDir = v1Dir
+			c.GatewayID = "gw-a.local"
+		})
+		admin := h.admin()
+		adminID := userIDOf(t, admin)
+		sshSrv, home := startCorraldSSH(t)
+		hostID, _ := createAndPinHost(t, admin, sshSrv, "recheck-clients")
+		fp := hostFingerprint(t, h, adminID, hostID)
+
+		startCorraldInstall(t, admin, hostID)
+		waitCorraldState(t, admin, hostID, gw.StateRunning)
+
+		mustStatus(t, admin.do("PUT", "/api/admin/corrald", map[string]any{"allowed": false}), http.StatusOK, "disable")
+		waitDaemonStopped(t, home)
+
+		// Add another gateway entry to clients.json on disk while daemon is stopped.
+		clientsPath := findClientsJSON(t, home)
+		raw, err := json.Marshal([]proto.ClientInfo{
+			{Gateway: "gw-a.local", CorralUser: "admin", HostID: fmt.Sprintf("%d", hostID)},
+			{Gateway: "gw-other.local", CorralUser: "carol", HostID: "7"},
+		})
+		if err != nil {
+			t.Fatalf("marshal clients.json: %v", err)
+		}
+		if err := os.WriteFile(clientsPath, raw, 0o600); err != nil {
+			t.Fatalf("write clients.json: %v", err)
+		}
+
+		sshA := dialTestSSH(t, sshSrv)
+		defer sshA.Close()
+		h.srv.corrald.OnHostConnected(context.Background(), adminID, hostID, "admin", fp, "alice", sshA)
+
+		bin := filepath.Join(home, ".local", "lib", "corral", "corrald")
+		if _, err := os.Stat(bin); err != nil {
+			t.Fatalf("corrald binary must be preserved when clients.json lists another gateway: %v", err)
+		}
+		chAfter, _ := h.srv.store.CorraldHostByID(context.Background(), hostID)
+		if chAfter.State != gw.StateStopped {
+			t.Fatalf("expected host DB state stopped, got %q", chAfter.State)
+		}
+	})
+
+	t.Run("unreadable_clients_json_preserves_files", func(t *testing.T) {
+		h := newHarness(t, func(c *config.Config) {
+			c.CorraldDir = v1Dir
+			c.GatewayID = "gw-a.local"
+		})
+		admin := h.admin()
+		adminID := userIDOf(t, admin)
+		sshSrv, home := startCorraldSSH(t)
+		hostID, _ := createAndPinHost(t, admin, sshSrv, "recheck-corrupt")
+		fp := hostFingerprint(t, h, adminID, hostID)
+
+		startCorraldInstall(t, admin, hostID)
+		waitCorraldState(t, admin, hostID, gw.StateRunning)
+
+		mustStatus(t, admin.do("PUT", "/api/admin/corrald", map[string]any{"allowed": false}), http.StatusOK, "disable")
+		waitDaemonStopped(t, home)
+
+		// Corrupt clients.json so exclusivity cannot be confirmed.
+		clientsPath := findClientsJSON(t, home)
+		if err := os.WriteFile(clientsPath, []byte("{corrupt-json"), 0o600); err != nil {
+			t.Fatalf("corrupt clients.json: %v", err)
+		}
+
+		sshA := dialTestSSH(t, sshSrv)
+		defer sshA.Close()
+		h.srv.corrald.OnHostConnected(context.Background(), adminID, hostID, "admin", fp, "alice", sshA)
+
+		bin := filepath.Join(home, ".local", "lib", "corral", "corrald")
+		if _, err := os.Stat(bin); err != nil {
+			t.Fatalf("corrald binary must be preserved when clients.json is unreadable: %v", err)
+		}
+		chAfter, _ := h.srv.store.CorraldHostByID(context.Background(), hostID)
+		if chAfter.State != gw.StateStopped {
+			t.Fatalf("expected host DB state stopped when clients.json unreadable, got %q", chAfter.State)
+		}
+	})
+}
+
+// Regression test for Review Item #3 [P2]:
+// A host that was NOT currently connected in Manager.conns when the admin
+// disabled corrald (e.g. DB state running/stopped after gateway restart) must
+// still be handled on its next SSH connection: sole gateway -> stop & clean up
+// to off; shared gateway -> preserve daemon & files and mark stopped.
+func TestCorraldAdminDisableDisconnectedHostOnLaterConnect(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("requires linux")
+	}
+	v1Dir, _ := buildTestCorraldDist(t)
+	distV1, err := gw.LoadDist(v1Dir)
+	if err != nil {
+		t.Fatalf("LoadDist: %v", err)
+	}
+
+	t.Run("sole_gateway_disconnected_cleans_on_reconnect", func(t *testing.T) {
+		h := newHarness(t, func(c *config.Config) {
+			c.CorraldDir = v1Dir
+			c.GatewayID = "gw-disc.local"
+		})
+		admin := h.admin()
+		adminID := userIDOf(t, admin)
+		sshSrv, home := startCorraldSSH(t)
+		hostID, _ := createAndPinHost(t, admin, sshSrv, "disc-sole")
+		fp := hostFingerprint(t, h, adminID, hostID)
+
+		startCorraldInstall(t, admin, hostID)
+		waitCorraldState(t, admin, hostID, gw.StateRunning)
+
+		// Recreate Manager (simulating gateway restart / disconnected host not in m.conns)
+		// while DB still records StateRunning and daemon is still running on host.
+		h.srv.corrald.Close()
+		h.srv.corrald = gw.NewManager(gw.ManagerConfig{
+			Store:     h.store,
+			Dist:      distV1,
+			GatewayID: "gw-disc.local",
+			SSH:       &webSSHProvider{s: h.srv},
+		})
+
+		// Admin disables while host is disconnected.
+		mustStatus(t, admin.do("PUT", "/api/admin/corrald", map[string]any{"allowed": false}), http.StatusOK, "disable")
+
+		// Later SSH connects -> must detect sole gateway, stop daemon, and uninstall files!
+		sshCl := dialTestSSH(t, sshSrv)
+		defer sshCl.Close()
+		h.srv.corrald.OnHostConnected(context.Background(), adminID, hostID, "admin", fp, "alice", sshCl)
+
+		chAfter, _ := h.srv.store.CorraldHostByID(context.Background(), hostID)
+		if chAfter.State != gw.StateOff {
+			t.Fatalf("expected disconnected sole-gateway host to be cleaned up to off, got %q", chAfter.State)
+		}
+		bin := filepath.Join(home, ".local", "lib", "corral", "corrald")
+		if _, statErr := os.Stat(bin); !os.IsNotExist(statErr) {
+			t.Fatalf("expected corrald binary removed, stat err=%v", statErr)
+		}
+	})
+
+	t.Run("shared_gateway_disconnected_preserves_on_reconnect", func(t *testing.T) {
+		h := newHarness(t, func(c *config.Config) {
+			c.CorraldDir = v1Dir
+			c.GatewayID = "gw-disc.local"
+		})
+		admin := h.admin()
+		adminID := userIDOf(t, admin)
+		sshSrv, home := startCorraldSSH(t)
+		hostID, _ := createAndPinHost(t, admin, sshSrv, "disc-shared")
+		fp := hostFingerprint(t, h, adminID, hostID)
+
+		startCorraldInstall(t, admin, hostID)
+		waitCorraldState(t, admin, hostID, gw.StateRunning)
+		chRow, _ := h.srv.store.CorraldHostByID(context.Background(), hostID)
+
+		// Connect a second gateway to the running daemon.
+		otherSSH := dialTestSSH(t, sshSrv)
+		defer otherSSH.Close()
+		otherCl, err := gw.Dial(context.Background(), otherSSH, chRow.SocketPath, nil)
+		if err != nil {
+			t.Fatalf("other gateway Dial: %v", err)
+		}
+		defer otherCl.Close()
+		if _, err := otherCl.Hello(context.Background(), proto.HelloParams{
+			Gateway:        "gw-peer.example.com",
+			GatewayVersion: "0.3.1",
+			ProtoMin:       1,
+			ProtoMax:       1,
+			Client:         proto.ClientIdentity{CorralUser: "peer", HostID: "88"},
+		}); err != nil {
+			t.Fatalf("other gateway Hello: %v", err)
+		}
+
+		// Disconnect this gateway (recreate Manager -> not in m.conns), then admin disables.
+		h.srv.corrald.Close()
+		h.srv.corrald = gw.NewManager(gw.ManagerConfig{
+			Store:     h.store,
+			Dist:      distV1,
+			GatewayID: "gw-disc.local",
+			SSH:       &webSSHProvider{s: h.srv},
+		})
+		mustStatus(t, admin.do("PUT", "/api/admin/corrald", map[string]any{"allowed": false}), http.StatusOK, "disable")
+
+		// Later SSH connects -> must detect other gateway, preserve daemon/files, mark stopped.
+		sshCl := dialTestSSH(t, sshSrv)
+		defer sshCl.Close()
+		h.srv.corrald.OnHostConnected(context.Background(), adminID, hostID, "admin", fp, "alice", sshCl)
+
+		if _, err := otherCl.Health(context.Background()); err != nil {
+			t.Fatalf("other gateway daemon must remain alive: %v", err)
+		}
+		bin := filepath.Join(home, ".local", "lib", "corral", "corrald")
+		if _, err := os.Stat(bin); err != nil {
+			t.Fatalf("corrald binary must be preserved: %v", err)
+		}
+		chAfter, _ := h.srv.store.CorraldHostByID(context.Background(), hostID)
+		if chAfter.State != gw.StateStopped {
+			t.Fatalf("expected stopped state for shared disconnected host, got %q", chAfter.State)
+		}
+	})
+}
+
+// Regression test for Review Item #4 [P2]:
+// An in-flight OnHostConnected / attachAndHello that already passed the entry
+// policy check and races with SetAdminDisabled(true) MUST NOT establish a live
+// connection or leave the host running; it must immediately enforce the disable
+// rule and close.
+func TestCorraldAdminDisableInFlightAttachRace(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("requires linux")
+	}
+	v1Dir, _ := buildTestCorraldDist(t)
+	distV1, err := gw.LoadDist(v1Dir)
+	if err != nil {
+		t.Fatalf("LoadDist: %v", err)
+	}
+	h := newHarness(t, func(c *config.Config) {
+		c.CorraldDir = v1Dir
+		c.GatewayID = "gw-race.local"
+	})
+	admin := h.admin()
+	adminID := userIDOf(t, admin)
+	sshSrv, home := startCorraldSSH(t)
+	hostID, _ := createAndPinHost(t, admin, sshSrv, "race-box")
+	fp := hostFingerprint(t, h, adminID, hostID)
+
+	startCorraldInstall(t, admin, hostID)
+	waitCorraldState(t, admin, hostID, gw.StateRunning)
+
+	// Recreate Manager with AfterAttachHello hook so we can deterministically
+	// fire SetAdminDisabled(true) right after Dial+Hello completes and before
+	// attachAndHello publishes the connection.
+	inAttach := make(chan struct{})
+	releaseAttach := make(chan struct{})
+	var hookOnce atomic.Bool
+	h.srv.corrald.Close()
+	h.srv.corrald = gw.NewManager(gw.ManagerConfig{
+		Store:     h.store,
+		Dist:      distV1,
+		GatewayID: "gw-race.local",
+		SSH:       &webSSHProvider{s: h.srv},
+		AfterAttachHello: func(hid int64) {
+			if hid == hostID && hookOnce.CompareAndSwap(false, true) {
+				close(inAttach)
+				<-releaseAttach
+			}
+		},
+	})
+
+	sshCl := dialTestSSH(t, sshSrv)
+	defer sshCl.Close()
+
+	attachDone := make(chan struct{})
+	go func() {
+		defer close(attachDone)
+		h.srv.corrald.OnHostConnected(context.Background(), adminID, hostID, "admin", fp, "alice", sshCl)
+	}()
+
+	select {
+	case <-inAttach:
+	case <-time.After(10 * time.Second):
+		t.Fatal("timed out waiting for attachAndHello to reach AfterAttachHello hook")
+	}
+
+	// Admin disables corrald while attachAndHello is in flight!
+	mustStatus(t, admin.do("PUT", "/api/admin/corrald", map[string]any{"allowed": false}), http.StatusOK, "admin disable mid-attach")
+	close(releaseAttach)
+
+	select {
+	case <-attachDone:
+	case <-time.After(10 * time.Second):
+		t.Fatal("timed out waiting for OnHostConnected to finish")
+	}
+
+	// Must have ZERO live client, daemon stopped (sole gateway), and DB marked remove_pending.
+	if _, ok := h.srv.CorraldClient(adminID, hostID, "pane.send"); ok {
+		t.Fatalf("expected no CorraldClient after in-flight attach raced with admin disable")
+	}
+	waitDaemonStopped(t, home)
+	chAfter, err := h.srv.store.CorraldHostByID(context.Background(), hostID)
+	if err != nil || chAfter.State != gw.StateRemovePending {
+		t.Fatalf("expected DB state remove_pending after raced attach, got (%+v, %v)", chAfter, err)
+	}
+}
+
+// Regression test for Review Item #7 [P2]:
+// When a flush fails transiently concurrently with Close(), the failed batch
+// MUST be re-queued even though p.closed is already true, and Close()'s final
+// flush MUST persist it while ignoring any new Observe() calls made after Close.
+func TestCorraldPerfDailyRequeueOnFailedFlushConcurrentWithClose(t *testing.T) {
+	h := newHarness(t)
+	admin := h.admin()
+	sshSrv, _ := startCorraldSSH(t)
+	hostID, _ := createAndPinHost(t, admin, sshSrv, "flush-race")
+
+	fixedNow := time.Date(2026, 11, 28, 12, 0, 0, 0, time.UTC)
+	p := newCorraldPerfDaily(h.srv.store, h.srv.log, time.Hour, func() time.Time { return fixedNow })
+
+	firstEntered := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	var calls atomic.Int32
+	p.writeBatch = func(ctx context.Context, deltas []store.CorraldPerfDailyDelta) error {
+		n := calls.Add(1)
+		if n == 1 {
+			close(firstEntered)
+			<-releaseFirst
+			return errors.New("transient sqlite busy")
+		}
+		return h.srv.store.AddCorraldPerfDailyBatch(ctx, deltas)
+	}
+
+	// Buffer 3 samples before close.
+	p.Observe(hostID, "send", "corrald", 250*time.Millisecond)
+	p.Observe(hostID, "send", "corrald", 350*time.Millisecond)
+	p.Observe(hostID, "card", "ssh", 1500*time.Millisecond)
+
+	// Start a flush that will fail transiently while Close() is called concurrently.
+	flushErrCh := make(chan error, 1)
+	go func() {
+		flushErrCh <- p.Flush(context.Background())
+	}()
+
+	select {
+	case <-firstEntered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for first flush to enter writeBatch")
+	}
+
+	closeDone := make(chan struct{})
+	go func() {
+		defer close(closeDone)
+		p.Close()
+	}()
+
+	// Wait until Close() has set p.closed = true.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		p.mu.Lock()
+		isClosed := p.closed
+		p.mu.Unlock()
+		if isClosed {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for Close() to mark closed=true")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	// New samples observed after Close() starts must NOT be accepted.
+	p.Observe(hostID, "send", "corrald", 999*time.Millisecond)
+
+	// Let the first flush fail -> it must re-queue its batch despite p.closed==true,
+	// and Close()'s final flush must then write it to SQLite.
+	close(releaseFirst)
+
+	if err := <-flushErrCh; err == nil {
+		t.Fatalf("expected first flush to return transient error")
+	}
+	select {
+	case <-closeDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for Close() to finish")
+	}
+
+	if calls.Load() < 2 {
+		t.Fatalf("expected Close() to run a second flush retry, got %d writeBatch calls", calls.Load())
+	}
+
+	rows, err := h.srv.store.CorraldPerfDailyRows(context.Background(), hostID)
+	if err != nil {
+		t.Fatalf("CorraldPerfDailyRows: %v", err)
+	}
+	var sendCount, cardCount int64
+	for _, r := range rows {
+		if r.Op == "send" && r.Via == "corrald" {
+			sendCount += r.Count
+		}
+		if r.Op == "card" && r.Via == "ssh" {
+			cardCount += r.Count
+		}
+	}
+	if sendCount != 2 || cardCount != 1 {
+		t.Fatalf("expected persisted pre-close samples (send=2, card=1) and post-close sample dropped, got send=%d card=%d rows=%+v", sendCount, cardCount, rows)
+	}
 }

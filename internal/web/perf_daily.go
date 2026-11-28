@@ -31,7 +31,9 @@ type corraldPerfDaily struct {
 	log           *slog.Logger
 	now           func() time.Time
 	flushInterval time.Duration
+	writeBatch    func(ctx context.Context, deltas []store.CorraldPerfDailyDelta) error
 
+	flushMu   sync.Mutex
 	mu        sync.Mutex
 	pending   map[perfDailyKey]store.CorraldPerfTotal
 	lastPrune time.Time
@@ -122,11 +124,16 @@ func (p *corraldPerfDaily) loop() {
 }
 
 // Flush writes all buffered daily deltas to SQLite and prunes rows older than
-// 90 days (throttled to once per hour).
+// 90 days (throttled to once per hour). Concurrent flushes (including the final
+// flush on Close) are serialized by flushMu so a failed periodic flush always
+// re-queues its batch before Close runs its final retry.
 func (p *corraldPerfDaily) Flush(ctx context.Context) error {
-	if p == nil || p.store == nil {
+	if p == nil || (p.store == nil && p.writeBatch == nil) {
 		return nil
 	}
+	p.flushMu.Lock()
+	defer p.flushMu.Unlock()
+
 	p.mu.Lock()
 	var batch []store.CorraldPerfDailyDelta
 	if len(p.pending) > 0 {
@@ -144,26 +151,29 @@ func (p *corraldPerfDaily) Flush(ctx context.Context) error {
 		p.pending = make(map[perfDailyKey]store.CorraldPerfTotal)
 	}
 	now := p.now()
-	needPrune := p.lastPrune.IsZero() || now.Sub(p.lastPrune) >= corraldPerfPruneInterval
+	needPrune := p.store != nil && (p.lastPrune.IsZero() || now.Sub(p.lastPrune) >= corraldPerfPruneInterval)
 	if needPrune {
 		p.lastPrune = now
+	}
+	writeFn := p.writeBatch
+	if writeFn == nil {
+		writeFn = p.store.AddCorraldPerfDailyBatch
 	}
 	p.mu.Unlock()
 
 	var firstErr error
 	if len(batch) > 0 {
-		if err := p.store.AddCorraldPerfDailyBatch(ctx, batch); err != nil {
+		if err := writeFn(ctx, batch); err != nil {
 			firstErr = err
-			// Re-queue failed deltas so transient errors do not lose samples.
+			// Always re-queue failed deltas (even if Close() was called
+			// concurrently) so the final flush on shutdown can persist them.
 			p.mu.Lock()
-			if !p.closed {
-				for _, d := range batch {
-					k := perfDailyKey{hostID: d.HostID, day: d.Day, op: d.Op, via: d.Via}
-					cur := p.pending[k]
-					cur.Count += d.Count
-					cur.TotalUs += d.TotalUs
-					p.pending[k] = cur
-				}
+			for _, d := range batch {
+				k := perfDailyKey{hostID: d.HostID, day: d.Day, op: d.Op, via: d.Via}
+				cur := p.pending[k]
+				cur.Count += d.Count
+				cur.TotalUs += d.TotalUs
+				p.pending[k] = cur
 			}
 			p.mu.Unlock()
 			if p.log != nil {
@@ -195,12 +205,12 @@ func (p *corraldPerfDaily) Compare(ctx context.Context, hostID, consentAt int64)
 	if now.Sub(time.Unix(consentAt, 0)) < gw.PerfCompareMinEnabledAge {
 		return nil
 	}
-	beforeMin, consentDay := gw.PerfCompareDateBounds(consentAt)
-	before, err := p.store.CorraldPerfDailyTotals(ctx, hostID, "ssh", beforeMin, consentDay)
+	beforeMin, beforeMax, afterMin := gw.PerfCompareDateBounds(consentAt)
+	before, err := p.store.CorraldPerfDailyTotals(ctx, hostID, "ssh", beforeMin, beforeMax)
 	if err != nil {
 		return nil
 	}
-	after, err := p.store.CorraldPerfDailyTotals(ctx, hostID, "corrald", consentDay, "")
+	after, err := p.store.CorraldPerfDailyTotals(ctx, hostID, "corrald", afterMin, "")
 	if err != nil {
 		return nil
 	}
@@ -213,14 +223,14 @@ func (p *corraldPerfDaily) Compare(ctx context.Context, hostID, consentAt int64)
 		}
 		switch k.via {
 		case "ssh":
-			if k.day >= beforeMin && k.day <= consentDay {
+			if k.day >= beforeMin && k.day <= beforeMax {
 				cur := before[k.op]
 				cur.Count += v.Count
 				cur.TotalUs += v.TotalUs
 				before[k.op] = cur
 			}
 		case "corrald":
-			if k.day >= consentDay {
+			if k.day >= afterMin {
 				cur := after[k.op]
 				cur.Count += v.Count
 				cur.TotalUs += v.TotalUs

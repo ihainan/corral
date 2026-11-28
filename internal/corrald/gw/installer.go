@@ -113,9 +113,27 @@ type HostFailedRecord struct {
 	Releases []HostFailedEntry `json:"releases"`
 }
 
-// HostClientsFile mirrors daemon.clientsFile.
+// HostClientsFile parses clients.json written by daemon.ClientRegistry.
+// Current daemons persist a JSON array ([]proto.ClientInfo); wrapped objects
+// ({"clients":[...]}) are also accepted for backward compatibility.
 type HostClientsFile struct {
 	Clients []proto.ClientInfo `json:"clients"`
+}
+
+func (f *HostClientsFile) UnmarshalJSON(data []byte) error {
+	var list []proto.ClientInfo
+	if err := json.Unmarshal(data, &list); err == nil {
+		f.Clients = list
+		return nil
+	}
+	var wrapped struct {
+		Clients []proto.ClientInfo `json:"clients"`
+	}
+	if err := json.Unmarshal(data, &wrapped); err != nil {
+		return err
+	}
+	f.Clients = wrapped.Clients
+	return nil
 }
 
 func (f *HostFailedRecord) ReleaseList() []int64 {

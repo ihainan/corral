@@ -1,11 +1,15 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { ApiError } from '../api'
 import {
   CORRALD_NOTICES_EVENT,
   getCorraldNotices,
   markCorraldNoticesSeen,
 } from '../corraldApi'
-import { groupCorraldUpdateNotices } from '../corraldLogic'
+import {
+  createCorraldNoticeFetcher,
+  type CorraldNoticeFetcher,
+  type GroupedCorraldUpdateNotices,
+} from '../corraldLogic'
 import { t } from '../i18n'
 import { CorraldChangelogDialog } from './CorraldDialogs'
 import { useToast } from './ui'
@@ -17,35 +21,18 @@ import { useToast } from './ui'
 export function CorraldUpdateNotices({ userId }: { userId?: number }) {
   const toast = useToast()
   const [changelogVersion, setChangelogVersion] = useState<string | null>(null)
-  const shownIdsRef = useRef<Set<number>>(new Set())
-  const inFlightRef = useRef(false)
+  const toastRef = useRef(toast)
+  toastRef.current = toast
+  const fetcherRef = useRef<CorraldNoticeFetcher | null>(null)
 
-  useEffect(() => {
-    shownIdsRef.current.clear()
-    setChangelogVersion(null)
-  }, [userId])
-
-  const checkNotices = useCallback(
-    async (signal?: AbortSignal) => {
-      if (!userId || inFlightRef.current) return
-      inFlightRef.current = true
-      try {
-        const raw = await getCorraldNotices(signal)
-        const fresh = raw.filter((n) => !shownIdsRef.current.has(n.id))
-        if (fresh.length === 0) return
-
-        const grouped = groupCorraldUpdateNotices(fresh)
-        if (grouped.allIds.length === 0) return
-
-        for (const id of grouped.allIds) {
-          shownIdsRef.current.add(id)
-        }
-        // Mark seen immediately so the same notices are never shown twice.
-        void markCorraldNoticesSeen(grouped.allIds).catch(() => {})
-
+  if (!fetcherRef.current) {
+    fetcherRef.current = createCorraldNoticeFetcher({
+      fetchNotices: (signal) => getCorraldNotices(signal),
+      markSeen: (ids) => markCorraldNoticesSeen(ids),
+      onNotices: (grouped: GroupedCorraldUpdateNotices) => {
         if (grouped.mergedSuccess) {
           const ver = grouped.mergedSuccess.version
-          toast.notice({
+          toastRef.current.notice({
             // Builds are named like v0.2.0-workbench-<date>-<commit>; the toast
             // names the release (0.2.0), the host settings show the full build.
             title: t('corrald.note.updatedTitle', { version: ver.replace(/^v/, '').split('-')[0] || ver }),
@@ -58,7 +45,7 @@ export function CorraldUpdateNotices({ userId }: { userId?: number }) {
         }
 
         for (const f of grouped.failures) {
-          toast.notice({
+          toastRef.current.notice({
             title: t('corrald.note.updateFailedTitle', { host: f.host_name || `#${f.host_id}` }),
             body: t('corrald.err.updateFailed', {
               next: f.new_version || '?',
@@ -67,34 +54,35 @@ export function CorraldUpdateNotices({ userId }: { userId?: number }) {
             error: true,
           })
         }
-      } catch (e) {
+      },
+      onError: (e) => {
         if (e instanceof ApiError && (e.code === 'aborted' || e.status === 404)) return
-      } finally {
-        inFlightRef.current = false
-      }
-    },
-    [userId, toast],
-  )
+      },
+    })
+  }
 
   useEffect(() => {
+    const fetcher = fetcherRef.current!
+    fetcher.setUser(userId)
+    setChangelogVersion(null)
     if (!userId) return
-    const ctl = new AbortController()
-    void checkNotices(ctl.signal)
 
-    const onRefresh = () => void checkNotices()
+    void fetcher.check()
+
+    const onRefresh = () => void fetcher.check()
     const onVis = () => {
       if (document.visibilityState === 'visible') {
-        void checkNotices()
+        void fetcher.check()
       }
     }
     window.addEventListener(CORRALD_NOTICES_EVENT, onRefresh)
     document.addEventListener('visibilitychange', onVis)
     return () => {
-      ctl.abort()
+      fetcher.dispose()
       window.removeEventListener(CORRALD_NOTICES_EVENT, onRefresh)
       document.removeEventListener('visibilitychange', onVis)
     }
-  }, [userId, checkNotices])
+  }, [userId])
 
   if (changelogVersion === null) return null
   return (

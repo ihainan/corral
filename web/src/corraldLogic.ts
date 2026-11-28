@@ -848,3 +848,91 @@ export function groupCorraldUpdateNotices(notices: CorraldUpdateNotice[]): Group
     allIds,
   }
 }
+
+export interface CorraldNoticeFetcherDeps {
+  fetchNotices: (signal: AbortSignal) => Promise<CorraldUpdateNotice[]>
+  markSeen: (ids: number[]) => Promise<void> | void
+  onNotices: (grouped: GroupedCorraldUpdateNotices) => void
+  onError?: (err: unknown) => void
+}
+
+export interface CorraldNoticeFetcher {
+  setUser: (userId?: number) => void
+  check: () => Promise<void>
+  dispose: () => void
+}
+
+// Manages unseen corrald update notice requests with per-account cancellation
+// and post-response user verification so switching or signing out of an account
+// immediately aborts any in-flight fetch and never displays or marks seen
+// notices belonging to a previous user.
+export function createCorraldNoticeFetcher(deps: CorraldNoticeFetcherDeps): CorraldNoticeFetcher {
+  let activeUserId: number | undefined = undefined
+  let generation = 0
+  let activeController: AbortController | null = null
+  let activeReqUser: number | undefined = undefined
+  const shownIds = new Set<number>()
+
+  const abortActive = () => {
+    if (activeController) {
+      activeController.abort()
+      activeController = null
+      activeReqUser = undefined
+    }
+  }
+
+  return {
+    setUser(userId?: number) {
+      if (activeUserId === userId) return
+      activeUserId = userId
+      generation++
+      abortActive()
+      shownIds.clear()
+    },
+
+    async check() {
+      const reqUser = activeUserId
+      if (!reqUser) return
+      if (activeController && activeReqUser === reqUser) return
+
+      abortActive()
+      const ctl = new AbortController()
+      const reqGen = ++generation
+      activeController = ctl
+      activeReqUser = reqUser
+
+      try {
+        const raw = await deps.fetchNotices(ctl.signal)
+        if (ctl.signal.aborted || activeUserId !== reqUser || generation !== reqGen) {
+          return
+        }
+        const fresh = raw.filter((n) => !shownIds.has(n.id))
+        if (fresh.length === 0) return
+
+        const grouped = groupCorraldUpdateNotices(fresh)
+        if (grouped.allIds.length === 0) return
+
+        for (const id of grouped.allIds) {
+          shownIds.add(id)
+        }
+        void Promise.resolve(deps.markSeen(grouped.allIds)).catch(() => {})
+        deps.onNotices(grouped)
+      } catch (err) {
+        if (ctl.signal.aborted || activeUserId !== reqUser || generation !== reqGen) {
+          return
+        }
+        deps.onError?.(err)
+      } finally {
+        if (activeController === ctl) {
+          activeController = null
+          activeReqUser = undefined
+        }
+      }
+    },
+
+    dispose() {
+      generation++
+      abortActive()
+    },
+  }
+}

@@ -320,9 +320,9 @@ func (s *Store) MarkCorraldHostsRemovePending(ctx context.Context, hostIDs []int
 	return tx.Commit()
 }
 
-// MarkCorraldHostsStopped transitions currently active hosts for a disconnected
-// account to stopped (preserving consent and files when another gateway keeps
-// using corrald).
+// MarkCorraldHostsStopped transitions active or pending-removal hosts for a
+// disconnected account to stopped (preserving consent and files when another
+// gateway keeps using corrald or exclusivity cannot be confirmed).
 func (s *Store) MarkCorraldHostsStopped(ctx context.Context, hostIDs []int64, fingerprint, username string) error {
 	now := s.unix()
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -338,7 +338,7 @@ func (s *Store) MarkCorraldHostsStopped(ctx context.Context, hostIDs []int64, fi
 		if _, err := tx.ExecContext(ctx, `
 			UPDATE corrald_hosts
 			SET state = 'stopped', active_op_id = '', updated_at = ?
-			WHERE host_id = ? AND state IN ('running', 'lost', 'updating')`, now, id); err != nil {
+			WHERE host_id = ? AND state IN ('running', 'lost', 'updating', 'remove_pending', 'removing')`, now, id); err != nil {
 			return err
 		}
 	}
@@ -346,7 +346,7 @@ func (s *Store) MarkCorraldHostsStopped(ctx context.Context, hostIDs []int64, fi
 		if _, err := tx.ExecContext(ctx, `
 			UPDATE corrald_hosts
 			SET state = 'stopped', active_op_id = '', updated_at = ?
-			WHERE bound_fingerprint = ? AND bound_username = ? AND state IN ('running', 'lost', 'updating')`, now, fingerprint, username); err != nil {
+			WHERE bound_fingerprint = ? AND bound_username = ? AND state IN ('running', 'lost', 'updating', 'remove_pending', 'removing')`, now, fingerprint, username); err != nil {
 			return err
 		}
 	}

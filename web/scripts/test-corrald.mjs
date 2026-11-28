@@ -17,6 +17,7 @@ const {
   corraldFailureKind,
   corraldSectionModel,
   corraldStatusBarModel,
+  createCorraldNoticeFetcher,
   degradedCaps,
   detectCorraldTransition,
   formatPerfSeconds,
@@ -509,6 +510,68 @@ function baseStatus(overrides = {}) {
   assert.equal(grouped.failures.length, 2)
   assert.equal(grouped.failures[0].host_name, 'c')
   assert.equal(grouped.failures[1].host_name, 'd')
+}
+
+// 10. Fix Round 1 Item #5: update notice fetch cancels on account switch / sign-out
+//     and discards late responses belonging to a previous user (no toast, no markSeen).
+{
+  const pending = []
+  const seenCalls = []
+  const emitted = []
+
+  const fetcher = createCorraldNoticeFetcher({
+    fetchNotices: (signal) =>
+      new Promise((resolve, reject) => {
+        pending.push({ signal, resolve, reject })
+      }),
+    markSeen: (ids) => {
+      seenCalls.push(ids)
+    },
+    onNotices: (grouped) => {
+      emitted.push(grouped)
+    },
+  })
+
+  // User 1 starts a fetch; before it completes, user switches to User 2.
+  fetcher.setUser(1)
+  const p1 = fetcher.check()
+  assert.equal(pending.length, 1)
+  assert.equal(pending[0].signal.aborted, false)
+
+  fetcher.setUser(2)
+  assert.equal(pending[0].signal.aborted, true, 'account switch must abort previous user request')
+
+  // Even if the stale promise resolves late (ignoring AbortSignal), it must be discarded.
+  pending[0].resolve([
+    { id: 101, host_id: 1, host_name: 'u1-host', old_version: '0.3.1', new_version: '0.3.2', new_release: 2000, success: true, created_at: 100 },
+  ])
+  await p1
+  assert.equal(seenCalls.length, 0, 'stale user 1 response must NOT call markSeen')
+  assert.equal(emitted.length, 0, 'stale user 1 response must NOT emit toast')
+
+  // User 2's own check runs cleanly and delivers User 2's notices.
+  const p2 = fetcher.check()
+  assert.equal(pending.length, 2)
+  assert.equal(pending[1].signal.aborted, false)
+  pending[1].resolve([
+    { id: 202, host_id: 2, host_name: 'u2-host', old_version: '0.3.1', new_version: '0.3.2', new_release: 2000, success: true, created_at: 200 },
+  ])
+  await p2
+  assert.deepEqual(seenCalls, [[202]])
+  assert.equal(emitted.length, 1)
+  assert.equal(emitted[0].mergedSuccess?.hostCount, 1)
+
+  // Sign-out (setUser(undefined)) while a refresh request is in flight aborts and discards it.
+  const p3 = fetcher.check()
+  assert.equal(pending.length, 3)
+  fetcher.setUser(undefined)
+  assert.equal(pending[2].signal.aborted, true, 'sign-out must abort in-flight notice request')
+  pending[2].resolve([
+    { id: 203, host_id: 2, host_name: 'u2-host', old_version: '0.3.1', new_version: '0.3.2', new_release: 2000, success: false, created_at: 300 },
+  ])
+  await p3
+  assert.deepEqual(seenCalls, [[202]], 'signed-out late response must NOT call markSeen')
+  assert.equal(emitted.length, 1, 'signed-out late response must NOT emit toast')
 }
 
 console.log('test-corrald.mjs: all assertions passed')
