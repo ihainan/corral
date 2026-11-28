@@ -2184,10 +2184,16 @@ details.adv > .form { margin-top: 16px; }
 .subs-win-val.is-danger { color: var(--danger); font-weight: 500; }
 .subs-win-val.is-stale { color: var(--fg-3); }
 .subs-bar { height: 6px; border-radius: 999px; background: var(--bg-active); overflow: hidden; }
+.subs-bar.is-scoped { height: 4px; }
 .subs-bar > span { display: block; height: 100%; border-radius: 999px; background: var(--accent); transition: width 0.2s var(--ease); }
 .subs-bar.is-warn > span { background: var(--warn); }
 .subs-bar.is-danger > span { background: var(--danger); }
 .subs-bar.is-stale > span { background: var(--fg-4); }
+.subs-scoped-list {
+  display: flex; flex-direction: column; gap: 6px; padding-left: 12px;
+  border-left: 1px solid var(--line);
+}
+.subs-win.is-scoped .subs-win-name { font-size: var(--fs-note); line-height: var(--lh-note); color: var(--fg-3); }
 .subs-card-foot {
   display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; padding-top: 8px;
   border-top: 1px solid var(--line);

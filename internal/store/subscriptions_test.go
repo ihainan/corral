@@ -277,3 +277,60 @@ func TestSubscriptionSnapshotsConcurrentUpsert(t *testing.T) {
 		}
 	}
 }
+
+func TestEnsureSubscriptionHostPlaceholderAndPreserveExisting(t *testing.T) {
+	ctx := context.Background()
+	s, err := OpenMemory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	now := time.Date(2026, 11, 28, 12, 0, 0, 0, time.UTC)
+	s.now = func() time.Time { return now }
+
+	u, err := s.CreateUser(ctx, "eve", "Eve", "hash", RoleMember)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.EnsureSubscriptionHost(ctx, u.ID, "opencode", "host:10", 10, "box-1"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.GetSubscriptionSnapshot(ctx, u.ID, "opencode", "host:10")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.UpdatedAt != 0 || string(got.QuotaJSON) != `{"known":false}` || got.HostName != "box-1" || len(got.Hosts) != 1 {
+		t.Fatalf("unexpected placeholder: %+v", got)
+	}
+
+	// Upserting a real snapshot upgrades the placeholder cleanly.
+	now = now.Add(2 * time.Minute)
+	if err := s.UpsertSubscriptionSnapshot(ctx, SubscriptionSnapshot{
+		OwnerID:      u.ID,
+		Provider:     "opencode",
+		AccountKey:   "host:10",
+		AccountLabel: "Default",
+		Plan:         "OpenCode Go",
+		HostID:       10,
+		HostName:     "box-1",
+		QuotaJSON:    json.RawMessage(`{"known":true,"weekly":{"used":36,"resets_at":1795996800}}`),
+		UpdatedAt:    now.Unix(),
+		SeenAt:       now.Unix(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Subsequent EnsureSubscriptionHost must not overwrite quota or updated_at, while still merging hosts.
+	now = now.Add(5 * time.Minute)
+	if err := s.EnsureSubscriptionHost(ctx, u.ID, "opencode", "host:10", 11, "box-2"); err != nil {
+		t.Fatal(err)
+	}
+	got, err = s.GetSubscriptionSnapshot(ctx, u.ID, "opencode", "host:10")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Plan != "OpenCode Go" || got.UpdatedAt == 0 || len(got.Hosts) != 2 {
+		t.Fatalf("EnsureSubscriptionHost clobbered existing snapshot: %+v", got)
+	}
+}

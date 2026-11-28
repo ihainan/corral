@@ -226,10 +226,10 @@ func (s *Server) subscriptionItemOf(sn *store.SubscriptionSnapshot, ownerID, now
 		item.NextRefreshAt = sn.LastRefreshAt + cooldownSec
 	}
 	switch sn.Provider {
-	case "codex":
+	case "codex", "devin":
 		item.CanRefresh = false
 		item.RefreshReason = "passive_only"
-	case "claude", "agy":
+	case "claude", "agy", "opencode":
 		if s.findRunningSessionForHosts(ownerID, sn.HostID, sn.Hosts) != nil {
 			item.CanRefresh = true
 		} else {
@@ -282,9 +282,12 @@ func (s *Server) apiRefreshSubscription(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	switch req.Provider {
-	case "claude", "agy":
+	case "claude", "agy", "opencode":
 	case "codex":
 		writeError(w, http.StatusBadRequest, "refresh_unsupported", "Codex quota is collected passively from session logs")
+		return
+	case "devin":
+		writeError(w, http.StatusBadRequest, "refresh_unsupported", "Devin quota is collected passively from local cache")
 		return
 	default:
 		writeError(w, http.StatusBadRequest, "bad_request", "unsupported provider")
@@ -396,6 +399,9 @@ func (s *Server) refreshSubscriptionOnSession(ctx context.Context, sess *term.Se
 		cacheKey := fmt.Sprintf("%d\x00%d", sess.OwnerID, sess.HostID)
 		s.agyQuota.putCached(cacheKey, q, now)
 		return nil
+
+	case "opencode":
+		return s.fetchOpenCodeQuota(ctx, sess, expectedAccountKey)
 
 	case "claude":
 		readClaude := func() (quotaInfo, string, bool, error) {

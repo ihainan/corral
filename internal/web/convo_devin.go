@@ -388,6 +388,7 @@ func (s *Server) dvRead(sess *term.Session, st *convoState, mode string, interac
 	if err != nil {
 		return err
 	}
+	s.readDevinQuotaPassive(sess)
 	rows, tip, reset, ok := dvRows(out)
 	if !ok {
 		st.reason, st.noReaderAt = convoNoReader, time.Now()

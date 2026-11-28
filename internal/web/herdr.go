@@ -1044,11 +1044,15 @@ func (s *Server) watchHerdr(sess *term.Session, h *store.Host) {
 			rounds.number(&sum, false)
 			titles.track(&sum)
 			agyTitles.track(&sum)
-			hasAgy := false
+			hasAgy, hasDevin, hasOpenCode := false, false, false
 			for _, w := range sum.Workspaces {
 				for _, a := range w.Agents {
 					if isAgyAgent(a.Agent) {
 						hasAgy = true
+					} else if isDevinAgent(a.Agent) {
+						hasDevin = true
+					} else if isOpenCodeAgent(a.Agent) {
+						hasOpenCode = true
 					}
 					sid := s.bgSession(sess, a.PaneID, a.Session)
 					bg.consider(a.PaneID, a.Agent, a.Status, sid, a.Round)
@@ -1057,6 +1061,12 @@ func (s *Server) watchHerdr(sess *term.Session, h *store.Host) {
 			}
 			if hasAgy {
 				s.warmAgyQuota(sess)
+			}
+			if hasDevin {
+				s.readDevinQuotaPassive(sess)
+			}
+			if hasOpenCode {
+				s.recordOpenCodeHostSeen(sess)
 			}
 			publish(sum)
 		},

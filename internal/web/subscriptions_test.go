@@ -357,3 +357,133 @@ func TestRefreshSubscriptionAccountChangedOnHost(t *testing.T) {
 		t.Fatalf("expected account A updated to 35, got %+v", refResp.Item.Quota)
 	}
 }
+
+func TestSubscriptionsDevinOpenCodeAndClaudeScopedFlows(t *testing.T) {
+	h := newHarness(t)
+	admin := h.admin()
+	alice := h.member(admin, "alice")
+
+	aliceUser, err := h.store.UserByName(context.Background(), "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	now := time.Now()
+	var opencodeCalls atomic.Int32
+	srv := h.sshServer(t.TempDir())
+	srv.HandleExec(func(cmd string) func(ssh.Channel) {
+		if strings.Contains(cmd, "experimental.usage.limits") {
+			opencodeCalls.Add(1)
+			return func(ch ssh.Channel) {
+				out := fmt.Sprintf(
+					`{"location":{"directory":"/home/alice"},"data":{"workspace":{"id":"wrk_1","name":"Default"},"go":{"rolling":{"percent":10,"limited":false,"resetsAt":%d},"weekly":{"percent":36,"limited":false,"resetsAt":%d},"monthly":{"percent":38,"limited":false,"resetsAt":%d}},"budgets":[]}}`,
+					now.Add(2*time.Hour).UnixMilli(),
+					now.Add(24*time.Hour).UnixMilli(),
+					now.Add(15*24*time.Hour).UnixMilli(),
+				)
+				ch.Write([]byte(out + "\n"))
+				ch.CloseWrite()
+				ch.SendRequest("exit-status", false, []byte{0, 0, 0, 0})
+			}
+		}
+		return nil
+	})
+
+	rHost := alice.do("POST", "/api/hosts", map[string]any{
+		"name": "oc-box", "address": "127.0.0.1", "port": srv.Addr.Port,
+		"username": "alice", "auth": "password", "password": "alice-pass", "persistence": "none",
+	})
+	mustStatus(t, rHost, http.StatusCreated, "create host")
+	hostID := int64(rHost.json()["id"].(float64))
+
+	rSess := alice.do("POST", "/api/sessions", map[string]any{"host_id": hostID})
+	mustStatus(t, rSess, http.StatusCreated, "open session")
+
+	// 1. Seed a Devin passive snapshot, an unfetched OpenCode host placeholder, and a Claude snapshot with weekly_scoped.
+	cap50 := 50.0
+	h.srv.recordSubscriptionSnapshot(aliceUser.ID, "claude", "uuid-scoped-1", "alice@example.com", hostID, "oc-box", quotaInfo{
+		Known:     true,
+		UpdatedAt: now.Unix(),
+		Plan:      "Claude Max 20x",
+		Weekly:    &quotaWindow{Used: 84, ResetsAt: now.Add(24 * time.Hour).Unix()},
+		WeeklyScoped: []quotaScopedLimit{
+			{Name: "Fable", Used: 0, ResetsAt: now.Add(24 * time.Hour).Unix(), IsActive: false, AllowancePctOfWeekly: &cap50},
+		},
+	})
+	h.srv.recordSubscriptionSnapshot(aliceUser.ID, "devin", "user-devin-1", "alice@example.com", hostID, "oc-box", quotaInfo{
+		Known:     true,
+		UpdatedAt: now.Unix(),
+		Plan:      "Devin Max",
+		Weekly:    &quotaWindow{Used: 100, ResetsAt: now.Add(18 * time.Hour).Unix()},
+	})
+	ocKey := fmt.Sprintf("host:%d", hostID)
+	if err := h.store.EnsureSubscriptionHost(context.Background(), aliceUser.ID, "opencode", ocKey, hostID, "oc-box"); err != nil {
+		t.Fatal(err)
+	}
+
+	// 2. Opening /api/subscriptions makes ZERO SSH/CLI calls and returns all three items properly classified.
+	rList := alice.do("GET", "/api/subscriptions", nil)
+	mustStatus(t, rList, http.StatusOK, "list subscriptions")
+	if opencodeCalls.Load() != 0 {
+		t.Fatalf("GET /api/subscriptions must not invoke opencode CLI, got %d calls", opencodeCalls.Load())
+	}
+	var listResp subscriptionsListResponse
+	if err := json.Unmarshal(rList.Body, &listResp); err != nil {
+		t.Fatal(err)
+	}
+	if len(listResp.Items) != 3 {
+		t.Fatalf("expected 3 items, got %d", len(listResp.Items))
+	}
+	byProvider := map[string]subscriptionItem{}
+	for _, it := range listResp.Items {
+		byProvider[it.Provider] = it
+	}
+	if cl := byProvider["claude"]; len(cl.Quota.WeeklyScoped) != 1 || cl.Quota.WeeklyScoped[0].Name != "Fable" || cl.Quota.WeeklyScoped[0].AllowancePctOfWeekly == nil || *cl.Quota.WeeklyScoped[0].AllowancePctOfWeekly != 50 {
+		t.Fatalf("claude weekly_scoped lost in round-trip: %+v", cl.Quota)
+	}
+	if dv := byProvider["devin"]; dv.CanRefresh || dv.RefreshReason != "passive_only" || dv.Plan != "Devin Max" {
+		t.Fatalf("devin should be passive_only: %+v", dv)
+	}
+	if oc := byProvider["opencode"]; !oc.CanRefresh || oc.UpdatedAt != 0 || oc.Quota.Known {
+		t.Fatalf("opencode placeholder should be refreshable and unfetched: %+v", oc)
+	}
+
+	// 3. Manual refresh on Devin is rejected cleanly (passive_only).
+	rDevinRef := alice.do("POST", "/api/subscriptions/refresh", map[string]any{
+		"provider":    "devin",
+		"account_key": "user-devin-1",
+	})
+	mustStatus(t, rDevinRef, http.StatusBadRequest, "devin refresh unsupported")
+
+	// 4. Manual refresh on OpenCode runs `opencode api experimental.usage.limits`, persists windows, and enforces cooldown.
+	rOC := alice.do("POST", "/api/subscriptions/refresh", map[string]any{
+		"provider":    "opencode",
+		"account_key": ocKey,
+	})
+	mustStatus(t, rOC, http.StatusOK, "opencode manual refresh")
+	if opencodeCalls.Load() != 1 {
+		t.Fatalf("expected 1 opencode CLI call, got %d", opencodeCalls.Load())
+	}
+	var refResp subscriptionRefreshResponse
+	if err := json.Unmarshal(rOC.Body, &refResp); err != nil {
+		t.Fatal(err)
+	}
+	if !refResp.Item.Quota.Known || refResp.Item.Plan != "OpenCode Go" || refResp.Item.AccountLabel != "Default" {
+		t.Fatalf("unexpected opencode refreshed item: %+v", refResp.Item)
+	}
+	if refResp.Item.Quota.FiveHour == nil || refResp.Item.Quota.FiveHour.Used != 10 ||
+		refResp.Item.Quota.Weekly == nil || refResp.Item.Quota.Weekly.Used != 36 ||
+		refResp.Item.Quota.Monthly == nil || refResp.Item.Quota.Monthly.Used != 38 {
+		t.Fatalf("unexpected opencode windows: %+v", refResp.Item.Quota)
+	}
+
+	// Immediate second refresh hits 5-min cooldown without calling SSH again.
+	rOC2 := alice.do("POST", "/api/subscriptions/refresh", map[string]any{
+		"provider":    "opencode",
+		"account_key": ocKey,
+	})
+	mustStatus(t, rOC2, http.StatusTooManyRequests, "opencode cooldown enforced")
+	if opencodeCalls.Load() != 1 {
+		t.Fatalf("rate-limited opencode refresh must not run CLI again, got %d calls", opencodeCalls.Load())
+	}
+}

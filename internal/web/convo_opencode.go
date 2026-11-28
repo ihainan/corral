@@ -664,6 +664,7 @@ func (s *Server) ocRead(sess *term.Session, st *convoState, mode string, interac
 	if err != nil {
 		return err
 	}
+	s.recordOpenCodeHostSeen(sess)
 	var rows bytes.Buffer
 	cursor, cursorK, cursorID := st.ocCursor, st.ocCursorK, st.ocCursorID
 	var floorC int64

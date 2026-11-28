@@ -205,6 +205,75 @@ func (s *Store) UpsertSubscriptionSnapshot(ctx context.Context, in SubscriptionS
 	return tx.Commit()
 }
 
+// EnsureSubscriptionHost passively records that a provider was seen on a host
+// without overwriting any existing quota snapshot or timestamps. If no row
+// exists yet for (owner_id, provider, account_key), it inserts a placeholder
+// row with quota_json='{"known":false}' and updated_at=0 so the Subscriptions
+// overview can offer manual Refresh without running unsolicited CLI calls.
+func (s *Store) EnsureSubscriptionHost(ctx context.Context, ownerID int64, provider, accountKey string, hostID int64, hostName string) error {
+	if ownerID <= 0 || provider == "" || accountKey == "" {
+		return errors.New("subscription host requires owner, provider and account key")
+	}
+	now := s.unix()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	var (
+		exHostsJSON string
+		exSeenAt    int64
+	)
+	err = tx.QueryRowContext(ctx,
+		`SELECT hosts_json, seen_at
+		 FROM subscription_snapshots
+		 WHERE owner_id = ? AND provider = ? AND account_key = ?`,
+		ownerID, provider, accountKey,
+	).Scan(&exHostsJSON, &exSeenAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		hosts := mergeSubscriptionHosts(nil, hostID, hostName, now)
+		hostsBytes, err := json.Marshal(hosts)
+		if err != nil {
+			return err
+		}
+		_, err = tx.ExecContext(ctx,
+			`INSERT INTO subscription_snapshots
+			 (owner_id, provider, account_key, account_label, plan, host_id, host_name, hosts_json, quota_json, updated_at, seen_at, last_refresh_at)
+			 VALUES (?, ?, ?, '', '', ?, ?, ?, '{"known":false}', 0, ?, 0)`,
+			ownerID, provider, accountKey, hostID, strings.TrimSpace(hostName), string(hostsBytes), now,
+		)
+		if err != nil {
+			return err
+		}
+		return tx.Commit()
+	}
+	if err != nil {
+		return err
+	}
+	var existingHosts []SubscriptionHost
+	_ = json.Unmarshal([]byte(exHostsJSON), &existingHosts)
+	mergedHosts := mergeSubscriptionHosts(existingHosts, hostID, hostName, now)
+	hostsBytes, err := json.Marshal(mergedHosts)
+	if err != nil {
+		return err
+	}
+	finalSeenAt := exSeenAt
+	if now > finalSeenAt {
+		finalSeenAt = now
+	}
+	_, err = tx.ExecContext(ctx,
+		`UPDATE subscription_snapshots
+		 SET hosts_json = ?, seen_at = ?
+		 WHERE owner_id = ? AND provider = ? AND account_key = ?`,
+		string(hostsBytes), finalSeenAt, ownerID, provider, accountKey,
+	)
+	if err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 func scanSubscriptionSnapshot(row interface{ Scan(...any) error }) (*SubscriptionSnapshot, error) {
 	sn := &SubscriptionSnapshot{}
 	var hostsJSON, quotaJSON string

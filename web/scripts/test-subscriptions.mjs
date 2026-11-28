@@ -11,6 +11,11 @@ const { outputText } = ts.transpileModule(src, {
 const {
   SUBSCRIPTION_STALE_SEC,
   isSubscriptionStale,
+  isSubscriptionUnfetched,
+  validWeeklyScoped,
+  scopedAllowancePct,
+  formatCreditsAmount,
+  subscriptionCreditsState,
   refreshCooldownRemaining,
   formatCooldownShort,
   formatResetCountdown,
@@ -54,7 +59,50 @@ assert.deepEqual(subscriptionWindowState({ used: 90, resets_at: now - 10 }, now,
 assert.equal(providerDisplayName('claude'), 'Claude Code')
 assert.equal(providerDisplayName('codex'), 'Codex')
 assert.equal(providerDisplayName('agy'), 'Antigravity')
+assert.equal(providerDisplayName('devin'), 'Devin')
+assert.equal(providerDisplayName('opencode'), 'OpenCode')
 assert.equal(providerIconProgram('agy'), 'antigravity')
+assert.equal(providerIconProgram('devin'), 'devin')
+assert.equal(providerIconProgram('opencode'), 'opencode')
+
+// Unfetched refresh-only placeholder detection & sorting order (fresh -> unfetched -> stale).
+assert.equal(isSubscriptionUnfetched({ updated_at: 0, quota: { known: false } }), true)
+assert.equal(isSubscriptionUnfetched({ updated_at: now - 60, quota: { known: true } }), false)
+assert.equal(isSubscriptionUnfetched({ updated_at: 0 }), false)
+
+const sortedWithUnfetched = sortSubscriptions(
+  [
+    { provider: 'claude', account_key: 'stale', updated_at: now - SUBSCRIPTION_STALE_SEC - 10, quota: { known: true } },
+    { provider: 'opencode', account_key: 'host:1', updated_at: 0, quota: { known: false } },
+    { provider: 'devin', account_key: 'fresh', updated_at: now - 60, quota: { known: true } },
+  ],
+  now,
+)
+assert.deepEqual(
+  sortedWithUnfetched.map((x) => x.account_key),
+  ['fresh', 'host:1', 'stale'],
+)
+
+// Weekly scoped validation and allowance formatting.
+const scoped = validWeeklyScoped([
+  { name: 'Fable', used: 0, resets_at: now + 3600, is_active: false, allowance_percent_of_weekly: 50 },
+  { name: '', used: 10, resets_at: now + 3600 },
+  { name: 'InvalidPct', used: 150, resets_at: now + 3600 },
+])
+assert.equal(scoped.length, 1)
+assert.equal(scoped[0].name, 'Fable')
+assert.equal(scopedAllowancePct(scoped[0]), 50)
+assert.equal(scopedAllowancePct({ allowance_percent_of_weekly: 0 }), undefined)
+assert.equal(scopedAllowancePct({ allowance_percent_of_weekly: undefined }), undefined)
+
+// Credits amount formatting and state calculation.
+assert.equal(formatCreditsAmount({ used: 12.5, limit: 50, unit: 'ACU' }), '12.5 / 50 ACU')
+assert.equal(formatCreditsAmount({ used: 8.25, limit: 100, unit: 'USD' }), '$8.25 / $100')
+assert.deepEqual(subscriptionCreditsState({ used: 42, limit: 50, unit: 'ACU', resets_at: now + 3600 }, now, false), {
+  usedPct: 84,
+  expired: false,
+  tone: 'warn',
+})
 
 // Host deduplication with primary host first.
 assert.deepEqual(

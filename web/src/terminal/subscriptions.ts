@@ -7,6 +7,21 @@ export interface SubQuotaWindow {
   resets_at: number
 }
 
+export interface SubQuotaScopedLimit {
+  name: string
+  used: number
+  resets_at: number
+  is_active?: boolean
+  allowance_percent_of_weekly?: number
+}
+
+export interface SubQuotaCredits {
+  used: number
+  limit: number
+  unit: string
+  resets_at?: number
+}
+
 export interface SubQuotaGroup {
   name: string
   five_hour?: SubQuotaWindow
@@ -18,8 +33,12 @@ export interface SubQuota {
   updated_at?: number
   plan?: string
   five_hour?: SubQuotaWindow
+  daily?: SubQuotaWindow
   weekly?: SubQuotaWindow
+  monthly?: SubQuotaWindow
+  weekly_scoped?: SubQuotaScopedLimit[]
   groups?: SubQuotaGroup[]
+  credits?: SubQuotaCredits
 }
 
 export interface SubHost {
@@ -57,6 +76,51 @@ export const SUBSCRIPTION_STALE_SEC = 24 * 60 * 60
 export function isSubscriptionStale(updatedAt: number, nowSec: number, thresholdSec = SUBSCRIPTION_STALE_SEC): boolean {
   if (!updatedAt || updatedAt <= 0) return true
   return nowSec - updatedAt >= thresholdSec
+}
+
+export function isSubscriptionUnfetched(item: Pick<SubscriptionItem, 'updated_at'> & { quota?: Pick<SubQuota, 'known'> }): boolean {
+  return item.quota !== undefined && !item.quota.known && (!item.updated_at || item.updated_at <= 0)
+}
+
+export function validWeeklyScoped(list?: SubQuotaScopedLimit[]): SubQuotaScopedLimit[] {
+  if (!Array.isArray(list)) return []
+  return list.filter(
+    (x) =>
+      !!x &&
+      typeof x.name === 'string' &&
+      x.name.trim().length > 0 &&
+      typeof x.used === 'number' &&
+      Number.isFinite(x.used) &&
+      x.used >= 0 &&
+      x.used <= 100,
+  )
+}
+
+export function scopedAllowancePct(entry: Pick<SubQuotaScopedLimit, 'allowance_percent_of_weekly'>): number | undefined {
+  const v = entry.allowance_percent_of_weekly
+  if (typeof v !== 'number' || !Number.isFinite(v) || v <= 0 || v > 100) return undefined
+  return Math.round(v)
+}
+
+function formatCreditNum(n: number): string {
+  const rounded = Math.round(n * 100) / 100
+  return Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(2).replace(/0+$/, '').replace(/\.$/, '')
+}
+
+export function formatCreditsAmount(c: Pick<SubQuotaCredits, 'used' | 'limit' | 'unit'>): string {
+  const u = formatCreditNum(Math.max(0, c.used))
+  const lim = formatCreditNum(Math.max(0, c.limit))
+  if (c.unit === 'USD') return `$${u} / $${lim}`
+  return `${u} / ${lim} ${c.unit}`
+}
+
+export function subscriptionCreditsState(
+  c: SubQuotaCredits,
+  nowSec: number,
+  stale: boolean,
+): { usedPct: number; expired: boolean; tone: WindowTone } {
+  const pct = c.limit > 0 && Number.isFinite(c.used) ? (c.used / c.limit) * 100 : 0
+  return subscriptionWindowState({ used: pct, resets_at: c.resets_at ?? 0 }, nowSec, stale)
 }
 
 export function refreshCooldownRemaining(nextRefreshAt: number | undefined, nowSec: number): number {
@@ -118,6 +182,10 @@ export function providerDisplayName(provider: string): string {
       return 'Codex'
     case 'agy':
       return 'Antigravity'
+    case 'devin':
+      return 'Devin'
+    case 'opencode':
+      return 'OpenCode'
     default:
       return provider
   }
@@ -131,6 +199,10 @@ export function providerIconProgram(provider: string): string {
       return 'codex'
     case 'agy':
       return 'antigravity'
+    case 'devin':
+      return 'devin'
+    case 'opencode':
+      return 'opencode'
     default:
       return provider
   }
@@ -153,12 +225,17 @@ export function subscriptionHostsSummary(item: Pick<SubscriptionItem, 'host_name
   return out
 }
 
-// Fresh accounts appear before stale ones; within each group newest updated_at first.
+// Fresh accounts appear first, then unfetched refresh-only cards, then stale
+// ones; within each group newest updated_at first.
 export function sortSubscriptions(items: readonly SubscriptionItem[], nowSec: number): SubscriptionItem[] {
+  const rank = (x: SubscriptionItem) => {
+    if (isSubscriptionUnfetched(x)) return 1
+    return isSubscriptionStale(x.updated_at, nowSec) ? 2 : 0
+  }
   return [...items].sort((a, b) => {
-    const aStale = isSubscriptionStale(a.updated_at, nowSec)
-    const bStale = isSubscriptionStale(b.updated_at, nowSec)
-    if (aStale !== bStale) return aStale ? 1 : -1
+    const ra = rank(a)
+    const rb = rank(b)
+    if (ra !== rb) return ra - rb
     if (a.updated_at !== b.updated_at) return b.updated_at - a.updated_at
     if (a.provider !== b.provider) return a.provider < b.provider ? -1 : 1
     return a.account_key < b.account_key ? -1 : a.account_key > b.account_key ? 1 : 0
