@@ -994,9 +994,18 @@ function baseStatus(overrides = {}) {
   const compClaimCalls = []
   let compClaimAnswer = false
   let deliverHint
+  let runHintPoll
   const prevWindow = globalThis.window
   const prevDocument = globalThis.document
-  globalThis.window = { setInterval: () => 1, clearInterval: () => {}, addEventListener: () => {}, removeEventListener: () => {} }
+  globalThis.window = {
+    setInterval: (fn) => {
+      runHintPoll = fn
+      return 1
+    },
+    clearInterval: () => {},
+    addEventListener: () => {},
+    removeEventListener: () => {},
+  }
   globalThis.document = { visibilityState: 'visible', addEventListener: () => {}, removeEventListener: () => {} }
   try {
     class FakeApiError extends Error {}
@@ -1114,10 +1123,189 @@ function baseStatus(overrides = {}) {
     await Promise.resolve()
     assert.equal(renderCtl().banner, null, 'fix4: another tab/reload must not render a claimed hint')
     assert.equal(compClaimCalls.length, 0, 'fix4: another tab/reload must not attempt to claim a claimed hint')
+
+    // Subcase D6 (fix5, fails on 1f4cf63): a poll returning claimed:true for the
+    // SAME host while its own claim POST is still in flight must NOT unmount the
+    // slot or cancel the claim, and the banner must render once the POST resolves true!
+    frames.clear()
+    compCache.clear()
+    compClaimCalls.length = 0
+    let finishDelayedClaim
+    compClaimAnswer = new Promise((r) => {
+      finishDelayedClaim = r
+    })
+    renderCtl()
+    commit('ctl', 'layout')
+    commit('ctl', 'passive')
+    deliverHint({ hint: { ...hint, claimed: false }, generation: 0 })
+    await Promise.resolve()
+    await Promise.resolve()
+    const delayedSlot = renderCtl().banner
+    assert.notEqual(delayedSlot, null)
+    enter('delayed-slot')
+    assert.equal(delayedSlot.type(delayedSlot.props), null, 'slot renders null while POST is in flight')
+    commit('delayed-slot', 'passive')
+    assert.equal(compClaimCalls.length, 1)
+    // Server committed the claim; a poll returns claimed:true BEFORE POST response arrives.
+    runHintPoll()
+    deliverHint({ hint: { ...hint, claimed: true }, generation: 0 })
+    await Promise.resolve()
+    await Promise.resolve()
+    assert.notEqual(
+      renderCtl().banner,
+      null,
+      'fix5: claimed:true poll during in-flight POST for same host must keep slot mounted',
+    )
+    finishDelayedClaim(true)
+    await Promise.resolve()
+    await Promise.resolve()
+    await Promise.resolve()
+    const shownAfterDelay = renderCtl().banner
+    assert.notEqual(shownAfterDelay, null, 'fix5: delayed winning POST must display banner')
+    enter('delayed-slot')
+    assert.equal(shownAfterDelay.type(shownAfterDelay.props).type, comp.CorraldHintBanner)
   } finally {
     globalThis.window = prevWindow
     globalThis.document = prevDocument
   }
+}
+
+// Phase 2b fix5 regression tests (fails on 1f4cf63):
+// - Two eligible hosts A then B across several polls never ends with no banner
+//   while one is still eligible, and the page never shows two bars at once.
+// - A poll returning claimed:true for the same host while its POST is in flight
+//   keeps candidateHint and displays the banner when the POST returns true.
+// - Reload / another tab still never renders a claimed hint.
+{
+  const hostA = {
+    host_id: 7,
+    host_name: 'host-A',
+    reason: 'ssh_session_full',
+    op: 'status',
+    count: 2,
+    last_at: 1_700_000_020,
+    generation: 0,
+  }
+  const hostB = {
+    host_id: 8,
+    host_name: 'host-B',
+    reason: 'ssh_session_full',
+    op: 'log',
+    count: 1,
+    last_at: 1_700_000_010,
+    generation: 0,
+  }
+
+  // Simulated server enforcing fix5 rule: claimed-before-unclaimed (most recently claimed first).
+  let claimTick = 0
+  const hosts = [
+    { hint: hostA, eligible: true, claimedAt: 0, dismissed: false },
+    { hint: hostB, eligible: true, claimedAt: 0, dismissed: false },
+  ]
+  const serverGet = () => {
+    let bestClaimed = null
+    let bestUnclaimed = null
+    for (const h of hosts) {
+      if (!h.eligible || h.dismissed) continue
+      if (h.claimedAt > 0) {
+        if (!bestClaimed || h.claimedAt > bestClaimed.claimedAt) bestClaimed = h
+      } else if (!bestUnclaimed) {
+        bestUnclaimed = h
+      }
+    }
+    const pick = bestClaimed ?? bestUnclaimed
+    return pick ? { ...pick.hint, claimed: pick.claimedAt > 0 } : null
+  }
+  const serverClaim = async (hostId) => {
+    const h = hosts.find((x) => x.hint.host_id === hostId)
+    if (!h || !h.eligible || h.dismissed || h.claimedAt > 0) return false
+    h.claimedAt = ++claimTick
+    return true
+  }
+
+  const page = createCorraldHintController({
+    claimShown: serverClaim,
+    dismiss: async (hostId) => {
+      const h = hosts.find((x) => x.hint.host_id === hostId)
+      if (h) h.dismissed = true
+    },
+    readCachedStatus: () => undefined,
+  })
+  page.setUser(1)
+  page.onSlotMounted()
+
+  // Poll 1 -> claims & displays A. Polls 2..4 -> server keeps returning A (claimed:true),
+  // page keeps displaying A (never drops to null, always a single displayedHint).
+  for (let i = 0; i < 4; i++) {
+    page.receiveServerHint(serverGet(), 0)
+    await Promise.resolve()
+    await Promise.resolve()
+    assert.equal(page.getState().displayedHint?.host_id, 7, `fix5: poll ${i + 1} must keep displaying host A`)
+  }
+
+  // Even if server switches back to an earlier host this page ALREADY claimed (e.g. A -> B -> A
+  // across polls as in 1f4cf63's P1 #1), page displays A (never drops to null while one is eligible!).
+  page.receiveServerHint({ ...hostB, claimed: false }, 0)
+  await Promise.resolve()
+  await Promise.resolve()
+  assert.equal(page.getState().displayedHint?.host_id, 8, 'fix5: switches cleanly to single bar for host B')
+  page.receiveServerHint({ ...hostA, claimed: true }, 0)
+  assert.equal(
+    page.getState().displayedHint?.host_id,
+    7,
+    'fix5 (fails on 1f4cf63): returning claimed:true for a host this page claimed must show it, never drop to null',
+  )
+
+  // Dismiss A -> server now returns B (claimed:true) -> page shows B.
+  page.dismiss(hostA)
+  await Promise.resolve()
+  await Promise.resolve()
+  page.receiveServerHint(serverGet(), 0)
+  assert.equal(page.getState().displayedHint?.host_id, 8, 'fix5: after A dismissed, page displays B')
+
+  // Reload / another tab receives serverGet() ({ host_id: 8, claimed: true }) -> NEVER renders!
+  let otherClaims = 0
+  const otherTab = createCorraldHintController({
+    claimShown: async () => {
+      otherClaims++
+      return false
+    },
+    dismiss: async () => {},
+    readCachedStatus: () => undefined,
+  })
+  otherTab.setUser(1)
+  otherTab.onSlotMounted()
+  otherTab.receiveServerHint(serverGet(), 0)
+  await Promise.resolve()
+  await Promise.resolve()
+  assert.equal(otherTab.getState().displayedHint, null, 'fix5: reload/another tab must not render claimed host B')
+  assert.equal(otherClaims, 0)
+  otherTab.dispose()
+  page.dispose()
+
+  // Controller-level in-flight claim + claimed:true poll test (fails on 1f4cf63):
+  let resolveInFlight
+  const inFlightCtl = createCorraldHintController({
+    claimShown: () => new Promise((r) => { resolveInFlight = r }),
+    dismiss: async () => {},
+    readCachedStatus: () => undefined,
+  })
+  inFlightCtl.setUser(1)
+  inFlightCtl.onSlotMounted()
+  inFlightCtl.receiveServerHint({ ...hostA, claimed: false }, 0)
+  assert.equal(inFlightCtl.getState().candidateHint?.host_id, 7)
+  // Poll returns claimed:true while POST is still in flight -> must KEEP candidateHint!
+  inFlightCtl.receiveServerHint({ ...hostA, claimed: true }, 0)
+  assert.equal(
+    inFlightCtl.getState().candidateHint?.host_id,
+    7,
+    'fix5 (fails on 1f4cf63): claimed:true poll while POST is in flight must keep candidateHint',
+  )
+  resolveInFlight(true)
+  await Promise.resolve()
+  await Promise.resolve()
+  assert.equal(inFlightCtl.getState().displayedHint?.host_id, 7, 'fix5: delayed POST returning true must display banner')
+  inFlightCtl.dispose()
 }
 
 // Phase 2b fix4 regression tests (fails on 66e0bdb):

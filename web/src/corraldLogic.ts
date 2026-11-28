@@ -1084,6 +1084,9 @@ export function createCorraldHintController(deps: CorraldHintControllerDeps): Co
   let candidateHint: CorraldHint | null = null
   let displayedHint: CorraldHint | null = null
   let claimInFlight: { hostId: number; generation: number; seq: number } | null = null
+  // Host IDs claimed by THIS page in the current user & generation (added only
+  // when this page's own claim POST returns claimed:true).
+  const claimedByPage = new Set<number>()
 
   const pendingDismisses = new Map<number, { hostId: number; generation: number }>()
   const dismissInFlight = new Set<number>()
@@ -1173,6 +1176,7 @@ export function createCorraldHintController(deps: CorraldHintControllerDeps): Co
         notify()
         return
       }
+      claimedByPage.add(h.host_id)
       candidateHint = null
       displayedHint = h
       notify()
@@ -1227,6 +1231,7 @@ export function createCorraldHintController(deps: CorraldHintControllerDeps): Co
 
   const hideHost = (hostId: number) => {
     if (hostId <= 0) return
+    claimedByPage.delete(hostId)
     let changed = false
     if (candidateHint?.host_id === hostId) {
       candidateHint = null
@@ -1254,6 +1259,7 @@ export function createCorraldHintController(deps: CorraldHintControllerDeps): Co
       epoch++
       cancelClaim()
       clearAllDismisses()
+      claimedByPage.clear()
       adminDisabled = false
       serverGeneration = 0
       candidateHint = null
@@ -1266,6 +1272,7 @@ export function createCorraldHintController(deps: CorraldHintControllerDeps): Co
       masterEnabled = enabled
       if (!enabled) {
         cancelClaim()
+        claimedByPage.clear()
         if (candidateHint !== null || displayedHint !== null) {
           candidateHint = null
           displayedHint = null
@@ -1279,6 +1286,7 @@ export function createCorraldHintController(deps: CorraldHintControllerDeps): Co
       adminDisabled = disabled
       if (disabled) {
         cancelClaim()
+        claimedByPage.clear()
         if (candidateHint !== null || displayedHint !== null) {
           candidateHint = null
           displayedHint = null
@@ -1296,6 +1304,7 @@ export function createCorraldHintController(deps: CorraldHintControllerDeps): Co
       if (Number.isFinite(serverGen) && serverGen >= 0) {
         if (serverGen > serverGeneration) {
           serverGeneration = serverGen
+          claimedByPage.clear()
           for (const [hostId, op] of pendingDismisses) {
             if (op.generation < serverGen) {
               pendingDismisses.delete(hostId)
@@ -1317,12 +1326,14 @@ export function createCorraldHintController(deps: CorraldHintControllerDeps): Co
       }
 
       if (displayedHint && !isHostStillEligible(displayedHint)) {
+        claimedByPage.delete(displayedHint.host_id)
         displayedHint = null
         changed = true
       }
 
       if (!masterEnabled || adminDisabled) {
-        if (candidateHint !== null || displayedHint !== null) {
+        claimedByPage.clear()
+        if (candidateHint !== null || displayedHint !== null || claimInFlight !== null) {
           cancelClaim()
           candidateHint = null
           displayedHint = null
@@ -1333,6 +1344,7 @@ export function createCorraldHintController(deps: CorraldHintControllerDeps): Co
       }
 
       if (!hint) {
+        claimedByPage.clear()
         if (candidateHint !== null || displayedHint !== null || claimInFlight !== null) {
           cancelClaim()
           candidateHint = null
@@ -1345,9 +1357,9 @@ export function createCorraldHintController(deps: CorraldHintControllerDeps): Co
 
       const normalized: CorraldHint = { ...hint, generation: hint.generation ?? serverGeneration }
 
-      // Immediately reject if the page's cached corrald status is already ineligible
-      // (and clear any displayed banner that is no longer returned as eligible).
+      // Immediately reject if the page's cached corrald status is already ineligible.
       if (!isHostStillEligible(normalized)) {
+        claimedByPage.delete(normalized.host_id)
         if (candidateHint !== null || displayedHint !== null || claimInFlight !== null) {
           cancelClaim()
           candidateHint = null
@@ -1358,45 +1370,47 @@ export function createCorraldHintController(deps: CorraldHintControllerDeps): Co
         return
       }
 
-      // Keep an already-claimed visible banner on THIS page while GET keeps
-      // returning the same host & generation as eligible (including claimed:true).
-      if (
-        displayedHint &&
-        displayedHint.host_id === normalized.host_id &&
-        (displayedHint.generation ?? 0) === (normalized.generation ?? 0)
-      ) {
-        const prev = displayedHint
-        const metaChanged =
-          prev.host_name !== normalized.host_name ||
-          prev.count !== normalized.count ||
-          prev.op !== normalized.op ||
-          prev.reason !== normalized.reason ||
-          prev.last_at !== normalized.last_at ||
-          prev.claimed !== normalized.claimed
-        if (metaChanged) {
-          displayedHint = normalized
-          changed = true
-        }
-        if (changed) notify()
-        return
-      }
+      const sameInFlight =
+        claimInFlight !== null &&
+        claimInFlight.hostId === normalized.host_id &&
+        claimInFlight.generation === (normalized.generation ?? 0)
 
-      // A page that did NOT claim this hint (another tab, a reload, or after
-      // closing/unmounting) never renders or claims a hint marked claimed:true.
       if (normalized.claimed) {
-        const sameInFlight =
-          claimInFlight !== null &&
-          claimInFlight.hostId === normalized.host_id &&
-          claimInFlight.generation === (normalized.generation ?? 0)
-        if (!sameInFlight && claimInFlight !== null) {
+        // If our own claim POST for this exact host is still in flight, keep
+        // the candidate slot mounted and wait for that POST's answer.
+        if (sameInFlight) {
+          if (displayedHint !== null) {
+            displayedHint = null
+            changed = true
+          }
+          if (changed) notify()
+          return
+        }
+        if (claimInFlight !== null) {
           cancelClaim()
-          changed = true
         }
         if (candidateHint !== null) {
           candidateHint = null
           changed = true
         }
-        if (displayedHint !== null) {
+        // Render a claimed hint iff THIS page claimed it.
+        if (claimedByPage.has(normalized.host_id)) {
+          const prev = displayedHint
+          const sameDisplayed =
+            prev !== null &&
+            prev.host_id === normalized.host_id &&
+            (prev.generation ?? 0) === (normalized.generation ?? 0) &&
+            prev.host_name === normalized.host_name &&
+            prev.count === normalized.count &&
+            prev.op === normalized.op &&
+            prev.reason === normalized.reason &&
+            prev.last_at === normalized.last_at &&
+            prev.claimed === normalized.claimed
+          if (!sameDisplayed) {
+            displayedHint = normalized
+            changed = true
+          }
+        } else if (displayedHint !== null) {
           displayedHint = null
           changed = true
         }
@@ -1404,15 +1418,13 @@ export function createCorraldHintController(deps: CorraldHintControllerDeps): Co
         return
       }
 
-      // The poll returned a different eligible unclaimed host, so the previously
-      // displayed host is no longer returned by the server: hide it before claiming.
+      // GET returned claimed:false -> hide any previously displayed host and
+      // claim this one (unless a claim for it is already in flight).
       if (displayedHint !== null) {
         displayedHint = null
         changed = true
       }
-
-      // If a claim is already in flight for this exact host & generation, keep waiting.
-      if (claimInFlight && claimInFlight.hostId === normalized.host_id && claimInFlight.generation === (normalized.generation ?? 0)) {
+      if (sameInFlight) {
         candidateHint = normalized
         if (changed) notify()
         return
@@ -1450,6 +1462,7 @@ export function createCorraldHintController(deps: CorraldHintControllerDeps): Co
               candidateHint = null
             }
             if (hadDisplay) {
+              claimedByPage.delete(displayedHint!.host_id)
               displayedHint = null
             }
             if (hadDisplay || hadInFlight) {
@@ -1462,8 +1475,10 @@ export function createCorraldHintController(deps: CorraldHintControllerDeps): Co
 
     closeDisplayed() {
       // Closing with X needs no extra write: shown_at was already recorded by
-      // the server when the claim succeeded.
+      // the server when the claim succeeded. Remove from claimedByPage so
+      // subsequent claimed:true polls do not re-display it.
       if (displayedHint !== null) {
+        claimedByPage.delete(displayedHint.host_id)
         displayedHint = null
         notify()
       }
@@ -1474,6 +1489,7 @@ export function createCorraldHintController(deps: CorraldHintControllerDeps): Co
     dismiss(hint: CorraldHint) {
       if (hint.host_id <= 0) return
       const gen = hint.generation ?? serverGeneration
+      claimedByPage.delete(hint.host_id)
       if (displayedHint?.host_id === hint.host_id) displayedHint = null
       if (candidateHint?.host_id === hint.host_id) candidateHint = null
       if (claimInFlight?.hostId === hint.host_id) cancelClaim()

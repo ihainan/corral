@@ -994,15 +994,16 @@ func TestCorraldHintClaimRevalidatesAfterStatusLookup(t *testing.T) {
 	}
 }
 
-// Phase 2b fix4 regression test (fails on 66e0bdb):
-// GET /api/corrald/hints must keep reporting a claimed (not dismissed) host
-// with claimed:true across subsequent normal polls while it remains eligible,
-// prioritize any newer/other unclaimed eligible host, and omit the claimed host
-// as soon as eligibility ends (daemon state, admin disable, switch off,
-// retarget, or dismiss).
+// Phase 2b fix4/fix5 regression test (fails on 66e0bdb and 1f4cf63):
+// GET /api/corrald/hints must:
+//   - Always return a claimed (not dismissed) still-eligible host (claimed:true)
+//     BEFORE any unclaimed host (if several are claimed, the most recently claimed).
+//   - Only when no such claimed host exists, return the best unclaimed eligible host (claimed:false).
+//   - Omit a claimed host as soon as eligibility ends (daemon state, admin disable,
+//     switch off, retarget, or dismiss).
 func TestCorraldHintClaimedReportedWhileEligibleAndClearedWhenIneligible(t *testing.T) {
 	h := newHarness(t, func(c *config.Config) {
-		c.GatewayID = "gw-hint-fix4.local"
+		c.GatewayID = "gw-hint-fix5.local"
 	})
 	h.srv.corrald.SetDist(makeFakeCorraldDist())
 	admin := h.admin()
@@ -1042,16 +1043,54 @@ func TestCorraldHintClaimedReportedWhileEligibleAndClearedWhenIneligible(t *test
 		}
 	}
 
-	// An unclaimed eligible host2 is NOT starved by claimed host1.
-	now = now.Add(-5 * time.Second) // even if older than host1
+	// Fix5 (fails on 1f4cf63): even when another eligible unclaimed host2 has a
+	// newer failure timestamp, GET MUST keep returning claimed host1 (claimed:true)
+	// before any unclaimed host.
+	now = now.Add(10 * time.Second)
 	h.srv.recordCorraldHintError(aliceID, host2, HintOpLog, sshx.ErrBusy)
-	rUnclaimed := alice.do("GET", "/api/corrald/hints", nil)
-	mustStatus(t, rUnclaimed, http.StatusOK, "unclaimed takes priority")
-	hintU, ok := rUnclaimed.json()["hint"].(map[string]any)
-	if !ok || int64(hintU["host_id"].(float64)) != host2 || hintU["claimed"] != false {
-		t.Fatalf("expected unclaimed host2 to take priority over claimed host1, got %+v", rUnclaimed.json())
+	for i := 0; i < 3; i++ {
+		rKeepClaimed := alice.do("GET", "/api/corrald/hints", nil)
+		mustStatus(t, rKeepClaimed, http.StatusOK, "claimed beats unclaimed")
+		hintC, ok := rKeepClaimed.json()["hint"].(map[string]any)
+		if !ok || int64(hintC["host_id"].(float64)) != host1 || hintC["claimed"] != true {
+			t.Fatalf("fix5 poll %d: expected claimed host1 before unclaimed host2, got %+v", i, rKeepClaimed.json())
+		}
 	}
-	// Dismiss host2 -> GET falls back to claimed host1 again.
+
+	// When host1 becomes temporarily ineligible (installing), GET falls through to
+	// unclaimed host2 (claimed:false).
+	if err := h.store.UpsertCorraldHost(ctx, &store.CorraldHost{HostID: host1, State: gw.StateInstalling}); err != nil {
+		t.Fatalf("UpsertCorraldHost installing: %v", err)
+	}
+	rFallback := alice.do("GET", "/api/corrald/hints", nil)
+	mustStatus(t, rFallback, http.StatusOK, "unclaimed host2 while host1 installing")
+	hintU, ok := rFallback.json()["hint"].(map[string]any)
+	if !ok || int64(hintU["host_id"].(float64)) != host2 || hintU["claimed"] != false {
+		t.Fatalf("expected unclaimed host2 while host1 installing, got %+v", rFallback.json())
+	}
+
+	// Claim host2 AFTER host1 (so host2 has a newer shown_at), then make host1 off
+	// again with an even newer failure LastAt: among multiple claimed hosts, GET
+	// must return the most recently CLAIMED one (host2)!
+	time.Sleep(2 * time.Millisecond) // ensure strictly greater unixMilli shown_at
+	rClaim2 := alice.do("POST", fmt.Sprintf("/api/hosts/%d/corrald/hint/shown", host2), map[string]any{"generation": 0})
+	mustStatus(t, rClaim2, http.StatusOK, "claim host2")
+	if rClaim2.json()["claimed"] != true {
+		t.Fatalf("expected claimed=true for host2, got %+v", rClaim2.json())
+	}
+	if err := h.store.UpsertCorraldHost(ctx, &store.CorraldHost{HostID: host1, State: gw.StateOff}); err != nil {
+		t.Fatalf("reset host1 off: %v", err)
+	}
+	now = now.Add(30 * time.Second)
+	h.srv.recordCorraldHintError(aliceID, host1, HintOpStatus, sshx.ErrBusy) // host1 has newer LastAt than host2
+	rMostRecentClaimed := alice.do("GET", "/api/corrald/hints", nil)
+	mustStatus(t, rMostRecentClaimed, http.StatusOK, "most recently claimed host")
+	hintMRC, ok := rMostRecentClaimed.json()["hint"].(map[string]any)
+	if !ok || int64(hintMRC["host_id"].(float64)) != host2 || hintMRC["claimed"] != true {
+		t.Fatalf("fix5: expected most recently claimed host2 (even when host1 has newer LastAt), got %+v", rMostRecentClaimed.json())
+	}
+
+	// Dismiss host2 -> GET returns remaining claimed host1.
 	mustStatus(t, alice.do("POST", fmt.Sprintf("/api/hosts/%d/corrald/hint/dismiss", host2), map[string]any{"generation": 0}), http.StatusOK, "dismiss host2")
 	hintBack, ok := alice.do("GET", "/api/corrald/hints", nil).json()["hint"].(map[string]any)
 	if !ok || int64(hintBack["host_id"].(float64)) != host1 || hintBack["claimed"] != true {
@@ -1077,12 +1116,12 @@ func TestCorraldHintClaimedReportedWhileEligibleAndClearedWhenIneligible(t *test
 	mustStatus(t, admin.do("PUT", "/api/admin/corrald", map[string]any{"allowed": true}), http.StatusOK, "admin allow")
 
 	// 3. Master switch off -> GET returns null.
-	mustStatus(t, patchUserSettings(t, alice, aliceID, "writer_fix4_test_01", 1, map[string]any{"corraldHints": false}), http.StatusOK, "switch off")
+	mustStatus(t, patchUserSettings(t, alice, aliceID, "writer_fix5_test_01", 1, map[string]any{"corraldHints": false}), http.StatusOK, "switch off")
 	if got := alice.do("GET", "/api/corrald/hints", nil).json()["hint"]; got != nil {
 		t.Fatalf("switch off must omit claimed hint, got %+v", got)
 	}
 	// Turning switch back on advances generation -> host1 is unclaimed again!
-	mustStatus(t, patchUserSettings(t, alice, aliceID, "writer_fix4_test_01", 2, map[string]any{"corraldHints": true}), http.StatusOK, "switch on")
+	mustStatus(t, patchUserSettings(t, alice, aliceID, "writer_fix5_test_01", 2, map[string]any{"corraldHints": true}), http.StatusOK, "switch on")
 	rReset := alice.do("GET", "/api/corrald/hints", nil)
 	gen1 := int64(rReset.json()["generation"].(float64))
 	hintReset, ok := rReset.json()["hint"].(map[string]any)
@@ -1090,7 +1129,7 @@ func TestCorraldHintClaimedReportedWhileEligibleAndClearedWhenIneligible(t *test
 		t.Fatalf("after reset host1 should be unclaimed again, got %+v", rReset.json())
 	}
 
-	// Re-claim under gen1, then verify retargeting and dismiss omit the claimed host.
+	// Re-claim under gen1, then verify dismiss and retargeting omit the claimed host.
 	mustStatus(t, alice.do("POST", fmt.Sprintf("/api/hosts/%d/corrald/hint/shown", host1), map[string]any{"generation": gen1}), http.StatusOK, "claim gen1")
 	if got := alice.do("GET", fmt.Sprintf("/api/corrald/hints?host_id=%d", host1), nil).json()["hint"].(map[string]any); got["claimed"] != true {
 		t.Fatalf("expected host1 claimed=true under gen1, got %+v", got)
