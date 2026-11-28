@@ -43,8 +43,40 @@ func (s *Server) tryCorraldLocate(ctx context.Context, sess *term.Session, param
 	return s.tryCorraldLocateBudget(ctx, sess, params, corraldBudgetDuration(ctx))
 }
 
+// corraldMatchesSession verifies that the host record's current connection
+// config and corrald machine binding still match sess so an old terminal
+// session connected to machine A never receives locate results from machine B
+// after a host record is retargeted.
+func (s *Server) corraldMatchesSession(ctx context.Context, sess *term.Session) bool {
+	if s == nil || sess == nil {
+		return false
+	}
+	if s.store == nil {
+		return true
+	}
+	h, err := s.store.Host(ctx, sess.OwnerID, sess.HostID)
+	if err != nil || h == nil {
+		return false
+	}
+	if sess.HostConfig != "" && hostConfig(h) != sess.HostConfig {
+		return false
+	}
+	if ch, err := s.store.CorraldHostByID(ctx, sess.HostID); err == nil && ch != nil {
+		if ch.BoundUsername != "" && h.Username != "" && ch.BoundUsername != h.Username {
+			return false
+		}
+		if hk, kerr := s.store.HostKey(ctx, sess.OwnerID, sess.HostID); kerr == nil && hk != nil && ch.BoundFingerprint != "" && hk.Fingerprint != ch.BoundFingerprint {
+			return false
+		}
+	}
+	return true
+}
+
 func (s *Server) tryCorraldLocateBudget(ctx context.Context, sess *term.Session, params proto.AgentLocateParams, budget time.Duration) ([]byte, bool) {
 	if s == nil || sess == nil || sess.HostID <= 0 {
+		return nil, false
+	}
+	if !s.corraldMatchesSession(ctx, sess) {
 		return nil, false
 	}
 	cl, ok := s.CorraldClient(sess.OwnerID, sess.HostID, "locate")

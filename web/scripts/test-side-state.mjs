@@ -15,7 +15,7 @@ function loadTs(rel) {
 const side = await loadTs('../src/terminal/sideState.ts')
 const order = await loadTs('../src/terminal/agentOrder.ts')
 
-const { reconcileAgentStatus, mergeRowTasks, convoLastUserMs, stampAgeMs } = side
+const { reconcileAgentStatus, mergeRowTasks, convoLastUserMs, stampAgeMs, resolveSubPeers } = side
 const { asHeld, buildAgentGroups, rowTasks } = order
 
 function makeRow(partial) {
@@ -347,6 +347,67 @@ function makeRow(partial) {
   // Bogus far-future timestamp (>60s ahead) still returns null.
   assert.equal(stampAgeMs(1000000 + 120000, 1000000), null)
   assert.equal(stampAgeMs(undefined, 1000000), null)
+}
+
+// 8. resolveSubPeers (fix5 #5): completed subagent panels must NOT keep using
+//    their frozen historical subPeers snapshot once polling stops; they follow
+//    the parent conversation's live peers refresh (or drop links when offline).
+{
+  const subOld = { '10:20': { session_id: 's1', pane: 'w1:p2', title: 'Stale Sub Peer' } }
+  const parentLive = { '10:20': { session_id: 's1', pane: 'w1:p2', title: 'Live Parent Peer' } }
+
+  // While subagent is still polling, merges live subPeers with parentLive (parent wins on shared keys).
+  assert.deepEqual(
+    resolveSubPeers({
+      going: true,
+      subFailed: false,
+      subPeers: { ...subOld, '30:40': { session_id: 's1', pane: 'w1:p3', title: 'Sub-Only Live' } },
+      parentPeers: parentLive,
+      parentOkAt: 1000,
+      parentFailing: false,
+    }),
+    {
+      '10:20': { session_id: 's1', pane: 'w1:p2', title: 'Live Parent Peer' },
+      '30:40': { session_id: 's1', pane: 'w1:p3', title: 'Sub-Only Live' },
+    },
+  )
+
+  // Once subagent stops polling (!going), frozen subPeers is discarded; follows parentLive only.
+  assert.deepEqual(
+    resolveSubPeers({
+      going: false,
+      subFailed: false,
+      subPeers: { '99:88': { session_id: 's1', pane: 'w1:p9', title: 'Exited Frozen Peer' } },
+      parentPeers: parentLive,
+      parentOkAt: 2000,
+      parentFailing: false,
+    }),
+    parentLive,
+  )
+
+  // When subagent stopped polling AND parent no longer has the peer (or parent is failing), no stale link remains.
+  assert.equal(
+    resolveSubPeers({
+      going: false,
+      subFailed: false,
+      subPeers: subOld,
+      parentPeers: undefined,
+      parentOkAt: 2000,
+      parentFailing: false,
+    }),
+    undefined,
+  )
+  assert.equal(
+    resolveSubPeers({
+      going: false,
+      subFailed: false,
+      subPeers: subOld,
+      parentPeers: parentLive,
+      parentOkAt: 2000,
+      parentFailing: true,
+    }),
+    undefined,
+  )
 }
 
 console.log('sideState: all tests passed')

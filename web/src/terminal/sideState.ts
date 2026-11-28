@@ -425,11 +425,13 @@ export interface SubPollPage<E extends { seq: number }, R> {
   older_cut?: boolean
   more?: boolean
   running?: R[]
+  peers?: Record<string, unknown>
 }
 
 export interface SubPollState<E extends { seq: number }, R> {
   entries: E[]
   running: R[]
+  peers?: Record<string, unknown>
   older: boolean
   olderCut: boolean
   loading: boolean
@@ -510,10 +512,11 @@ export function createSubConvoPoller<E extends { seq: number }, R>(deps: SubPoll
         more = !!r.more
         const entries = [...byseq.values()].sort((x, y) => x.seq - y.seq)
         const running = r.running ?? []
+        const peers = r.peers
         const hasOlder = !!r.older
         const olderCut = !!r.older_cut
         const grew = grewAt
-        deps.onState(() => ({ entries, running, older: hasOlder, olderCut, loading: false, failed: false, grewAt: grew }))
+        deps.onState(() => ({ entries, running, peers, older: hasOlder, olderCut, loading: false, failed: false, grewAt: grew }))
         if (!more || deps.hidden() || !deps.active()) break
       }
     } catch {
@@ -544,6 +547,31 @@ export function createSubConvoPoller<E extends { seq: number }, R>(deps: SubPoll
   }
 
   return { run, stop }
+}
+
+// resolveSubPeers chooses which peer lookup map a subagent panel may use so
+// completed subagents never keep showing links from a frozen historical poll:
+//   - While the subagent is still polling (`going && !subFailed`), merge its
+//     live `subPeers` with the parent conversation's latest live `parentPeers`
+//     (parent wins on shared keys when parent is healthy).
+//   - Once the subagent stops polling (`!going` or `subFailed`), discard the
+//     subagent's frozen `subPeers` snapshot and ONLY follow the parent's latest
+//     live `parentPeers` (or `undefined` when the parent is offline/failing).
+export function resolveSubPeers<P>(opts: {
+  going: boolean
+  subFailed?: boolean
+  subPeers?: Record<string, P>
+  parentPeers?: Record<string, P>
+  parentOkAt: number
+  parentFailing: boolean
+}): Record<string, P> | undefined {
+  const liveParent = !opts.parentFailing && opts.parentOkAt > 0 ? opts.parentPeers : undefined
+  if (!opts.going || opts.subFailed) {
+    return liveParent
+  }
+  if (!opts.subPeers) return liveParent
+  if (!liveParent) return opts.subPeers
+  return { ...opts.subPeers, ...liveParent }
 }
 
 // convoLastUserMs returns the unix-ms timestamp of the latest non-mid, non-gone

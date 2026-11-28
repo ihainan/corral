@@ -52,6 +52,16 @@ import { category, isNote, items, ms, partTime, sameEdits, toolName, verbOf, typ
 import { useThoughtTranslation } from './thoughtTranslate'
 import { parseApiError, type ParsedApiError } from './apiError'
 import { pickQuotaPlan, quotaPlanLabel, quotaTitleText } from './quotaPlan'
+import { formatPeerPlain, peerClickHow, resolvePeerSender, type ConvoPeerInfo, type PeerPickHow } from './peerSender'
+import { resolveSubPeers } from './sideState'
+
+const PeerCtx = createContext<{
+  peers?: Record<string, ConvoPeerInfo>
+  peerTitles?: ReadonlyMap<string, string>
+  okAt?: number
+  failing?: boolean
+  onOpenPeer?: (sessionId: string, pane: string | undefined, how?: PeerPickHow) => void
+}>({})
 
 // The conversation view: the agent's log as turns, over the terminal (which
 // stays mounted under it). Each turn is what the person wrote, then one line
@@ -271,6 +281,8 @@ export function ConversationView({
   onStop,
   stop,
   side,
+  peerTitles,
+  onOpenPeer,
   active = true,
   keysActive,
   splitPane,
@@ -318,6 +330,8 @@ export function ConversationView({
   onStop?: () => void // (it works: press Esc in its pane)
   stop?: string // what became of the last stop pressed, to say
   side?: { rows: ConvoListRow[] } // the agents to go to: beside the thread where there is room, else from the bar
+  peerTitles?: ReadonlyMap<string, string> // sidebar-computed titles keyed by peerTargetKey(sessionId, pane)
+  onOpenPeer?: (sessionId: string, pane: string | undefined, how?: PeerPickHow) => void // open a backend-verified live Corral peer session/pane
   active?: boolean // (its tab is the one shown: polling & live updates run)
   keysActive?: boolean // (defaults to active: per-pane keyboard shortcuts such as Ctrl+O, [, ], ?)
   splitPane?: ConvoSplitPane // (optional secondary conversation shown side by side)
@@ -1878,6 +1892,22 @@ export function ConversationView({
         event: (p) => {
           const ev = p.event
           if (!ev) return ''
+          if (ev.kind === 'peer') {
+            const resolved = resolvePeerSender({
+              from: ev.from,
+              peerPid: ev.peer_pid,
+              peerStart: ev.peer_start,
+              peers: convo.peers,
+              peerTitles,
+              failing: convo.failing,
+            })
+            const head = formatPeerPlain(resolved, {
+              from: (name) => t('convo.peerFrom', { name }),
+              fromSession: (name) => t('convo.queuedFromName', { name }),
+              notInCorral: t('convo.peerNotInCorral'),
+            })
+            return paren(head) + (ev.text ? ' ' + ev.text : '')
+          }
           // (Background work ended: as its line says it, its state and exit code.)
           if (ev.kind === 'task')
             return paren(t(`convo.task.${ev.task ?? 'cmd'}.${ev.status ?? 'done'}` as Parameters<typeof t>[0]) + (ev.code ? t('convo.task.code', { n: ev.code }) : '')) + (ev.text ? ' ' + ev.text : '')
@@ -1901,6 +1931,10 @@ export function ConversationView({
       },
     )
   }
+  const peerCtx = useMemo(
+    () => ({ peers: convo.peers, peerTitles, okAt: convo.okAt, failing: convo.failing, onOpenPeer }),
+    [convo.peers, peerTitles, convo.okAt, convo.failing, onOpenPeer],
+  )
   const rows = side?.rows ?? []
   const currentRow = rows.find((r) => r.current)
   const barTip = [currentRow?.title ?? name[0], currentRow?.where ?? name[1], currentRow?.sessionGroup, currentRow?.projectKey]
@@ -2475,11 +2509,13 @@ export function ConversationView({
       <div className="convo-scroll-wrap">
         <div className="convo-scroll" ref={box}>
           <div className="convo-col" ref={col}>
-            <ShowTerminal.Provider value={onShowTerminal}>
-              <OpenSub.Provider value={openSub}>
-                <TurnLive.Provider value={turnLive}>{body}</TurnLive.Provider>
-              </OpenSub.Provider>
-            </ShowTerminal.Provider>
+            <PeerCtx.Provider value={peerCtx}>
+              <ShowTerminal.Provider value={onShowTerminal}>
+                <OpenSub.Provider value={openSub}>
+                  <TurnLive.Provider value={turnLive}>{body}</TurnLive.Provider>
+                </OpenSub.Provider>
+              </ShowTerminal.Provider>
+            </PeerCtx.Provider>
           </div>
         </div>
         {railTurns.length >= RAIL_MIN && convo.status === 'ready' && <ConvoRail turns={railTurns} at={railAt} onGo={goTurn} />}
@@ -2544,7 +2580,11 @@ export function ConversationView({
           </ShowTerminal.Provider>
         )}
         {/* (Not of one at rest, which would have taken them in: not when its state is not known.) */}
-        {convo.status === 'ready' && agent?.status !== 'idle' && agent?.status !== 'done' && convo.queued && <Queue items={convo.queued} onSendNow={working ? onSendNow : undefined} said={sendNow} />}
+        {convo.status === 'ready' && agent?.status !== 'idle' && agent?.status !== 'done' && convo.queued && (
+          <PeerCtx.Provider value={peerCtx}>
+            <Queue items={convo.queued} onSendNow={working ? onSendNow : undefined} said={sendNow} />
+          </PeerCtx.Provider>
+        )}
         {waits && !ask && convo.status === 'ready' && (
           // (Where it cannot be answered here: in its terminal.)
           <div className="convo-waiting" role="status">
@@ -2671,6 +2711,7 @@ export function ConversationView({
       {changes && shownEdits && <ChangesPanel key={changes.key} edits={shownEdits} focus={changes.path} onClose={unshow} active={active} onCopy={copy} />}
       {subs && subs.length > 0 && convo.of && (
         // (A subagent's messages are not the session's turns: no fork or rewind from them.)
+        <PeerCtx.Provider value={peerCtx}>
         <ForkAtOf.Provider value={undefined}>
         <RewindAtOf.Provider value={undefined}>
         <SubPanel
@@ -2688,6 +2729,7 @@ export function ConversationView({
         />
         </RewindAtOf.Provider>
         </ForkAtOf.Provider>
+        </PeerCtx.Provider>
       )}
       {/* (Kept when the command ends — gone from the list — saying so, its output still there: review 1ad2c3d.) */}
       {bgCmd && convo.of && (
@@ -3203,16 +3245,58 @@ function Queue({ items, onSendNow, said }: { items: ConvoQueued[]; onSendNow?: (
   )
 }
 
+function PeerSenderHead({ from, peerPid, peerStart }: { from?: string; peerPid?: number; peerStart?: number }) {
+  const { peers, peerTitles, failing, onOpenPeer } = useContext(PeerCtx)
+  const resolved = resolvePeerSender({ from, peerPid, peerStart, peers, peerTitles, failing })
+  if (resolved.kind === 'live') {
+    const tip = [resolved.name, resolved.where, t('convo.peerOpenHint')].filter(Boolean).join(' · ')
+    return (
+      <>
+        <span>{t('convo.peerFromPrefix')}</span>
+        <a
+          className="convo-peer-link"
+          href={resolved.href}
+          title={tip}
+          onClick={(e) => {
+            if (!onOpenPeer) return
+            e.preventDefault()
+            e.stopPropagation()
+            onOpenPeer(resolved.sessionId, resolved.pane, peerClickHow(e))
+          }}
+          onMouseDown={(e) => e.button === 1 && e.preventDefault()}
+          onAuxClick={(e) => {
+            if (e.button !== 1 || !onOpenPeer) return
+            e.preventDefault()
+            e.stopPropagation()
+            onOpenPeer(resolved.sessionId, resolved.pane, 'tab')
+          }}
+        >
+          {resolved.name}
+        </a>
+        {resolved.where && <span className="convo-peer-where">{resolved.where}</span>}
+      </>
+    )
+  }
+  return (
+    <>
+      <span>{t('convo.queuedFromName', { name: resolved.name })}</span>
+      <span className="convo-peer-status">{t('convo.peerNotInCorral')}</span>
+    </>
+  )
+}
+
 function QueuedNote({ q }: { q: ConvoQueued }) {
   const [whole, setWhole] = useState(false)
   return (
-    <button type="button" className={'convo-queue-row is-note' + (whole ? ' is-whole' : '')} aria-expanded={whole} onClick={() => setWhole(!whole)}>
+    <div className={'convo-queue-row is-note' + (whole ? ' is-whole' : '')}>
       <span className="convo-queue-from">
         <MessagesSquare size={14} aria-hidden="true" />
-        {q.from ? t('convo.queuedFromName', { name: q.from }) : t('convo.queuedNoticeName')}
+        {q.from ? <PeerSenderHead from={q.from} peerPid={q.peer_pid} peerStart={q.peer_start} /> : t('convo.queuedNoticeName')}
       </span>
-      <span className="convo-queue-text">{queueWords(q.text)}</span>
-    </button>
+      <button type="button" className="convo-queue-toggle" aria-expanded={whole} onClick={() => setWhole(!whole)}>
+        <span className="convo-queue-text">{queueWords(q.text)}</span>
+      </button>
+    </div>
   )
 }
 
@@ -6552,7 +6636,7 @@ function PeerNote({ ev }: { ev: ConvoEvent }) {
       <MessagesSquare size={14} aria-hidden="true" />
       <div className="convo-trouble-body">
         <p className="convo-trouble-head">
-          {t('convo.queuedFromName', { name: ev.from ?? '?' })}
+          <PeerSenderHead from={ev.from} peerPid={ev.peer_pid} peerStart={ev.peer_start} />
           {ev.relayed && (
             <span className="convo-peer-relayed" title={t('convo.peerRelayedLong')}>
               {t('convo.peerRelayed')}
@@ -6861,6 +6945,24 @@ function SubPanel({ of, sub, depth, live, nav, onOpen, onBack, onClose, active, 
   const told = depth === 1 && live(sub.agent)
   const c = useSubConvo(sessionId, pane, sub.agent, told, active, depth > 1, sub.cli)
   const going = depth === 1 ? told : c.growing
+  const parentPeer = useContext(PeerCtx)
+  const subPeerCtx = useMemo(() => {
+    const subLive = going && !c.failed && !!c.peers
+    return {
+      peers: resolveSubPeers({
+        going,
+        subFailed: c.failed,
+        subPeers: c.peers,
+        parentPeers: parentPeer.peers,
+        parentOkAt: parentPeer.okAt ?? 0,
+        parentFailing: !!parentPeer.failing,
+      }),
+      peerTitles: parentPeer.peerTitles,
+      okAt: subLive ? undefined : parentPeer.okAt,
+      failing: subLive ? false : parentPeer.failing,
+      onOpenPeer: parentPeer.onOpenPeer,
+    }
+  }, [going, c.failed, c.peers, parentPeer.peers, parentPeer.peerTitles, parentPeer.okAt, parentPeer.failing, parentPeer.onOpenPeer])
   const panel = useRef<HTMLElement>(null)
   const [opened, setOpened] = useState<Record<string, boolean>>({})
   const toggle = useCallback((key: string, open: boolean) => setOpened((o) => ({ ...o, [key]: open })), [])
@@ -6976,6 +7078,7 @@ function SubPanel({ of, sub, depth, live, nav, onOpen, onBack, onClose, active, 
         )}
         {c.failed && <LoadErrorLine onRetry={c.read} />}
         {!c.failed && !c.loading && list.length === 0 && <p className="convo-older">{t('sub.empty')}</p>}
+        <PeerCtx.Provider value={subPeerCtx}>
         <OpenSub.Provider value={isCli ? undefined : onOpen}>
           <SubReadOnlyHint.Provider value={cliNestedHint}>
           <WordsAsWritten.Provider value={true}>
@@ -6992,6 +7095,7 @@ function SubPanel({ of, sub, depth, live, nav, onOpen, onBack, onClose, active, 
           )}
           </SubReadOnlyHint.Provider>
         </OpenSub.Provider>
+        </PeerCtx.Provider>
       </div>
       {going && c.running.length > 0 && (
         <div className="convo-sub-foot">

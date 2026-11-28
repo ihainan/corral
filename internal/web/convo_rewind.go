@@ -1418,6 +1418,7 @@ func (s *Server) apiConversationRewind(w http.ResponseWriter, r *http.Request) {
 	var front *convoProc
 	if sess.Persistence == "herdr" {
 		if plan := planHerdrFastLocate(livePI, b.Pane, herdr.Pane{}, false); plan.mode == herdrFastPIDs {
+			tFast := time.Now()
 			var locOut []byte
 			var lerr error
 			if cout, ok := s.tryCorraldLocate(ctx, sess, proto.AgentLocateParams{Mode: "herdr", ShellPID: plan.shellPID, PIDs: plan.pids}); ok {
@@ -1427,6 +1428,9 @@ func (s *Server) apiConversationRewind(w http.ResponseWriter, r *http.Request) {
 			}
 			if lerr == nil {
 				located := parseConvoLocate(string(locOut))
+				if !located.noProc {
+					s.recordLocatedProcs(sess, located, false, b.Pane, tFast)
+				}
 				if p, ok := fastLocateAccept(located, b.Pane, socket, liveHerdrSID); ok && !located.noProc && p != nil && p.pid == b.PID && p.start == b.Start && p.sid == b.Session {
 					front = p
 				}
@@ -1449,6 +1453,9 @@ func (s *Server) apiConversationRewind(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		located := parseConvoLocate(string(locOut))
+		if !located.noProc {
+			s.recordLocatedProcs(sess, located, true, "", tLoc)
+		}
 		s.perfLocate("locate.full", tLoc, nil, len(located.procs), sess.HostID)
 		front = pickConvoProc(located.procs, sess.Persistence, b.Pane, socket, located.tmuxPID, located.paneTTY, liveHerdrSID)
 	}

@@ -58,6 +58,7 @@ import {
   type TerminalBlockerState,
 } from '../terminal/liveTerminalPolicy'
 import { agentKey, sessionWhich } from '../terminal/sessionName'
+import { buildPeerTitles, peerHref, sidebarHerdrTitle, type PeerPickHow } from '../terminal/peerSender'
 import { firstShown, hideBox, keptBox, KeptPart, KeptView, letGoBox, modalShown, useEffectOnChange, useShownAt, useWhenGone, type KeptBox } from '../shown'
 import { Rail, StatusBar, StatusItem, useWorkbench } from '../workbench'
 import { CorraldStatusBarItem } from '../components/CorraldStatusBarItem'
@@ -262,18 +263,18 @@ const labelOf = (e: Entry, said: string, hosts: number, named = true, sameWsPare
   // (A name given its pane, the most of the person's own: before its workspace's.)
   const own = r?.a.label ?? ''
   const agentName = r?.a.name ?? ''
+  if (!r) return { title: said, where: whereOf(e, hosts) }
+  const title = sidebarHerdrTitle({ ws: r.ws, label: own, agentName, agent: r.a.agent, said, named, sameWsParent })
   // A subagent split inside its parent's workspace should not duplicate the
   // parent's workspace name as its own title: prefer its pane label, its
   // conversation title, or its herdr agent name (e.g. "antigravity").
-  if (r && sameWsParent && !own) {
-    const title = (named && said) || agentName || r.a.agent || said
+  if (sameWsParent && !own) {
     const host = hosts > 1 ? e.s.host_name : ''
     const where = [host, named && said && agentName && agentName !== title ? agentName : '', agentMark(r.a.agent) ? '' : r.a.agent].filter(Boolean)
     return { title, where: where.join(' · ') }
   }
-  if (!r || (!ws && !own)) return { title: said, where: whereOf(e, hosts) }
+  if (!ws && !own) return { title, where: whereOf(e, hosts) }
   const host = hosts > 1 ? e.s.host_name : ''
-  const title = own || ws
   const where = [host, own && !sameWsParent ? ws : '', sameWsParent ? '' : tabOf(r), named && said !== title ? said : '', agentMark(r.a.agent) ? '' : r.a.agent].filter(Boolean)
   // (Nothing else to say under it — a Codex not named, say, its first message
   // not used for a name — the folder it runs in, rather than an empty line.)
@@ -2170,6 +2171,40 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, previewTabKey
     return placedAs ? out.map((r) => (r.current ? { ...r, placeAs: placedAs } : r)) : out
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [entries, cur, agent, reconciled, liveConvoRunning, convoWorkingSince, convoTitle, all, titles, onPick, placedAs, pins, splitKey, isSecondary])
+  const peerTitles = useMemo(
+    () =>
+      buildPeerTitles(
+        entries.map((e, i) => ({
+          key: e.key,
+          sessionId: e.s.id,
+          pane: e.pane,
+          isHerdr: !!e.row,
+          lost: e.row?.lost,
+          title: rows[i]?.title ?? '',
+        })),
+        all,
+        { herdr: agentKey, tmux: tmuxKey },
+      ),
+    [entries, rows, all],
+  )
+  const openPeer = useCallback(
+    (sessionId: string, pane: string | undefined, how?: PeerPickHow) => {
+      const sess = all.find((x) => x.id === sessionId)
+      const target =
+        entries.find((e) => e.s.id === sessionId && (e.pane ?? '') === (pane ?? '')) ??
+        (sess?.persistence === 'herdr' && pane ? entries.find((e) => e.key === agentKey(sess, pane)) : undefined) ??
+        (sess?.persistence === 'tmux' && !pane ? entries.find((e) => !e.pane && e.key === tmuxKey(sess)) : undefined)
+      if (target) {
+        onPick(target, how)
+        return
+      }
+      const href = peerHref(sessionId, pane)
+      if (!href) return
+      if (how === 'tab') window.open(href, '_blank', 'noopener')
+      else window.location.assign(href)
+    },
+    [all, entries, onPick],
+  )
   const shown = rows.find((r) => r.current)
   const known = !!shown && shown.status !== 'unknown'
   useEffect(() => {
@@ -4432,6 +4467,8 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, previewTabKey
       onStop={canPress && !lead && (!!draft.trim() || !!up || askHides) ? () => press('stop') : undefined}
       stop={said?.what === 'stop' && said.bind === bindKey ? said.text : undefined}
       side={isSecondary ? undefined : { rows }}
+      peerTitles={peerTitles}
+      onOpenPeer={openPeer}
       active={active}
       keysActive={kActive}
       splitPane={isSecondary ? undefined : splitPane}

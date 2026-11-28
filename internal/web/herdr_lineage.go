@@ -838,6 +838,75 @@ func (t *lineageTracker) decorate(sum *herdrSummary) {
 	}
 }
 
+// sameWorkspaceParents returns the set of live panes whose confirmed parent
+// pane is currently live in the same workspace (mirroring decorate and the
+// sidebar's sameWsParent rule in AgentsChat.tsx).
+func (t *lineageTracker) sameWorkspaceParents(snapIdx *herdrSnapIndex) map[string]bool {
+	if t == nil || snapIdx == nil {
+		return nil
+	}
+	t.mu.Lock()
+	rows := append([]store.AgentLineage(nil), t.rows...)
+	t.mu.Unlock()
+
+	byChild := map[string]string{}
+	for _, r := range rows {
+		if r.State != store.LineageConfirmed {
+			continue
+		}
+		child, hasChild := snapIdx.panes[r.ChildPane]
+		if !hasChild || child.AgentStatus == herdr.StatusGone {
+			continue
+		}
+		if !sameOccupant(r.ChildTermID, r.ChildSession, child.TerminalID, agentSession(child)) {
+			continue
+		}
+		if !snapIdx.agentPanes[r.ParentPane] {
+			continue
+		}
+		parent, hasParent := snapIdx.panes[r.ParentPane]
+		if !hasParent || parent.AgentStatus == herdr.StatusGone {
+			continue
+		}
+		if !sameOccupant(r.ParentTermID, r.ParentSession, parent.TerminalID, agentSession(parent)) {
+			continue
+		}
+		byChild[r.ChildPane] = r.ParentPane
+	}
+	if len(byChild) == 0 {
+		return nil
+	}
+	out := map[string]bool{}
+	for childPane, parentPane := range byChild {
+		// Cycle guard (mirrors decorate's safeEdge).
+		cur := parentPane
+		cyclic := false
+		for depth := 0; depth < 16; depth++ {
+			if cur == childPane {
+				cyclic = true
+				break
+			}
+			next, has := byChild[cur]
+			if !has {
+				break
+			}
+			cur = next
+		}
+		if cyclic {
+			continue
+		}
+		child := snapIdx.panes[childPane]
+		parent := snapIdx.panes[parentPane]
+		if child.WorkspaceID != "" && child.WorkspaceID == parent.WorkspaceID {
+			out[childPane] = true
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
 // RecordEnvLink records a confirmed parent-child edge when a process running
 // inside childPane inherited a parent agent's session ID in its environment.
 // Only links when a unique live parent pane matches parentSession (never guesses).

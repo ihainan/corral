@@ -1918,7 +1918,7 @@ func (s *Server) refreshCodexClaims(sess *term.Session) {
 		defer cancel()
 		tScan := time.Now()
 		tmuxName := sess.CurrentTmuxSession()
-		out, _, _, shared, err := s.runConvoScan(ctx, sess, proto.AgentLocateParams{Mode: sess.Persistence, TmuxName: tmuxName}, convoLocateCommand(sess.Persistence, tmuxName, ""), time.Time{})
+		out, _, looked, shared, err := s.runConvoScan(ctx, sess, proto.AgentLocateParams{Mode: sess.Persistence, TmuxName: tmuxName}, convoLocateCommand(sess.Persistence, tmuxName, ""), time.Time{})
 		if err != nil {
 			s.perfLocate(locateOp("locate.full", shared), tScan, err, 0, sess.HostID)
 			return
@@ -1928,6 +1928,7 @@ func (s *Server) refreshCodexClaims(sess *term.Session) {
 		if l.noProc {
 			return
 		}
+		s.recordLocatedProcs(sess, l, true, "", looked)
 		s.convoClaimed.seeAliveOn(hostKey, l, aliveCodex(l), l.now())
 	}()
 }
@@ -2448,8 +2449,12 @@ type convoAnswer struct {
 	Running []convo.Running `json:"running,omitempty"`
 	// DefaultChanged: a model switch here left the default model of new
 	// sessions changed (not put back), lately.
-	DefaultChanged bool          `json:"default_changed,omitempty"`
-	Entries        []convo.Entry `json:"entries"`
+	DefaultChanged bool `json:"default_changed,omitempty"`
+	// Peers maps "<pid>:<proc_start>" of verified cross-session peer messages in
+	// this conversation to currently-online Corral agent sessions/panes matched
+	// from the latest locate scan.
+	Peers   map[string]convo.PeerInfo `json:"peers,omitempty"`
+	Entries []convo.Entry             `json:"entries"`
 }
 
 // GET /api/sessions/{id}/conversation?pane=<herdr pane>&gen=<n>&rev=<n>[&older=1]
@@ -2708,6 +2713,7 @@ func (s *Server) apiConversation(w http.ResponseWriter, r *http.Request) {
 	if !st.grewAt.IsZero() {
 		ans.QuietMs = max(0, time.Since(st.grewAt).Milliseconds())
 	}
+	ans.Peers = s.resolveConvoPeers(sess, st)
 	writeJSONCompressed(w, r, http.StatusOK, ans)
 }
 
@@ -2977,6 +2983,14 @@ func (s *Server) locateScan(ctx context.Context, sess *term.Session, st *convoSt
 		}
 	}
 	prevLocated, prevPane := st.located, st.pane
+	if !l.noProc {
+		full := !fastHit && !ocOnly
+		coveredPane := ""
+		if !full {
+			coveredPane = pane
+		}
+		s.recordLocatedProcs(sess, l, full, coveredPane, looked)
+	}
 	st.located, st.pane = at, pane // (when the scan was made: one shared may be a little older)
 	sid, log, reason, agent := "", "", "", ""
 	guessed := false
@@ -5085,6 +5099,13 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 			}
 			_ = err
 			l = parseConvoLocate(string(out))
+			if !l.noProc {
+				if fastTry {
+					s.recordLocatedProcs(sess, l, false, b.Pane, tLoc)
+				} else {
+					s.recordLocatedProcs(sess, l, true, "", tLoc)
+				}
+			}
 			s.perfLocate(op, tLoc, nil, len(l.procs), sess.HostID)
 			if fastTry {
 				if plan.mode == herdrFastPIDs {
@@ -6123,6 +6144,7 @@ func (s *Server) subagentAnswer(w http.ResponseWriter, r *http.Request, sess *te
 			s.recordCodexQuotaSnapshot(sess, m.Quota)
 		}
 	}
+	ans.Peers = s.resolveConvoPeers(sess, st)
 	writeJSONCompressed(w, r, http.StatusOK, ans)
 }
 

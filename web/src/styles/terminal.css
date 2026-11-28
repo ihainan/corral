@@ -1882,12 +1882,14 @@ button.convo-running-what { padding: 0; border: 0; background: none; font: inher
 /* Not the person's own: another session's agent, or a notice */
 .convo-queue-row.is-note { color: var(--term-fg-3); }
 /* Another session's message waiting (QueuedNote, 11-14): where it is from over its words, a few lines, the whole at a tap. */
-button.convo-queue-row.is-note { display: flex; flex-direction: column; gap: 2px; width: 100%; border-left: 0; border-right: 0; border-bottom: 0; background: none; font: inherit; text-align: left; cursor: pointer; }
-button.convo-queue-row.is-note:hover { background: var(--term-hover); }
-button.convo-queue-row.is-note:last-child { border-radius: 0 0 var(--r-lg) var(--r-lg); }
+.convo-queue-row.is-note { display: flex; flex-direction: column; gap: 2px; width: 100%; }
+.convo-queue-row.is-note:last-child { border-radius: 0 0 var(--r-lg) var(--r-lg); }
+.convo-queue-toggle { display: block; width: 100%; padding: 0; border: 0; background: none; font: inherit; color: inherit; text-align: left; cursor: pointer; }
+.convo-queue-toggle:hover { color: var(--term-fg-2); }
+.convo-queue-toggle:focus-visible { outline: 2px solid var(--term-accent-text); outline-offset: 2px; border-radius: var(--r-xs); }
 .convo-queue-row.is-whole .convo-queue-text { display: block; overflow: visible; }
 .convo-queue-row.is-note .convo-queue-text { font-size: var(--fs-note); line-height: var(--lh-note); }
-.convo-queue-from { display: inline-flex; align-items: center; gap: 6px; font-size: var(--fs-note); line-height: var(--lh-note); color: var(--term-fg-2); font-weight: 500; }
+.convo-queue-from { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; font-size: var(--fs-note); line-height: var(--lh-note); color: var(--term-fg-2); font-weight: 500; }
 .convo-user.is-mid .convo-user-text { background: color-mix(in srgb, var(--term-fg) 5%, var(--term-bg)); }
 
 /* The agents to go to: beside the thread (wide), over it (narrow, or folded away) */
@@ -2690,7 +2692,12 @@ button.convo-queue-row.is-note:last-child { border-radius: 0 0 var(--r-lg) var(-
 /* Another session's message (11-15): as a recap is, its sender above its words, a mark where it may relay others'. */
 .convo-event.is-peer { display: flex; gap: 8px; align-items: flex-start; margin: 0; font-size: var(--fs-sub); line-height: var(--lh-sub); color: var(--term-fg-2); padding: 8px 12px; border-radius: var(--r); background: color-mix(in srgb, var(--term-accent-text) 6%, transparent); }
 .convo-event.is-peer > svg { flex: none; margin-top: 3px; color: var(--term-accent-text); }
-.convo-event.is-peer .convo-trouble-head { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; color: var(--term-fg-3); font-size: var(--fs-note); line-height: var(--lh-note); }
+.convo-event.is-peer .convo-trouble-head { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; color: var(--term-fg-3); font-size: var(--fs-note); line-height: var(--lh-note); }
+.convo-peer-link { color: var(--term-accent-text); font-weight: 500; text-decoration: none; border-radius: var(--r-xs); }
+.convo-peer-link:hover { text-decoration: underline; }
+.convo-peer-link:focus-visible { outline: 2px solid var(--term-accent-text); outline-offset: 2px; }
+.convo-peer-where { color: var(--term-fg-3); font-weight: 400; }
+.convo-peer-status { padding: 0 6px; border-radius: var(--r-xs); background: color-mix(in srgb, var(--term-fg) 7%, transparent); color: var(--term-fg-3); font-weight: 400; }
 .convo-peer-relayed { padding: 0 6px; border-radius: var(--r-xs); background: color-mix(in srgb, var(--term-fg) 7%, transparent); color: var(--term-fg-3); cursor: help; }
 .convo-peer-text { color: var(--term-fg); min-width: 0; overflow-wrap: anywhere; }
 .convo-peer-text p { margin: 0; }
