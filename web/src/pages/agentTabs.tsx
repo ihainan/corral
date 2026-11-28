@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState } from 'react'
-import { ChevronDown, ExternalLink, Link2, Plus, X } from 'lucide-react'
+import { ChevronDown, ExternalLink, Link2, Pin, Plus, X } from 'lucide-react'
 import { t, type I18nKey } from '../i18n'
 import { local, session } from '../storage'
 import { AgentIcon } from '../terminal/agentIcons'
 import type { AgentStatusMark } from '../terminal/sideState'
+import { normalizeAgentTabs } from '../terminal/agentTabPolicy'
 import { showFront, useTabDrag, useTabSlide } from '../terminal/tabDrag'
 import { copyText, isCoarse, MenuLayer, useToast, type MenuItem } from '../components/ui'
 import { openInNewTab } from '../components/AppLink'
@@ -23,6 +24,7 @@ export type AgentTab = {
   focus?: 'primary' | 'secondary'
   title?: string // (as last shown: what the tab says once its agent is gone)
   program?: string
+  preview?: boolean // (true for the single preview/unpinned tab; omitted for normal tabs)
 }
 
 // Kept in the browser, of one account: the list shared by its windows, the
@@ -37,7 +39,8 @@ export function readTabs(user: number): AgentTab[] | null {
   try {
     const k = JSON.parse(local.get(TABS_KEY) ?? 'null') as Kept | null
     if (!k || k.user !== user || !Array.isArray(k.tabs)) return null
-    return k.tabs.filter((x) => x && typeof x.id === 'string' && typeof x.key === 'string' && typeof x.s === 'string')
+    const valid = k.tabs.filter((x) => x && typeof x.id === 'string' && typeof x.key === 'string' && typeof x.s === 'string')
+    return normalizeAgentTabs(valid)
   } catch {
     return null
   }
@@ -60,8 +63,8 @@ export const takePickInTab = () => {
 export const dropPickInTab = () => void (pickInTab = false)
 export const OPEN_PICKER = 'corral-open-picker'
 
-// How a pick from a list opens: in the tab in front (none said), a new tab, or beside it.
-export type PickHow = 'tab' | 'split'
+// How a pick from a list opens: in the preview tab (none said), a new pinned tab, pinned in place, or beside it.
+export type PickHow = 'tab' | 'split' | 'pin'
 // From a click: ⌘ or Ctrl a new tab, ⌥ or Alt beside it (as Claude Code's desktop app and Slack).
 export const howOf = (e: { metaKey: boolean; ctrlKey: boolean; altKey: boolean }): PickHow | undefined => (e.metaKey || e.ctrlKey ? 'tab' : e.altKey ? 'split' : undefined)
 
@@ -90,6 +93,7 @@ export function AgentTabBar(p: {
   views: TabView[]
   front: string | null
   onGo: (tab: AgentTab) => void
+  onPin: (tab: AgentTab) => void
   onClose: (tab: AgentTab) => void
   onCloseMany: (list: AgentTab[]) => void
   onMove: (id: string, to: number) => void
@@ -139,7 +143,8 @@ export function AgentTabBar(p: {
     const right = p.views.slice(at + 1).map((x) => x.tab)
     const url = location.origin + v.address
     return [
-      { label: t('tabs.menu.window'), icon: <ExternalLink size={16} />, onSelect: () => openInNewTab(url) },
+      ...(v.tab.preview ? [{ label: t('agentTabs.pin'), icon: <Pin size={16} />, onSelect: () => p.onPin(v.tab) }] : []),
+      { label: t('tabs.menu.window'), icon: <ExternalLink size={16} />, separator: !!v.tab.preview, onSelect: () => openInNewTab(url) },
       { label: t('tabs.menu.copyLink'), icon: <Link2 size={16} />, onSelect: () => void copyText(url).then((ok) => toast(ok ? t('tabs.menu.copied') : url)) },
       { label: t('agentTabs.close'), icon: <X size={16} />, separator: true, onSelect: () => p.onClose(v.tab) },
       { label: t('agentTabs.closeOthers', { n: others.length }), icon: <span className="menu-icon-space" />, disabled: !others.length, onSelect: () => p.onCloseMany(others) },
@@ -155,12 +160,12 @@ export function AgentTabBar(p: {
           const front = v.tab.id === p.front
           const label = statusWord(v.mark, v.status)
           const markCls = !v.ended && v.mark ? MARK_CLASS[v.mark] : ''
-          const tip = [v.title, v.ended ? t('agentTabs.ended') : label].filter(Boolean).join(' · ')
+          const tip = [v.title, v.tab.preview ? t('agentTabs.preview') : '', v.ended ? t('agentTabs.ended') : label].filter(Boolean).join(' · ')
           return (
             <div
               key={v.tab.id}
               data-tab={v.tab.id}
-              className={'term-tab has-x' + (drag?.id === v.tab.id ? ' held' : '') + (v.ended ? ' is-ended' : '')}
+              className={'term-tab has-x' + (drag?.id === v.tab.id ? ' held' : '') + (v.tab.preview ? ' is-preview' : '') + (v.ended ? ' is-ended' : '')}
               data-place={j}
               style={dx ? { transform: `translateX(${dx}px)` } : undefined}
               aria-current={front ? 'page' : undefined}
@@ -174,7 +179,20 @@ export function AgentTabBar(p: {
                 setMenu({ id: v.tab.id, anchor: r })
               }}
             >
-              <button type="button" className="term-tab-main" aria-current={front ? 'page' : undefined} onClick={() => !dragged() && !front && p.onGo(v.tab)}>
+              <button
+                type="button"
+                className="term-tab-main"
+                aria-current={front ? 'page' : undefined}
+                onClick={(e) => {
+                  if (dragged()) return
+                  if (!front) return p.onGo(v.tab)
+                  const pt = (e.nativeEvent as PointerEvent).pointerType
+                  if (pt ? pt === 'touch' || pt === 'pen' : isCoarse()) {
+                    setMenu({ id: v.tab.id, anchor: e.currentTarget.getBoundingClientRect() })
+                  }
+                }}
+                onDoubleClick={() => !dragged() && v.tab.preview && p.onPin(v.tab)}
+              >
                 <AgentIcon program={v.program} size={15} bare />
                 {markCls && (
                   <span className={'term-tab-count ' + markCls} role="img" aria-label={label}>
@@ -182,6 +200,7 @@ export function AgentTabBar(p: {
                   </span>
                 )}
                 <span className="term-tab-name">{v.title}</span>
+                {v.tab.preview && <span className="sr-only"> · {t('agentTabs.preview')}</span>}
               </button>
               <button type="button" className="term-tab-x" aria-label={t('agentTabs.closeTab', { name: v.title })} title={t('agentTabs.close')} onPointerDown={(e) => e.stopPropagation()} onClick={() => p.onClose(v.tab)}>
                 <X size={14} aria-hidden="true" />
@@ -220,7 +239,7 @@ export function AgentTabBar(p: {
           items={p.views.map((v) => ({
             label: v.title,
             icon: <AgentIcon program={v.program} size={16} bare />,
-            hint: v.ended ? t('agentTabs.ended') : statusWord(v.mark, v.status) || undefined,
+            hint: [v.tab.preview ? t('agentTabs.preview') : '', v.ended ? t('agentTabs.ended') : statusWord(v.mark, v.status)].filter(Boolean).join(' · ') || undefined,
             onSelect: () => v.tab.id !== p.front && p.onGo(v.tab),
           }))}
           onClose={() => setAll(null)}

@@ -5001,18 +5001,26 @@ export function AgentList({ rows, menus, onPicked, placed, query: given, onQuery
     to.scrollIntoView({ block: 'nearest' })
   }
   const navKey = (e: React.KeyboardEvent<HTMLInputElement>) => {
-    if (composing(e.nativeEvent) || e.altKey || e.metaKey || e.ctrlKey) return
+    if (composing(e.nativeEvent)) return
     const all = shownRows(e.currentTarget)
     if (!all.length) return
     const at = all.findIndex((b) => b.dataset.row === hi)
-    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+    if (!e.altKey && !e.metaKey && !e.ctrlKey && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
       e.preventDefault()
       const to = all[e.key === 'ArrowDown' ? (at + 1) % all.length : at <= 0 ? all.length - 1 : at - 1]
       setHi(to.dataset.row ?? null)
       to.scrollIntoView({ block: 'nearest' })
     } else if (e.key === 'Enter' && (at >= 0 || query.trim())) {
       e.preventDefault()
-      all[at >= 0 ? at : 0].click() // (none marked, some words typed: the first found)
+      const btn = all[at >= 0 ? at : 0]
+      const row = rows.find((r) => r.key === btn.dataset.row)
+      if (row) {
+        clearRowTip()
+        onPicked?.()
+        row.onPick(e.metaKey || e.ctrlKey ? 'tab' : e.altKey ? 'split' : undefined)
+      } else {
+        btn.click() // (none marked, some words typed: the first found)
+      }
     }
   }
   return (
@@ -5272,6 +5280,12 @@ export function AgentList({ rows, menus, onPicked, placed, query: given, onQuery
                 // (of the one shown: nothing, or the end of a switch to another; the list may be of before. With ⌘ or
                 // Ctrl a new tab, with ⌥ or Alt beside it — 11-24, as Claude Code's desktop app and Slack.)
                 r.onPick(e.metaKey || e.ctrlKey ? 'tab' : e.altKey ? 'split' : undefined)
+              }}
+              onDoubleClick={(e) => {
+                if (e.metaKey || e.ctrlKey || e.altKey) return
+                clearRowTip()
+                onPicked?.()
+                r.onPick('pin')
               }}
               // (The middle button: a new tab, as a link's. Held down, it would start the page's scrolling.)
               onMouseDown={(e) => e.button === 1 && e.preventDefault()}
