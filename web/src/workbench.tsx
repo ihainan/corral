@@ -1,5 +1,5 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { Bot, Film, KeyRound, LogOut, ScrollText, Search, Server, Settings, SquareTerminal, Users } from 'lucide-react'
+import { Bot, Command, Film, KeyRound, LogOut, ScrollText, Server, Settings, SquareTerminal, Users } from 'lucide-react'
 import { openPalette, PALETTE_KEY } from './palette'
 import { signOut, useSession } from './app'
 import { t } from './i18n'
@@ -136,7 +136,7 @@ export function Rail({ active }: { active?: RailKey }) {
   return (
     <nav className={'wb-rail' + (held ? ' is-keys' : '')} ref={navRef} aria-label={t('nav.main')}>
       <button type="button" className="wb-rail-item" onClick={openPalette} aria-label={t('palette.title')} title={t('palette.title') + (PALETTE_KEY ? ` (${PALETTE_KEY})` : '')} aria-keyshortcuts={PALETTE_KEY ? 'Meta+K' : undefined}>
-        <Search size={19} strokeWidth={1.75} />
+        <Command size={19} strokeWidth={1.75} />
       </button>
       <span className="wb-rail-sep" aria-hidden="true" />
       {items.map((i, at) => (

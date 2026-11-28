@@ -309,6 +309,7 @@ type herdrCmdIntent struct {
 	valid      bool
 	cmdPanes   map[string]bool // pane IDs literally mentioned in the command text (excluded from filtered-output fallback)
 	hasListing bool            // true if script also ran herdr list/snapshot (disables filtered-output fallback)
+	inLoop     bool            // true if script contains a for/while loop (one intent may emit multiple JSON creation payloads)
 }
 
 func newLineageExtractor(agent, serverSocket, serverSession string) *lineageExtractor {
@@ -923,19 +924,183 @@ func (e *lineageExtractor) classifyHerdrCommand(rawCmd string) herdrCmdIntent {
 	return list[0]
 }
 
+// stripHeredocs removes POSIX heredoc bodies (<<EOF ... EOF, <<-'EOF' ... EOF)
+// from a shell script while preserving commands outside heredocs, so writing a
+// prompt file via heredoc in the same Bash call as `herdr tab create` does not
+// block lineage extraction while heredoc-embedded `herdr` text is still ignored.
+// Returns ("", false) for unterminated heredocs.
+func stripHeredocs(cmd string) (string, bool) {
+	if !strings.Contains(cmd, "<<") {
+		return cmd, true
+	}
+	lines := strings.Split(cmd, "\n")
+	var out []string
+	var pending []struct {
+		delim     string
+		stripTabs bool
+	}
+	for _, line := range lines {
+		if len(pending) > 0 {
+			check := line
+			if pending[0].stripTabs {
+				check = strings.TrimLeft(check, "\t")
+			}
+			if check == pending[0].delim {
+				pending = pending[1:]
+			}
+			continue
+		}
+		var b strings.Builder
+		var quote byte
+		escaped := false
+		for i := 0; i < len(line); i++ {
+			c := line[i]
+			if escaped {
+				b.WriteByte(c)
+				escaped = false
+				continue
+			}
+			if quote == '\'' {
+				if c == '\'' {
+					quote = 0
+				}
+				b.WriteByte(c)
+				continue
+			}
+			if quote == '"' {
+				if c == '\\' && i+1 < len(line) {
+					escaped = true
+					b.WriteByte(c)
+					continue
+				}
+				if c == '"' {
+					quote = 0
+				}
+				b.WriteByte(c)
+				continue
+			}
+			if c == '\\' {
+				escaped = true
+				b.WriteByte(c)
+				continue
+			}
+			if c == '\'' || c == '"' {
+				quote = c
+				b.WriteByte(c)
+				continue
+			}
+			if c == '#' && (i == 0 || line[i-1] == ' ' || line[i-1] == '\t' || line[i-1] == ';') {
+				b.WriteString(line[i:])
+				break
+			}
+			if c == '<' && i+1 < len(line) && line[i+1] == '<' {
+				if i+2 < len(line) && line[i+2] == '<' {
+					// Here-string `<<<`: not a heredoc.
+					b.WriteString("<<<")
+					i += 2
+					continue
+				}
+				j := i + 2
+				stripTabs := false
+				if j < len(line) && line[j] == '-' {
+					stripTabs = true
+					j++
+				}
+				for j < len(line) && (line[j] == ' ' || line[j] == '\t') {
+					j++
+				}
+				var delim strings.Builder
+				var dq byte
+				for j < len(line) {
+					ch := line[j]
+					if dq != 0 {
+						if ch == dq {
+							dq = 0
+						} else {
+							delim.WriteByte(ch)
+						}
+						j++
+						continue
+					}
+					if ch == '\'' || ch == '"' {
+						dq = ch
+						j++
+						continue
+					}
+					if ch == '\\' && j+1 < len(line) {
+						j++
+						delim.WriteByte(line[j])
+						j++
+						continue
+					}
+					if ch == ' ' || ch == '\t' || ch == ';' || ch == '&' || ch == '|' || ch == '>' || ch == '<' || ch == ')' {
+						break
+					}
+					delim.WriteByte(ch)
+					j++
+				}
+				if dq != 0 || delim.Len() == 0 {
+					return "", false
+				}
+				pending = append(pending, struct {
+					delim     string
+					stripTabs bool
+				}{delim: delim.String(), stripTabs: stripTabs})
+				// Keep the rest of the command line (e.g. `> /tmp/brief.md && ...`)
+				// without the `<<DELIM` redirection token.
+				i = j - 1
+				continue
+			}
+			b.WriteByte(c)
+		}
+		out = append(out, b.String())
+	}
+	if len(pending) > 0 {
+		return "", false
+	}
+	return strings.Join(out, "\n"), true
+}
+
+// unwrapShellBlockKeyword strips leading/trailing simple control-flow keywords
+// (`do ...`, `... done`, `then ...`, `... fi`) produced when splitting simple
+// `for x in a b; do ...; done` loops on `;` / `\n`.
+func unwrapShellBlockKeyword(stmt string) string {
+	s := strings.TrimSpace(stmt)
+	for {
+		switch {
+		case strings.HasPrefix(s, "do ") || strings.HasPrefix(s, "do\t"):
+			s = strings.TrimSpace(s[2:])
+		case strings.HasPrefix(s, "then ") || strings.HasPrefix(s, "then\t"):
+			s = strings.TrimSpace(s[4:])
+		case strings.HasSuffix(s, " done") || strings.HasSuffix(s, "\tdone"):
+			s = strings.TrimSpace(s[:len(s)-5])
+		case strings.HasSuffix(s, " fi") || strings.HasSuffix(s, "\tfi"):
+			s = strings.TrimSpace(s[:len(s)-3])
+		default:
+			return s
+		}
+	}
+}
+
 // classifyHerdrCommands extracts every provable herdr creation/start command
 // targeting this herdr server from a shell command or multi-statement script
-// (supporting real agent idioms like `herdr ... 2>&1 | head -c 800` and
-// `W=$(herdr workspace create ...); echo "$W"`), while strictly rejecting
-// heredocs, `||` error fallbacks, `--remote`, `ssh`, `docker exec`, `--help`,
-// echo/comment spoofing, or mismatched HERDR_SOCKET_PATH / --socket / --session.
+// (supporting real agent idioms like `herdr ... 2>&1 | head -c 800`,
+// `W=$(herdr workspace create ...); echo "$W"`, heredoc prompt files beside
+// `herdr tab create`, and simple `for ...; do ...; done` loops), while strictly
+// rejecting `||` error fallbacks, `--remote`, `ssh`, `docker exec`, `--help`,
+// echo/comment/heredoc spoofing, or mismatched HERDR_SOCKET_PATH / --socket / --session.
 func (e *lineageExtractor) classifyHerdrCommands(rawCmd string) []herdrCmdIntent {
 	cmd := strings.TrimSpace(rawCmd)
 	if cmd == "" || len(cmd) > 16384 || !strings.Contains(cmd, "herdr") {
 		return nil
 	}
-	// Reject heredocs, backticks, fallback `||`, and self-spoofed result types in the command text.
-	if strings.Contains(cmd, "<<") || strings.Contains(cmd, "`") || strings.Contains(cmd, "||") {
+	// Reject backticks, fallback `||`, and self-spoofed result types in the command text.
+	if strings.Contains(cmd, "`") || strings.Contains(cmd, "||") {
+		return nil
+	}
+	var ok bool
+	cmd, ok = stripHeredocs(cmd)
+	if !ok || !strings.Contains(cmd, "herdr") {
 		return nil
 	}
 	if strings.Contains(cmd, "workspace_created") || strings.Contains(cmd, "tab_created") ||
@@ -951,7 +1116,16 @@ func (e *lineageExtractor) classifyHerdrCommands(rawCmd string) []herdrCmdIntent
 	// Reject entire script if any statement invokes a remote host or container.
 	envOverrides := map[string]string{}
 	hasListing := false
-	for _, st := range stmts {
+	hasLoop := false
+	for i, st := range stmts {
+		if strings.HasPrefix(st, "for ") || strings.HasPrefix(st, "while ") || strings.HasPrefix(st, "do ") || strings.HasPrefix(st, "do\t") {
+			hasLoop = true
+		}
+		st = unwrapShellBlockKeyword(st)
+		stmts[i] = st
+		if st == "" || st == "done" || st == "fi" {
+			continue
+		}
 		if stmtHasRemoteExec(st) {
 			return nil
 		}
@@ -983,6 +1157,9 @@ func (e *lineageExtractor) classifyHerdrCommands(rawCmd string) []herdrCmdIntent
 
 	var out []herdrCmdIntent
 	for _, st := range stmts {
+		if st == "" || st == "done" || st == "fi" {
+			continue
+		}
 		// Unwrap simple variable capture: VAR=$(herdr ...) or export VAR=$(herdr ...)
 		candidates := []string{st}
 		if inner, captured := unwrapCommandSubAssign(st); captured {
@@ -992,6 +1169,7 @@ func (e *lineageExtractor) classifyHerdrCommands(rawCmd string) []herdrCmdIntent
 			if intent, ok := e.classifyPipeline(cand, envOverrides); ok {
 				intent.cmdPanes = cmdPanes
 				intent.hasListing = hasListing
+				intent.inLoop = hasLoop
 				out = append(out, intent)
 			}
 		}
@@ -1551,14 +1729,22 @@ func (e *lineageExtractor) matchMultiResults(intents []herdrCmdIntent, output, b
 		if len(intents) > 1 {
 			key += ":" + strconv.Itoa(i)
 		}
+		matched := 0
 		for pi, payload := range payloads {
 			if used[pi] || !herdrResultTypeMatches(intent.action, payload.Type) {
 				continue
 			}
-			if d, ok := e.discoveryFromPayload(intent.action, payload, key); ok {
+			ek := key
+			if intent.inLoop && matched > 0 {
+				ek = key + ":" + strconv.Itoa(pi)
+			}
+			if d, ok := e.discoveryFromPayload(intent.action, payload, ek); ok {
 				used[pi] = true
 				out = append(out, d)
-				break
+				matched++
+				if !intent.inLoop {
+					break
+				}
 			}
 		}
 	}

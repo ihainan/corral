@@ -66,12 +66,22 @@ const (
 var errScanBudget = errors.New("background scan hit output budget")
 
 // bgCLI is a known agent CLI process ("agy", "claude", "codex") discovered
-// inside a background command's process tree, with its verified session UUID
-// and host log path (kept server-side, never sent to the browser).
+// inside a background command's process tree (or via inherited parent session
+// environment when detached/reparented), with its verified session UUID and
+// host log path (kept server-side, never sent to the browser).
 type bgCLI struct {
-	Agent   string
-	Session string
-	Log     string
+	Agent       string
+	Session     string
+	Log         string
+	HerdrPane   string
+	HerdrSocket string
+}
+
+// envPaneLink is a child herdr pane -> parent agent session link discovered
+// from a running CLI process's inherited environment variables.
+type envPaneLink struct {
+	ChildPane     string
+	ParentSession string
 }
 
 type bgCLILogEntry struct {
@@ -125,7 +135,7 @@ type cmdProber struct {
 	soon    time.Time // a look due soon (a pane came to done or idle)
 	wake    chan struct{}
 	poke    func()
-	scan func(ctx context.Context, watched []string) (cmds map[string][]bgCmd, subs map[string][]bgAgent, bgIDs map[string]map[string]bool, whole bool, err error)
+	scan    func(ctx context.Context, watched []string) (cmds map[string][]bgCmd, subs map[string][]bgAgent, bgIDs map[string]map[string]bool, whole bool, err error)
 	// bgIDs: of the sessions at work, which of their commands running the
 	// last look found their log says they set going in the background.
 	bgIDs map[string]map[string]bool
@@ -283,10 +293,18 @@ func (p *cmdProber) decorate(sum *herdrSummary) {
 	if p.at.IsZero() || time.Since(p.at) > p.kept {
 		return
 	}
+	livePanes := map[string]bool{}
+	for i := range sum.Workspaces {
+		for j := range sum.Workspaces[i].Agents {
+			if pid := sum.Workspaces[i].Agents[j].PaneID; pid != "" {
+				livePanes[pid] = true
+			}
+		}
+	}
 	for i := range sum.Workspaces {
 		for j := range sum.Workspaces[i].Agents {
 			a := &sum.Workspaces[i].Agents[j]
-			activeCmds := p.activeCmdsLocked(a.PaneID, a.Session)
+			activeCmds := filterLivePaneBgCLIs(p.activeCmdsLocked(a.PaneID, a.Session), a.PaneID, livePanes)
 			plain, cliSubs := splitBgCmds(activeCmds)
 			if len(plain) > 0 {
 				a.BgCmds, a.BgCmdList = len(plain), plain[:min(len(plain), maxCmdsShown)]
@@ -309,6 +327,65 @@ func (p *cmdProber) decorate(sum *herdrSummary) {
 			}
 		}
 	}
+}
+
+// filterLivePaneBgCLIs removes CLI entries that already live in their own
+// distinct herdr pane in the current summary so they are shown as nested herdr
+// panes via lineageTracker rather than duplicated as background CLI rows.
+func filterLivePaneBgCLIs(cmds []bgCmd, parentPane string, livePanes map[string]bool) []bgCmd {
+	if len(cmds) == 0 || len(livePanes) == 0 {
+		return cmds
+	}
+	var out []bgCmd
+	for _, c := range cmds {
+		if len(c.clis) == 0 {
+			out = append(out, c)
+			continue
+		}
+		var kept []bgCLI
+		for _, cli := range c.clis {
+			if cli.HerdrPane != "" && cli.HerdrPane != parentPane && livePanes[cli.HerdrPane] {
+				continue
+			}
+			kept = append(kept, cli)
+		}
+		if len(kept) == 0 && strings.HasPrefix(c.Task, "env-") {
+			continue
+		}
+		c.clis = kept
+		out = append(out, c)
+	}
+	return out
+}
+
+// envPaneLinks returns child-pane -> parent-session links discovered from
+// detached/env-inherited agent CLIs running inside herdr panes on socket.
+func (p *cmdProber) envPaneLinks(socket string) []envPaneLink {
+	if socket == "" {
+		return nil
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.at.IsZero() || time.Since(p.at) > p.kept {
+		return nil
+	}
+	seen := map[envPaneLink]bool{}
+	var out []envPaneLink
+	for parentSess, list := range p.cmds {
+		for _, c := range list {
+			for _, cli := range c.clis {
+				if cli.HerdrPane == "" || cli.HerdrSocket != socket || !herdrPaneID.MatchString(cli.HerdrPane) {
+					continue
+				}
+				link := envPaneLink{ChildPane: cli.HerdrPane, ParentSession: parentSess}
+				if !seen[link] {
+					seen[link] = true
+					out = append(out, link)
+				}
+			}
+		}
+	}
+	return out
 }
 
 func (p *cmdProber) activeCmdsLocked(pane, session string) []bgCmd {
@@ -596,17 +673,23 @@ agy_bg_fds() {
     _ab_l=$(readlink "$_ab_fd" 2>/dev/null) || continue
     case $_ab_l in *"$_ab_nl"*) continue;; esac
     _ab_p=$_ab_l
+    _ab_cand=
     case $_ab_p in
     */conversations/????????-????-????-????-????????????.db) _ab_p=${_ab_p%.db};;
     */conversations/????????-????-????-????-????????????.db-wal) _ab_p=${_ab_p%.db-wal};;
     */conversations/????????-????-????-????-????????????.db-shm) _ab_p=${_ab_p%.db-shm};;
+    */brain/????????-????-????-????-????????????/.system_generated/logs/transcript_full.jsonl)
+      _ab_cand=$_ab_p
+      _ab_p=${_ab_p%/.system_generated/logs/transcript_full.jsonl};;
     *) continue;;
     esac
     _ab_id=${_ab_p##*/}
     case $_ab_id in *[!0-9a-fA-F-]*) continue;; esac
     _ab_id=$(printf '%s' "$_ab_id" | tr 'A-F' 'a-f')
-    _ab_base=${_ab_l%/conversations/*}
-    _ab_cand="$_ab_base/brain/$_ab_id/.system_generated/logs/transcript_full.jsonl"
+    if [ -z "$_ab_cand" ]; then
+      _ab_base=${_ab_l%/conversations/*}
+      _ab_cand="$_ab_base/brain/$_ab_id/.system_generated/logs/transcript_full.jsonl"
+    fi
     if [ -f "$_ab_cand" ]; then
       if [ -z "$agylog" ] || [ "$_ab_cand" -nt "$agylog" ]; then
         agysid=$_ab_id
@@ -627,9 +710,9 @@ func cmdScanCommandWithBudget(budget int, watched ...string) string {
 
 // cmdScanCommandWithBudgets builds the host scan script with a unified total
 // byte budget (totalBudget <= cmdScanMax) and priority emission order:
-//   1. clock + plain cmd / anc / bgid / desc lines (highest priority)
-//   2. sub lines (truncating/omitting subagent description first if tight)
-//   3. cli lines (lowest priority, capped at min(cliBudget, remaining) and cliScanMaxLines)
+//  1. clock + plain cmd / anc / bgid / desc lines (highest priority)
+//  2. sub lines (truncating/omitting subagent description first if tight)
+//  3. cli lines (lowest priority, capped at min(cliBudget, remaining) and cliScanMaxLines)
 func cmdScanCommandWithBudgets(totalBudget, cliBudget int, watched ...string) string {
 	if totalBudget < 0 {
 		totalBudget = 0
@@ -761,6 +844,42 @@ _bt_budget=` + strconv.Itoa(cliBudget) + `
 _bt_emitted=0
 _bt_tab=$(printf '\t')
 _bt_nl=$(printf '\nx'); _bt_nl=${_bt_nl%x}
+_bt_all_vis=" "
+_bt_classify_proc() {
+  _bt_cp=$1
+  _bt_comm=$(head -c 64 "/proc/$_bt_cp/comm" 2>/dev/null | tr -d '\r\n\t')
+  _bt_exe=$(readlink "/proc/$_bt_cp/exe" 2>/dev/null | tr -d '\r\n\t')
+  _bt_eclean=${_bt_exe% (deleted)}
+  _bt_eb=${_bt_eclean##*/}
+  _bt_argv=
+  _bt_kind=
+  case $_bt_eb in
+  agy|antigravity|antigravity-cli) _bt_kind=agy;;
+  codex) _bt_kind=codex;;
+  claude) _bt_kind=claude;;
+  node|nodejs|bun|deno)
+    _bt_argv=$(tr '\0\n\t' '\001  ' <"/proc/$_bt_cp/cmdline" 2>/dev/null | head -c 512)
+    case $_bt_argv in
+    *claude*) _bt_kind=claude;;
+    *codex*) _bt_kind=codex;;
+    *antigravity*|*agy*) _bt_kind=agy;;
+    esac;;
+  *)
+    case $_bt_eclean in
+    */claude/versions/*) _bt_kind=claude;;
+    */antigravity-cli/*) _bt_kind=agy;;
+    *)
+      case $_bt_comm in
+      agy) _bt_kind=agy;;
+      codex) _bt_kind=codex;;
+      claude) _bt_kind=claude;;
+      esac;;
+    esac;;
+  esac
+  if [ -n "$_bt_kind" ] && [ -z "$_bt_argv" ]; then
+    _bt_argv=$(tr '\0\n\t' '\001  ' <"/proc/$_bt_cp/cmdline" 2>/dev/null | head -c 512)
+  fi
+}
 scan_cmd_tree() {
   [ "$_sc_bcut" = 0 ] || return 0
   _bt_root=$1
@@ -779,35 +898,10 @@ scan_cmd_tree() {
         break
       fi
       _bt_vis="$_bt_vis$_bt_p "
+      case $_bt_all_vis in *" $_bt_p "*) ;; *) _bt_all_vis="$_bt_all_vis$_bt_p ";; esac
       _bt_cnt=$((_bt_cnt + 1))
       [ -O "/proc/$_bt_p" ] || continue
-      _bt_comm=$(head -c 64 "/proc/$_bt_p/comm" 2>/dev/null | tr -d '\r\n\t')
-      _bt_exe=$(readlink "/proc/$_bt_p/exe" 2>/dev/null | tr -d '\r\n\t')
-      _bt_eclean=${_bt_exe% (deleted)}
-      _bt_eb=${_bt_eclean##*/}
-      _bt_argv=$(tr '\0\n\t' '\001  ' <"/proc/$_bt_p/cmdline" 2>/dev/null | head -c 512)
-      _bt_kind=
-      case $_bt_eb in
-      agy) _bt_kind=agy;;
-      codex) _bt_kind=codex;;
-      claude) _bt_kind=claude;;
-      node|nodejs|bun|deno)
-        case $_bt_argv in
-        *claude*) _bt_kind=claude;;
-        *codex*) _bt_kind=codex;;
-        *antigravity*|*agy*) _bt_kind=agy;;
-        esac;;
-      *)
-        case $_bt_eclean in
-        */claude/versions/*) _bt_kind=claude;;
-        *)
-          case $_bt_comm in
-          agy) _bt_kind=agy;;
-          codex) _bt_kind=codex;;
-          claude) _bt_kind=claude;;
-          esac;;
-        esac;;
-      esac
+      _bt_classify_proc "$_bt_p"
       _bt_found=0
       if [ -n "$_bt_kind" ]; then
         _bt_sid= _bt_log=
@@ -844,6 +938,54 @@ scan_cmd_tree() {
   if [ "$_sc_bcut" = 0 ] && [ -n "$_bt_q" ]; then
     _sc_mark_budget
   fi
+}
+scan_detached_clis() {
+  [ "$_sc_bcut" = 0 ] && [ "$_bt_budget" -gt 0 ] && [ "$_bt_emitted" -lt ` + strconv.Itoa(cliScanMaxLines) + ` ] || return 0
+  for _dp_d in /proc/[0-9]*; do
+    [ "$_sc_bcut" = 0 ] && [ "$_bt_budget" -gt 0 ] && [ "$_bt_emitted" -lt ` + strconv.Itoa(cliScanMaxLines) + ` ] || break
+    [ -O "$_dp_d" ] || continue
+    _dp=${_dp_d#/proc/}
+    [ "$_dp" = "$$" ] && continue
+    case $_bt_all_vis in *" $_dp "*) continue;; esac
+    _bt_classify_proc "$_dp"
+    [ -n "$_bt_kind" ] || continue
+    _dp_env=$(tr '\0\n' '\n\001' <"$_dp_d/environ" 2>/dev/null) || continue
+    if printf '%s\n' "$_dp_env" | grep -qx 'CORRAL_SIDE_COPY=1'; then continue; fi
+    _dp_psrc=
+    _dp_ps=$(printf '%s\n' "$_dp_env" | sed -n 's/^CLAUDE_CODE_SESSION_ID=\([0-9a-fA-F-]*\)$/\1/p' | head -n 1)
+    if [ -n "$_dp_ps" ]; then
+      _dp_psrc="claude:$_dp_ps"
+    elif printf '%s\n' "$_dp_env" | grep -q '^CODEX_TOOL_CALL_ID=.'; then
+      _dp_ps=$(printf '%s\n' "$_dp_env" | sed -n 's/^CODEX_THREAD_ID=\([0-9a-fA-F-]*\)$/\1/p' | head -n 1)
+      [ -n "$_dp_ps" ] && _dp_psrc="codex:$_dp_ps"
+    elif printf '%s\n' "$_dp_env" | grep -qx 'ANTIGRAVITY_AGENT=1'; then
+      _dp_ps=$(printf '%s\n' "$_dp_env" | sed -n 's/^ANTIGRAVITY_CONVERSATION_ID=\([0-9a-fA-F-]*\)$/\1/p' | head -n 1)
+      [ -n "$_dp_ps" ] && _dp_psrc="agy:$_dp_ps"
+    fi
+    [ -n "$_dp_psrc" ] || continue
+    _bt_sid= _bt_log=
+    case $_bt_kind in
+    agy) agy_bg_fds "$_dp_d"; _bt_sid=$agysid _bt_log=$agylog;;
+    codex) codex_bg_fds "$_dp_d"; _bt_sid=$cxid _bt_log=$cxlog;;
+    claude) claude_bg_fds "$_dp"; _bt_sid=$ccsid _bt_log=$cclog;;
+    esac
+    case $_bt_log in *"$_bt_tab"*|*"$_bt_nl"*) _bt_sid= _bt_log=;; esac
+    [ -n "$_bt_sid" ] && [ -n "$_bt_log" ] || continue
+    _dp_st=$(sed 's/^.*) //' "$_dp_d/stat" 2>/dev/null | cut -d' ' -f20)
+    case $_dp_st in ''|*[!0-9]*) continue;; esac
+    _dp_hp=$(printf '%s\n' "$_dp_env" | sed -n 's/^HERDR_PANE_ID=//p' | head -n 1 | tr '\t\r\n' '   ')
+    _dp_hs=$(printf '%s\n' "$_dp_env" | sed -n 's/^HERDR_SOCKET_PATH=//p' | head -n 1 | tr '\t\r\n' '   ')
+    _bt_line=$(printf 'envcli\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' "$_dp" "$_dp_st" "$_dp_psrc" "$_bt_comm" "$_bt_eclean" "$_bt_sid" "$_bt_log" "$_dp_hp" "$_dp_hs" "$_bt_argv")
+    _bt_len=$((${#_bt_line} + 1))
+    if [ "$_bt_emitted" -lt ` + strconv.Itoa(cliScanMaxLines) + ` ] && [ "$_bt_len" -le "$_bt_budget" ] && _sc_emit "$_bt_line"; then
+      _bt_budget=$((_bt_budget - _bt_len))
+      _bt_emitted=$((_bt_emitted + 1))
+    else
+      _bt_budget=0
+      _sc_mark_budget
+      break
+    fi
+  done
 }
 # Priority 1: plain background commands (cmd / anc / bgid / desc).
 seen=
@@ -1026,6 +1168,7 @@ done
     [ "$_sc_bcut" = 0 ] || break
     scan_cmd_tree "$_sc_k"
   done
+  scan_detached_clis
 }
 exit 0`
 	cmd := "sh -c " + sshx.QuoteShell(script) + " corral"
@@ -1136,8 +1279,21 @@ func parseCmdScanDetail(out string) (cmds map[string][]bgCmd, whole bool, budget
 		log     string
 		argv    string
 	}
+	type rawEnvCLI struct {
+		procPID     string
+		start       int64
+		parentSess  string
+		comm        string
+		exe         string
+		sid         string
+		log         string
+		herdrPane   string
+		herdrSocket string
+		argv        string
+	}
 	var all, wrappers []found
 	var rawCLIs []rawCLI
+	var rawEnvCLIs []rawEnvCLI
 	anc := map[string][]string{} // (a Codex's command's process → its parents, nearest first)
 	desc := map[string]string{}  // (session + " " + task → what the agent said it does)
 	for _, line := range strings.Split(out, "\n") {
@@ -1177,6 +1333,42 @@ func parseCmdScanDetail(out string) (cmds map[string][]bgCmd, whole bool, budget
 					sid:     strings.ToLower(strings.TrimSpace(cf[5])),
 					log:     strings.TrimSpace(cf[6]),
 					argv:    cf[7],
+				})
+			}
+		case strings.HasPrefix(line, "envcli\t"):
+			ef := strings.SplitN(line, "\t", 11)
+			if len(ef) == 11 && cmdPID.MatchString(ef[1]) {
+				start, err := strconv.ParseInt(ef[2], 10, 64)
+				if err != nil || start < 0 {
+					continue
+				}
+				pkind, psess, ok := strings.Cut(ef[3], ":")
+				if !ok || (pkind != "claude" && pkind != "codex" && pkind != "agy") || !convoUUID.MatchString(psess) {
+					continue
+				}
+				hp := strings.TrimSpace(ef[8])
+				if hp != "" && !herdrPaneID.MatchString(hp) {
+					hp = ""
+				}
+				hs := strings.TrimSpace(ef[9])
+				if hs != "" {
+					if clean, ok := cleanRemotePath(hs); ok {
+						hs = clean
+					} else {
+						hs = ""
+					}
+				}
+				rawEnvCLIs = append(rawEnvCLIs, rawEnvCLI{
+					procPID:     ef[1],
+					start:       start,
+					parentSess:  strings.ToLower(psess),
+					comm:        ef[4],
+					exe:         ef[5],
+					sid:         strings.ToLower(strings.TrimSpace(ef[6])),
+					log:         strings.TrimSpace(ef[7]),
+					herdrPane:   hp,
+					herdrSocket: hs,
+					argv:        ef[10],
 				})
 			}
 		case len(f) == 5 && f[0] == "cmd":
@@ -1247,6 +1439,7 @@ func parseCmdScanDetail(out string) (cmds map[string][]bgCmd, whole bool, budget
 	}
 	slices.SortStableFunc(all, func(a, b found) int { return int(min(max(a.start-b.start, -1), 1)) })
 	got := map[string][]bgCmd{}
+	seenSessionCLI := map[string]bool{}
 	for _, c := range all {
 		var attached []bgCLI
 		for _, cli := range clisByPID[c.pid] {
@@ -1254,6 +1447,7 @@ func parseCmdScanDetail(out string) (cmds map[string][]bgCmd, whole bool, budget
 				continue // never alias the parent session onto itself
 			}
 			attached = append(attached, cli)
+			seenSessionCLI[c.session+"\x00"+cli.Agent+"\x00"+cli.Session] = true
 		}
 		if idx := slices.IndexFunc(got[c.session], func(o bgCmd) bool { return o.Task == c.cmd.Task }); idx >= 0 {
 			// Merge any CLI subagents discovered on sibling/child processes of the same task.
@@ -1270,6 +1464,44 @@ func parseCmdScanDetail(out string) (cmds map[string][]bgCmd, whole bool, budget
 		c.cmd.Desc = desc[c.session+" "+c.cmd.Task]
 		c.cmd.clis = attached
 		got[c.session] = append(got[c.session], c.cmd)
+	}
+	// Attach detached / reparented / redirected CLI subagents identified via
+	// inherited parent session environment variables, skipping any (parent, agent, sid)
+	// already covered by a direct background command tree.
+	slices.SortStableFunc(rawEnvCLIs, func(a, b rawEnvCLI) int { return int(min(max(a.start-b.start, -1), 1)) })
+	for _, rc := range rawEnvCLIs {
+		agent := identifyBgCLI(rc.comm, rc.exe, rc.argv)
+		if agent == "" || !bgCLILogValid(agent, rc.log, rc.sid) {
+			continue
+		}
+		if strings.EqualFold(rc.sid, rc.parentSess) {
+			continue // never alias the parent session onto itself
+		}
+		ck := rc.parentSess + "\x00" + agent + "\x00" + rc.sid
+		if seenSessionCLI[ck] {
+			continue
+		}
+		seenSessionCLI[ck] = true
+		humanCmd := strings.TrimSpace(strings.ReplaceAll(rc.argv, "\x01", " "))
+		mCmd, mCut := cmdMatchText(humanCmd)
+		bc := bgCmd{
+			Task:     "env-" + rc.procPID,
+			Title:    cmdTitle(humanCmd),
+			quiet:    true,
+			matchCmd: mCmd,
+			matchCut: mCut,
+			clis: []bgCLI{{
+				Agent:       agent,
+				Session:     rc.sid,
+				Log:         rc.log,
+				HerdrPane:   rc.herdrPane,
+				HerdrSocket: rc.herdrSocket,
+			}},
+		}
+		if btime > 0 && hz > 0 && hz <= 100000 && rc.start < (1<<62)/1000 {
+			bc.Since = btime*1000 + rc.start*1000/hz
+		}
+		got[rc.parentSess] = append(got[rc.parentSess], bc)
 	}
 	return got, whole, budgetCut
 }
@@ -1301,7 +1533,7 @@ func identifyBgCLI(comm, exe, argvRaw string) string {
 	kind := ""
 	argStart := 1
 	switch exeBase {
-	case "agy":
+	case "agy", "antigravity", "antigravity-cli":
 		kind = "agy"
 	case "claude":
 		kind = "claude"
@@ -1341,6 +1573,8 @@ func identifyBgCLI(comm, exe, argvRaw string) string {
 	default:
 		if strings.Contains(exe, "/claude/versions/") {
 			kind = "claude"
+		} else if strings.Contains(exe, "/antigravity-cli/") {
+			kind = "agy"
 		} else if exe == "" {
 			// Fallback only when /proc/<pid>/exe was unavailable: require comm AND argv[0] to agree.
 			switch comm {
@@ -1601,7 +1835,7 @@ func bgCmdTaskIDs(cmds []bgCmd) []string {
 }
 
 func isSyntheticBgTask(task string) bool {
-	return strings.HasPrefix(task, "codex-") || strings.HasPrefix(task, "agy-") || strings.HasPrefix(task, "monitor-")
+	return strings.HasPrefix(task, "codex-") || strings.HasPrefix(task, "agy-") || strings.HasPrefix(task, "monitor-") || strings.HasPrefix(task, "env-")
 }
 
 func normBgCmdText(s string) string {

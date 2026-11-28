@@ -817,6 +817,35 @@ func (s *Server) watchHerdr(sess *term.Session, h *store.Host) {
 	s.herdrSocks.setChimes(sess.ID, chimes)
 	lineage := s.newLineageTracker(sess, server, socket, name)
 	s.herdrSocks.setLineage(sess.ID, lineage)
+	lineage.setNeedLogs(func(lctx context.Context) {
+		var locOut []byte
+		var locErr error
+		if cout, ok := s.tryCorraldLocate(lctx, sess, proto.AgentLocateParams{Mode: sess.Persistence, TmuxName: sess.TmuxSession}); ok {
+			locOut = cout
+		} else {
+			locOut, locErr = sshx.Output(lctx, sess.Client(), convoLocateCommand(sess.Persistence, sess.TmuxSession, "")+"; "+hostNowCommand, convoLocateMax)
+		}
+		if locErr != nil {
+			return
+		}
+		got := time.Now().UnixMilli()
+		found := parseConvoLocate(string(locOut))
+		began := time.UnixMilli(got)
+		for _, p := range found.procs {
+			if p.herdrSocket != socket || !herdrPane.MatchString(p.herdrPane) {
+				continue
+			}
+			if (p.agent == "claude" || p.agent == "agy") && convoUUID.MatchString(p.sid) {
+				s.locatedEverywhere(sess, p.herdrPane, p.sid, began)
+			}
+			if p.log != "" {
+				lineage.notePaneLog(p.herdrPane, p.agent, p.sid, p.log)
+			}
+		}
+		if off, ok := hostClockAhead(string(locOut), got); ok {
+			lineage.noteClock(off)
+		}
+	})
 	go bg.run(ctx)
 	cmds := newCmdSubProber(func(ctx context.Context, watched []string) (map[string][]bgCmd, map[string][]bgAgent, map[string]map[string]bool, bool, error) {
 		out, err := sshx.Output(ctx, sess.Client(), cmdScanCommand(watched...), cmdScanMax)
@@ -1039,7 +1068,12 @@ func (s *Server) watchHerdr(sess *term.Session, h *store.Host) {
 	}
 	rounds.setPoke(again)
 	bg.setPoke(again)
-	cmds.setPoke(again)
+	cmds.setPoke(func() {
+		for _, link := range cmds.envPaneLinks(socket) {
+			lineage.RecordEnvLink(ctx, link.ChildPane, link.ParentSession)
+		}
+		again()
+	})
 	chimes.setPoke(again)
 	titles.setPoke(again)
 	agyTitles.setPoke(again)
