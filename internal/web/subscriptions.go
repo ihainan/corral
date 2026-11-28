@@ -90,7 +90,7 @@ func (c *codexQuotaRecorded) changed(key, sig string) bool {
 
 func shortAccountLabel(accountKey string) string {
 	k := strings.TrimSpace(accountKey)
-	if k == "" || strings.HasPrefix(k, "host:") {
+	if k == "" || strings.HasPrefix(k, "host:") || strings.HasPrefix(k, "ws:") {
 		return ""
 	}
 	if len(k) > 12 {
@@ -207,7 +207,11 @@ func (s *Server) subscriptionItemOf(sn *store.SubscriptionSnapshot, ownerID, now
 	}
 	label := sn.AccountLabel
 	if label == "" {
-		label = shortAccountLabel(sn.AccountKey)
+		if sn.Provider == "opencode" {
+			label = strings.TrimSpace(sn.HostName)
+		} else {
+			label = shortAccountLabel(sn.AccountKey)
+		}
 	}
 	item := subscriptionItem{
 		Provider:     sn.Provider,
@@ -222,14 +226,28 @@ func (s *Server) subscriptionItemOf(sn *store.SubscriptionSnapshot, ownerID, now
 		SeenAt:       sn.SeenAt,
 	}
 	cooldownSec := int64(subscriptionRefreshCooldown / time.Second)
-	if sn.LastRefreshAt > 0 && sn.LastRefreshAt+cooldownSec > now {
-		item.NextRefreshAt = sn.LastRefreshAt + cooldownSec
+	effectiveLastRefresh := sn.LastRefreshAt
+	if sn.Provider == "opencode" && s.store != nil {
+		targetHostID := sn.HostID
+		if sess := s.findRunningSessionForHosts(ownerID, sn.HostID, sn.Hosts); sess != nil {
+			targetHostID = sess.HostID
+		}
+		if targetHostID > 0 {
+			rctx, rcancel := context.WithTimeout(context.Background(), 2*time.Second)
+			if hostLast, err := s.store.GetSubscriptionHostRefreshAt(rctx, ownerID, targetHostID, sn.Provider); err == nil && hostLast > effectiveLastRefresh {
+				effectiveLastRefresh = hostLast
+			}
+			rcancel()
+		}
+	}
+	if effectiveLastRefresh > 0 && effectiveLastRefresh+cooldownSec > now {
+		item.NextRefreshAt = effectiveLastRefresh + cooldownSec
 	}
 	switch sn.Provider {
-	case "codex":
+	case "codex", "devin":
 		item.CanRefresh = false
 		item.RefreshReason = "passive_only"
-	case "claude", "agy":
+	case "claude", "agy", "opencode":
 		if s.findRunningSessionForHosts(ownerID, sn.HostID, sn.Hosts) != nil {
 			item.CanRefresh = true
 		} else {
@@ -282,9 +300,12 @@ func (s *Server) apiRefreshSubscription(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	switch req.Provider {
-	case "claude", "agy":
+	case "claude", "agy", "opencode":
 	case "codex":
 		writeError(w, http.StatusBadRequest, "refresh_unsupported", "Codex quota is collected passively from session logs")
+		return
+	case "devin":
+		writeError(w, http.StatusBadRequest, "refresh_unsupported", "Devin quota is collected passively from local cache")
 		return
 	default:
 		writeError(w, http.StatusBadRequest, "bad_request", "unsupported provider")
@@ -330,9 +351,35 @@ func (s *Server) apiRefreshSubscription(w http.ResponseWriter, r *http.Request) 
 	}
 	claimedAt := nextAt - cooldownSec
 
+	targetHostID := sn.HostID
 	targetHost := sn.HostName
 	if sess != nil {
+		targetHostID = sess.HostID
 		targetHost = sess.HostName
+	}
+	// For OpenCode, also check and claim a durable (user, host, provider) cooldown
+	// BEFORE any remote call (covering placeholders and workspace switches); once
+	// claimed it is never released on rejection or account_changed.
+	if req.Provider == "opencode" && targetHostID > 0 {
+		hostAllowed, hostRetry, hostNextAt, herr := s.store.TryClaimSubscriptionHostRefresh(r.Context(), u.ID, targetHostID, req.Provider, cooldownSec)
+		if herr != nil {
+			rctx, rcancel := context.WithTimeout(context.Background(), 3*time.Second)
+			_ = s.store.ResetSubscriptionRefresh(rctx, u.ID, req.Provider, req.AccountKey, claimedAt, prevRefreshAt)
+			rcancel()
+			s.internalError(w, r, herr)
+			return
+		}
+		if !hostAllowed {
+			// No remote call was executed; restore the per-account claim and reject via host cooldown.
+			rctx, rcancel := context.WithTimeout(context.Background(), 3*time.Second)
+			_ = s.store.ResetSubscriptionRefresh(rctx, u.ID, req.Provider, req.AccountKey, claimedAt, prevRefreshAt)
+			rcancel()
+			writeErrorExtra(w, http.StatusTooManyRequests, "rate_limited", "please wait before refreshing this host again", map[string]any{
+				"retry_after":     hostRetry,
+				"next_refresh_at": hostNextAt,
+			})
+			return
+		}
 	}
 	s.audit(r, "subscription.refresh", targetHost, map[string]any{
 		"provider": req.Provider,
@@ -342,6 +389,7 @@ func (s *Server) apiRefreshSubscription(w http.ResponseWriter, r *http.Request) 
 	ctx, cancel := context.WithTimeout(r.Context(), subscriptionManualTimeout)
 	defer cancel()
 
+	resolvedKey := req.AccountKey
 	var refreshErr error
 	if s.subscriptionRefreshFn != nil {
 		var q quotaInfo
@@ -351,14 +399,25 @@ func (s *Server) apiRefreshSubscription(w http.ResponseWriter, r *http.Request) 
 			s.recordSubscriptionSnapshot(u.ID, req.Provider, req.AccountKey, label, sn.HostID, sn.HostName, q)
 		}
 	} else {
-		refreshErr = s.refreshSubscriptionOnSession(ctx, sess, req.Provider, req.AccountKey)
+		resolvedKey, refreshErr = s.refreshSubscriptionOnSession(ctx, sess, req.Provider, req.AccountKey)
 	}
 	if refreshErr != nil {
 		if errors.Is(refreshErr, errSubscriptionAccountChanged) {
-			rctx, rcancel := context.WithTimeout(context.Background(), 3*time.Second)
-			_ = s.store.ResetSubscriptionRefresh(rctx, u.ID, req.Provider, req.AccountKey, claimedAt, prevRefreshAt)
-			rcancel()
+			// Never release OpenCode cooldowns on account_changed; Claude keeps its existing rollback.
+			if req.Provider != "opencode" {
+				rctx, rcancel := context.WithTimeout(context.Background(), 3*time.Second)
+				_ = s.store.ResetSubscriptionRefresh(rctx, u.ID, req.Provider, req.AccountKey, claimedAt, prevRefreshAt)
+				rcancel()
+			}
 			writeError(w, http.StatusConflict, "account_changed", "another account is currently signed in on this host")
+			return
+		}
+		if errors.Is(refreshErr, errOpenCodeNotRunning) {
+			writeError(w, http.StatusConflict, "opencode_not_running", "OpenCode is not running on this host")
+			return
+		}
+		if errors.Is(refreshErr, errOpenCodeUnsupported) {
+			writeError(w, http.StatusConflict, "opencode_unsupported", "OpenCode refresh is not supported on this host")
 			return
 		}
 		if errors.Is(refreshErr, context.Canceled) {
@@ -372,7 +431,10 @@ func (s *Server) apiRefreshSubscription(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	updated, err := s.store.GetSubscriptionSnapshot(r.Context(), u.ID, req.Provider, req.AccountKey)
+	if resolvedKey == "" {
+		resolvedKey = req.AccountKey
+	}
+	updated, err := s.store.GetSubscriptionSnapshot(r.Context(), u.ID, req.Provider, resolvedKey)
 	if err != nil {
 		s.internalError(w, r, err)
 		return
@@ -385,17 +447,20 @@ func (s *Server) apiRefreshSubscription(w http.ResponseWriter, r *http.Request) 
 	})
 }
 
-func (s *Server) refreshSubscriptionOnSession(ctx context.Context, sess *term.Session, provider, expectedAccountKey string) error {
+func (s *Server) refreshSubscriptionOnSession(ctx context.Context, sess *term.Session, provider, expectedAccountKey string) (string, error) {
 	now := time.Now()
 	switch provider {
 	case "agy":
 		q, err := s.fetchAgyQuota(ctx, sess)
 		if err != nil {
-			return err
+			return "", err
 		}
 		cacheKey := fmt.Sprintf("%d\x00%d", sess.OwnerID, sess.HostID)
 		s.agyQuota.putCached(cacheKey, q, now)
-		return nil
+		return expectedAccountKey, nil
+
+	case "opencode":
+		return s.fetchOpenCodeQuota(ctx, sess, expectedAccountKey)
 
 	case "claude":
 		readClaude := func() (quotaInfo, string, bool, error) {
@@ -431,11 +496,11 @@ func (s *Server) refreshSubscriptionOnSession(ctx context.Context, sess *term.Se
 
 		q, accUUID, signedIn, err := readClaude()
 		if err != nil {
-			return err
+			return "", err
 		}
 		if !accountMatches(accUUID, signedIn) {
 			recordOtherAccount(q, accUUID, signedIn)
-			return errSubscriptionAccountChanged
+			return "", errSubscriptionAccountChanged
 		}
 		// Respect Claude Code's 15-minute minimum cadence both in gateway memory
 		// and on-host (~/.cache/corral/usage-asked) before invoking `claude -p /usage`.
@@ -448,7 +513,7 @@ func (s *Server) refreshSubscriptionOnSession(ctx context.Context, sess *term.Se
 		}
 		if !accountMatches(accUUID, signedIn) {
 			recordOtherAccount(q, accUUID, signedIn)
-			return errSubscriptionAccountChanged
+			return "", errSubscriptionAccountChanged
 		}
 		var email string
 		if signedIn {
@@ -464,8 +529,8 @@ func (s *Server) refreshSubscriptionOnSession(ctx context.Context, sess *term.Se
 		if q.Known && accountKey != "" {
 			s.recordSubscriptionSnapshot(sess.OwnerID, "claude", accountKey, email, sess.HostID, sess.HostName, q)
 		}
-		return nil
+		return expectedAccountKey, nil
 	default:
-		return errors.New("unsupported provider")
+		return "", errors.New("unsupported provider")
 	}
 }

@@ -9,15 +9,22 @@ import { quotaPlanLabel } from '../terminal/quotaPlan'
 import { whenText } from './pageText'
 import {
   formatCooldownShort,
+  formatCreditsAmount,
   formatResetCountdown,
   isSubscriptionStale,
+  isSubscriptionUnfetched,
   providerDisplayName,
   providerIconProgram,
   refreshCooldownRemaining,
+  scopedAllowancePct,
   sortSubscriptions,
+  subscriptionCreditsState,
   subscriptionHostsSummary,
   subscriptionRefreshErrorKey,
   subscriptionWindowState,
+  validWeeklyScoped,
+  type SubQuotaCredits,
+  type SubQuotaScopedLimit,
   type SubQuotaWindow,
   type SubscriptionItem,
   type SubscriptionsListResponse,
@@ -51,6 +58,73 @@ function WindowRow({ label, win, nowSec, stale }: { label: string; win: SubQuota
   )
 }
 
+function ScopedWindowRow({ entry, nowSec, stale }: { entry: SubQuotaScopedLimit; nowSec: number; stale: boolean }) {
+  const lang = getLang()
+  const st = subscriptionWindowState(entry, nowSec, stale)
+  const cap = scopedAllowancePct(entry)
+  const resetAtText = entry.resets_at > 0 ? new Date(entry.resets_at * 1000).toLocaleString() : ''
+  let detail: string
+  if (cap !== undefined) {
+    if (st.expired) {
+      detail = t('subs.scopedReset', { n: st.usedPct, cap })
+    } else if (entry.resets_at > 0) {
+      detail = t('subs.scopedUsed', { n: st.usedPct, cap, in: formatResetCountdown(entry.resets_at, nowSec, lang) })
+    } else {
+      detail = t('subs.scopedUsedNoReset', { n: st.usedPct, cap })
+    }
+  } else if (st.expired) {
+    detail = t('subs.windowReset', { n: st.usedPct })
+  } else if (entry.resets_at > 0) {
+    detail = t('subs.windowUsed', { n: st.usedPct, in: formatResetCountdown(entry.resets_at, nowSec, lang) })
+  } else {
+    detail = t('subs.windowUsedNoReset', { n: st.usedPct })
+  }
+  const toneCls = st.tone ? ` is-${st.tone}` : ''
+  return (
+    <div className="subs-win is-scoped">
+      <div className="subs-win-head">
+        <span className="subs-win-name">{entry.name}</span>
+        <span className={'subs-win-val tnum' + toneCls} title={resetAtText || undefined}>
+          {detail}
+        </span>
+      </div>
+      <div className={'subs-bar is-scoped' + toneCls} aria-hidden="true">
+        <span style={{ width: `${st.expired ? 0 : st.usedPct}%` }} />
+      </div>
+    </div>
+  )
+}
+
+function CreditsRow({ credits, nowSec, stale }: { credits: SubQuotaCredits; nowSec: number; stale: boolean }) {
+  const lang = getLang()
+  const st = subscriptionCreditsState(credits, nowSec, stale)
+  const amt = formatCreditsAmount(credits)
+  const resetAt = credits.resets_at ?? 0
+  const resetAtText = resetAt > 0 ? new Date(resetAt * 1000).toLocaleString() : ''
+  let detail: string
+  if (st.expired) {
+    detail = t('subs.creditsReset', { amt })
+  } else if (resetAt > 0) {
+    detail = t('subs.creditsUsed', { amt, in: formatResetCountdown(resetAt, nowSec, lang) })
+  } else {
+    detail = t('subs.creditsUsedNoReset', { amt })
+  }
+  const toneCls = st.tone ? ` is-${st.tone}` : ''
+  return (
+    <div className="subs-win">
+      <div className="subs-win-head">
+        <span className="subs-win-name">{t('subs.windowCredits')}</span>
+        <span className={'subs-win-val tnum' + toneCls} title={resetAtText || undefined}>
+          {detail}
+        </span>
+      </div>
+      <div className={'subs-bar' + toneCls} aria-hidden="true">
+        <span style={{ width: `${st.expired ? 0 : st.usedPct}%` }} />
+      </div>
+    </div>
+  )
+}
+
 function SubscriptionCard({
   item,
   nowSec,
@@ -63,12 +137,20 @@ function SubscriptionCard({
   onRefresh: (item: SubscriptionItem) => void
 }) {
   const lang = getLang()
-  const stale = isSubscriptionStale(item.updated_at, nowSec)
+  const unfetched = isSubscriptionUnfetched(item)
+  const stale = !unfetched && isSubscriptionStale(item.updated_at, nowSec)
   const plan = quotaPlanLabel(item.plan || item.quota.plan)
   const hosts = subscriptionHostsSummary(item)
   const cooldownLeft = refreshCooldownRemaining(item.next_refresh_at, nowSec)
+  const scopedWeekly = validWeeklyScoped(item.quota.weekly_scoped)
   const hasGroups = (item.quota.groups?.length ?? 0) > 0
-  const hasWindows = !!item.quota.five_hour || !!item.quota.weekly
+  const hasWindows =
+    !!item.quota.five_hour ||
+    !!item.quota.daily ||
+    !!item.quota.weekly ||
+    !!item.quota.monthly ||
+    !!item.quota.credits ||
+    scopedWeekly.length > 0
 
   const updatedTitle = item.updated_at > 0 ? new Date(item.updated_at * 1000).toLocaleString() : ''
   const updatedWhen = item.updated_at > 0 ? whenText(item.updated_at, nowSec * 1000) : '—'
@@ -94,7 +176,9 @@ function SubscriptionCard({
         </div>
         <div className="subs-act">
           {item.refresh_reason === 'passive_only' ? (
-            <span className="subs-passive-note">{t('subs.passiveOnly')}</span>
+            <span className="subs-passive-note">
+              {item.provider === 'devin' ? t('subs.passiveCache') : t('subs.passiveOnly')}
+            </span>
           ) : (
             <button
               type="button"
@@ -136,16 +220,28 @@ function SubscriptionCard({
         ) : hasWindows ? (
           <>
             {item.quota.five_hour && <WindowRow label={t('quota.fiveHour')} win={item.quota.five_hour} nowSec={nowSec} stale={stale} />}
+            {item.quota.daily && <WindowRow label={t('subs.windowDaily')} win={item.quota.daily} nowSec={nowSec} stale={stale} />}
             {item.quota.weekly && <WindowRow label={t('quota.weekly')} win={item.quota.weekly} nowSec={nowSec} stale={stale} />}
+            {scopedWeekly.length > 0 && (
+              <div className="subs-scoped-list">
+                {scopedWeekly.map((s) => (
+                  <ScopedWindowRow key={s.name} entry={s} nowSec={nowSec} stale={stale} />
+                ))}
+              </div>
+            )}
+            {item.quota.monthly && <WindowRow label={t('subs.windowMonthly')} win={item.quota.monthly} nowSec={nowSec} stale={stale} />}
+            {item.quota.credits && <CreditsRow credits={item.quota.credits} nowSec={nowSec} stale={stale} />}
           </>
+        ) : unfetched ? (
+          <p className="hint">{t('subs.unfetchedHint')}</p>
         ) : (
           <p className="hint">{t('subs.noWindows')}</p>
         )}
       </div>
 
       <footer className="subs-card-foot">
-        <span className="subs-meta" title={updatedTitle}>
-          {t('subs.updatedAt', { at: updatedWhen })}
+        <span className="subs-meta" title={updatedTitle || undefined}>
+          {unfetched ? t('subs.notRefreshedYet') : t('subs.updatedAt', { at: updatedWhen })}
         </span>
         {hosts.length > 0 && (
           <span className="subs-meta subs-hosts" title={hosts.join(', ')}>
@@ -201,11 +297,15 @@ export function SubscriptionsSection({ heading = true }: { heading?: boolean } =
         provider: item.provider,
         account_key: item.account_key,
       }, { timeoutMs: 40000 })
-      setItems((prev) =>
-        (prev ?? []).map((cur) =>
-          cur.provider === item.provider && cur.account_key === item.account_key ? res.item : cur,
-        ),
-      )
+      if (res.item.account_key !== item.account_key) {
+        void load()
+      } else {
+        setItems((prev) =>
+          (prev ?? []).map((cur) =>
+            cur.provider === item.provider && cur.account_key === item.account_key ? res.item : cur,
+          ),
+        )
+      }
       setNowSec(Math.floor(Date.now() / 1000))
       toast(t('subs.refreshed'))
     } catch (err) {

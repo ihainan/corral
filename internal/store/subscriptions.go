@@ -205,6 +205,142 @@ func (s *Store) UpsertSubscriptionSnapshot(ctx context.Context, in SubscriptionS
 	return tx.Commit()
 }
 
+// EnsureSubscriptionHost passively records that a provider was seen on a host
+// without overwriting any existing quota snapshot or timestamps. If no row
+// exists yet for (owner_id, provider, account_key), it inserts a placeholder
+// row with quota_json='{"known":false}' and updated_at=0 so the Subscriptions
+// overview can offer manual Refresh without running unsolicited CLI calls.
+func (s *Store) EnsureSubscriptionHost(ctx context.Context, ownerID int64, provider, accountKey string, hostID int64, hostName string) error {
+	if ownerID <= 0 || provider == "" || accountKey == "" {
+		return errors.New("subscription host requires owner, provider and account key")
+	}
+	now := s.unix()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	var (
+		exHostsJSON string
+		exSeenAt    int64
+	)
+	err = tx.QueryRowContext(ctx,
+		`SELECT hosts_json, seen_at
+		 FROM subscription_snapshots
+		 WHERE owner_id = ? AND provider = ? AND account_key = ?`,
+		ownerID, provider, accountKey,
+	).Scan(&exHostsJSON, &exSeenAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		// If this is a host placeholder for a workspace-keyed provider (e.g. OpenCode)
+		// and a real workspace snapshot already references this host, touch that row
+		// instead of recreating a stale host:<id> placeholder.
+		if hostID > 0 && strings.HasPrefix(accountKey, "host:") {
+			rows, qerr := tx.QueryContext(ctx,
+				`SELECT account_key, host_id, hosts_json, seen_at
+				 FROM subscription_snapshots
+				 WHERE owner_id = ? AND provider = ? AND account_key NOT LIKE 'host:%'`,
+				ownerID, provider,
+			)
+			if qerr != nil {
+				return qerr
+			}
+			var matchedKey, matchedHostsJSON string
+			var matchedSeenAt int64
+			for rows.Next() {
+				var k, hj string
+				var hid, sa int64
+				if serr := rows.Scan(&k, &hid, &hj, &sa); serr != nil {
+					rows.Close()
+					return serr
+				}
+				found := hid == hostID
+				if !found && hj != "" {
+					var hs []SubscriptionHost
+					_ = json.Unmarshal([]byte(hj), &hs)
+					for _, h := range hs {
+						if h.HostID == hostID {
+							found = true
+							break
+						}
+					}
+				}
+				if found {
+					matchedKey, matchedHostsJSON, matchedSeenAt = k, hj, sa
+					break
+				}
+			}
+			if rerr := rows.Err(); rerr != nil {
+				rows.Close()
+				return rerr
+			}
+			rows.Close()
+			if matchedKey != "" {
+				var existingHosts []SubscriptionHost
+				_ = json.Unmarshal([]byte(matchedHostsJSON), &existingHosts)
+				mergedHosts := mergeSubscriptionHosts(existingHosts, hostID, hostName, now)
+				hostsBytes, merr := json.Marshal(mergedHosts)
+				if merr != nil {
+					return merr
+				}
+				finalSeenAt := matchedSeenAt
+				if now > finalSeenAt {
+					finalSeenAt = now
+				}
+				_, uerr := tx.ExecContext(ctx,
+					`UPDATE subscription_snapshots
+					 SET hosts_json = ?, seen_at = ?
+					 WHERE owner_id = ? AND provider = ? AND account_key = ?`,
+					string(hostsBytes), finalSeenAt, ownerID, provider, matchedKey,
+				)
+				if uerr != nil {
+					return uerr
+				}
+				return tx.Commit()
+			}
+		}
+		hosts := mergeSubscriptionHosts(nil, hostID, hostName, now)
+		hostsBytes, err := json.Marshal(hosts)
+		if err != nil {
+			return err
+		}
+		_, err = tx.ExecContext(ctx,
+			`INSERT INTO subscription_snapshots
+			 (owner_id, provider, account_key, account_label, plan, host_id, host_name, hosts_json, quota_json, updated_at, seen_at, last_refresh_at)
+			 VALUES (?, ?, ?, '', '', ?, ?, ?, '{"known":false}', 0, ?, 0)`,
+			ownerID, provider, accountKey, hostID, strings.TrimSpace(hostName), string(hostsBytes), now,
+		)
+		if err != nil {
+			return err
+		}
+		return tx.Commit()
+	}
+	if err != nil {
+		return err
+	}
+	var existingHosts []SubscriptionHost
+	_ = json.Unmarshal([]byte(exHostsJSON), &existingHosts)
+	mergedHosts := mergeSubscriptionHosts(existingHosts, hostID, hostName, now)
+	hostsBytes, err := json.Marshal(mergedHosts)
+	if err != nil {
+		return err
+	}
+	finalSeenAt := exSeenAt
+	if now > finalSeenAt {
+		finalSeenAt = now
+	}
+	_, err = tx.ExecContext(ctx,
+		`UPDATE subscription_snapshots
+		 SET hosts_json = ?, seen_at = ?
+		 WHERE owner_id = ? AND provider = ? AND account_key = ?`,
+		string(hostsBytes), finalSeenAt, ownerID, provider, accountKey,
+	)
+	if err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 func scanSubscriptionSnapshot(row interface{ Scan(...any) error }) (*SubscriptionSnapshot, error) {
 	sn := &SubscriptionSnapshot{}
 	var hostsJSON, quotaJSON string
@@ -310,4 +446,92 @@ func (s *Store) ResetSubscriptionRefresh(ctx context.Context, ownerID int64, pro
 		restoreTo, ownerID, provider, accountKey, claimedAt,
 	)
 	return err
+}
+
+// DeleteSubscriptionSnapshot deletes a single snapshot row (used when an
+// unfetched host:<id> placeholder is promoted to a workspace-keyed snapshot).
+func (s *Store) DeleteSubscriptionSnapshot(ctx context.Context, ownerID int64, provider, accountKey string) error {
+	_, err := s.db.ExecContext(ctx,
+		`DELETE FROM subscription_snapshots
+		 WHERE owner_id = ? AND provider = ? AND account_key = ?`,
+		ownerID, provider, accountKey,
+	)
+	return err
+}
+
+// TryClaimSubscriptionHostRefresh atomically enforces a per-(owner, host, provider)
+// minimum cooldown in SQLite before any remote refresh command is executed. Once
+// claimed, callers must not release it on rejection or account_changed so repeated
+// refresh attempts across placeholders or switched workspaces cannot bypass rate limits.
+func (s *Store) TryClaimSubscriptionHostRefresh(ctx context.Context, ownerID, hostID int64, provider string, cooldownSec int64) (allowed bool, retryAfter int64, nextAt int64, err error) {
+	if ownerID <= 0 || hostID <= 0 || provider == "" {
+		return false, 0, 0, errors.New("host refresh claim requires owner, host and provider")
+	}
+	now := s.unix()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, 0, 0, err
+	}
+	defer tx.Rollback()
+
+	var last int64
+	err = tx.QueryRowContext(ctx,
+		`SELECT last_refresh_at FROM subscription_host_cooldowns
+		 WHERE owner_id = ? AND host_id = ? AND provider = ?`,
+		ownerID, hostID, provider,
+	).Scan(&last)
+	if errors.Is(err, sql.ErrNoRows) {
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO subscription_host_cooldowns (owner_id, host_id, provider, last_refresh_at)
+			 VALUES (?, ?, ?, ?)`,
+			ownerID, hostID, provider, now,
+		); err != nil {
+			return false, 0, 0, err
+		}
+		if err := tx.Commit(); err != nil {
+			return false, 0, 0, err
+		}
+		return true, 0, now + cooldownSec, nil
+	}
+	if err != nil {
+		return false, 0, 0, err
+	}
+	if last > 0 && (now-last) < cooldownSec {
+		nextAt = last + cooldownSec
+		retryAfter = nextAt - now
+		if retryAfter < 1 {
+			retryAfter = 1
+		}
+		return false, retryAfter, nextAt, nil
+	}
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE subscription_host_cooldowns
+		 SET last_refresh_at = ?
+		 WHERE owner_id = ? AND host_id = ? AND provider = ?`,
+		now, ownerID, hostID, provider,
+	); err != nil {
+		return false, 0, 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return false, 0, 0, err
+	}
+	return true, 0, now + cooldownSec, nil
+}
+
+// GetSubscriptionHostRefreshAt returns the last host-level refresh timestamp
+// (unix seconds) for (owner, host, provider), or 0 if never claimed.
+func (s *Store) GetSubscriptionHostRefreshAt(ctx context.Context, ownerID, hostID int64, provider string) (int64, error) {
+	if ownerID <= 0 || hostID <= 0 || provider == "" {
+		return 0, nil
+	}
+	var last int64
+	err := s.db.QueryRowContext(ctx,
+		`SELECT last_refresh_at FROM subscription_host_cooldowns
+		 WHERE owner_id = ? AND host_id = ? AND provider = ?`,
+		ownerID, hostID, provider,
+	).Scan(&last)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, nil
+	}
+	return last, err
 }

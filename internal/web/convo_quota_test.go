@@ -58,6 +58,47 @@ func TestQuotaOfConfig(t *testing.T) {
 	}
 }
 
+func TestQuotaOfConfigWeeklyScoped(t *testing.T) {
+	now := time.Date(2026, 11, 28, 12, 0, 0, 0, time.UTC)
+
+	// Real-shaped sample with weekly_all + weekly_scoped (Fable) + weekly_scoped_shares.
+	raw := `{"oauthAccount":{"accountUuid":"acc-1"},"cachedUsageUtilization":{"fetchedAtMs":1795868405000,"accountUuid":"acc-1","utilization":{"five_hour":null,"seven_day":{"utilization":84,"resets_at":"2026-11-29T14:59:59.53+00:00"},"limits":[{"kind":"weekly_all","group":"weekly","percent":84,"severity":"warning","resets_at":"2026-11-29T14:59:59.53+00:00","scope":null,"is_active":true},{"kind":"weekly_scoped","group":"weekly","percent":0,"severity":"normal","resets_at":"2026-11-29T15:00:00+00:00","scope":{"model":{"id":null,"display_name":"Fable"},"surface":null},"is_active":false}],"weekly_scoped_shares":[{"limit_index":1,"used_percent_of_weekly":0,"allowance_percent_of_weekly":50}]}}}`
+	q, in, ok := quotaOfConfig([]byte(raw), now)
+	if !ok || !in || !q.Known || q.Weekly == nil || q.Weekly.Used != 84 {
+		t.Fatalf("unexpected base quota: ok=%v in=%v q=%+v", ok, in, q)
+	}
+	if len(q.WeeklyScoped) != 1 {
+		t.Fatalf("expected 1 weekly_scoped entry, got %+v", q.WeeklyScoped)
+	}
+	fable := q.WeeklyScoped[0]
+	if fable.Name != "Fable" || fable.Used != 0 || fable.IsActive || fable.ResetsAt != time.Date(2026, 11, 29, 15, 0, 0, 0, time.UTC).Unix() {
+		t.Fatalf("unexpected fable entry: %+v", fable)
+	}
+	if fable.AllowancePctOfWeekly == nil || *fable.AllowancePctOfWeekly != 50 {
+		t.Fatalf("expected allowance 50, got %+v", fable.AllowancePctOfWeekly)
+	}
+
+	// Multiple scoped models: one with share & active, one without share, one expired, one garbled.
+	multi := `{"oauthAccount":{"accountUuid":"acc-1"},"cachedUsageUtilization":{"fetchedAtMs":1795868405000,"accountUuid":"acc-1","utilization":{"seven_day":{"utilization":50,"resets_at":"2026-11-29T15:00:00Z"},"limits":[{"kind":"weekly_all","group":"weekly","percent":50,"resets_at":"2026-11-29T15:00:00Z"},{"kind":"weekly_scoped","group":"weekly","percent":20,"resets_at":"2026-11-29T15:00:00Z","scope":{"model":{"display_name":"Fable"}},"is_active":true},{"kind":"weekly_scoped","group":"weekly","percent":10,"resets_at":"2026-11-29T15:00:00Z","scope":{"model":{"display_name":"Sonnet"}},"is_active":false},{"kind":"weekly_scoped","group":"weekly","percent":90,"resets_at":"2026-11-27T15:00:00Z","scope":{"model":{"display_name":"Expired"}}},{"kind":"weekly_scoped","percent":"bad","resets_at":"2026-11-29T15:00:00Z","scope":{"model":{"display_name":"BadPct"}}},{"kind":"weekly_scoped","percent":5,"resets_at":"2026-11-29T15:00:00Z","scope":{"model":{"display_name":""}}}],"weekly_scoped_shares":[{"limit_index":1,"allowance_percent_of_weekly":50},{"limit_index":2,"allowance_percent_of_weekly":0},{"limit_index":99,"allowance_percent_of_weekly":30},"bad-share"]}}}`
+	q, _, ok = quotaOfConfig([]byte(multi), now)
+	if !ok || !q.Known || len(q.WeeklyScoped) != 2 {
+		t.Fatalf("multi scoped failed: ok=%v q=%+v", ok, q)
+	}
+	if q.WeeklyScoped[0].Name != "Fable" || !q.WeeklyScoped[0].IsActive || q.WeeklyScoped[0].Used != 20 || q.WeeklyScoped[0].AllowancePctOfWeekly == nil || *q.WeeklyScoped[0].AllowancePctOfWeekly != 50 {
+		t.Fatalf("unexpected entry 0: %+v", q.WeeklyScoped[0])
+	}
+	if q.WeeklyScoped[1].Name != "Sonnet" || q.WeeklyScoped[1].IsActive || q.WeeklyScoped[1].Used != 10 || q.WeeklyScoped[1].AllowancePctOfWeekly != nil {
+		t.Fatalf("unexpected entry 1: %+v", q.WeeklyScoped[1])
+	}
+
+	// Garbled limits/shares types must NEVER break five_hour / seven_day.
+	garbled := `{"oauthAccount":{"accountUuid":"acc-1"},"cachedUsageUtilization":{"fetchedAtMs":1795868405000,"accountUuid":"acc-1","utilization":{"five_hour":{"utilization":12,"resets_at":"2026-11-28T16:00:00Z"},"seven_day":{"utilization":84,"resets_at":"2026-11-29T15:00:00Z"},"limits":"unexpected-string","weekly_scoped_shares":42}}}`
+	q, _, ok = quotaOfConfig([]byte(garbled), now)
+	if !ok || !q.Known || q.FiveHour == nil || q.FiveHour.Used != 12 || q.Weekly == nil || q.Weekly.Used != 84 || len(q.WeeklyScoped) != 0 {
+		t.Fatalf("garbled limits broke base windows: ok=%v q=%+v", ok, q)
+	}
+}
+
 // However many look, an account on a host has it asked at most once in quotaEvery.
 func TestQuotaRunsAtMostSoOften(t *testing.T) {
 	var r quotaRuns
@@ -97,7 +138,14 @@ func TestQuotaRead(t *testing.T) {
 		"primaryApiKey": "sk-kept-here",
 		"oauthAccount":  map[string]any{"accountUuid": "acc-1", "emailAddress": "someone@example.com", "organizationUuid": "org-1"},
 		"cachedUsageUtilization": map[string]any{"fetchedAtMs": 1793937000000, "accountUuid": "acc-1", "utilization": map[string]any{
-			"five_hour": nil, "seven_day": map[string]any{"utilization": 62, "resets_at": later}, "extra_usage": map[string]any{"is_enabled": false}}},
+			"five_hour": nil, "seven_day": map[string]any{"utilization": 62, "resets_at": later}, "extra_usage": map[string]any{"is_enabled": false},
+			"limits": []any{
+				map[string]any{"kind": "weekly_all", "group": "weekly", "percent": 62, "resets_at": later, "is_active": true},
+				map[string]any{"kind": "weekly_scoped", "group": "weekly", "percent": 0, "resets_at": later, "scope": map[string]any{"model": map[string]any{"id": nil, "display_name": "Fable"}, "surface": nil}, "is_active": false},
+			},
+			"weekly_scoped_shares": []any{
+				map[string]any{"limit_index": 1, "used_percent_of_weekly": 0, "allowance_percent_of_weekly": 50},
+			}}},
 		"zLast": map[string]any{"utilization": 1},
 	}
 	b, _ := json.MarshalIndent(cfg, "", "  ")
@@ -114,6 +162,9 @@ func TestQuotaRead(t *testing.T) {
 	q, in, ok := quotaOfConfig([]byte(out), time.Now())
 	if !ok || !in || !q.Known || q.Weekly == nil || q.Weekly.Used != 62 || q.FiveHour != nil || q.UpdatedAt != 1793937000 {
 		t.Errorf("%q: %+v %v %v", out, q, in, ok)
+	}
+	if len(q.WeeklyScoped) != 1 || q.WeeklyScoped[0].Name != "Fable" || q.WeeklyScoped[0].AllowancePctOfWeekly == nil || *q.WeeklyScoped[0].AllowancePctOfWeekly != 50 {
+		t.Errorf("weekly_scoped through quotaReadCommand: %+v", q.WeeklyScoped)
 	}
 	// (As the last key of the file too: no comma after its block.)
 	b, _ = json.MarshalIndent(map[string]any{"a": 1, "cachedUsageUtilization": cfg["cachedUsageUtilization"], "oauthAccount": map[string]any{"accountUuid": "acc-1"}}, "", "  ")

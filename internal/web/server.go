@@ -101,6 +101,8 @@ type Server struct {
 	claudePlan             claudePlanCache                                                                                  // cached Claude Code subscription tier from `claude auth status`
 	agyQuota               agyQuotaPoller                                                                                   // background periodic & stale-while-revalidate Antigravity quota cache
 	codexQuotaSeen         codexQuotaRecorded                                                                               // deduplicates passive Codex rollout quota writes to SQLite
+	devinQuotaSeen         hostThrottle                                                                                     // throttles passive Devin local cache reads per (owner, host)
+	opencodeHostSeen       hostThrottle                                                                                     // deduplicates passive OpenCode host registration in SQLite
 	subscriptionRefreshFn  func(ctx context.Context, ownerID int64, provider, accountKey string) (quotaInfo, string, error) // test hook; nil uses real SSH refresh
 	turns                  turnIndexes                                                                                      // the person's turns in those logs, for the page's panel of them (convo_turns.go)
 	newAgents              newAgents                                                                                        // agents being started from the conversation page

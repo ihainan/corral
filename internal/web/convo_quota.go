@@ -40,8 +40,24 @@ const (
 )
 
 type quotaWindow struct {
-	Used     float64 `json:"used"`      // percent (0..100)
-	ResetsAt int64   `json:"resets_at"` // unix seconds
+	Used     float64 `json:"used"`              // percent (0..100)
+	ResetsAt int64   `json:"resets_at"`         // unix seconds
+	Limited  bool    `json:"limited,omitempty"` // whether provider marks this window as limited
+}
+
+type quotaScopedLimit struct {
+	Name                 string   `json:"name"`
+	Used                 float64  `json:"used"`                                  // percent (0..100)
+	ResetsAt             int64    `json:"resets_at"`                             // unix seconds
+	IsActive             bool     `json:"is_active"`                             // whether this scoped limit is currently active
+	AllowancePctOfWeekly *float64 `json:"allowance_percent_of_weekly,omitempty"` // share of weekly allowance (0..100)
+}
+
+type quotaCredits struct {
+	Used     float64 `json:"used"`
+	Limit    float64 `json:"limit"`
+	Unit     string  `json:"unit"`                // e.g. "ACU", "USD"
+	ResetsAt int64   `json:"resets_at,omitempty"` // unix seconds
 }
 
 type quotaGroup struct {
@@ -51,12 +67,16 @@ type quotaGroup struct {
 }
 
 type quotaInfo struct {
-	Known     bool         `json:"known"`
-	UpdatedAt int64        `json:"updated_at,omitempty"` // unix seconds
-	Plan      string       `json:"plan,omitempty"`
-	FiveHour  *quotaWindow `json:"five_hour,omitempty"`
-	Weekly    *quotaWindow `json:"weekly,omitempty"`
-	Groups    []quotaGroup `json:"groups,omitempty"` // per-model-group quota (agy)
+	Known        bool               `json:"known"`
+	UpdatedAt    int64              `json:"updated_at,omitempty"` // unix seconds
+	Plan         string             `json:"plan,omitempty"`
+	FiveHour     *quotaWindow       `json:"five_hour,omitempty"`
+	Daily        *quotaWindow       `json:"daily,omitempty"`
+	Weekly       *quotaWindow       `json:"weekly,omitempty"`
+	Monthly      *quotaWindow       `json:"monthly,omitempty"`
+	WeeklyScoped []quotaScopedLimit `json:"weekly_scoped,omitempty"` // per-model weekly limits (Claude)
+	Groups       []quotaGroup       `json:"groups,omitempty"`        // per-model-group quota (agy)
+	Credits      *quotaCredits      `json:"credits,omitempty"`       // credits/ACU/spend allowance (Devin)
 }
 
 // cleanPlanName normalizes a provider-reported plan display name, dropping
@@ -112,8 +132,10 @@ func quotaOfConfig(raw []byte, now time.Time) (q quotaInfo, signedIn, ok bool) {
 			FetchedAtMs float64 `json:"fetchedAtMs"`
 			AccountUUID string  `json:"accountUuid"`
 			Utilization *struct {
-				FiveHour *window `json:"five_hour"`
-				SevenDay *window `json:"seven_day"`
+				FiveHour           *window         `json:"five_hour"`
+				SevenDay           *window         `json:"seven_day"`
+				Limits             json.RawMessage `json:"limits"`
+				WeeklyScopedShares json.RawMessage `json:"weekly_scoped_shares"`
 			} `json:"utilization"`
 		} `json:"cachedUsageUtilization"`
 	}
@@ -125,7 +147,7 @@ func quotaOfConfig(raw []byte, now time.Time) (q quotaInfo, signedIn, ok bool) {
 		return quotaInfo{}, signedIn, true
 	}
 	of := func(w *window) *quotaWindow {
-		if w == nil || w.Utilization == nil || *w.Utilization < 0 || *w.Utilization > 100 || math.IsNaN(*w.Utilization) {
+		if w == nil || w.Utilization == nil || *w.Utilization < 0 || *w.Utilization > 100 || math.IsNaN(*w.Utilization) || math.IsInf(*w.Utilization, 0) {
 			return nil
 		}
 		at, err := time.Parse(time.RFC3339Nano, w.ResetsAt)
@@ -135,11 +157,100 @@ func quotaOfConfig(raw []byte, now time.Time) (q quotaInfo, signedIn, ok bool) {
 		return &quotaWindow{Used: *w.Utilization, ResetsAt: at.Unix()}
 	}
 	q.FiveHour, q.Weekly = of(c.Cached.Utilization.FiveHour), of(c.Cached.Utilization.SevenDay)
+	q.WeeklyScoped = parseClaudeWeeklyScoped(c.Cached.Utilization.Limits, c.Cached.Utilization.WeeklyScopedShares, now)
 	if ms := c.Cached.FetchedAtMs; ms > 0 && ms < 1e15 {
 		q.UpdatedAt = int64(ms / 1000)
 	}
-	q.Known = q.FiveHour != nil || q.Weekly != nil
+	q.Known = q.FiveHour != nil || q.Weekly != nil || len(q.WeeklyScoped) > 0
 	return q, signedIn, true
+}
+
+// parseClaudeWeeklyScoped extracts per-model weekly_scoped entries from Claude
+// Code's cachedUsageUtilization.utilization.limits and pairs each entry with its
+// matching allowance_percent_of_weekly from weekly_scoped_shares via limit_index.
+// Malformed or unknown entries are silently skipped so existing rows never break.
+func parseClaudeWeeklyScoped(rawLimits, rawShares json.RawMessage, now time.Time) []quotaScopedLimit {
+	if len(rawLimits) == 0 {
+		return nil
+	}
+	var limitItems []json.RawMessage
+	if json.Unmarshal(rawLimits, &limitItems) != nil || len(limitItems) == 0 {
+		return nil
+	}
+	shareByIdx := map[int]float64{}
+	if len(rawShares) > 0 {
+		var shareItems []json.RawMessage
+		if json.Unmarshal(rawShares, &shareItems) == nil {
+			for _, rs := range shareItems {
+				var sh struct {
+					LimitIndex               *int     `json:"limit_index"`
+					AllowancePercentOfWeekly *float64 `json:"allowance_percent_of_weekly"`
+				}
+				if json.Unmarshal(rs, &sh) != nil || sh.LimitIndex == nil || *sh.LimitIndex < 0 {
+					continue
+				}
+				if sh.AllowancePercentOfWeekly == nil {
+					continue
+				}
+				v := *sh.AllowancePercentOfWeekly
+				if math.IsNaN(v) || math.IsInf(v, 0) || v <= 0 || v > 100 {
+					continue
+				}
+				shareByIdx[*sh.LimitIndex] = v
+			}
+		}
+	}
+	var out []quotaScopedLimit
+	for idx, rl := range limitItems {
+		var lim struct {
+			Kind     string   `json:"kind"`
+			Group    string   `json:"group"`
+			Percent  *float64 `json:"percent"`
+			ResetsAt string   `json:"resets_at"`
+			IsActive bool     `json:"is_active"`
+			Scope    *struct {
+				Model *struct {
+					ID          string `json:"id"`
+					DisplayName string `json:"display_name"`
+				} `json:"model"`
+			} `json:"scope"`
+		}
+		if json.Unmarshal(rl, &lim) != nil {
+			continue
+		}
+		if lim.Kind != "weekly_scoped" {
+			continue
+		}
+		if lim.Group != "" && lim.Group != "weekly" {
+			continue
+		}
+		if lim.Percent == nil || math.IsNaN(*lim.Percent) || math.IsInf(*lim.Percent, 0) || *lim.Percent < 0 || *lim.Percent > 100 {
+			continue
+		}
+		if lim.Scope == nil || lim.Scope.Model == nil {
+			continue
+		}
+		name := cleanPlanName(lim.Scope.Model.DisplayName)
+		if name == "" {
+			continue
+		}
+		at, err := time.Parse(time.RFC3339Nano, lim.ResetsAt)
+		if err != nil || !at.After(now) {
+			continue
+		}
+		entry := quotaScopedLimit{
+			Name:     name,
+			Used:     *lim.Percent,
+			ResetsAt: at.Unix(),
+			IsActive: lim.IsActive,
+		}
+		if allowance, ok := shareByIdx[idx]; ok {
+			v := allowance
+			entry.AllowancePctOfWeekly = &v
+		}
+		out = append(out, entry)
+	}
+	return out
 }
 
 // quotaRuns says when claude -p /usage was last set going, for each account on a host.
