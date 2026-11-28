@@ -177,7 +177,7 @@ func (s *Server) convoTailsOutput(ctx context.Context, sess *term.Session, logs 
 	}
 	defer func() {
 		if err != nil {
-			s.recordCorraldHintError(sess.OwnerID, sess.HostID, HintOpLog, err)
+			s.recordCorraldHintSessionError(sess, HintOpLog, err)
 		}
 	}()
 	return sshx.Output(ctx, sess.Client(), convoTailsCommand(logs), maxBytes)

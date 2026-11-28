@@ -833,7 +833,7 @@ func (s *Server) watchHerdr(sess *term.Session, h *store.Host) {
 	bg := newBgProber(func(ctx context.Context, sids []string, tail int) (map[string]bgRecord, error) {
 		out, err := sshx.Output(ctx, sess.Client(), bgTailCommand(sids, tail), len(sids)*(tail+256))
 		if err != nil {
-			s.recordCorraldHintError(sess.OwnerID, sess.HostID, HintOpLog, err)
+			s.recordCorraldHintSessionError(sess, HintOpLog, err)
 			return nil, err
 		}
 		return parseBgTails(out), nil
@@ -853,7 +853,7 @@ func (s *Server) watchHerdr(sess *term.Session, h *store.Host) {
 			locOut, locErr = sshx.Output(lctx, sess.Client(), convoLocateCommand(sess.Persistence, sess.CurrentTmuxSession(), "")+"; "+hostNowCommand, convoLocateMax)
 		}
 		if locErr != nil {
-			s.recordCorraldHintError(sess.OwnerID, sess.HostID, HintOpStatus, locErr)
+			s.recordCorraldHintSessionError(sess, HintOpStatus, locErr)
 			return
 		}
 		got := time.Now().UnixMilli()
@@ -878,7 +878,7 @@ func (s *Server) watchHerdr(sess *term.Session, h *store.Host) {
 	cmds := newCmdSubProber(func(ctx context.Context, watched []string) (map[string][]bgCmd, map[string][]bgAgent, map[string]map[string]bool, bool, error) {
 		out, err := sshx.Output(ctx, sess.Client(), cmdScanCommand(watched...), cmdScanMax)
 		if err != nil {
-			s.recordCorraldHintError(sess.OwnerID, sess.HostID, HintOpStatus, err)
+			s.recordCorraldHintSessionError(sess, HintOpStatus, err)
 			return nil, nil, nil, false, err
 		}
 		got, whole, budgetCut := parseCmdScanDetail(string(out))
@@ -943,7 +943,7 @@ func (s *Server) watchHerdr(sess *term.Session, h *store.Host) {
 			got := time.Now().UnixMilli()
 			cancel()
 			if err != nil {
-				s.recordCorraldHintError(sess.OwnerID, sess.HostID, HintOpStatus, err)
+				s.recordCorraldHintSessionError(sess, HintOpStatus, err)
 			}
 			var at map[string]int64
 			if err == nil {

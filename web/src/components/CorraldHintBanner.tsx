@@ -12,13 +12,20 @@ import {
   markCorraldHintShown,
   publishHostCorrald,
   readCachedCorrald,
+  subscribeAdminCorraldPolicy,
+  subscribeHostCorrald,
+  triggerCorraldHintsCheck,
   type CorraldHint,
+  type CorraldHintSync,
+  type CorraldHintSyncSnapshot,
   type CorraldStatus,
 } from '../corraldApi'
 import {
   corraldHintMessageKey,
   corraldSectionModel,
+  createCorraldHintSync,
   detectCorraldTransition,
+  isCorraldStatusHintEligible,
   shouldPollCorrald,
   shouldShowCorraldHint,
 } from '../corraldLogic'
@@ -38,7 +45,8 @@ export function CorraldHintBanner({
   hint,
   active,
   busy,
-  onShown,
+  onMountShown,
+  onUnmount,
   onEnable,
   onDismiss,
   onClose,
@@ -46,16 +54,21 @@ export function CorraldHintBanner({
   hint: CorraldHint
   active: boolean
   busy?: boolean
-  onShown: (hostId: number) => void
+  onMountShown: (hostId: number, generation: number) => void
+  onUnmount: (hostId: number) => void
   onEnable: (hint: CorraldHint) => void
   onDismiss: (hint: CorraldHint) => void
   onClose: (hint: CorraldHint) => void
 }) {
   const hostId = hint.host_id
+  const generation = hint.generation ?? 0
   useEffect(() => {
     if (!active || hostId <= 0) return
-    onShown(hostId)
-  }, [active, hostId, onShown])
+    onMountShown(hostId, generation)
+    return () => {
+      onUnmount(hostId)
+    }
+  }, [active, hostId, generation, onMountShown, onUnmount])
 
   const hostName = hint.host_name || `#${hint.host_id}`
   const msg = t(corraldHintMessageKey(hint), { host: hostName, n: hint.count })
@@ -98,9 +111,16 @@ export function CorraldHintBanner({
 
 const HINT_POLL_MS = 30_000
 
-// Owns fetching the single contextual corrald hint, reporting shown/dismissed,
-// and running the shared CorraldConsentAlert enablement flow right from the
-// Agents page without duplicating consent/install UI.
+const EMPTY_SYNC_SNAPSHOT: CorraldHintSyncSnapshot = {
+  generation: 0,
+  shownHostIds: new Set<number>(),
+  hiddenHostIds: new Set<number>(),
+  pending: [],
+}
+
+// Owns fetching the single contextual corrald hint, persisting & retrying
+// shown/dismissed writes across reloads, reacting immediately to host/admin
+// corrald status updates, and running the shared CorraldConsentAlert flow.
 export function useCorraldHintController(active: boolean): {
   banner: ReactNode
   dialog: ReactNode
@@ -111,9 +131,21 @@ export function useCorraldHintController(active: boolean): {
   const toast = useToast()
 
   const [hint, setHint] = useState<CorraldHint | null>(null)
-  const [sessionHidden, setSessionHidden] = useState<Set<number>>(() => new Set())
-  const reportedShownRef = useRef<Set<number>>(new Set())
-  const prevMasterRef = useRef<boolean>(masterEnabled)
+  const [syncSnap, setSyncSnap] = useState<CorraldHintSyncSnapshot>(EMPTY_SYNC_SNAPSHOT)
+  const [currentlyDisplayedHostId, setCurrentlyDisplayedHostId] = useState<number | null>(null)
+  const [knownHostStatus, setKnownHostStatus] = useState<{ status: CorraldStatus | null; unavailable?: boolean } | null>(null)
+  const [adminDisabledLocally, setAdminDisabledLocally] = useState(false)
+
+  const mountCountRef = useRef<Map<number, number>>(new Map())
+  const syncRef = useRef<CorraldHintSync | null>(null)
+  if (!syncRef.current) {
+    syncRef.current = createCorraldHintSync({
+      markShown: (hostId, gen) => markCorraldHintShown(hostId, gen),
+      dismiss: (hostId, gen) => dismissCorraldHint(hostId, gen),
+      isPermanentError: (err) => err instanceof ApiError && (err.status === 400 || err.status === 404),
+      onChange: (snap) => setSyncSnap(snap),
+    })
+  }
 
   // Shared consent/install dialog state (reusing CorraldConsentAlert).
   const [target, setTarget] = useState<{ hostId: number; hostName: string } | null>(null)
@@ -136,38 +168,86 @@ export function useCorraldHintController(active: boolean): {
 
   // Reset per-account state cleanly when switching or signing out of an account.
   useLayoutEffect(() => {
+    mountCountRef.current.clear()
     setHint(null)
-    setSessionHidden(new Set())
-    reportedShownRef.current.clear()
+    setCurrentlyDisplayedHostId(null)
+    setKnownHostStatus(null)
+    setAdminDisabledLocally(false)
     setTarget(null)
     setStatus(null)
     setInstallFailed(null)
     prevStatusRef.current = null
+    syncRef.current?.setUser(userId)
   }, [userId])
 
-  // When the user turns the account-level switch back ON, clear session-local
-  // hide/shown tracking so newly restored hosts can be shown immediately.
   useEffect(() => {
-    const prev = prevMasterRef.current
-    prevMasterRef.current = masterEnabled
+    const sync = syncRef.current
+    return () => {
+      sync?.dispose()
+    }
+  }, [])
+
+  // Clear visible hint immediately when account-level master switch is turned off.
+  useEffect(() => {
     if (!masterEnabled) {
       setHint(null)
-      return
-    }
-    if (!prev && masterEnabled) {
-      setSessionHidden(new Set())
-      reportedShownRef.current.clear()
+      setCurrentlyDisplayedHostId(null)
     }
   }, [masterEnabled])
+
+  // Track admin policy changes immediately without waiting for the next poll.
+  useEffect(() => {
+    return subscribeAdminCorraldPolicy((disabled) => {
+      setAdminDisabledLocally(disabled)
+      if (disabled) {
+        setHint(null)
+        setCurrentlyDisplayedHostId(null)
+      }
+    })
+  }, [])
+
+  // Subscribe to live CorraldStatus updates for the hinted host so enabling,
+  // installing, or admin-disabling it from any entry hides the bar immediately.
+  const hintHostId = hint?.host_id ?? 0
+  useEffect(() => {
+    if (hintHostId <= 0) {
+      setKnownHostStatus(null)
+      return
+    }
+    const cached = readCachedCorrald(hintHostId)
+    if (cached) {
+      setKnownHostStatus(cached)
+      if (cached.unavailable || (cached.status && !isCorraldStatusHintEligible(cached.status))) {
+        setHint((cur) => (cur && cur.host_id === hintHostId ? null : cur))
+        setCurrentlyDisplayedHostId((cur) => (cur === hintHostId ? null : cur))
+      }
+    } else {
+      setKnownHostStatus(null)
+    }
+    return subscribeHostCorrald(hintHostId, (st, unavailable) => {
+      setKnownHostStatus({ status: st, unavailable })
+      if (unavailable || (st && !isCorraldStatusHintEligible(st))) {
+        setHint((cur) => (cur && cur.host_id === hintHostId ? null : cur))
+        setCurrentlyDisplayedHostId((cur) => (cur === hintHostId ? null : cur))
+      }
+    })
+  }, [hintHostId])
 
   const fetchHint = useCallback(
     async (signal?: AbortSignal) => {
       const reqUser = userIdRef.current
       if (!reqUser || !masterEnabled) return
       try {
-        const next = await getCorraldHint(signal)
+        const res = await getCorraldHint(signal)
         if (userIdRef.current !== reqUser || signal?.aborted) return
-        setHint(next)
+        const sync = syncRef.current!
+        sync.syncServerGeneration(res.generation)
+        if (res.hint) {
+          setAdminDisabledLocally(false)
+          setHint({ ...res.hint, generation: res.hint.generation ?? res.generation })
+        } else {
+          setHint(null)
+        }
       } catch (e) {
         if (e instanceof ApiError && (e.code === 'aborted' || e.status === 404)) return
       }
@@ -189,60 +269,75 @@ export function useCorraldHintController(active: boolean): {
 
     run()
     const timer = window.setInterval(run, HINT_POLL_MS)
-    const onRefresh = (ev: Event) => {
-      const detail = (ev as CustomEvent<{ resetSession?: boolean } | undefined>).detail
-      if (detail?.resetSession) {
-        setSessionHidden(new Set())
-        reportedShownRef.current.clear()
-      }
+    const onRefresh = () => {
+      run()
+    }
+    const onOnline = () => {
+      void syncRef.current?.flushPending()
       run()
     }
     const onVis = () => {
       if (document.visibilityState === 'visible') run()
     }
     window.addEventListener(CORRALD_HINTS_EVENT, onRefresh)
+    window.addEventListener('online', onOnline)
     document.addEventListener('visibilitychange', onVis)
     return () => {
       stopped = true
       ctl?.abort()
       window.clearInterval(timer)
       window.removeEventListener(CORRALD_HINTS_EVENT, onRefresh)
+      window.removeEventListener('online', onOnline)
       document.removeEventListener('visibilitychange', onVis)
     }
   }, [active, userId, masterEnabled, fetchHint])
 
-  const hideForSession = useCallback((hostId: number) => {
-    setSessionHidden((prev) => {
-      if (prev.has(hostId)) return prev
-      const next = new Set(prev)
-      next.add(hostId)
-      return next
-    })
+  const hideLocally = useCallback((hostId: number) => {
+    syncRef.current?.hideLocally(hostId)
+    setCurrentlyDisplayedHostId((cur) => (cur === hostId ? null : cur))
     setHint((cur) => (cur && cur.host_id === hostId ? null : cur))
   }, [])
 
-  const handleShown = useCallback((hostId: number) => {
-    if (reportedShownRef.current.has(hostId)) return
-    reportedShownRef.current.add(hostId)
-    void markCorraldHintShown(hostId).catch(() => {})
+  const handleMountShown = useCallback((hostId: number, gen: number) => {
+    const counts = mountCountRef.current
+    counts.set(hostId, (counts.get(hostId) ?? 0) + 1)
+    setCurrentlyDisplayedHostId(hostId)
+    syncRef.current?.recordShown(hostId, gen)
+  }, [])
+
+  const handleUnmount = useCallback((hostId: number) => {
+    const counts = mountCountRef.current
+    const next = Math.max(0, (counts.get(hostId) ?? 1) - 1)
+    if (next === 0) {
+      counts.delete(hostId)
+      // Defer via microtask so React StrictMode's synchronous dev remount keeps
+      // currentlyDisplayedHostId intact while real list unmounts (mobile list ->
+      // conversation -> back, or picker close -> reopen) clear it cleanly.
+      queueMicrotask(() => {
+        if ((mountCountRef.current.get(hostId) ?? 0) === 0) {
+          setCurrentlyDisplayedHostId((cur) => (cur === hostId ? null : cur))
+        }
+      })
+    } else {
+      counts.set(hostId, next)
+    }
   }, [])
 
   const handleClose = useCallback(
     (h: CorraldHint) => {
-      // Closing hides only for this session (does not mark dismissed), while
-      // shown_at was already recorded when the banner appeared.
-      hideForSession(h.host_id)
+      // Closing hides locally (does not send dismiss); shown_at is already
+      // recorded & persisted by handleMountShown.
+      hideLocally(h.host_id)
     },
-    [hideForSession],
+    [hideLocally],
   )
 
-  const handleDismiss = useCallback(
-    (h: CorraldHint) => {
-      hideForSession(h.host_id)
-      void dismissCorraldHint(h.host_id).catch(() => {})
-    },
-    [hideForSession],
-  )
+  const handleDismiss = useCallback((h: CorraldHint) => {
+    const gen = h.generation ?? syncRef.current?.getSnapshot().generation ?? 0
+    setCurrentlyDisplayedHostId((cur) => (cur === h.host_id ? null : cur))
+    setHint((cur) => (cur && cur.host_id === h.host_id ? null : cur))
+    syncRef.current?.recordDismiss(h.host_id, gen)
+  }, [])
 
   const applyStatus = useCallback(
     (hostId: number, hostName: string, next: CorraldStatus | null) => {
@@ -309,11 +404,13 @@ export function useCorraldHintController(active: boolean): {
       const hostName = h.host_name || `#${hostId}`
       setInstallFailed(null)
       setLoadingStatus(true)
+      triggerCorraldHintsCheck()
       try {
         const cached = readCachedCorrald(hostId)
         const s = cached && !cached.unavailable && cached.status ? cached.status : await getHostCorrald(hostId)
-        if (!s || s.admin_disabled || s.state !== 'off') {
-          hideForSession(hostId)
+        if (!s || !isCorraldStatusHintEligible(s)) {
+          publishHostCorrald(hostId, s, s === null)
+          hideLocally(hostId)
           return
         }
         prevStatusRef.current = s
@@ -325,7 +422,7 @@ export function useCorraldHintController(active: boolean): {
         setLoadingStatus(false)
       }
     },
-    [loadingStatus, hideForSession, toast],
+    [loadingStatus, hideLocally, toast],
   )
 
   const shouldPoll = target !== null && shouldPollCorrald(status)
@@ -380,7 +477,7 @@ export function useCorraldHintController(active: boolean): {
       const op = await installHostCorrald(hostId, {
         ...(status.manifest_hash ? { manifest_hash: status.manifest_hash } : {}),
       })
-      hideForSession(hostId)
+      hideLocally(hostId)
       if (op) {
         applyStatus(hostId, hostName, { ...status, state: 'installing', op, error: null })
       }
@@ -407,14 +504,26 @@ export function useCorraldHintController(active: boolean): {
     }
   }
 
-  const visibleHint = shouldShowCorraldHint(hint, { masterEnabled, sessionHiddenHostIds: sessionHidden }) ? hint : null
+  const visibleHint =
+    !adminDisabledLocally &&
+    shouldShowCorraldHint(hint, {
+      masterEnabled,
+      sessionHiddenHostIds: syncSnap.hiddenHostIds,
+      shownHostIds: syncSnap.shownHostIds,
+      currentlyDisplayedHostId,
+      hostStatus: knownHostStatus?.status,
+      hostUnavailable: knownHostStatus?.unavailable,
+    })
+      ? hint
+      : null
 
   const banner = visibleHint ? (
     <CorraldHintBanner
       hint={visibleHint}
       active={active}
       busy={loadingStatus}
-      onShown={handleShown}
+      onMountShown={handleMountShown}
+      onUnmount={handleUnmount}
       onEnable={(h) => void handleEnable(h)}
       onDismiss={handleDismiss}
       onClose={handleClose}

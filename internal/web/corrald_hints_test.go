@@ -2,6 +2,7 @@ package web
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -18,6 +19,7 @@ import (
 	"github.com/ihainan/corral/internal/sftplite"
 	"github.com/ihainan/corral/internal/sshx"
 	"github.com/ihainan/corral/internal/store"
+	"github.com/ihainan/corral/internal/term"
 )
 
 type fakeNetTimeoutErr struct{}
@@ -26,6 +28,10 @@ func (fakeNetTimeoutErr) Error() string   { return "i/o timeout" }
 func (fakeNetTimeoutErr) Timeout() bool   { return true }
 func (fakeNetTimeoutErr) Temporary() bool { return true }
 
+// Item 1 regression test: only real SSH session-slot exhaustion (sshx.ErrBusy,
+// RFC 4254 ResourceShortage, and explicit MaxSessions / session-limit messages)
+// may trigger hints; generic "channel open failed" and policy-based
+// ssh.Prohibited / "open failed" rejections must NOT trigger (fails on 89c46aa).
 func TestCorraldHintClassifyError(t *testing.T) {
 	positives := []struct {
 		name string
@@ -33,16 +39,15 @@ func TestCorraldHintClassifyError(t *testing.T) {
 	}{
 		{"sshx.ErrBusy", sshx.ErrBusy},
 		{"wrapped sshx.ErrBusy", fmt.Errorf("%w: %w", errSFTPUnavailable, sshx.ErrBusy)},
-		{"OpenChannelError Prohibited open failed", &ssh.OpenChannelError{Reason: ssh.Prohibited, Message: "open failed"}},
 		{"OpenChannelError Prohibited no more sessions", &ssh.OpenChannelError{Reason: ssh.Prohibited, Message: "no more sessions"}},
+		{"OpenChannelError Prohibited MaxSessions", &ssh.OpenChannelError{Reason: ssh.Prohibited, Message: "MaxSessions exceeded"}},
 		{"OpenChannelError ResourceShortage", &ssh.OpenChannelError{Reason: ssh.ResourceShortage, Message: "resource shortage"}},
-		{"wrapped OpenChannelError", fmt.Errorf("open session: %w", &ssh.OpenChannelError{Reason: ssh.Prohibited, Message: "open failed"})},
-		{"stringified administratively prohibited", errors.New("ssh: rejected: administratively prohibited (open failed)")},
+		{"wrapped OpenChannelError ResourceShortage", fmt.Errorf("open session: %w", &ssh.OpenChannelError{Reason: ssh.ResourceShortage, Message: "too busy"})},
 		{"stringified MaxSessions", errors.New("channel open failed: MaxSessions limit reached")},
 		{"stringified no more sessions", errors.New("ssh: no more sessions available")},
 		{"stringified too many sessions", errors.New("too many sessions on connection")},
+		{"stringified session limit", errors.New("ssh: session limit reached")},
 		{"stringified resource shortage", errors.New("ssh: rejected: resource shortage")},
-		{"stringified channel open failed", errors.New("ssh: channel open failed")},
 	}
 	for _, tc := range positives {
 		reason, ok := ClassifyCorraldSolvableError(tc.err)
@@ -61,7 +66,7 @@ func TestCorraldHintClassifyError(t *testing.T) {
 		{"context.Canceled", context.Canceled},
 		{"errFileTimeout", errFileTimeout},
 		{"net timeout", fakeNetTimeoutErr{}},
-		{"JumpError wrapping Prohibited", &sshx.JumpError{Err: &ssh.OpenChannelError{Reason: ssh.Prohibited, Message: "open failed"}}},
+		{"JumpError wrapping Prohibited", &sshx.JumpError{Err: &ssh.OpenChannelError{Reason: ssh.Prohibited, Message: "no more sessions"}}},
 		{"ExitError", &sshx.ExitError{Status: 1}},
 		{"ErrOutputTooLarge", sshx.ErrOutputTooLarge},
 		{"ErrAuthFailed", sshx.ErrAuthFailed},
@@ -73,7 +78,14 @@ func TestCorraldHintClassifyError(t *testing.T) {
 		{"io.EOF", io.EOF},
 		{"OpenChannelError ConnectionFailed", &ssh.OpenChannelError{Reason: ssh.ConnectionFailed, Message: "connect failed"}},
 		{"OpenChannelError UnknownChannelType", &ssh.OpenChannelError{Reason: ssh.UnknownChannelType, Message: "unknown"}},
+		// Item 1: generic/policy rejections that MUST NOT trigger (failed on 89c46aa).
+		{"OpenChannelError Prohibited generic open failed", &ssh.OpenChannelError{Reason: ssh.Prohibited, Message: "open failed"}},
+		{"OpenChannelError Prohibited policy", &ssh.OpenChannelError{Reason: ssh.Prohibited, Message: "sessions disabled by policy"}},
+		{"OpenChannelError Prohibited empty", &ssh.OpenChannelError{Reason: ssh.Prohibited, Message: ""}},
 		{"OpenChannelError Prohibited forwarding", &ssh.OpenChannelError{Reason: ssh.Prohibited, Message: "port forwarding disabled"}},
+		{"plain channel open failed", errors.New("ssh: channel open failed")},
+		{"generic administratively prohibited open failed", errors.New("ssh: rejected: administratively prohibited (open failed)")},
+		{"generic administratively prohibited", errors.New("administratively prohibited by server policy")},
 		{"stringified forwarding prohibited", errors.New("ssh: rejected: administratively prohibited (forwarding disabled)")},
 		{"plain file open failed", errors.New("open failed: /tmp/foo: no such file or directory")},
 		{"refused exec", errors.New("the host refused to run the command")},
@@ -170,9 +182,9 @@ func TestCorraldHintEligibilityAllBranches(t *testing.T) {
 		t.Fatalf("recording failures must stay in memory only; found %d DB rows", len(dbRows))
 	}
 
-	// 4. Enable Dist -> host1 becomes eligible with count=1, op="status".
+	// 4. Enable Dist -> host1 becomes eligible with count=2, op="status".
 	h.srv.corrald.SetDist(makeFakeCorraldDist())
-	h.srv.recordCorraldHintError(aliceID, host1, HintOpStatus, &ssh.OpenChannelError{Reason: ssh.Prohibited, Message: "open failed"})
+	h.srv.recordCorraldHintError(aliceID, host1, HintOpStatus, &ssh.OpenChannelError{Reason: ssh.Prohibited, Message: "no more sessions"})
 	r = alice.do("GET", "/api/corrald/hints", nil)
 	mustStatus(t, r, http.StatusOK, "eligible hint")
 	hint := r.json()["hint"].(map[string]any)
@@ -290,8 +302,103 @@ func TestCorraldHintEligibilityAllBranches(t *testing.T) {
 	}
 }
 
-func TestCorraldHintShowOnceDismissAndMasterToggle(t *testing.T) {
-	h := newHarness(t)
+// Item 2 regression test: in-memory failure record is bound to (address, port,
+// login user); editing the host to another target invalidates old records, and
+// a stale open session cannot attach failures to the new target (fails on 89c46aa).
+func TestCorraldHintTargetBindingInvalidatesOnHostEdit(t *testing.T) {
+	h := newHarness(t, func(c *config.Config) {
+		c.GatewayID = "gw-hint-target.local"
+	})
+	h.srv.corrald.SetDist(makeFakeCorraldDist())
+	admin := h.admin()
+	alice := h.member(admin, "alice")
+	aliceID := userIDOf(t, alice)
+
+	hostID := createTestHostForHints(t, alice, "orig-box", 2231)
+	h.srv.recordCorraldHintError(aliceID, hostID, HintOpStatus, sshx.ErrBusy)
+
+	if got := alice.do("GET", "/api/corrald/hints", nil).json()["hint"]; got == nil {
+		t.Fatal("expected hint on original target")
+	}
+
+	// 1. Renaming host (same address, port, username) keeps the hint valid.
+	mustStatus(t, alice.do("PUT", fmt.Sprintf("/api/hosts/%d", hostID), map[string]any{
+		"name":     "renamed-box",
+		"address":  "127.0.0.1",
+		"port":     2231,
+		"username": "devuser",
+		"auth":     "ask",
+	}), http.StatusOK, "rename host only")
+	got := alice.do("GET", "/api/corrald/hints", nil).json()["hint"].(map[string]any)
+	if got == nil || got["host_name"] != "renamed-box" {
+		t.Fatalf("expected hint to survive rename with updated host_name, got %+v", got)
+	}
+
+	// 2. Editing address invalidates the old record.
+	mustStatus(t, alice.do("PUT", fmt.Sprintf("/api/hosts/%d", hostID), map[string]any{
+		"name":     "renamed-box",
+		"address":  "127.0.0.2",
+		"port":     2231,
+		"username": "devuser",
+		"auth":     "ask",
+	}), http.StatusOK, "change host address")
+	if got := alice.do("GET", "/api/corrald/hints", nil).json()["hint"]; got != nil {
+		t.Fatalf("changing address must invalidate old failure record, got %+v", got)
+	}
+
+	// 3. Editing port directly in store (even bypassing PUT handler) invalidates the record via Target check.
+	h.srv.recordCorraldHintError(aliceID, hostID, HintOpStatus, sshx.ErrBusy)
+	if got := alice.do("GET", "/api/corrald/hints", nil).json()["hint"]; got == nil {
+		t.Fatal("expected hint on 127.0.0.2:2231")
+	}
+	curHost, err := h.store.Host(context.Background(), aliceID, hostID)
+	if err != nil {
+		t.Fatalf("store.Host: %v", err)
+	}
+	curHost.Port = 2299
+	if err := h.store.UpdateHost(context.Background(), curHost, true); err != nil {
+		t.Fatalf("UpdateHost port: %v", err)
+	}
+	if got := alice.do("GET", "/api/corrald/hints", nil).json()["hint"]; got != nil {
+		t.Fatalf("changing port must invalidate old failure record, got %+v", got)
+	}
+
+	// 4. Editing login username invalidates the old record.
+	h.srv.recordCorraldHintError(aliceID, hostID, HintOpStatus, sshx.ErrBusy)
+	mustStatus(t, alice.do("PUT", fmt.Sprintf("/api/hosts/%d", hostID), map[string]any{
+		"name":     "renamed-box",
+		"address":  "127.0.0.2",
+		"port":     2299,
+		"username": "otheruser",
+		"auth":     "ask",
+	}), http.StatusOK, "change host username")
+	if got := alice.do("GET", "/api/corrald/hints", nil).json()["hint"]; got != nil {
+		t.Fatalf("changing username must invalidate old failure record, got %+v", got)
+	}
+
+	// 5. A stale running session still bound to the old HostConfig cannot attach
+	//    failures to the retargeted host record.
+	staleSess := &term.Session{
+		OwnerID:    aliceID,
+		HostID:     hostID,
+		HostConfig: "1|127.0.0.1|2231|devuser|ask|0",
+	}
+	h.srv.recordCorraldHintSessionError(staleSess, HintOpLog, sshx.ErrBusy)
+	if got := alice.do("GET", "/api/corrald/hints", nil).json()["hint"]; got != nil {
+		t.Fatalf("stale session error for old target must not show on retargeted host, got %+v", got)
+	}
+}
+
+// Items 3, 4, 5 regression tests:
+//   - Item 3: true->true PATCH is a no-op (does not reset shown/dismissed hosts).
+//   - Item 4: stale generation shown/dismiss POSTs return 204 and do not write.
+//   - Item 5: false->true atomically writes corraldHintsResetAt in the same
+//     settings JSON/transaction without deleting corrald_host_hints rows, and
+//     corraldHintsResetAt is rejected if sent by a client.
+func TestCorraldHintResetGenerationTrueToTrueStalePostAndAtomicNoDelete(t *testing.T) {
+	h := newHarness(t, func(c *config.Config) {
+		c.GatewayID = "gw-hint-gen.local"
+	})
 	h.srv.corrald.SetDist(makeFakeCorraldDist())
 	admin := h.admin()
 	alice := h.member(admin, "alice")
@@ -300,83 +407,129 @@ func TestCorraldHintShowOnceDismissAndMasterToggle(t *testing.T) {
 	host1 := createTestHostForHints(t, alice, "box-one", 2211)
 	host2 := createTestHostForHints(t, alice, "box-two", 2212)
 
-	now := time.Unix(1_700_100_000, 0)
+	now := time.UnixMilli(1_700_100_000_000)
 	h.srv.corraldHints.now = func() time.Time { return now }
 
-	// Record problem on host1, then later on host2.
 	h.srv.recordCorraldHintError(aliceID, host1, HintOpStatus, sshx.ErrBusy)
 	now = now.Add(5 * time.Second)
 	h.srv.recordCorraldHintError(aliceID, host2, HintOpLog, sshx.ErrBusy)
 
-	// Host2 is most recent.
-	got := alice.do("GET", "/api/corrald/hints", nil).json()["hint"].(map[string]any)
-	if int64(got["host_id"].(float64)) != host2 {
-		t.Fatalf("expected host2 first, got %+v", got)
+	// Initial GET returns generation 0 and host2 (most recent).
+	r := alice.do("GET", "/api/corrald/hints", nil)
+	mustStatus(t, r, http.StatusOK, "initial hints")
+	gen0 := int64(r.json()["generation"].(float64))
+	if gen0 != 0 {
+		t.Fatalf("expected initial generation=0, got %d", gen0)
+	}
+	if int64(r.json()["hint"].(map[string]any)["host_id"].(float64)) != host2 {
+		t.Fatalf("expected host2 first, got %+v", r.json())
 	}
 
-	// Report host2 shown (simulating user seeing banner and closing with × without clicking dismiss).
-	mustStatus(t, alice.do("POST", fmt.Sprintf("/api/hosts/%d/corrald/hint/shown", host2), nil), http.StatusOK, "mark host2 shown")
-	row2, err := h.store.CorraldHostHint(context.Background(), aliceID, host2)
-	if err != nil || row2.ShownAt == 0 || row2.DismissedAt != 0 {
-		t.Fatalf("expected shown_at>0, dismissed_at=0 for host2: (%+v, %v)", row2, err)
-	}
-
-	// Even if another failure hits host2, host2 is shown once and does NOT reappear; host1 now surfaces.
-	now = now.Add(10 * time.Second)
-	h.srv.recordCorraldHintError(aliceID, host2, HintOpStatus, sshx.ErrBusy)
-	got = alice.do("GET", "/api/corrald/hints", nil).json()["hint"].(map[string]any)
-	if int64(got["host_id"].(float64)) != host1 {
-		t.Fatalf("expected host1 after host2 was shown, got %+v", got)
-	}
-
-	// Dismiss host1 ("不再提示") -> both shown_at and dismissed_at set; no more hints.
-	mustStatus(t, alice.do("POST", fmt.Sprintf("/api/hosts/%d/corrald/hint/dismiss", host1), nil), http.StatusOK, "dismiss host1")
-	row1, err := h.store.CorraldHostHint(context.Background(), aliceID, host1)
-	if err != nil || row1.ShownAt == 0 || row1.DismissedAt == 0 {
-		t.Fatalf("expected shown_at>0 and dismissed_at>0 for host1: (%+v, %v)", row1, err)
-	}
+	// Mark host2 shown and host1 dismissed under gen0.
+	mustStatus(t, alice.do("POST", fmt.Sprintf("/api/hosts/%d/corrald/hint/shown", host2), map[string]any{"generation": gen0}), http.StatusOK, "shown host2")
+	mustStatus(t, alice.do("POST", fmt.Sprintf("/api/hosts/%d/corrald/hint/dismiss", host1), map[string]any{"generation": gen0}), http.StatusOK, "dismiss host1")
 	if got := alice.do("GET", "/api/corrald/hints", nil).json()["hint"]; got != nil {
-		t.Fatalf("expected nil hint after host1 dismissed & host2 shown, got %+v", got)
+		t.Fatalf("expected nil hint after host2 shown & host1 dismissed, got %+v", got)
 	}
 
-	// Master toggle OFF suppresses even a brand-new host3 with a fresh failure.
-	host3 := createTestHostForHints(t, alice, "box-three", 2213)
-	now = now.Add(5 * time.Second)
-	h.srv.recordCorraldHintError(aliceID, host3, HintOpStatus, sshx.ErrBusy)
+	// Item 3: true -> true (from default true, or repeated true from another writer) MUST BE A NO-OP!
+	mustStatus(t, patchUserSettings(t, alice, aliceID, "writer_true_noop_1", 1, map[string]any{"corraldHints": true}), http.StatusOK, "default true->true")
+	mustStatus(t, patchUserSettings(t, alice, aliceID, "writer_true_noop_2", 1, map[string]any{"corraldHints": true}), http.StatusOK, "explicit true->true")
+	rAfterNoOp := alice.do("GET", "/api/corrald/hints", nil)
+	mustStatus(t, rAfterNoOp, http.StatusOK, "hints after true->true")
+	if rAfterNoOp.json()["hint"] != nil {
+		t.Fatalf("Item 3 regression: true->true PATCH must not restore dismissed/shown hints, got %+v", rAfterNoOp.json())
+	}
+	if int64(rAfterNoOp.json()["generation"].(float64)) != 0 {
+		t.Fatalf("Item 3 regression: true->true PATCH must not advance generation, got %v", rAfterNoOp.json()["generation"])
+	}
 
-	writer := "writer_hint_test_01"
-	mustStatus(t, patchUserSettings(t, alice, aliceID, writer, 1, map[string]any{"corraldHints": false}), http.StatusOK, "master toggle off")
+	// Item 5: turn OFF (false), then ON (true) -> sets monotonic corraldHintsResetAt
+	// in the SAME settings JSON write WITHOUT deleting corrald_host_hints rows.
+	writer := "writer_reset_test_01"
+	mustStatus(t, patchUserSettings(t, alice, aliceID, writer, 1, map[string]any{"corraldHints": false}), http.StatusOK, "toggle off")
 	if got := alice.do("GET", "/api/corrald/hints", nil).json()["hint"]; got != nil {
-		t.Fatalf("expected nil hint when master toggle is off, got %+v", got)
+		t.Fatalf("expected nil hint when off, got %+v", got)
 	}
 
-	// Stale superseded request (seq=1 again with true) must NOT re-enable or reset.
-	stale := patchUserSettings(t, alice, aliceID, writer, 1, map[string]any{"corraldHints": true})
-	mustStatus(t, stale, http.StatusOK, "stale patch")
+	// Stale superseded seq=1 with true must NOT advance generation or re-enable.
+	mustStatus(t, patchUserSettings(t, alice, aliceID, writer, 1, map[string]any{"corraldHints": true}), http.StatusOK, "superseded true")
 	if got := alice.do("GET", "/api/corrald/hints", nil).json()["hint"]; got != nil {
-		t.Fatalf("stale superseded patch must not re-enable hints: %+v", got)
+		t.Fatalf("superseded patch must not re-enable hints: %+v", got)
 	}
 
-	// Master toggle ON (seq=2) re-enables AND restores previously dismissed & shown hosts!
-	mustStatus(t, patchUserSettings(t, alice, aliceID, writer, 2, map[string]any{"corraldHints": true}), http.StatusOK, "master toggle on")
-	allRows, err := h.store.ListCorraldHostHints(context.Background(), aliceID)
+	// Real false -> true transition (seq=2).
+	mustStatus(t, patchUserSettings(t, alice, aliceID, writer, 2, map[string]any{"corraldHints": true}), http.StatusOK, "toggle back on")
+
+	// DB rows in corrald_host_hints MUST still exist (nothing deleted).
+	dbRows, err := h.store.ListCorraldHostHints(context.Background(), aliceID)
 	if err != nil {
-		t.Fatalf("ListCorraldHostHints after re-enable: %v", err)
+		t.Fatalf("ListCorraldHostHints: %v", err)
 	}
-	if len(allRows) != 0 {
-		t.Fatalf("expected all host hint rows cleared on re-enable, got %d", len(allRows))
+	if len(dbRows) != 2 {
+		t.Fatalf("Item 5 regression: reset must NOT delete corrald_host_hints rows; found %d", len(dbRows))
 	}
-	// Host1 (previously dismissed) is eligible again!
-	r1 := alice.do("GET", fmt.Sprintf("/api/corrald/hints?host_id=%d", host1), nil)
-	mustStatus(t, r1, http.StatusOK, "host1 restored")
-	if r1.json()["hint"] == nil {
-		t.Fatal("expected previously dismissed host1 to be restored after turning master toggle on")
+
+	// user_settings JSON contains corraldHintsResetAt, while GET /api/me/settings hides it.
+	rawSettings, err := h.store.UserSettings(context.Background(), aliceID)
+	if err != nil {
+		t.Fatalf("UserSettings: %v", err)
 	}
-	// Host2 (previously shown) is also eligible again!
-	r2 := alice.do("GET", fmt.Sprintf("/api/corrald/hints?host_id=%d", host2), nil)
-	mustStatus(t, r2, http.StatusOK, "host2 restored")
-	if r2.json()["hint"] == nil {
-		t.Fatal("expected previously shown host2 to be restored after turning master toggle on")
+	var rawObj map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(rawSettings), &rawObj); err != nil {
+		t.Fatalf("unmarshal raw settings: %v", err)
+	}
+	if _, ok := rawObj[store.CorraldHintsResetKey]; !ok {
+		t.Fatalf("expected %s in stored user_settings JSON: %s", store.CorraldHintsResetKey, rawSettings)
+	}
+	meSettings := alice.do("GET", "/api/me/settings", nil).json()
+	if _, leaked := meSettings[store.CorraldHintsResetKey]; leaked {
+		t.Fatalf("GET /api/me/settings must not expose server-only key %s", store.CorraldHintsResetKey)
+	}
+
+	// GET /api/corrald/hints returns new generation gen1 > 0 and both hosts are eligible again.
+	rGen1 := alice.do("GET", "/api/corrald/hints", nil)
+	mustStatus(t, rGen1, http.StatusOK, "hints after reset")
+	gen1 := int64(rGen1.json()["generation"].(float64))
+	if gen1 <= gen0 {
+		t.Fatalf("expected gen1 > gen0 (%d), got %d", gen0, gen1)
+	}
+	if rGen1.json()["hint"] == nil {
+		t.Fatal("expected restored hint after false->true reset")
+	}
+	if alice.do("GET", fmt.Sprintf("/api/corrald/hints?host_id=%d", host1), nil).json()["hint"] == nil {
+		t.Fatal("expected previously dismissed host1 to be restored")
+	}
+
+	// Item 4: stale POSTs carrying gen0 (rendered before the reset) MUST return
+	// 204 No Content and MUST NOT write or suppress the restored host!
+	staleShown := alice.do("POST", fmt.Sprintf("/api/hosts/%d/corrald/hint/shown", host2), map[string]any{"generation": gen0})
+	mustStatus(t, staleShown, http.StatusNoContent, "stale shown returns 204")
+	staleDismiss := alice.do("POST", fmt.Sprintf("/api/hosts/%d/corrald/hint/dismiss", host1), map[string]any{"generation": gen0})
+	mustStatus(t, staleDismiss, http.StatusNoContent, "stale dismiss returns 204")
+	// Both hosts MUST still be eligible!
+	if alice.do("GET", fmt.Sprintf("/api/corrald/hints?host_id=%d", host2), nil).json()["hint"] == nil {
+		t.Fatal("Item 4 regression: stale shown POST suppressed restored host2")
+	}
+	if alice.do("GET", fmt.Sprintf("/api/corrald/hints?host_id=%d", host1), nil).json()["hint"] == nil {
+		t.Fatal("Item 4 regression: stale dismiss POST suppressed restored host1")
+	}
+
+	// Valid POST carrying gen1 succeeds (200) and suppresses host2 again.
+	mustStatus(t, alice.do("POST", fmt.Sprintf("/api/hosts/%d/corrald/hint/shown", host2), map[string]any{"generation": gen1}), http.StatusOK, "gen1 shown host2")
+	if alice.do("GET", fmt.Sprintf("/api/corrald/hints?host_id=%d", host2), nil).json()["hint"] != nil {
+		t.Fatal("host2 must be suppressed after gen1 shown POST")
+	}
+
+	// Second false->true reset even at the exact same frozen millisecond advances generation monotonically.
+	mustStatus(t, patchUserSettings(t, alice, aliceID, writer, 3, map[string]any{"corraldHints": false}), http.StatusOK, "second off")
+	mustStatus(t, patchUserSettings(t, alice, aliceID, writer, 4, map[string]any{"corraldHints": true}), http.StatusOK, "second on same ms")
+	gen2 := int64(alice.do("GET", "/api/corrald/hints", nil).json()["generation"].(float64))
+	if gen2 <= gen1 {
+		t.Fatalf("expected strictly monotonic gen2 > gen1 (%d), got %d", gen1, gen2)
+	}
+	if alice.do("GET", fmt.Sprintf("/api/corrald/hints?host_id=%d", host2), nil).json()["hint"] == nil {
+		t.Fatal("host2 should be eligible again after second reset")
 	}
 }
 
@@ -407,12 +560,12 @@ func TestCorraldHintSettingsWhitelist(t *testing.T) {
 		}
 	}
 
-	// Unknown keys rejected by whitelist with 400 bad_setting.
-	for i, badKey := range []string{"corrald_hints", "corraldHintsExtra", "arbitraryKey"} {
-		r := patchUserSettings(t, alice, aliceID, writer, int64(20+i), map[string]any{badKey: true})
-		mustStatus(t, r, http.StatusBadRequest, "unknown key "+badKey)
+	// Unknown keys AND server-written corraldHintsResetAt are rejected by whitelist.
+	for i, badKey := range []string{store.CorraldHintsResetKey, "corrald_hints", "corraldHintsExtra", "arbitraryKey"} {
+		r := patchUserSettings(t, alice, aliceID, writer, int64(20+i), map[string]any{badKey: 12345})
+		mustStatus(t, r, http.StatusBadRequest, "rejected key "+badKey)
 		if r.code() != "bad_setting" {
-			t.Fatalf("expected bad_setting for unknown key %q, got %q", badKey, r.code())
+			t.Fatalf("expected bad_setting for key %q, got %q", badKey, r.code())
 		}
 	}
 }
@@ -429,8 +582,8 @@ func TestCorraldHintDeleteHostAndUserCleanup(t *testing.T) {
 
 	h.srv.recordCorraldHintError(aliceID, host1, HintOpStatus, sshx.ErrBusy)
 	h.srv.recordCorraldHintError(aliceID, host2, HintOpLog, sshx.ErrBusy)
-	mustStatus(t, alice.do("POST", fmt.Sprintf("/api/hosts/%d/corrald/hint/dismiss", host1), nil), http.StatusOK, "dismiss host1")
-	mustStatus(t, alice.do("POST", fmt.Sprintf("/api/hosts/%d/corrald/hint/shown", host2), nil), http.StatusOK, "shown host2")
+	mustStatus(t, alice.do("POST", fmt.Sprintf("/api/hosts/%d/corrald/hint/dismiss", host1), map[string]any{"generation": 0}), http.StatusOK, "dismiss host1")
+	mustStatus(t, alice.do("POST", fmt.Sprintf("/api/hosts/%d/corrald/hint/shown", host2), map[string]any{"generation": 0}), http.StatusOK, "shown host2")
 
 	// Delete host1 via API -> clears both DB row and in-memory problem entry.
 	mustStatus(t, alice.do("DELETE", fmt.Sprintf("/api/hosts/%d", host1), map[string]any{
@@ -467,7 +620,6 @@ func TestCorraldHintEndToEndOnBusyConversationRead(t *testing.T) {
 
 	srv := h.sshServer(t.TempDir())
 	hostID := createTestHostForHints(t, alice, "busy-box", srv.Addr.Port)
-	// Update host to password auth so we can open a real test SSH session.
 	mustStatus(t, alice.do("PUT", fmt.Sprintf("/api/hosts/%d", hostID), map[string]any{
 		"name":     "busy-box",
 		"address":  "127.0.0.1",
@@ -477,7 +629,6 @@ func TestCorraldHintEndToEndOnBusyConversationRead(t *testing.T) {
 		"password": "alice-pass",
 	}), http.StatusOK, "update host auth")
 
-	// First open gives host key prompt; accept it to open the session.
 	r := alice.do("POST", "/api/sessions", map[string]any{"host_id": hostID})
 	if r.Status == http.StatusConflict {
 		fp := r.json()["fingerprint"].(string)
@@ -490,7 +641,6 @@ func TestCorraldHintEndToEndOnBusyConversationRead(t *testing.T) {
 		t.Fatalf("terms.Get: %v", err)
 	}
 
-	// Exhaust all Aux session slots on sess.Client() so convoTailsOutput hits real sshx.ErrBusy.
 	var releases []func()
 	defer func() {
 		for _, rel := range releases {
@@ -510,7 +660,6 @@ func TestCorraldHintEndToEndOnBusyConversationRead(t *testing.T) {
 		t.Fatalf("expected sshx.ErrBusy from convoTailsOutput with full Aux slots, got %v", cerr)
 	}
 
-	// Gateway hint API must now report this real failure for busy-box.
 	hr := alice.do("GET", "/api/corrald/hints", nil)
 	mustStatus(t, hr, http.StatusOK, "GET /api/corrald/hints")
 	hint, ok := hr.json()["hint"].(map[string]any)

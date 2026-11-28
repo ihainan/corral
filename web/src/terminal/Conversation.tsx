@@ -2792,7 +2792,7 @@ export function ConversationView({
         />
       )}
       </div>
-      {picking && side && <Picker rows={rows} onClose={unpick} searchFirst={picking === 'search'} />}
+      {picking && side && <Picker rows={rows} onClose={unpick} searchFirst={picking === 'search'} showHintBanner={!sideShown} />}
     </div>
     </FileLinkOf.Provider>
     </CodeSpanOf.Provider>
@@ -4867,7 +4867,7 @@ function shortFor(ms: number): string {
   return t('convo.bgTasks.dur.d', { d: Math.floor(m / 1440) })
 }
 
-export function AgentList({ rows, menus, onPicked, placed, query: given, onQuery, search, showSearch, onSearchLeft, hint, compact, showNew, tools, empty }: { rows: ConvoListRow[]; menus?: boolean; onPicked?: () => void; placed?: Map<string, ConvoListRow>; query?: string; onQuery?: (q: string) => void; search?: number; showSearch?: boolean; onSearchLeft?: () => void; hint?: boolean; compact?: boolean; showNew?: boolean; tools?: ReactNode; empty?: ReactNode }) {
+export function AgentList({ rows, menus, onPicked, placed, query: given, onQuery, search, showSearch, onSearchLeft, hint, compact, showNew, showHintBanner = true, tools, empty }: { rows: ConvoListRow[]; menus?: boolean; onPicked?: () => void; placed?: Map<string, ConvoListRow>; query?: string; onQuery?: (q: string) => void; search?: number; showSearch?: boolean; onSearchLeft?: () => void; hint?: boolean; compact?: boolean; showNew?: boolean; showHintBanner?: boolean; tools?: ReactNode; empty?: ReactNode }) {
   const wbList = useWorkbench()
   const sideBanner = useCorraldSideBanner()
   // (compact: one line a row, its name, the session's title in grey after it, its
@@ -5136,7 +5136,7 @@ export function AgentList({ rows, menus, onPicked, placed, query: given, onQuery
           </div>
         </div>
       )}
-      {!onPicked && sideBanner}
+      {showHintBanner && sideBanner}
       {hiddenBlocked.length > 0 && (
         <div className="convo-outside-blocked" role="region" aria-label={t('convo.lineage.outsideBlocked', { n: hiddenBlocked.length })}>
           <div className="convo-outside-blocked-head">
@@ -6041,7 +6041,7 @@ export function ListSearch({ value, onChange, focus, onLeft, hint, onNav }: { va
 // bottom on a phone. Its rows stay where they were when it opened: statuses
 // changing meanwhile do not move them under the finger (what they say is
 // current; one gone goes, one new comes in).
-function Picker({ rows, onClose, searchFirst }: { rows: ConvoListRow[]; onClose: () => void; searchFirst?: boolean }) {
+function Picker({ rows, onClose, searchFirst, showHintBanner = true }: { rows: ConvoListRow[]; onClose: () => void; searchFirst?: boolean; showHintBanner?: boolean }) {
   const [first] = useState(() => new Map(rows.map((r) => [r.key, asHeld(r)])))
   const box = useRef<HTMLDivElement>(null)
   // (Once, when it opens: focus moved on in it stays where it was moved.)
@@ -6102,7 +6102,7 @@ function Picker({ rows, onClose, searchFirst }: { rows: ConvoListRow[]; onClose:
             </button>
           </div>
         )}
-        <AgentList rows={rows} placed={first} onPicked={onClose} showSearch={searchFirst || !isTouchOnly} compact showNew />
+        <AgentList rows={rows} placed={first} onPicked={onClose} showSearch={searchFirst || !isTouchOnly} compact showNew showHintBanner={showHintBanner} />
         {!isTouchOnly && (
           <div className="convo-picker-foot" aria-hidden="true">
             <span>
@@ -6320,7 +6320,7 @@ export function AgentSidePane({
           />
         </>
       )}
-      {picking && <Picker rows={rows} searchFirst={picking === 'search'} onClose={() => setPicking(false)} />}
+      {picking && <Picker rows={rows} searchFirst={picking === 'search'} onClose={() => setPicking(false)} showHintBanner={!sideShown} />}
     </>
   )
 }

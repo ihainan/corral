@@ -10,6 +10,7 @@ import {
   removeHostCorrald,
   resumeHostCorrald,
   retryHostCorrald,
+  triggerCorraldHintsCheck,
   triggerCorraldNoticesCheck,
   updateHostCorrald,
   type CorraldStatus,
@@ -316,6 +317,7 @@ export function CorraldSection({ hostId, hostName }: { hostId: number; hostName:
                   onClick={() => {
                     setInstallFailed(null)
                     setConsentOpen('enable')
+                    triggerCorraldHintsCheck()
                   }}
                 >
                   {t('corrald.enableBtn')}

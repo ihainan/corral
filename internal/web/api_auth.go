@@ -538,13 +538,18 @@ func (s *Server) apiPatchSettings(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	var accepted, superseded []string
-	var resetCorraldHints bool
-	err := s.store.MergeUserSettings(r.Context(), currentUser(r).ID, func(old string) (string, error) {
+	err := s.store.MergeUserSettingsWithHintMax(r.Context(), currentUser(r).ID, func(old string, maxHintTS int64) (string, error) {
 		accepted, superseded = nil, nil
-		resetCorraldHints = false
 		var obj map[string]json.RawMessage
 		if json.Unmarshal([]byte(old), &obj) != nil || obj == nil {
 			obj = map[string]json.RawMessage{}
+		}
+		wasHintsDisabled := false
+		if rawPrev, ok := obj["corraldHints"]; ok {
+			var prevOn bool
+			if json.Unmarshal(rawPrev, &prevOn) == nil && !prevOn {
+				wasHintsDisabled = true
+			}
 		}
 		var writers []settingWriter // least recently heard from first
 		if raw, ok := obj[settingsWriters]; ok {
@@ -587,10 +592,22 @@ func (s *Server) apiPatchSettings(w http.ResponseWriter, r *http.Request) {
 			}
 			obj[k], me.Seq[k] = v, b.Seq
 			accepted = append(accepted, k)
-			if k == "corraldHints" {
+			if k == "corraldHints" && wasHintsDisabled {
 				var on bool
 				if json.Unmarshal(v, &on) == nil && on {
-					resetCorraldHints = true
+					var prevReset int64
+					if rawReset, ok := obj[store.CorraldHintsResetKey]; ok {
+						_ = json.Unmarshal(rawReset, &prevReset)
+					}
+					nextReset := s.corraldHints.clock().UnixMilli()
+					if nextReset <= prevReset {
+						nextReset = prevReset + 1
+					}
+					if nextReset <= maxHintTS {
+						nextReset = maxHintTS + 1
+					}
+					rawNext, _ := json.Marshal(nextReset)
+					obj[store.CorraldHintsResetKey] = rawNext
 				}
 			}
 		}
@@ -616,12 +633,6 @@ func (s *Server) apiPatchSettings(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		s.internalError(w, r, err)
 		return
-	}
-	if resetCorraldHints {
-		if err := s.store.ResetCorraldHintsForUser(r.Context(), currentUser(r).ID); err != nil {
-			s.internalError(w, r, err)
-			return
-		}
 	}
 	sort.Strings(accepted)
 	sort.Strings(superseded)

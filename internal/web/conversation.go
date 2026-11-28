@@ -1295,7 +1295,7 @@ func (s *Server) screenSays(ctx context.Context, sess *term.Session, pane string
 	}
 	out, err := sshx.Output(ctx, sess.Client(), convoScreenCommand(sess.Persistence, target, s.herdrSocks.get(sess.ID)), 256<<10)
 	if err != nil {
-		s.recordCorraldHintError(sess.OwnerID, sess.HostID, HintOpLog, err)
+		s.recordCorraldHintSessionError(sess, HintOpLog, err)
 		return "", "", 0, false // (no screen to go by)
 	}
 	screen := letters(string(out))
@@ -1309,7 +1309,7 @@ func (s *Server) screenSays(ctx context.Context, sess *term.Session, pane string
 	} else {
 		tails, err := sshx.Output(ctx, sess.Client(), convoMessageTailsCommand(logs), maxScreenLogs*(72<<10))
 		if err != nil {
-			s.recordCorraldHintError(sess.OwnerID, sess.HostID, HintOpLog, err)
+			s.recordCorraldHintSessionError(sess, HintOpLog, err)
 			return "", "", 0, false
 		}
 		rawTails = tails
@@ -2570,7 +2570,7 @@ func (s *Server) apiConversation(w http.ResponseWriter, r *http.Request) {
 			st.relocAfter.CompareAndSwap(reloc, 0) // (not one marked since)
 		}
 		if err != nil {
-			s.recordCorraldHintError(sess.OwnerID, sess.HostID, HintOpStatus, err)
+			s.recordCorraldHintSessionError(sess, HintOpStatus, err)
 			if errors.Is(err, sshx.ErrBusy) {
 				perfOutcome = "busy"
 				writeSSHChannelsBusy(w)
@@ -2616,7 +2616,7 @@ func (s *Server) apiConversation(w http.ResponseWriter, r *http.Request) {
 		err = s.readOlder(sess, st)
 	}
 	if err != nil {
-		s.recordCorraldHintError(sess.OwnerID, sess.HostID, HintOpLog, err)
+		s.recordCorraldHintSessionError(sess, HintOpLog, err)
 		perfOutcome = convoReadErrOutcome(err)
 		writeFileError(w, err)
 		return
@@ -2836,7 +2836,7 @@ func (s *Server) relocateLater(sess *term.Session, key string, st *convoState, p
 		err := s.locateConvoBy(ctx, sess, st, pane, st.weak)
 		st.relocFailed.Store(err != nil)
 		if err != nil {
-			s.recordCorraldHintError(sess.OwnerID, sess.HostID, HintOpStatus, err)
+			s.recordCorraldHintSessionError(sess, HintOpStatus, err)
 		} else {
 			s.recordConvoHintBinding(sess, pane, st)
 		}
@@ -3669,7 +3669,7 @@ func (s *Server) convoFreshStatusInteractive(ctx context.Context, sess *term.Ses
 	}
 	res, err := sshx.Exec(ctx, sess.Client(), freshStatusCommand(b.PID), 64<<10, sshx.ExecOptions{Interactive: interactive, AwaitSlot: await})
 	if err != nil {
-		s.recordCorraldHintError(sess.OwnerID, sess.HostID, HintOpStatus, err)
+		s.recordCorraldHintSessionError(sess, HintOpStatus, err)
 		return ""
 	}
 	return procStatusOf(res.Out, b)

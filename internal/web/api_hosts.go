@@ -425,6 +425,7 @@ func (s *Server) updateHost(w http.ResponseWriter, r *http.Request, b *hostBody)
 		if s.corrald != nil {
 			s.corrald.DetachHost(h.ID)
 		}
+		s.corraldHints.forgetHost(u.ID, h.ID)
 	}
 	if connChanged {
 		// Nothing open through the old settings carries on, here or on the

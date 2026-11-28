@@ -18,6 +18,7 @@ const {
   corraldHintMessageKey,
   corraldSectionModel,
   corraldStatusBarModel,
+  createCorraldHintSync,
   createCorraldNoticeFetcher,
   degradedCaps,
   detectCorraldTransition,
@@ -25,6 +26,7 @@ const {
   formatRssMb,
   groupCorraldUpdateNotices,
   hasInstalledCorrald,
+  isCorraldStatusHintEligible,
   isCorraldUnknownResult,
   isOpActive,
   isOpCancellable,
@@ -670,6 +672,249 @@ function baseStatus(overrides = {}) {
     const matches = i18nSrc.match(new RegExp(`'${key.replaceAll('.', '\\.')}':`, 'g')) ?? []
     assert.equal(matches.length, 2, `i18n key ${key} must appear in both zh and en tables (found ${matches.length})`)
   }
+}
+
+// Phase 2b fix1 item 6: once a hint has been shown in this page session,
+// remounting the list (mobile list -> conversation -> back) must not show it again.
+{
+  const hint = {
+    host_id: 7,
+    host_name: 'gpu-01',
+    reason: 'ssh_session_full',
+    op: 'status',
+    count: 2,
+    last_at: 1_700_000_000,
+    generation: 0,
+  }
+  const shown = new Set([7])
+  // Unbroken initial mount keeps the bar visible so the user can read/act on it.
+  assert.equal(
+    shouldShowCorraldHint(hint, {
+      masterEnabled: true,
+      sessionHiddenHostIds: new Set(),
+      shownHostIds: shown,
+      currentlyDisplayedHostId: 7,
+    }),
+    true,
+  )
+  // After unmount (currentlyDisplayedHostId becomes null), remounting the list
+  // before the next poll MUST NOT render the banner again.
+  assert.equal(
+    shouldShowCorraldHint(hint, {
+      masterEnabled: true,
+      sessionHiddenHostIds: new Set(),
+      shownHostIds: shown,
+      currentlyDisplayedHostId: null,
+    }),
+    false,
+    'item 6: remounting list after hint was shown must suppress re-display',
+  )
+}
+
+// Phase 2b fix1 item 7: hide the bar immediately when this host's corrald
+// state is known to be anything other than off and enablable, and refetch hints
+// when consent starts from any entry.
+{
+  const hint = {
+    host_id: 9,
+    host_name: 'gpu-02',
+    reason: 'ssh_session_full',
+    op: 'log',
+    count: 3,
+    last_at: 1_700_000_000,
+    generation: 0,
+  }
+  assert.equal(isCorraldStatusHintEligible(baseStatus({ state: 'off' })), true)
+  for (const st of [
+    baseStatus({ state: 'running' }),
+    baseStatus({ state: 'installing', op: { id: 'op1', kind: 'install', state: 'running', step: 'upload' } }),
+    baseStatus({ state: 'off', admin_disabled: true }),
+    baseStatus({ state: 'rebind' }),
+    baseStatus({ state: 'incompatible' }),
+    baseStatus({ state: 'off', error: { code: 'unsupported_os' } }),
+    baseStatus({ state: 'off', op: { id: 'op2', kind: 'install', state: 'failed', error_code: 'unsupported_arch' } }),
+  ]) {
+    assert.equal(isCorraldStatusHintEligible(st), false)
+    assert.equal(
+      shouldShowCorraldHint(hint, {
+        masterEnabled: true,
+        sessionHiddenHostIds: new Set(),
+        hostStatus: st,
+      }),
+      false,
+      `item 7: status ${JSON.stringify(st)} must hide hint immediately`,
+    )
+  }
+  assert.equal(
+    shouldShowCorraldHint(hint, {
+      masterEnabled: true,
+      sessionHiddenHostIds: new Set(),
+      hostUnavailable: true,
+    }),
+    false,
+    'item 7: unavailable corrald must hide hint immediately',
+  )
+
+  const sectionSrc = readFileSync(fileURLToPath(new URL('../src/components/CorraldSection.tsx', import.meta.url)), 'utf8')
+  assert.ok(
+    sectionSrc.includes('triggerCorraldHintsCheck()'),
+    'item 7: CorraldSection must trigger hints refetch when consent flow starts',
+  )
+  const bannerSrc = readFileSync(fileURLToPath(new URL('../src/components/CorraldHintBanner.tsx', import.meta.url)), 'utf8')
+  assert.ok(
+    bannerSrc.includes('subscribeHostCorrald') && bannerSrc.includes('subscribeAdminCorraldPolicy'),
+    'item 7: CorraldHintBanner must subscribe to live host and admin policy updates',
+  )
+}
+
+// Phase 2b fix1 item 8: failed shown/dismiss writes retry with backoff, then
+// on the next successful hints fetch, and local hidden/shown state survives
+// reload via try/catch-guarded storage until the server confirms.
+{
+  const mem = new Map()
+  const storage = {
+    getItem: (k) => (mem.has(k) ? mem.get(k) : null),
+    setItem: (k, v) => mem.set(k, v),
+  }
+  const scheduled = []
+  let shownAttempts = 0
+  let dismissAttempts = 0
+  let shownShouldFail = 2 // fail first 2 attempts, succeed on 3rd (2nd retry)
+  let dismissShouldFail = 10 // fail all immediate retries; recover later on next fetch
+
+  const sync = createCorraldHintSync({
+    storage,
+    backoffMs: [100, 300],
+    schedule: (fn, delay) => {
+      const entry = { fn, delay, cancelled: false }
+      scheduled.push(entry)
+      return entry
+    },
+    cancelSchedule: (entry) => {
+      entry.cancelled = true
+    },
+    markShown: async () => {
+      shownAttempts++
+      if (shownAttempts <= shownShouldFail) throw new Error('offline')
+    },
+    dismiss: async () => {
+      dismissAttempts++
+      if (dismissAttempts <= dismissShouldFail) throw new Error('offline')
+    },
+  })
+
+  sync.setUser(42)
+  sync.recordShown(11, 0)
+  await Promise.resolve()
+  await Promise.resolve()
+  assert.equal(shownAttempts, 1)
+  assert.equal(scheduled.length, 1)
+  assert.equal(scheduled[0].delay, 100)
+  assert.equal(sync.getSnapshot().pending.length, 1)
+
+  // Fire 1st backoff retry (100ms) -> still fails, schedules 2nd retry (300ms).
+  scheduled[0].fn()
+  await Promise.resolve()
+  await Promise.resolve()
+  assert.equal(shownAttempts, 2)
+  assert.equal(scheduled.length, 2)
+  assert.equal(scheduled[1].delay, 300)
+
+  // Fire 2nd backoff retry (300ms) -> succeeds and clears pending!
+  scheduled[1].fn()
+  await Promise.resolve()
+  await Promise.resolve()
+  assert.equal(shownAttempts, 3)
+  assert.equal(sync.getSnapshot().pending.length, 0)
+
+  // Dismiss host 12 while offline: exhausts backoff retries, stays persisted.
+  sync.recordDismiss(12, 0)
+  await Promise.resolve()
+  await Promise.resolve()
+  assert.equal(dismissAttempts, 1)
+  scheduled[scheduled.length - 1].fn()
+  await Promise.resolve()
+  await Promise.resolve()
+  assert.equal(dismissAttempts, 2)
+  scheduled[scheduled.length - 1].fn()
+  await Promise.resolve()
+  await Promise.resolve()
+  assert.equal(dismissAttempts, 3)
+  assert.equal(sync.getSnapshot().pending.length, 1)
+  sync.dispose()
+
+  // Simulate full page reload: new sync instance reads the same storage.
+  dismissShouldFail = 0 // network recovered after reload
+  const replayed = []
+  const syncAfterReload = createCorraldHintSync({
+    storage,
+    backoffMs: [100, 300],
+    markShown: async (id, gen) => {
+      replayed.push({ kind: 'shown', id, gen })
+    },
+    dismiss: async (id, gen) => {
+      replayed.push({ kind: 'dismiss', id, gen })
+    },
+  })
+  syncAfterReload.setUser(42)
+  const snap = syncAfterReload.getSnapshot()
+  assert.equal(snap.hiddenHostIds.has(12), true, 'item 8: hidden host must survive reload before server confirms')
+  assert.equal(snap.shownHostIds.has(11), true, 'item 8: shown host must survive reload')
+  assert.equal(snap.pending.length, 1)
+
+  // Next successful hints fetch at same generation replays the pending dismiss!
+  syncAfterReload.syncServerGeneration(0)
+  await Promise.resolve()
+  await Promise.resolve()
+  assert.deepEqual(replayed, [{ kind: 'dismiss', id: 12, gen: 0 }])
+  assert.equal(syncAfterReload.getSnapshot().pending.length, 0)
+
+  // Advancing server generation clears stale local shown/hidden state.
+  syncAfterReload.syncServerGeneration(1_700_000_000_500)
+  assert.equal(syncAfterReload.getSnapshot().hiddenHostIds.size, 0)
+  assert.equal(syncAfterReload.getSnapshot().shownHostIds.size, 0)
+  syncAfterReload.dispose()
+
+  // Throwing storage must never crash sync operations.
+  const brokenStorage = {
+    getItem: () => {
+      throw new Error('SecurityError')
+    },
+    setItem: () => {
+      throw new Error('QuotaExceededError')
+    },
+  }
+  const safeSync = createCorraldHintSync({
+    storage: brokenStorage,
+    markShown: async () => {},
+    dismiss: async () => {},
+  })
+  safeSync.setUser(99)
+  safeSync.recordShown(5, 0)
+  safeSync.hideLocally(5)
+  assert.equal(safeSync.getSnapshot().hiddenHostIds.has(5), true)
+  safeSync.dispose()
+}
+
+// Phase 2b fix1 item 9: agent picker (narrow desktop windows < 900px) must also
+// render the hint banner when the sidebar is not shown, under the same once-only rule.
+{
+  const convoSrc = readFileSync(fileURLToPath(new URL('../src/terminal/Conversation.tsx', import.meta.url)), 'utf8')
+  assert.equal(
+    convoSrc.includes('{!onPicked && sideBanner}'),
+    false,
+    'item 9: AgentList must not unconditionally exclude sideBanner when onPicked is set',
+  )
+  assert.ok(
+    convoSrc.includes('{showHintBanner && sideBanner}'),
+    'item 9: AgentList must gate sideBanner via showHintBanner',
+  )
+  const pickerCalls = convoSrc.match(/<Picker\b[^\n]*showHintBanner=\{!sideShown\}/g) ?? []
+  assert.equal(
+    pickerCalls.length,
+    2,
+    'item 9: both Picker call sites must pass showHintBanner={!sideShown}',
+  )
 }
 
 console.log('test-corrald.mjs: all assertions passed')

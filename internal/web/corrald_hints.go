@@ -2,8 +2,8 @@ package web
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
 	"net"
 	"net/http"
@@ -20,6 +20,7 @@ import (
 	"github.com/ihainan/corral/internal/sftplite"
 	"github.com/ihainan/corral/internal/sshx"
 	"github.com/ihainan/corral/internal/store"
+	"github.com/ihainan/corral/internal/term"
 )
 
 // CorraldHintReason identifies a real, observable failure category that
@@ -30,7 +31,7 @@ const (
 	// HintReasonSSHSessionFull indicates an SSH status or log read failed
 	// because SSH session/channel slots on the connection were exhausted
 	// (either the gateway's per-connection session quota or the host's
-	// OpenSSH MaxSessions / channel-open refusal).
+	// OpenSSH MaxSessions / resource-shortage refusal).
 	HintReasonSSHSessionFull CorraldHintReason = "ssh_session_full"
 )
 
@@ -43,13 +44,27 @@ const (
 	HintOpBoth   CorraldHintOp = "both"
 )
 
+func isExplicitSessionLimitMessage(s string) bool {
+	msg := strings.ToLower(s)
+	if strings.Contains(msg, "forwarding") {
+		return false
+	}
+	return strings.Contains(msg, "maxsessions") ||
+		strings.Contains(msg, "max sessions") ||
+		strings.Contains(msg, "no more sessions") ||
+		strings.Contains(msg, "too many sessions") ||
+		strings.Contains(msg, "session limit")
+}
+
 // ClassifyCorraldSolvableError determines whether err is a real, reliable
-// failure that enabling corrald can solve (currently: SSH session/channel
-// quota exhaustion on status or log reads).
+// failure that enabling corrald can solve: exclusively SSH session-slot
+// exhaustion (sshx.ErrBusy, RFC 4254 ResourceShortage, or an explicit
+// MaxSessions / session-limit refusal).
 //
-// Timeouts, cancellations, remote command non-zero exits, file/SFTP errors,
+// Generic "channel open failed", policy-based ssh.Prohibited / "open failed",
+// timeouts, cancellations, remote command non-zero exits, file/SFTP errors,
 // authentication/host-key/jump-host errors, and generic network drops return
-// ("", false) so the gateway never guesses from timeouts or unrelated errors.
+// ("", false).
 func ClassifyCorraldSolvableError(err error) (CorraldHintReason, bool) {
 	if err == nil {
 		return "", false
@@ -95,40 +110,63 @@ func ClassifyCorraldSolvableError(err error) (CorraldHintReason, bool) {
 		return HintReasonSSHSessionFull, true
 	}
 
-	// 2. Remote SSH server rejected opening a session channel (e.g. OpenSSH MaxSessions).
+	// 2. Remote SSH server rejected opening a session channel due to session
+	//    slot exhaustion (ResourceShortage, or Prohibited with an explicit
+	//    MaxSessions / no-more-sessions message — never policy rejections).
 	var openErr *ssh.OpenChannelError
 	if errors.As(err, &openErr) {
 		switch openErr.Reason {
 		case ssh.ResourceShortage:
 			return HintReasonSSHSessionFull, true
 		case ssh.Prohibited:
-			if strings.Contains(strings.ToLower(openErr.Message), "forwarding") {
-				return "", false
+			if isExplicitSessionLimitMessage(openErr.Message) {
+				return HintReasonSSHSessionFull, true
 			}
-			return HintReasonSSHSessionFull, true
+			return "", false
 		default:
 			return "", false
 		}
 	}
 
-	// 3. Stringified SSH channel-open rejection messages (without matching
-	//    unrelated file "open failed" errors or port-forwarding rejections).
+	// 3. Stringified explicit session-limit or resource-shortage messages
+	//    (never generic "channel open failed" or "administratively prohibited").
 	msg := strings.ToLower(err.Error())
 	if strings.Contains(msg, "forwarding") {
 		return "", false
 	}
-	switch {
-	case strings.Contains(msg, "maxsessions"),
-		strings.Contains(msg, "no more sessions"),
-		strings.Contains(msg, "too many sessions"),
-		strings.Contains(msg, "administratively prohibited"),
-		strings.Contains(msg, "resource shortage"),
-		strings.Contains(msg, "channel open failed"),
-		strings.Contains(msg, "ssh: rejected:") && strings.Contains(msg, "open failed"):
+	if isExplicitSessionLimitMessage(msg) || strings.Contains(msg, "resource shortage") {
 		return HintReasonSSHSessionFull, true
 	}
 
 	return "", false
+}
+
+// corraldHintTarget returns the canonical target tuple (address, port, login
+// user) used to bind in-memory failure records to a host's current target.
+func corraldHintTarget(h *store.Host) string {
+	if h == nil {
+		return ""
+	}
+	return fmt.Sprintf("%s\x00%d\x00%s", strings.TrimSpace(h.Address), h.Port, h.Username)
+}
+
+// corraldHintTargetFromSession extracts (address, port, login user) from a
+// running session's hostConfig fingerprint ("connVer|addr|port|user|auth|cred").
+func corraldHintTargetFromSession(sess *term.Session) string {
+	if sess == nil || sess.HostConfig == "" {
+		return ""
+	}
+	parts := strings.Split(sess.HostConfig, "|")
+	if len(parts) < 4 {
+		return ""
+	}
+	addr := strings.TrimSpace(parts[1])
+	port := strings.TrimSpace(parts[2])
+	user := parts[3]
+	if addr == "" || port == "" {
+		return ""
+	}
+	return addr + "\x00" + port + "\x00" + user
 }
 
 const maxCorraldHintEntries = 4096
@@ -139,6 +177,7 @@ type corraldHintKey struct {
 }
 
 type corraldHostProblem struct {
+	Target string
 	Reason CorraldHintReason
 	Op     CorraldHintOp
 	Count  int
@@ -151,8 +190,9 @@ type corraldHostProblemEntry struct {
 }
 
 // corraldHintTracker holds in-memory counts of recent corrald-solvable host
-// failures per (user, host). Intentionally ephemeral: never writes to SQLite on
-// failure and resets cleanly on gateway restart.
+// failures per (user, host), bound to the host's (address, port, login user).
+// Intentionally ephemeral: never writes to SQLite on failure and resets cleanly
+// on gateway restart.
 type corraldHintTracker struct {
 	mu      sync.Mutex
 	entries map[corraldHintKey]corraldHostProblem
@@ -176,8 +216,8 @@ func mergeCorraldHintOp(prev, next CorraldHintOp) CorraldHintOp {
 	return HintOpBoth
 }
 
-func (t *corraldHintTracker) record(userID, hostID int64, op CorraldHintOp, err error) bool {
-	if t == nil || userID <= 0 || hostID <= 0 {
+func (t *corraldHintTracker) record(userID, hostID int64, target string, op CorraldHintOp, err error) bool {
+	if t == nil || userID <= 0 || hostID <= 0 || target == "" {
 		return false
 	}
 	reason, ok := ClassifyCorraldSolvableError(err)
@@ -206,6 +246,10 @@ func (t *corraldHintTracker) record(userID, hostID int64, op CorraldHintOp, err 
 			delete(t.entries, oldestKey)
 		}
 	}
+	if exists && cur.Target != target {
+		cur = corraldHostProblem{}
+	}
+	cur.Target = target
 	cur.Reason = reason
 	cur.Op = mergeCorraldHintOp(cur.Op, op)
 	cur.Count++
@@ -267,49 +311,77 @@ func (t *corraldHintTracker) forgetUser(userID int64) {
 	t.mu.Unlock()
 }
 
+func (s *Server) hostHintTarget(userID, hostID int64) string {
+	if s == nil || s.store == nil || userID <= 0 || hostID <= 0 {
+		return ""
+	}
+	h, err := s.store.Host(context.Background(), userID, hostID)
+	if err != nil || h == nil {
+		return ""
+	}
+	return corraldHintTarget(h)
+}
+
 // recordCorraldHintError records a corrald-solvable SSH failure in memory for
-// (userID, hostID). Safe to call on nil Server or zero IDs.
+// (userID, hostID) bound to the host's current target. Safe to call on nil Server.
 func (s *Server) recordCorraldHintError(userID, hostID int64, op CorraldHintOp, err error) bool {
-	if s == nil {
+	if s == nil || userID <= 0 || hostID <= 0 {
 		return false
 	}
-	return s.corraldHints.record(userID, hostID, op, err)
+	if _, ok := ClassifyCorraldSolvableError(err); !ok {
+		return false
+	}
+	target := s.hostHintTarget(userID, hostID)
+	if target == "" {
+		return false
+	}
+	return s.corraldHints.record(userID, hostID, target, op, err)
+}
+
+// recordCorraldHintSessionError records a corrald-solvable SSH failure observed
+// on sess, binding the record to sess's connected (address, port, login user)
+// so a stale session cannot attach failures to a retargeted host record.
+func (s *Server) recordCorraldHintSessionError(sess *term.Session, op CorraldHintOp, err error) bool {
+	if s == nil || sess == nil || sess.OwnerID <= 0 || sess.HostID <= 0 {
+		return false
+	}
+	if _, ok := ClassifyCorraldSolvableError(err); !ok {
+		return false
+	}
+	target := corraldHintTargetFromSession(sess)
+	if target == "" {
+		target = s.hostHintTarget(sess.OwnerID, sess.HostID)
+	}
+	if target == "" {
+		return false
+	}
+	return s.corraldHints.record(sess.OwnerID, sess.HostID, target, op, err)
 }
 
 // CorraldHintItem is the gateway's decision payload for the frontend contextual
 // hint banner above the agent list.
 type CorraldHintItem struct {
-	HostID   int64             `json:"host_id"`
-	HostName string            `json:"host_name"`
-	Reason   CorraldHintReason `json:"reason"`
-	Op       CorraldHintOp     `json:"op"`
-	Count    int               `json:"count"`
-	LastAt   int64             `json:"last_at"`
+	HostID     int64             `json:"host_id"`
+	HostName   string            `json:"host_name"`
+	Reason     CorraldHintReason `json:"reason"`
+	Op         CorraldHintOp     `json:"op"`
+	Count      int               `json:"count"`
+	LastAt     int64             `json:"last_at"`
+	Generation int64             `json:"generation"`
 }
 
-// corraldHintsEnabled reads the user's account-level master switch from
-// user_settings ("corraldHints", default true when absent).
-func (s *Server) corraldHintsEnabled(ctx context.Context, userID int64) bool {
+// corraldHintsSettings reads the user's account-level master switch
+// ("corraldHints", default true) and server-written reset generation
+// ("corraldHintsResetAt", ms, default 0) from user_settings.
+func (s *Server) corraldHintsSettings(ctx context.Context, userID int64) (enabled bool, resetAt int64) {
 	if s == nil || s.store == nil || userID <= 0 {
-		return false
+		return false, 0
 	}
 	raw, err := s.store.UserSettings(ctx, userID)
 	if err != nil {
-		return true
+		return true, 0
 	}
-	var obj map[string]json.RawMessage
-	if json.Unmarshal([]byte(raw), &obj) != nil || obj == nil {
-		return true
-	}
-	val, ok := obj["corraldHints"]
-	if !ok {
-		return true
-	}
-	var enabled bool
-	if json.Unmarshal(val, &enabled) != nil {
-		return true
-	}
-	return enabled
+	return store.ParseCorraldHintsSettings(raw)
 }
 
 // corraldHostStatusEligible reports whether st represents an unenabled host
@@ -336,20 +408,21 @@ func corraldHostStatusEligible(st *gw.StatusResponse) bool {
 
 // evaluateCorraldHostHint is the single centralized rule determining whether a
 // contextual corrald hint should be shown for (userID, hostID):
-//  1. A real corrald-solvable problem was observed on this host.
+//  1. A real corrald-solvable problem was observed on this host's current target.
 //  2. The account-level master switch ("corraldHints") is enabled.
 //  3. Corrald is available on this gateway and not disabled by the admin.
-//  4. This host has not already been shown or dismissed for this user.
-//  5. The host exists, belongs to userID, and is currently unenabled & enableable
-//     (StateOff, no active op, not admin-disabled, not rebind/incompatible).
+//  4. This host has not already been shown or dismissed at or after resetAt.
+//  5. The host exists, belongs to userID, its target still matches prob.Target,
+//     and it is currently unenabled & enableable.
 func (s *Server) evaluateCorraldHostHint(
 	ctx context.Context,
 	userID, hostID int64,
 	prob corraldHostProblem,
 	hintRow *store.CorraldHostHint,
 	masterEnabled bool,
+	resetAt int64,
 ) (*CorraldHintItem, bool) {
-	if prob.Count <= 0 || prob.Reason == "" {
+	if prob.Count <= 0 || prob.Reason == "" || prob.Target == "" {
 		return nil, false
 	}
 	if !masterEnabled {
@@ -358,11 +431,14 @@ func (s *Server) evaluateCorraldHostHint(
 	if s == nil || s.corrald == nil || !s.corrald.Available() || s.corraldAdminDisabled() {
 		return nil, false
 	}
-	if hintRow != nil && (hintRow.ShownAt > 0 || hintRow.DismissedAt > 0) {
+	if store.CorraldHintRowActive(hintRow, resetAt) {
 		return nil, false
 	}
 	h, err := s.store.Host(ctx, userID, hostID)
 	if err != nil || h == nil {
+		return nil, false
+	}
+	if prob.Target != corraldHintTarget(h) {
 		return nil, false
 	}
 	st, err := s.corrald.Status(ctx, userID, hostID)
@@ -374,56 +450,55 @@ func (s *Server) evaluateCorraldHostHint(
 		op = HintOpStatus
 	}
 	return &CorraldHintItem{
-		HostID:   h.ID,
-		HostName: h.Name,
-		Reason:   prob.Reason,
-		Op:       op,
-		Count:    prob.Count,
-		LastAt:   prob.LastAt.Unix(),
+		HostID:     h.ID,
+		HostName:   h.Name,
+		Reason:     prob.Reason,
+		Op:         op,
+		Count:      prob.Count,
+		LastAt:     prob.LastAt.Unix(),
+		Generation: resetAt,
 	}, true
 }
 
 // selectCorraldHint returns the single most recently affected eligible host
-// hint for userID (or for filterHostID when > 0).
-func (s *Server) selectCorraldHint(ctx context.Context, userID, filterHostID int64) (*CorraldHintItem, error) {
+// hint for userID (or for filterHostID when > 0) alongside the user's current
+// reset generation.
+func (s *Server) selectCorraldHint(ctx context.Context, userID, filterHostID int64) (*CorraldHintItem, int64, error) {
 	if filterHostID > 0 {
 		if _, err := s.store.Host(ctx, userID, filterHostID); err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 	}
-	if s.corrald == nil || !s.corrald.Available() || s.corraldAdminDisabled() {
-		return nil, nil
-	}
-	masterEnabled := s.corraldHintsEnabled(ctx, userID)
-	if !masterEnabled {
-		return nil, nil
+	masterEnabled, resetAt := s.corraldHintsSettings(ctx, userID)
+	if s.corrald == nil || !s.corrald.Available() || s.corraldAdminDisabled() || !masterEnabled {
+		return nil, resetAt, nil
 	}
 
 	if filterHostID > 0 {
 		prob, ok := s.corraldHints.get(userID, filterHostID)
 		if !ok {
-			return nil, nil
+			return nil, resetAt, nil
 		}
 		row, err := s.store.CorraldHostHint(ctx, userID, filterHostID)
 		if err != nil && !errors.Is(err, store.ErrNotFound) {
-			return nil, err
+			return nil, resetAt, err
 		}
 		if errors.Is(err, store.ErrNotFound) {
 			row = nil
 		}
-		if item, eligible := s.evaluateCorraldHostHint(ctx, userID, filterHostID, prob, row, masterEnabled); eligible {
-			return item, nil
+		if item, eligible := s.evaluateCorraldHostHint(ctx, userID, filterHostID, prob, row, masterEnabled, resetAt); eligible {
+			return item, resetAt, nil
 		}
-		return nil, nil
+		return nil, resetAt, nil
 	}
 
 	probs := s.corraldHints.forUser(userID)
 	if len(probs) == 0 {
-		return nil, nil
+		return nil, resetAt, nil
 	}
 	rows, err := s.store.ListCorraldHostHints(ctx, userID)
 	if err != nil {
-		return nil, err
+		return nil, resetAt, err
 	}
 	for _, entry := range probs {
 		var row *store.CorraldHostHint
@@ -431,11 +506,11 @@ func (s *Server) selectCorraldHint(ctx context.Context, userID, filterHostID int
 			r := existing
 			row = &r
 		}
-		if item, eligible := s.evaluateCorraldHostHint(ctx, userID, entry.HostID, entry.Prob, row, masterEnabled); eligible {
-			return item, nil
+		if item, eligible := s.evaluateCorraldHostHint(ctx, userID, entry.HostID, entry.Prob, row, masterEnabled, resetAt); eligible {
+			return item, resetAt, nil
 		}
 	}
-	return nil, nil
+	return nil, resetAt, nil
 }
 
 // GET /api/corrald/hints[?host_id=<id>]
@@ -449,7 +524,7 @@ func (s *Server) apiGetCorraldHints(w http.ResponseWriter, r *http.Request) {
 		}
 		filterHostID = id
 	}
-	item, err := s.selectCorraldHint(r.Context(), currentUser(r).ID, filterHostID)
+	item, gen, err := s.selectCorraldHint(r.Context(), currentUser(r).ID, filterHostID)
 	if errors.Is(err, store.ErrNotFound) {
 		writeError(w, http.StatusNotFound, "not_found", "no such host")
 		return
@@ -459,7 +534,26 @@ func (s *Server) apiGetCorraldHints(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store")
-	writeJSON(w, http.StatusOK, map[string]any{"hint": item})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"hint":       item,
+		"generation": gen,
+	})
+}
+
+func readHintGenerationBody(r *http.Request) (int64, error) {
+	if r.Body == nil || r.ContentLength == 0 {
+		return 0, nil
+	}
+	var b struct {
+		Generation int64 `json:"generation"`
+	}
+	if err := readJSON(r, &b); err != nil {
+		return 0, err
+	}
+	if b.Generation < 0 {
+		return 0, store.ErrInvalidHintGeneration
+	}
+	return b.Generation, nil
 }
 
 // POST /api/hosts/{id}/corrald/hint/shown
@@ -468,12 +562,26 @@ func (s *Server) apiMarkCorraldHintShown(w http.ResponseWriter, r *http.Request)
 	if !ok {
 		return
 	}
-	if err := s.store.MarkCorraldHintShown(r.Context(), currentUser(r).ID, h.ID); err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			writeError(w, http.StatusNotFound, "not_found", "no such host")
-			return
-		}
+	gen, err := readHintGenerationBody(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "bad_request", err.Error())
+		return
+	}
+	applied, err := s.store.MarkCorraldHintShown(r.Context(), currentUser(r).ID, h.ID, gen)
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "not_found", "no such host")
+		return
+	}
+	if errors.Is(err, store.ErrInvalidHintGeneration) {
+		writeError(w, http.StatusBadRequest, "bad_request", err.Error())
+		return
+	}
+	if err != nil {
 		s.internalError(w, r, err)
+		return
+	}
+	if !applied {
+		w.WriteHeader(http.StatusNoContent)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
@@ -485,12 +593,26 @@ func (s *Server) apiDismissCorraldHint(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if err := s.store.MarkCorraldHintDismissed(r.Context(), currentUser(r).ID, h.ID); err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			writeError(w, http.StatusNotFound, "not_found", "no such host")
-			return
-		}
+	gen, err := readHintGenerationBody(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "bad_request", err.Error())
+		return
+	}
+	applied, err := s.store.MarkCorraldHintDismissed(r.Context(), currentUser(r).ID, h.ID, gen)
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "not_found", "no such host")
+		return
+	}
+	if errors.Is(err, store.ErrInvalidHintGeneration) {
+		writeError(w, http.StatusBadRequest, "bad_request", err.Error())
+		return
+	}
+	if err != nil {
 		s.internalError(w, r, err)
+		return
+	}
+	if !applied {
+		w.WriteHeader(http.StatusNoContent)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})

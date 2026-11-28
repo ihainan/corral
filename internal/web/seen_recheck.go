@@ -80,7 +80,7 @@ func (s *Server) recheckSeen(ctx context.Context, sess *term.Session, rounds *se
 				}
 			}
 			if err != nil {
-				s.recordCorraldHintError(sess.OwnerID, sess.HostID, HintOpStatus, err)
+				s.recordCorraldHintSessionError(sess, HintOpStatus, err)
 			}
 			if err != nil || lo == nil || hi == nil {
 				for _, p := range panes {
@@ -133,7 +133,7 @@ func (s *Server) paneLogWrote(ctx context.Context, sess *term.Session, hp herdr.
 	out, err := sshx.Output(ctx, sess.Client(), logsWroteCommand([]string{ref})+"; "+hostNowCommand, 512)
 	got := time.Now().UnixMilli()
 	if err != nil {
-		s.recordCorraldHintError(sess.OwnerID, sess.HostID, HintOpStatus, err)
+		s.recordCorraldHintSessionError(sess, HintOpStatus, err)
 		return 0, false
 	}
 	_, h := parseLogsWrote(string(out), []string{"p"})

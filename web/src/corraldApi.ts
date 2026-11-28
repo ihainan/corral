@@ -4,6 +4,7 @@ import type {
   CorraldAdminPolicy,
   CorraldChangelog,
   CorraldHint,
+  CorraldHintResponse,
   CorraldOp,
   CorraldStatus,
   CorraldUpdateNotice,
@@ -24,6 +25,11 @@ export type {
   CorraldHintMessageKey,
   CorraldHintOp,
   CorraldHintReason,
+  CorraldHintResponse,
+  CorraldHintStorageLike,
+  CorraldHintSync,
+  CorraldHintSyncDeps,
+  CorraldHintSyncSnapshot,
   CorraldLeftItem,
   CorraldOp,
   CorraldOpKind,
@@ -68,7 +74,9 @@ export async function installHostCorrald(
   hostId: number,
   body: { manifest_hash?: string; rebind?: boolean } = {},
 ): Promise<CorraldOp> {
-  return api<CorraldOp>('POST', `/api/hosts/${hostId}/corrald/install`, body)
+  const op = await api<CorraldOp>('POST', `/api/hosts/${hostId}/corrald/install`, body)
+  triggerCorraldHintsCheck()
+  return op
 }
 
 export async function cancelHostCorrald(hostId: number): Promise<CorraldOp> {
@@ -133,7 +141,19 @@ export async function getAdminCorraldPolicy(signal?: AbortSignal): Promise<Corra
 }
 
 export async function setAdminCorraldPolicy(allowed: boolean): Promise<CorraldAdminPolicy> {
-  return api<CorraldAdminPolicy>('PUT', '/api/admin/corrald', { allowed })
+  const res = await api<CorraldAdminPolicy>('PUT', '/api/admin/corrald', { allowed })
+  if (!res.allowed) {
+    for (const [hostId, entry] of cache) {
+      if (entry.status) {
+        publishHostCorrald(hostId, { ...entry.status, admin_disabled: true }, entry.unavailable)
+      }
+    }
+    for (const fn of adminPolicyListeners) fn(true)
+  } else {
+    for (const fn of adminPolicyListeners) fn(false)
+  }
+  triggerCorraldHintsCheck()
+  return res
 }
 
 export const CORRALD_NOTICES_EVENT = 'corral.corraldNoticesRefresh'
@@ -151,30 +171,34 @@ export function triggerCorraldHintsCheck(detail?: { resetSession?: boolean }) {
   }
 }
 
-// Fetch the single most recent eligible contextual corrald hint, if any.
-export async function getCorraldHint(signal?: AbortSignal): Promise<CorraldHint | null> {
+// Fetch the single most recent eligible contextual corrald hint and current
+// per-user reset generation.
+export async function getCorraldHint(signal?: AbortSignal): Promise<CorraldHintResponse> {
   try {
-    const res = await api<{ hint?: CorraldHint | null }>('GET', '/api/corrald/hints', undefined, { signal })
-    return res?.hint ?? null
+    const res = await api<{ hint?: CorraldHint | null; generation?: number }>('GET', '/api/corrald/hints', undefined, { signal })
+    const generation = typeof res?.generation === 'number' && Number.isFinite(res.generation) ? res.generation : 0
+    return { hint: res?.hint ?? null, generation }
   } catch (e) {
-    if (e instanceof ApiError && e.status === 404) return null
+    if (e instanceof ApiError && e.status === 404) return { hint: null, generation: 0 }
     throw e
   }
 }
 
-export async function markCorraldHintShown(hostId: number): Promise<void> {
-  await api('POST', `/api/hosts/${hostId}/corrald/hint/shown`)
+export async function markCorraldHintShown(hostId: number, generation = 0): Promise<void> {
+  await api('POST', `/api/hosts/${hostId}/corrald/hint/shown`, { generation })
 }
 
-export async function dismissCorraldHint(hostId: number): Promise<void> {
-  await api('POST', `/api/hosts/${hostId}/corrald/hint/dismiss`)
+export async function dismissCorraldHint(hostId: number, generation = 0): Promise<void> {
+  await api('POST', `/api/hosts/${hostId}/corrald/hint/dismiss`, { generation })
 }
 
-// Lightweight shared pub/sub cache per host so HostEdit and the workbench
-// status bar stay in sync without duplicate fetches.
-type Listener = (status: CorraldStatus | null) => void
+// Lightweight shared pub/sub cache per host so HostEdit, the workbench
+// status bar, and the contextual hint bar stay in sync without duplicate fetches.
+type Listener = (status: CorraldStatus | null, unavailable?: boolean) => void
+type AdminPolicyListener = (adminDisabled: boolean) => void
 const cache = new Map<number, { at: number; status: CorraldStatus | null; unavailable?: boolean }>()
 const listeners = new Map<number, Set<Listener>>()
+const adminPolicyListeners = new Set<AdminPolicyListener>()
 const CACHE_TTL_MS = 30_000
 
 export function readCachedCorrald(hostId: number): { status: CorraldStatus | null; unavailable?: boolean } | undefined {
@@ -186,7 +210,7 @@ export function readCachedCorrald(hostId: number): { status: CorraldStatus | nul
 
 export function publishHostCorrald(hostId: number, status: CorraldStatus | null, unavailable = false) {
   cache.set(hostId, { at: Date.now(), status, unavailable })
-  for (const fn of listeners.get(hostId) ?? []) fn(status)
+  for (const fn of listeners.get(hostId) ?? []) fn(status, unavailable)
 }
 
 export function subscribeHostCorrald(hostId: number, fn: Listener): () => void {
@@ -199,6 +223,13 @@ export function subscribeHostCorrald(hostId: number, fn: Listener): () => void {
   return () => {
     set!.delete(fn)
     if (set!.size === 0) listeners.delete(hostId)
+  }
+}
+
+export function subscribeAdminCorraldPolicy(fn: AdminPolicyListener): () => void {
+  adminPolicyListeners.add(fn)
+  return () => {
+    adminPolicyListeners.delete(fn)
   }
 }
 
