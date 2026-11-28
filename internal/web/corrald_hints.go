@@ -478,10 +478,14 @@ func (s *Server) evaluateCorraldHostHint(
 	}, true
 }
 
-// selectCorraldHint returns the single most recently affected eligible host
-// hint for userID (or for filterHostID when > 0) alongside the user's current
-// reset generation. Unclaimed eligible hosts take priority over already-claimed
-// (not dismissed) eligible hosts so a claimed host never starves a new one.
+// selectCorraldHint returns the single hint for userID (or for filterHostID
+// when > 0) alongside the user's current reset generation.
+//
+// When filterHostID == 0: if the user has any host claimed in the current
+// generation, not dismissed, and still eligible, return that host (claimed:true)
+// BEFORE any unclaimed one (if several, the most recently claimed). Only when
+// there is no such host, return the most recently affected unclaimed eligible
+// host (claimed:false).
 func (s *Server) selectCorraldHint(ctx context.Context, userID, filterHostID int64) (*CorraldHintItem, int64, error) {
 	if filterHostID > 0 {
 		if _, err := s.store.Host(ctx, userID, filterHostID); err != nil {
@@ -519,7 +523,9 @@ func (s *Server) selectCorraldHint(ctx context.Context, userID, filterHostID int
 	if err != nil {
 		return nil, resetAt, err
 	}
-	var claimedFallback *CorraldHintItem
+	var bestClaimed *CorraldHintItem
+	var bestClaimedAt int64
+	var bestUnclaimed *CorraldHintItem
 	for _, entry := range probs {
 		var row *store.CorraldHostHint
 		if existing, ok := rows[entry.HostID]; ok {
@@ -530,14 +536,20 @@ func (s *Server) selectCorraldHint(ctx context.Context, userID, filterHostID int
 		if !eligible {
 			continue
 		}
-		if !item.Claimed {
-			return item, resetAt, nil
-		}
-		if claimedFallback == nil {
-			claimedFallback = item
+		if item.Claimed {
+			shownAt := store.HintTimestampMillis(row.ShownAt)
+			if bestClaimed == nil || shownAt > bestClaimedAt {
+				bestClaimed = item
+				bestClaimedAt = shownAt
+			}
+		} else if bestUnclaimed == nil {
+			bestUnclaimed = item
 		}
 	}
-	return claimedFallback, resetAt, nil
+	if bestClaimed != nil {
+		return bestClaimed, resetAt, nil
+	}
+	return bestUnclaimed, resetAt, nil
 }
 
 // GET /api/corrald/hints[?host_id=<id>]
