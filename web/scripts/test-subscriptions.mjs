@@ -136,6 +136,7 @@ assert.deepEqual(
 assert.equal(subscriptionRefreshErrorKey('account_changed'), 'subs.accountChanged')
 assert.equal(subscriptionRefreshErrorKey('host_offline'), 'subs.hostOfflineHint')
 assert.equal(subscriptionRefreshErrorKey('opencode_not_running'), 'subs.opencodeNotRunning')
+assert.equal(subscriptionRefreshErrorKey('opencode_unsupported'), 'subs.opencodeUnsupported')
 assert.equal(subscriptionRefreshErrorKey('refresh_failed'), null)
 
 // Limited flag escalates window tone to danger when not expired or stale.

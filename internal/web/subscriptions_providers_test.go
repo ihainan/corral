@@ -292,7 +292,6 @@ func TestDevinQuotaReadCommandNoFollowCapAndAllowlist(t *testing.T) {
 	os.Remove(cacheFile)
 
 	// 4. Symlinked intermediate directory ($HOME/.cache/devin -> target) must NOT be followed.
-	//    (On 3a6a603, os.path.islink(cache_dir) only checked the final 'cli' component and followed 'devin'!)
 	homeMidLink := t.TempDir()
 	realDevin := filepath.Join(t.TempDir(), "real-devin")
 	os.MkdirAll(filepath.Join(realDevin, "cli"), 0o700)
@@ -311,6 +310,46 @@ func TestDevinQuotaReadCommandNoFollowCapAndAllowlist(t *testing.T) {
 	os.Symlink(realCache, filepath.Join(homeCacheLink, ".cache"))
 	if got := strings.TrimSpace(runIn(homeCacheLink, "")); got != "{}" {
 		t.Fatalf("symlinked '.cache' directory must not be followed, got %q", got)
+	}
+
+	// 5b. Symlinked 'cli' directory must NOT be followed.
+	homeCliLink := t.TempDir()
+	realCli := filepath.Join(t.TempDir(), "real-cli")
+	os.MkdirAll(realCli, 0o700)
+	os.WriteFile(filepath.Join(realCli, "user_status.abcd.bin"), wrapper, 0o600)
+	os.MkdirAll(filepath.Join(homeCliLink, ".cache", "devin"), 0o700)
+	os.Symlink(realCli, filepath.Join(homeCliLink, ".cache", "devin", "cli"))
+	if got := strings.TrimSpace(runIn(homeCliLink, "")); got != "{}" {
+		t.Fatalf("symlinked 'cli' directory must not be followed, got %q", got)
+	}
+
+	// 5c. Fix2 Item 2 [P1]: XDG_CACHE_HOME must be completely ignored (including via symlinked parent).
+	//     Fails on 0f4911c.
+	homeNoCache := t.TempDir()
+	xdgReal := filepath.Join(t.TempDir(), "xdg-target")
+	os.MkdirAll(filepath.Join(xdgReal, "cache", "devin", "cli"), 0o700)
+	os.WriteFile(filepath.Join(xdgReal, "cache", "devin", "cli", "user_status.xdg.bin"), wrapper, 0o600)
+	xdgLinkParent := filepath.Join(t.TempDir(), "xdg-link")
+	os.Symlink(xdgReal, xdgLinkParent)
+	if got := strings.TrimSpace(runIn(homeNoCache, filepath.Join(xdgLinkParent, "cache"))); got != "{}" {
+		t.Fatalf("XDG_CACHE_HOME must be ignored, got %q", got)
+	}
+	if got := strings.TrimSpace(runIn(homeNoCache, filepath.Join(xdgReal, "cache"))); got != "{}" {
+		t.Fatalf("plain XDG_CACHE_HOME must also be ignored, got %q", got)
+	}
+
+	// 5d. Fix2 Item 1 [P1]: Hard link to another file (st_nlink > 1) must be rejected.
+	//     Fails on 0f4911c.
+	homeHardlink := t.TempDir()
+	hlCliDir := filepath.Join(homeHardlink, ".cache", "devin", "cli")
+	os.MkdirAll(hlCliDir, 0o700)
+	otherFile := filepath.Join(homeHardlink, "credentials.toml")
+	os.WriteFile(otherFile, wrapper, 0o600)
+	if err := os.Link(otherFile, filepath.Join(hlCliDir, "user_status.hardlink.bin")); err != nil {
+		t.Fatalf("failed to create hard link for test: %v", err)
+	}
+	if got := strings.TrimSpace(runIn(homeHardlink, "")); got != "{}" {
+		t.Fatalf("hard-linked file (st_nlink > 1) must be rejected, got %q", got)
 	}
 
 	// 6. Oversized file (> 4 MiB cap) must be refused.
@@ -460,8 +499,14 @@ echo '{"data":{"workspace":{"id":"wrk_test1","name":"Ignored"},"go":{"rolling":{
 		t.Fatalf("unexpected parsed output: ok=%v wsKey=%q q=%+v out=%s", ok, wsKey, q, out)
 	}
 
-	// Case 2: service NOT running (non-zero status or non-URL output) -> exits 75 immediately, NEVER calls `opencode api`.
-	for _, statusBody := range []string{"exit 1", "echo 'stopped'; exit 0"} {
+	// Case 2: service NOT running or non-loopback/invalid URL -> exits 75 immediately, NEVER calls `opencode api`.
+	for _, statusBody := range []string{
+		"exit 1",
+		"echo 'stopped'; exit 0",
+		"echo 'http://10.0.0.5:49374'; exit 0",
+		"echo 'http://127.0.0.1:49374/evil'; exit 0",
+		"echo 'http://127.0.0.1:99999'; exit 0",
+	} {
 		os.Remove(argsLog)
 		os.WriteFile(fakeOC, []byte(`#!/bin/sh
 printf '%s\n' "$*" >> `+argsLog+`
@@ -475,11 +520,29 @@ echo "SHOULD_NOT_RUN"
 		out, err = c.Output()
 		var ee *exec.ExitError
 		if !errors.As(err, &ee) || ee.ExitCode() != opencodeNotRunningExitCode {
-			t.Fatalf("service stopped (%s): expected exit %d, got err=%v out=%q", statusBody, opencodeNotRunningExitCode, err, out)
+			t.Fatalf("service stopped/invalid (%s): expected exit %d, got err=%v out=%q", statusBody, opencodeNotRunningExitCode, err, out)
 		}
 		aBytes, _ := os.ReadFile(argsLog)
 		if strings.Contains(string(aBytes), "api") || strings.Contains(string(aBytes), "--standalone") {
-			t.Fatalf("when service is stopped (%s), must not invoke api or --standalone; got %q", statusBody, string(aBytes))
+			t.Fatalf("when service is stopped/invalid (%s), must not invoke api or --standalone; got %q", statusBody, string(aBytes))
 		}
+	}
+
+	// Case 3: Fix2 Item 3 [P1]: if host has no working `timeout` (missing or incompatible),
+	//         exits 76 (opencodeUnsupportedExitCode) immediately WITHOUT running opencode at all.
+	//         Fails on 0f4911c.
+	os.Remove(argsLog)
+	os.WriteFile(filepath.Join(localBin, "timeout"), []byte("#!/bin/sh\nexit 1\n"), 0o755)
+	os.WriteFile(fakeOC, []byte("#!/bin/sh\nprintf '%s\\n' \"$*\" >> "+argsLog+"\necho 'http://127.0.0.1:49374'\n"), 0o755)
+	c = exec.Command("sh", "-c", cmdStr)
+	c.Env = append(os.Environ(), "HOME="+home)
+	out, err = c.Output()
+	var ee *exec.ExitError
+	if !errors.As(err, &ee) || ee.ExitCode() != opencodeUnsupportedExitCode {
+		t.Fatalf("incompatible timeout: expected exit %d, got err=%v out=%q", opencodeUnsupportedExitCode, err, out)
+	}
+	if _, statErr := os.Stat(argsLog); statErr == nil {
+		b, _ := os.ReadFile(argsLog)
+		t.Fatalf("opencode must NOT be invoked when working timeout is unavailable; got args=%q", string(b))
 	}
 }

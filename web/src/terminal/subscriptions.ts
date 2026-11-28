@@ -243,7 +243,11 @@ export function sortSubscriptions(items: readonly SubscriptionItem[], nowSec: nu
   })
 }
 
-export type SubscriptionRefreshErrorKey = 'subs.hostOfflineHint' | 'subs.accountChanged' | 'subs.opencodeNotRunning'
+export type SubscriptionRefreshErrorKey =
+  | 'subs.hostOfflineHint'
+  | 'subs.accountChanged'
+  | 'subs.opencodeNotRunning'
+  | 'subs.opencodeUnsupported'
 
 // Maps subscription-specific manual refresh error codes to dedicated i18n keys.
 export function subscriptionRefreshErrorKey(code?: string): SubscriptionRefreshErrorKey | null {
@@ -254,6 +258,8 @@ export function subscriptionRefreshErrorKey(code?: string): SubscriptionRefreshE
       return 'subs.accountChanged'
     case 'opencode_not_running':
       return 'subs.opencodeNotRunning'
+    case 'opencode_unsupported':
+      return 'subs.opencodeUnsupported'
     default:
       return null
   }

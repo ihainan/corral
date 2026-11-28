@@ -18,97 +18,113 @@ import (
 )
 
 const (
-	devinQuotaReadMax          = 32 << 10
-	devinQuotaPassive          = 5 * time.Minute
-	devinQuotaTimeout          = 10 * time.Second
-	opencodeQuotaMax           = 64 << 10
-	opencodeHostSeenTTL        = 10 * time.Minute
-	opencodeNotRunningExitCode = 75 // sentinel exit code when opencode service is not running on host
+	devinQuotaReadMax           = 32 << 10
+	devinQuotaPassive           = 5 * time.Minute
+	devinQuotaTimeout           = 10 * time.Second
+	opencodeQuotaMax            = 64 << 10
+	opencodeHostSeenTTL         = 10 * time.Minute
+	opencodeNotRunningExitCode  = 75 // sentinel exit code when opencode service is not running on host
+	opencodeUnsupportedExitCode = 76 // sentinel exit code when host lacks working coreutils `timeout`
 )
 
-var errOpenCodeNotRunning = errors.New("opencode service is not running on this host")
+var (
+	errOpenCodeNotRunning  = errors.New("opencode service is not running on this host")
+	errOpenCodeUnsupported = errors.New("opencode refresh is not supported on this host")
+)
 
 // devinQuotaReadScript passively reads the newest regular non-symlink
-// user_status.*.bin cache file written by Devin CLI itself under
-// ${XDG_CACHE_HOME}/devin/cli and ~/.cache/devin/cli. Every directory step and
-// the target file itself are opened with O_NOFOLLOW (via dir_fd), verified via
-// fstat (regular file, size within CAP), and read from that exact descriptor up
-// to CAP bytes so no symlink can be followed at any step. Only numeric/boolean
-// plan & quota fields plus email and user_id leave the host; all other strings
-// and fields stay on the host.
+// user_status.*.bin cache file written by Devin CLI itself strictly under
+// $HOME/.cache/devin/cli (XDG_CACHE_HOME is ignored). $HOME is opened once and
+// ".cache", "devin", "cli" are walked one component at a time via dir_fd with
+// O_DIRECTORY|O_NOFOLLOW, checking st_uid == getuid() on every directory. Each
+// candidate file is opened via dir_fd with O_NOFOLLOW|O_NONBLOCK and verified
+// via fstat: regular file, st_nlink == 1 (no hard links), st_uid == getuid(),
+// and size within CAP; bytes are read directly from that descriptor up to CAP.
+// Only numeric/boolean plan & quota fields plus email and user_id leave the
+// host; all other strings and fields stay on the host.
 const devinQuotaReadScript = `import base64, json, os, stat, struct, sys
 
 CAP = 4 * 1024 * 1024
 O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
 O_NONBLOCK = getattr(os, "O_NONBLOCK", 0)
+UID = os.getuid()
 
-def open_dir_nofollow(base, parts):
-    if not base or not os.path.isabs(base):
-        return -1
-    try:
-        fd = os.open(base, os.O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
-    except OSError:
-        return -1
-    for comp in parts:
+home = os.environ.get("HOME", "")
+if not home or not os.path.isabs(home):
+    print("{}")
+    sys.exit(0)
+
+try:
+    dfd = os.open(home, os.O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
+except OSError:
+    print("{}")
+    sys.exit(0)
+
+try:
+    st = os.fstat(dfd)
+    if not stat.S_ISDIR(st.st_mode) or st.st_uid != UID:
+        os.close(dfd)
+        print("{}")
+        sys.exit(0)
+    for comp in (".cache", "devin", "cli"):
         try:
-            nfd = os.open(comp, os.O_RDONLY | O_DIRECTORY | O_NOFOLLOW, dir_fd=fd)
+            nfd = os.open(comp, os.O_RDONLY | O_DIRECTORY | O_NOFOLLOW, dir_fd=dfd)
         except OSError:
-            os.close(fd)
-            return -1
-        os.close(fd)
-        fd = nfd
-    return fd
-
-roots = []
-xdg = os.environ.get("XDG_CACHE_HOME")
-if xdg and os.path.isabs(xdg):
-    roots.append((xdg, ("devin", "cli")))
-home = os.path.expanduser("~")
-if home and os.path.isabs(home):
-    roots.append((home, (".cache", "devin", "cli")))
+            os.close(dfd)
+            print("{}")
+            sys.exit(0)
+        os.close(dfd)
+        dfd = nfd
+        st = os.fstat(dfd)
+        if not stat.S_ISDIR(st.st_mode) or st.st_uid != UID:
+            os.close(dfd)
+            print("{}")
+            sys.exit(0)
+except Exception:
+    try:
+        os.close(dfd)
+    except OSError:
+        pass
+    print("{}")
+    sys.exit(0)
 
 best_mtime = None
 best_fd = -1
-seen_dev_ino = set()
-
-for base, parts in roots:
-    dfd = open_dir_nofollow(base, parts)
-    if dfd < 0:
-        continue
+try:
     try:
+        names = os.listdir(dfd)
+    except OSError:
+        names = []
+    for name in names:
+        if not (name == "user_status.bin" or (name.startswith("user_status.") and name.endswith(".bin"))):
+            continue
         try:
-            names = os.listdir(dfd)
+            ffd = os.open(name, os.O_RDONLY | O_NOFOLLOW | O_NONBLOCK, dir_fd=dfd)
         except OSError:
-            names = []
-        for name in names:
-            if not (name == "user_status.bin" or (name.startswith("user_status.") and name.endswith(".bin"))):
-                continue
-            try:
-                ffd = os.open(name, os.O_RDONLY | O_NOFOLLOW | O_NONBLOCK, dir_fd=dfd)
-            except OSError:
-                continue
-            try:
-                st = os.fstat(ffd)
-                if not stat.S_ISREG(st.st_mode) or st.st_size <= 0 or st.st_size > CAP:
-                    os.close(ffd)
-                    continue
-                key = (st.st_dev, st.st_ino)
-                if key in seen_dev_ino:
-                    os.close(ffd)
-                    continue
-                seen_dev_ino.add(key)
-                if best_mtime is None or st.st_mtime > best_mtime:
-                    if best_fd >= 0:
-                        os.close(best_fd)
-                    best_mtime = st.st_mtime
-                    best_fd = ffd
-                else:
-                    os.close(ffd)
-            except OSError:
+            continue
+        try:
+            st = os.fstat(ffd)
+            if (
+                not stat.S_ISREG(st.st_mode)
+                or st.st_nlink != 1
+                or st.st_uid != UID
+                or st.st_size <= 0
+                or st.st_size > CAP
+            ):
                 os.close(ffd)
-    finally:
-        os.close(dfd)
+                continue
+            if best_mtime is None or st.st_mtime > best_mtime:
+                if best_fd >= 0:
+                    os.close(best_fd)
+                best_mtime = st.st_mtime
+                best_fd = ffd
+            else:
+                os.close(ffd)
+        except OSError:
+            os.close(ffd)
+finally:
+    os.close(dfd)
 
 if best_fd < 0:
     print("{}")
@@ -433,21 +449,34 @@ func quotaOfDevinStatus(raw []byte, now time.Time) (q quotaInfo, accountKey, acc
 }
 
 // opencodeQuotaCommand queries OpenCode's already-running background service
-// via `opencode api experimental.usage.limits`. It never starts a standalone
-// or background server: if `opencode service status` does not report a live
-// URL, it exits 75 immediately. When coreutils `timeout` is available on the
-// host, both commands are bounded (`timeout -k 5 30`) so a hung CLI is killed
-// on the host rather than orphaned when SSH closes. Fixed script.
+// via `opencode api experimental.usage.limits`. Requires a working coreutils
+// `timeout -k` on the host (exits 76 without running opencode if missing) so
+// both calls are hard-bounded on the host (`timeout -k 5 30`). Never uses
+// `--standalone`; verifies `opencode service status` prints a local loopback
+// URL (`http(s)://127.0.0.1:<port>` or `http(s)://localhost:<port>`, port
+// 1..65535), exiting 75 otherwise.
+//
+// Note on `--server`: OpenCode v2.2.6's `opencode api --server <url>` skips
+// `Nt.ensure`, but only reads Basic auth from `OPENCODE_PASSWORD` and does not
+// read its own `service.json`, so passing `--server` against a standard
+// password-protected OpenCode background service fails with "requires a
+// password; set OPENCODE_PASSWORD" unless credentials were read from
+// `service.json` (which is forbidden). OpenCode v2.2.6 exposes no CLI flag or
+// env var to forbid auto-start while using `service.json` auth. Fixed script.
 func opencodeQuotaCommand() string {
 	script := `PATH="$HOME/.opencode/bin:$HOME/.local/bin:$HOME/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
+command -v timeout >/dev/null 2>&1 && timeout -k 1 1 true >/dev/null 2>&1 || exit 76
 command -v opencode >/dev/null 2>&1 || exit 75
-t=
-if command -v timeout >/dev/null 2>&1 && timeout -k 1 1 true >/dev/null 2>&1; then
-  t="timeout -k 5 30"
-fi
-st=$($t opencode service status </dev/null 2>/dev/null) || exit 75
+st=$(timeout -k 5 30 opencode service status </dev/null 2>/dev/null) || exit 75
 case "$st" in
-  http://*|https://*) exec $t opencode api experimental.usage.limits </dev/null 2>/dev/null ;;
+  http://127.0.0.1:[0-9]*|https://127.0.0.1:[0-9]*|http://localhost:[0-9]*|https://localhost:[0-9]*)
+    port=${st##*:}
+    case "$port" in
+      ''|*[!0-9]*) exit 75 ;;
+    esac
+    [ "$port" -ge 1 ] && [ "$port" -le 65535 ] || exit 75
+    exec timeout -k 5 30 opencode api experimental.usage.limits </dev/null 2>/dev/null
+    ;;
   *) exit 75 ;;
 esac`
 	return "sh -c " + sshx.QuoteShell(script)
@@ -642,8 +671,13 @@ func (s *Server) fetchOpenCodeQuota(ctx context.Context, sess *term.Session, exp
 	res, err := sshx.Exec(ctx, sess.Client(), opencodeQuotaCommand(), opencodeQuotaMax, sshx.ExecOptions{})
 	if err != nil {
 		var exitErr *sshx.ExitError
-		if errors.As(err, &exitErr) && exitErr.Status == opencodeNotRunningExitCode {
-			return "", errOpenCodeNotRunning
+		if errors.As(err, &exitErr) {
+			switch exitErr.Status {
+			case opencodeNotRunningExitCode:
+				return "", errOpenCodeNotRunning
+			case opencodeUnsupportedExitCode:
+				return "", errOpenCodeUnsupported
+			}
 		}
 		return "", err
 	}

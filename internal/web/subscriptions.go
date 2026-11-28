@@ -226,8 +226,22 @@ func (s *Server) subscriptionItemOf(sn *store.SubscriptionSnapshot, ownerID, now
 		SeenAt:       sn.SeenAt,
 	}
 	cooldownSec := int64(subscriptionRefreshCooldown / time.Second)
-	if sn.LastRefreshAt > 0 && sn.LastRefreshAt+cooldownSec > now {
-		item.NextRefreshAt = sn.LastRefreshAt + cooldownSec
+	effectiveLastRefresh := sn.LastRefreshAt
+	if sn.Provider == "opencode" && s.store != nil {
+		targetHostID := sn.HostID
+		if sess := s.findRunningSessionForHosts(ownerID, sn.HostID, sn.Hosts); sess != nil {
+			targetHostID = sess.HostID
+		}
+		if targetHostID > 0 {
+			rctx, rcancel := context.WithTimeout(context.Background(), 2*time.Second)
+			if hostLast, err := s.store.GetSubscriptionHostRefreshAt(rctx, ownerID, targetHostID, sn.Provider); err == nil && hostLast > effectiveLastRefresh {
+				effectiveLastRefresh = hostLast
+			}
+			rcancel()
+		}
+	}
+	if effectiveLastRefresh > 0 && effectiveLastRefresh+cooldownSec > now {
+		item.NextRefreshAt = effectiveLastRefresh + cooldownSec
 	}
 	switch sn.Provider {
 	case "codex", "devin":
@@ -337,9 +351,35 @@ func (s *Server) apiRefreshSubscription(w http.ResponseWriter, r *http.Request) 
 	}
 	claimedAt := nextAt - cooldownSec
 
+	targetHostID := sn.HostID
 	targetHost := sn.HostName
 	if sess != nil {
+		targetHostID = sess.HostID
 		targetHost = sess.HostName
+	}
+	// For OpenCode, also check and claim a durable (user, host, provider) cooldown
+	// BEFORE any remote call (covering placeholders and workspace switches); once
+	// claimed it is never released on rejection or account_changed.
+	if req.Provider == "opencode" && targetHostID > 0 {
+		hostAllowed, hostRetry, hostNextAt, herr := s.store.TryClaimSubscriptionHostRefresh(r.Context(), u.ID, targetHostID, req.Provider, cooldownSec)
+		if herr != nil {
+			rctx, rcancel := context.WithTimeout(context.Background(), 3*time.Second)
+			_ = s.store.ResetSubscriptionRefresh(rctx, u.ID, req.Provider, req.AccountKey, claimedAt, prevRefreshAt)
+			rcancel()
+			s.internalError(w, r, herr)
+			return
+		}
+		if !hostAllowed {
+			// No remote call was executed; restore the per-account claim and reject via host cooldown.
+			rctx, rcancel := context.WithTimeout(context.Background(), 3*time.Second)
+			_ = s.store.ResetSubscriptionRefresh(rctx, u.ID, req.Provider, req.AccountKey, claimedAt, prevRefreshAt)
+			rcancel()
+			writeErrorExtra(w, http.StatusTooManyRequests, "rate_limited", "please wait before refreshing this host again", map[string]any{
+				"retry_after":     hostRetry,
+				"next_refresh_at": hostNextAt,
+			})
+			return
+		}
 	}
 	s.audit(r, "subscription.refresh", targetHost, map[string]any{
 		"provider": req.Provider,
@@ -363,17 +403,21 @@ func (s *Server) apiRefreshSubscription(w http.ResponseWriter, r *http.Request) 
 	}
 	if refreshErr != nil {
 		if errors.Is(refreshErr, errSubscriptionAccountChanged) {
-			rctx, rcancel := context.WithTimeout(context.Background(), 3*time.Second)
-			_ = s.store.ResetSubscriptionRefresh(rctx, u.ID, req.Provider, req.AccountKey, claimedAt, prevRefreshAt)
-			rcancel()
+			// Never release OpenCode cooldowns on account_changed; Claude keeps its existing rollback.
+			if req.Provider != "opencode" {
+				rctx, rcancel := context.WithTimeout(context.Background(), 3*time.Second)
+				_ = s.store.ResetSubscriptionRefresh(rctx, u.ID, req.Provider, req.AccountKey, claimedAt, prevRefreshAt)
+				rcancel()
+			}
 			writeError(w, http.StatusConflict, "account_changed", "another account is currently signed in on this host")
 			return
 		}
 		if errors.Is(refreshErr, errOpenCodeNotRunning) {
-			rctx, rcancel := context.WithTimeout(context.Background(), 3*time.Second)
-			_ = s.store.ResetSubscriptionRefresh(rctx, u.ID, req.Provider, req.AccountKey, claimedAt, prevRefreshAt)
-			rcancel()
 			writeError(w, http.StatusConflict, "opencode_not_running", "OpenCode is not running on this host")
+			return
+		}
+		if errors.Is(refreshErr, errOpenCodeUnsupported) {
+			writeError(w, http.StatusConflict, "opencode_unsupported", "OpenCode refresh is not supported on this host")
 			return
 		}
 		if errors.Is(refreshErr, context.Canceled) {

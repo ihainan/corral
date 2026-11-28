@@ -458,3 +458,80 @@ func (s *Store) DeleteSubscriptionSnapshot(ctx context.Context, ownerID int64, p
 	)
 	return err
 }
+
+// TryClaimSubscriptionHostRefresh atomically enforces a per-(owner, host, provider)
+// minimum cooldown in SQLite before any remote refresh command is executed. Once
+// claimed, callers must not release it on rejection or account_changed so repeated
+// refresh attempts across placeholders or switched workspaces cannot bypass rate limits.
+func (s *Store) TryClaimSubscriptionHostRefresh(ctx context.Context, ownerID, hostID int64, provider string, cooldownSec int64) (allowed bool, retryAfter int64, nextAt int64, err error) {
+	if ownerID <= 0 || hostID <= 0 || provider == "" {
+		return false, 0, 0, errors.New("host refresh claim requires owner, host and provider")
+	}
+	now := s.unix()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, 0, 0, err
+	}
+	defer tx.Rollback()
+
+	var last int64
+	err = tx.QueryRowContext(ctx,
+		`SELECT last_refresh_at FROM subscription_host_cooldowns
+		 WHERE owner_id = ? AND host_id = ? AND provider = ?`,
+		ownerID, hostID, provider,
+	).Scan(&last)
+	if errors.Is(err, sql.ErrNoRows) {
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO subscription_host_cooldowns (owner_id, host_id, provider, last_refresh_at)
+			 VALUES (?, ?, ?, ?)`,
+			ownerID, hostID, provider, now,
+		); err != nil {
+			return false, 0, 0, err
+		}
+		if err := tx.Commit(); err != nil {
+			return false, 0, 0, err
+		}
+		return true, 0, now + cooldownSec, nil
+	}
+	if err != nil {
+		return false, 0, 0, err
+	}
+	if last > 0 && (now-last) < cooldownSec {
+		nextAt = last + cooldownSec
+		retryAfter = nextAt - now
+		if retryAfter < 1 {
+			retryAfter = 1
+		}
+		return false, retryAfter, nextAt, nil
+	}
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE subscription_host_cooldowns
+		 SET last_refresh_at = ?
+		 WHERE owner_id = ? AND host_id = ? AND provider = ?`,
+		now, ownerID, hostID, provider,
+	); err != nil {
+		return false, 0, 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return false, 0, 0, err
+	}
+	return true, 0, now + cooldownSec, nil
+}
+
+// GetSubscriptionHostRefreshAt returns the last host-level refresh timestamp
+// (unix seconds) for (owner, host, provider), or 0 if never claimed.
+func (s *Store) GetSubscriptionHostRefreshAt(ctx context.Context, ownerID, hostID int64, provider string) (int64, error) {
+	if ownerID <= 0 || hostID <= 0 || provider == "" {
+		return 0, nil
+	}
+	var last int64
+	err := s.db.QueryRowContext(ctx,
+		`SELECT last_refresh_at FROM subscription_host_cooldowns
+		 WHERE owner_id = ? AND host_id = ? AND provider = ?`,
+		ownerID, hostID, provider,
+	).Scan(&last)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, nil
+	}
+	return last, err
+}

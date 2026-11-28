@@ -362,3 +362,49 @@ func TestEnsureSubscriptionHostPlaceholderAndPreserveExisting(t *testing.T) {
 		t.Fatalf("expected host:10 deleted, got err=%v", err)
 	}
 }
+
+// Fix2 Item 5 [P1]: Per-(user, host, provider) durable cooldown claim in SQLite.
+// Fails on 0f4911c.
+func TestSubscriptionHostCooldownClaim(t *testing.T) {
+	ctx := context.Background()
+	s, err := OpenMemory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	now := time.Date(2026, 11, 28, 12, 0, 0, 0, time.UTC)
+	s.now = func() time.Time { return now }
+
+	u1, err := s.CreateUser(ctx, "alice", "Alice", "hash", RoleMember)
+	if err != nil {
+		t.Fatal(err)
+	}
+	u2, err := s.CreateUser(ctx, "bob", "Bob", "hash", RoleMember)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// First claim succeeds.
+	ok, retry, nextAt, err := s.TryClaimSubscriptionHostRefresh(ctx, u1.ID, 10, "opencode", 300)
+	if err != nil || !ok || retry != 0 || nextAt != now.Unix()+300 {
+		t.Fatalf("first host claim: ok=%v retry=%d next=%d err=%v", ok, retry, nextAt, err)
+	}
+	// Second claim on same (user, host, provider) within cooldown is blocked.
+	now = now.Add(60 * time.Second)
+	ok, retry, nextAt, err = s.TryClaimSubscriptionHostRefresh(ctx, u1.ID, 10, "opencode", 300)
+	if err != nil || ok || retry != 240 || nextAt != now.Unix()+240 {
+		t.Fatalf("second host claim should be blocked: ok=%v retry=%d next=%d err=%v", ok, retry, nextAt, err)
+	}
+	// Different host or different user is independent.
+	if ok, _, _, err := s.TryClaimSubscriptionHostRefresh(ctx, u1.ID, 11, "opencode", 300); err != nil || !ok {
+		t.Fatalf("different host should be allowed: ok=%v err=%v", ok, err)
+	}
+	if ok, _, _, err := s.TryClaimSubscriptionHostRefresh(ctx, u2.ID, 10, "opencode", 300); err != nil || !ok {
+		t.Fatalf("different user should be allowed: ok=%v err=%v", ok, err)
+	}
+	// After cooldown elapses, claim succeeds again.
+	now = now.Add(240 * time.Second)
+	if ok, _, _, err := s.TryClaimSubscriptionHostRefresh(ctx, u1.ID, 10, "opencode", 300); err != nil || !ok {
+		t.Fatalf("after cooldown should be allowed: ok=%v err=%v", ok, err)
+	}
+}
