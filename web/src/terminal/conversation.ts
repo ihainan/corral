@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api, ApiError, authGen } from '../api'
 import type { RowCmds } from './agentOrder'
 import { knownSession } from './agents'
-import type { ConvoPeerInfo } from './peerSender'
+import { PEER_SLOT_MAX_AGE_MS, type ConvoPeerInfo } from './peerSender'
 import { isPushHostCovered, onPushConvo, onPushStateChange, watchPushHosts } from './pushEvents'
 import { CONVO_POLL_COVERED, convoNextPollDelay, matchesConvoHint, type ConvoRequestSource } from './pushEventsLogic'
 
@@ -600,7 +600,7 @@ export function useConversation(sessionId: string, enabled: boolean, pane: strin
         if (stopped || mine.signal.aborted || (e instanceof ApiError && e.code === 'aborted')) return
         lastError = true
         next = RETRY
-        setConvo((c) => (c.failing ? c : { ...c, status: c.entries.length ? c.status : 'error', failing: true, okAt: lastOk.current }))
+        setConvo((c) => (c.failing && !c.peers ? c : { ...c, status: c.entries.length ? c.status : 'error', failing: true, peers: undefined, okAt: lastOk.current }))
       } finally {
         if (ctl === mine) ctl = null
       }
@@ -654,7 +654,8 @@ export function useConversation(sessionId: string, enabled: boolean, pane: strin
         else {
           const entries = [...byseq.values()].sort((x, y) => x.seq - y.seq)
           const older = !!k.older || entries.length === MAX
-          setConvo({ ...initial(key), status: 'ready', entries, older, olderCut: older && (!!k.older_cut || entries.length === MAX), gen, bind: k.bind, agentStatus: k.agent_status, waitingFor: k.waiting_for, bgCmds: cmdsOf(k), bgAgents: k.bg_agent_list?.length ? k.bg_agent_list : undefined, title: k.title || undefined, tasks: k.tasks?.length ? k.tasks : undefined, meta: k.meta, queued: k.queued?.length ? k.queued : undefined, running: k.running?.length ? k.running : undefined, peers: k.peers && Object.keys(k.peers).length ? k.peers : undefined, failing: false, okAt: now, changedAt: now, of: key })
+          const freshPeers = now - was.at <= PEER_SLOT_MAX_AGE_MS && k.peers && Object.keys(k.peers).length ? k.peers : undefined
+          setConvo({ ...initial(key), status: 'ready', entries, older, olderCut: older && (!!k.older_cut || entries.length === MAX), gen, bind: k.bind, agentStatus: k.agent_status, waitingFor: k.waiting_for, bgCmds: cmdsOf(k), bgAgents: k.bg_agent_list?.length ? k.bg_agent_list : undefined, title: k.title || undefined, tasks: k.tasks?.length ? k.tasks : undefined, meta: k.meta, queued: k.queued?.length ? k.queued : undefined, running: k.running?.length ? k.running : undefined, peers: freshPeers, failing: false, okAt: now, changedAt: now, of: key })
         }
       } else {
         gen = 0

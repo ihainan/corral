@@ -55,7 +55,13 @@ import { pickQuotaPlan, quotaPlanLabel, quotaTitleText } from './quotaPlan'
 import { formatPeerPlain, peerClickHow, resolvePeerSender, type ConvoPeerInfo, type PeerPickHow } from './peerSender'
 import { resolveSubPeers } from './sideState'
 
-const PeerCtx = createContext<{ peers?: Record<string, ConvoPeerInfo>; okAt?: number; failing?: boolean; onOpenPeer?: (sessionId: string, pane: string | undefined, how?: PeerPickHow) => void }>({})
+const PeerCtx = createContext<{
+  peers?: Record<string, ConvoPeerInfo>
+  peerTitles?: ReadonlyMap<string, string>
+  okAt?: number
+  failing?: boolean
+  onOpenPeer?: (sessionId: string, pane: string | undefined, how?: PeerPickHow) => void
+}>({})
 
 // The conversation view: the agent's log as turns, over the terminal (which
 // stays mounted under it). Each turn is what the person wrote, then one line
@@ -275,6 +281,7 @@ export function ConversationView({
   onStop,
   stop,
   side,
+  peerTitles,
   onOpenPeer,
   active = true,
   keysActive,
@@ -323,6 +330,7 @@ export function ConversationView({
   onStop?: () => void // (it works: press Esc in its pane)
   stop?: string // what became of the last stop pressed, to say
   side?: { rows: ConvoListRow[] } // the agents to go to: beside the thread where there is room, else from the bar
+  peerTitles?: ReadonlyMap<string, string> // sidebar-computed titles keyed by peerTargetKey(sessionId, pane)
   onOpenPeer?: (sessionId: string, pane: string | undefined, how?: PeerPickHow) => void // open a backend-verified live Corral peer session/pane
   active?: boolean // (its tab is the one shown: polling & live updates run)
   keysActive?: boolean // (defaults to active: per-pane keyboard shortcuts such as Ctrl+O, [, ], ?)
@@ -1890,6 +1898,9 @@ export function ConversationView({
               peerPid: ev.peer_pid,
               peerStart: ev.peer_start,
               peers: convo.peers,
+              peerTitles,
+              failing: convo.failing,
+              okAt: convo.okAt,
             })
             const head = formatPeerPlain(resolved, {
               from: (name) => t('convo.peerFrom', { name }),
@@ -1922,8 +1933,8 @@ export function ConversationView({
     )
   }
   const peerCtx = useMemo(
-    () => ({ peers: convo.peers, okAt: convo.okAt, failing: convo.failing, onOpenPeer }),
-    [convo.peers, convo.okAt, convo.failing, onOpenPeer],
+    () => ({ peers: convo.peers, peerTitles, okAt: convo.okAt, failing: convo.failing, onOpenPeer }),
+    [convo.peers, peerTitles, convo.okAt, convo.failing, onOpenPeer],
   )
   const rows = side?.rows ?? []
   const currentRow = rows.find((r) => r.current)
@@ -3235,8 +3246,8 @@ function Queue({ items, onSendNow, said }: { items: ConvoQueued[]; onSendNow?: (
 }
 
 function PeerSenderHead({ from, peerPid, peerStart }: { from?: string; peerPid?: number; peerStart?: number }) {
-  const { peers, onOpenPeer } = useContext(PeerCtx)
-  const resolved = resolvePeerSender({ from, peerPid, peerStart, peers })
+  const { peers, peerTitles, failing, okAt, onOpenPeer } = useContext(PeerCtx)
+  const resolved = resolvePeerSender({ from, peerPid, peerStart, peers, peerTitles, failing, okAt })
   if (resolved.kind === 'live') {
     const tip = [resolved.name, resolved.where, t('convo.peerOpenHint')].filter(Boolean).join(' · ')
     return (
@@ -6921,8 +6932,9 @@ function SubPanel({ of, sub, depth, live, nav, onOpen, onBack, onClose, active, 
   const c = useSubConvo(sessionId, pane, sub.agent, told, active, depth > 1, sub.cli)
   const going = depth === 1 ? told : c.growing
   const parentPeer = useContext(PeerCtx)
-  const subPeerCtx = useMemo(
-    () => ({
+  const subPeerCtx = useMemo(() => {
+    const subLive = going && !c.failed && !!c.peers
+    return {
       peers: resolveSubPeers({
         going,
         subFailed: c.failed,
@@ -6931,12 +6943,12 @@ function SubPanel({ of, sub, depth, live, nav, onOpen, onBack, onClose, active, 
         parentOkAt: parentPeer.okAt ?? 0,
         parentFailing: !!parentPeer.failing,
       }),
-      okAt: parentPeer.okAt,
-      failing: parentPeer.failing,
+      peerTitles: parentPeer.peerTitles,
+      okAt: subLive ? undefined : parentPeer.okAt,
+      failing: subLive ? false : parentPeer.failing,
       onOpenPeer: parentPeer.onOpenPeer,
-    }),
-    [going, c.failed, c.peers, parentPeer.peers, parentPeer.okAt, parentPeer.failing, parentPeer.onOpenPeer],
-  )
+    }
+  }, [going, c.failed, c.peers, parentPeer.peers, parentPeer.peerTitles, parentPeer.okAt, parentPeer.failing, parentPeer.onOpenPeer])
   const panel = useRef<HTMLElement>(null)
   const [opened, setOpened] = useState<Record<string, boolean>>({})
   const toggle = useCallback((key: string, open: boolean) => setOpened((o) => ({ ...o, [key]: open })), [])

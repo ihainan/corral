@@ -3,11 +3,62 @@
 //
 // Display rule: the backend decides whether a peer's verified (pid, proc_start)
 // matches a currently-selected Corral agent in the latest locate scan. The
-// frontend does no identity matching and never reads sidebar names — if the
-// backend supplied a complete Corral target (title + session_id), show it with
-// a link; otherwise show the message's own sender name + "Not in Corral".
+// frontend does no identity matching — it only names the backend-matched
+// (session_id, pane) using the sidebar's own naming function (peerTitles /
+// sidebarHerdrTitle) so sidebar and peer sender names cannot drift. If refresh
+// is failing or peer data is older than PEER_SLOT_MAX_AGE_MS, or if the
+// backend did not supply a complete Corral target, show the message's own
+// sender name + "Not in Corral".
 
 export type PeerPickHow = 'tab' | 'split'
+
+// Maximum age of peer-resolution data before links are withheld (matches Go
+// peerSlotMaxAge in internal/web/convo_peers.go).
+export const PEER_SLOT_MAX_AGE_MS = 10 * 60 * 1000
+
+// Canonical target key for looking up a sidebar row title by (sessionId, pane).
+export function peerTargetKey(sessionId: string, pane?: string): string {
+  return `${sessionId}\x00${pane ?? ''}`
+}
+
+// Pure sidebar title rule for a herdr pane, shared by AgentsChat.tsx's labelOf
+// and peer sender display so they cannot drift.
+// Precedence:
+//   1. Custom pane label always wins.
+//   2. Same-workspace lineage child without a custom label shows its own name
+//      rather than duplicating its parent's workspace name.
+//   3. Plain workspace agent (not a same-workspace lineage child, ws !== '~')
+//      keeps the workspace name.
+//   4. Otherwise falls back to said.
+export function sidebarHerdrTitle(p: {
+  ws?: string
+  label?: string
+  agentName?: string
+  agent?: string
+  said: string
+  named?: boolean
+  sameWsParent?: boolean
+}): string {
+  const ws = p.ws && p.ws !== '~' ? p.ws : ''
+  const own = p.label ?? ''
+  const agentName = p.agentName ?? ''
+  const named = p.named ?? true
+  if (p.sameWsParent && !own) {
+    return (named && p.said) || agentName || p.agent || p.said
+  }
+  if (!ws && !own) return p.said
+  return own || ws
+}
+
+// Whether conversation peer data is fresh enough to render live links.
+export function peerFresh(opts: { failing?: boolean; okAt?: number; now?: number }): boolean {
+  if (opts.failing) return false
+  if (opts.okAt !== undefined) {
+    const now = opts.now ?? Date.now()
+    if (opts.okAt <= 0 || now - opts.okAt > PEER_SLOT_MAX_AGE_MS) return false
+  }
+  return true
+}
 
 // Mirrors internal/convo/convo.go PeerInfo.
 export interface ConvoPeerInfo {
@@ -88,16 +139,24 @@ export function resolvePeerSender(input: {
   peerPid?: number
   peerStart?: number
   peers?: Record<string, ConvoPeerInfo>
+  peerTitles?: ReadonlyMap<string, string>
+  failing?: boolean
+  okAt?: number
+  now?: number
 }): ResolvedPeer {
   const rawFrom = sanitizePeerText(input.from)
+  if (!peerFresh({ failing: input.failing, okAt: input.okAt, now: input.now })) {
+    return { kind: 'unknown', name: rawFrom || '?' }
+  }
   const key = peerRefKey(input.peerPid, input.peerStart)
   const info = key && input.peers ? input.peers[key] : undefined
   if (!info) {
     return { kind: 'unknown', name: rawFrom || '?' }
   }
-  const name = sanitizePeerText(info.title)
   const sessionId = sanitizePeerText(info.session_id)
   const pane = sanitizePeerText(info.pane) || undefined
+  const sidebarName = sessionId && input.peerTitles ? sanitizePeerText(input.peerTitles.get(peerTargetKey(sessionId, pane))) : ''
+  const name = sidebarName || sanitizePeerText(info.title)
   const href = sessionId ? peerHref(sessionId, pane) : ''
   if (!name || !sessionId || !href) {
     return { kind: 'unknown', name: rawFrom || '?' }

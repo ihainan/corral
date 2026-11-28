@@ -623,3 +623,94 @@ func TestPeerSanitization(t *testing.T) {
 		t.Fatalf("launch cmd should be stripped, got %q", got)
 	}
 }
+
+// Fix6 #1 [P1]: peerTitleFromHerdr / resolveConvoPeers must follow the same
+// naming rule as the sidebar (AgentsChat.tsx:labelOf / sidebarHerdrTitle):
+//   - Lineage child without a custom pane label shows its own name (not the
+//     parent's workspace name).
+//   - A custom pane label always wins.
+//   - A plain workspace agent keeps the workspace name.
+func TestPeerTitleMatchesSidebarNamingRule(t *testing.T) {
+	sock := "/tmp/herdr-test/default.sock"
+	t0 := time.Date(2026, 11, 28, 12, 0, 0, 0, time.UTC)
+
+	snap := &herdr.Snapshot{
+		Workspaces: []herdr.Workspace{
+			{ID: "ws1", Label: "Main Agent"},
+			{ID: "ws2", Label: "Other Space"},
+		},
+		Panes: []herdr.Pane{
+			{ID: "w1:p1", WorkspaceID: "ws1"},
+			{ID: "w1:p2", WorkspaceID: "ws1"},
+			{ID: "w1:p3", WorkspaceID: "ws1", Label: "Custom Reviewer"},
+			{ID: "w2:p1", WorkspaceID: "ws2"},
+			{ID: "w1:p4", WorkspaceID: "ws1", Label: "Custom Plain"},
+		},
+		Agents: []herdr.Pane{
+			// Plain workspace agent (parent) -> keeps workspace name "Main Agent".
+			{ID: "w1:p1", WorkspaceID: "ws1", Agent: "claude", Title: "Parent Chat", TerminalID: "term-p1"},
+			// Same-workspace lineage child without custom label -> shows its own name "Security Reviewer".
+			{ID: "w1:p2", WorkspaceID: "ws1", Agent: "claude", Title: "Security Reviewer", TerminalID: "term-p2"},
+			// Same-workspace lineage child WITH custom label -> custom label "Custom Reviewer" wins.
+			{ID: "w1:p3", WorkspaceID: "ws1", Agent: "claude", Title: "Ignored Title", TerminalID: "term-p3"},
+			// Cross-workspace lineage child (different ws) -> NOT sameWsParent, keeps its own workspace "Other Space".
+			{ID: "w2:p1", WorkspaceID: "ws2", Agent: "claude", Title: "Cross Ws Child", TerminalID: "term-p4"},
+			// Plain workspace agent WITH custom label -> custom label "Custom Plain" wins.
+			{ID: "w1:p4", WorkspaceID: "ws1", Agent: "claude", Title: "Ignored Plain", TerminalID: "term-p5"},
+		},
+	}
+
+	sess := &term.Session{ID: "s-herdr", OwnerID: 1, HostID: 10, HostName: "devbox", HostConfig: "cfg1", Persistence: "herdr"}
+	srv := &Server{herdrSocks: herdrSockets{path: map[string]string{}}}
+	srv.peers.nowFn = func() time.Time { return t0 }
+	srv.herdrSocks.set(sess.ID, sock)
+	srv.herdrSocks.setServer(sess.ID, "srv-1", 1, func() (*herdr.Snapshot, time.Time) { return snap, t0 }, func() {})
+	lt := &lineageTracker{
+		rows: []store.AgentLineage{
+			{ChildPane: "w1:p2", ChildTermID: "term-p2", ParentPane: "w1:p1", ParentTermID: "term-p1", State: store.LineageConfirmed},
+			{ChildPane: "w1:p3", ChildTermID: "term-p3", ParentPane: "w1:p1", ParentTermID: "term-p1", State: store.LineageConfirmed},
+			{ChildPane: "w2:p1", ChildTermID: "term-p4", ParentPane: "w1:p1", ParentTermID: "term-p1", State: store.LineageConfirmed},
+		},
+	}
+	srv.herdrSocks.setLineage(sess.ID, lt)
+
+	procs := []convoProc{
+		{pid: 101, start: 1001, agent: "claude", herdrPane: "w1:p1", herdrSocket: sock, anc: herdrAnc()},
+		{pid: 102, start: 1002, agent: "claude", herdrPane: "w1:p2", herdrSocket: sock, anc: herdrAnc()},
+		{pid: 103, start: 1003, agent: "claude", herdrPane: "w1:p3", herdrSocket: sock, anc: herdrAnc()},
+		{pid: 104, start: 1004, agent: "claude", herdrPane: "w2:p1", herdrSocket: sock, anc: herdrAnc()},
+		{pid: 105, start: 1005, agent: "claude", herdrPane: "w1:p4", herdrSocket: sock, anc: herdrAnc()},
+	}
+	srv.recordLocatedProcs(sess, convoLocated{procs: procs}, true, "", t0)
+
+	parser := makePeerParser(t,
+		peerMsgLine("u1", 101, 1001, "ai-1"),
+		peerMsgLine("u2", 102, 1002, "ai-2"),
+		peerMsgLine("u3", 103, 1003, "ai-3"),
+		peerMsgLine("u4", 104, 1004, "ai-4"),
+		peerMsgLine("u5", 105, 1005, "ai-5"),
+	)
+	peers := srv.resolveConvoPeers(sess, &convoState{parser: parser})
+
+	want := map[string]string{
+		"101:1001": "Main Agent",
+		"102:1002": "Security Reviewer",
+		"103:1003": "Custom Reviewer",
+		"104:1004": "Other Space",
+		"105:1005": "Custom Plain",
+	}
+	for k, wantTitle := range want {
+		if got := peers[k].Title; got != wantTitle {
+			t.Errorf("peer %s title = %q, want %q (full=%+v)", k, got, wantTitle, peers[k])
+		}
+	}
+
+	// If lineage is later rejected/unlinked, w1:p2 reverts to its workspace name.
+	lt.mu.Lock()
+	lt.rows[0].State = store.LineageRejected
+	lt.mu.Unlock()
+	peersAfterUnlink := srv.resolveConvoPeers(sess, &convoState{parser: parser})
+	if got := peersAfterUnlink["102:1002"].Title; got != "Main Agent" {
+		t.Fatalf("after lineage unlink, w1:p2 title = %q, want %q", got, "Main Agent")
+	}
+}

@@ -288,9 +288,28 @@ func samePeerProgram(a, b string) bool {
 	return na != "" && nb != "" && na == nb
 }
 
-func peerTitleFromHerdr(wsLabel, paneLabel, paneTitle, agentName, cwd, agent string) string {
+// peerTitleFromHerdr mirrors the sidebar's sidebarHerdrTitle rule in
+// web/src/terminal/peerSender.ts (used by AgentsChat.tsx's labelOf):
+//  1. A custom pane label always wins.
+//  2. A same-workspace lineage child without a custom label shows its own name
+//     (pane title, agent name, program, or dir) instead of its parent's workspace.
+//  3. A plain workspace agent keeps the workspace name (except "~").
+//  4. Otherwise falls back to pane title, agent name, dir, or program.
+func peerTitleFromHerdr(wsLabel, paneLabel, paneTitle, agentName, cwd, agent string, sameWsParent bool) string {
 	if t := sanitizePeerLabel(paneLabel, 120); t != "" {
 		return t
+	}
+	if sameWsParent {
+		if t := cleanPeerPaneTitle(paneTitle); t != "" {
+			return t
+		}
+		if t := sanitizePeerLabel(agentName, 120); t != "" {
+			return t
+		}
+		if t := sanitizePeerLabel(agent, 64); t != "" {
+			return t
+		}
+		return peerDirName(cwd)
 	}
 	if ws := sanitizePeerLabel(wsLabel, 120); ws != "" && ws != "~" {
 		return ws
@@ -371,8 +390,9 @@ func mergeHerdrPane(base, over herdr.Pane) herdr.Pane {
 }
 
 type herdrSnapIndex struct {
-	wsLabels map[string]string
-	panes    map[string]herdr.Pane
+	wsLabels   map[string]string
+	panes      map[string]herdr.Pane
+	agentPanes map[string]bool
 }
 
 func indexHerdrSnapshot(snap *herdr.Snapshot) *herdrSnapIndex {
@@ -384,9 +404,13 @@ func indexHerdrSnapshot(snap *herdr.Snapshot) *herdrSnapIndex {
 		wsLabels[w.ID] = w.Label
 	}
 	panes := make(map[string]herdr.Pane, len(snap.Agents)+len(snap.Panes))
+	agentPanes := make(map[string]bool, len(snap.Agents))
 	for _, p := range snap.Panes {
 		if p.ID != "" {
 			panes[p.ID] = p
+			if p.Agent != "" && p.AgentStatus != herdr.StatusGone {
+				agentPanes[p.ID] = true
+			}
 		}
 	}
 	for _, a := range snap.Agents {
@@ -398,8 +422,13 @@ func indexHerdrSnapshot(snap *herdr.Snapshot) *herdrSnapIndex {
 		} else {
 			panes[a.ID] = a
 		}
+		if a.AgentStatus == herdr.StatusGone {
+			delete(agentPanes, a.ID)
+		} else {
+			agentPanes[a.ID] = true
+		}
 	}
-	return &herdrSnapIndex{wsLabels: wsLabels, panes: panes}
+	return &herdrSnapIndex{wsLabels: wsLabels, panes: panes, agentPanes: agentPanes}
 }
 
 func (idx *herdrSnapIndex) lookup(paneID string) (herdr.Pane, string, bool) {
@@ -413,7 +442,7 @@ func (idx *herdrSnapIndex) lookup(paneID string) (herdr.Pane, string, bool) {
 	return p, idx.wsLabels[p.WorkspaceID], true
 }
 
-func (s *Server) buildHerdrPaneSlot(rs *term.Session, sock, pane string, procs []convoProc, snapIdx *herdrSnapIndex) *livePaneSlot {
+func (s *Server) buildHerdrPaneSlot(rs *term.Session, sock, pane string, procs []convoProc, snapIdx *herdrSnapIndex, sameWsParents map[string]bool) *livePaneSlot {
 	p := pickConvoProc(procs, "herdr", pane, sock, "", "", s.herdrSocks.sid(rs.ID, pane))
 	if p == nil || p.pid <= 0 || p.start <= 0 {
 		return nil
@@ -428,7 +457,7 @@ func (s *Server) buildHerdrPaneSlot(rs *term.Session, sock, pane string, procs [
 	if p.sid != "" && agentSession(hp) != "" && agentSession(hp) != p.sid {
 		return nil
 	}
-	title := peerTitleFromHerdr(wsLabel, hp.Label, hp.Title, hp.Name, p.cwd, p.agent)
+	title := peerTitleFromHerdr(wsLabel, hp.Label, hp.Title, hp.Name, p.cwd, p.agent, sameWsParents[pane])
 	if title == "" {
 		return nil
 	}
@@ -489,7 +518,9 @@ func (s *Server) recordLocatedProcs(sess *term.Session, l convoLocated, full boo
 		if !ok {
 			return
 		}
-		slot := s.buildHerdrPaneSlot(sess, sock, coveredPane, l.procs, indexHerdrSnapshot(snap))
+		snapIdx := indexHerdrSnapshot(snap)
+		sameWs := s.herdrSocks.lineageOf(sess.ID).sameWorkspaceParents(snapIdx)
+		slot := s.buildHerdrPaneSlot(sess, sock, coveredPane, l.procs, snapIdx, sameWs)
 		s.peers.replaceHerdrPane(sess.ID, sess.OwnerID, sess.HostID, hc, coveredPane, observedAt, slot)
 		return
 	}
@@ -529,8 +560,9 @@ func (s *Server) recordLocatedProcs(sess *term.Session, l convoLocated, full boo
 	for sock, rs := range herdrBySock {
 		picked := map[string]livePaneSlot{}
 		snapIdx := snapIndexes[rs.ID]
+		sameWs := s.herdrSocks.lineageOf(rs.ID).sameWorkspaceParents(snapIdx)
 		for pane := range panesBySock[sock] {
-			if slot := s.buildHerdrPaneSlot(rs, sock, pane, l.procs, snapIdx); slot != nil && slot.has {
+			if slot := s.buildHerdrPaneSlot(rs, sock, pane, l.procs, snapIdx, sameWs); slot != nil && slot.has {
 				picked[pane] = *slot
 			}
 		}
@@ -588,10 +620,13 @@ func (s *Server) resolveConvoPeers(sess *term.Session, st *convoState) map[strin
 	running := s.runningInPeerScope(sess, sess.OwnerID, sess.HostID, hc)
 
 	snapIndexes := map[string]*herdrSnapIndex{}
+	sameWsBySess := map[string]map[string]bool{}
 	for _, rs := range running {
 		if rs.Persistence == "herdr" {
 			if snap, ok := s.herdrSocks.snapshotOf(rs.ID); ok {
-				snapIndexes[rs.ID] = indexHerdrSnapshot(snap)
+				idx := indexHerdrSnapshot(snap)
+				snapIndexes[rs.ID] = idx
+				sameWsBySess[rs.ID] = s.herdrSocks.lineageOf(rs.ID).sameWorkspaceParents(idx)
 			}
 		}
 	}
@@ -633,7 +668,7 @@ func (s *Server) resolveConvoPeers(sess *term.Session, st *convoState) map[strin
 					if locatedSID, locatedAt := s.herdrSocks.locatedAtOf(rs.ID, pi.Pane); entry.agentSID != "" && locatedSID != "" && !locatedAt.Before(slot.scanAt) && locatedSID != entry.agentSID {
 						continue
 					}
-					if t := peerTitleFromHerdr(wsLabel, hp.Label, hp.Title, hp.Name, entry.cwd, entry.program); t != "" {
+					if t := peerTitleFromHerdr(wsLabel, hp.Label, hp.Title, hp.Name, entry.cwd, entry.program, sameWsBySess[rs.ID][pi.Pane]); t != "" {
 						pi.Title = t
 					}
 					if wsLabel != "" && wsLabel != "~" {
