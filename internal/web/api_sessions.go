@@ -677,13 +677,20 @@ func (s *Server) apiRenameSession(w http.ResponseWriter, r *http.Request) {
 				writeError(w, http.StatusBadGateway, "rename_failed", "could not rename the tmux session on the host")
 				return
 			}
-			sess.SetTmuxSession(name)
 			renamedID := strings.TrimSpace(string(res.Out))
-			if tmuxSessionIDRE.MatchString(renamedID) && (boundID == "" || renamedID == boundID) {
-				sess.SetTmuxSessionID(renamedID)
-			} else {
-				renamedID = boundID
+			if tmuxSessionIDRE.MatchString(renamedID) {
+				if !sess.SetTmuxSessionID(renamedID) {
+					writeError(w, http.StatusConflict, "session_mismatch", "the tmux session was renamed or replaced outside Corral")
+					return
+				}
+			} else if curID := sess.CurrentTmuxSessionID(); curID != "" {
+				if boundID == "" || curID != boundID {
+					writeError(w, http.StatusConflict, "session_mismatch", "the tmux session was renamed or replaced outside Corral")
+					return
+				}
+				renamedID = curID
 			}
+			sess.SetTmuxSession(name)
 			if err := s.store.RenameTab(ctx, u.ID, sess.ID, name); err != nil {
 				s.log.Warn("open tabs: rename not recorded", "session", sess.ID, "err", err)
 			}

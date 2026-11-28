@@ -12,7 +12,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"unicode"
 	"unicode/utf8"
 
 	"github.com/ihainan/corral/internal/herdr"
@@ -39,7 +38,7 @@ type paneEnvVar struct {
 	Name      string `json:"name"`
 	Sensitive bool   `json:"sensitive"`
 	Value     string `json:"value,omitempty"`   // omitted when sensitive
-	Preview   string `json:"preview,omitempty"` // masked prefix when sensitive
+	Preview   string `json:"preview,omitempty"` // fixed mask placeholder when sensitive
 }
 
 type paneEnvResponse struct {
@@ -130,6 +129,7 @@ var sensitiveValueSubstrings = []string{
 	"password",
 	"passwd",
 	"passphrase",
+	"passkey",
 	"pwd=",
 	"secret",
 	"token",
@@ -140,6 +140,7 @@ var sensitiveValueSubstrings = []string{
 	"api-key",
 	"access_key",
 	"accesskey",
+	"accountkey",
 	"private_key",
 	"privatekey",
 	"bearer",
@@ -249,35 +250,122 @@ func hasColonBeforeAt(s string) bool {
 	return false
 }
 
-func matchesSensitiveForm(s string) bool {
+func isASCIIAlphaNum(c byte) bool {
+	return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')
+}
+
+// hasSensitiveFieldToken scans lower in a single forward pass (no backtracking)
+// for standalone field names (key, sig, accountkey, sharedaccesskey, pwd)
+// followed by optional ASCII whitespace and one of '=', ':', or '"'.
+func hasSensitiveFieldToken(lower string) bool {
+	n := len(lower)
+	for i := 0; i < n; {
+		if !isASCIIAlphaNum(lower[i]) {
+			i++
+			continue
+		}
+		start := i
+		for i < n && isASCIIAlphaNum(lower[i]) {
+			i++
+		}
+		switch lower[start:i] {
+		case "key", "sig", "accountkey", "sharedaccesskey", "pwd":
+			for i < n && (lower[i] == ' ' || lower[i] == '\t' || lower[i] == '\r' || lower[i] == '\n') {
+				i++
+			}
+			if i < n && (lower[i] == '=' || lower[i] == ':' || lower[i] == '"') {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// isBasicNonSecretEnvName reports whether an uppercase env var name belongs to
+// the small allowlist of standard shell/path/locale variables whose values skip
+// keyword-substring matching (so e.g. HOME=/home/author or
+// PATH=/usr/local/sbin:/opt/auth:/usr/bin stay visible). Structural checks
+// (colon-before-at credentials, key prefixes, JWT, AWS keys, high entropy)
+// still apply.
+func isBasicNonSecretEnvName(upper string) bool {
+	switch upper {
+	case "HOME", "PATH", "PWD", "OLDPWD", "SHELL", "USER", "LOGNAME",
+		"LANG", "LANGUAGE", "TERM", "TMPDIR", "MANPATH", "INFOPATH":
+		return true
+	}
+	if strings.HasPrefix(upper, "LC_") {
+		return true
+	}
+	if strings.HasPrefix(upper, "XDG_") &&
+		(strings.HasSuffix(upper, "_DIR") || strings.HasSuffix(upper, "_HOME") || strings.HasSuffix(upper, "_PATH")) {
+		return true
+	}
+	return false
+}
+
+func matchesSensitiveForm(s string, skipKeywords bool) bool {
 	lower := strings.ToLower(s)
-	for _, sub := range sensitiveValueSubstrings {
-		if strings.Contains(lower, sub) {
+	if !skipKeywords {
+		for _, sub := range sensitiveValueSubstrings {
+			if strings.Contains(lower, sub) {
+				return true
+			}
+		}
+		if hasSensitiveFieldToken(lower) {
 			return true
 		}
 	}
 	return hasColonBeforeAt(lower)
 }
 
-// hasSensitiveValuePattern checks up to three linear-time forms of v: raw,
-// percent-decoded (up to two passes), and JSON-unescaped.
-func hasSensitiveValuePattern(v string) bool {
-	if matchesSensitiveForm(v) {
+const (
+	maxDecodeRounds = 3
+	maxDecodeForms  = 8
+)
+
+// hasSensitiveValuePattern expands v through up to maxDecodeRounds BFS rounds
+// of single-step percent-decoding and JSON-unescaping (deduplicated, capped at
+// maxDecodeForms distinct forms) and checks each form in linear time.
+func hasSensitiveValuePattern(v string, skipKeywords bool) bool {
+	if matchesSensitiveForm(v, skipKeywords) {
 		return true
 	}
-	if u, ok := jsonUnescapeOnce(v); ok && matchesSensitiveForm(u) {
-		return true
-	}
-	if d1, ok := percentDecodeOnce(v); ok {
-		if matchesSensitiveForm(d1) {
-			return true
+	forms := make([]string, 0, maxDecodeForms)
+	seen := make(map[string]struct{}, maxDecodeForms)
+	forms = append(forms, v)
+	seen[v] = struct{}{}
+
+	frontierStart := 0
+	for round := 0; round < maxDecodeRounds && len(forms) < maxDecodeForms; round++ {
+		frontierEnd := len(forms)
+		if frontierStart >= frontierEnd {
+			break
 		}
-		if d2, ok := percentDecodeOnce(d1); ok && matchesSensitiveForm(d2) {
-			return true
+		for i := frontierStart; i < frontierEnd && len(forms) < maxDecodeForms; i++ {
+			cur := forms[i]
+			if d, ok := percentDecodeOnce(cur); ok {
+				if _, dup := seen[d]; !dup {
+					if matchesSensitiveForm(d, skipKeywords) {
+						return true
+					}
+					seen[d] = struct{}{}
+					forms = append(forms, d)
+					if len(forms) >= maxDecodeForms {
+						break
+					}
+				}
+			}
+			if u, ok := jsonUnescapeOnce(cur); ok {
+				if _, dup := seen[u]; !dup {
+					if matchesSensitiveForm(u, skipKeywords) {
+						return true
+					}
+					seen[u] = struct{}{}
+					forms = append(forms, u)
+				}
+			}
 		}
-		if u1, ok := jsonUnescapeOnce(d1); ok && matchesSensitiveForm(u1) {
-			return true
-		}
+		frontierStart = frontierEnd
 	}
 	return false
 }
@@ -291,15 +379,15 @@ func isSensitiveEnv(name, value string) bool {
 			return true
 		}
 	}
-	return isSensitiveEnvValue(value)
+	return isSensitiveEnvValue(value, isBasicNonSecretEnvName(upper))
 }
 
-func isSensitiveEnvValue(value string) bool {
+func isSensitiveEnvValue(value string, skipKeywords bool) bool {
 	v := strings.TrimSpace(value)
 	if len(v) == 0 {
 		return false
 	}
-	if hasSensitiveValuePattern(v) {
+	if hasSensitiveValuePattern(v, skipKeywords) {
 		return true
 	}
 	if len(v) < 6 {
@@ -403,31 +491,14 @@ func looksLikeRandomSecret(v string) bool {
 	return false
 }
 
-// maskEnvPreview returns a safe preview consisting of at most a few leading
-// non-control characters followed by bullets, never exposing short secrets.
+// maskEnvPreview returns a fixed bullet placeholder for non-empty sensitive
+// values without revealing any prefix characters (which could expose short
+// credentials such as "a:b@" at the start of a DSN).
 func maskEnvPreview(value string) string {
 	if value == "" {
 		return ""
 	}
-	runes := []rune(value)
-	const mask = "••••••••"
-	if len(runes) <= 4 {
-		return mask
-	}
-	keep := 4
-	if len(runes) <= 8 {
-		keep = 2
-	}
-	var b strings.Builder
-	for _, r := range runes[:keep] {
-		if unicode.IsControl(r) {
-			b.WriteRune(' ')
-		} else {
-			b.WriteRune(r)
-		}
-	}
-	b.WriteString(mask)
-	return b.String()
+	return "••••••••"
 }
 
 // parseProcEnviron parses NUL-delimited KEY=VALUE records from Linux
@@ -718,8 +789,8 @@ func (s *Server) readPaneEnviron(ctx context.Context, sess *term.Session, pane s
 		}
 		var discoveredID string
 		discoveredID, pid, procName, vars, reason, truncated = parseEnvExecOutput(res.Out)
-		if discoveredID != "" {
-			sess.SetTmuxSessionID(discoveredID)
+		if discoveredID != "" && !sess.SetTmuxSessionID(discoveredID) {
+			return 0, "", nil, "session_mismatch", false, nil
 		}
 		return pid, procName, vars, reason, truncated, nil
 

@@ -77,9 +77,10 @@ func TestMaskEnvPreview(t *testing.T) {
 		{"", ""},
 		{"a", "••••••••"},
 		{"abcd", "••••••••"},
-		{"abcdef", "ab••••••••"},
-		{"sk-ant-secret-999999", "sk-a••••••••"},
-		{"a\nb\tcdefgh", "a b ••••••••"},
+		{"abcdef", "••••••••"},
+		{"a:b@tcp(localhost:3306)/db", "••••••••"},
+		{"sk-ant-secret-999999", "••••••••"},
+		{"a\nb\tcdefgh", "••••••••"},
 	}
 	for _, tc := range cases {
 		if got := maskEnvPreview(tc.in); got != tc.want {
@@ -304,7 +305,7 @@ func TestPaneEnvEndToEndMaskingRevealAuditAndOwnership(t *testing.T) {
 	}
 	for _, k := range []string{"CORRAL_API_KEY", "CORRAL_DATABASE_URL", "CORRAL_OPAQUE_VAL"} {
 		v, ok := byName[k]
-		if !ok || !v.Sensitive || v.Value != "" || v.Preview == "" {
+		if !ok || !v.Sensitive || v.Value != "" || v.Preview != "••••••••" {
 			t.Fatalf("sensitive var %s mismatch: %+v", k, v)
 		}
 	}
@@ -382,7 +383,9 @@ func TestIsSensitiveEnvURLAndConnStrings(t *testing.T) {
 		{"query api_key", "API_ENDPOINT", "https://api.example.com/v1?api_key=k123", true},
 		{"query apikey", "API_ENDPOINT", "https://api.example.com/v1?apikey=k123", true},
 		{"query camelCase apiKey", "API_ENDPOINT", "https://api.example.com/v1?apiKey=k123", true},
+		{"query key", "API_ENDPOINT", "https://api.example.com/v1?key=k123", true},
 		{"query X-Amz-Signature", "SIGNED_URL", "https://s3.example.com/obj?X-Amz-Signature=deadbeef", true},
+		{"query sig", "SIGNED_URL", "https://cdn.example.com/file?sig=deadbeef", true},
 		{"query auth", "REDIS_URL", "redis://cache.internal:6379/0?auth=mysecret", true},
 		{"query client_secret", "OAUTH_URL", "https://idp.example.com/token?client_secret=s123", true},
 		{"fragment id_token", "FRAG_URL", "https://example.com/app#id_token=abc&state=1", true},
@@ -406,6 +409,12 @@ func TestIsSensitiveEnvURLAndConnStrings(t *testing.T) {
 		{"header proxy-authorization basic", "EXTRA_HEADER", "Proxy-Authorization: Basic YWxpY2U6aHVudGVyMg==", true},
 		{"yaml token colon", "APP_YAML", "host: db\ntoken: abc123", true},
 		{"azure SharedAccessKey", "SERVICE_BUS", "Endpoint=sb://ns.servicebus.windows.net/;SharedAccessKeyName=Root;SharedAccessKey=abc123=", true},
+		{"azure AccountKey", "STORAGE_CONN", "DefaultEndpointsProtocol=https;AccountName=dev;AccountKey=abc123==", true},
+		{"odbc spaced PWD =", "CONN_STR", "Driver=SQL Server;Server=db;UID=alice;PWD = hunter2", true},
+		{"json pwd", "APP_CONFIG", `{"pwd":"hunter2"}`, true},
+		{"json spaced pwd colon", "APP_CONFIG", `{"pwd" : "hunter2"}`, true},
+		{"json passkey", "APP_CONFIG", `{"passkey":"hunter2"}`, true},
+		{"json dotted api.key", "APP_CONFIG", `{"api.key":"hunter2"}`, true},
 		{"short PWD=", "SHORT_CONN", "PWD=a", true},
 
 		// Passwords starting with punctuation or literal quotes (must never be treated as empty).
@@ -426,6 +435,9 @@ func TestIsSensitiveEnvURLAndConnStrings(t *testing.T) {
 		{"percent-encoded fragment access_token", "CALLBACK_URL", "https://example.com/#access%5Ftoken=abc123", true},
 		{"double-encoded query password", "DATABASE_URL", "https://example.com/?%2570assword=hunter2", true},
 		{"percent-encoded credential url in query", "UPSTREAM_URL", "https://proxy.example/?upstream=https%3A%2F%2Falice%3Ahunter2%40db.example", true},
+		{"json with percent-encoded password", "APP_CONFIG", `{"%70assword":"x"}`, true},
+		{"json unicode then percent password", "APP_CONFIG", `{"\u002570assword":"hunter2"}`, true},
+		{"double percent then json unicode password", "APP_CONFIG", `%257B%2522pass%255Cu0077ord%2522%253A%2522hunter2%2522%257D`, true},
 
 		// Fail-closed: any sensitive key with trailing content after '=' / ':' is masked
 		// (we do not try to parse syntax-specific empty values mid-string).
@@ -450,9 +462,28 @@ func TestIsSensitiveEnvURLAndConnStrings(t *testing.T) {
 		{"mongo authSource", "MONGO_URL", "mongodb://db.internal:27017/app?authSource=admin&retryWrites=true", true},
 		{"mongo authMechanism", "MONGO_URL", "mongodb://db.internal:27017/app?authMechanism=SCRAM-SHA-256", true},
 		{"azure key name only", "BUS_META", "SharedAccessKeyName=RootManage;Endpoint=sb://ns.example.com/", true},
-		{"PATH with auth dir segment", "PATH", "/usr/local/sbin:/opt/auth:/usr/bin", true},
 		{"empty password query trailing EOF", "DATABASE_URL", "postgresql://db/app?user=alice&password=", true},
 		{"empty password libpq trailing EOF", "PGCONN", "host=localhost user=alice password=", true},
+
+		// Basic shell/path/locale variables skip keyword substrings, but still catch structural credentials.
+		{"HOME with author dir", "HOME", "/home/author", false},
+		{"PATH with auth dir segment", "PATH", "/usr/local/sbin:/opt/auth:/usr/bin", false},
+		{"PWD with auth dir", "PWD", "/tmp/work/auth/corral", false},
+		{"OLDPWD with secret dir", "OLDPWD", "/tmp/secret-project", false},
+		{"SHELL with auth path", "SHELL", "/opt/auth/bin/zsh", false},
+		{"USER named author", "USER", "author", false},
+		{"LOGNAME named author", "LOGNAME", "author", false},
+		{"LC_ALL basic", "LC_ALL", "en_US.UTF-8", false},
+		{"TMPDIR with token path", "TMPDIR", "/tmp/token-cache", false},
+		{"XDG_CONFIG_HOME with auth", "XDG_CONFIG_HOME", "/home/author/.config/auth", false},
+		{"XDG_RUNTIME_DIR with auth", "XDG_RUNTIME_DIR", "/run/user/1000/auth", false},
+		{"XDG_CACHE_PATH with secret", "XDG_CACHE_PATH", "/var/cache/secret", false},
+		{"MANPATH with auth", "MANPATH", "/opt/auth/share/man:/usr/share/man", false},
+		{"INFOPATH with auth", "INFOPATH", "/opt/auth/share/info", false},
+		{"HOME with embedded dsn cred still masked", "HOME", "alice:hunter2@tcp(localhost:3306)/app", true},
+		{"PATH with api key prefix still masked", "PATH", "sk-ant-api03-1234567890abcdefghij", true},
+		{"TMPDIR with jwt still masked", "TMPDIR", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c", true},
+		{"XDG non-path suffix still keyword checked", "XDG_CUSTOM", "password=hunter2", true},
 
 		// Ordinary everyday non-sensitive values must stay visible.
 		{"pg url without password", "DATABASE_URL", "postgresql://db.internal:5432/app?sslmode=require&connect_timeout=10", false},
@@ -487,6 +518,9 @@ func TestIsSensitiveEnvLinearTime(t *testing.T) {
 	bracketChain := "password" + strings.Repeat("[password]", size/len("[password]")) + "="
 	colonAt := strings.Repeat("a:", size/2) + "@"
 	doublePct := strings.Repeat("%25", size/3)
+	rawPct := strings.Repeat("%", size)
+	mixedEscape := strings.Repeat(`%25\/`, size/5)
+	keySpaces := strings.Repeat("key x ", size/6)
 	plainLong := strings.Repeat("x=1;", size/4)
 
 	inputs := []struct {
@@ -497,6 +531,9 @@ func TestIsSensitiveEnvLinearTime(t *testing.T) {
 		{"password_bracket_chain_256k", bracketChain, true},
 		{"long_colon_at_256k", colonAt, true},
 		{"long_double_percent_256k", doublePct, false},
+		{"long_raw_percent_256k", rawPct, false},
+		{"long_mixed_percent_json_256k", mixedEscape, false},
+		{"long_key_spaces_256k", keySpaces, false},
 		{"long_plain_256k", plainLong, false},
 	}
 	const limit = 50 * time.Millisecond
@@ -510,6 +547,65 @@ func TestIsSensitiveEnvLinearTime(t *testing.T) {
 			}
 			if elapsed >= limit {
 				t.Errorf("%s took %v, want < %v", tc.name, elapsed, limit)
+			}
+		})
+	}
+}
+
+func TestPaneEnvLinearScaling(t *testing.T) {
+	const smallSize = 128 << 10
+	const largeSize = 256 << 10
+
+	buildCases := []struct {
+		name  string
+		build func(n int) string
+		want  bool
+	}{
+		{"repeated_percent25", func(n int) string { return strings.Repeat("%25", n/3) }, false},
+		{"repeated_percent", func(n int) string { return strings.Repeat("%", n) }, false},
+		{"repeated_percent_and_json", func(n int) string { return strings.Repeat(`%25\/`, n/5) }, false},
+		{"repeated_bracket_nonmatch", func(n int) string { return "pass" + strings.Repeat("[pass]", n/len("[pass]")) + "=" }, false},
+		{"repeated_key_spaces", func(n int) string { return strings.Repeat("key x ", n/6) }, false},
+		{"password_bracket_256k", func(n int) string { return "password" + strings.Repeat("[password]", n/len("[password]")) + "=" }, true},
+	}
+
+	for _, tc := range buildCases {
+		t.Run(tc.name, func(t *testing.T) {
+			small := tc.build(smallSize)
+			large := tc.build(largeSize)
+			// Warm up once and verify classification.
+			if got := isSensitiveEnv("PLAIN_VAR", small); got != tc.want {
+				t.Fatalf("small got %v, want %v", got, tc.want)
+			}
+			if got := isSensitiveEnv("PLAIN_VAR", large); got != tc.want {
+				t.Fatalf("large got %v, want %v", got, tc.want)
+			}
+			// Pick enough iterations so the 128 KiB run clears timer/scheduler noise.
+			iters := 0
+			var dSmall time.Duration
+			start := time.Now()
+			for iters < 200 && time.Since(start) < 10*time.Millisecond {
+				isSensitiveEnv("PLAIN_VAR", small)
+				iters++
+			}
+			dSmall = time.Since(start)
+
+			startLarge := time.Now()
+			for i := 0; i < iters; i++ {
+				isSensitiveEnv("PLAIN_VAR", large)
+			}
+			dLarge := time.Since(startLarge)
+
+			perCallLarge := dLarge / time.Duration(iters)
+			if perCallLarge >= 50*time.Millisecond {
+				t.Errorf("%s 256 KiB took %v/op, want < 50ms", tc.name, perCallLarge)
+			}
+			if dSmall >= 2*time.Millisecond {
+				ratio := float64(dLarge) / float64(dSmall)
+				if ratio > 2.5 {
+					t.Errorf("%s scaling ratio 256KiB/128KiB = %.2fx (%v vs %v over %d iters), want <= 2.5x",
+						tc.name, ratio, dLarge, dSmall, iters)
+				}
 			}
 		})
 	}
@@ -1165,5 +1261,161 @@ func TestTmuxPaneEnvAndInspectRealTmux(t *testing.T) {
 	}
 	if renamedOnly.Reason != "session_mismatch" {
 		t.Fatalf("expected session_mismatch when original id exists under another name, got %+v", renamedOnly)
+	}
+}
+
+func TestTmuxPaneEnvAndInspectConcurrentBindConflict(t *testing.T) {
+	h := newHarness(t)
+	admin := h.admin()
+
+	home := t.TempDir()
+	srv := h.sshServer(home)
+
+	envStarted := make(chan struct{})
+	envRelease := make(chan struct{})
+	revealStarted := make(chan struct{})
+	revealRelease := make(chan struct{})
+	inspectStarted := make(chan struct{})
+	inspectRelease := make(chan struct{})
+
+	srv.HandleExec(func(cmd string) func(ssh.Channel) {
+		if strings.Contains(cmd, "new-session") || strings.Contains(cmd, "attach-session") {
+			return func(ch ssh.Channel) {
+				buf := make([]byte, 16)
+				_, _ = ch.Read(buf)
+				ch.SendRequest("exit-status", false, []byte{0, 0, 0, 0})
+			}
+		}
+		if strings.Contains(cmd, "/proc/$pid/environ") {
+			return func(ch ssh.Channel) {
+				// Distinguish first call (pane-env) from second (reveal) by checking channel state.
+				select {
+				case <-envRelease:
+					close(revealStarted)
+					<-revealRelease
+				default:
+					close(envStarted)
+					<-envRelease
+				}
+				_, _ = ch.Write([]byte("ID\t$2\nOK\t4242\tsh\nSECRET_FROM_REPLACEMENT=super-secret-leak\x00"))
+				ch.CloseWrite()
+				ch.SendRequest("exit-status", false, []byte{0, 0, 0, 0})
+			}
+		}
+		if strings.Contains(cmd, "#{pane_id}|#{pane_pid}|#{pane_tty}") {
+			return func(ch ssh.Channel) {
+				close(inspectStarted)
+				<-inspectRelease
+				_, _ = ch.Write([]byte("ID\t$2\npane\t%9|4242|/dev/pts/1|sh|0\nproc\t4242 sh sh\n"))
+				ch.CloseWrite()
+				ch.SendRequest("exit-status", false, []byte{0, 0, 0, 0})
+			}
+		}
+		return nil
+	})
+
+	rHost := admin.do("POST", "/api/hosts", map[string]any{
+		"name": "race-box", "address": "127.0.0.1", "port": srv.Addr.Port,
+		"username": "alice", "auth": "password", "password": "alice-pass",
+	})
+	mustStatus(t, rHost, http.StatusCreated, "create host")
+	hostID := rHost.json()["id"].(float64)
+
+	openUnbound := func() (string, int64) {
+		rSess := admin.do("POST", "/api/sessions", map[string]any{
+			"host_id": hostID,
+			"open":    map[string]any{"kind": "tmux", "name": "work"},
+		})
+		mustStatus(t, rSess, http.StatusCreated, "open tmux work")
+		me := admin.do("GET", "/api/me", nil)
+		mustStatus(t, me, http.StatusOK, "me")
+		return rSess.json()["id"].(string), int64(me.json()["id"].(float64))
+	}
+
+	// 1. Concurrent bind conflict on GET /pane-env: request starts unbound, another
+	//    request binds "$0" while in flight, remote returns ID "$2" -> must refuse
+	//    with session_mismatch and return zero vars.
+	sid1, uid := openUnbound()
+	sess1, err := h.srv.terms.Get(uid, sid1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	envDone := make(chan resp, 1)
+	go func() {
+		envDone <- admin.do("GET", "/api/sessions/"+sid1+"/pane-env", nil)
+	}()
+	<-envStarted
+	if !sess1.SetTmuxSessionID("$0") {
+		t.Fatal("expected initial bind to $0")
+	}
+	close(envRelease)
+	rEnv := <-envDone
+	mustStatus(t, rEnv, http.StatusOK, "GET pane-env on bind conflict")
+	if strings.Contains(string(rEnv.Body), "super-secret-leak") || strings.Contains(string(rEnv.Body), "SECRET_FROM_REPLACEMENT") {
+		t.Fatalf("pane-env leaked replacement session vars on bind conflict: %s", rEnv.Body)
+	}
+	var envResp paneEnvResponse
+	if err := json.Unmarshal(rEnv.Body, &envResp); err != nil {
+		t.Fatal(err)
+	}
+	if envResp.Reason != "session_mismatch" || len(envResp.Vars) != 0 || envResp.PID != 0 {
+		t.Fatalf("expected session_mismatch with empty vars/pid, got %+v", envResp)
+	}
+	if got := sess1.CurrentTmuxSessionID(); got != "$0" {
+		t.Fatalf("bound id changed to %q, want $0", got)
+	}
+
+	// 2. Concurrent bind conflict on POST /pane-env/reveal (fresh unbound session):
+	//    must return 409 session_mismatch without revealing the secret.
+	mustStatus(t, admin.do("DELETE", "/api/sessions/"+sid1, nil), http.StatusOK, "close sid1")
+	sid2, _ := openUnbound()
+	sess2, err := h.srv.terms.Get(uid, sid2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	revDone := make(chan resp, 1)
+	go func() {
+		revDone <- admin.do("POST", "/api/sessions/"+sid2+"/pane-env/reveal", map[string]any{
+			"name": "SECRET_FROM_REPLACEMENT",
+		})
+	}()
+	<-revealStarted
+	if !sess2.SetTmuxSessionID("$0") {
+		t.Fatal("expected initial bind to $0")
+	}
+	close(revealRelease)
+	rRev := <-revDone
+	mustStatus(t, rRev, http.StatusConflict, "POST reveal on bind conflict")
+	if rRev.code() != "session_mismatch" || strings.Contains(string(rRev.Body), "super-secret-leak") {
+		t.Fatalf("reveal did not reject bind conflict cleanly: %s", rRev.Body)
+	}
+	if got := sess2.CurrentTmuxSessionID(); got != "$0" {
+		t.Fatalf("bound id changed to %q, want $0", got)
+	}
+
+	// 3. Concurrent bind conflict on GET /pane-inspect (fresh unbound session):
+	//    must return 409 session_mismatch without returning inspect payload.
+	mustStatus(t, admin.do("DELETE", "/api/sessions/"+sid2, nil), http.StatusOK, "close sid2")
+	sid3, _ := openUnbound()
+	sess3, err := h.srv.terms.Get(uid, sid3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inspDone := make(chan resp, 1)
+	go func() {
+		inspDone <- admin.do("GET", "/api/sessions/"+sid3+"/pane-inspect", nil)
+	}()
+	<-inspectStarted
+	if !sess3.SetTmuxSessionID("$0") {
+		t.Fatal("expected initial bind to $0")
+	}
+	close(inspectRelease)
+	rInsp := <-inspDone
+	mustStatus(t, rInsp, http.StatusConflict, "GET pane-inspect on bind conflict")
+	if rInsp.code() != "session_mismatch" || strings.Contains(string(rInsp.Body), "4242") || strings.Contains(string(rInsp.Body), "%9") {
+		t.Fatalf("pane-inspect did not reject bind conflict cleanly: %s", rInsp.Body)
+	}
+	if got := sess3.CurrentTmuxSessionID(); got != "$0" {
+		t.Fatalf("bound id changed to %q, want $0", got)
 	}
 }

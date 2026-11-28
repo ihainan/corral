@@ -3,12 +3,15 @@ package web
 import (
 	"context"
 	"encoding/json"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
+
+	"golang.org/x/crypto/ssh"
 
 	"github.com/ihainan/corral/internal/testutil"
 )
@@ -570,5 +573,90 @@ func TestConcurrentHerdrRenamePreventsDuplicate(t *testing.T) {
 		if holders != 1 {
 			t.Fatalf("round %d: expected exactly 1 holder of %q in session_names, got %+v", round, target, aliases)
 		}
+	}
+}
+
+func TestRenameTmuxConcurrentFirstBindConflict(t *testing.T) {
+	h := newHarness(t)
+	admin := h.admin()
+
+	home := t.TempDir()
+	srv := h.sshServer(home)
+
+	renameStarted := make(chan struct{})
+	renameRelease := make(chan struct{})
+
+	srv.HandleExec(func(cmd string) func(ssh.Channel) {
+		if strings.Contains(cmd, "new-session") || strings.Contains(cmd, "attach-session") {
+			return func(ch ssh.Channel) {
+				buf := make([]byte, 16)
+				_, _ = ch.Read(buf)
+				ch.SendRequest("exit-status", false, []byte{0, 0, 0, 0})
+			}
+		}
+		if strings.Contains(cmd, "rename-session") {
+			return func(ch ssh.Channel) {
+				close(renameStarted)
+				<-renameRelease
+				// Simulate remote script resolving/renaming replacement session $2.
+				_, _ = ch.Write([]byte("$2\n"))
+				ch.CloseWrite()
+				ch.SendRequest("exit-status", false, []byte{0, 0, 0, 0})
+			}
+		}
+		return nil
+	})
+
+	rHost := admin.do("POST", "/api/hosts", map[string]any{
+		"name": "rename-race-box", "address": "127.0.0.1", "port": srv.Addr.Port,
+		"username": "alice", "auth": "password", "password": "alice-pass",
+	})
+	mustStatus(t, rHost, http.StatusCreated, "create host")
+	hostID := rHost.json()["id"].(float64)
+
+	rSess := admin.do("POST", "/api/sessions", map[string]any{
+		"host_id": hostID,
+		"open":    map[string]any{"kind": "tmux", "name": "work"},
+	})
+	mustStatus(t, rSess, http.StatusCreated, "open tmux work")
+	sid := rSess.json()["id"].(string)
+
+	me := admin.do("GET", "/api/me", nil)
+	mustStatus(t, me, http.StatusOK, "me")
+	uid := int64(me.json()["id"].(float64))
+	sess, err := h.srv.terms.Get(uid, sid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := sess.CurrentTmuxSessionID(); got != "" {
+		t.Fatalf("expected unbound session before rename, got %q", got)
+	}
+
+	// Start rename while boundID is empty; while remote rename is in flight,
+	// bind session to $0; then let remote rename finish reporting $2.
+	done := make(chan resp, 1)
+	go func() {
+		done <- admin.do("PUT", "/api/sessions/"+sid+"/name", map[string]any{"name": "backend-new"})
+	}()
+	<-renameStarted
+	if !sess.SetTmuxSessionID("$0") {
+		t.Fatal("expected concurrent bind to $0")
+	}
+	close(renameRelease)
+
+	rRename := <-done
+	mustStatus(t, rRename, http.StatusConflict, "rename conflict with concurrent bind")
+	if rRename.code() != "session_mismatch" {
+		t.Fatalf("expected session_mismatch, got %s", rRename.Body)
+	}
+	if got := sess.CurrentTmuxSession(); got != "work" {
+		t.Fatalf("local session name changed after conflict: got %q, want work", got)
+	}
+	if got := sess.CurrentTmuxSessionID(); got != "$0" {
+		t.Fatalf("bound session id changed after conflict: got %q, want $0", got)
+	}
+	tab, err := h.store.OpenTabByID(context.Background(), uid, sid)
+	if err != nil || tab.Name != "work" {
+		t.Fatalf("open_tab wrongly updated after conflict: %+v err=%v", tab, err)
 	}
 }

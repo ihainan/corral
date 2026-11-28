@@ -26,7 +26,7 @@ const {
 
 const sample = [
   { name: 'Z_PLAIN', sensitive: false, value: '/usr/local/bin' },
-  { name: 'ANTHROPIC_API_KEY', sensitive: true, preview: 'sk-a••••••••' },
+  { name: 'ANTHROPIC_API_KEY', sensitive: true, preview: '••••••••' },
   { name: 'HOME', sensitive: false, value: '/home/dev' },
   { name: 'DB_PASSWORD', sensitive: true, preview: '••••••••' },
 ]
@@ -43,7 +43,7 @@ assert.deepEqual(
   ['Z_PLAIN'],
 )
 assert.deepEqual(
-  filterPaneEnvVars(sample, {}, 'sk-a').map((v) => v.name),
+  filterPaneEnvVars(sample, {}, '••••').map((v) => v.name),
   [],
   'unrevealed sensitive preview must not match value search',
 )
@@ -61,8 +61,10 @@ assert.equal(isEnvRevealed(sample[1], {}), false)
 assert.equal(isEnvRevealed(sample[1], { ANTHROPIC_API_KEY: 'sk-ant-full' }), true)
 assert.equal(isEnvRevealed(sample[0], {}), true)
 
-// Display value shows preview while hidden, full value once revealed.
-assert.deepEqual(envDisplayValue(sample[1], {}), { text: 'sk-a••••••••', masked: true, revealed: false })
+// Display value shows fixed bullet mask while hidden, full value once revealed.
+assert.deepEqual(envDisplayValue(sample[1], {}), { text: '••••••••', masked: true, revealed: false })
+assert.deepEqual(envDisplayValue({ name: 'DSN', sensitive: true, preview: 'a:b@••••••••' }, {}), { text: '••••••••', masked: true, revealed: false })
+assert.deepEqual(envDisplayValue({ name: 'DSN', sensitive: true, preview: '' }, {}), { text: '••••••••', masked: true, revealed: false })
 assert.deepEqual(envDisplayValue(sample[1], { ANTHROPIC_API_KEY: 'sk-ant-full' }), { text: 'sk-ant-full', masked: false, revealed: true })
 assert.deepEqual(envDisplayValue(sample[2], {}), { text: '/home/dev', masked: false, revealed: true })
 

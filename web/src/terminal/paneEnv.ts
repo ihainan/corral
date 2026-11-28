@@ -57,7 +57,7 @@ export function envDisplayValue(
   if (Object.prototype.hasOwnProperty.call(revealed, v.name)) {
     return { text: revealed[v.name], masked: false, revealed: true }
   }
-  return { text: v.preview || '••••••••', masked: true, revealed: false }
+  return { text: '••••••••', masked: true, revealed: false }
 }
 
 // Returns the full value eligible to copy, or undefined when a sensitive

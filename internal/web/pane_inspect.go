@@ -326,8 +326,9 @@ func (s *Server) apiPaneInspect(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		parsed, discoveredID := parseTmuxPaneInspectWithID(res.Out)
-		if discoveredID != "" {
-			sess.SetTmuxSessionID(discoveredID)
+		if discoveredID != "" && !sess.SetTmuxSessionID(discoveredID) {
+			writeError(w, http.StatusConflict, "session_mismatch", "the tmux session was renamed or replaced outside Corral")
+			return
 		}
 		writeJSON(w, http.StatusOK, parsed)
 
