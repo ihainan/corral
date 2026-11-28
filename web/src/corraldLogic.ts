@@ -958,6 +958,7 @@ export interface CorraldHint {
   count: number
   last_at: number
   generation?: number
+  claimed?: boolean
 }
 
 export interface CorraldHintResponse {
@@ -1012,7 +1013,7 @@ export function canClaimCorraldHint(
     hostUnavailable?: boolean
   },
 ): boolean {
-  if (!hint || !opts.masterEnabled || opts.adminDisabled) return false
+  if (!hint || hint.claimed || !opts.masterEnabled || opts.adminDisabled) return false
   if (hint.host_id <= 0 || hint.count <= 0) return false
   if (opts.hostUnavailable) return false
   if (opts.hostStatus && !isCorraldStatusHintEligible(opts.hostStatus)) return false
@@ -1126,12 +1127,15 @@ export function createCorraldHintController(deps: CorraldHintControllerDeps): Co
 
   const isHostStillEligible = (hint: CorraldHint): boolean => {
     const cached = deps.readCachedStatus(hint.host_id)
-    return canClaimCorraldHint(hint, {
-      masterEnabled,
-      adminDisabled,
-      hostStatus: cached?.status,
-      hostUnavailable: cached?.unavailable,
-    })
+    return canClaimCorraldHint(
+      { ...hint, claimed: false },
+      {
+        masterEnabled,
+        adminDisabled,
+        hostStatus: cached?.status,
+        hostUnavailable: cached?.unavailable,
+      },
+    )
   }
 
   const tryClaim = () => {
@@ -1142,8 +1146,9 @@ export function createCorraldHintController(deps: CorraldHintControllerDeps): Co
     if (claimInFlight !== null) return
 
     const h = candidateHint
-    // Re-check latest cached corrald status immediately before claiming.
-    if (!isHostStillEligible(h)) {
+    // Never claim an already-claimed hint, and re-check latest cached corrald
+    // status immediately before claiming.
+    if (h.claimed || !isHostStillEligible(h)) {
       candidateHint = null
       notify()
       return
@@ -1353,19 +1358,54 @@ export function createCorraldHintController(deps: CorraldHintControllerDeps): Co
         return
       }
 
-      // Keep an already-claimed visible banner only when the poll still returns
-      // the same host & generation and its cached status remains eligible.
+      // Keep an already-claimed visible banner on THIS page while GET keeps
+      // returning the same host & generation as eligible (including claimed:true).
       if (
         displayedHint &&
         displayedHint.host_id === normalized.host_id &&
         (displayedHint.generation ?? 0) === (normalized.generation ?? 0)
       ) {
+        const prev = displayedHint
+        const metaChanged =
+          prev.host_name !== normalized.host_name ||
+          prev.count !== normalized.count ||
+          prev.op !== normalized.op ||
+          prev.reason !== normalized.reason ||
+          prev.last_at !== normalized.last_at ||
+          prev.claimed !== normalized.claimed
+        if (metaChanged) {
+          displayedHint = normalized
+          changed = true
+        }
         if (changed) notify()
         return
       }
 
-      // The poll returned a different eligible host, so the previously displayed
-      // host is no longer returned by the server: hide it before claiming the new one.
+      // A page that did NOT claim this hint (another tab, a reload, or after
+      // closing/unmounting) never renders or claims a hint marked claimed:true.
+      if (normalized.claimed) {
+        const sameInFlight =
+          claimInFlight !== null &&
+          claimInFlight.hostId === normalized.host_id &&
+          claimInFlight.generation === (normalized.generation ?? 0)
+        if (!sameInFlight && claimInFlight !== null) {
+          cancelClaim()
+          changed = true
+        }
+        if (candidateHint !== null) {
+          candidateHint = null
+          changed = true
+        }
+        if (displayedHint !== null) {
+          displayedHint = null
+          changed = true
+        }
+        if (changed) notify()
+        return
+      }
+
+      // The poll returned a different eligible unclaimed host, so the previously
+      // displayed host is no longer returned by the server: hide it before claiming.
       if (displayedHint !== null) {
         displayedHint = null
         changed = true

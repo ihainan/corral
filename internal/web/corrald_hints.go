@@ -368,6 +368,7 @@ type CorraldHintItem struct {
 	Count      int               `json:"count"`
 	LastAt     int64             `json:"last_at"`
 	Generation int64             `json:"generation"`
+	Claimed    bool              `json:"claimed"`
 }
 
 // corraldHintsSettings reads the user's account-level master switch
@@ -429,11 +430,15 @@ func (s *Server) corraldHostProblemAndStateEligible(ctx context.Context, userID 
 }
 
 // evaluateCorraldHostHint is the single centralized rule determining whether a
-// contextual corrald hint should be shown for (userID, hostID):
+// contextual corrald hint is eligible for (userID, hostID):
 //  1. A real corrald-solvable problem was observed on this host's current target.
 //  2. The account-level master switch ("corraldHints") is enabled.
 //  3. Corrald is available on this gateway and not disabled by the admin.
-//  4. This host has not already been shown or dismissed at or after resetAt.
+//  4. This host has not been explicitly dismissed at or after resetAt.
+//     If it was already claimed (shown_at >= resetAt) and not dismissed, it is
+//     still returned with Claimed=true while all other eligibility rules hold,
+//     so the page that claimed it keeps displaying it across normal polls
+//     while non-claiming pages ignore it.
 //  5. The host exists, belongs to userID, its target still matches prob.Target,
 //     and it is currently unenabled & enableable.
 func (s *Server) evaluateCorraldHostHint(
@@ -444,7 +449,7 @@ func (s *Server) evaluateCorraldHostHint(
 	masterEnabled bool,
 	resetAt int64,
 ) (*CorraldHintItem, bool) {
-	if !masterEnabled || store.CorraldHintRowActive(hintRow, resetAt) {
+	if !masterEnabled || store.CorraldHintRowDismissed(hintRow, resetAt) {
 		return nil, false
 	}
 	if s == nil || s.corrald == nil || !s.corrald.Available() || s.corraldAdminDisabled() {
@@ -469,12 +474,14 @@ func (s *Server) evaluateCorraldHostHint(
 		Count:      prob.Count,
 		LastAt:     prob.LastAt.Unix(),
 		Generation: resetAt,
+		Claimed:    store.CorraldHintRowShown(hintRow, resetAt),
 	}, true
 }
 
 // selectCorraldHint returns the single most recently affected eligible host
 // hint for userID (or for filterHostID when > 0) alongside the user's current
-// reset generation.
+// reset generation. Unclaimed eligible hosts take priority over already-claimed
+// (not dismissed) eligible hosts so a claimed host never starves a new one.
 func (s *Server) selectCorraldHint(ctx context.Context, userID, filterHostID int64) (*CorraldHintItem, int64, error) {
 	if filterHostID > 0 {
 		if _, err := s.store.Host(ctx, userID, filterHostID); err != nil {
@@ -512,17 +519,25 @@ func (s *Server) selectCorraldHint(ctx context.Context, userID, filterHostID int
 	if err != nil {
 		return nil, resetAt, err
 	}
+	var claimedFallback *CorraldHintItem
 	for _, entry := range probs {
 		var row *store.CorraldHostHint
 		if existing, ok := rows[entry.HostID]; ok {
 			r := existing
 			row = &r
 		}
-		if item, eligible := s.evaluateCorraldHostHint(ctx, userID, entry.HostID, entry.Prob, row, masterEnabled, resetAt); eligible {
+		item, eligible := s.evaluateCorraldHostHint(ctx, userID, entry.HostID, entry.Prob, row, masterEnabled, resetAt)
+		if !eligible {
+			continue
+		}
+		if !item.Claimed {
 			return item, resetAt, nil
 		}
+		if claimedFallback == nil {
+			claimedFallback = item
+		}
 	}
-	return nil, resetAt, nil
+	return claimedFallback, resetAt, nil
 }
 
 // GET /api/corrald/hints[?host_id=<id>]
