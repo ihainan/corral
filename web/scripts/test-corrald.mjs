@@ -1090,10 +1090,97 @@ function baseStatus(overrides = {}) {
     enter('slot')
     const rendered = claimedBanner.type(claimedBanner.props)
     assert.equal(rendered.type, comp.CorraldHintBanner, 'slot must render CorraldHintBanner only after claimed:true')
+
+    // Subcase D4 (fix3 item 1, fails on 87306f4): once displayed, if the host's
+    // status in the page cache becomes non-off-and-enablable (e.g. running), the
+    // displayed banner must hide immediately without waiting for watchedHostId to change.
+    compCache.set(11, { status: baseStatus({ state: 'running' }) })
+    assert.equal(renderCtl().banner, null, 'fix3 item 1: displayed banner must hide immediately when cache turns running')
+    commit('ctl', 'passive')
+    compCache.clear()
+    assert.equal(renderCtl().banner, null, 'fix3 item 1: hidden displayedHint stays cleared')
   } finally {
     globalThis.window = prevWindow
     globalThis.document = prevDocument
   }
+}
+
+// Phase 2b fix3 item 1 regression tests (fails on 87306f4):
+// An already-displayed banner must hide when a hints poll no longer returns
+// that host, returns it as ineligible in cache, or returns a different host;
+// and a hint hidden this way stays shown_at on the server so it never comes back.
+{
+  const h7 = {
+    host_id: 7,
+    host_name: 'gpu-01',
+    reason: 'ssh_session_full',
+    op: 'status',
+    count: 2,
+    last_at: 1_700_000_000,
+    generation: 0,
+  }
+  const h8 = {
+    host_id: 8,
+    host_name: 'gpu-02',
+    reason: 'ssh_session_full',
+    op: 'log',
+    count: 1,
+    last_at: 1_700_000_010,
+    generation: 0,
+  }
+
+  // 1a. Poll returning null clears displayedHint, and server shown_at keeps it from returning.
+  const serverShown = new Set()
+  const cache = new Map()
+  const ctl = createCorraldHintController({
+    claimShown: async (hostId, gen) => {
+      const k = `${hostId}:${gen}`
+      if (serverShown.has(k)) return false
+      serverShown.add(k)
+      return true
+    },
+    dismiss: async () => {},
+    readCachedStatus: (id) => cache.get(id),
+  })
+  ctl.setUser(42)
+  ctl.onSlotMounted()
+  ctl.receiveServerHint(h7, 0)
+  await Promise.resolve()
+  await Promise.resolve()
+  assert.equal(ctl.getState().displayedHint?.host_id, 7)
+
+  ctl.receiveServerHint(null, 0)
+  assert.equal(ctl.getState().displayedHint, null, 'fix3 item 1: null poll must clear displayedHint')
+
+  // Even if offered again in the same generation, server still has shown_at -> claimed:false -> stays hidden.
+  ctl.receiveServerHint(h7, 0)
+  await Promise.resolve()
+  await Promise.resolve()
+  assert.equal(ctl.getState().displayedHint, null, 'fix3 item 1: hint hidden after null poll must not come back')
+
+  // 1b. Displayed banner hides when cached daemon status turns installing even if poll returns the same host.
+  ctl.receiveServerHint(h8, 0)
+  await Promise.resolve()
+  await Promise.resolve()
+  assert.equal(ctl.getState().displayedHint?.host_id, 8)
+  cache.set(8, { status: baseStatus({ state: 'installing', op: { id: 'op-i', kind: 'install', state: 'running' } }) })
+  ctl.receiveServerHint(h8, 0)
+  assert.equal(ctl.getState().displayedHint, null, 'fix3 item 1: ineligible cache status must clear displayedHint on poll')
+
+  // 1c. Poll returning a different eligible host clears old displayedHint and claims the new one.
+  cache.clear()
+  const h9 = { ...h8, host_id: 9, host_name: 'gpu-03' }
+  const h10 = { ...h8, host_id: 10, host_name: 'gpu-04' }
+  ctl.receiveServerHint(h9, 0)
+  await Promise.resolve()
+  await Promise.resolve()
+  assert.equal(ctl.getState().displayedHint?.host_id, 9)
+  ctl.receiveServerHint(h10, 0)
+  assert.equal(ctl.getState().displayedHint, null, 'fix3 item 1: poll returning another host must clear previous displayedHint')
+  await Promise.resolve()
+  await Promise.resolve()
+  assert.equal(ctl.getState().displayedHint?.host_id, 10)
+  ctl.dispose()
 }
 
 // Phase 2b fix2: dismiss retries in memory with backoff, flushes on next

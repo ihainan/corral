@@ -591,6 +591,24 @@ func (s *Server) apiMarkCorraldHintShown(w http.ResponseWriter, r *http.Request)
 		writeJSON(w, http.StatusOK, map[string]any{"claimed": false})
 		return
 	}
+	// Re-read mutable eligibility after the Status() lookup so concurrent
+	// retargeting, failure clearing, or admin disable refuses the claim before
+	// writing shown_at.
+	curHost, err := s.store.Host(r.Context(), userID, h.ID)
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "not_found", "no such host")
+		return
+	}
+	if err != nil {
+		s.internalError(w, r, err)
+		return
+	}
+	prob, hasProb = s.corraldHints.get(userID, h.ID)
+	if s.corrald == nil || !s.corrald.Available() || s.corraldAdminDisabled() ||
+		!hasProb || prob.Count <= 0 || prob.Reason == "" || prob.Target != corraldHintTarget(curHost) {
+		writeJSON(w, http.StatusOK, map[string]any{"claimed": false})
+		return
+	}
 	claimed, err := s.store.ClaimCorraldHintShown(r.Context(), userID, h.ID, gen)
 	if errors.Is(err, store.ErrNotFound) {
 		writeError(w, http.StatusNotFound, "not_found", "no such host")

@@ -1311,6 +1311,11 @@ export function createCorraldHintController(deps: CorraldHintControllerDeps): Co
         }
       }
 
+      if (displayedHint && !isHostStillEligible(displayedHint)) {
+        displayedHint = null
+        changed = true
+      }
+
       if (!masterEnabled || adminDisabled) {
         if (candidateHint !== null || displayedHint !== null) {
           cancelClaim()
@@ -1323,8 +1328,10 @@ export function createCorraldHintController(deps: CorraldHintControllerDeps): Co
       }
 
       if (!hint) {
-        if (candidateHint !== null) {
+        if (candidateHint !== null || displayedHint !== null || claimInFlight !== null) {
+          cancelClaim()
           candidateHint = null
+          displayedHint = null
           changed = true
         }
         if (changed) notify()
@@ -1333,7 +1340,21 @@ export function createCorraldHintController(deps: CorraldHintControllerDeps): Co
 
       const normalized: CorraldHint = { ...hint, generation: hint.generation ?? serverGeneration }
 
-      // Keep an already-claimed visible banner for the same host & generation.
+      // Immediately reject if the page's cached corrald status is already ineligible
+      // (and clear any displayed banner that is no longer returned as eligible).
+      if (!isHostStillEligible(normalized)) {
+        if (candidateHint !== null || displayedHint !== null || claimInFlight !== null) {
+          cancelClaim()
+          candidateHint = null
+          displayedHint = null
+          changed = true
+        }
+        if (changed) notify()
+        return
+      }
+
+      // Keep an already-claimed visible banner only when the poll still returns
+      // the same host & generation and its cached status remains eligible.
       if (
         displayedHint &&
         displayedHint.host_id === normalized.host_id &&
@@ -1343,20 +1364,11 @@ export function createCorraldHintController(deps: CorraldHintControllerDeps): Co
         return
       }
 
-      // Immediately reject if the page's cached corrald status is already ineligible.
-      if (!isHostStillEligible(normalized)) {
-        if (candidateHint !== null) {
-          candidateHint = null
-          changed = true
-        }
-        if (changed) notify()
-        return
-      }
-
-      // Do not replace a different already-claimed banner currently on screen.
+      // The poll returned a different eligible host, so the previously displayed
+      // host is no longer returned by the server: hide it before claiming the new one.
       if (displayedHint !== null) {
-        if (changed) notify()
-        return
+        displayedHint = null
+        changed = true
       }
 
       // If a claim is already in flight for this exact host & generation, keep waiting.

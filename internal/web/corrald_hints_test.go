@@ -886,3 +886,100 @@ func TestCorraldHintClaimRefusedWhenIneligibleForEachReason(t *testing.T) {
 	assertClaimed("first valid claim", hostClean, gen1, true)
 	assertClaimed("already shown", hostClean, gen1, false)
 }
+
+type blockingHintSSHProvider struct {
+	inner   gw.SSHProvider
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (p *blockingHintSSHProvider) AcquireSSH(ctx context.Context, userID, hostID int64) (*ssh.Client, func(), string, string, error) {
+	return p.inner.AcquireSSH(ctx, userID, hostID)
+}
+
+func (p *blockingHintSSHProvider) HostBinding(ctx context.Context, userID, hostID int64) (string, string, error) {
+	p.once.Do(func() {
+		close(p.entered)
+		<-p.release
+	})
+	return p.inner.HostBinding(ctx, userID, hostID)
+}
+
+func (p *blockingHintSSHProvider) UserLabel(ctx context.Context, userID int64) string {
+	return p.inner.UserLabel(ctx, userID)
+}
+
+// Phase 2b fix3 item 2 regression test (fails on 87306f4):
+// If the host is retargeted, the failure record is cleared, or admin disables
+// corrald while Status() is running, POST /hint/shown must re-check eligibility
+// before writing shown_at and return 200 {"claimed": false} without persisting.
+func TestCorraldHintClaimRevalidatesAfterStatusLookup(t *testing.T) {
+	for _, kind := range []string{"retarget_via_api", "retarget_in_store", "admin_disable"} {
+		t.Run(kind, func(t *testing.T) {
+			h := newHarness(t, func(c *config.Config) {
+				c.GatewayID = "gw-hint-reval-" + kind + ".local"
+			})
+			admin := h.admin()
+			uid := userIDOf(t, admin)
+			hid := createTestHostForHints(t, admin, "reval-box", 2291)
+			h.srv.recordCorraldHintError(uid, hid, HintOpStatus, sshx.ErrBusy)
+
+			gate := &blockingHintSSHProvider{
+				inner:   &webSSHProvider{s: h.srv},
+				entered: make(chan struct{}),
+				release: make(chan struct{}),
+			}
+			h.srv.corrald.Close()
+			h.srv.corrald = gw.NewManager(gw.ManagerConfig{
+				Store:     h.store,
+				Dist:      makeFakeCorraldDist(),
+				GatewayID: h.cfg.GatewayID,
+				SSH:       gate,
+			})
+
+			done := make(chan resp, 1)
+			go func() {
+				done <- admin.do("POST", fmt.Sprintf("/api/hosts/%d/corrald/hint/shown", hid), map[string]any{"generation": 0})
+			}()
+
+			select {
+			case <-gate.entered:
+			case <-time.After(5 * time.Second):
+				t.Fatal("claim did not enter Status/HostBinding")
+			}
+
+			switch kind {
+			case "retarget_via_api":
+				mustStatus(t, admin.do("PUT", fmt.Sprintf("/api/hosts/%d", hid), map[string]any{
+					"name":     "retargeted-box",
+					"address":  "127.0.0.2",
+					"port":     2291,
+					"username": "devuser",
+					"auth":     "ask",
+				}), http.StatusOK, "retarget host")
+			case "retarget_in_store":
+				cur, err := h.store.Host(context.Background(), uid, hid)
+				if err != nil {
+					t.Fatalf("store.Host: %v", err)
+				}
+				cur.Port = 2299
+				if err := h.store.UpdateHost(context.Background(), cur, true); err != nil {
+					t.Fatalf("UpdateHost: %v", err)
+				}
+			case "admin_disable":
+				mustStatus(t, admin.do("PUT", "/api/admin/corrald", map[string]any{"allowed": false}), http.StatusOK, "admin disable")
+			}
+
+			close(gate.release)
+			r := <-done
+			mustStatus(t, r, http.StatusOK, "claim result")
+			if got, ok := r.json()["claimed"].(bool); !ok || got {
+				t.Fatalf("%s: expected claimed=false, got body=%s", kind, string(r.Body))
+			}
+			if _, err := h.store.CorraldHostHint(context.Background(), uid, hid); !errors.Is(err, store.ErrNotFound) {
+				t.Fatalf("%s: refused claim must not persist shown_at, got err=%v", kind, err)
+			}
+		})
+	}
+}

@@ -218,8 +218,14 @@ export function useCorraldHintController(active: boolean): {
 
   // Subscribe to live CorraldStatus updates for the candidate or displayed host
   // so enabling, installing, or admin-disabling it from any entry cancels/hides
-  // the hint immediately.
+  // the hint immediately. Also re-check the page status cache synchronously so
+  // an already-displayed banner hides immediately if its cached state turned
+  // anything other than off-and-enablable.
   const watchedHostId = ctlState.displayedHint?.host_id ?? ctlState.candidateHint?.host_id ?? 0
+  const watchedCached = watchedHostId > 0 ? readCachedCorrald(watchedHostId) : undefined
+  const watchedCacheIneligible = Boolean(
+    watchedCached && (watchedCached.unavailable || (watchedCached.status && !isCorraldStatusHintEligible(watchedCached.status))),
+  )
   useEffect(() => {
     if (watchedHostId <= 0) return
     const cached = readCachedCorrald(watchedHostId)
@@ -229,7 +235,7 @@ export function useCorraldHintController(active: boolean): {
     return subscribeHostCorrald(watchedHostId, (st, unavailable) => {
       ctlRef.current?.onHostStatus(watchedHostId, st, unavailable)
     })
-  }, [watchedHostId])
+  }, [watchedHostId, watchedCacheIneligible])
 
   const fetchHint = useCallback(
     async (signal?: AbortSignal) => {
@@ -471,12 +477,14 @@ export function useCorraldHintController(active: boolean): {
     }
   }
 
+  const effectiveDisplayedHint = watchedCacheIneligible ? null : ctlState.displayedHint
+  const effectiveCandidateHint = watchedCacheIneligible ? null : ctlState.candidateHint
   const banner =
-    ctlState.displayedHint || ctlState.candidateHint ? (
+    effectiveDisplayedHint || effectiveCandidateHint ? (
       <CorraldHintSlot
         key={userId ?? 0}
         active={active}
-        displayedHint={ctlState.displayedHint}
+        displayedHint={effectiveDisplayedHint}
         busy={loadingStatus}
         onSlotMounted={handleSlotMounted}
         onSlotUnmounted={handleSlotUnmounted}
