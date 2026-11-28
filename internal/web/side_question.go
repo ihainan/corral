@@ -379,7 +379,7 @@ func (s *Server) apiConversationSide(w http.ResponseWriter, r *http.Request) {
 		}
 		l := parseConvoLocate(string(out))
 		if !l.noProc {
-			s.recordLocatedProcs(sess, l, !fastTry)
+			s.recordLocatedProcs(sess, l, !fastTry, tLoc)
 		}
 		s.perfLocate(op, tLoc, nil, len(l.procs), sess.HostID)
 		if fastTry {

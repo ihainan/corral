@@ -818,6 +818,7 @@ func (s *Server) watchHerdr(sess *term.Session, h *store.Host) {
 	lineage := s.newLineageTracker(sess, server, socket, name)
 	s.herdrSocks.setLineage(sess.ID, lineage)
 	lineage.setNeedLogs(func(lctx context.Context) {
+		tLoc := time.Now()
 		var locOut []byte
 		var locErr error
 		if cout, ok := s.tryCorraldLocate(lctx, sess, proto.AgentLocateParams{Mode: sess.Persistence, TmuxName: sess.CurrentTmuxSession()}); ok {
@@ -831,7 +832,7 @@ func (s *Server) watchHerdr(sess *term.Session, h *store.Host) {
 		got := time.Now().UnixMilli()
 		found := parseConvoLocate(string(locOut))
 		if !found.noProc {
-			s.recordLocatedProcs(sess, found, true)
+			s.recordLocatedProcs(sess, found, true, tLoc)
 		}
 		began := time.UnixMilli(got)
 		for _, p := range found.procs {
@@ -921,7 +922,7 @@ func (s *Server) watchHerdr(sess *term.Session, h *store.Host) {
 				at = map[string]int64{}
 				found := parseConvoLocate(string(out))
 				if !found.noProc {
-					s.recordLocatedProcs(sess, found, true)
+					s.recordLocatedProcs(sess, found, true, tLoc)
 				}
 				s.perfLocate("locate.times", tLoc, nil, len(found.procs), sess.HostID)
 				began := time.UnixMilli(got)

@@ -1,6 +1,7 @@
 package web
 
 import (
+	"container/list"
 	"context"
 	"fmt"
 	"path"
@@ -18,14 +19,16 @@ import (
 )
 
 const (
-	peerCacheMaxPerHost = 512
-	peerNegCacheTTL     = 60 * time.Second
-	peerLastSeenRefresh = time.Hour
+	peerCacheMaxPerHost    = 512
+	peerNegCacheMaxPerHost = 2048
+	peerNegCacheTTL        = 60 * time.Second
+	peerLastSeenRefresh    = time.Hour
 )
 
 type peerHostScope struct {
-	ownerID int64
-	hostID  int64
+	ownerID    int64
+	hostID     int64
+	hostConfig string
 }
 
 type peerProcID struct {
@@ -33,12 +36,27 @@ type peerProcID struct {
 	start int64
 }
 
+type peerTitleKey struct {
+	scope peerHostScope
+	id    peerProcID
+}
+
 type observedPeer struct {
-	info      store.PeerIdentity
-	sessionID string    // live Corral term.Session ID when observed (empty when loaded only from DB)
-	seenAt    time.Time // zero when loaded from DB and not yet confirmed alive in this gateway run
-	exited    bool      // true once a full scan covering this scope confirmed exit
-	gen       uint64    // monotonic observation generation for concurrent write ordering
+	info          store.PeerIdentity
+	sessionID     string    // live Corral term.Session ID when observed (empty when loaded only from DB)
+	tmuxServerPID string    // live tmux server PID when observed on tmux
+	seenAt        time.Time // zero when loaded from DB and not yet confirmed alive in this gateway run
+	observedAt    time.Time // scan/snapshot timestamp of the latest live observation
+	stateAt       time.Time // latest scan/snapshot timestamp that set alive or exited state
+	exited        bool      // true once a scan covering this scope confirmed exit or replacement
+	gen           uint64    // monotonic observation generation for concurrent write ordering
+}
+
+type latestPeerOccupant struct {
+	id            peerProcID
+	sessionID     string
+	tmuxServerPID string
+	observedAt    time.Time
 }
 
 type persistedPeer struct {
@@ -54,10 +72,84 @@ type peerScanScope struct {
 	coveredTmuxKeys map[string]bool
 }
 
-// peerRegistry caches observed (owner, host, pid, proc_start) -> Corral agent
-// mappings captured passively from Corral's existing locate scans and persists
-// them to SQLite so historical cross-session messages remain stable across
-// reloads, gateway restarts, and sender exits.
+type peerNegEntry struct {
+	id     peerProcID
+	missAt time.Time
+}
+
+// peerNegLRU is a bounded per-scope LRU negative cache for peer (pid, start)
+// lookups that missed SQLite. When full, only the least-recently-used entry is
+// evicted rather than clearing the whole table.
+type peerNegLRU struct {
+	ll    *list.List
+	items map[peerProcID]*list.Element
+	cap   int
+}
+
+func newPeerNegLRU(capacity int) *peerNegLRU {
+	if capacity <= 0 {
+		capacity = peerNegCacheMaxPerHost
+	}
+	return &peerNegLRU{
+		ll:    list.New(),
+		items: make(map[peerProcID]*list.Element),
+		cap:   capacity,
+	}
+}
+
+func (c *peerNegLRU) hasFresh(id peerProcID, now time.Time, ttl time.Duration) bool {
+	if c == nil {
+		return false
+	}
+	el, ok := c.items[id]
+	if !ok {
+		return false
+	}
+	ent := el.Value.(*peerNegEntry)
+	if now.Sub(ent.missAt) >= ttl {
+		c.ll.Remove(el)
+		delete(c.items, id)
+		return false
+	}
+	c.ll.MoveToFront(el)
+	return true
+}
+
+func (c *peerNegLRU) put(id peerProcID, now time.Time) {
+	if c == nil {
+		return
+	}
+	if el, ok := c.items[id]; ok {
+		el.Value.(*peerNegEntry).missAt = now
+		c.ll.MoveToFront(el)
+		return
+	}
+	for c.ll.Len() >= c.cap {
+		back := c.ll.Back()
+		if back == nil {
+			break
+		}
+		c.ll.Remove(back)
+		delete(c.items, back.Value.(*peerNegEntry).id)
+	}
+	el := c.ll.PushFront(&peerNegEntry{id: id, missAt: now})
+	c.items[id] = el
+}
+
+func (c *peerNegLRU) delete(id peerProcID) {
+	if c == nil {
+		return
+	}
+	if el, ok := c.items[id]; ok {
+		c.ll.Remove(el)
+		delete(c.items, id)
+	}
+}
+
+// peerRegistry caches observed (owner, host, host_config, pid, proc_start) ->
+// Corral agent mappings captured passively from Corral's existing locate scans
+// and persists them to SQLite so historical cross-session messages remain
+// stable across reloads, gateway restarts, and sender exits.
 type peerRegistry struct {
 	// persistMu serializes SQLite upserts so concurrent writers never commit an
 	// older observation over a newer one. Lock order: persistMu -> mu.
@@ -67,14 +159,15 @@ type peerRegistry struct {
 	nextGen     uint64
 	known       map[peerHostScope]map[peerProcID]*observedPeer
 	persisted   map[peerHostScope]map[peerProcID]persistedPeer
-	latestByKey map[peerHostScope]map[string]peerProcID // agentKey -> latest observed live (pid, start)
-	titles      map[string]string                       // sessID+"\x00"+pane -> latest convo.Title()
-	negCache    map[peerHostScope]map[peerProcID]time.Time
+	latestByKey map[peerHostScope]map[string]latestPeerOccupant // agentKey -> latest picked live occupant
+	titles      map[peerTitleKey]string                         // (scope, pid, start) -> verified convo.Title()
+	negCache    map[peerHostScope]*peerNegLRU
 
-	// Test hooks (nil in production).
-	nowFn     func() time.Time
-	persistFn func(ctx context.Context, ownerID, hostID int64, rows []store.PeerIdentity) error
-	lookupFn  func(ctx context.Context, ownerID, hostID int64, keys []store.PeerProcKey) (map[store.PeerProcKey]store.PeerIdentity, error)
+	// Test hooks (nil/zero in production).
+	nowFn       func() time.Time
+	negCacheCap int
+	persistFn   func(ctx context.Context, ownerID, hostID int64, hostConfig string, rows []store.PeerIdentity) error
+	lookupFn    func(ctx context.Context, ownerID, hostID int64, hostConfig string, keys []store.PeerProcKey) (map[store.PeerProcKey]store.PeerIdentity, error)
 }
 
 func (r *peerRegistry) now() time.Time {
@@ -82,6 +175,48 @@ func (r *peerRegistry) now() time.Time {
 		return r.nowFn()
 	}
 	return time.Now()
+}
+
+func peerHostConfig(sess *term.Session) string {
+	if sess == nil {
+		return ""
+	}
+	if sess.HostConfig != "" {
+		return sess.HostConfig
+	}
+	if c := sess.Client(); c != nil {
+		addr := ""
+		if ra := c.RemoteAddr(); ra != nil {
+			addr = ra.String()
+		}
+		if user := c.User(); user != "" || addr != "" {
+			return "ssh:" + user + "@" + addr
+		}
+	}
+	return ""
+}
+
+func peerScopeOf(sess *term.Session) peerHostScope {
+	return peerHostScope{
+		ownerID:    sess.OwnerID,
+		hostID:     sess.HostID,
+		hostConfig: peerHostConfig(sess),
+	}
+}
+
+func (s *Server) runningInPeerScope(sess *term.Session, scope peerHostScope) []*term.Session {
+	var filtered []*term.Session
+	if s.terms != nil {
+		for _, rs := range s.terms.Running(scope.ownerID, scope.hostID) {
+			if peerHostConfig(rs) == scope.hostConfig {
+				filtered = append(filtered, rs)
+			}
+		}
+	}
+	if len(filtered) == 0 && sess != nil {
+		return []*term.Session{sess}
+	}
+	return filtered
 }
 
 func peerMapKey(pid, start int64) string {
@@ -172,9 +307,11 @@ func normalizePeerProgram(agent string) string {
 	}
 }
 
+// samePeerProgram is fail-closed: both sides must identify a known program and
+// match after normalization.
 func samePeerProgram(a, b string) bool {
 	na, nb := normalizePeerProgram(a), normalizePeerProgram(b)
-	return na == "" || nb == "" || na == nb
+	return na != "" && nb != "" && na == nb
 }
 
 func peerTitleFromHerdr(wsLabel, paneLabel, convoTitle, paneTitle, agentName, cwd, agent string) string {
@@ -256,36 +393,35 @@ func (idx *herdrSnapIndex) lookup(paneID string) (herdr.Pane, string, bool) {
 	return p, idx.wsLabels[p.WorkspaceID], true
 }
 
-func (r *peerRegistry) noteConvoTitle(sessID, pane, title string) {
+func (r *peerRegistry) noteConvoTitleLocked(scope peerHostScope, id peerProcID, title string) {
 	t := sanitizePeerLabel(title, 160)
-	if sessID == "" || t == "" {
+	if id.pid <= 0 || id.start <= 0 || t == "" {
 		return
 	}
-	r.mu.Lock()
 	if r.titles == nil {
-		r.titles = map[string]string{}
+		r.titles = map[peerTitleKey]string{}
 	}
 	if len(r.titles) >= 2048 {
-		r.titles = map[string]string{}
+		r.titles = map[peerTitleKey]string{}
 	}
-	r.titles[sessID+"\x00"+pane] = t
-	r.mu.Unlock()
+	r.titles[peerTitleKey{scope: scope, id: id}] = t
 }
 
-func (r *peerRegistry) convoTitleOf(sessID, pane string) string {
+func (r *peerRegistry) convoTitleOf(scope peerHostScope, id peerProcID) string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.titles == nil {
 		return ""
 	}
-	return r.titles[sessID+"\x00"+pane]
+	return r.titles[peerTitleKey{scope: scope, id: id}]
 }
 
-// record updates in-memory observed peer state and returns the process IDs that
-// need to be persisted to SQLite (either new/changed metadata or throttled
-// last_seen refresh). It deliberately does NOT mark rows as persisted before
-// SQLite commits.
-func (r *peerRegistry) record(scope peerHostScope, items []observedPeer, scan peerScanScope, now time.Time) []peerProcID {
+// record updates in-memory observed peer state from a scan taken at observedAt
+// and returns the process IDs that need to be persisted to SQLite. Stale
+// late-arriving scans (observedAt older than already-recorded state) are
+// ignored and never overwrite newer metadata or resurrect exited processes.
+// It deliberately does NOT mark rows as persisted before SQLite commits.
+func (r *peerRegistry) record(scope peerHostScope, items []observedPeer, scan peerScanScope, observedAt time.Time) []peerProcID {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -296,7 +432,7 @@ func (r *peerRegistry) record(scope peerHostScope, items []observedPeer, scan pe
 		r.persisted = map[peerHostScope]map[peerProcID]persistedPeer{}
 	}
 	if r.latestByKey == nil {
-		r.latestByKey = map[peerHostScope]map[string]peerProcID{}
+		r.latestByKey = map[peerHostScope]map[string]latestPeerOccupant{}
 	}
 	km := r.known[scope]
 	if km == nil {
@@ -310,13 +446,15 @@ func (r *peerRegistry) record(scope peerHostScope, items []observedPeer, scan pe
 	}
 	lm := r.latestByKey[scope]
 	if lm == nil {
-		lm = map[string]peerProcID{}
+		lm = map[string]latestPeerOccupant{}
 		r.latestByKey[scope] = lm
 	}
 	nm := r.negCache[scope]
 
-	nowSec := now.Unix()
+	nowSec := observedAt.Unix()
+	obsMs := observedAt.UnixMilli()
 	seenItems := make(map[peerProcID]bool, len(items))
+	pickedByKey := make(map[string]peerProcID, len(items))
 	needPersist := make(map[peerProcID]struct{})
 
 	for _, item := range items {
@@ -324,11 +462,16 @@ func (r *peerRegistry) record(scope peerHostScope, items []observedPeer, scan pe
 			continue
 		}
 		id := peerProcID{pid: item.info.PID, start: item.info.ProcStart}
+		if prev := km[id]; prev != nil && observedAt.Before(prev.stateAt) {
+			// Late-arriving older scan: never overwrite newer observation or
+			// resurrect a process already confirmed exited by a newer scan.
+			continue
+		}
 		seenItems[id] = true
 		if nm != nil {
-			delete(nm, id)
+			nm.delete(id)
 		}
-		if prev := km[id]; prev != nil {
+		if prev := km[id]; prev != nil && prev.info.AgentKey == item.info.AgentKey {
 			if item.info.Title == "" && prev.info.Title != "" {
 				item.info.Title = prev.info.Title
 			}
@@ -342,30 +485,68 @@ func (r *peerRegistry) record(scope peerHostScope, items []observedPeer, scan pe
 				item.info.Program = prev.info.Program
 			}
 		}
+		item.info.HostConfig = scope.hostConfig
+		item.info.ObservedAt = obsMs
 		item.info.LastSeen = nowSec
 		if item.info.UpdatedAt <= 0 {
 			item.info.UpdatedAt = nowSec
 		}
 		r.nextGen++
 		item.gen = r.nextGen
-		item.seenAt = now
+		item.seenAt = observedAt
+		item.observedAt = observedAt
+		item.stateAt = observedAt
 		item.exited = false
 		cp := item
 		km[id] = &cp
 		if item.info.AgentKey != "" {
-			lm[item.info.AgentKey] = id
+			pickedByKey[item.info.AgentKey] = id
+			if prevOcc, ok := lm[item.info.AgentKey]; !ok || !observedAt.Before(prevOcc.observedAt) {
+				lm[item.info.AgentKey] = latestPeerOccupant{
+					id:            id,
+					sessionID:     item.sessionID,
+					tmuxServerPID: item.tmuxServerPID,
+					observedAt:    observedAt,
+				}
+			}
 		}
 		if prevP, ok := pm[id]; !ok || !prevP.info.SameSnapshot(item.info) || nowSec-prevP.lastSeen >= int64(peerLastSeenRefresh/time.Second) {
 			needPersist[id] = struct{}{}
 		}
 	}
 
+	// If a tmux session was explicitly scanned and no process won pickConvoProc
+	// for its active pane, clear its current occupant and mark prior occupants
+	// exited (unless a newer scan already updated them).
+	for tkey := range scan.coveredTmuxKeys {
+		if _, picked := pickedByKey[tkey]; picked {
+			continue
+		}
+		if prevOcc, ok := lm[tkey]; ok && !observedAt.Before(prevOcc.observedAt) {
+			delete(lm, tkey)
+		}
+		for id, obs := range km {
+			if seenItems[id] || obs.info.AgentKey != tkey {
+				continue
+			}
+			if observedAt.Before(obs.stateAt) {
+				continue
+			}
+			obs.exited = true
+			obs.stateAt = observedAt
+		}
+	}
+
 	// Keep previously known tmux peers alive when their (pid, start) is still
 	// present in a host-wide /proc scan (even when the scan ran from a herdr
-	// session and had no tmuxActive metadata).
+	// session and had no tmuxActive metadata), provided they are still the
+	// current verified occupant and this scan is not older than their state.
 	if len(scan.aliveInProcScan) > 0 {
 		for id, obs := range km {
-			if seenItems[id] || obs.info.Persistence != "tmux" {
+			if seenItems[id] || obs.info.Persistence != "tmux" || obs.exited || obs.seenAt.IsZero() {
+				continue
+			}
+			if observedAt.Before(obs.stateAt) {
 				continue
 			}
 			if !scan.aliveInProcScan[id] {
@@ -376,11 +557,15 @@ func (r *peerRegistry) record(scope peerHostScope, items []observedPeer, scan pe
 				// (or no process) won pickConvoProc for its active pane.
 				continue
 			}
-			if obs.info.AgentKey != "" && lm[obs.info.AgentKey] != (peerProcID{}) && lm[obs.info.AgentKey] != id {
+			occ, ok := lm[obs.info.AgentKey]
+			if !ok || occ.id != id || occ.sessionID != obs.sessionID {
 				continue
 			}
-			obs.seenAt = now
+			obs.seenAt = observedAt
+			obs.observedAt = observedAt
+			obs.stateAt = observedAt
 			obs.exited = false
+			obs.info.ObservedAt = obsMs
 			obs.info.LastSeen = nowSec
 			if prevP, ok := pm[id]; !ok || nowSec-prevP.lastSeen >= int64(peerLastSeenRefresh/time.Second) {
 				r.nextGen++
@@ -395,18 +580,31 @@ func (r *peerRegistry) record(scope peerHostScope, items []observedPeer, scan pe
 			if seenItems[id] {
 				continue
 			}
+			if observedAt.Before(obs.stateAt) {
+				// Never let a late-arriving older full scan mark a newer
+				// observation as exited.
+				continue
+			}
+			markExited := false
 			switch obs.info.Persistence {
 			case "herdr":
 				if !scan.aliveInProcScan[id] || scan.coveredHerdrMux[normalizeHerdrMux(obs.info.MuxSession)] {
-					obs.exited = true
+					markExited = true
 				}
 			case "tmux":
 				if !scan.aliveInProcScan[id] || scan.coveredTmuxKeys[obs.info.AgentKey] {
-					obs.exited = true
+					markExited = true
 				}
 			default:
 				if !scan.aliveInProcScan[id] {
-					obs.exited = true
+					markExited = true
+				}
+			}
+			if markExited {
+				obs.exited = true
+				obs.stateAt = observedAt
+				if occ, ok := lm[obs.info.AgentKey]; ok && occ.id == id && !observedAt.Before(occ.observedAt) {
+					delete(lm, obs.info.AgentKey)
 				}
 			}
 		}
@@ -440,6 +638,8 @@ func (r *peerRegistry) recordLoadedFromDB(scope peerHostScope, rows map[store.Pe
 	defer r.mu.Unlock()
 	if r.known == nil {
 		r.known = map[peerHostScope]map[peerProcID]*observedPeer{}
+	}
+	if r.persisted == nil {
 		r.persisted = map[peerHostScope]map[peerProcID]persistedPeer{}
 	}
 	km := r.known[scope]
@@ -455,7 +655,11 @@ func (r *peerRegistry) recordLoadedFromDB(scope peerHostScope, rows map[store.Pe
 	for k, row := range rows {
 		id := peerProcID{pid: k.PID, start: k.ProcStart}
 		if _, exists := km[id]; !exists {
-			km[id] = &observedPeer{info: row}
+			var obsAt time.Time
+			if row.ObservedAt > 0 {
+				obsAt = time.UnixMilli(row.ObservedAt)
+			}
+			km[id] = &observedPeer{info: row, observedAt: obsAt, stateAt: obsAt}
 		}
 		if _, exists := pm[id]; !exists {
 			seen := row.LastSeen
@@ -465,7 +669,7 @@ func (r *peerRegistry) recordLoadedFromDB(scope peerHostScope, rows map[store.Pe
 			pm[id] = persistedPeer{info: row, lastSeen: seen}
 		}
 		if nm := r.negCache[scope]; nm != nil {
-			delete(nm, id)
+			nm.delete(id)
 		}
 	}
 	// Record negative cache entries for keys queried from SQLite that did not exist.
@@ -478,25 +682,24 @@ func (r *peerRegistry) recordLoadedFromDB(scope peerHostScope, rows map[store.Pe
 			continue
 		}
 		if r.negCache == nil {
-			r.negCache = map[peerHostScope]map[peerProcID]time.Time{}
+			r.negCache = map[peerHostScope]*peerNegLRU{}
 		}
 		nm := r.negCache[scope]
-		if nm == nil || len(nm) >= peerCacheMaxPerHost {
-			nm = map[peerProcID]time.Time{}
+		if nm == nil {
+			nm = newPeerNegLRU(r.negCacheCap)
 			r.negCache[scope] = nm
 		}
-		nm[id] = now
+		nm.put(id, now)
 	}
 }
 
 // persistPeerIdentities writes pending peer observations to SQLite under
 // persistMu so concurrent callers never overwrite a newer observation with an
 // older one, and marks rows persisted ONLY after SQLite commits cleanly.
-func (s *Server) persistPeerIdentities(ownerID, hostID int64, ids []peerProcID) {
+func (s *Server) persistPeerIdentities(scope peerHostScope, ids []peerProcID) {
 	if s == nil || len(ids) == 0 || (s.store == nil && s.peers.persistFn == nil) {
 		return
 	}
-	scope := peerHostScope{ownerID: ownerID, hostID: hostID}
 
 	s.peers.persistMu.Lock()
 	defer s.peers.persistMu.Unlock()
@@ -540,13 +743,13 @@ func (s *Server) persistPeerIdentities(ownerID, hostID int64, ids []peerProcID) 
 	defer cancel()
 	var err error
 	if s.peers.persistFn != nil {
-		err = s.peers.persistFn(ctx, ownerID, hostID, rows)
+		err = s.peers.persistFn(ctx, scope.ownerID, scope.hostID, scope.hostConfig, rows)
 	} else {
-		err = s.store.UpsertPeerIdentities(ctx, ownerID, hostID, rows)
+		err = s.store.UpsertPeerIdentities(ctx, scope.ownerID, scope.hostID, scope.hostConfig, rows)
 	}
 	if err != nil {
 		if s.log != nil {
-			s.log.Warn("peer identities: persist failed", "owner", ownerID, "host", hostID, "count", len(rows), "err", err)
+			s.log.Warn("peer identities: persist failed", "owner", scope.ownerID, "host", scope.hostID, "count", len(rows), "err", err)
 		}
 		return
 	}
@@ -570,20 +773,19 @@ func (s *Server) persistPeerIdentities(ownerID, hostID int64, ids []peerProcID) 
 
 // recordLocatedProcs updates the server's peer identity registry from an
 // existing locate scan's results (zero extra remote calls). Only the primary
-// process selected by pickConvoProc for each Corral-managed pane is mapped to
-// that pane; child/background processes sharing HERDR_PANE_ID are ignored.
-func (s *Server) recordLocatedProcs(sess *term.Session, l convoLocated, full bool) {
+// process selected by pickConvoProc for each Corral-managed pane/tmux session
+// whose full positive identity evidence is present is mapped; child/background
+// processes sharing HERDR_PANE_ID and panes with incomplete snapshots are
+// ignored.
+func (s *Server) recordLocatedProcs(sess *term.Session, l convoLocated, full bool, observedAt time.Time) {
 	if s == nil || sess == nil || sess.OwnerID <= 0 || sess.HostID <= 0 || l.noProc {
 		return
 	}
-	scope := peerHostScope{ownerID: sess.OwnerID, hostID: sess.HostID}
-	var running []*term.Session
-	if s.terms != nil {
-		running = s.terms.Running(sess.OwnerID, sess.HostID)
+	if observedAt.IsZero() {
+		observedAt = s.peers.now()
 	}
-	if len(running) == 0 {
-		running = []*term.Session{sess}
-	}
+	scope := peerScopeOf(sess)
+	running := s.runningInPeerScope(sess, scope)
 
 	herdrBySock := map[string]*term.Session{}
 	snapIndexes := map[string]*herdrSnapIndex{}
@@ -629,9 +831,23 @@ func (s *Server) recordLocatedProcs(sess *term.Session, l convoLocated, full boo
 		if p == nil || p.pid <= 0 || p.start <= 0 {
 			continue
 		}
+		hp, wsLabel, paneExists := snapIndexes[rs.ID].lookup(pk.pane)
+		if !paneExists {
+			continue
+		}
+		candidate := store.PeerIdentity{
+			Program:      sanitizePeerLabel(p.agent, 64),
+			AgentSession: sanitizePeerLabel(p.sid, 128),
+			TerminalID:   sanitizePeerLabel(hp.TerminalID, 128),
+		}
+		// Fail-closed: only record a herdr peer identity when the current pane
+		// snapshot has complete, matching positive evidence (program, terminal
+		// ID, and agent session).
+		if !peerMatchesHerdrPane(candidate, hp, s.herdrSocks.locatedOf(rs.ID, pk.pane)) {
+			continue
+		}
 		info := rs.Info()
-		hp, wsLabel, _ := snapIndexes[rs.ID].lookup(pk.pane)
-		convoTitle := s.peers.convoTitleOf(rs.ID, pk.pane)
+		convoTitle := s.peers.convoTitleOf(scope, peerProcID{pid: p.pid, start: p.start})
 		title := peerTitleFromHerdr(wsLabel, hp.Label, convoTitle, hp.Title, hp.Name, p.cwd, p.agent)
 		if wsLabel == "~" {
 			wsLabel = ""
@@ -641,6 +857,7 @@ func (s *Server) recordLocatedProcs(sess *term.Session, l convoLocated, full boo
 			info: store.PeerIdentity{
 				OwnerID:      sess.OwnerID,
 				HostID:       sess.HostID,
+				HostConfig:   scope.hostConfig,
 				PID:          p.pid,
 				ProcStart:    p.start,
 				AgentKey:     herdrAgentKey(rs.HostID, info.MuxSession, pk.pane),
@@ -651,39 +868,43 @@ func (s *Server) recordLocatedProcs(sess *term.Session, l convoLocated, full boo
 				HostName:     sanitizePeerLabel(info.HostName, 120),
 				Workspace:    sanitizePeerLabel(wsLabel, 120),
 				Title:        title,
-				Program:      sanitizePeerLabel(p.agent, 64),
-				AgentSession: sanitizePeerLabel(p.sid, 128),
-				TerminalID:   sanitizePeerLabel(hp.TerminalID, 128),
+				Program:      candidate.Program,
+				AgentSession: candidate.AgentSession,
+				TerminalID:   candidate.TerminalID,
 			},
 		})
 	}
 
 	coveredTmuxKeys := map[string]bool{}
-	if sess.Persistence == "tmux" && l.tmuxActive != "" && l.tmuxPID != "" {
+	if sess.Persistence == "tmux" && (full || l.tmuxActive != "") {
 		info := sess.Info()
 		tkey := tmuxAgentKey(sess.HostID, info.MuxSession)
 		coveredTmuxKeys[tkey] = true
-		if p := pickConvoProc(l.procs, "tmux", l.tmuxActive, "", l.tmuxPID, l.tmuxTTY, ""); p != nil && p.pid > 0 && p.start > 0 {
-			convoTitle := s.peers.convoTitleOf(sess.ID, p.tmuxPane)
-			title := peerTitleFromTmux(convoTitle, l.tmuxTitle, info.DisplayName, info.MuxSession, p.agent)
-			items = append(items, observedPeer{
-				sessionID: sess.ID,
-				info: store.PeerIdentity{
-					OwnerID:      sess.OwnerID,
-					HostID:       sess.HostID,
-					PID:          p.pid,
-					ProcStart:    p.start,
-					AgentKey:     tkey,
-					Persistence:  "tmux",
-					MuxSession:   sanitizePeerLabel(info.MuxSession, 120),
-					DisplayName:  sanitizePeerLabel(info.DisplayName, 120),
-					Pane:         p.tmuxPane,
-					HostName:     sanitizePeerLabel(info.HostName, 120),
-					Title:        title,
-					Program:      sanitizePeerLabel(p.agent, 64),
-					AgentSession: sanitizePeerLabel(p.sid, 128),
-				},
-			})
+		if l.tmuxActive != "" && l.tmuxPID != "" {
+			if p := pickConvoProc(l.procs, "tmux", l.tmuxActive, "", l.tmuxPID, l.tmuxTTY, ""); p != nil && p.pid > 0 && p.start > 0 && normalizePeerProgram(p.agent) != "" {
+				convoTitle := s.peers.convoTitleOf(scope, peerProcID{pid: p.pid, start: p.start})
+				title := peerTitleFromTmux(convoTitle, l.tmuxTitle, info.DisplayName, info.MuxSession, p.agent)
+				items = append(items, observedPeer{
+					sessionID:     sess.ID,
+					tmuxServerPID: l.tmuxPID,
+					info: store.PeerIdentity{
+						OwnerID:      sess.OwnerID,
+						HostID:       sess.HostID,
+						HostConfig:   scope.hostConfig,
+						PID:          p.pid,
+						ProcStart:    p.start,
+						AgentKey:     tkey,
+						Persistence:  "tmux",
+						MuxSession:   sanitizePeerLabel(info.MuxSession, 120),
+						DisplayName:  sanitizePeerLabel(info.DisplayName, 120),
+						Pane:         p.tmuxPane,
+						HostName:     sanitizePeerLabel(info.HostName, 120),
+						Title:        title,
+						Program:      sanitizePeerLabel(p.agent, 64),
+						AgentSession: sanitizePeerLabel(p.sid, 128),
+					},
+				})
+			}
 		}
 	}
 
@@ -692,94 +913,142 @@ func (s *Server) recordLocatedProcs(sess *term.Session, l convoLocated, full boo
 		aliveInProcScan: aliveInProcScan,
 		coveredHerdrMux: coveredHerdrMux,
 		coveredTmuxKeys: coveredTmuxKeys,
-	}, s.peers.now())
+	}, observedAt)
 	if len(needPersist) > 0 {
-		s.persistPeerIdentities(sess.OwnerID, sess.HostID, needPersist)
+		s.persistPeerIdentities(scope, needPersist)
 	}
 }
 
-// recordBoundProc records the active conversation binding for sess (handles
-// both herdr and tmux sessions, and refreshes the remembered Corral title).
-func (s *Server) recordBoundProc(sess *term.Session, b *convoBind, convoTitle string) {
+// recordBoundProc updates the remembered title/session metadata for an ALREADY
+// verified live peer process (one currently selected by pickConvoProc in
+// latestByKey for sess's pane/tmux session). Fail-closed: if the binding does
+// not match the pane's current (pid, start) occupant or live herdr pane
+// identity, it writes nothing and merges nothing.
+func (s *Server) recordBoundProc(sess *term.Session, b *convoBind, convoTitle string, observedAt time.Time) {
 	if s == nil || sess == nil || b == nil || b.PID <= 0 || b.Start <= 0 || sess.OwnerID <= 0 || sess.HostID <= 0 {
 		return
 	}
-	if convoTitle != "" {
-		s.peers.noteConvoTitle(sess.ID, b.Pane, convoTitle)
+	if normalizePeerProgram(b.Agent) == "" {
+		return
 	}
-	scope := peerHostScope{ownerID: sess.OwnerID, hostID: sess.HostID}
+	if observedAt.IsZero() {
+		observedAt = s.peers.now()
+	}
+	scope := peerScopeOf(sess)
+	id := peerProcID{pid: b.PID, start: b.Start}
 	info := sess.Info()
 
-	var rec store.PeerIdentity
+	var agentKey, title, wsLabel, termID, agentSID string
 	switch sess.Persistence {
 	case "herdr":
 		if b.Pane == "" {
 			return
 		}
-		snap, _ := s.herdrSocks.snapshotOf(sess.ID)
-		hp, wsLabel, _ := indexHerdrSnapshot(snap).lookup(b.Pane)
-		if convoTitle == "" {
-			convoTitle = s.peers.convoTitleOf(sess.ID, b.Pane)
+		snap, ok := s.herdrSocks.snapshotOf(sess.ID)
+		if !ok {
+			return
 		}
-		title := peerTitleFromHerdr(wsLabel, hp.Label, convoTitle, hp.Title, hp.Name, hp.Cwd, b.Agent)
+		hp, ws, paneExists := indexHerdrSnapshot(snap).lookup(b.Pane)
+		if !paneExists {
+			return
+		}
+		candidate := store.PeerIdentity{
+			Program:      sanitizePeerLabel(b.Agent, 64),
+			AgentSession: sanitizePeerLabel(b.Session, 128),
+			TerminalID:   sanitizePeerLabel(b.TerminalID, 128),
+		}
+		if !peerMatchesHerdrPane(candidate, hp, s.herdrSocks.locatedOf(sess.ID, b.Pane)) {
+			return
+		}
+		agentKey = herdrAgentKey(sess.HostID, info.MuxSession, b.Pane)
+		wsLabel = ws
+		termID = candidate.TerminalID
+		agentSID = candidate.AgentSession
+		cleanConvoTitle := sanitizePeerLabel(convoTitle, 160)
+		if cleanConvoTitle == "" {
+			cleanConvoTitle = s.peers.convoTitleOf(scope, id)
+		}
+		title = peerTitleFromHerdr(wsLabel, hp.Label, cleanConvoTitle, hp.Title, hp.Name, hp.Cwd, b.Agent)
 		if wsLabel == "~" {
 			wsLabel = ""
 		}
-		termID := b.TerminalID
-		if termID == "" {
-			termID = hp.TerminalID
-		}
-		rec = store.PeerIdentity{
-			OwnerID:      sess.OwnerID,
-			HostID:       sess.HostID,
-			PID:          b.PID,
-			ProcStart:    b.Start,
-			AgentKey:     herdrAgentKey(sess.HostID, info.MuxSession, b.Pane),
-			Persistence:  "herdr",
-			MuxSession:   normalizeHerdrMux(info.MuxSession),
-			DisplayName:  sanitizePeerLabel(info.DisplayName, 120),
-			Pane:         b.Pane,
-			HostName:     sanitizePeerLabel(info.HostName, 120),
-			Workspace:    sanitizePeerLabel(wsLabel, 120),
-			Title:        title,
-			Program:      sanitizePeerLabel(b.Agent, 64),
-			AgentSession: sanitizePeerLabel(b.Session, 128),
-			TerminalID:   sanitizePeerLabel(termID, 128),
-		}
 	case "tmux":
-		if convoTitle == "" {
-			convoTitle = s.peers.convoTitleOf(sess.ID, b.Pane)
+		agentKey = tmuxAgentKey(sess.HostID, info.MuxSession)
+		agentSID = sanitizePeerLabel(b.Session, 128)
+		cleanConvoTitle := sanitizePeerLabel(convoTitle, 160)
+		if cleanConvoTitle == "" {
+			cleanConvoTitle = s.peers.convoTitleOf(scope, id)
 		}
-		title := peerTitleFromTmux(convoTitle, b.Title, info.DisplayName, info.MuxSession, b.Agent)
-		rec = store.PeerIdentity{
-			OwnerID:      sess.OwnerID,
-			HostID:       sess.HostID,
-			PID:          b.PID,
-			ProcStart:    b.Start,
-			AgentKey:     tmuxAgentKey(sess.HostID, info.MuxSession),
-			Persistence:  "tmux",
-			MuxSession:   sanitizePeerLabel(info.MuxSession, 120),
-			DisplayName:  sanitizePeerLabel(info.DisplayName, 120),
-			Pane:         b.Pane,
-			HostName:     sanitizePeerLabel(info.HostName, 120),
-			Title:        title,
-			Program:      sanitizePeerLabel(b.Agent, 64),
-			AgentSession: sanitizePeerLabel(b.Session, 128),
-		}
+		title = peerTitleFromTmux(cleanConvoTitle, b.Title, info.DisplayName, info.MuxSession, b.Agent)
 	default:
 		return
 	}
 
-	needPersist := s.peers.record(scope, []observedPeer{{info: rec, sessionID: sess.ID}}, peerScanScope{}, s.peers.now())
-	if len(needPersist) > 0 {
-		s.persistPeerIdentities(sess.OwnerID, sess.HostID, needPersist)
+	var shouldPersist bool
+	s.peers.mu.Lock()
+	km := s.peers.known[scope]
+	lm := s.peers.latestByKey[scope]
+	pm := s.peers.persisted[scope]
+	occ, hasOcc := lm[agentKey]
+	obs := km[id]
+	if hasOcc && occ.id == id && occ.sessionID == sess.ID && obs != nil && !obs.exited && !obs.seenAt.IsZero() {
+		// Verified: b matches the exact current (pid, start) picked by
+		// pickConvoProc for this pane/tmux session.
+		if convoTitle != "" {
+			s.peers.noteConvoTitleLocked(scope, id, convoTitle)
+		}
+		updated := obs.info
+		updated.HostConfig = scope.hostConfig
+		updated.HostName = sanitizePeerLabel(info.HostName, 120)
+		updated.DisplayName = sanitizePeerLabel(info.DisplayName, 120)
+		if wsLabel != "" {
+			updated.Workspace = sanitizePeerLabel(wsLabel, 120)
+		}
+		if title != "" {
+			updated.Title = title
+		}
+		if agentSID != "" {
+			updated.AgentSession = agentSID
+		}
+		if termID != "" {
+			updated.TerminalID = termID
+		}
+		// Never fabricate a newer locate scan timestamp than observedAt; only
+		// advance observedAt/stateAt/LastSeen when observedAt is strictly newer.
+		if observedAt.After(obs.observedAt) {
+			nowSec := observedAt.Unix()
+			updated.ObservedAt = observedAt.UnixMilli()
+			updated.LastSeen = nowSec
+			if updated.UpdatedAt < nowSec {
+				updated.UpdatedAt = nowSec
+			}
+			obs.seenAt = observedAt
+			obs.observedAt = observedAt
+			if observedAt.After(obs.stateAt) {
+				obs.stateAt = observedAt
+			}
+		} else if nowSec := s.peers.now().Unix(); updated.UpdatedAt < nowSec {
+			updated.UpdatedAt = nowSec
+		}
+		changed := !obs.info.SameSnapshot(updated)
+		obs.info = updated
+		if prevP, ok := pm[id]; !ok || changed || !prevP.info.SameSnapshot(updated) || updated.LastSeen-prevP.lastSeen >= int64(peerLastSeenRefresh/time.Second) {
+			s.peers.nextGen++
+			obs.gen = s.peers.nextGen
+			shouldPersist = true
+		}
+	}
+	s.peers.mu.Unlock()
+
+	if shouldPersist {
+		s.persistPeerIdentities(scope, []peerProcID{id})
 	}
 }
 
-// peerMatchesHerdrPane verifies that the live herdr pane snapshot still holds
-// the same agent identity as the recorded peer (terminal ID, session ID, and
-// program). Any mismatch treats the recorded peer as exited rather than
-// misattributing old messages to a replacement agent in the same pane.
+// peerMatchesHerdrPane is strictly fail-closed: it returns true ONLY when the
+// live herdr pane snapshot carries complete, non-empty, matching positive
+// evidence for program, terminal ID, and agent session (and agrees with any
+// locatedSID). Missing or mismatched fields always return false.
 func peerMatchesHerdrPane(info store.PeerIdentity, hp herdr.Pane, locatedSID string) bool {
 	if hp.Agent == "" || hp.AgentStatus == herdr.StatusGone {
 		return false
@@ -787,25 +1056,24 @@ func peerMatchesHerdrPane(info store.PeerIdentity, hp herdr.Pane, locatedSID str
 	if !samePeerProgram(info.Program, hp.Agent) {
 		return false
 	}
-	if info.TerminalID != "" && hp.TerminalID != "" && hp.TerminalID != info.TerminalID {
+	if info.TerminalID == "" || hp.TerminalID == "" || hp.TerminalID != info.TerminalID {
 		return false
 	}
 	snapSID := agentSession(hp)
-	if info.AgentSession != "" {
-		if snapSID != "" && snapSID != info.AgentSession {
-			return false
-		}
-		if locatedSID != "" && locatedSID != info.AgentSession {
-			return false
-		}
+	if info.AgentSession == "" || snapSID == "" || snapSID != info.AgentSession {
+		return false
+	}
+	if locatedSID != "" && locatedSID != info.AgentSession {
+		return false
 	}
 	return true
 }
 
 // resolveConvoPeers builds the peer lookup table for all verified peer
 // references present in st.parser (and queued items), combining in-memory
-// observations, SQLite history (with negative caching), and strict live
-// Corral session/pane identity verification. Never triggers remote calls.
+// observations, SQLite history (with LRU negative caching), and strict
+// fail-closed live Corral session/pane identity verification. Never triggers
+// remote calls.
 func (s *Server) resolveConvoPeers(ctx context.Context, sess *term.Session, st *convoState) map[string]convo.PeerInfo {
 	if s == nil || sess == nil || st == nil || st.parser == nil || sess.OwnerID <= 0 || sess.HostID <= 0 {
 		return nil
@@ -814,10 +1082,10 @@ func (s *Server) resolveConvoPeers(ctx context.Context, sess *term.Session, st *
 	if len(refs) == 0 {
 		return nil
 	}
-	scope := peerHostScope{ownerID: sess.OwnerID, hostID: sess.HostID}
+	scope := peerScopeOf(sess)
 	now := s.peers.now()
 
-	// Step 1: check in-memory cache and negative cache before querying SQLite.
+	// Step 1: check in-memory cache and LRU negative cache before querying SQLite.
 	var dbKeys []store.PeerProcKey
 	s.peers.mu.Lock()
 	km := s.peers.known[scope]
@@ -827,10 +1095,8 @@ func (s *Server) resolveConvoPeers(ctx context.Context, sess *term.Session, st *
 		if km != nil && km[id] != nil {
 			continue
 		}
-		if nm != nil {
-			if missAt, ok := nm[id]; ok && now.Sub(missAt) < peerNegCacheTTL {
-				continue
-			}
+		if nm != nil && nm.hasFresh(id, now, peerNegCacheTTL) {
+			continue
 		}
 		dbKeys = append(dbKeys, store.PeerProcKey{PID: ref.PID, ProcStart: ref.Start})
 	}
@@ -840,25 +1106,20 @@ func (s *Server) resolveConvoPeers(ctx context.Context, sess *term.Session, st *
 		var dbRows map[store.PeerProcKey]store.PeerIdentity
 		var err error
 		if s.peers.lookupFn != nil {
-			dbRows, err = s.peers.lookupFn(ctx, sess.OwnerID, sess.HostID, dbKeys)
+			dbRows, err = s.peers.lookupFn(ctx, scope.ownerID, scope.hostID, scope.hostConfig, dbKeys)
 		} else {
-			dbRows, err = s.store.LookupPeerIdentities(ctx, sess.OwnerID, sess.HostID, dbKeys)
+			dbRows, err = s.store.LookupPeerIdentities(ctx, scope.ownerID, scope.hostID, scope.hostConfig, dbKeys)
 		}
 		if err == nil {
 			s.peers.recordLoadedFromDB(scope, dbRows, dbKeys, now)
 		}
 	}
 
-	// Step 2: gather currently running Corral sessions and index each snapshot
-	// once (O(N)) to verify whether each matched peer is still alive and holds
-	// the exact same pane identity.
-	var running []*term.Session
-	if s.terms != nil {
-		running = s.terms.Running(sess.OwnerID, sess.HostID)
-	}
-	if len(running) == 0 {
-		running = []*term.Session{sess}
-	}
+	// Step 2: gather currently running Corral sessions in the SAME host config
+	// scope and index each herdr snapshot once (O(N)) to verify whether each
+	// matched peer is still alive and holds the exact same pane/process
+	// identity.
+	running := s.runningInPeerScope(sess, scope)
 	liveHerdr := map[string]*term.Session{} // normalized mux -> session
 	liveTmux := map[string]*term.Session{}  // mux -> session
 	snapIndexes := map[string]*herdrSnapIndex{}
@@ -900,15 +1161,15 @@ func (s *Server) resolveConvoPeers(ctx context.Context, sess *term.Session, st *
 			AgentSession: obs.info.AgentSession,
 			TerminalID:   obs.info.TerminalID,
 		}
-		if !obs.seenAt.IsZero() && !obs.exited {
-			// Alive only if this exact (pid, start) is still the latest
-			// occupant for its agentKey AND matches the live session/pane
-			// identity (terminal ID, session ID, program).
-			replaced := obs.info.AgentKey != "" && lm != nil && lm[obs.info.AgentKey] != (peerProcID{}) && lm[obs.info.AgentKey] != id
-			if !replaced {
+		// Fail-closed liveness: positive evidence is required on every check.
+		// This exact (pid, start) must still be the current pickConvoProc
+		// occupant for its agentKey on the exact same live Corral session.
+		if !obs.seenAt.IsZero() && !obs.exited && obs.info.AgentKey != "" && obs.sessionID != "" && lm != nil {
+			occ, ok := lm[obs.info.AgentKey]
+			if ok && occ.id == id && occ.sessionID == obs.sessionID {
 				switch obs.info.Persistence {
 				case "herdr":
-					if rs := liveHerdr[normalizeHerdrMux(obs.info.MuxSession)]; rs != nil {
+					if rs := liveHerdr[normalizeHerdrMux(obs.info.MuxSession)]; rs != nil && rs.ID == obs.sessionID {
 						snapIdx := snapIndexes[rs.ID]
 						hp, wsLabel, paneExists := snapIdx.lookup(obs.info.Pane)
 						locatedSID := s.herdrSocks.locatedOf(rs.ID, obs.info.Pane)
@@ -921,21 +1182,21 @@ func (s *Server) resolveConvoPeers(ctx context.Context, sess *term.Session, st *
 							if wsLabel != "" && wsLabel != "~" {
 								pi.Workspace = sanitizePeerLabel(wsLabel, 120)
 							}
-							if hp.TerminalID != "" {
-								pi.TerminalID = sanitizePeerLabel(hp.TerminalID, 128)
-							}
-							if t := peerTitleFromHerdr(wsLabel, hp.Label, s.peers.titles[rs.ID+"\x00"+obs.info.Pane], hp.Title, hp.Name, hp.Cwd, pi.Program); t != "" {
+							pi.TerminalID = sanitizePeerLabel(hp.TerminalID, 128)
+							if t := peerTitleFromHerdr(wsLabel, hp.Label, s.peers.titles[peerTitleKey{scope: scope, id: id}], hp.Title, hp.Name, hp.Cwd, pi.Program); t != "" {
 								pi.Title = t
 							}
 						}
 					}
 				case "tmux":
-					if rs := liveTmux[obs.info.MuxSession]; rs != nil {
-						info := rs.Info()
-						pi.Alive = true
-						pi.SessionID = rs.ID
-						pi.HostName = sanitizePeerLabel(info.HostName, 120)
-						pi.DisplayName = sanitizePeerLabel(info.DisplayName, 120)
+					if rs := liveTmux[obs.info.MuxSession]; rs != nil && rs.ID == obs.sessionID && normalizePeerProgram(obs.info.Program) != "" {
+						if obs.tmuxServerPID == "" || occ.tmuxServerPID == "" || obs.tmuxServerPID == occ.tmuxServerPID {
+							info := rs.Info()
+							pi.Alive = true
+							pi.SessionID = rs.ID
+							pi.HostName = sanitizePeerLabel(info.HostName, 120)
+							pi.DisplayName = sanitizePeerLabel(info.DisplayName, 120)
+						}
 					}
 				}
 			}

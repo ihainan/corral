@@ -35,7 +35,8 @@ assert.equal(peerHref('sess&evil=1', 'w1:p1&x=2'), '/agents?s=sess%26evil%3D1&pa
 // 3. sanitizePeerText strips ASCII control chars and BiDi overrides.
 assert.equal(sanitizePeerText('  \x1b\u202ehello\x00world  '), 'helloworld')
 
-// 4. Live matched peer uses exact live sidebar title, location, href, and onPick.
+// 4. Live matched herdr peer (with complete positive identity evidence) uses
+//    exact live sidebar title, location, href, and onPick.
 {
   let picked = null
   const liveByKey = new Map([
@@ -49,8 +50,11 @@ assert.equal(sanitizePeerText('  \x1b\u202ehello\x00world  '), 'helloworld')
         hostName: 'devbox',
         sessionLabel: 'herdr',
         sessionId: 'sess-live',
+        persistence: 'herdr',
         pane: 'w1:p2',
         program: 'claude',
+        agentSession: '11111111-1111-1111-1111-111111111111',
+        terminalId: 'term-1',
         onPick: (how) => {
           picked = how ?? 'plain'
         },
@@ -69,6 +73,8 @@ assert.equal(sanitizePeerText('  \x1b\u202ehello\x00world  '), 'helloworld')
       workspace: 'corral-dev',
       title: 'stale-title',
       program: 'claude',
+      agent_session: '11111111-1111-1111-1111-111111111111',
+      terminal_id: 'term-1',
       alive: true,
     },
   }
@@ -89,6 +95,119 @@ assert.equal(sanitizePeerText('  \x1b\u202ehello\x00world  '), 'helloworld')
   assert.equal(picked, 'split')
   r.onPick(peerClickHow({ metaKey: false, ctrlKey: false, altKey: false }))
   assert.equal(picked, 'plain')
+}
+
+// 4b. Fail-closed regression (fix2 #1): ANY missing identity field on either
+//     peer info or live sidebar target MUST fail closed -> exited with
+//     remembered title and NO link, never overwriting with live.title.
+{
+  const baseLive = {
+    key: '1||w1:p2',
+    title: 'Current Sidebar Agent',
+    where: 'new work',
+    sessionGroup: 'devbox · herdr',
+    hostName: 'devbox',
+    sessionLabel: 'herdr',
+    sessionId: 'sess-live',
+    persistence: 'herdr',
+    pane: 'w1:p2',
+    program: 'claude',
+    agentSession: 'sid-1',
+    terminalId: 'term-1',
+    onPick: () => {
+      throw new Error('must not be clickable when identity fields are incomplete')
+    },
+  }
+  const baseInfo = {
+    key: '1||w1:p2',
+    session_id: 'sess-live',
+    host_id: 1,
+    host_name: 'devbox',
+    persistence: 'herdr',
+    mux_session: '',
+    pane: 'w1:p2',
+    workspace: 'corral-dev',
+    title: 'Remembered Agent',
+    program: 'claude',
+    agent_session: 'sid-1',
+    terminal_id: 'term-1',
+    alive: true,
+  }
+
+  const cases = [
+    ['missing live.terminalId', baseInfo, { ...baseLive, terminalId: undefined }],
+    ['missing info.terminal_id', { ...baseInfo, terminal_id: undefined }, baseLive],
+    ['missing live.agentSession', baseInfo, { ...baseLive, agentSession: undefined }],
+    ['missing info.agent_session', { ...baseInfo, agent_session: undefined }, baseLive],
+    ['missing live.program', baseInfo, { ...baseLive, program: undefined }],
+    ['missing info.program', { ...baseInfo, program: undefined }, baseLive],
+    ['missing info.session_id', { ...baseInfo, session_id: undefined }, baseLive],
+    ['missing live.sessionId', baseInfo, { ...baseLive, sessionId: '' }],
+    ['missing persistence', { ...baseInfo, persistence: undefined }, baseLive],
+    ['mismatched pane', baseInfo, { ...baseLive, pane: 'w1:p9' }],
+  ]
+
+  for (const [label, info, live] of cases) {
+    const r = resolvePeerSender({
+      from: 'ai-68',
+      peerPid: 100,
+      peerStart: 200,
+      peers: { '100:200': info },
+      liveByKey: new Map([['1||w1:p2', live]]),
+    })
+    assert.equal(r.kind, 'exited', `${label}: expected exited`)
+    assert.equal(r.name, 'Remembered Agent', `${label}: must keep remembered title`)
+    assert.equal('href' in r, false, `${label}: must not emit href`)
+  }
+}
+
+// 4c. Live tmux peer requires exact session_id match; recreated tmux session
+//     with the same name but different sessionId must fail closed.
+{
+  const liveOld = {
+    key: '1|tmux|main',
+    title: 'devbox · main',
+    where: 'devbox',
+    sessionGroup: 'devbox · main',
+    hostName: 'devbox',
+    sessionLabel: 'main',
+    sessionId: 'sess-tmux-1',
+    persistence: 'tmux',
+    onPick: () => {},
+  }
+  const peerInfo = {
+    key: '1|tmux|main',
+    session_id: 'sess-tmux-1',
+    host_id: 1,
+    host_name: 'devbox',
+    persistence: 'tmux',
+    mux_session: 'main',
+    title: 'tmux-verified-title',
+    program: 'claude',
+    alive: true,
+  }
+  const hit = resolvePeerSender({
+    from: 'ai-tm',
+    peerPid: 300,
+    peerStart: 1200,
+    peers: { '300:1200': peerInfo },
+    liveByKey: new Map([['1|tmux|main', liveOld]]),
+  })
+  assert.equal(hit.kind, 'live')
+  assert.equal(hit.name, 'tmux-verified-title') // does not overwrite with generic sidebar label
+  assert.equal(hit.href, '/agents?s=sess-tmux-1')
+
+  // Recreated tmux session with same key '1|tmux|main' but new sessionId fails closed.
+  const recreated = resolvePeerSender({
+    from: 'ai-tm',
+    peerPid: 300,
+    peerStart: 1200,
+    peers: { '300:1200': peerInfo },
+    liveByKey: new Map([['1|tmux|main', { ...liveOld, sessionId: 'sess-tmux-2' }]]),
+  })
+  assert.equal(recreated.kind, 'exited')
+  assert.equal(recreated.name, 'tmux-verified-title')
+  assert.equal('href' in recreated, false)
 }
 
 // 5. Exited peer (alive=false or absent from liveByKey) keeps remembered Corral
@@ -136,6 +255,7 @@ assert.equal(sanitizePeerText('  \x1b\u202ehello\x00world  '), 'helloworld')
         hostName: 'devbox',
         sessionLabel: 'herdr',
         sessionId: 'sess-live',
+        persistence: 'herdr',
         pane: 'w1:p2',
         program: 'claude',
         agentSession: 'new-session-uuid',

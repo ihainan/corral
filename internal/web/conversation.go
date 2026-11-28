@@ -2686,7 +2686,7 @@ func (s *Server) apiConversation(w http.ResponseWriter, r *http.Request) {
 	st.takeEarlierTitle()
 	ans.Title, ans.Tasks = st.parser.Title(), st.parser.Tasks()
 	if st.bind != nil && !st.sub {
-		s.recordBoundProc(sess, st.bind, ans.Title)
+		s.recordBoundProc(sess, st.bind, ans.Title, st.located)
 	}
 	if m := st.meta(); m != (convo.Meta{}) {
 		ans.Meta = &m
@@ -2986,7 +2986,7 @@ func (s *Server) locateScan(ctx context.Context, sess *term.Session, st *convoSt
 	}
 	prevLocated, prevPane := st.located, st.pane
 	if !l.noProc {
-		s.recordLocatedProcs(sess, l, !fastHit && !ocOnly)
+		s.recordLocatedProcs(sess, l, !fastHit && !ocOnly, at)
 	}
 	st.located, st.pane = at, pane // (when the scan was made: one shared may be a little older)
 	sid, log, reason, agent := "", "", "", ""
@@ -3101,7 +3101,7 @@ func (s *Server) locateScan(ctx context.Context, sess *term.Session, st *convoSt
 			// before had queued is not this one's.)
 			b.started = p.started
 			st.bind = b
-			s.recordBoundProc(sess, b, "")
+			s.recordBoundProc(sess, b, "", at)
 		}
 		switch {
 		case p == nil:

@@ -2139,6 +2139,7 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
     const byKey = new Map<string, LivePeerTarget>()
     const entryByKey = new Map(entries.map((e) => [e.key, e]))
     for (const r of rows) {
+      if (r.lost) continue
       const e = entryByKey.get(r.key)
       if (!e) continue
       byKey.set(r.key, {
@@ -2149,15 +2150,16 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
         hostName: e.s.host_name,
         sessionLabel: sessionWhich(e.s, all),
         sessionId: e.s.id,
+        persistence: e.s.persistence,
         pane: e.pane,
         program: r.program,
-        agentSession: e.row?.a.session || undefined,
+        agentSession: e.row?.a.session || (r.current ? convo.bind?.session : undefined) || undefined,
         terminalId: e.row?.a.terminal_id || undefined,
         onPick: r.onPick,
       })
     }
     return byKey
-  }, [entries, rows, all])
+  }, [entries, rows, all, convo.bind?.session])
   livePeerTargetsRef.current = livePeerTargets
   const shown = rows.find((r) => r.current)
   const known = !!shown && shown.status !== 'unknown'

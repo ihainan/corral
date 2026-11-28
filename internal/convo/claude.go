@@ -1221,8 +1221,49 @@ func (c *Claude) imageSources(r *claudeRow) {
 	}
 }
 
+func isPeerOrigin(o *claudeOrigin) bool {
+	return o != nil && o.Kind == "peer"
+}
+
 func hasCompletePeerOrigin(o *claudeOrigin) bool {
-	return o != nil && o.Kind == "peer" && rawPositiveInt64(o.VerifiedPeerPID) > 0 && rawPositiveInt64(o.VerifiedPeerProcStart) > 0
+	return isPeerOrigin(o) && rawPositiveInt64(o.VerifiedPeerPID) > 0 && rawPositiveInt64(o.VerifiedPeerProcStart) > 0
+}
+
+func peerOriginAddr(s string, o *claudeOrigin) string {
+	if i := strings.Index(s, "<cross-session-message"); i >= 0 {
+		if a := crossSessionAddr.FindStringSubmatch(s[i:]); a != nil {
+			return clip(a[1], maxMeta)
+		}
+	}
+	if isPeerOrigin(o) && o.From != "" {
+		return clip(o.From, maxMeta)
+	}
+	return ""
+}
+
+func peerOriginName(s string, o *claudeOrigin) string {
+	if i := strings.Index(s, "<cross-session-message"); i >= 0 {
+		if m := crossSession.FindStringSubmatch(s[i:]); m != nil {
+			return clip(m[1], maxMeta)
+		}
+	}
+	if isPeerOrigin(o) && o.Name != "" {
+		return clip(o.Name, maxMeta)
+	}
+	return ""
+}
+
+// clearPeerAddr invalidates any cached verified (pid, start) for socket addr.
+// Keeping a zero-pid entry acts as a tombstone against Prepend so an older
+// chunk cannot resurrect a stale verified process identity after socket reuse.
+func (c *Claude) clearPeerAddr(addr, name string) {
+	if addr == "" {
+		return
+	}
+	if c.peers == nil || len(c.peers) >= maxPeers {
+		c.peers = map[string]peerAddrInfo{}
+	}
+	c.peers[addr] = peerAddrInfo{name: name}
 }
 
 func extractClaudeText(raw json.RawMessage) string {
@@ -1244,19 +1285,29 @@ func extractClaudeText(raw json.RawMessage) string {
 }
 
 func (c *Claude) user(r *claudeRow) {
+	// Fail-closed socket invalidation: any incomplete/unverified peer origin
+	// (even with missing isMeta, empty body, or plain-text content) clears the
+	// socket address's cached verified (pid, start) BEFORE any early return.
+	if isPeerOrigin(r.Origin) && !hasCompletePeerOrigin(r.Origin) {
+		s := extractClaudeText(r.Message.Content)
+		c.clearPeerAddr(peerOriginAddr(s, r.Origin), peerOriginName(s, r.Origin))
+	}
 	// (A message of the person's, not a tool's result, tells by where it
 	// hangs of a rewind. Not one Claude Code wrote itself (isMeta): /exit's
 	// caveat hangs where the message before the last does, and the session
 	// resumed goes on from that last one.)
-	if r.IsMeta || hasCompletePeerOrigin(r.Origin) {
+	if r.IsMeta || isPeerOrigin(r.Origin) {
 		if r.IsMeta {
 			c.imageSources(r)
+		}
+		s := extractClaudeText(r.Message.Content)
+		if !hasCompletePeerOrigin(r.Origin) && strings.Contains(s, "<cross-session-message") {
+			c.clearPeerAddr(peerOriginAddr(s, r.Origin), peerOriginName(s, r.Origin))
 		}
 		// (Not shown. But one Claude Code sent on its own may be what waited:
 		// another session's message, a scheduled task's prompt, which it
 		// writes so when it takes them in — the waiting is over.)
-		if r.PromptSource == "system" || (r.Origin != nil && r.Origin.Kind == "peer") {
-			s := extractClaudeText(r.Message.Content)
+		if r.PromptSource == "system" || isPeerOrigin(r.Origin) {
 			if s != "" {
 				c.metaArrived(s)
 			}
@@ -1414,6 +1465,11 @@ func (c *Claude) queueOp(r *claudeRow) {
 	_ = json.Unmarshal(r.Content, &s)
 	switch r.Operation {
 	case "enqueue":
+		// Incomplete/unverified peer origin clears any cached verified identity
+		// for that socket address before any early exit.
+		if isPeerOrigin(r.Origin) && !hasCompletePeerOrigin(r.Origin) {
+			c.clearPeerAddr(peerOriginAddr(s, r.Origin), peerOriginName(s, r.Origin))
+		}
 		// What waits there is the person's message, another session's
 		// agent writing to this one, or a notice from the harness; what
 		// belongs to no one of these (a background task's notice) is not
@@ -1424,41 +1480,14 @@ func (c *Claude) queueOp(r *claudeRow) {
 			q.Text, q.cut = cut(clean(blankEnds(text)), maxText)
 			q.key = queueKey(q.Text)
 			q.Time = clip(r.Timestamp, 64)
-			if r.Origin != nil && r.Origin.Kind == "peer" {
-				pid := rawPositiveInt64(r.Origin.VerifiedPeerPID)
-				start := rawPositiveInt64(r.Origin.VerifiedPeerProcStart)
-				if pid > 0 && start > 0 {
-					q.PeerPID, q.PeerStart = pid, start
-					c.hasPeers = true
-				} else {
-					// Partial/unverified peer origin must never reuse a prior
-					// verified identity for the same socket address.
-					addr := clip(r.Origin.From, maxMeta)
-					if addr == "" {
-						if a := crossSessionAddr.FindStringSubmatch(s); a != nil {
-							addr = clip(a[1], maxMeta)
-						}
-					}
-					if addr != "" && c.peers != nil {
-						if prev, ok := c.peers[addr]; ok {
-							name := clip(r.Origin.Name, maxMeta)
-							if name == "" {
-								name = from
-							}
-							if name == "" {
-								name = prev.name
-							}
-							c.peers[addr] = peerAddrInfo{name: name}
-						}
-					}
-				}
-			} else if from != "" {
-				if a := crossSessionAddr.FindStringSubmatch(s); a != nil {
-					if info, ok := c.peers[clip(a[1], maxMeta)]; ok && info.pid > 0 && info.start > 0 && (info.name == "" || info.name == from) {
-						q.PeerPID, q.PeerStart = info.pid, info.start
-						c.hasPeers = true
-					}
-				}
+			// Fail-closed: only copy verified (pid, start) when this queue
+			// record itself carries complete verified peer origin fields.
+			// Never inherit an older (pid, start) from c.peers (even if from
+			// or socket address matches).
+			if hasCompletePeerOrigin(r.Origin) {
+				q.PeerPID = rawPositiveInt64(r.Origin.VerifiedPeerPID)
+				q.PeerStart = rawPositiveInt64(r.Origin.VerifiedPeerProcStart)
+				c.hasPeers = true
 			}
 			c.queue = append(c.queue, q)
 			if n := len(c.queue) - maxQueue; n > 0 {
@@ -1537,7 +1566,7 @@ func (c *Claude) peerOf(s string, origin *claudeOrigin) *Event {
 		}
 	}
 	var pid, start int64
-	if origin != nil && origin.Kind == "peer" {
+	if isPeerOrigin(origin) {
 		if name == "" && origin.Name != "" {
 			name = clip(origin.Name, maxMeta)
 		}
@@ -1550,35 +1579,32 @@ func (c *Claude) peerOf(s string, origin *claudeOrigin) *Event {
 				words, relayed = strings.TrimSpace(words[:j]), true
 			}
 		}
+		if words == "" && strings.TrimSpace(s) != "" {
+			words = strings.TrimSpace(s)
+			if j := strings.Index(words, relayedMark); j >= 0 {
+				words, relayed = strings.TrimSpace(words[:j]), true
+			}
+		}
 		p := rawPositiveInt64(origin.VerifiedPeerPID)
 		st := rawPositiveInt64(origin.VerifiedPeerProcStart)
 		if p > 0 && st > 0 {
 			pid, start = p, st
-			// Verified peer origin with plain-text content (no XML wrapper and
-			// no origin.body): fall back to message content rather than dropping.
-			if words == "" && strings.TrimSpace(s) != "" {
-				words = strings.TrimSpace(s)
-				if j := strings.Index(words, relayedMark); j >= 0 {
-					words, relayed = strings.TrimSpace(words[:j]), true
-				}
-			}
 		}
+	}
+	// Clear any stale verified (pid, start) on addr BEFORE any early return
+	// whenever this message is not fully verified.
+	if addr != "" && (pid <= 0 || start <= 0) {
+		c.clearPeerAddr(addr, name)
 	}
 	words = clean(words)
 	if words == "" || (name == "" && pid == 0) {
 		return nil
 	}
-	if addr != "" {
+	if addr != "" && pid > 0 && start > 0 {
 		if c.peers == nil || len(c.peers) >= maxPeers {
 			c.peers = map[string]peerAddrInfo{}
 		}
-		if pid > 0 && start > 0 {
-			c.peers[addr] = peerAddrInfo{name: name, pid: pid, start: start}
-		} else {
-			// Unverified message on addr must never inherit an older verified
-			// (pid, start) previously seen on the same socket path.
-			c.peers[addr] = peerAddrInfo{name: name}
-		}
+		c.peers[addr] = peerAddrInfo{name: name, pid: pid, start: start}
 	}
 	if pid > 0 && start > 0 {
 		c.hasPeers = true

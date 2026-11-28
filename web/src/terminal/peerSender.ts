@@ -29,6 +29,7 @@ export interface LivePeerTarget {
   hostName: string
   sessionLabel: string
   sessionId: string
+  persistence?: string
   pane?: string
   program?: string
   agentSession?: string
@@ -118,14 +119,30 @@ function normalizeProgram(p?: string): string {
   return s
 }
 
+// Fail-closed identity verification between backend-resolved peer info and the
+// live sidebar entry. Missing required identity fields always return false so
+// a replaced pane or incomplete snapshot is never overwritten with live sidebar
+// names or links.
 function samePeerIdentity(info: ConvoPeerInfo, live: LivePeerTarget): boolean {
-  if (info.session_id && live.sessionId && info.session_id !== live.sessionId) return false
-  if (info.terminal_id && live.terminalId && info.terminal_id !== live.terminalId) return false
-  if (info.agent_session && live.agentSession && info.agent_session !== live.agentSession) return false
+  if (!info.session_id || !live.sessionId || info.session_id !== live.sessionId) return false
+  if (live.persistence && live.persistence !== info.persistence) return false
   const pa = normalizeProgram(info.program)
-  const pb = normalizeProgram(live.program)
-  if (pa && pb && pa !== pb) return false
-  return true
+  if (!pa) return false
+  if (info.persistence === 'herdr') {
+    if (!info.pane || !live.pane || info.pane !== live.pane) return false
+    if (!info.terminal_id || !live.terminalId || info.terminal_id !== live.terminalId) return false
+    if (!info.agent_session || !live.agentSession || info.agent_session !== live.agentSession) return false
+    const pb = normalizeProgram(live.program)
+    if (!pb || pa !== pb) return false
+    return true
+  }
+  if (info.persistence === 'tmux') {
+    const pb = normalizeProgram(live.program)
+    if (pb && pa !== pb) return false
+    if (info.agent_session && live.agentSession && info.agent_session !== live.agentSession) return false
+    return true
+  }
+  return false
 }
 
 function livePeerWhere(live: LivePeerTarget): string {
@@ -152,15 +169,19 @@ export function resolvePeerSender(input: {
   }
   if (info.alive && info.key) {
     const live = input.liveByKey?.get(info.key)
-    // Only bind to the live sidebar row when its identity still matches the
-    // verified peer (same Corral session, terminal ID, agent session, program).
-    // Never overwrite a replaced pane's old message with the new occupant's name.
+    // Only bind to the live sidebar row when ALL required identity fields
+    // positively match the verified peer. Never overwrite with a sidebar name
+    // when any identity field is missing or changed.
     if (live && samePeerIdentity(info, live)) {
       const href = peerHref(live.sessionId, live.pane)
       if (href) {
+        const useLiveTitle = info.persistence === 'herdr' || (!!live.program && !!live.agentSession)
+        const name = useLiveTitle
+          ? sanitizePeerText(live.title) || sanitizePeerText(info.title) || rawFrom || '?'
+          : sanitizePeerText(info.title) || sanitizePeerText(live.title) || rawFrom || '?'
         return {
           kind: 'live',
-          name: sanitizePeerText(live.title) || sanitizePeerText(info.title) || rawFrom || '?',
+          name,
           where: livePeerWhere(live),
           detail: sanitizePeerText(live.where) || undefined,
           href,

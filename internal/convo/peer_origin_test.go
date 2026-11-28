@@ -12,7 +12,12 @@ func TestClaudePeerOriginAndVerifiedProcess(t *testing.T) {
 			`"origin":{"kind":"peer","from":"uds:/tmp/cc-socks/530048.sock","verifiedPeerPid":530048,"verifiedPeerProcStart":"193322812","msg_id":"m1","name":"ai-68","fromMode":"prompting","body":"hello from peer"},` +
 			`"message":{"role":"user","content":"Another Claude session sent a message:\n<cross-session-message from=\"uds:/tmp/cc-socks/530048.sock\" from-name=\"ai-68\" from-mode=\"prompting\">\nhello from peer\n</cross-session-message>"}}` + "\n" +
 			`{"type":"assistant","uuid":"a1","timestamp":"2026-11-28T03:00:05Z","message":{"role":"assistant","content":[{"type":"tool_use","id":"tu1","name":"SendMessage","input":{"to":"uds:/tmp/cc-socks/530048.sock","summary":"Ack","message":"got it"}}]}}` + "\n" +
-			`{"type":"queue-operation","operation":"enqueue","timestamp":"2026-11-28T03:00:08Z","content":"<cross-session-message from=\"uds:/tmp/cc-socks/530048.sock\" from-name=\"ai-68\" from-mode=\"prompting\">\nsecond note\n</cross-session-message>"}` + "\n",
+			// Queue-operation WITH verified origin carries (pid, start).
+			`{"type":"queue-operation","operation":"enqueue","timestamp":"2026-11-28T03:00:08Z",` +
+			`"origin":{"kind":"peer","from":"uds:/tmp/cc-socks/530048.sock","verifiedPeerPid":530048,"verifiedPeerProcStart":"193322812","name":"ai-68"},` +
+			`"content":"<cross-session-message from=\"uds:/tmp/cc-socks/530048.sock\" from-name=\"ai-68\" from-mode=\"prompting\">\nverified queued\n</cross-session-message>"}` + "\n" +
+			// Queue-operation WITHOUT verified origin must NOT copy old (pid, start) even with same socket and same name (fix2 #4).
+			`{"type":"queue-operation","operation":"enqueue","timestamp":"2026-11-28T03:00:09Z","content":"<cross-session-message from=\"uds:/tmp/cc-socks/530048.sock\" from-name=\"ai-68\" from-mode=\"prompting\">\nunverified queued same name\n</cross-session-message>"}` + "\n",
 	))
 
 	entries := c.Since(0)
@@ -34,11 +39,14 @@ func TestClaudePeerOriginAndVerifiedProcess(t *testing.T) {
 		t.Fatalf("SendMessage tool = %+v, want ai-68 + verified peer proc", tool)
 	}
 	queued := c.Queued()
-	if len(queued) != 1 {
-		t.Fatalf("queued = %+v, want 1", queued)
+	if len(queued) != 2 {
+		t.Fatalf("queued = %+v, want 2", queued)
 	}
 	if queued[0].From != "ai-68" || queued[0].PeerPID != 530048 || queued[0].PeerStart != 193322812 {
-		t.Fatalf("queued[0] = %+v, want verified peer proc from c.peers", queued[0])
+		t.Fatalf("queued[0] = %+v, want verified peer proc from origin", queued[0])
+	}
+	if queued[1].From != "ai-68" || queued[1].PeerPID != 0 || queued[1].PeerStart != 0 {
+		t.Fatalf("queued[1] = %+v, unverified queue-operation must NOT copy old pid/start even with same name", queued[1])
 	}
 	refs := PeerRefs(c)
 	wantRefs := []PeerRef{{PID: 530048, Start: 193322812}}
@@ -76,41 +84,95 @@ func TestClaudePeerOriginRequiresBothPidAndStart(t *testing.T) {
 	}
 }
 
-// Regression #3: a later unverified/partial peer message on the same socket
-// address must invalidate the old verified (pid, start) rather than inheriting
-// it onto subsequent SendMessage or queue-operation entries.
-func TestClaudePeerOriginPartialDoesNotInheritOldSocketIdentity(t *testing.T) {
-	c := NewClaude()
-	c.Feed([]byte(
-		// 1. Initial verified message on socket X.
-		`{"type":"user","isMeta":true,"promptSource":"system","uuid":"u1","timestamp":"2026-11-28T03:00:00Z",` +
-			`"origin":{"kind":"peer","from":"uds:/tmp/cc-socks/530048.sock","verifiedPeerPid":530048,"verifiedPeerProcStart":"193322812","name":"ai-old"},` +
-			`"message":{"role":"user","content":"<cross-session-message from=\"uds:/tmp/cc-socks/530048.sock\" from-name=\"ai-old\">\nfrom old\n</cross-session-message>"}}` + "\n" +
-			// 2. Later message on the SAME socket X with invalid/missing verifiedPeerProcStart.
-			`{"type":"user","isMeta":true,"promptSource":"system","uuid":"u2","timestamp":"2026-11-28T03:01:00Z",` +
-			`"origin":{"kind":"peer","from":"uds:/tmp/cc-socks/530048.sock","verifiedPeerPid":530048,"verifiedPeerProcStart":"","name":"ai-new"},` +
-			`"message":{"role":"user","content":"<cross-session-message from=\"uds:/tmp/cc-socks/530048.sock\" from-name=\"ai-new\">\nfrom new unverified\n</cross-session-message>"}}` + "\n" +
-			// 3. Subsequent SendMessage to socket X must NOT inherit old pid/start.
-			`{"type":"assistant","uuid":"a1","timestamp":"2026-11-28T03:01:05Z","message":{"role":"assistant","content":[{"type":"tool_use","id":"tu1","name":"SendMessage","input":{"to":"uds:/tmp/cc-socks/530048.sock","summary":"Reply","message":"reply"}}]}}` + "\n" +
-			// 4. Subsequent queued message on socket X must NOT inherit old pid/start.
-			`{"type":"queue-operation","operation":"enqueue","timestamp":"2026-11-28T03:01:08Z","content":"<cross-session-message from=\"uds:/tmp/cc-socks/530048.sock\" from-name=\"ai-new\">\nqueued after partial\n</cross-session-message>"}` + "\n",
-	))
+// Regression fix1 #3 & fix2 #3/#4: any incomplete/unverified peer origin on a
+// reused socket address — including empty body (early return in peerOf),
+// missing isMeta, or plain-text content without XML — MUST clear the socket's
+// cached verified (pid, start) before deciding how to display it, and queued
+// messages without verified fields must never copy old (pid, start).
+func TestClaudePeerOriginPartialClearsSocketAcrossAllEarlyReturnPaths(t *testing.T) {
+	cases := []struct {
+		name           string
+		partialRow     string
+		wantTitle      string
+		wantEntryCount int // verified u1 + optional partial event + SendMessage
+	}{
+		{
+			name: "isMeta_empty_body_early_return",
+			partialRow: `{"type":"user","isMeta":true,"promptSource":"system","uuid":"u2","timestamp":"2026-11-28T03:01:00Z",` +
+				`"origin":{"kind":"peer","from":"uds:/tmp/cc-socks/530048.sock","verifiedPeerPid":530048,"verifiedPeerProcStart":"","name":"ai-reused"},` +
+				`"message":{"role":"user","content":""}}`,
+			wantTitle:      "ai-reused",
+			wantEntryCount: 2, // empty body produces no event, still clears c.peers
+		},
+		{
+			name: "missing_isMeta_partial_origin_plain_text",
+			partialRow: `{"type":"user","uuid":"u2","timestamp":"2026-11-28T03:01:00Z",` +
+				`"origin":{"kind":"peer","from":"uds:/tmp/cc-socks/530048.sock","verifiedPeerPid":530048,"name":"ai-reused"},` +
+				`"message":{"role":"user","content":"plain unverified peer text"}}`,
+			wantTitle:      "ai-reused",
+			wantEntryCount: 3, // parsed as unverified EventPeer
+		},
+		{
+			name: "isMeta_missing_start_xml_body",
+			partialRow: `{"type":"user","isMeta":true,"promptSource":"system","uuid":"u2","timestamp":"2026-11-28T03:01:00Z",` +
+				`"origin":{"kind":"peer","from":"uds:/tmp/cc-socks/530048.sock","verifiedPeerPid":530048,"verifiedPeerProcStart":"","name":"ai-reused"},` +
+				`"message":{"role":"user","content":"<cross-session-message from=\"uds:/tmp/cc-socks/530048.sock\" from-name=\"ai-reused\">\nfrom new unverified\n</cross-session-message>"}}`,
+			wantTitle:      "ai-reused",
+			wantEntryCount: 3,
+		},
+		{
+			name: "partial_origin_no_name_clears_pid_and_old_name",
+			partialRow: `{"type":"user","isMeta":true,"promptSource":"system","uuid":"u2","timestamp":"2026-11-28T03:01:00Z",` +
+				`"origin":{"kind":"peer","from":"uds:/tmp/cc-socks/530048.sock","verifiedPeerPid":530048},` +
+				`"message":{"role":"user","content":""}}`,
+			wantTitle:      "uds:/tmp/cc-socks/530048.sock",
+			wantEntryCount: 2,
+		},
+		{
+			name: "queue_operation_partial_origin_empty_content",
+			partialRow: `{"type":"queue-operation","operation":"enqueue","timestamp":"2026-11-28T03:01:00Z",` +
+				`"origin":{"kind":"peer","from":"uds:/tmp/cc-socks/530048.sock","verifiedPeerPid":530048,"name":"ai-reused"},` +
+				`"content":""}`,
+			wantTitle:      "ai-reused",
+			wantEntryCount: 2,
+		},
+	}
 
-	entries := c.Since(0)
-	if len(entries) != 3 {
-		t.Fatalf("got %d entries, want 3: %+v", len(entries), entries)
-	}
-	ev2 := entries[1].Parts[0].Event
-	if ev2 == nil || ev2.From != "ai-new" || ev2.PeerPID != 0 || ev2.PeerStart != 0 {
-		t.Fatalf("ev2 = %+v, want unverified ai-new with zero pid/start", ev2)
-	}
-	tool := entries[2].Parts[0].Tool
-	if tool == nil || tool.Title != "ai-new" || tool.PeerPID != 0 || tool.PeerStart != 0 {
-		t.Fatalf("SendMessage after partial origin = %+v, must NOT inherit old verified pid/start", tool)
-	}
-	queued := c.Queued()
-	if len(queued) != 1 || queued[0].From != "ai-new" || queued[0].PeerPID != 0 || queued[0].PeerStart != 0 {
-		t.Fatalf("queued after partial origin = %+v, must NOT inherit old verified pid/start", queued)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := NewClaude()
+			c.Feed([]byte(
+				// 1. Initial verified message on socket X.
+				`{"type":"user","isMeta":true,"promptSource":"system","uuid":"u1","timestamp":"2026-11-28T03:00:00Z",` +
+					`"origin":{"kind":"peer","from":"uds:/tmp/cc-socks/530048.sock","verifiedPeerPid":530048,"verifiedPeerProcStart":"193322812","name":"ai-old"},` +
+					`"message":{"role":"user","content":"<cross-session-message from=\"uds:/tmp/cc-socks/530048.sock\" from-name=\"ai-old\">\nfrom old\n</cross-session-message>"}}` + "\n" +
+					// 2. Partial/unverified row on the SAME socket X.
+					tc.partialRow + "\n" +
+					// 3. Subsequent SendMessage to socket X must NOT inherit old pid/start.
+					`{"type":"assistant","uuid":"a1","timestamp":"2026-11-28T03:01:05Z","message":{"role":"assistant","content":[{"type":"tool_use","id":"tu1","name":"SendMessage","input":{"to":"uds:/tmp/cc-socks/530048.sock","summary":"Reply","message":"reply"}}]}}` + "\n" +
+					// 4. Subsequent queued message (even with OLD name ai-old) must NOT inherit old pid/start.
+					`{"type":"queue-operation","operation":"enqueue","timestamp":"2026-11-28T03:01:08Z","content":"<cross-session-message from=\"uds:/tmp/cc-socks/530048.sock\" from-name=\"ai-old\">\nqueued after partial\n</cross-session-message>"}` + "\n",
+			))
+
+			entries := c.Since(0)
+			if len(entries) != tc.wantEntryCount {
+				t.Fatalf("got %d entries, want %d: %+v", len(entries), tc.wantEntryCount, entries)
+			}
+			if tc.wantEntryCount == 3 {
+				ev2 := entries[1].Parts[0].Event
+				if ev2 == nil || ev2.Kind != EventPeer || ev2.PeerPID != 0 || ev2.PeerStart != 0 {
+					t.Fatalf("ev2 = %+v, want unverified EventPeer with zero pid/start", ev2)
+				}
+			}
+			tool := entries[len(entries)-1].Parts[0].Tool
+			if tool == nil || tool.Title != tc.wantTitle || tool.PeerPID != 0 || tool.PeerStart != 0 {
+				t.Fatalf("SendMessage after partial origin = %+v, want title=%q and zero pid/start", tool, tc.wantTitle)
+			}
+			queued := c.Queued()
+			if len(queued) != 1 || queued[0].PeerPID != 0 || queued[0].PeerStart != 0 {
+				t.Fatalf("queued after partial origin = %+v, must NOT inherit old verified pid/start", queued)
+			}
+		})
 	}
 }
 

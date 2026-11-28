@@ -34,8 +34,11 @@ func TestPeerIdentitiesLifecycleAndOwnership(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	cfgA1 := "1|10.0.0.1|22|alice|password|0"
+	cfgA2 := "2|10.0.0.9|2222|alice|password|0"
+
 	// Upsert two processes with the same PID but different proc_start (PID reuse).
-	err = st.UpsertPeerIdentities(ctx, alice.ID, hostA.ID, []PeerIdentity{
+	err = st.UpsertPeerIdentities(ctx, alice.ID, hostA.ID, cfgA1, []PeerIdentity{
 		{
 			PID:          530048,
 			ProcStart:    193322812,
@@ -49,6 +52,7 @@ func TestPeerIdentitiesLifecycleAndOwnership(t *testing.T) {
 			Program:      "claude",
 			AgentSession: "11111111-1111-1111-1111-111111111111",
 			TerminalID:   "term-1",
+			ObservedAt:   now.UnixMilli(),
 		},
 		{
 			PID:          530048,
@@ -63,14 +67,15 @@ func TestPeerIdentitiesLifecycleAndOwnership(t *testing.T) {
 			Program:      "claude",
 			AgentSession: "22222222-2222-2222-2222-222222222222",
 			TerminalID:   "term-2",
+			ObservedAt:   now.UnixMilli(),
 		},
 	})
 	if err != nil {
 		t.Fatalf("UpsertPeerIdentities: %v", err)
 	}
 
-	// Lookup distinguishes by (pid, proc_start) and round-trips agent_session / terminal_id / last_seen.
-	got, err := st.LookupPeerIdentities(ctx, alice.ID, hostA.ID, []PeerProcKey{
+	// Lookup distinguishes by (pid, proc_start) and round-trips all identity fields.
+	got, err := st.LookupPeerIdentities(ctx, alice.ID, hostA.ID, cfgA1, []PeerProcKey{
 		{PID: 530048, ProcStart: 193322812},
 		{PID: 530048, ProcStart: 999999999},
 		{PID: 530048, ProcStart: 12345},
@@ -81,22 +86,32 @@ func TestPeerIdentitiesLifecycleAndOwnership(t *testing.T) {
 	if len(got) != 2 {
 		t.Fatalf("got %d rows, want 2: %+v", len(got), got)
 	}
-	if r := got[PeerProcKey{PID: 530048, ProcStart: 193322812}]; r.Title != "corral-old" || r.Pane != "w1:p1" || r.AgentSession != "11111111-1111-1111-1111-111111111111" || r.TerminalID != "term-1" || r.LastSeen != now.Unix() {
+	if r := got[PeerProcKey{PID: 530048, ProcStart: 193322812}]; r.Title != "corral-old" || r.Pane != "w1:p1" || r.HostConfig != cfgA1 || r.AgentSession != "11111111-1111-1111-1111-111111111111" || r.TerminalID != "term-1" || r.ObservedAt != now.UnixMilli() || r.LastSeen != now.Unix() {
 		t.Fatalf("row1 = %+v", r)
 	}
 	if r := got[PeerProcKey{PID: 530048, ProcStart: 999999999}]; r.Title != "other-new" || r.Pane != "w2:p1" {
 		t.Fatalf("row2 = %+v", r)
 	}
 
+	// Host-config isolation (fix2 #8): retargeting hostA to another machine/config
+	// must NOT read rows from cfgA1.
+	retargetGot, err := st.LookupPeerIdentities(ctx, alice.ID, hostA.ID, cfgA2, []PeerProcKey{{PID: 530048, ProcStart: 193322812}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(retargetGot) != 0 {
+		t.Fatalf("cfgA2 saw cfgA1's peer identity: %+v", retargetGot)
+	}
+
 	// Ownership isolation: Bob cannot see Alice's peer identities.
-	bobGot, err := st.LookupPeerIdentities(ctx, bob.ID, hostA.ID, []PeerProcKey{{PID: 530048, ProcStart: 193322812}})
+	bobGot, err := st.LookupPeerIdentities(ctx, bob.ID, hostA.ID, cfgA1, []PeerProcKey{{PID: 530048, ProcStart: 193322812}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(bobGot) != 0 {
 		t.Fatalf("bob saw alice's peer identity: %+v", bobGot)
 	}
-	bobHostGot, err := st.LookupPeerIdentities(ctx, bob.ID, hostB.ID, []PeerProcKey{{PID: 530048, ProcStart: 193322812}})
+	bobHostGot, err := st.LookupPeerIdentities(ctx, bob.ID, hostB.ID, cfgA1, []PeerProcKey{{PID: 530048, ProcStart: 193322812}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -104,41 +119,51 @@ func TestPeerIdentitiesLifecycleAndOwnership(t *testing.T) {
 		t.Fatalf("bob saw peer on hostB: %+v", bobHostGot)
 	}
 
-	// Updating with empty title preserves prior title; updating with non-empty title replaces it.
-	if err := st.UpsertPeerIdentities(ctx, alice.ID, hostA.ID, []PeerIdentity{
-		{PID: 530048, ProcStart: 193322812, AgentKey: "1||w1:p1", Persistence: "herdr", Pane: "w1:p1", HostName: "devbox", Title: ""},
+	// ObservedAt ordering (fix2 #7): a late-arriving older observation must NOT
+	// overwrite a newer observation in SQLite.
+	newerObsAt := now.UnixMilli() + 5000
+	olderObsAt := now.UnixMilli() - 5000
+	if err := st.UpsertPeerIdentities(ctx, alice.ID, hostA.ID, cfgA1, []PeerIdentity{
+		{PID: 530048, ProcStart: 193322812, AgentKey: "1||w1:p1", Persistence: "herdr", Pane: "w1:p1", HostName: "devbox", Title: "corral-renamed", ObservedAt: newerObsAt},
 	}); err != nil {
 		t.Fatal(err)
 	}
-	got, _ = st.LookupPeerIdentities(ctx, alice.ID, hostA.ID, []PeerProcKey{{PID: 530048, ProcStart: 193322812}})
-	if got[PeerProcKey{PID: 530048, ProcStart: 193322812}].Title != "corral-old" {
-		t.Fatalf("empty title overwrote previous title: %+v", got)
-	}
-	if err := st.UpsertPeerIdentities(ctx, alice.ID, hostA.ID, []PeerIdentity{
-		{PID: 530048, ProcStart: 193322812, AgentKey: "1||w1:p1", Persistence: "herdr", Pane: "w1:p1", HostName: "devbox", Title: "corral-renamed"},
+	if err := st.UpsertPeerIdentities(ctx, alice.ID, hostA.ID, cfgA1, []PeerIdentity{
+		{PID: 530048, ProcStart: 193322812, AgentKey: "1||w1:p1", Persistence: "herdr", Pane: "w1:p1", HostName: "devbox", Title: "stale-older-scan", ObservedAt: olderObsAt},
 	}); err != nil {
 		t.Fatal(err)
 	}
-	got, _ = st.LookupPeerIdentities(ctx, alice.ID, hostA.ID, []PeerProcKey{{PID: 530048, ProcStart: 193322812}})
-	if got[PeerProcKey{PID: 530048, ProcStart: 193322812}].Title != "corral-renamed" {
-		t.Fatalf("non-empty title did not update: %+v", got)
+	got, _ = st.LookupPeerIdentities(ctx, alice.ID, hostA.ID, cfgA1, []PeerProcKey{{PID: 530048, ProcStart: 193322812}})
+	if r := got[PeerProcKey{PID: 530048, ProcStart: 193322812}]; r.Title != "corral-renamed" || r.ObservedAt != newerObsAt {
+		t.Fatalf("older observed_at overwrote newer row: %+v", r)
 	}
 
-	// Retention pruning by last_seen (item 6): refreshing last_seen at day 60
-	// keeps row 1 alive at day 100 while row 2 (unseen since day 0) is pruned.
+	// Updating with empty title at >= observed_at preserves prior title.
+	if err := st.UpsertPeerIdentities(ctx, alice.ID, hostA.ID, cfgA1, []PeerIdentity{
+		{PID: 530048, ProcStart: 193322812, AgentKey: "1||w1:p1", Persistence: "herdr", Pane: "w1:p1", HostName: "devbox", Title: "", ObservedAt: newerObsAt + 1000},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got, _ = st.LookupPeerIdentities(ctx, alice.ID, hostA.ID, cfgA1, []PeerProcKey{{PID: 530048, ProcStart: 193322812}})
+	if got[PeerProcKey{PID: 530048, ProcStart: 193322812}].Title != "corral-renamed" {
+		t.Fatalf("empty title overwrote previous title: %+v", got)
+	}
+
+	// Retention pruning by last_seen: refreshing last_seen at day 60 keeps row 1
+	// alive at day 100 while row 2 (unseen since day 0) is pruned.
 	now = now.Add(60 * 24 * time.Hour)
-	if err := st.UpsertPeerIdentities(ctx, alice.ID, hostA.ID, []PeerIdentity{
-		{PID: 530048, ProcStart: 193322812, AgentKey: "1||w1:p1", Persistence: "herdr", Pane: "w1:p1", HostName: "devbox", Title: "corral-renamed", LastSeen: now.Unix()},
+	if err := st.UpsertPeerIdentities(ctx, alice.ID, hostA.ID, cfgA1, []PeerIdentity{
+		{PID: 530048, ProcStart: 193322812, AgentKey: "1||w1:p1", Persistence: "herdr", Pane: "w1:p1", HostName: "devbox", Title: "corral-renamed", ObservedAt: now.UnixMilli(), LastSeen: now.Unix()},
 	}); err != nil {
 		t.Fatal(err)
 	}
 	now = now.Add(40 * 24 * time.Hour) // day 100 since start, day 40 since row 1 last_seen
-	if err := st.UpsertPeerIdentities(ctx, alice.ID, hostA.ID, []PeerIdentity{
-		{PID: 700, ProcStart: 800, AgentKey: "1||w3:p1", Persistence: "herdr", Pane: "w3:p1", HostName: "devbox", Title: "fresh"},
+	if err := st.UpsertPeerIdentities(ctx, alice.ID, hostA.ID, cfgA1, []PeerIdentity{
+		{PID: 700, ProcStart: 800, AgentKey: "1||w3:p1", Persistence: "herdr", Pane: "w3:p1", HostName: "devbox", Title: "fresh", ObservedAt: now.UnixMilli()},
 	}); err != nil {
 		t.Fatal(err)
 	}
-	got, _ = st.LookupPeerIdentities(ctx, alice.ID, hostA.ID, []PeerProcKey{
+	got, _ = st.LookupPeerIdentities(ctx, alice.ID, hostA.ID, cfgA1, []PeerProcKey{
 		{PID: 530048, ProcStart: 193322812},
 		{PID: 530048, ProcStart: 999999999},
 		{PID: 700, ProcStart: 800},
