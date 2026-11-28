@@ -479,6 +479,7 @@ func RemoveRunDirLockedOwned(layout *Layout, systemRunDir string, timeout time.D
 
 		var heldFDs []int
 		seenOwned := make(map[string]struct{}, len(entries))
+		lockedPaths := make(map[string]struct{}, len(entries))
 		hasUnowned := false
 		releaseAll := func() {
 			for i := len(heldFDs) - 1; i >= 0; i-- {
@@ -517,6 +518,7 @@ func RemoveRunDirLockedOwned(layout *Layout, systemRunDir string, timeout time.D
 				// Owned-name symlink: senders ignore symlinks (O_NOFOLLOW);
 				// RemoveOwned unlinks the link without traversing it.
 				seenOwned[name] = struct{}{}
+				lockedPaths[filepath.Clean(filepath.Join(runDir, name))] = struct{}{}
 				continue
 			}
 			seenOwned[name] = struct{}{}
@@ -554,14 +556,16 @@ func RemoveRunDirLockedOwned(layout *Layout, systemRunDir string, timeout time.D
 				break
 			}
 			heldFDs = append(heldFDs, rfd)
+			lockedPaths[filepath.Clean(filepath.Join(runDir, name))] = struct{}{}
 		}
 		if retryPass {
 			continue
 		}
 
-		// While still holding every exclusive flock, delegate unlinking of
-		// owned files and rmdir of runDir to the single RemoveOwned routine.
-		left := RemoveOwned(layout, OwnedRemoveRunDir, runDir, nil)
+		// Fix13 Item #2: While still holding every exclusive flock, delegate
+		// unlinking ONLY of the lockedPaths set (never a newly-created file not
+		// locked in the first pass) and rmdir of runDir to RemoveOwned.
+		left := RemoveOwned(layout, OwnedRemoveRunDir, runDir, lockedPaths)
 		releaseAll()
 
 		if len(left) == 0 {

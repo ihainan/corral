@@ -957,18 +957,33 @@ func (m *Manager) isOpRunningInMemory(opID string) bool {
 	return false
 }
 
-// finalizeCrashedHostOp finishes a host's active_op_id left behind in SQLite
-// by a previous gateway process crash so pending cleanup and future operations
+// finalizeCrashedHostOp finishes a host's active_op_id (or account-wide
+// pending/running op) left behind in SQLite by a previous gateway process crash
+// so pending cleanup and future operations on ANY peer host sharing the account
 // are not permanently blocked. Callers must already hold acquireCleanupOpLock.
-func (m *Manager) finalizeCrashedHostOp(ctx context.Context, hostID int64, activeOpID string) bool {
-	if m == nil || m.store == nil || activeOpID == "" || m.isOpRunningInMemory(activeOpID) {
+func (m *Manager) finalizeCrashedHostOp(ctx context.Context, hostID int64, acctKey, activeOpID string) bool {
+	if m == nil || m.store == nil || (activeOpID == "" && acctKey == "") || m.isOpRunningInMemory(activeOpID) {
 		return false
 	}
-	if op, err := m.store.ActiveCorraldOp(ctx, hostID); err == nil && op != nil && op.ID == activeOpID {
+	if op, err := m.store.ActiveCorraldOpByIDOrAccount(ctx, activeOpID, acctKey); err == nil && op != nil {
+		if m.isOpRunningInMemory(op.ID) {
+			return false
+		}
 		op.State = OpFailed
 		op.ErrorCode = "interrupted"
 		op.Detail = encodeOpDetail(opDetailPayload{Message: "interrupted by gateway restart"})
-		if released, rerr := m.store.ReleaseCorraldHostOpAndFinish(ctx, hostID, op, ""); rerr == nil && released {
+		if released, rerr := m.store.ReleaseCorraldOpAcrossAccountAndFinish(ctx, op); rerr == nil && released {
+			return true
+		}
+	}
+	if op, err := m.store.ActiveCorraldOp(ctx, hostID); err == nil && op != nil && (activeOpID == "" || op.ID == activeOpID) {
+		if m.isOpRunningInMemory(op.ID) {
+			return false
+		}
+		op.State = OpFailed
+		op.ErrorCode = "interrupted"
+		op.Detail = encodeOpDetail(opDetailPayload{Message: "interrupted by gateway restart"})
+		if released, rerr := m.store.ReleaseCorraldOpAcrossAccountAndFinish(ctx, op); rerr == nil && released {
 			return true
 		}
 	}
@@ -1020,15 +1035,19 @@ func (m *Manager) runSafeCleanupLocked(
 	if !CheckBinding(toSnapshot(fresh), fp, sshUser, m.gatewayID) {
 		return
 	}
+	acctKey := ""
+	if fp != "" && sshUser != "" {
+		acctKey = fp + "\x00" + sshUser
+	}
 	if fresh.ActiveOpID != "" && fresh.ActiveOpID != heldOpID {
-		// Fix12 Item #4: When heldOpID == "", the caller holds
+		// Fix12 Item #4 + Fix13 Item #1: When heldOpID == "", the caller holds
 		// acquireCleanupOpLock, which guarantees no in-memory operation is
 		// active for this host or account. If SQLite still has an active_op_id
-		// from a gateway crash mid-remove (running op row still in DB), finish
-		// that crashed op so cleanup proceeds and retries/new removes are not
-		// permanently blocked by active_op_id or idx_corrald_ops_active_*.
+		// from a gateway crash mid-remove (including one created on a peer host
+		// record sharing this account), finish that crashed op across the
+		// account so cleanup proceeds and retries/new removes are not blocked.
 		if heldOpID == "" && !m.isOpRunningInMemory(fresh.ActiveOpID) {
-			if m.finalizeCrashedHostOp(ctx, hostID, fresh.ActiveOpID) {
+			if m.finalizeCrashedHostOp(ctx, hostID, acctKey, fresh.ActiveOpID) {
 				fresh.ActiveOpID = ""
 			} else {
 				return
@@ -1038,14 +1057,19 @@ func (m *Manager) runSafeCleanupLocked(
 		}
 	}
 	if heldOpID == "" {
-		// Also finish any orphaned running remove op row for this host whose
-		// active_op_id was already cleared before crash, so idx_corrald_ops_active_*
-		// cannot reject future removes.
-		if op, oerr := m.store.ActiveCorraldOp(ctx, hostID); oerr == nil && op != nil && op.Kind == OpRemove && !m.isOpRunningInMemory(op.ID) {
+		// Also finish any orphaned running remove op row for this host or
+		// account whose active_op_id was already cleared before crash, so
+		// idx_corrald_ops_active_* cannot reject future removes.
+		if op, oerr := m.store.ActiveCorraldOpByIDOrAccount(ctx, "", acctKey); oerr == nil && op != nil && op.Kind == OpRemove && !m.isOpRunningInMemory(op.ID) {
 			op.State = OpFailed
 			op.ErrorCode = "interrupted"
 			op.Detail = encodeOpDetail(opDetailPayload{Message: "interrupted by gateway restart"})
-			_, _ = m.store.UpdateCorraldOpIfActive(ctx, op)
+			_, _ = m.store.ReleaseCorraldOpAcrossAccountAndFinish(ctx, op)
+		} else if op, oerr := m.store.ActiveCorraldOp(ctx, hostID); oerr == nil && op != nil && op.Kind == OpRemove && !m.isOpRunningInMemory(op.ID) {
+			op.State = OpFailed
+			op.ErrorCode = "interrupted"
+			op.Detail = encodeOpDetail(opDetailPayload{Message: "interrupted by gateway restart"})
+			_, _ = m.store.ReleaseCorraldOpAcrossAccountAndFinish(ctx, op)
 		}
 	}
 

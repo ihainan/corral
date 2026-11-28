@@ -565,6 +565,47 @@ func (s *Store) ReleaseCorraldHostOpAndFinish(ctx context.Context, hostID int64,
 	return n > 0, nil
 }
 
+// ReleaseCorraldOpAcrossAccountAndFinish atomically finalizes a pending/running
+// corrald_ops row and clears active_op_id = ” on EVERY corrald_hosts row
+// referencing that op.ID (e.g. peer host records sharing an account after a
+// gateway crash mid-remove).
+func (s *Store) ReleaseCorraldOpAcrossAccountAndFinish(ctx context.Context, op *CorraldOp) (bool, error) {
+	if op == nil || op.ID == "" {
+		return false, nil
+	}
+	now := s.unix()
+	op.UpdatedAt = now
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+
+	opRes, err := tx.ExecContext(ctx, `
+		UPDATE corrald_ops SET state = ?, step = ?, error_code = ?, detail = ?, updated_at = ?
+		WHERE id = ? AND state IN ('pending', 'running')`,
+		op.State, op.Step, op.ErrorCode, op.Detail, now, op.ID)
+	if err != nil {
+		return false, err
+	}
+	nOps, _ := opRes.RowsAffected()
+
+	hostRes, err := tx.ExecContext(ctx, `
+		UPDATE corrald_hosts
+		SET active_op_id = '', updated_at = ?
+		WHERE active_op_id = ?`,
+		now, op.ID)
+	if err != nil {
+		return false, err
+	}
+	nHosts, _ := hostRes.RowsAffected()
+
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	return nOps > 0 || nHosts > 0, nil
+}
+
 // ClearStaleCorraldHostOps clears active_op_id on all corrald_hosts rows whose
 // active_op_id references a finished (done/failed/cancelled/unknown) or missing
 // operation in corrald_ops. Called on manager startup for crash recovery.
@@ -1463,6 +1504,37 @@ func (s *Store) ActiveCorraldOp(ctx context.Context, hostID int64) (*CorraldOp, 
 		return nil, notFound(err)
 	}
 	return op, nil
+}
+
+// ActiveCorraldOpByIDOrAccount returns a pending/running operation matching
+// opID (if non-empty) or accountKey (if non-empty), or ErrNotFound. Used by
+// crash recovery when a peer host sharing the same account reconnects first.
+func (s *Store) ActiveCorraldOpByIDOrAccount(ctx context.Context, opID, accountKey string) (*CorraldOp, error) {
+	if opID != "" {
+		op := &CorraldOp{}
+		err := s.db.QueryRowContext(ctx, `
+			SELECT id, host_id, account_key, kind, state, step, error_code, detail, created_by, created_at, updated_at
+			FROM corrald_ops WHERE id = ? AND state IN ('pending', 'running') LIMIT 1`, opID).
+			Scan(&op.ID, &op.HostID, &op.AccountKey, &op.Kind, &op.State, &op.Step, &op.ErrorCode, &op.Detail, &op.CreatedBy, &op.CreatedAt, &op.UpdatedAt)
+		if err == nil {
+			return op, nil
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return nil, err
+		}
+	}
+	if accountKey != "" {
+		op := &CorraldOp{}
+		err := s.db.QueryRowContext(ctx, `
+			SELECT id, host_id, account_key, kind, state, step, error_code, detail, created_by, created_at, updated_at
+			FROM corrald_ops WHERE account_key = ? AND state IN ('pending', 'running') LIMIT 1`, accountKey).
+			Scan(&op.ID, &op.HostID, &op.AccountKey, &op.Kind, &op.State, &op.Step, &op.ErrorCode, &op.Detail, &op.CreatedBy, &op.CreatedAt, &op.UpdatedAt)
+		if err != nil {
+			return nil, notFound(err)
+		}
+		return op, nil
+	}
+	return nil, ErrNotFound
 }
 
 // SetCorraldUserPaused adds or removes userID in paused_users_json for hostID

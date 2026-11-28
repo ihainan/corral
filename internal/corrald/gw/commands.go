@@ -604,14 +604,12 @@ if [ ! -x "$BIN" ]; then
 fi
 `+execBranch+`
 
-has_corrald_lib() {
-  [ -L "$L/corrald" ] || [ -e "$L/corrald" ] && return 0
-  [ -e "$L/README.txt" ] && return 0
-  [ -e "$L/.corrald-shared.lock" ] && return 0
-  for d in "$L"/corrald-*; do
-    [ -e "$d" ] || continue
-    is_ver_dir "$(basename -- "$d")" && return 0
-  done
+has_lib_entries() {
+  [ -L "$L" ] && return 0
+  [ ! -e "$L" ] && return 1
+  [ ! -d "$L" ] && return 0
+  _entries=$(ls -A -- "$L" 2>/dev/null) || return 0
+  [ -n "$_entries" ] && return 0
   return 1
 }
 
@@ -626,7 +624,7 @@ if [ -d "$st_root" ]; then
   done
 fi
 
-if [ ! -e "$ST" ] && ! has_corrald_lib && { [ "$other_machine" -ne 0 ] || [ ! -e "$run_dir" ]; }; then
+if [ ! -e "$ST" ] && [ ! -L "$ST" ] && ! has_lib_entries && { [ "$other_machine" -ne 0 ] || { [ ! -e "$run_dir" ] && [ ! -L "$run_dir" ]; }; }; then
   echo "result=removed"
   exit 0
 fi

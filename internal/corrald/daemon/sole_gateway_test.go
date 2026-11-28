@@ -1929,6 +1929,134 @@ func TestCLIUninstallOnlyIfSoleGateway(t *testing.T) {
 			t.Fatalf("expected %s in left=:\n%s", extraLibFile, outB)
 		}
 	})
+
+	t.Run("fix13_item4_reject_non_canonical_op_before_any_write", func(t *testing.T) {
+		home := t.TempDir()
+		mid := randomHexMid(t)
+		env := []string{"CORRALD_TEST_MACHINE_ID=" + mid}
+		uid := uint32(os.Getuid())
+		layout, err := ResolveLayout(PathOptions{Home: home, UID: &uid, MachineID: mid})
+		if err != nil {
+			t.Fatalf("ResolveLayout: %v", err)
+		}
+
+		// 1. `install --op badop` MUST fail with exit=2 invalid_op BEFORE creating
+		//    LibDir, install.json, or ops/badop.json.
+		badStage := filepath.Join(layout.StateDir, "stage-badop")
+		if err := os.MkdirAll(badStage, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		binBytes, err := os.ReadFile(bins.v1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		badStageBin := filepath.Join(badStage, "corrald")
+		if err := os.WriteFile(badStageBin, binBytes, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		out, code := runCLI(t, badStageBin, home, env, "install", "--stage", badStage, "--op", "badop", "--gateway", "gw-a", "--by", "alice")
+		if code != 2 || parseKV(out)["error"] != "invalid_op" {
+			t.Fatalf("Fix13 Item #4 regression: install did not reject non-canonical --op before writes! code=%d\n%s", code, out)
+		}
+		for _, p := range []string{layout.LibDir, layout.InstallJSON, filepath.Join(layout.OpsDir, "badop.json")} {
+			if _, err := os.Lstat(p); !os.IsNotExist(err) {
+				t.Fatalf("Fix13 Item #4 regression: install wrote %s despite invalid --op! stat err=%v", p, err)
+			}
+		}
+
+		// 2. `uninstall --op badop` on an installed host MUST fail with exit=2 invalid_op
+		//    before touching install.json, tombstone, or binary.
+		home2 := t.TempDir()
+		mid2 := randomHexMid(t)
+		env2 := []string{"CORRALD_TEST_MACHINE_ID=" + mid2}
+		installedBin2, layout2 := installAndServe(t, home2, mid2)
+		out2, code2 := runCLI(t, installedBin2, home2, env2, "uninstall", "--op", "badop", "--only-if-sole-gateway", "gw-a")
+		if code2 != 2 || parseKV(out2)["error"] != "invalid_op" {
+			t.Fatalf("Fix13 Item #4 regression: uninstall accepted non-canonical --op! code=%d\n%s", code2, out2)
+		}
+		if _, err := os.Stat(layout2.InstallJSON); err != nil {
+			t.Fatalf("Fix13 Item #4 regression: uninstall touched install.json despite invalid --op: %v", err)
+		}
+		if _, err := os.Lstat(layout2.TombstonePath); !os.IsNotExist(err) {
+			t.Fatalf("Fix13 Item #4 regression: uninstall wrote tombstone despite invalid --op: %v", err)
+		}
+	})
+}
+
+// Regression test for Fix Round 13 Item #5 [P2]:
+// Server exit cleanup (server.go:468) MUST remove layout.SocketPath ONLY via
+// removeOwnedSocket (verifying it is a Unix socket), never unlinking a regular
+// file that replaced the socket path.
+func TestServerExitCleanupNeverDeletesNonSocketAtSocketPath(t *testing.T) {
+	home, err := os.MkdirTemp("/tmp", "c13s-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(home) })
+	mid := randomHexMid(t)
+	uid := uint32(os.Getuid())
+	layout, err := ResolveLayout(PathOptions{Home: home, UID: &uid, MachineID: mid})
+	if err != nil {
+		t.Fatalf("ResolveLayout: %v", err)
+	}
+	if err := layout.EnsureStateDir(); err != nil {
+		t.Fatal(err)
+	}
+	lifeLock, err := AcquireLock(layout.LockPath)
+	if err != nil {
+		t.Fatalf("AcquireLock: %v", err)
+	}
+	defer lifeLock.Release()
+
+	ready := make(chan struct{})
+	srv, err := NewServer(ServerConfig{
+		Layout:      layout,
+		Lock:        lifeLock,
+		Build:       proto.BuildInfo{Version: "0.1.0", Release: 100},
+		IdleTimeout: time.Minute,
+		OnReady:     func() { close(ready) },
+	})
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- srv.Serve(ctx)
+	}()
+	select {
+	case <-ready:
+	case err := <-done:
+		t.Fatalf("Server.Run exited before ready: %v", err)
+	case <-time.After(5 * time.Second):
+		cancel()
+		t.Fatal("timed out waiting for server ready")
+	}
+
+	// Replace the socket path with a regular non-socket file before daemon exits.
+	if err := os.Remove(layout.SocketPath); err != nil {
+		cancel()
+		t.Fatalf("remove socket: %v", err)
+	}
+	if err := os.WriteFile(layout.SocketPath, []byte("user-file-not-a-socket\n"), 0o600); err != nil {
+		cancel()
+		t.Fatalf("write non-socket file: %v", err)
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Server.Run error: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for server exit")
+	}
+
+	got, err := os.ReadFile(layout.SocketPath)
+	if err != nil || string(got) != "user-file-not-a-socket\n" {
+		t.Fatalf("Fix13 Item #5 regression: server exit cleanup deleted non-socket regular file at %s! err=%v content=%q", layout.SocketPath, err, string(got))
+	}
 }
 
 // Regression test for Fix Round 6 F2 [P3]:

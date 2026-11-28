@@ -4494,11 +4494,11 @@ func (m *Manager) reconcileHost(
 
 	dec := ReconcileAfterRestart(ch.State, opKind, obs)
 
-	// Clean only owned leftover stage-<16hex> directories from interrupted uploads
-	// via the already-installed verified binary's `corrald clean-stage`
-	// (SharedLock -> OpLock -> daemon.RemoveOwned). Never execute an unverified
-	// staged binary, and when opID is known, only clean that interrupted op's
-	// stage so another gateway's in-progress upload is never touched.
+	// Fix13 Item #3: Clean ONLY this gateway's own interrupted op stage
+	// (opID != "" && stageOpID == opID) via the already-installed verified
+	// binary's `corrald clean-stage`. Never sweep stages when opID == "" or
+	// stageOpID != opID so another gateway's in-progress upload, verification,
+	// or selftest stage is never touched.
 	for _, stage := range dec.CleanupStages {
 		base := stage
 		if idx := strings.LastIndexByte(stage, '/'); idx >= 0 {
@@ -4508,7 +4508,7 @@ func (m *Manager) reconcileHost(
 			continue
 		}
 		stageOpID := strings.TrimPrefix(base, "stage-")
-		if opID != "" && stageOpID != opID {
+		if opID == "" || stageOpID != opID {
 			continue
 		}
 		_, _ = runSSH(ctx, sshClient, CleanStageCommand(probe.CurrentBin, "", stage, stageOpID), 4096, sshx.ExecOptions{})

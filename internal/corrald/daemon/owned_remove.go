@@ -439,7 +439,20 @@ func RemoveOwned(layout *Layout, kind OwnedRemoveKind, target string, manifestFi
 			add(target, "path is not layout run dir")
 			return left
 		}
-		removeOwnedDir(cleanRun, isOwnedRunFileName, "unexpected file in run dir preserved")
+		removeOwnedDir(cleanRun, func(name string) bool {
+			if !isOwnedRunFileName(name) {
+				return false
+			}
+			// Fix13 Item #2: When caller supplies the exact set of locked paths
+			// (manifestFiles != nil), only delete entries that were actually
+			// locked in the first pass; any newly created file is left intact
+			// so rmdir fails with ENOTEMPTY and caller retries/returns ErrLocked.
+			if manifestFiles != nil {
+				_, ok := manifestFiles[filepath.Clean(filepath.Join(cleanRun, name))]
+				return ok
+			}
+			return true
+		}, "unexpected file in run dir preserved")
 
 	case OwnedRemoveStateEntries:
 		cleanState := filepath.Clean(layout.StateDir)

@@ -237,3 +237,54 @@ func TestProbeCommandDetectsLibDirTempFiles(t *testing.T) {
 		})
 	}
 }
+
+// TestUninstallCommandDoesNotReportRemovedWhenLibDirHasTempFiles verifies Fix13 Item #6:
+// The uninstall shell's early `result=removed` branch MUST NOT fire while
+// LibDir still holds anything (corrald temp files or unowned leftovers); it
+// must fall through to the Go recovery/uninstall path.
+func TestUninstallCommandDoesNotReportRemovedWhenLibDirHasTempFiles(t *testing.T) {
+	sh, err := exec.LookPath("sh")
+	if err != nil {
+		t.Skip("sh not found")
+	}
+
+	for _, filename := range []string{
+		".corrald.tmp.12345.deadbeef",
+		".README.txt.tmp.12345.cafebabe",
+		"leftover.dat",
+	} {
+		t.Run(filename, func(t *testing.T) {
+			home := t.TempDir()
+			libDir := filepath.Join(home, ".local", "lib", "corral")
+			stateDir := filepath.Join(home, ".local", "state", "corral", "corrald", "aa11bb22cc77")
+			if err := os.MkdirAll(libDir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			// StateDir and run/ do NOT exist; only LibDir/<filename> remains.
+			target := filepath.Join(libDir, filename)
+			if err := os.WriteFile(target, []byte("leftover"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			// 1. UninstallCommand (manual remove) -> must fall through to error=binary_missing (NOT result=removed).
+			cmd1 := exec.Command(sh, "-c", UninstallCommand(libDir, stateDir, "", "1306000000000001"))
+			cmd1.Env = []string{"HOME=" + home, "PATH=/usr/bin:/bin", "LC_ALL=C"}
+			out1, err1 := cmd1.CombinedOutput()
+			if err1 == nil || ParseKeyValues(out1)["result"] == "removed" || ParseKeyValues(out1)["error"] != "binary_missing" {
+				t.Fatalf("Fix13 Item #6 regression: UninstallCommand fired early removed with LibDir/%s present! err=%v out=%s", filename, err1, string(out1))
+			}
+
+			// 2. UninstallCommandSoleGateway -> must fail closed (NOT result=removed).
+			cmd2 := exec.Command(sh, "-c", UninstallCommandSoleGateway(libDir, stateDir, "", "1306000000000002", "gw-test.local"))
+			cmd2.Env = []string{"HOME=" + home, "PATH=/usr/bin:/bin", "LC_ALL=C"}
+			out2, err2 := cmd2.CombinedOutput()
+			if err2 == nil || ParseKeyValues(out2)["result"] == "removed" {
+				t.Fatalf("Fix13 Item #6 regression: UninstallCommandSoleGateway fired early removed with LibDir/%s present! err=%v out=%s", filename, err2, string(out2))
+			}
+
+			if _, err := os.Lstat(target); err != nil {
+				t.Fatalf("shell unexpectedly removed %s: %v", target, err)
+			}
+		})
+	}
+}

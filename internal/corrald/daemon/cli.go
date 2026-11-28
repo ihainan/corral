@@ -279,6 +279,12 @@ func cmdInstall(args []string, build proto.BuildInfo, stdout io.Writer) int {
 		writeErr(stdout, "invalid_args", "required flags: --stage, --op, --gateway, --by")
 		return 2
 	}
+	// Fix13 Item #4: Reject non-canonical op IDs (must be 16 lowercase hex)
+	// before resolving layout, taking locks, or writing any file.
+	if !IsOwnedOpID(*opID) {
+		writeErr(stdout, "invalid_op", fmt.Sprintf("invalid op id %q", *opID))
+		return 2
+	}
 
 	layout, err := resolveDefaultLayout()
 	if err != nil {
@@ -1771,7 +1777,12 @@ func cmdUninstall(args []string, stdout io.Writer) int {
 		writeErr(stdout, "invalid_args", err.Error())
 		return 2
 	}
-	_ = opID
+	// Fix13 Item #4: Reject non-canonical op IDs when --op is provided, before
+	// acquiring locks or writing any file.
+	if *opID != "" && !IsOwnedOpID(*opID) {
+		writeErr(stdout, "invalid_op", fmt.Sprintf("invalid op id %q", *opID))
+		return 2
+	}
 	soleGW := strings.TrimSpace(*onlyIfSoleGW)
 
 	layout, err := resolveDefaultLayout()

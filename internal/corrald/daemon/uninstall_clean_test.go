@@ -3,6 +3,7 @@
 package daemon
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -503,5 +504,59 @@ func TestRemoveRunDirLockedChecksSystemRunDirFirst(t *testing.T) {
 	}
 	if _, err := os.Stat(sysLockPath); err != nil {
 		t.Fatalf("RemoveRunDirLocked unexpectedly removed systemRunDir file: %v", err)
+	}
+}
+
+// TestRemoveRunDirLockedDoesNotDeleteUnlistedConcurrentPaneLock verifies Fix13 Item #2:
+// OwnedRemoveRunDir MUST NOT delete a pane lock file that was not in the
+// lockedPaths allowlist from pass 1 (e.g. a new pane file created and locked by
+// a concurrent sender between ReadDir and RemoveOwned), and concurrent senders
+// creating/holding locks during RemoveRunDirLocked never have their held lock
+// file unlinked.
+func TestRemoveRunDirLockedDoesNotDeleteUnlistedConcurrentPaneLock(t *testing.T) {
+	uid := uint32(os.Geteuid())
+	base := t.TempDir()
+	runDir := filepath.Join(base, "run")
+	if err := os.MkdirAll(runDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	lockedFile := filepath.Join(runDir, "corral-send-tmux-_0")
+	concurrentFile := filepath.Join(runDir, "corral-send-tmux-_9")
+	if err := os.WriteFile(lockedFile, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(concurrentFile, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate pass 1 only having locked lockedFile; concurrentFile arrived
+	// after pass 1's ReadDir and is NOT in lockedPaths.
+	lockedPaths := map[string]struct{}{
+		filepath.Clean(lockedFile): {},
+	}
+	left := RemoveOwned(&Layout{RunDir: runDir, UID: uid}, OwnedRemoveRunDir, runDir, lockedPaths)
+	if len(left) == 0 {
+		t.Fatalf("Fix13 Item #2 regression: RemoveOwned deleted unlisted concurrent pane file %s!", concurrentFile)
+	}
+	if _, err := os.Lstat(lockedFile); !os.IsNotExist(err) {
+		t.Fatalf("expected lockedFile %s removed, stat err=%v", lockedFile, err)
+	}
+	if _, err := os.Lstat(concurrentFile); err != nil {
+		t.Fatalf("Fix13 Item #2 regression: unlisted concurrent pane file %s was deleted: %v", concurrentFile, err)
+	}
+
+	// Verify that when concurrentFile is held by a sender, RemoveRunDirLocked
+	// returns ErrLocked and leaves concurrentFile intact.
+	lk, err := AcquireLock(concurrentFile)
+	if err != nil {
+		t.Fatalf("AcquireLock(concurrentFile): %v", err)
+	}
+	defer lk.Release()
+	if err := RemoveRunDirLocked(runDir, filepath.Join(base, "no-sys"), uid, 60*time.Millisecond); !errors.Is(err, ErrLocked) {
+		t.Fatalf("expected ErrLocked while concurrentFile is held, got %v", err)
+	}
+	if _, err := os.Lstat(concurrentFile); err != nil {
+		t.Fatalf("held concurrentFile was deleted: %v", err)
 	}
 }

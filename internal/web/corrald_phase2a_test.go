@@ -3448,14 +3448,20 @@ func TestCorraldFix11_ReconnectRecoveryPreservesStageBackups(t *testing.T) {
 	}
 
 	// Simulate interrupted update before gateway restart so OnHostConnected enters
-	// reconcileHost -> ReconcileAfterRestart -> CleanupStages.
+	// reconcileHost -> ReconcileAfterRestart -> CleanupStages for this op.
 	ch, err := h.store.CorraldHostByID(context.Background(), hostID)
 	if err != nil {
 		t.Fatalf("CorraldHostByID: %v", err)
 	}
 	ch.State = gw.StateUpdating
+	ch.ActiveOpID = "deadbeef12345678"
 	if err := h.store.UpsertCorraldHost(context.Background(), ch); err != nil {
 		t.Fatalf("UpsertCorraldHost: %v", err)
+	}
+	if err := h.store.CreateCorraldOp(context.Background(), &store.CorraldOp{
+		ID: "deadbeef12345678", HostID: hostID, Kind: gw.OpUpdate, State: gw.OpRunning, Step: "upload",
+	}, false); err != nil {
+		t.Fatalf("CreateCorraldOp: %v", err)
 	}
 
 	// Simulate gateway restart + reconnect recovery (which runs ReconcileAfterRestart -> CleanupStages).
@@ -3852,6 +3858,180 @@ func TestCorraldFix12_CrashMidRemoveResumesToOffAndFinishesOp(t *testing.T) {
 	// Verify a subsequent operation (install) is accepted without unique-index conflict.
 	startCorraldInstall(t, admin, hostID)
 	waitCorraldState(t, admin, hostID, gw.StateRunning)
+}
+
+// Regression test for Fix Round 13 Item #1 [P1]:
+// Two host records A and B share the same account, both remove_pending.
+// Remove starts from A (CreateCorraldOp writes A's op ID on BOTH host rows in
+// real SQLite), the gateway crashes, and ONLY host B reconnects. Recovery MUST
+// find the stuck op by active_op_id / account, finish it across both rows,
+// clean the host to StateOff, and allow subsequent operations from B without
+// hitting the account unique index.
+func TestCorraldFix13_PeerHostReconnectRecoversCrashedAccountRemove(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("requires linux")
+	}
+	v1Dir, _ := buildTestCorraldDist(t)
+	distV1, err := gw.LoadDist(v1Dir)
+	if err != nil {
+		t.Fatalf("LoadDist v1: %v", err)
+	}
+	h := newHarness(t, func(c *config.Config) {
+		c.CorraldDir = v1Dir
+		c.GatewayID = "gw-fix13-peer.local"
+	})
+	admin := h.admin()
+	adminID := userIDOf(t, admin)
+	sshSrv, home := startCorraldSSH(t)
+	hostA, _ := createAndPinHost(t, admin, sshSrv, "peer-a")
+	hostB, _ := createAndPinHost(t, admin, sshSrv, "peer-b")
+	fp := hostFingerprint(t, h, adminID, hostA)
+
+	// Install on hostA, then connect hostB so both host rows are bound to the
+	// same (fp, "alice") account in SQLite.
+	startCorraldInstall(t, admin, hostA)
+	waitCorraldState(t, admin, hostA, gw.StateRunning)
+	sshCl := dialTestSSH(t, sshSrv)
+	defer sshCl.Close()
+	h.srv.corrald.OnHostConnected(context.Background(), adminID, hostB, "admin", fp, "alice", sshCl)
+	waitCorraldState(t, admin, hostB, gw.StateRunning)
+
+	// Mark both hostA and hostB remove_pending, then start a remove op on hostA
+	// via real SQL CreateCorraldOp (which sets active_op_id = crashedOpID on
+	// BOTH hostA and hostB while corrald_ops.host_id == hostA).
+	if err := h.store.MarkCorraldHostsRemovePending(context.Background(), []int64{hostA, hostB}, fp, "alice"); err != nil {
+		t.Fatalf("MarkCorraldHostsRemovePending: %v", err)
+	}
+	const crashedOpID = "1301000000000001"
+	acctKey := fp + "\x00alice"
+	if err := h.store.CreateCorraldOp(context.Background(), &store.CorraldOp{
+		ID:         crashedOpID,
+		HostID:     hostA,
+		AccountKey: acctKey,
+		Kind:       gw.OpRemove,
+		State:      gw.OpRunning,
+		Step:       "uninstall",
+	}, true); err != nil {
+		t.Fatalf("CreateCorraldOp: %v", err)
+	}
+	if err := h.store.ClaimCorraldHostForRemove(context.Background(), hostA, crashedOpID); err != nil {
+		t.Fatalf("ClaimCorraldHostForRemove: %v", err)
+	}
+
+	// Verify real SQL wrote hostA's op ID onto hostB as well.
+	chBPre, err := h.store.CorraldHostByID(context.Background(), hostB)
+	if err != nil {
+		t.Fatalf("CorraldHostByID(B): %v", err)
+	}
+	if chBPre.ActiveOpID != crashedOpID {
+		t.Fatalf("expected hostB active_op_id=%s before crash, got %q", crashedOpID, chBPre.ActiveOpID)
+	}
+
+	// Simulate hard gateway crash & restart; ONLY hostB reconnects!
+	h.srv.corrald.Close()
+	h.srv.corrald = gw.NewManager(gw.ManagerConfig{
+		Store:     h.store,
+		Dist:      distV1,
+		GatewayID: "gw-fix13-peer.local",
+		SSH:       &webSSHProvider{s: h.srv},
+	})
+	h.srv.corrald.OnHostConnected(context.Background(), adminID, hostB, "admin", fp, "alice", sshCl)
+
+	chA, err := h.store.CorraldHostByID(context.Background(), hostA)
+	if err != nil {
+		t.Fatalf("CorraldHostByID(A): %v", err)
+	}
+	chB, err := h.store.CorraldHostByID(context.Background(), hostB)
+	if err != nil {
+		t.Fatalf("CorraldHostByID(B): %v", err)
+	}
+	if chB.State != gw.StateOff || chB.ActiveOpID != "" {
+		t.Fatalf("Fix13 Item #1 regression: hostB stuck after peer crash reconnect! state=%q active_op_id=%q", chB.State, chB.ActiveOpID)
+	}
+	if chA.State != gw.StateOff || chA.ActiveOpID != "" {
+		t.Fatalf("Fix13 Item #1 regression: hostA not cleared after hostB recovery! state=%q active_op_id=%q", chA.State, chA.ActiveOpID)
+	}
+	if activeOp, aerr := h.store.ActiveCorraldOp(context.Background(), hostA); aerr == nil && activeOp != nil {
+		t.Fatalf("Fix13 Item #1 regression: crashed account op still active! %+v", activeOp)
+	}
+	bin := filepath.Join(home, ".local", "lib", "corral", "corrald")
+	if _, err := os.Lstat(bin); !os.IsNotExist(err) {
+		t.Fatalf("expected binary %s cleaned up on hostB reconnect, stat err=%v", bin, err)
+	}
+
+	// Subsequent install + remove from hostB must succeed without unique-index conflict.
+	startCorraldInstall(t, admin, hostB)
+	waitCorraldState(t, admin, hostB, gw.StateRunning)
+	rRm := admin.do("POST", fmt.Sprintf("/api/hosts/%d/corrald/remove", hostB), nil)
+	mustStatus(t, rRm, http.StatusAccepted, "remove via hostB after recovery")
+	waitCorraldState(t, admin, hostB, gw.StateOff)
+}
+
+// Regression test for Fix Round 13 Item #3 [P2]:
+// Reconnect recovery MUST NOT touch a stage-<16hex> directory belonging to
+// another gateway's in-progress upload/verify/selftest (even when opID == "").
+func TestCorraldFix13_ReconnectDoesNotTouchOtherGatewayStage(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("requires linux")
+	}
+	v1Dir, _ := buildTestCorraldDist(t)
+	distV1, err := gw.LoadDist(v1Dir)
+	if err != nil {
+		t.Fatalf("LoadDist v1: %v", err)
+	}
+	h := newHarness(t, func(c *config.Config) {
+		c.CorraldDir = v1Dir
+		c.GatewayID = "gw-fix13-a.local"
+	})
+	admin := h.admin()
+	adminID := userIDOf(t, admin)
+	sshSrv, _ := startCorraldSSH(t)
+	hostID, _ := createAndPinHost(t, admin, sshSrv, "other-gw-stage")
+	fp := hostFingerprint(t, h, adminID, hostID)
+
+	startCorraldInstall(t, admin, hostID)
+	waitCorraldState(t, admin, hostID, gw.StateRunning)
+
+	sshCl := dialTestSSH(t, sshSrv)
+	defer sshCl.Close()
+	probe, err := gw.ProbeHost(context.Background(), sshCl)
+	if err != nil {
+		t.Fatalf("ProbeHost: %v", err)
+	}
+
+	// Simulate Gateway B actively uploading/verifying inside stage-feedface12345678
+	// (before Gateway B calls `corrald install` and takes OpLock).
+	otherStage := filepath.Join(probe.StateDir, "stage-feedface12345678")
+	otherUpload := filepath.Join(otherStage, ".corrald.upload.0123456789abcdef")
+	if err := os.MkdirAll(otherStage, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(otherUpload, []byte("uploading-from-gw-b"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Gateway A restarts and reconnects into reconcileHost with opID == "".
+	ch, err := h.store.CorraldHostByID(context.Background(), hostID)
+	if err != nil {
+		t.Fatalf("CorraldHostByID: %v", err)
+	}
+	ch.State = gw.StateUpdating
+	ch.ActiveOpID = ""
+	if err := h.store.UpsertCorraldHost(context.Background(), ch); err != nil {
+		t.Fatalf("UpsertCorraldHost: %v", err)
+	}
+	h.srv.corrald.Close()
+	h.srv.corrald = gw.NewManager(gw.ManagerConfig{
+		Store:     h.store,
+		Dist:      distV1,
+		GatewayID: "gw-fix13-a.local",
+		SSH:       &webSSHProvider{s: h.srv},
+	})
+	h.srv.corrald.OnHostConnected(context.Background(), adminID, hostID, "admin", fp, "alice", sshCl)
+
+	if got, err := os.ReadFile(otherUpload); err != nil || string(got) != "uploading-from-gw-b" {
+		t.Fatalf("Fix13 Item #3 regression: Gateway A reconcile deleted Gateway B's active upload stage %s! err=%v content=%q", otherUpload, err, string(got))
+	}
 }
 
 func syscallFlockEx(f *os.File) error {

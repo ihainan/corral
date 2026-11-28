@@ -251,8 +251,6 @@ func TestFix5_Item4_ShellSoleGatewayUninstallRecoversFromLeftoverTombstoneWithou
 		libDir := filepath.Join(base, "lib", "corral")
 		stateDir := filepath.Join(base, "state", "corral", "corrald", "aabbcc112234")
 		_ = os.MkdirAll(libDir, 0o700)
-		// Unrelated sibling tool in LibDir does not block removed.
-		_ = os.WriteFile(filepath.Join(libDir, "code-server-keep"), []byte("keep"), 0o600)
 
 		script := UninstallCommandSoleGateway(libDir, stateDir, filepath.Join(stateDir, "corrald.sock"), "op-retry2", "gw-a.local")
 		out, err := runShell(t, script)

@@ -465,7 +465,9 @@ func (s *Server) Serve(parentCtx context.Context) error {
 	s.wg.Wait()
 
 	if !s.HandedOff() {
-		_ = os.Remove(s.layout.SocketPath)
+		// Fix13 Item #5: Remove socket ONLY at layout.SocketPath and ONLY if
+		// Lstat confirms it is a Unix socket.
+		_ = removeOwnedSocket(s.layout.SocketPath)
 		if s.layout.SocketUsesTmpDir {
 			_ = os.Remove(s.layout.SocketDir)
 		}
