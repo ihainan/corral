@@ -6,7 +6,7 @@ Security problems go to [SECURITY.md](SECURITY.md), not to issues.
 
 ## Setting up
 
-The [Develop](README.md#develop) section of the README has the commands: a test
+The [Development](docs/development.md) guide has the commands: a test
 SSH server in a container, the web interface built once, the gateway run with
 `go run`. You need Go (the version in `go.mod`), Node.js 22 with corepack, and
 Docker for the test server.

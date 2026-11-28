@@ -29,8 +29,8 @@ prefer otherwise.
 
 ## Out of scope
 
-These are how Corral is meant to work, described in the README's
-[Security](README.md#security) section:
+These are how Corral is meant to work, described in
+[docs/security.md](docs/security.md):
 
 - administrators see the audit log and everyone's recordings; recordings are
   stored unencrypted;
@@ -38,6 +38,6 @@ These are how Corral is meant to work, described in the README's
   users can;
 - the hop from a jump host to the host behind it is made by the jump host and
   is not limited by `CORRAL_ALLOWED_NETWORKS`;
-- the limitations listed under [Known limitations](README.md#known-limitations).
+- the limitations listed under [Known limitations](docs/security.md#known-limitations).
 
 A way around any of these protections is in scope, of course.

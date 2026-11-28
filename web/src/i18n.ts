@@ -4356,7 +4356,7 @@ const en: Record<Key, string> = {
   'convo.askEdit': 'Change this file?',
   'convo.askAutoNo': 'Unanswered, Claude Code refuses it by itself in {t}.',
   'convo.askAutoNoNow': 'Claude Code refuses it by itself now, or has.',
-  'convo.askRule': 'Remembered as a rule: it will not ask again for the like',
+  'convo.askRule': 'Saved as a rule: it will not ask again for similar actions',
   'convo.askMode': 'Changes the permissions for the rest of the session, not this once',
   'convo.askConfirm': 'It lasts: tap (or press) it again to confirm',
   'convo.askKeys': '1–{n} to choose, Esc to refuse',

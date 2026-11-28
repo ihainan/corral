@@ -5,511 +5,129 @@
 <h1 align="center">Corral</h1>
 
 <p align="center">
-  A self-hosted SSH client in the browser — on a desktop, a tablet or a phone —<br>
-  made for running coding agents (Claude Code, Codex, Gemini CLI) from anywhere.
+  A self-hosted workbench and SSH gateway for running coding agents (Claude Code, Codex, and more)<br>
+  on your own servers — follow, answer, and continue sessions from any desktop, tablet, or phone browser.
 </p>
 
 <p align="center">
-  <a href="#run">Run</a> ·
+  <a href="#quick-start">Quick start</a> ·
   <a href="#features">Features</a> ·
-  <a href="#configuration">Configuration</a> ·
-  <a href="#security">Security</a> ·
-  <a href="#develop">Develop</a>
+  <a href="#documentation">Documentation</a> ·
+  <a href="#security">Security</a>
 </p>
 
 <p align="center">
-  <img src="docs/screenshots/desktop.png" width="860" alt="Corral on a desktop: a tab per session; herdr in front with an agent asking to apply an edit, tests running beside it">
+  <img src="docs/screenshots/agents-desktop.png" width="860" alt="Corral Agents page on desktop in light mode: agents grouped by waiting, working and other, with two helper agents nested under the lead agent; the lead agent's conversation open, showing collapsed tool calls, a changed-file summary, a running background command, the task list and the composer">
 </p>
 
-<p align="center">
-  <img src="docs/screenshots/tablet.png" width="640" alt="Corral on an iPad: the running sessions as cards showing their screens, one with an agent waiting, and the hosts below">
-</p>
-
-<p align="center">
-  <img src="docs/screenshots/phone-terminal.png" width="260" alt="A terminal on a phone, with the key bar">
-  <img src="docs/screenshots/phone-reply.png" width="260" alt="Answering an agent from a phone: its question and its choices as buttons">
-  <img src="docs/screenshots/phone-composer.png" width="260" alt="The composer completing a file after @">
-</p>
-
-Corral is a gateway: it holds the SSH connections and serves the terminal to
-the browser. Close the laptop, lose signal on the phone, switch apps — the
-session keeps running, and you pick it up where it was, on the same device or
-another: start it at your desk, check on it from your phone, carry on on a tablet.
+Corral is a gateway that holds SSH connections and serves both an agent workbench and a full terminal to the browser. Close the laptop, lose signal on your phone, or switch devices: sessions keep running on your hosts and pick up where you left off.
 
 ## Features
 
-### Desktop, tablet and phone
+### Agent workbench
 
-- **Sessions that follow you** — They keep running while nobody looks and open
-  on whichever device you sign in from; the home page shows each one's screen
-  in small. tmux and [herdr](https://herdr.dev) sessions also outlive a gateway
-  restart, and open pages reattach them by themselves.
-- **Tabs** — In a wide window (a computer, a tablet, a phone on its side) every
-  session is a tab, with whether agents are at work and how many wait or are
-  done; up to 8 stay connected, so switching is instant. Drag a tab to another
-  place (on a touch screen, hold it a moment first); places are kept on each
-  device. `+` searches your hosts. In the installed app: Ctrl+Tab and
-  Ctrl+Shift+Tab switch, Ctrl+Shift+PageUp and PageDown move the tab, ⌘T
-  (Ctrl+Shift+T off a Mac) opens a new one, and on a Mac or an iPad ⌘1–⌘8 pick
-  a tab by its place, ⌘9 the last, ⌘⇧[ and ⌘⇧] the previous and next.
-- **A hardware keyboard** — On a computer or an iPad, keys go straight to the
-  terminal and Option works as Alt. Paste an image to upload it.
-- **A touch screen** — Tap where you type for the keyboard; Chinese and other
-  input methods and dictation work. A key bar holds Esc, Ctrl, Alt, Tab,
-  arrows, F1–F12 and hard-to-type symbols: arrange it, add keys of your own,
-  give keys a long press.
-- **Gestures** — Two fingers sideways go to the next session, up or down to
-  herdr's next workspace; pinch to size the font.
-- **Settings follow you too** — Theme, font size, colour schemes, the key bar
-  and the rest are kept with your account.
+- **Unified agent list and tree** — Collects running agents across your open `herdr` and `tmux` sessions on Linux hosts (supporting Claude Code, Codex, OpenCode, Antigravity CLI, and Devin CLI). Waiting agents surface first, with pinning, filtering, parent–child subagent nesting, and background command tracking.
+- **Structured conversations** — Reads each agent's own session log over SSH and renders turns with formatted answers, collapsed tool calls per turn, per-turn file-change summaries and inline diffs, turn navigation, in-thread search, and Markdown export. Supports multiple agent tabs and side-by-side split views.
+- **Direct interaction without stealing terminal focus** — Send prompts, queue messages ("send now"), stop a running turn, or answer permission and question cards directly to an agent's pane without switching what `herdr` or another terminal tab displays.
+- **Agent composer and actions** — Complete `@` files, `/` commands, and `$` skills; attach images, PDFs, or text files; switch models, reasoning effort, and permission modes; ask side questions (`/btw` on Claude Code); fork or rewind conversations; and launch or resume agents (including git worktrees) from the browser.
+- **Session dock** — Inspect git branch, status, diffs against `HEAD` or base branch, pull request status, pane processes, environment variables, task lists, context usage, cost, files, and a live pane terminal alongside the conversation.
+- **Desktop workbench and alerts** — Icon rail navigation, command palette (`⌘K`), global status bar showing waiting and working agent counts, optional AI translation/summarization of thinking blocks, and Web Push or webhook alerts with quick-reply actions.
 
-### Made for coding agents
+### Terminal and hosts
 
-- **Answer an agent** — When an agent in herdr waits, answer from the top bar or
-  straight from its notification: its question, its choices as buttons.
-- **Notifications** — When an agent waits or finishes, or a program rings the
-  bell or sends one. Tapping one opens that agent's pane. On an iPhone or iPad,
-  add Corral to the Home Screen first: Safari notifies only from there.
-- **Agents page** — Every agent of your open tmux and herdr sessions in one
-  place, those waiting for you first, and the one you pick as a
-  conversation you write to; its own tab beside the terminals (the bot
-  button), a page of its own on a phone. A message goes to that agent's pane
-  only: what herdr has in front, or a terminal shows, does not change. Its
-  conversation is Claude Code's session read as such, by
-  its own title: each answer formatted, with the files the turn changed (lines
-  added and removed; one opens the turn's changes beside it, with line
-  numbers and the lines around) and copy; all the agent did between your
-  messages in one line ("worked for 2m 14s"; while it works, what it is doing
-  and for how long), folded until you open it (a tap, or Ctrl+O for all). The composer sits under the
-  thread, with the permission mode, branch, model and context size under it;
-  over it, its task list, what you sent that waits to be taken in (send it
-  now), and a permission prompt to answer with its own keys (1–9, Esc),
-  showing what it asks as the screen does. Stop it from the send button, and
-  go to another agent from the list beside it (Alt+↑/↓). The whole history
-  shows even where the terminal keeps none; its terminal is a tap away.
-- **A composer** — Write longer prompts: `@` files, `/` commands, `$` skills,
-  history, Claude Code's suggested prompt with Tab. Ctrl+Shift+Enter
-  (⇧⌘↩ on a Mac) opens it from the terminal.
-- **Images and files** — Paste, drop or pick an image, a PDF or a text file: it
-  is uploaded to the host and its path typed in for the agent to read.
+<p align="center">
+  <img src="docs/screenshots/terminal-desktop.png" width="860" alt="Corral terminal on desktop in dark mode: a herdr session with the lead agent and its two helpers side by side, the herdr workspace and agent list on the left, and session tabs with waiting and working counts and the recording indicator along the top">
+</p>
 
-### Around the terminal
+<p align="center">
+  <img src="docs/screenshots/hosts-desktop.png" width="860" alt="Corral Hosts page on desktop: running sessions across the top, one with an agent waiting for approval, above a searchable table of saved SSH hosts with their status">
+</p>
 
-- **Files** — Browse the host, upload (or drop files in), download, rename,
-  delete, insert a path, jump to the terminal's folder.
-- **Web previews** — Open servers running on the host through port forwarding
-  (click a localhost address in the terminal), for yourself or everyone signed
-  in; VS Code in the browser ([code-server](https://github.com/coder/code-server)).
-- **Looks** — Light and dark, a colour scheme for the terminal (or one each for
-  light and dark), copy mode, clipboard from the host (OSC 52), installable as
-  an app.
+- **Persistent sessions** — Opening a host lists existing `tmux` and `herdr` sessions (restarting stopped `herdr` sessions on open), offers to start a new one, or falls back to a plain shell. `tmux` and `herdr` sessions survive disconnects and gateway restarts and reattach automatically.
+- **Multi-tab terminal** — Keeps up to 8 sessions connected at once for instant switching, with drag-to-reorder tabs, per-device tab positions, and terminal-app keyboard shortcuts when installed as a PWA.
+- **Terminal polish** — Light and dark themes with per-mode terminal color schemes and automatic theme sync (mode 2031), copy mode, OSC 52 host clipboard, and hardware-keyboard support (including Option-as-Alt and pasting images to upload).
+- **Files, port forwarding, and VS Code** — Built-in SFTP file browser (upload, download, rename, delete, path insertion), drag-and-drop or pasted file uploads, private or shared HTTP port forwarding by clicking localhost addresses, and on-demand VS Code in the browser (`code-server`).
+- **Jump hosts and optional host helper** — Single-hop jump hosts with pinned host keys, plus an optional user-consented host helper daemon (`corrald`) over SSH-forwarded Unix sockets for immediate agent updates and lower SSH channel usage.
 
-### For a team
+### Phone and tablet
 
-- **Accounts** — By invitation or created by an administrator; each user has
-  their own hosts and keys.
-- **Safety** — Credentials encrypted at rest (or a password asked for each
-  time), host keys checked, two-step sign-in, an audit log, only the networks
-  you allow.
-- **Sharing** — Jump hosts, optional session recording, read-only watching of a
-  session.
+<p align="center">
+  <img src="docs/screenshots/phone-hosts.png" width="260" alt="Corral Hosts view on a phone: running session cards with agent status above the saved hosts list, and the bottom navigation bar">
+  <img src="docs/screenshots/phone-agents.png" width="260" alt="Corral Agents list on a phone: the agent waiting for approval at the top, then working and idle agents">
+  <img src="docs/screenshots/phone-chat.png" width="260" alt="An agent conversation on a phone: a banner pointing to another agent that is waiting, the conversation with a running background command, the task list and the composer">
+</p>
 
-Chinese and English interfaces ship together.
+<p align="center">
+  <img src="docs/screenshots/phone-terminal.png" width="260" alt="Corral terminal on a phone: a directory tree and the touch key bar with Esc, Tab, Ctrl, Alt and arrow keys">
+  <img src="docs/screenshots/phone-reply.png" width="260" alt="Answering a permission prompt on a phone: the command to approve, the agent's choices as buttons, and a box for writing a different answer">
+</p>
 
-<details>
-<summary><b>More about the features</b></summary>
+- **Mobile-first agent and host views** — Dedicated bottom navigation for Hosts, Agents, Keys, and Settings, with full conversation reading, file-change lists, reply sheets, and notification deep-links straight to the waiting agent (Add to Home Screen on iOS and iPadOS for Web Push).
+- **Touch terminal and key bar** — Tap where you type to summon the soft keyboard with full Chinese/IME and dictation support. Arrange a customizable key bar (Esc, Ctrl, Alt, Tab, arrows, F1–F12, custom macro sequences, long-press actions, and a Ctrl long-press shortcut panel).
+- **Gestures and synced preferences** — Two-finger horizontal swipe switches sessions, vertical swipe switches `herdr` workspaces, pinch resizes the font, and themes, key bars, and preferences sync with your account across devices.
 
-- Opening a host lists its tmux and herdr sessions to pick from (a stopped
-  herdr session starts again), along with a new tmux or herdr session and a
-  plain shell. The home page shows running sessions as
-  cards with their screen in small.
-- Keys of your own send a sequence written as for tmux's send-keys
-  (`C-b c`, `"git status" Enter`) or as in Moshi (`C-b, S-t`,
-  `text:/clear, Enter`), or picked from a list. A dot in a key's corner means
-  it has a long press; a long press on Ctrl opens a shortcut panel (Ctrl
-  combinations, herdr's workspaces, tabs and panes, tmux, Claude Code and
-  Codex keys and commands). The layout
-  follows you to every device.
-- The composer keeps its draft across a reload of the tab, shows a long paste
-  as a label it sends in full, and completes as the agents' own input boxes do
-  (`/` also offers your own commands in `.claude/commands`, skills, Codex
-  prompts). On a computer Enter sends and Shift+Enter starts a new line, or
-  (as set) Enter starts a new line and ⌘/Ctrl+Enter sends. On a phone or
-  tablet Enter always starts a new line; the button or ⌘/Ctrl+Enter sends.
-- When Gemini CLI is in front (in tmux or herdr), an uploaded image's path is
-  typed as `@path`. Shift+Enter inserts a newline and Ctrl+Enter reaches the
-  programs that tell it apart (Claude Code's "send now").
-- An agent's alert says what it asks; where the platform shows buttons (not
-  iOS), its first and last choices answer it from the alert, once, if nothing
-  changed since. Once the agent no longer waits, its alert is replaced. At
-  most 10 alerts a minute; webhooks too, if enabled. The terminal offers to
-  turn alerts on once agents show up.
-- The agents page reads Claude Code's own log of the session in each herdr
-  pane, or in a tmux session's active pane, over the session's SSH
-  connection; nothing is installed on the host. It shows the last 4 MB of a
-  long log, and follows a `/clear` or `/resume` in the pane.
-- Tabs show in windows at least 700 pixels wide; narrower ones switch sessions
-  from a list.
-- Several devices can have one session open; the one you act on decides the
-  terminal size, the others follow it.
-- Programs that follow the terminal's colours are told when it turns light or
-  dark (mode 2031): Claude Code with its theme set to "Auto (match terminal)",
-  herdr with `auto_switch = true` under `[theme]` in its config.
-- Programs inside tmux that send OSC 52 themselves (vim, Neovim) also need
-  `set -g set-clipboard on`. Where the browser allows copying only on a tap
-  (Safari), Corral offers a button.
-- VS Code opens in Chinese with the Chinese interface: the language pack is
-  fetched from [Open VSX](https://open-vsx.org) by the host, or uploaded from
-  `CORRAL_CODE_SERVER_DIR`, and checked against a pinned digest.
-- A password an administrator sets (a new account, a reset) is changed at the
-  next sign-in before anything else, unless the administrator unticks that.
+### Team and administration
 
-</details>
+<p align="center">
+  <img src="docs/screenshots/recordings.png" width="860" alt="Corral Recordings page: sessions being recorded now and earlier recordings grouped by day, with host, user, start time, length and size, and host, user and time filters">
+</p>
 
-## Run
+<p align="center">
+  <img src="docs/screenshots/audit-log.png" width="860" alt="Corral Audit log page: timestamped entries for two users, including sign-ins, new hosts, opened sessions, account creation and agent screen reads, with user, kind and time filters">
+</p>
 
-Corral is one binary or container image, with the web interface embedded and
-a SQLite database. Images for linux/amd64 and linux/arm64 are published as
-`ghcr.io/ihainan/corral`; the [releases](https://github.com/ihainan/corral/releases)
-also have Linux binaries.
+- **Accounts and SSO** — Invite users by link or create accounts directly as an administrator; each user has isolated hosts and SSH keys. Supports two-step sign-in (TOTP with recovery codes) and OpenID Connect single sign-on with group-based access and admin roles.
+- **Recordings and live watching** — Optional asciicast session recording with in-browser playback and configurable retention/size limits, plus read-only live session sharing with chosen teammates.
+- **Audit log** — Filterable log of sign-ins, host changes, file uploads, agent interactions, recording views, and session restores.
+- **Subscription quota overview** — Displays cached 5-hour and weekly quota windows collected across your hosts for Claude Code, Codex, and Antigravity accounts, with opt-in rate-limited refresh.
+- **Bilingual interface** — Ships with English and Chinese interfaces.
+
+## Quick start
+
+Corral runs as a single container (`ghcr.io/ihainan/corral`, `linux/amd64` and `linux/arm64`) or standalone Linux binary from [GitHub Releases](https://github.com/ihainan/corral/releases), with the web UI embedded and data stored in SQLite.
 
 ```sh
-(umask 077; docker run --rm ghcr.io/ihainan/corral genkey > corral.key)   # keep it: it decrypts what is stored
-docker run -d --name corral --stop-timeout 30 -p 127.0.0.1:8080:8080 -v corral-data:/data \
+(umask 077; docker run --rm ghcr.io/ihainan/corral genkey > corral.key)   # keep separate from DB backups
+docker run -d --name corral --stop-timeout 30 \
+  -p 127.0.0.1:8080:8080 -v corral-data:/data \
   -e CORRAL_PUBLIC_URL=https://ssh.example.com \
   -e CORRAL_MASTER_KEY="$(cat corral.key)" \
   ghcr.io/ihainan/corral
-docker logs corral   # a one-time link to create the first administrator
+docker logs corral   # prints the one-time link to create the first administrator
 ```
 
-Open the link from the log, create the first administrator, then add people
-from **Users** (an invitation link, or an account you create).
-
-<details>
-<summary><b>With Compose</b></summary>
-
-The key in `.env` next to the file, made once with
-`(umask 077; echo "CORRAL_MASTER_KEY=$(docker run --rm ghcr.io/ihainan/corral genkey)" > .env)`:
+With Docker Compose (generate `.env` once with `(umask 077; echo "CORRAL_MASTER_KEY=$(docker run --rm ghcr.io/ihainan/corral genkey)" > .env)`):
 
 ```yaml
 services:
   corral:
-    image: ghcr.io/ihainan/corral:0.2.0
+    image: ghcr.io/ihainan/corral:latest
     restart: unless-stopped
-    stop_grace_period: 30s  # time to record the open sessions, to open them again after
+    stop_grace_period: 30s
     ports: ["127.0.0.1:8080:8080"]
     environment:
       CORRAL_PUBLIC_URL: https://ssh.example.com
-      CORRAL_MASTER_KEY: ${CORRAL_MASTER_KEY:?}  # from .env
-      CORRAL_TRUSTED_PROXIES: 172.16.0.0/12      # the reverse proxy, as the container sees it
+      CORRAL_MASTER_KEY: ${CORRAL_MASTER_KEY:?}
+      CORRAL_TRUSTED_PROXIES: 172.16.0.0/12
     volumes:
       - corral-data:/data
 volumes:
   corral-data:
 ```
 
-A folder instead of the volume (`./data:/data`) must be writable by the
-image's user, uid 10001: `mkdir data && sudo chown 10001 data`.
+Place Corral behind an HTTPS reverse proxy that passes WebSocket upgrades and disables response buffering (see [`deploy/nginx.conf.example`](deploy/nginx.conf.example)). For reverse proxy setup, forwarded ports, VS Code, host preparation, and building from source, see [Deployment](docs/deployment.md).
 
-To build the image yourself: `docker build -t corral .` (any platform, e.g.
-`docker buildx build --platform linux/arm64`).
+## Documentation
 
-</details>
-
-<details>
-<summary><b>Behind a reverse proxy</b></summary>
-
-Serve Corral over HTTPS. The proxy must pass WebSocket upgrades, must not
-buffer responses, and should allow long-lived connections and uploads as large
-as `CORRAL_UPLOAD_MAX_MB`; see [`deploy/nginx.conf.example`](deploy/nginx.conf.example).
-Set `CORRAL_TRUSTED_PROXIES` to the proxy's address so sign-in limits and the
-audit log see real client addresses.
-
-</details>
-
-<details>
-<summary><b>Forwarded ports and VS Code</b></summary>
-
-Both are served on subdomains of `CORRAL_FORWARD_DOMAIN`: `<port>-<id>.<domain>`
-for a forwarded port and `code-<id>.<domain>` for VS Code. Point a wildcard DNS
-record (`*.<domain>`) and a wildcard certificate at the proxy, and route those
-names to Corral as well. Each forward is checked against the signed-in user on
-every request; subdomains cannot read the main site's sign-in.
-
-</details>
-
-<details>
-<summary><b>On the hosts</b></summary>
-
-Nothing needs to be installed. With **tmux** or **herdr** on a host, opening it
-offers their sessions (and a new one); terminals running in them
-survive the gateway restarting and can be attached from elsewhere. A host with
-neither opens a plain shell. The file panel and image uploads need the host's
-SFTP subsystem (enabled by default in OpenSSH).
-
-</details>
-
-## Configuration
-
-All settings are environment variables. Only the first two are required.
-
-<details>
-<summary><b>All variables</b></summary>
-
-| Variable | Default | Meaning |
-|---|---|---|
-| `CORRAL_PUBLIC_URL` | (required) | The URL users open; used for origin checks and cookies |
-| `CORRAL_EXTRA_URLS` | — | More URLs for the same site, comma-separated (say, an outside domain beside an inside one), same scheme as the public URL, names in ASCII (`xn--` form), none under `CORRAL_FORWARD_DOMAIN`; they pass the origin checks too. Invite links follow the domain they were made from; forwarded ports and VS Code stay on `CORRAL_PUBLIC_URL`'s side. Each domain has its own sign-in |
-| `CORRAL_MASTER_KEY` / `CORRAL_MASTER_KEY_FILE` | (required) | 32 random bytes, base64 (`corral genkey`); encrypts stored credentials. The file wins if both are set |
-| `CORRAL_LISTEN` | `127.0.0.1:8080` (`0.0.0.0:8080` in the image) | Listen address |
-| `CORRAL_DATA_DIR` | `./data` (`/data` in the image) | Database and recordings |
-| `CORRAL_ALLOWED_NETWORKS` | everywhere but loopback | Networks SSH targets may resolve to, comma-separated. Unset, any address but loopback (`127.0.0.0/8`, `::1`); the gateway machine's other addresses are not refused. Set, only those named (`127.0.0.1/32` among them to reach loopback) |
-| `CORRAL_DENIED_NETWORKS` | — | Extra networks to refuse. Always refused, whatever is allowed: `0.0.0.0/8`, link-local (`169.254.0.0/16`, `fe80::/10`: most clouds' instance metadata), Alibaba Cloud's metadata `100.100.100.200`, Azure's WireServer `168.63.129.16`, AWS's `fd00:ec2::254`, multicast, reserved and documentation ranges. An IPv6 address that carries an IPv4 one by a known translation (NAT64's `64:ff9b::/96` and `64:ff9b:1::/48`, SIIT, 6to4, Teredo) is held to the rules for that IPv4 address too (in `64:ff9b:1::/48`, whose prefix length is not known, to each reading of it); a network's own NAT64 prefix is not recognised, so on such a network list the allowed networks instead |
-| `CORRAL_TRUSTED_PROXIES` | — | Proxies whose `X-Forwarded-For` is believed |
-| `CORRAL_DETACH_TIMEOUT` | `24h` | How long a session runs with nobody viewing it |
-| `CORRAL_MAX_SESSIONS_PER_USER` | `20` | Open sessions per user |
-| `CORRAL_UPLOAD_MAX_MB` | `100` | Upload size limit |
-| `CORRAL_LOGIN_IDLE_TIMEOUT` / `CORRAL_LOGIN_MAX_AGE` | `168h` / `720h` | Browser sign-in lifetime |
-| `CORRAL_DEFAULT_LANGUAGE` | each browser's language (English for webhooks) | `zh-CN` or `en` for everyone who has not picked one, and for webhooks |
-| `CORRAL_FORWARD_DOMAIN` | — | Parent domain for forwarded ports and VS Code; needs an `https://` public URL |
-| `CORRAL_CODE_SERVER` | `on` with a forward domain | `on` / `off`: VS Code in the browser |
-| `CORRAL_CODE_SERVER_VERSION` | `4.138.0` | code-server release installed on hosts |
-| `CORRAL_CODE_SERVER_URL` | GitHub release | Download URL template (https) with `{version}` and optionally `{arch}` (`amd64`, `arm64`) |
-| `CORRAL_CODE_SERVER_SHA256` | built in for `4.138.0` | Trusted archive digests, `amd64=<sha256>,arm64=<sha256>`; required for other versions |
-| `CORRAL_CODE_SERVER_DIR` | — | Gateway directory with `code-server-{version}-linux-{arch}.tar.gz` (and, for the Chinese interface, `MS-CEINTL.vscode-language-pack-zh-hans-1.131.0.vsix`), uploaded to hosts without internet access |
-| `CORRAL_RECORDING` | `off` | `on` records the output of every session |
-| `CORRAL_RECORDING_DAYS` | `30` | How long recordings are kept |
-| `CORRAL_RECORDING_MAX_MB` | `200` | Size limit of one recording |
-| `CORRAL_PUSH_HOSTS` | — | Extra push services (besides Apple, Google, Mozilla, Microsoft): a host name, or `.example.com` for any below it |
-| `CORRAL_WEBHOOK_PREFIXES` | — (webhooks off) | URL prefixes users may send alert webhooks to |
-| `CORRAL_RESTORE_SESSIONS` | `on` | `off`: tmux and herdr terminals open when the gateway stops are not opened again when it starts (see Restarts) |
-| `CORRAL_STATIC_DIR` | — (embedded) | Serve the web interface from this directory instead (front-end development) |
-| `CORRAL_LOCAL_LOGIN` | `all` | Who may sign in with a password: `all`, `admins` (administrators only; everyone else uses single sign-on), or `off` (nobody; needs `CORRAL_OIDC_ISSUER`). See Single sign-on |
-| `CORRAL_OIDC_ISSUER` | — (single sign-on off) | The OpenID Connect provider's issuer URL, `https://` (or `http://localhost` for development). Its endpoints and keys are discovered from it |
-| `CORRAL_OIDC_CLIENT_ID` | (required with an issuer) | The client Corral is registered as at the provider |
-| `CORRAL_OIDC_CLIENT_SECRET` / `CORRAL_OIDC_CLIENT_SECRET_FILE` | (required with an issuer) | The client's secret (Corral is a confidential client); set one of the two |
-| `CORRAL_OIDC_SCOPES` | `openid profile email` | Scopes asked for, space- or comma-separated; `openid` is always included |
-| `CORRAL_OIDC_GROUPS_CLAIM` | `groups` | The claim holding the person's groups: a name, or a dotted path (`realm_access.roles`) |
-| `CORRAL_OIDC_ALLOWED_GROUPS` | — (anyone the provider signs in) | Groups whose members may sign in, comma-separated |
-| `CORRAL_OIDC_ADMIN_GROUPS` | — (roles managed in Corral) | Groups whose members are administrators, comma-separated; checked at every sign-in, and members of none become ordinary users (never the last administrator) |
-| `CORRAL_OIDC_BUTTON` | `使用单点登录` / `Sign in with SSO` | The sign-in button's words |
-| `CORRAL_OIDC_END_SESSION` | `false` | `true`: signing out of a session single sign-on made also signs out at the provider (if it has an `end_session_endpoint`) |
-
-</details>
-
-## Single sign-on
-
-Corral can sign people in with any OpenID Connect provider (Keycloak,
-Authentik, Authelia, Azure AD / Entra ID, Okta, Google …) beside, or instead
-of, its own passwords.
-
-- **How it works.** The Authorization Code flow with PKCE (`S256`), a state
-  and a nonce; Corral is a confidential client. The ID token's signature is
-  checked against the provider's published keys (refetched when a new key
-  appears), with only asymmetric algorithms accepted (never `none`, never
-  `HS*`), and its issuer, audience (and authorized party), expiry, issue time
-  and nonce are checked too. The provider's tokens are not kept.
-- **Who is who.** A person is the provider's *issuer and subject* (`sub`):
-  never an email or a user name, which a provider may let people change. The
-  first sign-in creates the account (no password); its user name comes from
-  `preferred_username` (else the email), and if that name is taken, `-2`,
-  `-3` … is added: an existing account is never taken over. Existing
-  accounts are never linked by email: a signed-in user links their account
-  in Settings › Account › Single sign-on, which keeps their password working.
-  An account with no password cannot be unlinked (disable it instead, or give
-  it a password first).
-- **Groups.** With `CORRAL_OIDC_ALLOWED_GROUPS`, only members of those groups
-  get in. With `CORRAL_OIDC_ADMIN_GROUPS`, group membership decides at every
-  sign-in who is an administrator. A disabled Corral account stays out
-  whatever the provider says. Corral's own two-step sign-in is not asked of a
-  single sign-on sign-in (the provider handles that); it still applies to the
-  same account's password sign-in.
-- **Signing out.** Corral supports OpenID Connect **back-channel logout**:
-  register `https://<your Corral>/api/auth/oidc/backchannel` at the provider,
-  and when someone signs out there, or an administrator ends their session,
-  Corral ends the sessions single sign-on made for them (their password
-  sessions are left alone). With `CORRAL_OIDC_END_SESSION=true`, signing out
-  of Corral also signs out at the provider.
-- **Several domains.** Each `CORRAL_PUBLIC_URL` / `CORRAL_EXTRA_URLS` origin
-  signs in on its own domain: register `https://<each>/api/auth/oidc/callback`
-  as a redirect URI. Forwarded ports and VS Code sign in through the main site
-  as before.
-- **Keeping a way in.** `CORRAL_LOCAL_LOGIN=off` removes password sign-in for
-  everyone, administrators included: if the provider is down or misconfigured,
-  nobody gets in. `admins` keeps it for administrators as a way back in.
-
-<details>
-<summary><b>Example: Keycloak</b></summary>
-
-1. In your realm, **Clients › Create client**: type *OpenID Connect*, client
-   ID `corral`.
-2. **Capability config**: *Client authentication* on (a confidential client),
-   *Standard flow* on; *Direct access grants* and *Implicit flow* off.
-3. **Login settings**: *Valid redirect URIs*
-   `https://corral.example.com/api/auth/oidc/callback`; *Valid post logout
-   redirect URIs* `https://corral.example.com/login`; *Web origins*
-   `https://corral.example.com`. Each of these once per Corral domain
-   (`CORRAL_PUBLIC_URL` and every `CORRAL_EXTRA_URLS` one): a sign-in, and a
-   sign-out, come back to the domain they began on.
-4. **Advanced › Advanced settings**: *Proof Key for Code Exchange Code
-   Challenge Method* `S256`.
-5. **Logout settings**: *Front channel logout* off; *Backchannel logout URL*
-   `https://corral.example.com/api/auth/oidc/backchannel`; *Backchannel logout
-   session required* on.
-6. **Client scopes › corral-dedicated › Add mapper › By configuration ›
-   Group Membership**: name `groups`, *Token Claim Name* `groups`, *Full group
-   path* off, *Add to ID token* on.
-7. **Credentials**: copy the *Client secret*.
-
-```sh
-CORRAL_OIDC_ISSUER=https://id.example.com/realms/example
-CORRAL_OIDC_CLIENT_ID=corral
-CORRAL_OIDC_CLIENT_SECRET_FILE=/run/secrets/corral-oidc
-CORRAL_OIDC_ALLOWED_GROUPS=corral-users,corral-admins
-CORRAL_OIDC_ADMIN_GROUPS=corral-admins
-CORRAL_LOCAL_LOGIN=admins
-```
-
-With *Full group path* on, groups arrive as `/corral-users`: list them so.
-Keycloak asks before signing out when Corral sends no ID token hint
-(`CORRAL_OIDC_END_SESSION=true`), since Corral does not keep the ID token.
-
-</details>
+- [Deployment](docs/deployment.md) — Docker, Docker Compose, reverse proxy, forwarded ports, VS Code, target hosts, and restarts.
+- [Configuration](docs/configuration.md) — Complete reference of all `CORRAL_*` environment variables, defaults, and limits.
+- [Single sign-on](docs/single-sign-on.md) — OpenID Connect setup, account linking, group mapping, back-channel logout, and a Keycloak example.
+- [Security](docs/security.md) — Trust model, credential encryption, network controls, `corrald` guarantees, and known limitations.
+- [Development](docs/development.md) — Local test environment, build targets, and test suites.
 
 ## Security
 
-- **Keep the master key and the database apart.** Stored SSH credentials are
-  encrypted with the master key; anyone with both can decrypt them.
-- **The gateway acts with the users' SSH credentials.** Run it on a machine you
-  trust as much as the hosts behind it.
-- **Narrow where SSH may go when you share the gateway.** By default users may
-  connect anywhere but loopback, the public internet and the gateway
-  machine's other addresses included, as one would from their own computer. On a gateway shared by many,
-  set `CORRAL_ALLOWED_NETWORKS` to the networks your hosts are in (say
-  `10.0.0.0/8,100.64.0.0/10` for a LAN and Tailscale): otherwise anyone signed
-  in can use the gateway's place in the network to try addresses and ports.
-- **Tell your users when you turn recording on.** Recordings hold what the
-  screen showed and are kept unencrypted in the data directory.
-
-<details>
-<summary><b>The details</b></summary>
-
-- **Backups.** Back up `CORRAL_DATA_DIR` and keep the key somewhere else (a
-  secret store, or a file that is not in the backup).
-- **Sign-in.** Passwords are hashed with Argon2id; failed attempts slow an
-  account down and are limited per address. Two-step sign-in is per user, and
-  administrators can reset it for a lost phone. Disabling an account (or an
-  administrator resetting its password) ends all of its browser logins,
-  terminals and forwards at once; changing your own password signs out your
-  other browsers; signing out ends that browser's login. Terminals otherwise
-  keep running until closed or detached for `CORRAL_DETACH_TIMEOUT`.
-- **Restarts.** Terminals end with the gateway, but tmux and herdr sessions
-  keep running on their hosts. When it starts again, the gateway attaches
-  again the ones that were open within the last hour, for users still signed
-  in somewhere, with the host's saved credential and pinned key (never a
-  password asked for), and only if the session is still on the host: it
-  makes none anew. Give the container time to stop (`--stop-timeout 30`,
-  or `stop_grace_period` with Compose). Each outcome is in the audit log as
-  `session.restore`.
-- **Recordings** contain whatever the screen showed: typing that the terminal
-  echoes, but not a password typed at a prompt that hides it.
-  Owners see their own, administrators everyone's; watching one is audited.
-  The terminal tells users it is recorded.
-- **Watching** shows the screen, recent output included, to the people the
-  owner adds; they cannot type, resize or use anything else.
-- **Jump hosts.** `CORRAL_ALLOWED_NETWORKS` applies to what the gateway
-  connects to itself, the jump host included. The hop from a jump host to the
-  host behind it starts on the jump host, where the user can log in anyway;
-  only addresses that are never a host (link-local, multicast, unspecified)
-  are refused there, and only when written as an address: a name is resolved
-  by the jump host.
-
-</details>
-
-Report security problems privately, not in a public issue: see [SECURITY.md](SECURITY.md).
-
-<details>
-<summary><b>Known limitations</b></summary>
-
-- Two devices typing into one session at the same time interleave, as with any
-  shared terminal.
-- In a plain shell `@` completes from the home folder (in tmux and herdr, from
-  the folder the terminal is in).
-- In a folder where other users may rename entries (world-writable without the
-  sticky bit), an upload's staging folder can be swapped by them between steps;
-  such a folder lets them tamper with anything put there anyway.
-- The file panel shows the first 5000 entries the host lists in a folder
-  (folders first, by name) and says when there are more.
-- Answering an agent checks the pane's screen right before typing, but herdr
-  cannot check and type in one step: an answer given on the host in that very
-  moment is not seen.
-- After a gateway restart, a window's tmux and herdr tabs open again by
-  themselves, in their places; one whose host asks for a password each time
-  is not (the window says so), and plain shells end with the gateway. Each
-  window keeps its own list: a tab closed in one window while another was
-  hidden or on another page may be opened again there after a restart.
-- The agents page talks to Claude Code only, in tmux or herdr on Linux
-  hosts (it finds the process through `/proc`), with its settings in
-  `~/.claude` (not a `CLAUDE_CONFIG_DIR` of its own). Only the session's
-  owner sees it: someone watching a shared session sees the screen, and the
-  log holds more than that.
-- A question is answered in the conversation in herdr panes, as from the
-  reply dialog; in tmux, a question Claude Code asks with its own tool shows
-  as waiting and is answered in the terminal (a permission prompt is not in
-  its log, so tmux shows that as working). The list beside it has the status
-  of herdr's agents and of the tmux session shown; other tmux sessions are
-  listed without one.
-- A message is typed only for the Claude Code process the conversation
-  shows, in front of its terminal in that pane: the host checks that again
-  just before typing, but cannot check and type in one step, so a process
-  ending in that very moment (a few milliseconds) leaves the message to the
-  shell. Stop and send now press their keys after the gateway's own check,
-  a moment before: a process that ends, or a pane taken over, in between is
-  still pressed. In a tmux session they check that the pane is in the session
-  and then press, two tmux commands: a window moved to another session in
-  between would still be pressed. Keys from the key bar go to the terminal
-  as typed, not through the prompt's card.
-- The permission card shows what the prompt asks as Claude Code draws it on
-  the screen (from the rule over it to its question); where it cannot tell
-  that apart, it shows the screen itself. The context size under the
-  composer is what the latest request carried; the log does not say how
-  large the session's window is. The permission mode is the one of the
-  latest message (a change since shows with the next).
-- What waits to be taken in is what Claude Code's log says was queued to the
-  process shown since it started; a process of the same session started
-  again within a second of the one before is not told apart from it (the
-  host's boot time is known to the second).
-- Several tabs of one tmux or herdr session keep places by when they were
-  opened; closing one can move the others of that session.
-- Claude Code's suggested prompt is read off the screen (greyed text in its
-  input box): another program drawing the same box would be offered too, though
-  only typed into the composer, never sent.
-
-</details>
-
-## Develop
-
-```sh
-docker build -t corral-test-sshd test/sshd && docker run -d -p 127.0.0.1:2222:22 corral-test-sshd
-make web
-export CORRAL_PUBLIC_URL=http://127.0.0.1:8080 CORRAL_ALLOWED_NETWORKS=127.0.0.1/32 \
-  CORRAL_MASTER_KEY=$(go run ./cmd/corral genkey)
-go run ./cmd/corral serve   # the log has the link to create the first account
-make check                  # Go tests (incl. the security suite), type check, notices
-make notices                # after changing dependencies
-```
-
-For Codex chat changes, run `make codex-check` as well. The
-[Codex chat validation plan](docs/codex-chat-validation.md) describes the
-isolated real CLI checks, browser regressions and performance measurements,
-and distinguishes those checks from physical-device and real-provider testing.
-
-Add the test SSH server as host `127.0.0.1`, port `2222`, user `alice`,
-password `alice-pass`. Third-party licences are
-listed in [`web/public/THIRD-PARTY-NOTICES.txt`](web/public/THIRD-PARTY-NOTICES.txt),
-which the web interface also serves. See [CONTRIBUTING.md](CONTRIBUTING.md)
-before sending a change, and [CHANGELOG.md](CHANGELOG.md) for what changed
-between versions.
+Stored SSH credentials are encrypted at rest with `CORRAL_MASTER_KEY`, which should be kept separate from database backups. On a shared gateway, restrict reachable SSH targets with `CORRAL_ALLOWED_NETWORKS` and review the trust boundaries and known limitations in [docs/security.md](docs/security.md). Report vulnerabilities privately as described in [SECURITY.md](SECURITY.md).
 
 ## License
 
