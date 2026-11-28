@@ -820,10 +820,10 @@ func (s *Server) watchHerdr(sess *term.Session, h *store.Host) {
 	lineage.setNeedLogs(func(lctx context.Context) {
 		var locOut []byte
 		var locErr error
-		if cout, ok := s.tryCorraldLocate(lctx, sess, proto.AgentLocateParams{Mode: sess.Persistence, TmuxName: sess.TmuxSession}); ok {
+		if cout, ok := s.tryCorraldLocate(lctx, sess, proto.AgentLocateParams{Mode: sess.Persistence, TmuxName: sess.CurrentTmuxSession()}); ok {
 			locOut = cout
 		} else {
-			locOut, locErr = sshx.Output(lctx, sess.Client(), convoLocateCommand(sess.Persistence, sess.TmuxSession, "")+"; "+hostNowCommand, convoLocateMax)
+			locOut, locErr = sshx.Output(lctx, sess.Client(), convoLocateCommand(sess.Persistence, sess.CurrentTmuxSession(), "")+"; "+hostNowCommand, convoLocateMax)
 		}
 		if locErr != nil {
 			return

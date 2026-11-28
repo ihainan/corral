@@ -1,5 +1,5 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { Bot, Command, Film, KeyRound, LogOut, ScrollText, Server, Settings, SquareTerminal, Users } from 'lucide-react'
+import { Bot, Command, Film, Gauge, KeyRound, LogOut, ScrollText, Server, Settings, SquareTerminal, Users } from 'lucide-react'
 import { openPalette, PALETTE_KEY } from './palette'
 import { signOut, useSession } from './app'
 import { t } from './i18n'
@@ -242,7 +242,10 @@ export function Rail({ active, shown = true }: { active?: RailKey; shown?: boole
           at="point"
           sheet={false}
           trigger={() => meBtn.current}
-          items={[{ label: t('nav.signOut'), icon: <LogOut size={16} />, onSelect: () => void signOut(setMe, toast) }]}
+          items={[
+            { label: t('nav.subscriptions'), icon: <Gauge size={16} />, onSelect: () => openSettingsModal('subscriptions') },
+            { label: t('nav.signOut'), icon: <LogOut size={16} />, separator: true, onSelect: () => void signOut(setMe, toast) },
+          ]}
           onClose={() => setAccount(null)}
         />
       )}

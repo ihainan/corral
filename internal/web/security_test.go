@@ -53,19 +53,23 @@ func TestRouteTableIsExplicit(t *testing.T) {
 	}
 	// Host-scoped routes added later are signed-in (and owner-checked by ownedHost).
 	signedIn := map[string]bool{
-		"GET /api/hosts/{id}/code":             false,
-		"POST /api/hosts/{id}/code":            false,
-		"POST /api/hosts/{id}/code/stop":       false,
-		"GET /api/corrald/readme":              false,
-		"GET /api/events/ws":                   false,
-		"GET /api/hosts/{id}/corrald":          false,
-		"POST /api/hosts/{id}/corrald/install": false,
-		"POST /api/hosts/{id}/corrald/cancel":  false,
-		"POST /api/hosts/{id}/corrald/pause":   false,
-		"POST /api/hosts/{id}/corrald/resume":  false,
-		"POST /api/hosts/{id}/corrald/remove":  false,
-		"POST /api/hosts/{id}/corrald/update":  false,
-		"POST /api/hosts/{id}/corrald/retry":   false,
+		"GET /api/hosts/{id}/code":                false,
+		"POST /api/hosts/{id}/code":               false,
+		"POST /api/hosts/{id}/code/stop":          false,
+		"GET /api/corrald/readme":                 false,
+		"GET /api/events/ws":                      false,
+		"GET /api/hosts/{id}/corrald":             false,
+		"POST /api/hosts/{id}/corrald/install":    false,
+		"POST /api/hosts/{id}/corrald/cancel":     false,
+		"POST /api/hosts/{id}/corrald/pause":      false,
+		"POST /api/hosts/{id}/corrald/resume":     false,
+		"POST /api/hosts/{id}/corrald/remove":     false,
+		"POST /api/hosts/{id}/corrald/update":     false,
+		"POST /api/hosts/{id}/corrald/retry":      false,
+		"GET /api/sessions/{id}/pane-env":         false,
+		"POST /api/sessions/{id}/pane-env/reveal": false,
+		"GET /api/subscriptions":                  false,
+		"POST /api/subscriptions/refresh":         false,
 	}
 	for _, r := range h.srv.Routes() {
 		if _, ok := signedIn[r.Method+" "+r.Pattern]; ok {
@@ -459,6 +463,10 @@ func TestRemoteExecCallSitesAreReviewed(t *testing.T) {
 		"web/herdr_agytitle.go: res, err := sshx.Exec(ctx, sess.Client(), agyTitlesCommand(socket), agyTitleScanMax, sshx.ExecOptions{})":                                                                                                                                               true, // fixed read-only python3 scan of the user's agy panes on this herdr socket, reading conversation_summaries.db (?mode=ro) and recent USER_INPUT lines; socket from discovery quoted
 		"web/pane_inspect.go: res, err := sshx.Exec(ctx, sess.Client(), tmuxPaneInspectCommand(sess.CurrentTmuxSession(), pane), 64<<10, sshx.ExecOptions{Interactive: true, AwaitSlot: 2 * time.Second})":                                                                              true, // fixed read-only tmux display-message + ps inspection of validated tmux session and pane id; nothing of the user's executed
 		"web/api_sessions.go: res, err := sshx.Exec(rctx, sess.Client(), tmuxRenameCommand(oldName, name), 4096, sshx.ExecOptions{Interactive: true, AwaitSlot: 2 * time.Second})":                                                                                                      true, // fixed script checking duplicate then running tmux rename-session; oldName and name validated against tmuxNameRE and shell-quoted
+		"web/pane_env.go: res, execErr := sshx.Exec(ctx, sess.Client(), procEnvironByPIDCommand(targetPID), paneEnvReadMax+512, sshx.ExecOptions{Interactive: true, AwaitSlot: 2 * time.Second})":                                                                                       true, // fixed read-only /proc/<pid>/environ read of foreground PID resolved via herdr pane.process_info for the owner's session; pid is a positive integer, quoted
+		"web/pane_env.go: res, execErr := sshx.Exec(ctx, sess.Client(), tmuxPaneEnvironCommand(sess.CurrentTmuxSession(), pane), paneEnvReadMax+512, sshx.ExecOptions{Interactive: true, AwaitSlot: 2 * time.Second})":                                                                           true, // fixed read-only tmux foreground PID + /proc/<pid>/environ read of validated tmux session and pane id; nothing of the user's executed
+		"web/subscriptions.go: res, err := sshx.Exec(ctx, sess.Client(), quotaReadCommand(), quotaReadMax, sshx.ExecOptions{})":                                                                                                                                                         true, // same fixed quotaReadCommand as convo_quota.go on manual refresh, strictly 5-min rate-limited per account
+		"web/subscriptions.go: _, _ = sshx.Exec(ctx, sess.Client(), quotaRefreshCommand(), 4<<10, sshx.ExecOptions{})":                                                                                                                                                                  true, // same fixed quotaRefreshCommand as convo_quota.go on manual refresh, still gated by 15-min on-host & gateway limit
 		"web/agents_sessions_search.go: res, err := sshx.Exec(ctx, sess.Client(), agentSessionsSearchCommand(q, kind, dir), 512<<10, sshx.ExecOptions{Interactive: true, AwaitSlot: 2 * time.Second})":                                                                                  true, // fixed read-only python3 script scanning claude/codex/agy/opencode local session stores (?mode=ro); query/kind/dir are shell-quoted arguments
 		"web/convo_opencode_model.go: mRes, err := sshx.Exec(mctx, sess.Client(), ocAPICommand(\"GET\", \"/api/model\", \"\"), 2<<20, sshx.ExecOptions{Interactive: true, AwaitSlot: 2 * time.Second})":                                                                                 true, // fixed read-only opencode api GET /api/model listing configured models
 		"web/convo_opencode_model.go: pRes, perr := sshx.Exec(mctx, sess.Client(), ocAPICommand(\"GET\", \"/api/provider\", \"\"), 256<<10, sshx.ExecOptions{Interactive: true, AwaitSlot: 2 * time.Second})":                                                                           true, // fixed read-only opencode api GET /api/provider listing configured providers

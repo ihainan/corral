@@ -20,6 +20,7 @@ import { HostsPage } from './pages/Hosts'
 import { HostEditPage } from './pages/HostEdit'
 import { KeysPage } from './pages/Keys'
 import { isDesktopSettings, OPEN_SETTINGS, openSettingsModal, SettingsDialog, SettingsPage, type SettingsCatId } from './pages/Settings'
+import { SubscriptionsPage } from './pages/Subscriptions'
 import { AdminUsersPage, AdminAuditPage } from './pages/Admin'
 import { preloadTerminal, RecordingPlayerPage, RecordingsPage, TerminalPage } from './pages/lazyPages'
 import { TERMINALS, TerminalTabs, useTabsMode } from './pages/TerminalTabs'
@@ -276,6 +277,7 @@ function route(path: string, boot: Bootstrap, me: Me | null, tabs: boolean): Rea
   if ((m = match('/hosts/:id/edit', path))) return <Shell active="hosts"><HostEditPage id={Number(m.id)} /></Shell>
   if (path === '/keys') return <Shell active="keys"><KeysPage /></Shell>
   if (path === '/settings') return <Shell active="settings"><SettingsPage /></Shell>
+  if (path === '/subscriptions') return <Shell active="settings"><SubscriptionsPage /></Shell>
   if (me.role === 'admin') {
     if (path === '/admin/users') return <Shell active="users"><AdminUsersPage /></Shell>
     if (path === '/admin/audit') return <Shell active="audit"><AdminAuditPage /></Shell>

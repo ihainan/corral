@@ -313,7 +313,7 @@ func (s *Server) boxDraftAction(w http.ResponseWriter, ctx context.Context, sess
 	_, err = s.runGated(ctx, sess, gatedReq{
 		Gate:      gate,
 		Mode:      sess.Persistence,
-		Session:   sess.TmuxSession,
+		Session:   sess.CurrentTmuxSession(),
 		Pane:      pane,
 		Socket:    socket,
 		PID:       pid,

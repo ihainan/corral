@@ -4412,7 +4412,7 @@ export function QuotaChip({ of }: { of: QuotaOf }) {
     [at ? t('wb.quotaAt', { at: quotaClock(at) }) : '', failed ? t('quota.failed') : ''].filter(Boolean).join(' · '),
   ].filter(Boolean).join('\n')
   return (
-    <StatusItem title={title}>
+    <StatusItem title={title} onClick={() => openSettingsModal('subscriptions')}>
       <span className={'wb-quota' + (failed ? ' is-stale' : '')}>
         <span className="wb-quota-label">
           {t('wb.quotaLabel')}
