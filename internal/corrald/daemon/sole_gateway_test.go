@@ -1463,6 +1463,176 @@ func TestCLIUninstallOnlyIfSoleGateway(t *testing.T) {
 			t.Fatalf("Fix10 Item #2 regression: .corrald-shared.lock was unlinked before StateDir removal succeeded: %v\n%s", err, out)
 		}
 	})
+
+	// Regression tests for Fix Round 11 Items #1-#4 [P1]:
+	// Single RemoveOwned implementation MUST never follow symlinks, never
+	// traverse symlinked ops/stage-* directory roots, and never delete unowned
+	// files like .notes.tmp.backup, ops/notes.json, or stage-backups/notes.txt.
+	t.Run("fix11_items1_4_owned_removal_protects_symlinks_and_unowned_files", func(t *testing.T) {
+		t.Run("ops_symlink_and_stage_symlink_never_traversed", func(t *testing.T) {
+			home := t.TempDir()
+			mid := randomHexMid(t)
+			env := []string{"CORRALD_TEST_MACHINE_ID=" + mid}
+			installedBin, layout := installAndServe(t, home, mid)
+
+			var h proto.HelloResult
+			if err := callLocalRPC(layout.SocketPath, proto.MethodDaemonHello, proto.HelloParams{
+				Gateway: "gw-a", ProtoMin: 1, ProtoMax: 1, Client: proto.ClientIdentity{CorralUser: "alice", HostID: "1"},
+			}, &h, 2*time.Second); err != nil {
+				t.Fatalf("Hello gw-a: %v", err)
+			}
+
+			// Replace StateDir/ops with a symlink to a user directory containing a user file.
+			userOpsDir := t.TempDir()
+			userOpsFile := filepath.Join(userOpsDir, "0123456789abcdef.json")
+			if err := os.WriteFile(userOpsFile, []byte("user-secret\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			_ = os.RemoveAll(layout.OpsDir)
+			if err := os.Symlink(userOpsDir, layout.OpsDir); err != nil {
+				t.Fatal(err)
+			}
+
+			// Create a symlinked stage-<16hex> pointing to a user directory containing a user file.
+			userStageDir := t.TempDir()
+			userStageFile := filepath.Join(userStageDir, "corrald")
+			if err := os.WriteFile(userStageFile, []byte("user-binary\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			symStage := filepath.Join(layout.StateDir, "stage-deadbeef12345678")
+			if err := os.Symlink(userStageDir, symStage); err != nil {
+				t.Fatal(err)
+			}
+
+			out, code := runCLI(t, installedBin, home, env, "uninstall", "--op", "op11sym1", "--only-if-sole-gateway", "gw-a")
+			if code == 0 || parseKV(out)["result"] != "partial" {
+				t.Fatalf("Fix11 regression: expected partial when ops and stage-* are symlinks, got code=%d\n%s", code, out)
+			}
+			if got, err := os.ReadFile(userOpsFile); err != nil || string(got) != "user-secret\n" {
+				t.Fatalf("Fix11 regression: symlinked ops target file was deleted! err=%v content=%q", err, string(got))
+			}
+			if got, err := os.ReadFile(userStageFile); err != nil || string(got) != "user-binary\n" {
+				t.Fatalf("Fix11 regression: symlinked stage-* target file was deleted! err=%v content=%q", err, string(got))
+			}
+			if !strings.Contains(out, layout.OpsDir) || !strings.Contains(out, symStage) {
+				t.Fatalf("Fix11 regression: expected symlinked dirs reported as leftovers, got:\n%s", out)
+			}
+		})
+
+		t.Run("unowned_temp_and_ops_notes_and_stage_backups_preserved", func(t *testing.T) {
+			home := t.TempDir()
+			mid := randomHexMid(t)
+			env := []string{"CORRALD_TEST_MACHINE_ID=" + mid}
+			installedBin, layout := installAndServe(t, home, mid)
+
+			var h proto.HelloResult
+			if err := callLocalRPC(layout.SocketPath, proto.MethodDaemonHello, proto.HelloParams{
+				Gateway: "gw-a", ProtoMin: 1, ProtoMax: 1, Client: proto.ClientIdentity{CorralUser: "alice", HostID: "1"},
+			}, &h, 2*time.Second); err != nil {
+				t.Fatalf("Hello gw-a: %v", err)
+			}
+
+			notesTmp := filepath.Join(layout.StateDir, ".notes.tmp.backup")
+			opsNotes := filepath.Join(layout.OpsDir, "notes.json")
+			stageBkpDir := filepath.Join(layout.StateDir, "stage-backups")
+			stageBkpNotes := filepath.Join(stageBkpDir, "notes.txt")
+			if err := os.MkdirAll(stageBkpDir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			for _, f := range []string{notesTmp, opsNotes, stageBkpNotes} {
+				if err := os.WriteFile(f, []byte("keep-user-content\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			out, code := runCLI(t, installedBin, home, env, "uninstall", "--op", "op11unown1", "--only-if-sole-gateway", "gw-a")
+			if code == 0 || parseKV(out)["result"] != "partial" {
+				t.Fatalf("Fix11 regression: expected partial when unowned files exist, got code=%d\n%s", code, out)
+			}
+			for _, f := range []string{notesTmp, opsNotes, stageBkpNotes} {
+				if got, err := os.ReadFile(f); err != nil || string(got) != "keep-user-content\n" {
+					t.Fatalf("Fix11 regression: unowned file %s was deleted! err=%v content=%q", f, err, string(got))
+				}
+			}
+			if !strings.Contains(out, notesTmp) || !strings.Contains(out, opsNotes) || !strings.Contains(out, stageBkpDir) {
+				t.Fatalf("Fix11 regression: expected unowned files reported in left output:\n%s", out)
+			}
+		})
+	})
+
+	// Regression test for Fix Round 11 Item #7 [P2]:
+	// Two leftover tombstones from two machines in a shared HOME MUST NOT block
+	// each other forever; each machine removes its own state dir (and shared
+	// files go when no machine has install.json) so retries from both reach removed.
+	t.Run("fix11_item7_two_tombstones_shared_home_no_deadlock", func(t *testing.T) {
+		home := t.TempDir()
+		midA := randomHexMid(t)
+		midB := randomHexMid(t)
+		envA := []string{"CORRALD_TEST_MACHINE_ID=" + midA}
+		envB := []string{"CORRALD_TEST_MACHINE_ID=" + midB}
+		uid := uint32(os.Getuid())
+		layoutA, err := ResolveLayout(PathOptions{Home: home, UID: &uid, MachineID: midA})
+		if err != nil {
+			t.Fatal(err)
+		}
+		layoutB, err := ResolveLayout(PathOptions{Home: home, UID: &uid, MachineID: midB})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		// Install on both machines sharing HOME, then stop/delete install.json
+		// and leave removing tombstones on BOTH machines.
+		stageA := stageBinary(t, home, midA, "0123456789abcdef", bins.v1)
+		if out, code := runCLI(t, filepath.Join(stageA, "corrald"), home, envA,
+			"install", "--stage", stageA, "--op", "0123456789abcdef", "--gateway", "gw-a", "--by", "alice"); code != 0 {
+			t.Fatalf("install A: %s", out)
+		}
+		stageB := stageBinary(t, home, midB, "fedcba9876543210", bins.v1)
+		if out, code := runCLI(t, filepath.Join(stageB, "corrald"), home, envB,
+			"install", "--stage", stageB, "--op", "fedcba9876543210", "--gateway", "gw-a", "--by", "alice"); code != 0 {
+			t.Fatalf("install B: %s", out)
+		}
+		_ = os.Remove(layoutA.InstallJSON)
+		_ = os.Remove(layoutB.InstallJSON)
+		tomb := []byte(`{"created_at":"2026-11-28T00:00:00Z","gateway":"gw-a"}` + "\n")
+		if err := os.WriteFile(layoutA.TombstonePath, tomb, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(layoutB.TombstonePath, tomb, 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		// Machine A retries uninstall -> MUST succeed (not blocked by midB tombstone)!
+		outA, codeA := runCLI(t, layoutA.CurrentSymlink, home, envA, "uninstall", "--op", "1111111111111111", "--only-if-sole-gateway", "gw-a")
+		if codeA != 0 || parseKV(outA)["result"] != "removed" {
+			t.Fatalf("Fix11 Item #7 regression: machine A blocked by machine B tombstone! code=%d\n%s", codeA, outA)
+		}
+		if _, err := os.Lstat(layoutA.StateDir); !os.IsNotExist(err) {
+			t.Fatalf("expected midA state dir removed, stat err=%v", err)
+		}
+		if _, err := os.Lstat(layoutA.LibDir); !os.IsNotExist(err) {
+			t.Fatalf("expected shared LibDir removed when no machine has install.json, stat err=%v", err)
+		}
+		if !layoutB.TombstoneExists() {
+			t.Fatal("expected midB tombstone preserved for machine B's own retry")
+		}
+
+		// Machine B retries via binaryless recovery -> MUST also reach removed and clean StateRoot!
+		recStageB := stageBinary(t, home, midB, "2222222222222222", bins.v1)
+		if out, code := runCLI(t, filepath.Join(recStageB, "corrald"), home, envB,
+			"install", "--for-uninstall-recovery", "--stage", recStageB, "--op", "2222222222222222", "--gateway", "gw-a"); code != 0 {
+			t.Fatalf("recovery install B: %s", out)
+		}
+		outB, codeB := runCLI(t, layoutB.CurrentSymlink, home, envB, "uninstall", "--op", "2222222222222222", "--only-if-sole-gateway", "gw-a")
+		if codeB != 0 || parseKV(outB)["result"] != "removed" {
+			t.Fatalf("Fix11 Item #7 regression: machine B retry failed! code=%d\n%s", codeB, outB)
+		}
+		for _, p := range []string{layoutB.StateDir, layoutB.StateRoot, layoutB.LibDir} {
+			if _, err := os.Lstat(p); !os.IsNotExist(err) {
+				t.Fatalf("expected %s removed after both machines finished, stat err=%v", p, err)
+			}
+		}
+	})
 }
 
 // Regression test for Fix Round 6 F2 [P3]:

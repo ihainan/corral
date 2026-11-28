@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/ihainan/corral/internal/corrald/daemon"
 	"github.com/ihainan/corral/internal/sshx"
 )
 
@@ -100,6 +101,9 @@ type HostProbe struct {
 	HasTombstone  bool
 	HasSymlink    bool
 	HasInstall    bool
+	HasClients    bool
+	HasStateFiles bool
+	HasLibFiles   bool
 	HasRunDir     bool
 	CurrentTarget string
 	Stages        []string
@@ -117,6 +121,17 @@ type HostProbe struct {
 	OpsDir        string
 	TombstonePath string
 	SocketPath    string
+}
+
+// HasAnyOwnedFiles reports whether the host probe observed any corrald-owned
+// file, directory, lock, metadata, or stage directory on the host (Fix11 Item #6).
+func (p *HostProbe) HasAnyOwnedFiles() bool {
+	if p == nil {
+		return false
+	}
+	return p.HasSymlink || p.HasInstall || p.HasTombstone || p.HasClients ||
+		p.HasStateFiles || p.HasLibFiles || p.HasRunDir ||
+		len(p.Versions) > 0 || len(p.Stages) > 0
 }
 
 // UIDInt64 returns the parsed numeric UID or -1 if unavailable.
@@ -168,8 +183,11 @@ if [ -e "$L/corrald" ] || [ -L "$L/corrald" ]; then
   echo "current_target=$tgt"
 fi
 if [ -d "$L" ]; then
+  if [ -e "$L/README.txt" ] || [ -L "$L/README.txt" ] || [ -e "$L/.corrald-shared.lock" ] || [ -L "$L/.corrald-shared.lock" ]; then
+    echo "has_lib_files=1"
+  fi
   for d in "$L"/corrald-*; do
-    [ -d "$d" ] && echo "version_dir=$(basename "$d")"
+    [ -d "$d" ] && [ ! -L "$d" ] && echo "version_dir=$(basename "$d")"
   done
 fi
 if [ -e "$HOME/.local/state/corral/run" ]; then
@@ -180,11 +198,19 @@ echo "result=ok"
 }
 
 // ProbeStateCommand inspects the machine-id specific state directory once mid
-// has been resolved (checking tombstone, install.json, leftover stage-* dirs).
+// has been resolved (checking tombstone, install.json, clients.json, owned
+// state files, and leftover stage-* dirs).
 func ProbeStateCommand(stateDir string) string {
 	return shellScript(`if [ -e "$ST/removing" ]; then echo "tombstone=1"; fi
-if [ -f "$ST/install.json" ]; then echo "has_install=1"; fi
-if [ -d "$ST" ]; then
+if [ -f "$ST/install.json" ] && [ ! -L "$ST/install.json" ]; then echo "has_install=1"; fi
+if [ -e "$ST/clients.json" ] || [ -L "$ST/clients.json" ]; then echo "has_clients=1"; fi
+if [ -d "$ST" ] && [ ! -L "$ST" ]; then
+  for f in meta.json failed.json corrald.lock op.lock corrald.log corrald.log.1 corrald.sock ops; do
+    if [ -e "$ST/$f" ] || [ -L "$ST/$f" ]; then
+      echo "has_state_files=1"
+      break
+    fi
+  done
   for d in "$ST"/stage-*; do
     [ -e "$d" ] && echo "stage_dir=$(basename "$d")"
   done
@@ -208,6 +234,7 @@ func ParseProbe(out []byte) (*HostProbe, error) {
 		HomeWritable:  f["home_writable"] == "1",
 		HasSymlink:    f["has_symlink"] == "1",
 		HasRunDir:     f["has_run_dir"] == "1",
+		HasLibFiles:   f["has_lib_files"] == "1",
 		CurrentTarget: strings.TrimSpace(f["current_target"]),
 	}
 	p.Arch = ArchMap[p.Machine]
@@ -364,11 +391,44 @@ echo "result=ok"
 `, "HOME_DIR", home, "ST", stateDir, "STAGE", stageDir)
 }
 
-// RmStageCommand removes a staging directory.
-func RmStageCommand(stageDir string) string {
-	return shellScript(`rm -rf -- "$STAGE" || { echo "error=rm_failed"; exit 1; }
+// CleanStageCommand removes an owned staging directory using corrald's own
+// `clean-stage` subcommand (which delegates to daemon.RemoveOwned). If no
+// binary is executable yet (e.g. upload failed before the binary landed), it
+// only unlinks regular non-symlink upload/binary files inside a real non-symlink
+// stage directory and calls rmdir — never `rm -rf` and never following symlinks.
+func CleanStageCommand(primaryBin, fallbackBin, stageDir, opID string) string {
+	return shellScript(`if [ -n "$BIN" ] && [ -x "$BIN" ]; then
+  "$BIN" clean-stage --stage "$STAGE" --op "$OP"
+  exit $?
+fi
+if [ -n "$ALT" ] && [ -x "$ALT" ]; then
+  "$ALT" clean-stage --stage "$STAGE" --op "$OP"
+  exit $?
+fi
+if [ ! -e "$STAGE" ] && [ ! -L "$STAGE" ]; then
+  echo "result=ok"
+  exit 0
+fi
+if [ -L "$STAGE" ] || [ ! -d "$STAGE" ]; then
+  echo "error=unsafe_stage"
+  exit 1
+fi
+if [ -f "$STAGE/corrald" ] && [ ! -L "$STAGE/corrald" ]; then
+  rm -f -- "$STAGE/corrald" || { echo "error=rm_failed"; exit 1; }
+fi
+for f in "$STAGE"/.corrald.upload.*; do
+  [ -e "$f" ] || continue
+  [ -L "$f" ] && continue
+  [ -f "$f" ] || continue
+  bn=$(basename -- "$f")
+  hex=${bn#.corrald.upload.}
+  if [ "${#hex}" -eq 16 ]; then
+    case "$hex" in *[!0-9a-f]*) ;; *) rm -f -- "$f" || { echo "error=rm_failed"; exit 1; } ;; esac
+  fi
+done
+rmdir -- "$STAGE" || { echo "error=rm_failed"; exit 1; }
 echo "result=ok"
-`, "STAGE", stageDir)
+`, "BIN", primaryBin, "ALT", fallbackBin, "STAGE", stageDir, "OP", opID)
 }
 
 // SelftestCommand executes `<bin> selftest` and classifies execution failures
@@ -522,8 +582,19 @@ exit 1`
       _rel=${_rest##*-}
       _ver=${_rest%-*}
       [ -n "$_ver" ] && [ -n "$_rel" ] || return 1
+      [ "${#_ver}" -le 128 ] || return 1
       case "$_rel" in *[!0-9]*) return 1 ;; esac
       case "$_ver" in *..*|*[!A-Za-z0-9._+-]*) return 1 ;; esac
+      # Match daemon.ParseVersionDirName's exact release overflow bound
+      # (rel > (1<<62)/10 -> max accepted release is 4611686018427387909).
+      _rel_nz=$(printf '%s' "$_rel" | sed 's/^0*//')
+      [ -z "$_rel_nz" ] && _rel_nz=0
+      if [ "${#_rel_nz}" -gt 19 ]; then
+        return 1
+      fi
+      if [ "${#_rel_nz}" -eq 19 ]; then
+        awk -v r="$_rel_nz" 'BEGIN { exit (r <= "4611686018427387909" ? 0 : 1) }' || return 1
+      fi
       return 0
       ;;
   esac
@@ -533,8 +604,11 @@ exit 1`
 BIN="$L/corrald"
 if [ ! -x "$BIN" ]; then
   for cand in "$L"/corrald-*/corrald; do
-    _dir=$(basename -- "$(dirname -- "$cand")")
-    if is_ver_dir "$_dir" && [ -x "$cand" ]; then BIN="$cand"; break; fi
+    [ -e "$cand" ] || continue
+    _pdir=$(dirname -- "$cand")
+    [ -L "$_pdir" ] && continue
+    _dir=$(basename -- "$_pdir")
+    if is_ver_dir "$_dir" && [ -x "$cand" ] && [ ! -L "$cand" ]; then BIN="$cand"; break; fi
   done
 fi
 `+execBranch+`
@@ -594,27 +668,18 @@ type StartSelectOptions struct {
 	PreferredTarget string
 }
 
-// parseVersionDirInfo extracts (version, release, relTarget) from a bare
-// "corrald-<ver>-<rel>" directory name (no path separators or traversal).
+// parseVersionDirInfo delegates strictly to daemon.ParseVersionDirName so
+// gateway and daemon share the exact single version-directory rule.
 func parseVersionDirInfo(name string) (ver string, rel int64, relTarget string, ok bool) {
 	name = strings.TrimSpace(name)
-	if name == "" || strings.ContainsAny(name, "/\\\x00") || name == "." || name == ".." {
+	if name == "" || strings.ContainsAny(name, "/\\\x00") {
 		return "", 0, "", false
 	}
-	if !strings.HasPrefix(name, "corrald-") {
+	v, r, valid := daemon.ParseVersionDirName(name)
+	if !valid || r <= 0 {
 		return "", 0, "", false
 	}
-	rest := strings.TrimPrefix(name, "corrald-")
-	idx := strings.LastIndexByte(rest, '-')
-	if idx <= 0 || idx+1 >= len(rest) {
-		return "", 0, "", false
-	}
-	ver = rest[:idx]
-	rel, err := strconv.ParseInt(rest[idx+1:], 10, 64)
-	if err != nil || rel <= 0 || ver == "" {
-		return "", 0, "", false
-	}
-	return ver, rel, name + "/corrald", true
+	return v, r, name + "/corrald", true
 }
 
 // parseSymlinkTargetInLibDir validates that a shared symlink target points

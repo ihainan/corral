@@ -579,6 +579,7 @@ func (m *Manager) applySoleGatewayUninstallOutcome(fp, sshUser string, hostIDs [
 	}
 	switch out.Result {
 	case "removed":
+		m.recordAccountRemoval(accountKey{Fingerprint: fp, Username: sshUser})
 		m.resetHostsOff(fp, sshUser, hostIDs, heldOpID)
 	case "other_gateways", "unsupported":
 		_ = m.store.MarkCorraldHostsPreservedOtherGatewayIfOp(context.Background(), hostIDs, fp, sshUser, heldOpID)
@@ -1009,9 +1010,10 @@ func (m *Manager) runSafeCleanupLocked(
 	}
 
 	files := ReadHostStateFiles(ctx, sshClient, probe, "")
-	hasOnHost := probe.HasSymlink || probe.HasInstall || probe.HasTombstone || probe.HasRunDir ||
-		len(probe.Versions) > 0 || len(probe.Stages) > 0 ||
-		files.Install != nil || files.Meta != nil
+	// Fix11 Item #6: Count clients.json and any corrald-owned state/lib file so
+	// hosts with leftover clients.json/locks still go through recovery instead
+	// of flipping straight to off.
+	hasOnHost := probe.HasAnyOwnedFiles() || files.Install != nil || files.Meta != nil || len(files.Clients) > 0
 	if !hasOnHost {
 		m.resetHostsOff(fp, sshUser, []int64{hostID}, heldOpID)
 		return
@@ -1021,9 +1023,6 @@ func (m *Manager) runSafeCleanupLocked(
 	// op.lock -> corrald.lock. Refuses without modifying files if another
 	// gateway is connected/registered or if the host binary/daemon is too old.
 	out := RunUninstallSoleGatewayWithRetry(ctx, sshClient, m.Dist(), probe, opID, m.gatewayID, m.busyRetry, nil)
-	if out.Result == "removed" {
-		m.recordAccountRemoval(accountKey{Fingerprint: fp, Username: sshUser})
-	}
 	m.applySoleGatewayUninstallOutcome(fp, sshUser, []int64{hostID}, wasPending, out, 0, heldOpID)
 }
 

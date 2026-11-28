@@ -1507,9 +1507,9 @@ func TestIntegrationUninstallWithoutInstallJSONPreservesSharedAndReturnsPartial(
 	const mid = "131313131313"
 	env := []string{"CORRALD_TEST_MACHINE_ID=" + mid}
 
-	stage := stageBinary(t, home, mid, "op1", bins.v1)
+	stage := stageBinary(t, home, mid, "1313131313130001", bins.v1)
 	if out, code := runCLI(t, filepath.Join(stage, "corrald"), home, env,
-		"install", "--stage", stage, "--op", "op1", "--gateway", "gw.noinst", "--by", "alice"); code != 0 {
+		"install", "--stage", stage, "--op", "1313131313130001", "--gateway", "gw.noinst", "--by", "alice"); code != 0 {
 		t.Fatalf("install: %s", out)
 	}
 	installedBin := filepath.Join(home, ".local", "lib", "corral", "corrald")
@@ -1995,14 +1995,14 @@ func TestIntegrationUninstallMissingInstallJSONNonLastMachineReturnsPartial(t *t
 		}
 	})
 
-	stageA := stageBinary(t, sharedHome, midA, "opA", bins.v1)
+	stageA := stageBinary(t, sharedHome, midA, "6a6a6a6a6a6a0001", bins.v1)
 	if out, code := runCLI(t, filepath.Join(stageA, "corrald"), sharedHome, envA,
-		"install", "--stage", stageA, "--op", "opA", "--gateway", "gw.r6", "--by", "alice"); code != 0 {
+		"install", "--stage", stageA, "--op", "6a6a6a6a6a6a0001", "--gateway", "gw.r6", "--by", "alice"); code != 0 {
 		t.Fatalf("install A: %s", out)
 	}
-	stageB := stageBinary(t, sharedHome, midB, "opB", bins.v1)
+	stageB := stageBinary(t, sharedHome, midB, "6b6b6b6b6b6b0001", bins.v1)
 	if out, code := runCLI(t, filepath.Join(stageB, "corrald"), sharedHome, envB,
-		"install", "--stage", stageB, "--op", "opB", "--gateway", "gw.r6", "--by", "alice"); code != 0 {
+		"install", "--stage", stageB, "--op", "6b6b6b6b6b6b0001", "--gateway", "gw.r6", "--by", "alice"); code != 0 {
 		t.Fatalf("install B: %s", out)
 	}
 	outB, code := runCLI(t, installedBin, sharedHome, envB, "serve", "--gateway", "gw.r6")

@@ -36,7 +36,7 @@ func Main(args []string, build proto.BuildInfo, stdout, stderr io.Writer) int {
 		build.Version = "dev"
 	}
 	if len(args) == 0 {
-		writeErr(stdout, "usage", "subcommand required: version|manifest|changelog|selftest|install|serve|status|stop|uninstall")
+		writeErr(stdout, "usage", "subcommand required: version|manifest|changelog|selftest|install|clean-stage|serve|status|stop|uninstall")
 		return 2
 	}
 
@@ -54,6 +54,8 @@ func Main(args []string, build proto.BuildInfo, stdout, stderr io.Writer) int {
 		return cmdSelftest(stdout)
 	case "install":
 		return cmdInstall(rest, build, stdout)
+	case "clean-stage":
+		return cmdCleanStage(rest, stdout)
 	case "serve":
 		return cmdServe(rest, build, stdout)
 	case "status":
@@ -66,6 +68,42 @@ func Main(args []string, build proto.BuildInfo, stdout, stderr io.Writer) int {
 		writeErr(stdout, "unknown_command", fmt.Sprintf("unknown subcommand %q", sub))
 		return 2
 	}
+}
+
+func cmdCleanStage(args []string, stdout io.Writer) int {
+	fs := flag.NewFlagSet("clean-stage", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	stageDir := fs.String("stage", "", "staging directory (<state_dir>/stage-<op>)")
+	opID := fs.String("op", "", "operation identifier")
+	if err := fs.Parse(args); err != nil {
+		writeErr(stdout, "invalid_args", err.Error())
+		return 2
+	}
+	if *stageDir == "" || *opID == "" {
+		writeErr(stdout, "invalid_args", "required flags: --stage, --op")
+		return 2
+	}
+	layout, err := resolveDefaultLayout()
+	if err != nil {
+		writeErr(stdout, "layout_failed", err.Error())
+		return 1
+	}
+	expectedStage, err := layout.StageDir(*opID)
+	if err != nil {
+		writeErr(stdout, "invalid_op", err.Error())
+		return 2
+	}
+	absStage, err := filepath.Abs(*stageDir)
+	if err != nil || filepath.Clean(absStage) != filepath.Clean(expectedStage) {
+		writeErr(stdout, "invalid_stage", fmt.Sprintf("--stage must be %s", expectedStage))
+		return 2
+	}
+	if left := RemoveOwned(layout, OwnedRemoveStageDir, expectedStage, nil); len(left) > 0 {
+		writeErr(stdout, "stage_cleanup_failed", formatOwnedLeftoverErr(left).Error())
+		return 1
+	}
+	fmt.Fprintf(stdout, "result=ok\n")
+	return 0
 }
 
 func resolveDefaultLayout() (*Layout, error) {
@@ -250,13 +288,13 @@ func cmdInstall(args []string, build proto.BuildInfo, stdout io.Writer) int {
 		if *gateway != "" {
 			if fi, terr := os.Lstat(layout.TombstonePath); terr == nil {
 				if !fi.Mode().IsRegular() {
-					_ = os.RemoveAll(expectedStage)
+					_ = RemoveOwned(layout, OwnedRemoveStageDir, expectedStage, nil)
 					writeErr(stdout, "tombstone_unreadable", "removing tombstone is not a regular file")
 					return 1
 				}
 				tombRec, tombErr := readUninstallTombstone(layout.TombstonePath)
 				if tombErr != nil || tombRec == nil || tombRec.CreatedAt == "" || tombRec.Gateway == "" {
-					_ = os.RemoveAll(expectedStage)
+					_ = RemoveOwned(layout, OwnedRemoveStageDir, expectedStage, nil)
 					detail := "removing tombstone is truncated or missing required fields"
 					if tombErr != nil {
 						detail = tombErr.Error()
@@ -265,7 +303,7 @@ func cmdInstall(args []string, build proto.BuildInfo, stdout io.Writer) int {
 					return 1
 				}
 				if tombRec.Gateway != *gateway {
-					_ = os.RemoveAll(expectedStage)
+					_ = RemoveOwned(layout, OwnedRemoveStageDir, expectedStage, nil)
 					fmt.Fprintf(stdout, "result=other_gateways\n")
 					return 0
 				}
@@ -277,7 +315,7 @@ func cmdInstall(args []string, build proto.BuildInfo, stdout io.Writer) int {
 				ll, lerr := AcquireLock(layout.LockPath)
 				if lerr != nil {
 					if !errors.Is(lerr, ErrLocked) {
-						_ = os.RemoveAll(expectedStage)
+						_ = RemoveOwned(layout, OwnedRemoveStageDir, expectedStage, nil)
 						writeErr(stdout, "lock_failed", lerr.Error())
 						return 1
 					}
@@ -288,7 +326,7 @@ func cmdInstall(args []string, build proto.BuildInfo, stdout io.Writer) int {
 					}
 					_, sres, ferr, cerr := callLocalSoleShutdown(sockCheck, *gateway, 3*time.Second)
 					if ferr != "" {
-						_ = os.RemoveAll(expectedStage)
+						_ = RemoveOwned(layout, OwnedRemoveStageDir, expectedStage, nil)
 						writeErr(stdout, ferr, "running daemon does not support conditional shutdown")
 						return 1
 					}
@@ -300,7 +338,7 @@ func cmdInstall(args []string, build proto.BuildInfo, stdout io.Writer) int {
 						}
 						ll, lerr = AcquireLockWait(layout.LockPath, waitDur)
 						if lerr != nil {
-							_ = os.RemoveAll(expectedStage)
+							_ = RemoveOwned(layout, OwnedRemoveStageDir, expectedStage, nil)
 							if waitDur == 5*time.Second {
 								writeErr(stdout, "stop_failed", lerr.Error())
 							} else {
@@ -310,13 +348,13 @@ func cmdInstall(args []string, build proto.BuildInfo, stdout io.Writer) int {
 						}
 					} else {
 						if sres.OtherGateways || !sres.OK {
-							_ = os.RemoveAll(expectedStage)
+							_ = RemoveOwned(layout, OwnedRemoveStageDir, expectedStage, nil)
 							fmt.Fprintf(stdout, "result=other_gateways\n")
 							return 0
 						}
 						ll, lerr = AcquireLockWait(layout.LockPath, 5*time.Second)
 						if lerr != nil {
-							_ = os.RemoveAll(expectedStage)
+							_ = RemoveOwned(layout, OwnedRemoveStageDir, expectedStage, nil)
 							writeErr(stdout, "stop_failed", lerr.Error())
 							return 1
 						}
@@ -329,36 +367,36 @@ func cmdInstall(args []string, build proto.BuildInfo, stdout io.Writer) int {
 				if rerr == nil {
 					clients, uerr := parseClientsJSON(b)
 					if uerr != nil {
-						_ = os.RemoveAll(expectedStage)
+						_ = RemoveOwned(layout, OwnedRemoveStageDir, expectedStage, nil)
 						writeErr(stdout, "clients_unreadable", uerr.Error())
 						return 1
 					}
 					for _, c := range clients {
 						if c.Gateway != *gateway {
-							_ = os.RemoveAll(expectedStage)
+							_ = RemoveOwned(layout, OwnedRemoveStageDir, expectedStage, nil)
 							fmt.Fprintf(stdout, "result=other_gateways\n")
 							return 0
 						}
 					}
 				} else if !errors.Is(rerr, os.ErrNotExist) {
-					_ = os.RemoveAll(expectedStage)
+					_ = RemoveOwned(layout, OwnedRemoveStageDir, expectedStage, nil)
 					writeErr(stdout, "clients_unreadable", rerr.Error())
 					return 1
 				} else {
 					if installErr != nil || installRec == nil {
-						_ = os.RemoveAll(expectedStage)
+						_ = RemoveOwned(layout, OwnedRemoveStageDir, expectedStage, nil)
 						writeErr(stdout, "cannot_verify_exclusivity", "neither clients.json nor install.json readable")
 						return 1
 					}
 					if installRec.Gateway != "" && installRec.Gateway != *gateway {
-						_ = os.RemoveAll(expectedStage)
+						_ = RemoveOwned(layout, OwnedRemoveStageDir, expectedStage, nil)
 						fmt.Fprintf(stdout, "result=other_gateways\n")
 						return 0
 					}
 				}
 
 				if err := os.Remove(layout.InstallJSON); err != nil && !errors.Is(err, os.ErrNotExist) {
-					_ = os.RemoveAll(expectedStage)
+					_ = RemoveOwned(layout, OwnedRemoveStageDir, expectedStage, nil)
 					writeErr(stdout, "remove_install_json_failed", err.Error())
 					return 1
 				}
@@ -366,12 +404,12 @@ func cmdInstall(args []string, build proto.BuildInfo, stdout io.Writer) int {
 					if installErr == nil && installRec != nil {
 						_ = WriteInstallRecord(layout.InstallJSON, installRec)
 					}
-					_ = os.RemoveAll(expectedStage)
+					_ = RemoveOwned(layout, OwnedRemoveStageDir, expectedStage, nil)
 					writeErr(stdout, "tombstone_failed", err.Error())
 					return 1
 				}
 			} else {
-				_ = os.RemoveAll(expectedStage)
+				_ = RemoveOwned(layout, OwnedRemoveStageDir, expectedStage, nil)
 				writeErr(stdout, "tombstone_unreadable", terr.Error())
 				return 1
 			}
@@ -380,7 +418,7 @@ func cmdInstall(args []string, build proto.BuildInfo, stdout io.Writer) int {
 			_, instErr := os.Lstat(layout.InstallJSON)
 			if errors.Is(tombErr, os.ErrNotExist) && errors.Is(instErr, os.ErrNotExist) {
 				if err := WriteFileAtomic(layout.TombstonePath, marshalUninstallTombstone(nil, ""), 0o600); err != nil {
-					_ = os.RemoveAll(expectedStage)
+					_ = RemoveOwned(layout, OwnedRemoveStageDir, expectedStage, nil)
 					writeErr(stdout, "tombstone_failed", err.Error())
 					return 1
 				}
@@ -438,7 +476,7 @@ func cmdInstall(args []string, build proto.BuildInfo, stdout io.Writer) int {
 			}
 			outBin = layout.CurrentSymlink
 		}
-		_ = os.RemoveAll(expectedStage)
+		_ = RemoveOwned(layout, OwnedRemoveStageDir, expectedStage, nil)
 		fmt.Fprintf(stdout, "result=ok\n")
 		fmt.Fprintf(stdout, "bin=%s\n", outBin)
 		return 0
@@ -485,6 +523,12 @@ func cmdInstall(args []string, build proto.BuildInfo, stdout io.Writer) int {
 
 	nowStr := time.Now().UTC().Format(time.RFC3339)
 
+	opPath, err := layout.OpPath(*opID)
+	if err != nil {
+		writeErr(stdout, "invalid_op", err.Error())
+		return 1
+	}
+
 	baseFiles := []string{
 		verDir,
 		dstBin,
@@ -498,6 +542,7 @@ func cmdInstall(args []string, build proto.BuildInfo, stdout io.Writer) int {
 		layout.ClientsJSON,
 		layout.LogPath,
 		layout.OpsDir,
+		opPath,
 		layout.SocketPath,
 	}
 
@@ -589,11 +634,6 @@ func cmdInstall(args []string, build proto.BuildInfo, stdout io.Writer) int {
 		return 1
 	}
 
-	opPath, err := layout.OpPath(*opID)
-	if err != nil {
-		writeErr(stdout, "invalid_op", err.Error())
-		return 1
-	}
 	kind := "install"
 	if *upgrade {
 		kind = "upgrade"
@@ -612,8 +652,8 @@ func cmdInstall(args []string, build proto.BuildInfo, stdout io.Writer) int {
 		return 1
 	}
 
-	if err := os.RemoveAll(expectedStage); err != nil {
-		writeErr(stdout, "stage_cleanup_failed", err.Error())
+	if left := RemoveOwned(layout, OwnedRemoveStageDir, expectedStage, nil); len(left) > 0 {
+		writeErr(stdout, "stage_cleanup_failed", formatOwnedLeftoverErr(left).Error())
 		return 1
 	}
 
@@ -1704,10 +1744,15 @@ func cmdUninstall(args []string, stdout io.Writer) int {
 		lifeLock   *FileLock
 	)
 
-	// Rule 1: Acquire SharedLock FIRST (if LibDir exists). Never cache
-	// StateDir, install.json, or other-machine checks from before SharedLock!
+	// Rule 1: Acquire SharedLock FIRST (if LibDir exists and is a real dir).
+	// Never cache StateDir, install.json, or other-machine checks from before
+	// SharedLock, and NEVER descend into a symlinked LibDir or StateDir root!
 	libDirExists := false
-	if _, err := os.Lstat(layout.LibDir); err == nil {
+	if linfo, err := os.Lstat(layout.LibDir); err == nil {
+		if linfo.Mode()&os.ModeSymlink != 0 || !linfo.IsDir() {
+			writeErr(stdout, "unsafe_path", "lib dir is a symlink or non-directory")
+			return 1
+		}
 		sharedLock, err = AcquireLockWait(layout.SharedLockPath, lockTimeout)
 		if err != nil {
 			if errors.Is(err, os.ErrNotExist) {
@@ -1727,7 +1772,11 @@ func cmdUninstall(args []string, stdout io.Writer) int {
 
 	// Re-check StateDir existence AFTER acquiring SharedLock (Rule 4).
 	stateDirExists := false
-	if _, err := os.Lstat(layout.StateDir); err == nil {
+	if sinfo, err := os.Lstat(layout.StateDir); err == nil {
+		if sinfo.Mode()&os.ModeSymlink != 0 || !sinfo.IsDir() {
+			writeErr(stdout, "unsafe_path", "state dir is a symlink or non-directory")
+			return 1
+		}
 		stateDirExists = true
 	} else if !errors.Is(err, os.ErrNotExist) {
 		writeErr(stdout, "state_dir_failed", err.Error())
@@ -2043,27 +2092,22 @@ func cmdUninstall(args []string, stdout io.Writer) int {
 		} else {
 			sharedTargets = listPreservedSharedPaths(layout)
 		}
+		manifestFiles := ManifestFileSet(installRec)
 		for _, target := range sharedTargets {
-			removeOwnedLibTarget(layout, target, addLeft)
+			for _, l := range RemoveOwned(layout, OwnedRemoveLibTarget, target, manifestFiles) {
+				addLeft(l.Path, l.Reason)
+			}
 		}
 	}
 
-	// Rule 4 + Fix10 Item #1: Explicitly delete ONLY corrald-owned entries inside
-	// StateDir (removing known files then rmdir on known subdirs; never RemoveAll
-	// unknown user files), keeping op.lock, corrald.lock, and removing intact
-	// until ALL post-check verifications pass.
+	// Rule 4 + Fix11 Items #1-#4: Use the single RemoveOwned implementation for
+	// all StateDir cleanup (never following symlinks, never RemoveAll, leaving
+	// unowned files in place and reporting leftovers), keeping op.lock,
+	// corrald.lock, and removing intact until ALL post-checks pass.
 	if stateDirExists {
-		entries, rerr := os.ReadDir(layout.StateDir)
-		if rerr != nil {
-			addLeft(layout.StateDir, rerr.Error())
-		} else {
-			for _, e := range entries {
-				name := e.Name()
-				if name == "op.lock" || name == "corrald.lock" || name == "removing" {
-					continue
-				}
-				removeOwnedStateEntry(layout, name, addLeft)
-			}
+		manifestFiles := ManifestFileSet(installRec)
+		for _, l := range RemoveOwned(layout, OwnedRemoveStateEntries, layout.StateDir, manifestFiles) {
+			addLeft(l.Path, l.Reason)
 		}
 	}
 
@@ -2109,10 +2153,13 @@ func cmdUninstall(args []string, stdout io.Writer) int {
 		}
 	}
 
+	// Fix11 Item #7: Another machine's state dir that holds ONLY a removing
+	// tombstone (no install.json, no live daemon) must not block this machine's
+	// uninstall or deadlock shared-HOME retries between two machines.
 	if stateDirExists && isLast && lastCheckErr == nil && !willPreserveForMissingInstall {
 		if entries, err := os.ReadDir(layout.StateRoot); err == nil {
 			for _, e := range entries {
-				if e.Name() == layout.MachineID {
+				if e.Name() == layout.MachineID || isSiblingTombstoneOnlyDir(layout.StateRoot, layout.MachineID, e.Name()) {
 					continue
 				}
 				addLeft(filepath.Join(layout.StateRoot, e.Name()), "leftover entry in corrald state root")
@@ -2161,7 +2208,7 @@ func cmdUninstall(args []string, stdout io.Writer) int {
 		if isLast && lastCheckErr == nil {
 			if entries, rerr := os.ReadDir(layout.StateRoot); rerr == nil {
 				for _, e := range entries {
-					if e.Name() == layout.MachineID {
+					if e.Name() == layout.MachineID || isSiblingTombstoneOnlyDir(layout.StateRoot, layout.MachineID, e.Name()) {
 						continue
 					}
 					addLeft(filepath.Join(layout.StateRoot, e.Name()), "leftover entry in corrald state root")
@@ -2242,19 +2289,28 @@ func cmdUninstall(args []string, stdout io.Writer) int {
 					}
 				} else if err := os.Remove(layout.StateRoot); err != nil && !errors.Is(err, os.ErrNotExist) {
 					if isLast && lastCheckErr == nil {
-						if sharedLock != nil && len(tombPayload) > 0 && os.Mkdir(layout.StateDir, 0o700) == nil {
-							_ = WriteFileAtomic(layout.TombstonePath, tombPayload, 0o600)
-						}
+						// Ignore ENOTEMPTY when StateRoot only holds sibling
+						// tombstone-only machine dirs (Fix11 Item #7); each
+						// sibling will rmdir StateRoot when its own retry finishes.
+						var unexpected []string
 						if entries, rerr := os.ReadDir(layout.StateRoot); rerr == nil && len(entries) > 0 {
 							for _, e := range entries {
-								if e.Name() == layout.MachineID {
+								if e.Name() == layout.MachineID || isSiblingTombstoneOnlyDir(layout.StateRoot, layout.MachineID, e.Name()) {
 									continue
 								}
-								addLeft(filepath.Join(layout.StateRoot, e.Name()), "leftover entry in corrald state root")
+								unexpected = append(unexpected, filepath.Join(layout.StateRoot, e.Name()))
 							}
 						}
-						if len(left) == 0 {
-							addLeft(layout.StateRoot, err.Error())
+						if len(unexpected) > 0 || (!errors.Is(err, syscall.ENOTEMPTY) && !errors.Is(err, syscall.EEXIST)) {
+							if sharedLock != nil && len(tombPayload) > 0 && os.Mkdir(layout.StateDir, 0o700) == nil {
+								_ = WriteFileAtomic(layout.TombstonePath, tombPayload, 0o600)
+							}
+							for _, p := range unexpected {
+								addLeft(p, "leftover entry in corrald state root")
+							}
+							if len(left) == 0 {
+								addLeft(layout.StateRoot, err.Error())
+							}
 						}
 					}
 				}
@@ -2314,125 +2370,6 @@ func checkDirWritable(dir string) error {
 		return fmt.Errorf("remove %s: %w", dir, err)
 	}
 	return nil
-}
-
-// removeOwnedLibTarget removes a single corrald-owned target directly inside
-// layout.LibDir without ever recursively deleting user files or prefix-matched
-// non-version directories (Fix10 Item #1).
-func removeOwnedLibTarget(layout *Layout, target string, addLeft func(path, reason string)) {
-	cleanLib := filepath.Clean(layout.LibDir)
-	clean := filepath.Clean(target)
-	if filepath.Dir(clean) != cleanLib {
-		return
-	}
-	base := filepath.Base(clean)
-	if base == "corrald" || base == "README.txt" {
-		if err := os.Remove(clean); err != nil && !errors.Is(err, os.ErrNotExist) {
-			addLeft(clean, err.Error())
-		}
-		return
-	}
-	if _, _, ok := ParseVersionDirName(base); !ok {
-		return
-	}
-	// Version dir created by corrald: remove ONLY known corrald-created files
-	// inside it ("corrald" and ".corrald.tmp.*"), then rmdir. Any unknown/user
-	// file survives and is reported as a leftover.
-	info, err := os.Lstat(clean)
-	if err != nil {
-		if !errors.Is(err, os.ErrNotExist) {
-			addLeft(clean, err.Error())
-		}
-		return
-	}
-	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
-		if err := os.Remove(clean); err != nil && !errors.Is(err, os.ErrNotExist) {
-			addLeft(clean, err.Error())
-		}
-		return
-	}
-	entries, rerr := os.ReadDir(clean)
-	if rerr != nil {
-		addLeft(clean, rerr.Error())
-		return
-	}
-	for _, e := range entries {
-		name := e.Name()
-		if name == "corrald" || (!e.IsDir() && strings.HasPrefix(name, ".corrald.tmp.")) {
-			p := filepath.Join(clean, name)
-			if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
-				addLeft(p, err.Error())
-			}
-		}
-	}
-	if err := os.Remove(clean); err != nil && !errors.Is(err, os.ErrNotExist) {
-		if rem, rerr := os.ReadDir(clean); rerr == nil && len(rem) > 0 {
-			for _, e := range rem {
-				addLeft(filepath.Join(clean, e.Name()), "unexpected file in corrald version dir preserved")
-			}
-		} else {
-			addLeft(clean, err.Error())
-		}
-	}
-}
-
-// removeOwnedStateEntry removes a known corrald-created file or directory
-// inside layout.StateDir without ever recursively deleting unknown user files.
-func removeOwnedStateEntry(layout *Layout, name string, addLeft func(path, reason string)) {
-	p := filepath.Join(layout.StateDir, name)
-	switch {
-	case name == "install.json" || name == "meta.json" || name == "clients.json" ||
-		name == "failed.json" || name == "corrald.log" || name == "corrald.log.1" ||
-		name == "corrald.sock" ||
-		(strings.HasPrefix(name, ".selftest-") && strings.HasSuffix(name, ".lock")) ||
-		(strings.HasPrefix(name, ".") && strings.Contains(name, ".tmp.")):
-		if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
-			addLeft(p, err.Error())
-		}
-	case name == "ops":
-		entries, err := os.ReadDir(p)
-		if err != nil {
-			if !errors.Is(err, os.ErrNotExist) {
-				addLeft(p, err.Error())
-			}
-			return
-		}
-		for _, e := range entries {
-			en := e.Name()
-			if !e.IsDir() && (strings.HasSuffix(en, ".json") || (strings.HasPrefix(en, ".") && strings.Contains(en, ".tmp."))) {
-				fp := filepath.Join(p, en)
-				if err := os.Remove(fp); err != nil && !errors.Is(err, os.ErrNotExist) {
-					addLeft(fp, err.Error())
-				}
-			}
-		}
-		if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
-			addLeft(p, err.Error())
-		}
-	case strings.HasPrefix(name, "stage-"):
-		if _, err := layout.StageDir(strings.TrimPrefix(name, "stage-")); err != nil {
-			return
-		}
-		entries, err := os.ReadDir(p)
-		if err != nil {
-			if !errors.Is(err, os.ErrNotExist) {
-				addLeft(p, err.Error())
-			}
-			return
-		}
-		for _, e := range entries {
-			en := e.Name()
-			if !e.IsDir() && (en == "corrald" || (strings.HasPrefix(en, ".") && strings.Contains(en, ".tmp."))) {
-				fp := filepath.Join(p, en)
-				if err := os.Remove(fp); err != nil && !errors.Is(err, os.ErrNotExist) {
-					addLeft(fp, err.Error())
-				}
-			}
-		}
-		if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
-			addLeft(p, err.Error())
-		}
-	}
 }
 
 func isLastMachineInStateRoot(stateRoot, currentMID string) (bool, error) {

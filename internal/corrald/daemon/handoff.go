@@ -978,7 +978,7 @@ func PruneOldVersions(layout *Layout, currentVersion string, currentRelease int6
 	removedSet := make(map[string]struct{}, len(toRemove))
 	var removed []string
 	for _, o := range toRemove {
-		if err := os.RemoveAll(o.path); err == nil {
+		if len(RemoveOwned(layout, OwnedRemoveVersionDir, o.path, nil)) == 0 {
 			removed = append(removed, o.path)
 			removedSet[o.path] = struct{}{}
 		}

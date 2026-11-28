@@ -15,6 +15,7 @@ import (
 
 	"golang.org/x/crypto/ssh"
 
+	"github.com/ihainan/corral/internal/corrald/daemon"
 	"github.com/ihainan/corral/internal/corrald/proto"
 	"github.com/ihainan/corral/internal/sshx"
 )
@@ -176,9 +177,11 @@ func ProbeHost(ctx context.Context, c *ssh.Client) (*HostProbe, error) {
 			sf := ParseKeyValues(sres.Out)
 			p.HasTombstone = sf["tombstone"] == "1"
 			p.HasInstall = sf["has_install"] == "1"
+			p.HasClients = sf["has_clients"] == "1"
+			p.HasStateFiles = sf["has_state_files"] == "1"
 			sc := bufio.NewScanner(strings.NewReader(string(sres.Out)))
 			for sc.Scan() {
-				if v, ok := strings.CutPrefix(sc.Text(), "stage_dir="); ok && v != "" {
+				if v, ok := strings.CutPrefix(sc.Text(), "stage_dir="); ok && daemon.IsOwnedStageDirName(v) {
 					p.Stages = append(p.Stages, p.StateDir+"/"+v)
 				}
 			}
@@ -427,7 +430,7 @@ func StageAndInstallWithRetry(
 	cleanupStage := func() []LeftItem {
 		cctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		r, err := runSSH(cctx, c, RmStageCommand(stageDir), 4096, sshx.ExecOptions{})
+		r, err := runSSH(cctx, c, CleanStageCommand(stageBin, probe.CurrentBin, stageDir, opID), 4096, sshx.ExecOptions{})
 		if err != nil || ParseKeyValues(r.Out)["result"] != "ok" {
 			reason := "cleanup failed"
 			if err != nil {
@@ -735,7 +738,7 @@ func runLibDirReinstallUninstall(ctx context.Context, c *ssh.Client, dist *Dist,
 	cleanupStage := func() {
 		cctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		_, _ = runSSH(cctx, c, RmStageCommand(stageDir), 4096, sshx.ExecOptions{})
+		_, _ = runSSH(cctx, c, CleanStageCommand(stageBin, probe.CurrentBin, stageDir, opID), 4096, sshx.ExecOptions{})
 	}
 
 	if err := sftpUploadBinarySecure(ctx, c, bin.Path, probe.Home, probe.UIDInt64(), probe.LibDir, stageDir, stageBin); err != nil {

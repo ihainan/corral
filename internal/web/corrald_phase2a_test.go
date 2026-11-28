@@ -3398,6 +3398,278 @@ func TestCorraldFix10_AdminDisableCleanupRecoversBinarylessNoTombstone(t *testin
 	})
 }
 
+// Regression test for Fix Round 11 Items #1-#4 (reconnect recovery stage cleanup):
+// Reconnect recovery MUST clean owned stage-<16hex> dirs via corrald clean-stage
+// (RemoveOwned) while leaving unowned stage-backups/notes.txt completely untouched.
+func TestCorraldFix11_ReconnectRecoveryPreservesStageBackups(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("requires linux")
+	}
+	v1Dir, _ := buildTestCorraldDist(t)
+	distV1, err := gw.LoadDist(v1Dir)
+	if err != nil {
+		t.Fatalf("LoadDist v1: %v", err)
+	}
+	h := newHarness(t, func(c *config.Config) {
+		c.CorraldDir = v1Dir
+		c.GatewayID = "gw-fix11-stage.local"
+	})
+	admin := h.admin()
+	adminID := userIDOf(t, admin)
+	sshSrv, _ := startCorraldSSH(t)
+	hostID, _ := createAndPinHost(t, admin, sshSrv, "stage-bkp-host")
+	fp := hostFingerprint(t, h, adminID, hostID)
+
+	startCorraldInstall(t, admin, hostID)
+	waitCorraldState(t, admin, hostID, gw.StateRunning)
+
+	sshCl := dialTestSSH(t, sshSrv)
+	defer sshCl.Close()
+	probe, err := gw.ProbeHost(context.Background(), sshCl)
+	if err != nil {
+		t.Fatalf("ProbeHost: %v", err)
+	}
+
+	// Plant both an owned leftover stage dir AND an unowned user stage-backups dir!
+	ownedStage := filepath.Join(probe.StateDir, "stage-deadbeef12345678")
+	if err := os.MkdirAll(ownedStage, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(ownedStage, "corrald"), []byte("partial"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	userStageDir := filepath.Join(probe.StateDir, "stage-backups")
+	userNotes := filepath.Join(userStageDir, "notes.txt")
+	if err := os.MkdirAll(userStageDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(userNotes, []byte("precious user notes\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate interrupted update before gateway restart so OnHostConnected enters
+	// reconcileHost -> ReconcileAfterRestart -> CleanupStages.
+	ch, err := h.store.CorraldHostByID(context.Background(), hostID)
+	if err != nil {
+		t.Fatalf("CorraldHostByID: %v", err)
+	}
+	ch.State = gw.StateUpdating
+	if err := h.store.UpsertCorraldHost(context.Background(), ch); err != nil {
+		t.Fatalf("UpsertCorraldHost: %v", err)
+	}
+
+	// Simulate gateway restart + reconnect recovery (which runs ReconcileAfterRestart -> CleanupStages).
+	h.srv.corrald.Close()
+	h.srv.corrald = gw.NewManager(gw.ManagerConfig{
+		Store:     h.store,
+		Dist:      distV1,
+		GatewayID: "gw-fix11-stage.local",
+		SSH:       &webSSHProvider{s: h.srv},
+	})
+	h.srv.corrald.OnHostConnected(context.Background(), adminID, hostID, "admin", fp, "alice", sshCl)
+
+	if _, err := os.Lstat(ownedStage); !os.IsNotExist(err) {
+		t.Fatalf("expected owned leftover stage dir %s cleaned up on reconnect, stat err=%v", ownedStage, err)
+	}
+	if got, err := os.ReadFile(userNotes); err != nil || string(got) != "precious user notes\n" {
+		t.Fatalf("Fix11 regression: reconnect recovery deleted unowned stage-backups/notes.txt! err=%v content=%q", err, string(got))
+	}
+}
+
+// Regression test for Fix Round 11 Item #5 [P2]:
+// Automatic recovery uninstall in reconcileHost (ReconcileFinishRemove) MUST
+// bump the per-account removal generation so a late-binding install queued
+// before the recovery uninstall completes does not reinstall corrald.
+func TestCorraldFix11_ReconcileFinishRemoveBumpsAccountRemovalGen(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("requires linux")
+	}
+	v1Dir, _ := buildTestCorraldDist(t)
+	distV1, err := gw.LoadDist(v1Dir)
+	if err != nil {
+		t.Fatalf("LoadDist v1: %v", err)
+	}
+	h := newHarness(t, func(c *config.Config) {
+		c.CorraldDir = v1Dir
+		c.GatewayID = "gw-fix11-recgen.local"
+	})
+	admin := h.admin()
+	adminID := userIDOf(t, admin)
+	sshSrv, home := startCorraldSSH(t)
+	h1, _ := createAndPinHost(t, admin, sshSrv, "recgen-1")
+	h2, _ := createAndPinHost(t, admin, sshSrv, "recgen-2")
+	fp := hostFingerprint(t, h, adminID, h1)
+
+	startCorraldInstall(t, admin, h1)
+	waitCorraldState(t, admin, h1, gw.StateRunning)
+
+	// Simulate a host tombstone discovered on reconnect while DB still shows
+	// StateRunning (e.g. partial/external removal or pre-persist crash):
+	// OnHostConnected probes HasTombstone and enters reconcileHost ->
+	// ReconcileFinishRemove!
+	sshCl := dialTestSSH(t, sshSrv)
+	defer sshCl.Close()
+	probe, err := gw.ProbeHost(context.Background(), sshCl)
+	if err != nil {
+		t.Fatalf("ProbeHost: %v", err)
+	}
+	if err := os.WriteFile(probe.TombstonePath, []byte(`{"created_at":"2026-11-28T00:00:00Z","gateway":"gw-fix11-recgen.local"}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	h2InAcquire := make(chan struct{})
+	releaseH2 := make(chan struct{})
+	var h2Once sync.Once
+	h.srv.corrald.Close()
+	h.srv.corrald = gw.NewManager(gw.ManagerConfig{
+		Store:     h.store,
+		Dist:      distV1,
+		GatewayID: "gw-fix11-recgen.local",
+		SSH: &blockingLateBindingSSHProvider{
+			inner:      &webSSHProvider{s: h.srv},
+			lateHostID: h2,
+			onEntering: func() { h2Once.Do(func() { close(h2InAcquire) }) },
+			releaseCh:  releaseH2,
+		},
+	})
+
+	// 1. Start late-binding h2 install -> blocks in AcquireSSH before learning acct.
+	r2 := admin.do("POST", fmt.Sprintf("/api/hosts/%d/corrald/install", h2), map[string]any{"manifest_hash": distV1.ManifestHash})
+	mustStatus(t, r2, http.StatusAccepted, "start late-binding h2")
+	select {
+	case <-h2InAcquire:
+	case <-time.After(10 * time.Second):
+		t.Fatal("timed out waiting for h2 to enter AcquireSSH")
+	}
+
+	// 2. Trigger reconcileHost on h1 via OnHostConnected -> runs ReconcileFinishRemove
+	//    and completes uninstall to StateOff!
+	h.srv.corrald.OnHostConnected(context.Background(), adminID, h1, "admin", fp, "alice", sshCl)
+	waitCorraldState(t, admin, h1, gw.StateOff)
+
+	// 3. Release h2's AcquireSSH -> h2 learns acct AFTER reconcileHost finished removing!
+	close(releaseH2)
+	if err := h.srv.corrald.WaitOpsIdle(context.Background()); err != nil {
+		t.Fatalf("WaitOpsIdle: %v", err)
+	}
+
+	ch2, err := h.srv.store.CorraldHostByID(context.Background(), h2)
+	if err != nil {
+		t.Fatalf("CorraldHostByID(h2): %v", err)
+	}
+	if ch2.State != gw.StateOff {
+		t.Fatalf("Fix11 Item #5 regression: late-binding h2 reinstalled after ReconcileFinishRemove! state=%q", ch2.State)
+	}
+	if latest2, lerr := h.srv.store.LatestCorraldOp(context.Background(), h2); lerr != nil || latest2.State != gw.OpCancelled {
+		t.Fatalf("Fix11 Item #5 regression: expected h2 op state=cancelled, got (%+v, %v)", latest2, lerr)
+	}
+	bin := filepath.Join(home, ".local", "lib", "corral", "corrald")
+	if _, err := os.Lstat(bin); !os.IsNotExist(err) {
+		t.Fatalf("Fix11 Item #5 regression: binary %s reinstalled by h2 after ReconcileFinishRemove! stat err=%v", bin, err)
+	}
+}
+
+// Regression test for Fix Round 11 Item #6 [P2]:
+// hasOnHost MUST count clients.json and any corrald-owned state/lib files so a
+// host with only clients.json + lock files goes through recovery (never jumps
+// straight to StateOff leaving those files behind).
+func TestCorraldFix11_HasOnHostCountsClientsJSONAndLocks(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("requires linux")
+	}
+	v1Dir, _ := buildTestCorraldDist(t)
+
+	setupClientsAndLocksOnly := func(t *testing.T, gwID, clientsContent string) (*harness, *client, int64, string, *ssh.Client, *gw.HostProbe) {
+		t.Helper()
+		h := newHarness(t, func(c *config.Config) {
+			c.CorraldDir = v1Dir
+			c.GatewayID = gwID
+		})
+		admin := h.admin()
+		adminID := userIDOf(t, admin)
+		sshSrv, _ := startCorraldSSH(t)
+		hostID, _ := createAndPinHost(t, admin, sshSrv, "clients-only")
+		fp := hostFingerprint(t, h, adminID, hostID)
+
+		sshCl := dialTestSSH(t, sshSrv)
+		t.Cleanup(func() { _ = sshCl.Close() })
+		probe, err := gw.ProbeHost(context.Background(), sshCl)
+		if err != nil {
+			t.Fatalf("ProbeHost: %v", err)
+		}
+		// Place ONLY StateDir/clients.json + corrald.lock + op.lock (no LibDir,
+		// no install.json, no meta.json, no removing tombstone, no run/).
+		if err := os.MkdirAll(probe.StateDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(probe.ClientsJSON, []byte(clientsContent), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(probe.StateDir, "corrald.lock"), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(probe.StateDir, "op.lock"), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		uid := adminID
+		if err := h.srv.store.UpsertCorraldHost(context.Background(), &store.CorraldHost{
+			HostID:           hostID,
+			State:            gw.StateRemovePending,
+			ConsentBy:        &uid,
+			ConsentAt:        time.Now().Unix(),
+			BoundFingerprint: fp,
+			BoundUsername:    "alice",
+			BoundGateway:     gwID,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		return h, admin, hostID, fp, sshCl, probe
+	}
+
+	t.Run("foreign_gateway_clients_json_only_marks_stopped_not_off", func(t *testing.T) {
+		h, admin, hostID, fp, sshCl, probe := setupClientsAndLocksOnly(
+			t, "gw-fix11-a.local", `[{"gateway":"gw-other.local","corral_user":"bob"}]`,
+		)
+		adminID := userIDOf(t, admin)
+		h.srv.corrald.SetAdminDisabled(context.Background(), true)
+		h.srv.corrald.OnHostConnected(context.Background(), adminID, hostID, "admin", fp, "alice", sshCl)
+
+		ch, err := h.srv.store.CorraldHostByID(context.Background(), hostID)
+		if err != nil {
+			t.Fatalf("CorraldHostByID: %v", err)
+		}
+		if ch.State != gw.StateStopped {
+			t.Fatalf("Fix11 Item #6 regression: expected StateStopped (other_gateways) for foreign clients.json, got %q", ch.State)
+		}
+		if _, err := os.Stat(probe.ClientsJSON); err != nil {
+			t.Fatalf("expected foreign clients.json preserved: %v", err)
+		}
+	})
+
+	t.Run("sole_gateway_clients_json_and_locks_actually_cleaned", func(t *testing.T) {
+		h, admin, hostID, fp, sshCl, probe := setupClientsAndLocksOnly(
+			t, "gw-fix11-b.local", `[{"gateway":"gw-fix11-b.local","corral_user":"admin"}]`,
+		)
+		adminID := userIDOf(t, admin)
+		h.srv.corrald.SetAdminDisabled(context.Background(), true)
+		h.srv.corrald.OnHostConnected(context.Background(), adminID, hostID, "admin", fp, "alice", sshCl)
+
+		ch, err := h.srv.store.CorraldHostByID(context.Background(), hostID)
+		if err != nil {
+			t.Fatalf("CorraldHostByID: %v", err)
+		}
+		if ch.State != gw.StateOff {
+			t.Fatalf("expected StateOff after cleaning sole-gateway clients.json + locks, got %q", ch.State)
+		}
+		if _, err := os.Lstat(probe.ClientsJSON); !os.IsNotExist(err) {
+			t.Fatalf("Fix11 Item #6 regression: clients.json still left on disk after cleanup reported off! stat err=%v", err)
+		}
+		if _, err := os.Lstat(probe.StateDir); !os.IsNotExist(err) {
+			t.Fatalf("Fix11 Item #6 regression: StateDir/locks still left on disk after cleanup reported off! stat err=%v", err)
+		}
+	})
+}
+
 func syscallFlockEx(f *os.File) error {
 	return syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
 }

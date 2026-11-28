@@ -1907,10 +1907,10 @@ func (m *Manager) DeleteHostCleanup(ctx context.Context, userID, hostID int64, c
 		}
 	}
 
-	hasOnHost := probe.HasSymlink || probe.HasInstall || probe.HasTombstone || probe.HasRunDir || len(probe.Versions) > 0 || len(probe.Stages) > 0
+	hasOnHost := probe.HasAnyOwnedFiles()
 	if !hasOnHost {
 		files := ReadHostStateFiles(ctx, sshClient, probe, "")
-		hasOnHost = files.Install != nil || files.Meta != nil
+		hasOnHost = files.Install != nil || files.Meta != nil || len(files.Clients) > 0
 	}
 	if !hasOnHost {
 		m.detachHost(hostID)
@@ -4494,9 +4494,18 @@ func (m *Manager) reconcileHost(
 
 	dec := ReconcileAfterRestart(ch.State, opKind, obs)
 
-	// Clean any leftover stage-* directories from interrupted uploads.
+	// Clean only owned leftover stage-<16hex> directories from interrupted uploads
+	// via corrald clean-stage (daemon.RemoveOwned), never rm -rf.
 	for _, stage := range dec.CleanupStages {
-		_, _ = runSSH(ctx, sshClient, RmStageCommand(stage), 4096, sshx.ExecOptions{})
+		base := stage
+		if idx := strings.LastIndexByte(stage, '/'); idx >= 0 {
+			base = stage[idx+1:]
+		}
+		if !strings.HasPrefix(base, "stage-") {
+			continue
+		}
+		stageOpID := strings.TrimPrefix(base, "stage-")
+		_, _ = runSSH(ctx, sshClient, CleanStageCommand(probe.CurrentBin, stage+"/corrald", stage, stageOpID), 4096, sshx.ExecOptions{})
 	}
 
 	writeReconciled := func(opToFinalize *store.CorraldOp) {
@@ -4508,6 +4517,9 @@ func (m *Manager) reconcileHost(
 		out := RunUninstallWithRetry(ctx, sshClient, m.Dist(), probe, opID, m.busyRetry, nil)
 		switch out.Result {
 		case "removed":
+			// Fix11 Item #5: Bump per-account removal generation on automatic
+			// recovery uninstall just like every other account removal path.
+			m.recordAccountRemoval(accountKey{Fingerprint: fp, Username: sshUser})
 			_ = m.store.CorraldResetByBinding(ctx, fp, sshUser)
 			ch.State = StateOff
 			ch.Version = ""
