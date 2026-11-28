@@ -47,8 +47,8 @@ export interface ConvoListRow {
   sessionGroup?: string // host + session label (for "Group by session")
   parentKey?: string // agentKey of confirmed herdr parent within the same server
   lineageSource?: string
-  // (how: from a click with ⌘/Ctrl, the middle button or a menu, a new tab; with ⌥/Alt, beside the one shown.)
-  onPick: (how?: 'tab' | 'split') => void
+  // (how: from a click with ⌘/Ctrl, the middle button or a menu, a new tab; with ⌥/Alt, beside the one shown; double-click, pin.)
+  onPick: (how?: 'tab' | 'split' | 'pin') => void
   menu?: () => (MenuItem | null)[] // what else is done with it, from its row's menu (the side list's)
 
   // Projection metadata populated by buildAgentGroups on shallow row copies:

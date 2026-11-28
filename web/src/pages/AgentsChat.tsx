@@ -63,7 +63,7 @@ import { Rail, StatusBar, StatusItem, useWorkbench } from '../workbench'
 import { CorraldStatusBarItem } from '../components/CorraldStatusBarItem'
 import { isCorraldUnknownResult } from '../corraldLogic'
 import { AgentTabBar, askPickInTab, isTabsKey, newTabId, OPEN_PICKER, readFront, readTabs, takePickInTab, writeFront, writeTabs, type AgentTab, type PickHow, type TabView } from './agentTabs'
-import { AGENT_CLOSED_EVENT, closeAgentTabs, migrateAgentTabsKey } from '../terminal/agentTabPolicy'
+import { AGENT_CLOSED_EVENT, closeAgentTabs, expandSplitAgentTab, migrateAgentTabsKey, moveAgentTab, openAgentTab, pinAgentTab, pinAgentTabByKey } from '../terminal/agentTabPolicy'
 import { SESSION_RENAMED_EVENT, tmuxEntryKey, type SessionRenamedPayload } from '../terminal/sessionRenamePolicy'
 import { agentMark } from '../terminal/agentIcons'
 import { useComposerFit } from '../terminal/autosize'
@@ -498,19 +498,37 @@ export function AgentsChat({ bar, active = true, onHead }: { bar?: ReactNode; ac
     lastCur.current = cur
     if (cur && !(stack && screen === 'list')) shownKey.current = cur.key // (a phone's list: none of them is in front)
   })
-  // Gone to: as said by how — a new tab ('tab'), beside the one shown
-  // ('split'), else in the tab in front. Open already in a tab, that tab is
-  // gone to instead (see the tabs' keeping below: one agent, one tab).
+  // Promote a preview tab to a normal (pinned) tab by id or hosted agent key.
+  const pinTab = (id: string | null) => {
+    const res = pinAgentTab(tabsRef.current, id)
+    if (res.changed) putTabs(res.tabs)
+  }
+  const pinTabByKey = (key: string) => {
+    const res = pinAgentTabByKey(tabsRef.current, key)
+    if (res.changed) putTabs(res.tabs)
+  }
+  // Gone to: as said by how — a new pinned tab ('tab'), pinned in place or
+  // newly opened ('pin'), beside the one shown ('split'), else in the single
+  // preview tab (reused if one exists, else created). Open already in a tab,
+  // that tab is gone to instead (one agent, one tab; pinned if how asks).
   const choose = (e: Entry, how?: PickHow) => {
     if (how === 'split') return openSplit(e)
-    if (how === 'tab' && !stack) {
-      const open = tabsRef.current.find((x) => x.key === e.key || (x.split === e.key && entries.some((en) => en.key === x.key))) // (beside one ended: not shown there)
-      if (open) return goTab(open, open.split === e.key ? 'secondary' : undefined)
-      const tab: AgentTab = { id: newTabId(), key: e.key, s: e.s.id, pane: e.pane }
-      const l = [...tabsRef.current]
-      l.splice(l.findIndex((x) => x.id === frontRef.current) + 1, 0, tab)
-      putTabs(l)
-      putFront(tab.id)
+    if (!stack) {
+      const live = new Set(entries.map((en) => en.key))
+      const mode = how === 'tab' || how === 'pin' ? 'pinned' : 'preview'
+      const res = openAgentTab(tabsRef.current, frontRef.current, { key: e.key, s: e.s.id, pane: e.pane }, mode, newTabId, live)
+      if (res.changed) putTabs(res.tabs)
+      if (res.existing) {
+        const sameFront =
+          res.existing.id === frontRef.current &&
+          pick?.s === e.s.id &&
+          (pick.pane ?? '') === (e.pane ?? '') &&
+          (!res.focus || res.focus === focusedPane)
+        if (!sameFront) return goTab(res.existing, res.focus)
+        return
+      }
+      putFront(res.front)
+      splitSeen.current = { cur: e.key, split: null }
       setSplitKey(null)
       setFocusedPane('primary')
     }
@@ -599,12 +617,11 @@ export function AgentsChat({ bar, active = true, onHead }: { bar?: ReactNode; ac
     putTabs(l.map((x) => (x.id === id ? { ...x, split: splitKey ?? undefined, focus: splitKey ? focusedPane : undefined } : x)))
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [splitKey, focusedPane])
-  // The tabs kept with what is shown, however it came to be shown (picked in
-  // the list, an address, an alert, back and forward): one agent, one tab —
-  // shown in the tab in front, that tab is of it; open in another tab, that
-  // tab comes to the front; beside the one shown in a tab, that tab, its
-  // focus there; else it takes the tab in front's place (what was beside
-  // that goes, as it did), or is the first tab.
+  // The tabs kept with what is shown, however it came to be shown (an address,
+  // an alert, back and forward, initial load): one agent, one tab — shown in
+  // the tab in front, that tab is of it; open in another tab, that tab comes to
+  // the front; beside the one shown in a tab, that tab, its focus there; else
+  // it opens in the single preview tab (never overwriting a pinned tab).
   useEffect(() => {
     if (!cur || (stack && screen === 'list')) return
     const l = tabsRef.current
@@ -613,16 +630,14 @@ export function AgentsChat({ bar, active = true, onHead }: { bar?: ReactNode; ac
       if (f.s !== cur.s.id || (f.pane ?? '') !== (cur.pane ?? '')) putTabs(l.map((x) => (x.id === f.id ? { ...x, s: cur.s.id, pane: cur.pane } : x)))
       return
     }
-    const other = l.find((x) => x.key === cur.key)
-    if (other) return goTab(other)
-    const beside = l.find((x) => x.split === cur.key)
-    if (beside && entries.some((e) => e.key === beside.key)) return goTab(beside, 'secondary')
-    if (f) putTabs(l.map((x) => (x.id === f.id ? { ...x, key: cur.key, s: cur.s.id, pane: cur.pane, title: undefined, program: undefined } : x)))
-    else {
-      const tab: AgentTab = { id: newTabId(), key: cur.key, s: cur.s.id, pane: cur.pane }
-      putTabs([...l, tab])
-      putFront(tab.id)
-    }
+    const live = new Set(entries.map((e) => e.key))
+    const res = openAgentTab(l, frontRef.current, { key: cur.key, s: cur.s.id, pane: cur.pane }, 'preview', newTabId, live)
+    if (res.changed) putTabs(res.tabs)
+    if (res.existing) return goTab(res.existing, res.focus)
+    putFront(res.front)
+    splitSeen.current = { cur: cur.key, split: null }
+    setSplitKey(null)
+    setFocusedPane('primary')
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cur?.key, cur?.s.id, cur?.pane, screen])
   // A tab to the front: its agent shown, with what was beside it.
@@ -740,11 +755,8 @@ export function AgentsChat({ bar, active = true, onHead }: { bar?: ReactNode; ac
     return () => window.removeEventListener(SESSION_RENAMED_EVENT, onRenamed)
   }, [])
   const moveTab = (id: string, to: number) => {
-    const l = [...tabsRef.current]
-    const from = l.findIndex((x) => x.id === id)
-    if (from < 0 || to < 0 || to >= l.length || from === to) return
-    l.splice(to, 0, l.splice(from, 1)[0])
-    putTabs(l)
+    const res = moveAgentTab(tabsRef.current, id, to)
+    if (res.changed) putTabs(res.tabs)
   }
   // (The tab in front gone from the list — closed in another window —: the first, or none.)
   useEffect(() => {
@@ -816,11 +828,12 @@ export function AgentsChat({ bar, active = true, onHead }: { bar?: ReactNode; ac
       setFocusedPane('primary')
       return
     }
+    pinTab(frontRef.current)
     setSplitKey(e.key)
     setFocusedPane('secondary')
   }
   const openParentChildSplit = (parent: Entry, child: Entry) => {
-    choose(parent)
+    choose(parent, 'pin')
     setSplitKey(child.key)
     setFocusedPane('secondary')
   }
@@ -833,16 +846,29 @@ export function AgentsChat({ bar, active = true, onHead }: { bar?: ReactNode; ac
     const prevCur = cur
     const prevSplit = splitEntry
     // (The tab is of the other now, the one shown beside it: as it is, not gone to as another.)
-    putTabs(tabsRef.current.map((x) => (x.id === frontRef.current ? { ...x, key: prevSplit.key, s: prevSplit.s.id, pane: prevSplit.pane, split: prevCur.key, title: undefined, program: undefined } : x)))
+    putTabs(tabsRef.current.map((x) => (x.id === frontRef.current ? { ...x, key: prevSplit.key, s: prevSplit.s.id, pane: prevSplit.pane, split: prevCur.key, title: undefined, program: undefined, preview: undefined } : x)))
     choose(prevSplit)
     setSplitKey(prevCur.key)
   }
   const expandSplit = () => {
     if (!splitEntry) return
     const target = splitEntry
+    const live = new Set(entries.map((en) => en.key))
+    const res = expandSplitAgentTab(tabsRef.current, frontRef.current, { key: target.key, s: target.s.id, pane: target.pane }, newTabId, live)
+    if (res.changed) putTabs(res.tabs)
+    if (res.existing) return goTab(res.existing, res.focus)
+    putFront(res.front)
+    splitSeen.current = { cur: target.key, split: null }
     setSplitKey(null)
     setFocusedPane('primary')
-    choose(target)
+    setPick({ s: target.s.id, pane: target.pane, key: target.key })
+    pickKey.current = { s: target.s.id, pane: target.pane, key: target.key }
+    try {
+      local.set(LAST, JSON.stringify({ s: target.s.id, pane: target.pane, key: target.key }))
+    } catch {
+      /* not kept */
+    }
+    navigate(chatAddress(target), true, history.state)
   }
   const chooseFromList = (e: Entry, how?: PickHow) => {
     if (!how && takePickInTab()) how = 'tab' // (picked in the switcher ⌘T opened)
@@ -876,10 +902,11 @@ export function AgentsChat({ bar, active = true, onHead }: { bar?: ReactNode; ac
       const asSplit = arriving.openInSplit && !stack && cur && cur.key !== e.key
       setArriving(null)
       if (asSplit) {
+        pinTab(frontRef.current)
         setSplitKey(e.key)
         setFocusedPane('secondary')
       } else {
-        choose(e)
+        choose(e, 'tab')
       }
       return
     }
@@ -1153,6 +1180,7 @@ export function AgentsChat({ bar, active = true, onHead }: { bar?: ReactNode; ac
   // Sidebar rows & close confirmation used when no conversation view is mounted
   // (no open tab, or front tab ended unexpectedly), so the left sidebar stays
   // mounted, interactive, and in the exact same position.
+  const previewTabKey = tabs.find((x) => x.preview)?.key ?? null
   const [fallbackSideShown, setFallbackSideShown] = useState(true)
   const [fallbackClosing, setFallbackClosing] = useState<Entry | null>(null)
   const fallbackRows = useMemo((): ConvoListRow[] => {
@@ -1166,7 +1194,9 @@ export function AgentsChat({ bar, active = true, onHead }: { bar?: ReactNode; ac
       const pinnedNow = pins.includes(e.key)
       const canClose = e.s.persistence === 'herdr' && !!e.row && !e.row.lost
       return [
-        { label: t('agentTabs.newTab'), icon: <Plus size={16} />, onSelect: () => choose(e, 'tab') },
+        previewTabKey === e.key
+          ? { label: t('agentTabs.pin'), icon: <Pin size={16} />, onSelect: () => pinTabByKey(e.key) }
+          : { label: t('agentTabs.newTab'), icon: <Plus size={16} />, onSelect: () => choose(e, 'tab') },
         { label: t('convo.showTerminal'), icon: <SquareTerminal size={16} />, onSelect: () => navigate(`/t/${e.s.id}` + (e.pane ? '?pane=' + encodeURIComponent(e.pane) : '')) },
         {
           label: t(pinnedNow ? 'agents.unpin' : 'agents.pin'),
@@ -1233,7 +1263,7 @@ export function AgentsChat({ bar, active = true, onHead }: { bar?: ReactNode; ac
       }
     })
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [cur, stack, sessions, entries, prefs.pinnedAgents])
+  }, [cur, stack, sessions, entries, prefs.pinnedAgents, previewTabKey])
 
   let body: ReactNode
   if (stack && screen === 'list' && sessions !== null && entries.length)
@@ -1307,10 +1337,11 @@ export function AgentsChat({ bar, active = true, onHead }: { bar?: ReactNode; ac
           all={sessions ?? []}
           titles={titles.current}
           onPick={(e, how) => {
-            if (how === 'tab') return choose(e, 'tab')
+            if (how === 'tab' || how === 'pin') return choose(e, how)
             if (e.key === cur.key) setFocusedPane('primary')
             else openSplit(e)
           }}
+          onInteract={() => pinTabByKey(sk)}
           active={active}
           keysActive={active && focusedPane === 'secondary'}
           isSecondary
@@ -1349,6 +1380,9 @@ export function AgentsChat({ bar, active = true, onHead }: { bar?: ReactNode; ac
         titles={titles.current}
         onPick={chooseFromList}
         onOpenTab={stack ? undefined : (e) => choose(e, 'tab')}
+        previewTabKey={stack ? null : previewTabKey}
+        onPinTab={stack ? undefined : pinTabByKey}
+        onInteract={() => pinTabByKey(k)}
         active={active}
         keysActive={active && (!splitEntry || focusedPane === 'primary')}
         splitPane={secondaryNode ? { node: secondaryNode, focused: focusedPane, onFocus: setFocusedPane, dir: splitDir, onDirToggle: toggleSplitDir } : undefined}
@@ -1443,7 +1477,7 @@ export function AgentsChat({ bar, active = true, onHead }: { bar?: ReactNode; ac
         </button>
       )}
       {bar}
-      {!stack && <AgentTabBar views={tabViews} front={front} onGo={goTab} onClose={(x) => closeTabs(new Set([x.id]))} onCloseMany={(l) => closeTabs(new Set(l.map((x) => x.id)))} onMove={moveTab} onNew={newTab} newKey={standalone ? (isMac ? '⌘T' : 'Ctrl+Shift+T') : undefined} />}
+      {!stack && <AgentTabBar views={tabViews} front={front} onGo={goTab} onPin={(x) => pinTab(x.id)} onClose={(x) => closeTabs(new Set([x.id]))} onCloseMany={(l) => closeTabs(new Set(l.map((x) => x.id)))} onMove={moveTab} onNew={newTab} newKey={standalone ? (isMac ? '⌘T' : 'Ctrl+Shift+T') : undefined} />}
     </header>
   ) : stack && screen === 'chat' && cur ? null : stack && screen === 'chat' ? (
     // (A phone's conversation, none shown in it: back to the list, as from one.)
@@ -1522,7 +1556,7 @@ export function AgentsChat({ bar, active = true, onHead }: { bar?: ReactNode; ac
           sessions={sessions}
           parent={typeof newAgent === 'object' ? newAgent : undefined}
           onDone={started}
-          onOpen={(s, pane) => (setNewAgent(false), choose({ s, pane, key: agentKey(s, pane) }))}
+          onOpen={(s, pane) => (setNewAgent(false), choose({ s, pane, key: agentKey(s, pane) }, 'tab'))}
           onClose={() => setNewAgent(false)}
         />
       )}
@@ -1728,7 +1762,7 @@ const tmuxBgOf = (e: Entry) => (e.row || e.pane ? {} : readTmuxBg(tmuxCmds, e.ke
 
 // The conversation of one agent, and what is sent to it. Keyed by the
 // agent: nothing of another's (its draft, what was sent, a stop) carries over.
-function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysActive, isSecondary, primaryKey, splitPane, splitKey, splitDir, onSplitDirToggle, onSplitOpen, onSplitParentChild, onSplitClose, onSplitSwap, onSplitExpand, onNewSubagent, onHead, onLiveMark, toast, composerEnter, sent, setSent, sending, setSending, draft: shownDraft, setDraftShown, used, lead, onClosed, onStarted, query, onQuery }: {
+function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, previewTabKey, onPinTab, onInteract, active, keysActive, isSecondary, primaryKey, splitPane, splitKey, splitDir, onSplitDirToggle, onSplitOpen, onSplitParentChild, onSplitClose, onSplitSwap, onSplitExpand, onNewSubagent, onHead, onLiveMark, toast, composerEnter, sent, setSent, sending, setSending, draft: shownDraft, setDraftShown, used, lead, onClosed, onStarted, query, onQuery }: {
   onHead?: (h: AgentsHead | null) => void
   onLiveMark?: (m: { key: string; status: string; mark: AgentStatusMark } | null) => void
   cur: Entry
@@ -1749,6 +1783,9 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
   onQuery: (q: string) => void
   onPick: (e: Entry, how?: PickHow) => void
   onOpenTab?: (e: Entry) => void
+  previewTabKey?: string | null
+  onPinTab?: (key: string) => void
+  onInteract?: () => void
   active: boolean
   keysActive?: boolean
   isSecondary?: boolean
@@ -2260,6 +2297,7 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
   const press = (what: 'stop' | 'now') => {
     const b = convo.bind
     if (!b || (said?.busy && said.bind === bindKey)) return
+    onInteract?.()
     const n = ++saidN.current
     const bind = bindKey // (what becomes of it is of that process: another in the pane shows none of it)
     setSaid({ what, text: t(what === 'stop' ? 'convo.stopping' : 'convo.sendingNow'), busy: true, n, bind })
@@ -2279,6 +2317,7 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
   const closeDialog = () => {
     const b = convo.bind
     if (!b || shutting) return
+    onInteract?.()
     setShutting(true)
     // (Its session file says so a moment after: read then, not at the next
     // tick; pressed again only once that read had time to come.)
@@ -2323,6 +2362,7 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
   const pickMode = (target: string) => {
     const b = convo.bind
     if (!b || modeBusy) return
+    onInteract?.()
     const bind = bindKey
     setModeBusy(true)
     const name = (m: string) => t(`convo.mode.${m}` as I18nKey)
@@ -2410,6 +2450,7 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
   }, [panelWanted, bindKey])
   const pickEffort = (level: string) => {
     if (!convo.bind || effortBusy) return
+    onInteract?.()
     const bind = bindKey
     const was = convo.meta?.effort
     setEffortBusy(true)
@@ -2464,6 +2505,7 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
   }
   const pickModel = (label: string, effort?: string) => {
     if (!convo.bind || modelBusy) return
+    onInteract?.()
     const bind = bindKey
     const ckey = modelCacheKey
     const wasModel = convo.meta?.model
@@ -2864,6 +2906,7 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
       })
   }, [])
   const upload = (files: File[]) => {
+    if (files.length) onInteract?.()
     const forKey = draftKey // (its path is for this agent's draft only)
     setUps((l) => [
       ...l,
@@ -3122,6 +3165,7 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
     const b = convo.bind
     const cur = activeBlocker
     if (!b || !cur || !cur.digest || draftActionBusy) return
+    onInteract?.()
     setDraftActionBusy(action)
     setDraftCardError('')
     api<{ ok?: boolean }>('POST', `/api/sessions/${sid}/conversation/box-draft`, { ...pressBody(), action, digest: cur.digest }, { timeoutMs: PRESS_MS })
@@ -3323,6 +3367,7 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
   const suggestion = (askKey && suggestAsks.get(askKey)?.text) || null // (askKey: nothing in the way of sending)
   const takeSuggestion = () => {
     if (!suggestion) return
+    onInteract?.()
     const s = suggestion
     setDraft(s)
     requestAnimationFrame(() => {
@@ -3393,6 +3438,7 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
     const text = (b.agent ?? 'claude') === 'claude' ? expandForClaude(draft, 100 << 10) : expandPastes(draft, 100 << 10)
     if (text === null || new TextEncoder().encode(text).length > 100 << 10) return toast(t('agents.tooLong'), true)
     const was = draft // (what is typed meanwhile is a new draft: it stays)
+    onInteract?.()
     setSending(true)
     setSentAt(Date.now())
     const last = convo.entries.length ? convo.entries[convo.entries.length - 1] : undefined
@@ -3522,7 +3568,10 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
           busyKey={claudeCard.busyKey}
           error={claudeCard.error}
           errorSeq={claudeCard.errorSeq}
-          onPress={claudeCard.press}
+          onPress={(key) => {
+            onInteract?.()
+            return claudeCard.press(key)
+          }}
         />
       )}
       {completion.list}
@@ -3625,7 +3674,10 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
           spellCheck={false}
           placeholder={placeholder}
           rows={1}
-          onChange={(e) => setDraft(e.target.value)} // (an entry edited is a draft of its own)
+          onChange={(e) => {
+            setDraft(e.target.value)
+            if (e.target.value.trim()) onInteract?.()
+          }} // (an entry edited is a draft of its own)
           onSelect={() => completion.update()}
           {...completion.field}
           onBlur={() => {
@@ -3648,6 +3700,7 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
             const label = keepPaste(text, (n) => t('term.pasteLabel', { n, lines: text.split('\n').length }))
             const s = el.selectionStart
             setDraft(draft.slice(0, s) + label + draft.slice(el.selectionEnd))
+            onInteract?.()
             requestAnimationFrame(() => field.current?.setSelectionRange(s + label.length, s + label.length))
           }}
           onKeyDown={(e) => {
@@ -3839,6 +3892,7 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
   const opsOf = codex ? (['compact', 'rename', 'clear'] as const) : agy ? (['compact', 'clear'] as const) : notClaude ? ([] as const) : (['compact', 'rename', 'clear'] as const)
   const canOps = canModel || canEffort || (bound && opsOf.length > 0 && convo.status === 'ready' && (agent?.status === 'idle' || agent?.status === 'done') && !agent?.other)
   const runOp = (b: NonNullable<typeof convo.bind>, text: string) => {
+    onInteract?.()
     return api('POST', `/api/sessions/${sid}/conversation/command`, { pane: b.pane, pid: b.pid, start: b.start, session: b.session, text }, { timeoutMs: PRESS_MS }).then(
       () => {
         toast(t('ops.sent'))
@@ -4119,7 +4173,11 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
   // (Claude Code's own commands on it are not there: they are of the one
   // shown, its process known.)
   rowMenu.current = (e) => [
-    onOpenTab && e.key !== cur.key ? { label: t('agentTabs.newTab'), icon: <Plus size={16} />, onSelect: () => onOpenTab(e) } : null,
+    onPinTab && previewTabKey === e.key
+      ? { label: t('agentTabs.pin'), icon: <Pin size={16} />, onSelect: () => onPinTab(e.key) }
+      : onOpenTab && e.key !== cur.key
+        ? { label: t('agentTabs.newTab'), icon: <Plus size={16} />, onSelect: () => onOpenTab(e) }
+        : null,
     { label: t('convo.showTerminal'), icon: <SquareTerminal size={16} />, onSelect: terminalOf(e) },
     splitRowItem(e),
     pinItem(e.key),
@@ -4358,7 +4416,7 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
       ask={
         !readOnly && waits && replyTo ? (
           // (One a pane, and a process in it: nothing of another's carries over. Not tied to a terminal: no size to wait for.)
-          <InlineReply key={replyTo.key} target={replyTo} resizedAt={0} active={kActive} held={() => false} call={asked} pending={pendingCall} agentVersion={convo.meta?.version} onAnswered={(yes) => {
+          <InlineReply key={replyTo.key} target={replyTo} resizedAt={0} active={kActive} held={() => false} call={asked} pending={pendingCall} agentVersion={convo.meta?.version} onTyped={onInteract} onAct={onInteract} onAnswered={(yes) => {
             setAnswered(yes)
             // (Answered: not waiting in the list and the title either, at once — not at its next read. 11-14.)
             const pane = cur.pane
@@ -4396,6 +4454,7 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
       onEnter={async (id) => {
         const p = sent.find((q) => q.id === id)
         if (!p) return false
+        onInteract?.()
         const enter = (text: string) => api<{ pressed: boolean }>('POST', `/api/sessions/${sid}/conversation/sent-enter`, { ...pressBody(), text }, { timeoutMs: PRESS_MS })
         // (Several queued, their turn stopped: Codex puts them all back in its
         // input, one after another, one message now — Enter sends them as one.
@@ -4444,6 +4503,7 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
       files={fileActs}
       // (The session card's request of the agent: in the composer to be read and sent — after a draft there, never over it.)
       onDraft={(text) => {
+        onInteract?.()
         const d = field.current ? field.current.value : draft
         setDraft(d.trim() ? d.replace(/\s*$/, '\n\n') + text : text)
         requestAnimationFrame(() => {
@@ -4549,6 +4609,7 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
         target={rewinding}
         onRefresh={() => convo.refresh()}
         onDone={(text, warning, restoredFiles) => {
+          onInteract?.()
           setRewinding(null)
           setDraft(text)
           requestAnimationFrame(() => {

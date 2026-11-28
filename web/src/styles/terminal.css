@@ -2417,6 +2417,17 @@ button.convo-queue-row.is-note:last-child { border-radius: 0 0 var(--r-lg) var(-
 .agents-chat-pick { flex: 1; min-height: 0; display: flex; flex-direction: column; width: 100%; max-width: 720px; margin: 0 auto; }
 .agents-chat-pick-note { flex: none; display: flex; align-items: center; gap: 12px; padding: 16px 16px 8px; color: var(--term-fg-2); font: var(--fs-ui)/var(--lh-ui) var(--font-ui); }
 .agents-chat-pick-note p { flex: 1; margin: 0; }
+/* A preview (unpinned) agent tab: italic and quieter than a normal tab (regular weight + softer role colour so CJK titles read clearly too). */
+.term-tab.is-preview .term-tab-name { font-style: italic; font-weight: 400; color: var(--term-fg-3); }
+.term-tab.is-preview:not([aria-current="page"]):hover .term-tab-name { color: var(--term-fg-2); }
+.term-tab.is-preview[aria-current="page"] .term-tab-name { color: var(--term-fg-2); }
+@media (pointer: coarse) {
+  .term-tab.is-preview[aria-current="page"] .term-tab-name { font-weight: 400; }
+}
+@media (forced-colors: active) {
+  .term-tab.is-preview[aria-current="page"] { font-weight: 400; border-style: dashed; }
+  .term-tab.is-preview:not([aria-current="page"]) .term-tab-name { text-decoration: underline dotted; text-underline-offset: 3px; }
+}
 /* An agent's tab whose agent ended: its name quiet. */
 .term-tab.is-ended .term-tab-name { color: var(--term-fg-3); }
 /* A list not refreshed: said in one quiet line over the page, not over the conversation. */
