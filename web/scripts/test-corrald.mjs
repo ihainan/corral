@@ -646,6 +646,7 @@ function baseStatus(overrides = {}) {
   assert.equal(corraldHintMessageKey({ ...baseHint, op: 'both', count: 1 }), 'corrald.hint.sshSessionBothOne')
 
   assert.equal(canClaimCorraldHint(baseHint, { masterEnabled: true }), true)
+  assert.equal(canClaimCorraldHint({ ...baseHint, claimed: true }, { masterEnabled: true }), false)
   assert.equal(canClaimCorraldHint(null, { masterEnabled: true }), false)
   assert.equal(canClaimCorraldHint(baseHint, { masterEnabled: false }), false)
   assert.equal(canClaimCorraldHint(baseHint, { masterEnabled: true, adminDisabled: true }), false)
@@ -1099,10 +1100,137 @@ function baseStatus(overrides = {}) {
     commit('ctl', 'passive')
     compCache.clear()
     assert.equal(renderCtl().banner, null, 'fix3 item 1: hidden displayedHint stays cleared')
+
+    // Subcase D5 (fix4): another tab / reload receiving GET { hint: { ..., claimed: true } }
+    // NEVER mounts/renders CorraldHintBanner and NEVER calls claimCorraldHintShown.
+    frames.clear()
+    compClaimCalls.length = 0
+    compClaimAnswer = true
+    renderCtl()
+    commit('ctl', 'layout')
+    commit('ctl', 'passive')
+    deliverHint({ hint: { ...hint, claimed: true }, generation: 0 })
+    await Promise.resolve()
+    await Promise.resolve()
+    assert.equal(renderCtl().banner, null, 'fix4: another tab/reload must not render a claimed hint')
+    assert.equal(compClaimCalls.length, 0, 'fix4: another tab/reload must not attempt to claim a claimed hint')
   } finally {
     globalThis.window = prevWindow
     globalThis.document = prevDocument
   }
+}
+
+// Phase 2b fix4 regression tests (fails on 66e0bdb):
+// - After its own claim, a banner survives several normal polls where GET
+//   keeps returning { ..., claimed: true } while the host stays eligible.
+// - It hides immediately when GET stops returning it (eligibility gone -> null)
+//   or returns another host, and stays hidden.
+// - Another tab or a page reload receiving { ..., claimed: true } NEVER renders
+//   and NEVER attempts to claim.
+{
+  const h7 = {
+    host_id: 7,
+    host_name: 'gpu-01',
+    reason: 'ssh_session_full',
+    op: 'status',
+    count: 2,
+    last_at: 1_700_000_000,
+    generation: 0,
+    claimed: false,
+  }
+  const h8 = {
+    host_id: 8,
+    host_name: 'gpu-02',
+    reason: 'ssh_session_full',
+    op: 'log',
+    count: 1,
+    last_at: 1_700_000_010,
+    generation: 0,
+    claimed: false,
+  }
+
+  let serverClaimed7 = false
+  let serverEligible7 = true
+  let tabAClaims = 0
+  const pollServerFor7 = () => (serverEligible7 ? { ...h7, claimed: serverClaimed7 } : null)
+
+  const tabA = createCorraldHintController({
+    claimShown: async () => {
+      tabAClaims++
+      if (serverClaimed7) return false
+      serverClaimed7 = true
+      return true
+    },
+    dismiss: async () => {},
+    readCachedStatus: () => undefined,
+  })
+  tabA.setUser(42)
+  tabA.onSlotMounted()
+  tabA.receiveServerHint(pollServerFor7(), 0)
+  await Promise.resolve()
+  await Promise.resolve()
+  assert.equal(tabA.getState().displayedHint?.host_id, 7)
+  assert.equal(tabAClaims, 1)
+
+  // Normal polls after claim: server returns { ...h7, claimed: true }; banner MUST stay visible!
+  for (let i = 0; i < 4; i++) {
+    tabA.receiveServerHint(pollServerFor7(), 0)
+    assert.equal(tabA.getState().displayedHint?.host_id, 7, `fix4: banner must survive normal poll #${i + 1} after its own claim`)
+  }
+  assert.equal(tabAClaims, 1, 'fix4: normal polls must not re-claim an already displayed banner')
+
+  // Another tab (or page reload) polling the exact same server response { ...h7, claimed: true }
+  // MUST NOT render and MUST NOT call claimShown!
+  let tabBClaims = 0
+  const tabB = createCorraldHintController({
+    claimShown: async () => {
+      tabBClaims++
+      return false
+    },
+    dismiss: async () => {},
+    readCachedStatus: () => undefined,
+  })
+  tabB.setUser(42)
+  tabB.onSlotMounted()
+  tabB.receiveServerHint(pollServerFor7(), 0)
+  await Promise.resolve()
+  await Promise.resolve()
+  assert.equal(tabB.getState().displayedHint, null, 'fix4: another tab/reload must never render a claimed hint')
+  assert.equal(tabB.getState().candidateHint, null)
+  assert.equal(tabBClaims, 0, 'fix4: another tab/reload must not send POST /hint/shown for a claimed hint')
+  tabB.dispose()
+
+  // Eligibility ends on server (e.g. enabled elsewhere / admin disabled) -> GET returns null -> Tab A hides!
+  serverEligible7 = false
+  tabA.receiveServerHint(pollServerFor7(), 0)
+  assert.equal(tabA.getState().displayedHint, null, 'fix4: banner must hide when eligibility ends and GET returns null')
+
+  // Even if server eligibility returns later in same generation (claimed:true), Tab A stays hidden.
+  serverEligible7 = true
+  tabA.receiveServerHint(pollServerFor7(), 0)
+  await Promise.resolve()
+  await Promise.resolve()
+  assert.equal(tabA.getState().displayedHint, null, 'fix4: once hidden, claimed:true must not re-display the banner')
+  assert.equal(tabAClaims, 1)
+  tabA.dispose()
+
+  // Also verify closing with X stays hidden on subsequent claimed:true polls.
+  const tabClose = createCorraldHintController({
+    claimShown: async () => true,
+    dismiss: async () => {},
+    readCachedStatus: () => undefined,
+  })
+  tabClose.setUser(42)
+  tabClose.onSlotMounted()
+  tabClose.receiveServerHint(h8, 0)
+  await Promise.resolve()
+  await Promise.resolve()
+  assert.equal(tabClose.getState().displayedHint?.host_id, 8)
+  tabClose.closeDisplayed()
+  assert.equal(tabClose.getState().displayedHint, null)
+  tabClose.receiveServerHint({ ...h8, claimed: true }, 0)
+  assert.equal(tabClose.getState().displayedHint, null, 'fix4: closed banner must not reappear on claimed:true poll')
+  tabClose.dispose()
 }
 
 // Phase 2b fix3 item 1 regression tests (fails on 87306f4):

@@ -61,18 +61,36 @@ func ParseCorraldHintsSettings(raw string) (enabled bool, resetAt int64) {
 	return enabled, resetAt
 }
 
-// CorraldHintRowActive reports whether row counts as shown or dismissed under
-// the user's current resetAt generation (milliseconds).
-func CorraldHintRowActive(row *CorraldHostHint, resetAt int64) bool {
+// CorraldHintRowShown reports whether row was claimed/shown at or after resetAt
+// (milliseconds).
+func CorraldHintRowShown(row *CorraldHostHint, resetAt int64) bool {
 	if row == nil {
 		return false
 	}
 	shown := HintTimestampMillis(row.ShownAt)
+	if resetAt <= 0 {
+		return shown > 0
+	}
+	return shown >= resetAt
+}
+
+// CorraldHintRowDismissed reports whether row was explicitly dismissed at or
+// after resetAt (milliseconds).
+func CorraldHintRowDismissed(row *CorraldHostHint, resetAt int64) bool {
+	if row == nil {
+		return false
+	}
 	dismissed := HintTimestampMillis(row.DismissedAt)
 	if resetAt <= 0 {
-		return shown > 0 || dismissed > 0
+		return dismissed > 0
 	}
-	return shown >= resetAt || dismissed >= resetAt
+	return dismissed >= resetAt
+}
+
+// CorraldHintRowActive reports whether row counts as shown or dismissed under
+// the user's current resetAt generation (milliseconds).
+func CorraldHintRowActive(row *CorraldHostHint, resetAt int64) bool {
+	return CorraldHintRowShown(row, resetAt) || CorraldHintRowDismissed(row, resetAt)
 }
 
 // MergeUserSettingsWithHintMax reads a user's settings JSON and the maximum

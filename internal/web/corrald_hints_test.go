@@ -434,8 +434,13 @@ func TestCorraldHintResetGenerationTrueToTrueStalePostAndAtomicNoDelete(t *testi
 		t.Fatalf("expected claimed=true for host2 under gen0, got %+v", rClaim0.json())
 	}
 	mustStatus(t, alice.do("POST", fmt.Sprintf("/api/hosts/%d/corrald/hint/dismiss", host1), map[string]any{"generation": gen0}), http.StatusOK, "dismiss host1")
-	if got := alice.do("GET", "/api/corrald/hints", nil).json()["hint"]; got != nil {
-		t.Fatalf("expected nil hint after host2 shown & host1 dismissed, got %+v", got)
+	// Dismissed host1 is omitted; claimed (not dismissed) host2 stays reported with claimed=true while still eligible.
+	if got := alice.do("GET", fmt.Sprintf("/api/corrald/hints?host_id=%d", host1), nil).json()["hint"]; got != nil {
+		t.Fatalf("expected nil hint for dismissed host1, got %+v", got)
+	}
+	gotClaimed0, ok := alice.do("GET", "/api/corrald/hints", nil).json()["hint"].(map[string]any)
+	if !ok || int64(gotClaimed0["host_id"].(float64)) != host2 || gotClaimed0["claimed"] != true {
+		t.Fatalf("expected claimed=true hint for host2 while still eligible, got %+v", gotClaimed0)
 	}
 
 	// Item 3: true -> true (from default true, or repeated true from another writer) MUST BE A NO-OP!
@@ -443,8 +448,11 @@ func TestCorraldHintResetGenerationTrueToTrueStalePostAndAtomicNoDelete(t *testi
 	mustStatus(t, patchUserSettings(t, alice, aliceID, "writer_true_noop_2", 1, map[string]any{"corraldHints": true}), http.StatusOK, "explicit true->true")
 	rAfterNoOp := alice.do("GET", "/api/corrald/hints", nil)
 	mustStatus(t, rAfterNoOp, http.StatusOK, "hints after true->true")
-	if rAfterNoOp.json()["hint"] != nil {
-		t.Fatalf("Item 3 regression: true->true PATCH must not restore dismissed/shown hints, got %+v", rAfterNoOp.json())
+	if gotNoOp, ok := rAfterNoOp.json()["hint"].(map[string]any); !ok || int64(gotNoOp["host_id"].(float64)) != host2 || gotNoOp["claimed"] != true {
+		t.Fatalf("Item 3 regression: true->true PATCH must keep host2 claimed=true (not unclaimed), got %+v", rAfterNoOp.json())
+	}
+	if gotH1 := alice.do("GET", fmt.Sprintf("/api/corrald/hints?host_id=%d", host1), nil).json()["hint"]; gotH1 != nil {
+		t.Fatalf("Item 3 regression: true->true PATCH must not restore dismissed host1, got %+v", gotH1)
 	}
 	if int64(rAfterNoOp.json()["generation"].(float64)) != 0 {
 		t.Fatalf("Item 3 regression: true->true PATCH must not advance generation, got %v", rAfterNoOp.json()["generation"])
@@ -517,22 +525,23 @@ func TestCorraldHintResetGenerationTrueToTrueStalePostAndAtomicNoDelete(t *testi
 	}
 	staleDismiss := alice.do("POST", fmt.Sprintf("/api/hosts/%d/corrald/hint/dismiss", host1), map[string]any{"generation": gen0})
 	mustStatus(t, staleDismiss, http.StatusNoContent, "stale dismiss returns 204")
-	// Both hosts MUST still be eligible!
-	if alice.do("GET", fmt.Sprintf("/api/corrald/hints?host_id=%d", host2), nil).json()["hint"] == nil {
-		t.Fatal("Item 4 regression: stale shown POST suppressed restored host2")
+	// Both hosts MUST still be eligible and unclaimed!
+	if h2 := alice.do("GET", fmt.Sprintf("/api/corrald/hints?host_id=%d", host2), nil).json()["hint"].(map[string]any); h2 == nil || h2["claimed"] != false {
+		t.Fatalf("Item 4 regression: stale shown POST suppressed restored host2: %+v", h2)
 	}
-	if alice.do("GET", fmt.Sprintf("/api/corrald/hints?host_id=%d", host1), nil).json()["hint"] == nil {
-		t.Fatal("Item 4 regression: stale dismiss POST suppressed restored host1")
+	if h1 := alice.do("GET", fmt.Sprintf("/api/corrald/hints?host_id=%d", host1), nil).json()["hint"].(map[string]any); h1 == nil || h1["claimed"] != false {
+		t.Fatalf("Item 4 regression: stale dismiss POST suppressed restored host1: %+v", h1)
 	}
 
-	// Valid POST carrying gen1 succeeds (200 {claimed:true}) and suppresses host2 again.
+	// Valid POST carrying gen1 succeeds (200 {claimed:true}); GET now reports host2 as claimed=true.
 	rClaim1 := alice.do("POST", fmt.Sprintf("/api/hosts/%d/corrald/hint/shown", host2), map[string]any{"generation": gen1})
 	mustStatus(t, rClaim1, http.StatusOK, "gen1 claim host2")
 	if rClaim1.json()["claimed"] != true {
 		t.Fatalf("expected claimed=true under gen1, got %+v", rClaim1.json())
 	}
-	if alice.do("GET", fmt.Sprintf("/api/corrald/hints?host_id=%d", host2), nil).json()["hint"] != nil {
-		t.Fatal("host2 must be suppressed after gen1 shown claim")
+	h2AfterGen1, ok := alice.do("GET", fmt.Sprintf("/api/corrald/hints?host_id=%d", host2), nil).json()["hint"].(map[string]any)
+	if !ok || h2AfterGen1["claimed"] != true {
+		t.Fatalf("host2 must be marked claimed=true after gen1 shown claim, got %+v", h2AfterGen1)
 	}
 
 	// Second false->true reset even at the exact same frozen millisecond advances generation monotonically.
@@ -542,8 +551,8 @@ func TestCorraldHintResetGenerationTrueToTrueStalePostAndAtomicNoDelete(t *testi
 	if gen2 <= gen1 {
 		t.Fatalf("expected strictly monotonic gen2 > gen1 (%d), got %d", gen1, gen2)
 	}
-	if alice.do("GET", fmt.Sprintf("/api/corrald/hints?host_id=%d", host2), nil).json()["hint"] == nil {
-		t.Fatal("host2 should be eligible again after second reset")
+	if h2Gen2, ok := alice.do("GET", fmt.Sprintf("/api/corrald/hints?host_id=%d", host2), nil).json()["hint"].(map[string]any); !ok || h2Gen2["claimed"] != false {
+		t.Fatalf("host2 should be unclaimed again after second reset, got %+v", h2Gen2)
 	}
 }
 
@@ -742,8 +751,9 @@ func TestCorraldHintConcurrentClaimsExactlyOneWins(t *testing.T) {
 
 	// Two tabs racing under gen 0.
 	runConcurrentClaims(0, 2)
-	if got := alice.do("GET", "/api/corrald/hints", nil).json()["hint"]; got != nil {
-		t.Fatalf("expected nil hint after winning claim, got %+v", got)
+	gotAfterWin, ok := alice.do("GET", "/api/corrald/hints", nil).json()["hint"].(map[string]any)
+	if !ok || int64(gotAfterWin["host_id"].(float64)) != hostID || gotAfterWin["claimed"] != true {
+		t.Fatalf("expected claimed=true hint after winning claim while host stays eligible, got %+v", gotAfterWin)
 	}
 
 	// Reset off -> on, then race 6 concurrent tabs under gen 1.
@@ -981,5 +991,127 @@ func TestCorraldHintClaimRevalidatesAfterStatusLookup(t *testing.T) {
 				t.Fatalf("%s: refused claim must not persist shown_at, got err=%v", kind, err)
 			}
 		})
+	}
+}
+
+// Phase 2b fix4 regression test (fails on 66e0bdb):
+// GET /api/corrald/hints must keep reporting a claimed (not dismissed) host
+// with claimed:true across subsequent normal polls while it remains eligible,
+// prioritize any newer/other unclaimed eligible host, and omit the claimed host
+// as soon as eligibility ends (daemon state, admin disable, switch off,
+// retarget, or dismiss).
+func TestCorraldHintClaimedReportedWhileEligibleAndClearedWhenIneligible(t *testing.T) {
+	h := newHarness(t, func(c *config.Config) {
+		c.GatewayID = "gw-hint-fix4.local"
+	})
+	h.srv.corrald.SetDist(makeFakeCorraldDist())
+	admin := h.admin()
+	alice := h.member(admin, "alice")
+	aliceID := userIDOf(t, alice)
+	ctx := context.Background()
+
+	host1 := createTestHostForHints(t, alice, "claimed-box", 2261)
+	host2 := createTestHostForHints(t, alice, "unclaimed-box", 2262)
+
+	now := time.Unix(1_700_200_000, 0)
+	h.srv.corraldHints.now = func() time.Time { return now }
+	h.srv.recordCorraldHintError(aliceID, host1, HintOpStatus, sshx.ErrBusy)
+
+	// Before claim: GET returns host1 with claimed:false.
+	r0 := alice.do("GET", "/api/corrald/hints", nil)
+	mustStatus(t, r0, http.StatusOK, "pre-claim GET")
+	hint0, ok := r0.json()["hint"].(map[string]any)
+	if !ok || int64(hint0["host_id"].(float64)) != host1 || hint0["claimed"] != false {
+		t.Fatalf("expected unclaimed host1 before claim, got %+v", r0.json())
+	}
+
+	// Claim host1 -> claimed:true.
+	rClaim := alice.do("POST", fmt.Sprintf("/api/hosts/%d/corrald/hint/shown", host1), map[string]any{"generation": 0})
+	mustStatus(t, rClaim, http.StatusOK, "claim host1")
+	if rClaim.json()["claimed"] != true {
+		t.Fatalf("expected claimed=true, got %+v", rClaim.json())
+	}
+
+	// Several subsequent normal polls keep returning host1 with claimed:true!
+	for i := 0; i < 3; i++ {
+		rPoll := alice.do("GET", "/api/corrald/hints", nil)
+		mustStatus(t, rPoll, http.StatusOK, "normal poll after claim")
+		hintPoll, ok := rPoll.json()["hint"].(map[string]any)
+		if !ok || int64(hintPoll["host_id"].(float64)) != host1 || hintPoll["claimed"] != true {
+			t.Fatalf("poll %d: expected host1 with claimed=true, got %+v", i, rPoll.json())
+		}
+	}
+
+	// An unclaimed eligible host2 is NOT starved by claimed host1.
+	now = now.Add(-5 * time.Second) // even if older than host1
+	h.srv.recordCorraldHintError(aliceID, host2, HintOpLog, sshx.ErrBusy)
+	rUnclaimed := alice.do("GET", "/api/corrald/hints", nil)
+	mustStatus(t, rUnclaimed, http.StatusOK, "unclaimed takes priority")
+	hintU, ok := rUnclaimed.json()["hint"].(map[string]any)
+	if !ok || int64(hintU["host_id"].(float64)) != host2 || hintU["claimed"] != false {
+		t.Fatalf("expected unclaimed host2 to take priority over claimed host1, got %+v", rUnclaimed.json())
+	}
+	// Dismiss host2 -> GET falls back to claimed host1 again.
+	mustStatus(t, alice.do("POST", fmt.Sprintf("/api/hosts/%d/corrald/hint/dismiss", host2), map[string]any{"generation": 0}), http.StatusOK, "dismiss host2")
+	hintBack, ok := alice.do("GET", "/api/corrald/hints", nil).json()["hint"].(map[string]any)
+	if !ok || int64(hintBack["host_id"].(float64)) != host1 || hintBack["claimed"] != true {
+		t.Fatalf("expected fallback to claimed host1 after host2 dismissed, got %+v", hintBack)
+	}
+
+	// 1. Daemon becomes installing -> GET stops returning claimed host1.
+	if err := h.store.UpsertCorraldHost(ctx, &store.CorraldHost{HostID: host1, State: gw.StateInstalling}); err != nil {
+		t.Fatalf("UpsertCorraldHost installing: %v", err)
+	}
+	if got := alice.do("GET", "/api/corrald/hints", nil).json()["hint"]; got != nil {
+		t.Fatalf("installing host must omit claimed hint, got %+v", got)
+	}
+	if err := h.store.UpsertCorraldHost(ctx, &store.CorraldHost{HostID: host1, State: gw.StateOff}); err != nil {
+		t.Fatalf("reset off: %v", err)
+	}
+
+	// 2. Admin disables corrald -> GET returns null.
+	mustStatus(t, admin.do("PUT", "/api/admin/corrald", map[string]any{"allowed": false}), http.StatusOK, "admin disable")
+	if got := alice.do("GET", "/api/corrald/hints", nil).json()["hint"]; got != nil {
+		t.Fatalf("admin disable must omit claimed hint, got %+v", got)
+	}
+	mustStatus(t, admin.do("PUT", "/api/admin/corrald", map[string]any{"allowed": true}), http.StatusOK, "admin allow")
+
+	// 3. Master switch off -> GET returns null.
+	mustStatus(t, patchUserSettings(t, alice, aliceID, "writer_fix4_test_01", 1, map[string]any{"corraldHints": false}), http.StatusOK, "switch off")
+	if got := alice.do("GET", "/api/corrald/hints", nil).json()["hint"]; got != nil {
+		t.Fatalf("switch off must omit claimed hint, got %+v", got)
+	}
+	// Turning switch back on advances generation -> host1 is unclaimed again!
+	mustStatus(t, patchUserSettings(t, alice, aliceID, "writer_fix4_test_01", 2, map[string]any{"corraldHints": true}), http.StatusOK, "switch on")
+	rReset := alice.do("GET", "/api/corrald/hints", nil)
+	gen1 := int64(rReset.json()["generation"].(float64))
+	hintReset, ok := rReset.json()["hint"].(map[string]any)
+	if !ok || int64(hintReset["host_id"].(float64)) != host1 || hintReset["claimed"] != false {
+		t.Fatalf("after reset host1 should be unclaimed again, got %+v", rReset.json())
+	}
+
+	// Re-claim under gen1, then verify retargeting and dismiss omit the claimed host.
+	mustStatus(t, alice.do("POST", fmt.Sprintf("/api/hosts/%d/corrald/hint/shown", host1), map[string]any{"generation": gen1}), http.StatusOK, "claim gen1")
+	if got := alice.do("GET", fmt.Sprintf("/api/corrald/hints?host_id=%d", host1), nil).json()["hint"].(map[string]any); got["claimed"] != true {
+		t.Fatalf("expected host1 claimed=true under gen1, got %+v", got)
+	}
+	mustStatus(t, alice.do("POST", fmt.Sprintf("/api/hosts/%d/corrald/hint/dismiss", host1), map[string]any{"generation": gen1}), http.StatusOK, "dismiss gen1")
+	if got := alice.do("GET", fmt.Sprintf("/api/corrald/hints?host_id=%d", host1), nil).json()["hint"]; got != nil {
+		t.Fatalf("dismissed host1 must omit hint, got %+v", got)
+	}
+	// Claim restored host2 under gen1, then retarget it -> GET returns null.
+	mustStatus(t, alice.do("POST", fmt.Sprintf("/api/hosts/%d/corrald/hint/shown", host2), map[string]any{"generation": gen1}), http.StatusOK, "claim host2 gen1")
+	if got := alice.do("GET", "/api/corrald/hints", nil).json()["hint"].(map[string]any); int64(got["host_id"].(float64)) != host2 || got["claimed"] != true {
+		t.Fatalf("expected claimed host2 under gen1, got %+v", got)
+	}
+	mustStatus(t, alice.do("PUT", fmt.Sprintf("/api/hosts/%d", host2), map[string]any{
+		"name":     "retargeted-box",
+		"address":  "127.0.0.2",
+		"port":     2262,
+		"username": "devuser",
+		"auth":     "ask",
+	}), http.StatusOK, "retarget claimed host2")
+	if got := alice.do("GET", "/api/corrald/hints", nil).json()["hint"]; got != nil {
+		t.Fatalf("retargeted claimed host2 must omit hint, got %+v", got)
 	}
 }
