@@ -3,6 +3,7 @@ import { api, ApiError } from './api'
 import type {
   CorraldAdminPolicy,
   CorraldChangelog,
+  CorraldHint,
   CorraldOp,
   CorraldStatus,
   CorraldUpdateNotice,
@@ -19,6 +20,10 @@ export type {
   CorraldError,
   CorraldFailureKind,
   CorraldFailureModel,
+  CorraldHint,
+  CorraldHintMessageKey,
+  CorraldHintOp,
+  CorraldHintReason,
   CorraldLeftItem,
   CorraldOp,
   CorraldOpKind,
@@ -132,11 +137,37 @@ export async function setAdminCorraldPolicy(allowed: boolean): Promise<CorraldAd
 }
 
 export const CORRALD_NOTICES_EVENT = 'corral.corraldNoticesRefresh'
+export const CORRALD_HINTS_EVENT = 'corral.corraldHintsRefresh'
 
 export function triggerCorraldNoticesCheck() {
   if (typeof window !== 'undefined') {
     window.dispatchEvent(new CustomEvent(CORRALD_NOTICES_EVENT))
   }
+}
+
+export function triggerCorraldHintsCheck(detail?: { resetSession?: boolean }) {
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent(CORRALD_HINTS_EVENT, { detail }))
+  }
+}
+
+// Fetch the single most recent eligible contextual corrald hint, if any.
+export async function getCorraldHint(signal?: AbortSignal): Promise<CorraldHint | null> {
+  try {
+    const res = await api<{ hint?: CorraldHint | null }>('GET', '/api/corrald/hints', undefined, { signal })
+    return res?.hint ?? null
+  } catch (e) {
+    if (e instanceof ApiError && e.status === 404) return null
+    throw e
+  }
+}
+
+export async function markCorraldHintShown(hostId: number): Promise<void> {
+  await api('POST', `/api/hosts/${hostId}/corrald/hint/shown`)
+}
+
+export async function dismissCorraldHint(hostId: number): Promise<void> {
+  await api('POST', `/api/hosts/${hostId}/corrald/hint/dismiss`)
 }
 
 // Lightweight shared pub/sub cache per host so HostEdit and the workbench

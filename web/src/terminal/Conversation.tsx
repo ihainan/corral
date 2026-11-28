@@ -11,6 +11,7 @@ import { dropPickInTab, OPEN_PICKER } from '../pages/agentTabs'
 import { asHeld, buildAgentGroups, dayStart, FOLDED, foldAt, hasBgCli, isLiveBlocked, listOrder, pinned, rowMatchesQuery, splitRowTasks, visibleCliAgents, type ConvoListRow, type OrderOpts, type RowCmds, type RowTask } from './agentOrder'
 import { agentStatusMark, conversationRunningItems, filterHostCmds, stampAgeMs } from './sideState'
 import { copyText, Dialog, DialogHead, isCoarse, Menu, MenuLayer, swallowNextClick, useToast, type MenuItem } from '../components/ui'
+import { useCorraldSideBanner } from '../components/CorraldHintBanner'
 import { saveFile } from '../saveFile'
 import { StatusItem, useWorkbench } from '../workbench'
 import { composing, foldAllKey, helpKey, jumpKey, onMac, pickKey, RAIL_KEYS, sideKey, switchKey, takenFromTerminal, TERM_VIEW_KEY, terminalHasKeys, termViewKey } from './pageKeys'
@@ -4868,6 +4869,7 @@ function shortFor(ms: number): string {
 
 export function AgentList({ rows, menus, onPicked, placed, query: given, onQuery, search, showSearch, onSearchLeft, hint, compact, showNew, tools, empty }: { rows: ConvoListRow[]; menus?: boolean; onPicked?: () => void; placed?: Map<string, ConvoListRow>; query?: string; onQuery?: (q: string) => void; search?: number; showSearch?: boolean; onSearchLeft?: () => void; hint?: boolean; compact?: boolean; showNew?: boolean; tools?: ReactNode; empty?: ReactNode }) {
   const wbList = useWorkbench()
+  const sideBanner = useCorraldSideBanner()
   // (compact: one line a row, its name, the session's title in grey after it, its
   // time; a second only for what waits on the person. Every list since 11-24, a
   // touch screen's too, its rows then 44 high to touch — the person liked the
@@ -5134,6 +5136,7 @@ export function AgentList({ rows, menus, onPicked, placed, query: given, onQuery
           </div>
         </div>
       )}
+      {!onPicked && sideBanner}
       {hiddenBlocked.length > 0 && (
         <div className="convo-outside-blocked" role="region" aria-label={t('convo.lineage.outsideBlocked', { n: hiddenBlocked.length })}>
           <div className="convo-outside-blocked-head">

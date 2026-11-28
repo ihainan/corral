@@ -946,3 +946,45 @@ export function createCorraldNoticeFetcher(deps: CorraldNoticeFetcherDeps): Corr
     },
   }
 }
+
+export type CorraldHintReason = 'ssh_session_full'
+export type CorraldHintOp = 'status' | 'log' | 'both'
+
+export interface CorraldHint {
+  host_id: number
+  host_name: string
+  reason: CorraldHintReason
+  op: CorraldHintOp
+  count: number
+  last_at: number
+}
+
+export type CorraldHintMessageKey =
+  | 'corrald.hint.sshSessionStatus'
+  | 'corrald.hint.sshSessionStatusOne'
+  | 'corrald.hint.sshSessionLog'
+  | 'corrald.hint.sshSessionLogOne'
+  | 'corrald.hint.sshSessionBoth'
+  | 'corrald.hint.sshSessionBothOne'
+
+// Map a gateway CorraldHint payload to its exact i18n copy key.
+export function corraldHintMessageKey(hint: CorraldHint): CorraldHintMessageKey {
+  const single = hint.count <= 1
+  if (hint.op === 'log') {
+    return single ? 'corrald.hint.sshSessionLogOne' : 'corrald.hint.sshSessionLog'
+  }
+  if (hint.op === 'both') {
+    return single ? 'corrald.hint.sshSessionBothOne' : 'corrald.hint.sshSessionBoth'
+  }
+  return single ? 'corrald.hint.sshSessionStatusOne' : 'corrald.hint.sshSessionStatus'
+}
+
+// Local display gate for the single hint returned by the gateway.
+export function shouldShowCorraldHint(
+  hint: CorraldHint | null,
+  opts: { masterEnabled: boolean; sessionHiddenHostIds: ReadonlySet<number> },
+): boolean {
+  if (!hint || !opts.masterEnabled) return false
+  if (hint.host_id <= 0 || hint.count <= 0) return false
+  return !opts.sessionHiddenHostIds.has(hint.host_id)
+}

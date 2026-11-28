@@ -305,6 +305,8 @@ func (s *Server) subScan(ctx context.Context, sess *term.Session, root string, d
 			if err == nil {
 				c.list = parseSubScan(res.Out)
 				s.subScans.put(key, c.list, now)
+			} else {
+				s.recordCorraldHintError(sess.OwnerID, sess.HostID, HintOpStatus, err)
 			}
 			c.err = err
 			s.subScans.leave(key)

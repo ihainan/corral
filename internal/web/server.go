@@ -118,11 +118,12 @@ type Server struct {
 	stopMu  sync.Mutex
 	stopCtx context.Context // the stop's deadline, once it began (see BeginShutdown)
 
-	restores  restorer // sessions open before the restart, being opened again (restore.go)
-	perf      *perf.Tracker
-	perfDaily *corraldPerfDaily
-	corrald   *gw.Manager
-	events    *eventHub
+	restores     restorer // sessions open before the restart, being opened again (restore.go)
+	perf         *perf.Tracker
+	perfDaily    *corraldPerfDaily
+	corrald      *gw.Manager
+	corraldHints corraldHintTracker
+	events       *eventHub
 }
 
 type liveSocket struct {
@@ -187,6 +188,7 @@ func New(d Deps) *Server {
 		s.cancelRestores(userID, 0)
 		s.closeUserForwards(userID)
 		s.forgetUserCode(userID)
+		s.corraldHints.forgetUser(userID)
 		if s.notifier != nil {
 			s.notifier.Revoke(userID)
 		}
@@ -379,7 +381,10 @@ func (s *Server) registerRoutes() {
 	s.handle("POST /api/corrald/changelog/seen", SignedIn, s.apiCorraldChangelogSeen)
 	s.handle("GET /api/corrald/notices", SignedIn, s.apiCorraldNotices)
 	s.handle("POST /api/corrald/notices/seen", SignedIn, s.apiCorraldNoticesSeen)
+	s.handle("GET /api/corrald/hints", SignedIn, s.apiGetCorraldHints)
 	s.handle("GET /api/hosts/{id}/corrald", SignedIn, s.apiGetHostCorrald)
+	s.handle("POST /api/hosts/{id}/corrald/hint/shown", SignedIn, s.apiMarkCorraldHintShown)
+	s.handle("POST /api/hosts/{id}/corrald/hint/dismiss", SignedIn, s.apiDismissCorraldHint)
 	s.handle("POST /api/hosts/{id}/corrald/install", SignedIn, s.apiInstallHostCorrald)
 	s.handle("POST /api/hosts/{id}/corrald/cancel", SignedIn, s.apiCancelHostCorrald)
 	s.handle("POST /api/hosts/{id}/corrald/pause", SignedIn, s.apiPauseHostCorrald)

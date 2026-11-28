@@ -15,6 +15,7 @@ const {
   buildStopCommand,
   classifyDeleteHostResult,
   corraldFailureKind,
+  corraldHintMessageKey,
   corraldSectionModel,
   corraldStatusBarModel,
   createCorraldNoticeFetcher,
@@ -30,6 +31,7 @@ const {
   opProgress,
   otherUsersCount,
   shouldPollCorrald,
+  shouldShowCorraldHint,
 } = await import(`data:text/javascript;base64,${Buffer.from(outputText).toString('base64')}`)
 
 function baseStatus(overrides = {}) {
@@ -621,6 +623,53 @@ function baseStatus(overrides = {}) {
   await p2
   assert.equal(seenCalls.length, 0, 'pre-effect signed-out response must NOT call markSeen')
   assert.equal(emitted.length, 0, 'pre-effect signed-out response must NOT emit toast')
+}
+
+// Phase 2b: contextual hint message mapping, display gating, and i18n copy presence.
+{
+  const baseHint = {
+    host_id: 7,
+    host_name: 'gpu-01',
+    reason: 'ssh_session_full',
+    op: 'status',
+    count: 3,
+    last_at: 1_700_000_000,
+  }
+  assert.equal(corraldHintMessageKey({ ...baseHint, op: 'status', count: 3 }), 'corrald.hint.sshSessionStatus')
+  assert.equal(corraldHintMessageKey({ ...baseHint, op: 'status', count: 1 }), 'corrald.hint.sshSessionStatusOne')
+  assert.equal(corraldHintMessageKey({ ...baseHint, op: 'log', count: 2 }), 'corrald.hint.sshSessionLog')
+  assert.equal(corraldHintMessageKey({ ...baseHint, op: 'log', count: 1 }), 'corrald.hint.sshSessionLogOne')
+  assert.equal(corraldHintMessageKey({ ...baseHint, op: 'both', count: 4 }), 'corrald.hint.sshSessionBoth')
+  assert.equal(corraldHintMessageKey({ ...baseHint, op: 'both', count: 1 }), 'corrald.hint.sshSessionBothOne')
+
+  assert.equal(shouldShowCorraldHint(baseHint, { masterEnabled: true, sessionHiddenHostIds: new Set() }), true)
+  assert.equal(shouldShowCorraldHint(null, { masterEnabled: true, sessionHiddenHostIds: new Set() }), false)
+  assert.equal(shouldShowCorraldHint(baseHint, { masterEnabled: false, sessionHiddenHostIds: new Set() }), false)
+  assert.equal(shouldShowCorraldHint(baseHint, { masterEnabled: true, sessionHiddenHostIds: new Set([7]) }), false)
+  assert.equal(shouldShowCorraldHint(baseHint, { masterEnabled: true, sessionHiddenHostIds: new Set([8]) }), true)
+  assert.equal(shouldShowCorraldHint({ ...baseHint, count: 0 }, { masterEnabled: true, sessionHiddenHostIds: new Set() }), false)
+  assert.equal(shouldShowCorraldHint({ ...baseHint, host_id: 0 }, { masterEnabled: true, sessionHiddenHostIds: new Set() }), false)
+
+  // Verify both zh and en i18n keys exist for every Phase 2b hint & setting string.
+  const i18nSrc = readFileSync(fileURLToPath(new URL('../src/i18n.ts', import.meta.url)), 'utf8')
+  const requiredKeys = [
+    'settings.corraldHints',
+    'settings.corraldHintsHint',
+    'corrald.hint.regionLabel',
+    'corrald.hint.enable',
+    'corrald.hint.dismiss',
+    'corrald.hint.close',
+    'corrald.hint.sshSessionStatus',
+    'corrald.hint.sshSessionStatusOne',
+    'corrald.hint.sshSessionLog',
+    'corrald.hint.sshSessionLogOne',
+    'corrald.hint.sshSessionBoth',
+    'corrald.hint.sshSessionBothOne',
+  ]
+  for (const key of requiredKeys) {
+    const matches = i18nSrc.match(new RegExp(`'${key.replaceAll('.', '\\.')}':`, 'g')) ?? []
+    assert.equal(matches.length, 2, `i18n key ${key} must appear in both zh and en tables (found ${matches.length})`)
+  }
 }
 
 console.log('test-corrald.mjs: all assertions passed')

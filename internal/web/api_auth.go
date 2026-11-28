@@ -311,6 +311,7 @@ var settingRules = map[string]func(json.RawMessage) bool{
 	// Who has the keys with a terminal focused: it (Corral's own shortcuts let go) or Corral.
 	"keysFirst":    oneOf("terminal", "corral"),
 	"confirmLeave": isBool,
+	"corraldHints": isBool,
 }
 
 // validSetting is true for a known setting with a valid value. null is no
@@ -537,8 +538,10 @@ func (s *Server) apiPatchSettings(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	var accepted, superseded []string
+	var resetCorraldHints bool
 	err := s.store.MergeUserSettings(r.Context(), currentUser(r).ID, func(old string) (string, error) {
 		accepted, superseded = nil, nil
+		resetCorraldHints = false
 		var obj map[string]json.RawMessage
 		if json.Unmarshal([]byte(old), &obj) != nil || obj == nil {
 			obj = map[string]json.RawMessage{}
@@ -584,6 +587,12 @@ func (s *Server) apiPatchSettings(w http.ResponseWriter, r *http.Request) {
 			}
 			obj[k], me.Seq[k] = v, b.Seq
 			accepted = append(accepted, k)
+			if k == "corraldHints" {
+				var on bool
+				if json.Unmarshal(v, &on) == nil && on {
+					resetCorraldHints = true
+				}
+			}
 		}
 		writers = append(writers, me)
 		if n := len(writers) - maxSettingWriters; n > 0 {
@@ -607,6 +616,12 @@ func (s *Server) apiPatchSettings(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		s.internalError(w, r, err)
 		return
+	}
+	if resetCorraldHints {
+		if err := s.store.ResetCorraldHintsForUser(r.Context(), currentUser(r).ID); err != nil {
+			s.internalError(w, r, err)
+			return
+		}
 	}
 	sort.Strings(accepted)
 	sort.Strings(superseded)

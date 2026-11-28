@@ -39,6 +39,7 @@ export interface Prefs {
   // that a terminal could use let go) or Corral's (workbench 11-23).
   keysFirst: 'terminal' | 'corral'
   confirmLeave: boolean // confirm before closing/refreshing with open terminals or unsent drafts
+  corraldHints: boolean // show a one-time contextual helper daemon hint when a host hits a solvable SSH issue
 }
 
 // A key of one's own: what it is called on the key bar, and what it sends
@@ -52,7 +53,7 @@ export const maxPinned = 20 // (as the server's maxPinned)
 
 // Phones get a slightly smaller default so common output fits without wrapping.
 const phone = window.matchMedia('(pointer: coarse) and (max-width: 599px)').matches
-const defaults: Prefs = { theme: 'system', termTheme: 'corral-dark', termThemeDark: 'corral-dark', termThemeLight: 'corral-light', fontSize: phone ? 13 : 14, keybar: true, optionIsMeta: true, webgl: false, remoteClipboard: true, tapKeyboard: false, composerEnter: 'send', customKeys: [], keyLayout: null, pinnedAgents: [], sidebarGroup: 'status', sidebarSort: 'recent', pinFixedOrder: false, sidebarNestChildren: true, chime: 'all', chimeTone: 'bell', chimeBells: true, keysFirst: 'terminal', confirmLeave: true }
+const defaults: Prefs = { theme: 'system', termTheme: 'corral-dark', termThemeDark: 'corral-dark', termThemeLight: 'corral-light', fontSize: phone ? 13 : 14, keybar: true, optionIsMeta: true, webgl: false, remoteClipboard: true, tapKeyboard: false, composerEnter: 'send', customKeys: [], keyLayout: null, pinnedAgents: [], sidebarGroup: 'status', sidebarSort: 'recent', pinFixedOrder: false, sidebarNestChildren: true, chime: 'all', chimeTone: 'bell', chimeBells: true, keysFirst: 'terminal', confirmLeave: true, corraldHints: true }
 
 // The local copy is kept per account (several people may share a device);
 // until the account is known the last one used here paints the first frame.
@@ -134,6 +135,19 @@ export function setPrefs(patch: Partial<Prefs>) {
   emit()
   clearTimeout(saveTimer)
   saveTimer = window.setTimeout(save, 600)
+}
+
+export function setPrefsNow(patch: Partial<Prefs>): Promise<void> {
+  if (frozen) return Promise.resolve()
+  state = { ...state, ...patch }
+  for (const [k, v] of Object.entries(patch)) {
+    edits++
+    editedAt.set(k, edits)
+    pending.set(k, { value: v, edit: edits })
+  }
+  emit()
+  save()
+  return queue
 }
 
 function save() {
@@ -259,7 +273,7 @@ function sanitize(raw: unknown): Partial<Prefs> {
   if (o.chimeTone === 'bell' || o.chimeTone === 'soft' || o.chimeTone === 'ping') out.chimeTone = o.chimeTone
   if (o.sidebarGroup === 'status' || o.sidebarGroup === 'project' || o.sidebarGroup === 'session') out.sidebarGroup = o.sidebarGroup
   if (o.sidebarSort === 'recent' || o.sidebarSort === 'smart' || o.sidebarSort === 'name') out.sidebarSort = o.sidebarSort
-  for (const k of ['keybar', 'optionIsMeta', 'webgl', 'remoteClipboard', 'tapKeyboard', 'chimeBells', 'pinFixedOrder', 'sidebarNestChildren', 'confirmLeave'] as const) if (typeof o[k] === 'boolean') out[k] = o[k] as boolean
+  for (const k of ['keybar', 'optionIsMeta', 'webgl', 'remoteClipboard', 'tapKeyboard', 'chimeBells', 'pinFixedOrder', 'sidebarNestChildren', 'confirmLeave', 'corraldHints'] as const) if (typeof o[k] === 'boolean') out[k] = o[k] as boolean
   if (Array.isArray(o.customKeys) && o.customKeys.length <= maxCustomKeys) {
     const text = (v: unknown, max: number) => typeof v === 'string' && v.trim() !== '' && [...v].length <= max && !controlChars.test(v)
     const keys = o.customKeys.filter((k): k is CustomKey => !!k && typeof k === 'object' && text(k.label, 12) && text(k.keys, 200))

@@ -10,6 +10,7 @@ import { heldOpen, onHeldOpen, onOpenRequest, takeHeld } from '../notifyopen'
 import { isDark, maxPinned, setChromeColor, setPrefs, usePrefs } from '../prefs'
 import { local } from '../storage'
 import { CLOSE_MENUS, Confirm, copyText, Menu, useToast, type MenuItem, type ToastAction } from '../components/ui'
+import { CorraldSideBannerContext, useCorraldHintController } from '../components/CorraldHintBanner'
 import { chromeVars, corralDark, corralLight } from '../terminal/themes'
 import { HostHistoryDialog } from '../terminal/hostHistory'
 import { CardNotice, useClaudeCard, type ClaudeCard } from '../terminal/cardNotice'
@@ -322,6 +323,7 @@ export function AgentsChat({ bar, active = true, onHead }: { bar?: ReactNode; ac
   const scheme = isDark() ? corralDark : corralLight
   const { sessions, failed } = useRunningSessions(active, 3000)
   const wb = useWorkbench()
+  const { banner: corraldHintBanner, dialog: corraldHintDialog } = useCorraldHintController(active)
   // A sound when one finishes or comes to need the person (terminal/chime.ts).
   const chimeCounts = useRef(new ChimeCounter())
   useEffect(() => {
@@ -1551,7 +1553,9 @@ export function AgentsChat({ bar, active = true, onHead }: { bar?: ReactNode; ac
     </div>
   )
   return (
+    <CorraldSideBannerContext.Provider value={corraldHintBanner}>
     <div className={'term-root agents-chat ' + (scheme.dark ? 'dark' : 'light') + (active ? '' : ' inactive') + (stack ? ' is-stack is-' + screen : '') + (wbOn ? ' wb-on' : '')} inert={!active} aria-hidden={active ? undefined : true} style={chromeVars(scheme) as React.CSSProperties} ref={rootRef}>
+      {corraldHintDialog}
       {newAgent && sessions && (
         <NewAgentDialog
           sessions={sessions}
@@ -1617,6 +1621,7 @@ export function AgentsChat({ bar, active = true, onHead }: { bar?: ReactNode; ac
         </StatusBar>
       )}
     </div>
+    </CorraldSideBannerContext.Provider>
   )
 }
 
