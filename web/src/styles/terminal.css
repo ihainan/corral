@@ -2685,7 +2685,6 @@ button.convo-running-what { padding: 0; border: 0; background: none; font: inher
 .convo-peer-link { color: var(--term-accent-text); font-weight: 500; text-decoration: none; border-radius: var(--r-xs); }
 .convo-peer-link:hover { text-decoration: underline; }
 .convo-peer-link:focus-visible { outline: 2px solid var(--term-accent-text); outline-offset: 2px; }
-.convo-peer-name { color: var(--term-fg-2); font-weight: 500; }
 .convo-peer-where { color: var(--term-fg-3); font-weight: 400; }
 .convo-peer-status { padding: 0 6px; border-radius: var(--r-xs); background: color-mix(in srgb, var(--term-fg) 7%, transparent); color: var(--term-fg-3); font-weight: 400; }
 .convo-peer-relayed { padding: 0 6px; border-radius: var(--r-xs); background: color-mix(in srgb, var(--term-fg) 7%, transparent); color: var(--term-fg-3); cursor: help; }

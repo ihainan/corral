@@ -1,40 +1,24 @@
 // Pure resolution and formatting helpers for cross-session peer messages
 // (tested directly in web/scripts/test-peer-sender.mjs).
+//
+// Display rule: the backend decides whether a peer's verified (pid, proc_start)
+// matches a currently-selected Corral agent in the latest locate scan. The
+// frontend does no identity matching and never reads sidebar names — if the
+// backend supplied a complete Corral target (title + session_id), show it with
+// a link; otherwise show the message's own sender name + "Not in Corral".
 
 export type PeerPickHow = 'tab' | 'split'
 
 // Mirrors internal/convo/convo.go PeerInfo.
 export interface ConvoPeerInfo {
-  key?: string
   session_id?: string
-  host_id?: number
+  pane?: string
+  title?: string
   host_name?: string
   persistence?: string
   mux_session?: string
   display_name?: string
-  pane?: string
   workspace?: string
-  title?: string
-  program?: string
-  agent_session?: string
-  terminal_id?: string
-  alive?: boolean
-}
-
-export interface LivePeerTarget {
-  key: string
-  title: string
-  where: string
-  sessionGroup: string
-  hostName: string
-  sessionLabel: string
-  sessionId: string
-  persistence?: string
-  pane?: string
-  program?: string
-  agentSession?: string
-  terminalId?: string
-  onPick: (how?: PeerPickHow) => void
 }
 
 export type ResolvedPeer =
@@ -42,18 +26,9 @@ export type ResolvedPeer =
       kind: 'live'
       name: string
       where: string
-      detail?: string
+      sessionId: string
+      pane?: string
       href: string
-      program?: string
-      rawFrom?: string
-      onPick: (how?: PeerPickHow) => void
-    }
-  | {
-      kind: 'exited'
-      name: string
-      where: string
-      program?: string
-      rawFrom?: string
     }
   | {
       kind: 'unknown'
@@ -108,58 +83,11 @@ export function peerLocation(
   return parts.join(' · ')
 }
 
-function normalizeProgram(p?: string): string {
-  const s = (p ?? '').trim().toLowerCase()
-  if (!s) return ''
-  if (s.includes('claude')) return 'claude'
-  if (s.includes('codex')) return 'codex'
-  if (s.includes('opencode')) return 'opencode'
-  if (s.startsWith('agy') || s.includes('antigravity')) return 'agy'
-  if (s.startsWith('devin')) return 'devin'
-  return s
-}
-
-// Fail-closed identity verification between backend-resolved peer info and the
-// live sidebar entry. Missing required identity fields always return false so
-// a replaced pane or incomplete snapshot is never overwritten with live sidebar
-// names or links.
-function samePeerIdentity(info: ConvoPeerInfo, live: LivePeerTarget): boolean {
-  if (!info.session_id || !live.sessionId || info.session_id !== live.sessionId) return false
-  if (live.persistence && live.persistence !== info.persistence) return false
-  const pa = normalizeProgram(info.program)
-  if (!pa) return false
-  if (info.persistence === 'herdr') {
-    if (!info.pane || !live.pane || info.pane !== live.pane) return false
-    if (!info.terminal_id || !live.terminalId || info.terminal_id !== live.terminalId) return false
-    if (!info.agent_session || !live.agentSession || info.agent_session !== live.agentSession) return false
-    const pb = normalizeProgram(live.program)
-    if (!pb || pa !== pb) return false
-    return true
-  }
-  if (info.persistence === 'tmux') {
-    const pb = normalizeProgram(live.program)
-    if (pb && pa !== pb) return false
-    if (info.agent_session && live.agentSession && info.agent_session !== live.agentSession) return false
-    return true
-  }
-  return false
-}
-
-function livePeerWhere(live: LivePeerTarget): string {
-  const host = sanitizePeerText(live.hostName)
-  const sess = sanitizePeerText(live.sessionLabel)
-  const parts: string[] = []
-  if (host) parts.push(host)
-  if (sess && sess !== live.title) parts.push(sess)
-  return parts.join(' · ') || sanitizePeerText(live.sessionGroup)
-}
-
 export function resolvePeerSender(input: {
   from?: string
   peerPid?: number
   peerStart?: number
   peers?: Record<string, ConvoPeerInfo>
-  liveByKey?: ReadonlyMap<string, LivePeerTarget>
 }): ResolvedPeer {
   const rawFrom = sanitizePeerText(input.from)
   const key = peerRefKey(input.peerPid, input.peerStart)
@@ -167,58 +95,21 @@ export function resolvePeerSender(input: {
   if (!info) {
     return { kind: 'unknown', name: rawFrom || '?' }
   }
-  if (info.alive && info.key) {
-    const live = input.liveByKey?.get(info.key)
-    // Only bind to the live sidebar row when ALL required identity fields
-    // positively match the verified peer. Never overwrite with a sidebar name
-    // when any identity field is missing or changed.
-    if (live && samePeerIdentity(info, live)) {
-      const href = peerHref(live.sessionId, live.pane)
-      if (href) {
-        const useLiveTitle = info.persistence === 'herdr' || (!!live.program && !!live.agentSession)
-        const name = useLiveTitle
-          ? sanitizePeerText(live.title) || sanitizePeerText(info.title) || rawFrom || '?'
-          : sanitizePeerText(info.title) || sanitizePeerText(live.title) || rawFrom || '?'
-        return {
-          kind: 'live',
-          name,
-          where: livePeerWhere(live),
-          detail: sanitizePeerText(live.where) || undefined,
-          href,
-          program: live.program ?? info.program,
-          rawFrom: rawFrom || undefined,
-          onPick: live.onPick,
-        }
-      }
-    }
+  const name = sanitizePeerText(info.title)
+  const sessionId = sanitizePeerText(info.session_id)
+  const pane = sanitizePeerText(info.pane) || undefined
+  const href = sessionId ? peerHref(sessionId, pane) : ''
+  if (!name || !sessionId || !href) {
+    return { kind: 'unknown', name: rawFrom || '?' }
   }
-  const name = sanitizePeerText(info.title) || rawFrom || '?'
   return {
-    kind: 'exited',
+    kind: 'live',
     name,
     where: peerLocation(info, name),
-    program: info.program,
-    rawFrom: rawFrom || undefined,
+    sessionId,
+    pane,
+    href,
   }
-}
-
-// Resolve a SendMessage tool call's target name for step headers, sidebar
-// previews, and hover cards. Returns null when the tool is not a verified
-// cross-session peer message.
-export function resolvePeerToolTarget(
-  tool: { name: string; title?: string; peer_pid?: number; peer_start?: number },
-  peers?: Record<string, ConvoPeerInfo>,
-  liveByKey?: ReadonlyMap<string, LivePeerTarget>,
-): ResolvedPeer | null {
-  if (tool.name !== 'SendMessage') return null
-  if (!peerRefKey(tool.peer_pid, tool.peer_start)) return null
-  return resolvePeerSender({
-    from: tool.title,
-    peerPid: tool.peer_pid,
-    peerStart: tool.peer_start,
-    peers,
-    liveByKey,
-  })
 }
 
 // Plain-text display label for Markdown exports and previews.
@@ -228,17 +119,11 @@ export function formatPeerPlain(
     from: (name: string) => string
     fromSession: (name: string) => string
     notInCorral: string
-    exited: string
   },
 ): string {
   if (r.kind === 'live') {
     const head = say.from(r.name)
     return r.where ? `${head} (${r.where})` : head
-  }
-  if (r.kind === 'exited') {
-    const head = say.from(r.name)
-    const meta = [r.where, say.exited].filter(Boolean).join(' · ')
-    return meta ? `${head} (${meta})` : head
   }
   return `${say.fromSession(r.name)} (${say.notInCorral})`
 }

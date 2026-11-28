@@ -141,23 +141,17 @@ type PeerRef struct {
 	Start int64
 }
 
-// PeerInfo identifies the Corral agent session/pane corresponding to a peer
-// process on the same host (either currently alive or recalled from history).
+// PeerInfo identifies a currently-online Corral agent session/pane matched from
+// the latest locate scan for a peer process on the same host.
 type PeerInfo struct {
-	Key          string `json:"key,omitempty"`
-	SessionID    string `json:"session_id,omitempty"`
-	HostID       int64  `json:"host_id,omitempty"`
-	HostName     string `json:"host_name,omitempty"`
-	Persistence  string `json:"persistence,omitempty"`
-	MuxSession   string `json:"mux_session,omitempty"`
-	DisplayName  string `json:"display_name,omitempty"`
-	Pane         string `json:"pane,omitempty"`
-	Workspace    string `json:"workspace,omitempty"`
-	Title        string `json:"title,omitempty"`
-	Program      string `json:"program,omitempty"`
-	AgentSession string `json:"agent_session,omitempty"`
-	TerminalID   string `json:"terminal_id,omitempty"`
-	Alive        bool   `json:"alive,omitempty"`
+	SessionID   string `json:"session_id"`
+	Pane        string `json:"pane,omitempty"`
+	Title       string `json:"title"`
+	HostName    string `json:"host_name,omitempty"`
+	Persistence string `json:"persistence,omitempty"`
+	MuxSession  string `json:"mux_session,omitempty"`
+	DisplayName string `json:"display_name,omitempty"`
+	Workspace   string `json:"workspace,omitempty"`
 }
 
 // PeerRefs returns all unique verified (PID, Start) peer references present in
@@ -378,11 +372,6 @@ type Tool struct {
 	// its session, and the keys pressed by name, else how many characters
 	// were typed (never what they were).
 	Stdin *Stdin `json:"stdin,omitempty"`
-	// PeerPID / PeerStart: (SendMessage to another Claude Code session) the
-	// recipient's verified process identity when known from an earlier peer
-	// message on the same socket.
-	PeerPID   int64 `json:"peer_pid,omitempty"`
-	PeerStart int64 `json:"peer_start,omitempty"`
 
 	// fromCall: (Codex) this line is of a call the agent made, which tells
 	// of the commands it means to run; where it tells of each command on

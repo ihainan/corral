@@ -58,7 +58,7 @@ import {
   type TerminalBlockerState,
 } from '../terminal/liveTerminalPolicy'
 import { agentKey, sessionWhich } from '../terminal/sessionName'
-import type { LivePeerTarget } from '../terminal/peerSender'
+import { peerHref, type PeerPickHow } from '../terminal/peerSender'
 import { firstShown, hideBox, keptBox, KeptPart, KeptView, letGoBox, modalShown, useEffectOnChange, useShownAt, useWhenGone, type KeptBox } from '../shown'
 import { Rail, StatusBar, StatusItem, useWorkbench } from '../workbench'
 import { CorraldStatusBarItem } from '../components/CorraldStatusBarItem'
@@ -2102,7 +2102,6 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
   // A row's menu (the side list's), of whichever agent it is: as of now, not
   // of when the rows were made (set below, with the bar's menu).
   const rowMenu = useRef<(e: Entry) => (MenuItem | null)[]>(() => [])
-  const livePeerTargetsRef = useRef<ReadonlyMap<string, LivePeerTarget>>(new Map())
   const rows = useMemo((): ConvoListRow[] => {
     const hosts = hostCount(entries)
     const wsByKey = new Map<string, string>()
@@ -2124,7 +2123,7 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
         const tasks = current ? mergeRowTasks(tasksOf(r), liveConvoRunning, { blocked: st === 'blocked', lost: r.lost }) : tasksOf(r)
         const parentKey = r.lost || !r.a.parent_pane ? undefined : agentKey(e.s, r.a.parent_pane)
         const sameWsParent = !!parentKey && wsByKey.get(parentKey) === r.wsId
-        return { key: e.key, ...labelOf(e, said, hosts, !!named, sameWsParent), now: r.lost || bg || st !== 'blocked' ? undefined : glanceOf(e.s.id, e.pane, st, r.a.since, livePeerTargetsRef.current) || undefined /* (said only of one waiting on the person) */, program: r.a.agent, status: st, liveStatus: st, lost: r.lost, lastStatus: r.lost && r.last && r.last !== 'unknown' ? r.last : undefined, lostAt: r.lost ? r.lostAt : undefined, bg, failed: failedOf(r, st), model: r.lost ? undefined : r.a.model, glance: r.lost || bg ? undefined : () => glanceOf(e.s.id, e.pane, st, r.a.since, livePeerTargetsRef.current), cmds: cmdsOf(r), tasks, since, current, inSplit: !isSecondary && !!splitKey && e.key === splitKey, pinned: pinAt(e.key), projectKey: normalizeProjectPath(r.a.cwd), sessionGroup: sessionGroupOf(e, all), parentKey, lineageSource: r.lost ? undefined : r.a.lineage_source, onPick: (how) => onPick(e, how), menu: () => rowMenu.current(e) }
+        return { key: e.key, ...labelOf(e, said, hosts, !!named, sameWsParent), now: r.lost || bg || st !== 'blocked' ? undefined : glanceOf(e.s.id, e.pane, st, r.a.since) || undefined /* (said only of one waiting on the person) */, program: r.a.agent, status: st, liveStatus: st, lost: r.lost, lastStatus: r.lost && r.last && r.last !== 'unknown' ? r.last : undefined, lostAt: r.lost ? r.lostAt : undefined, bg, failed: failedOf(r, st), model: r.lost ? undefined : r.a.model, glance: r.lost || bg ? undefined : () => glanceOf(e.s.id, e.pane, st, r.a.since), cmds: cmdsOf(r), tasks, since, current, inSplit: !isSecondary && !!splitKey && e.key === splitKey, pinned: pinAt(e.key), projectKey: normalizeProjectPath(r.a.cwd), sessionGroup: sessionGroupOf(e, all), parentKey, lineageSource: r.lost ? undefined : r.a.lineage_source, onPick: (how) => onPick(e, how), menu: () => rowMenu.current(e) }
       }
       const title = (current && agent?.title) || keptTitle(titles, e) || `${e.s.host_name} · ${sessionWhich(e.s, all)}`
       const tmuxStatus = current && agent ? agent.status : 'unknown'
@@ -2135,32 +2134,20 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
     return placedAs ? out.map((r) => (r.current ? { ...r, placeAs: placedAs } : r)) : out
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [entries, cur, agent, reconciled, liveConvoRunning, convoWorkingSince, convoTitle, all, titles, onPick, placedAs, pins, splitKey, isSecondary])
-  const livePeerTargets = useMemo(() => {
-    const byKey = new Map<string, LivePeerTarget>()
-    const entryByKey = new Map(entries.map((e) => [e.key, e]))
-    for (const r of rows) {
-      if (r.lost) continue
-      const e = entryByKey.get(r.key)
-      if (!e) continue
-      byKey.set(r.key, {
-        key: r.key,
-        title: r.title,
-        where: r.where,
-        sessionGroup: r.sessionGroup ?? sessionGroupOf(e, all),
-        hostName: e.s.host_name,
-        sessionLabel: sessionWhich(e.s, all),
-        sessionId: e.s.id,
-        persistence: e.s.persistence,
-        pane: e.pane,
-        program: r.program,
-        agentSession: e.row?.a.session || (r.current ? convo.bind?.session : undefined) || undefined,
-        terminalId: e.row?.a.terminal_id || undefined,
-        onPick: r.onPick,
-      })
-    }
-    return byKey
-  }, [entries, rows, all, convo.bind?.session])
-  livePeerTargetsRef.current = livePeerTargets
+  const openPeer = useCallback(
+    (sessionId: string, pane: string | undefined, how?: PeerPickHow) => {
+      const target = entries.find((e) => e.s.id === sessionId && (e.pane ?? '') === (pane ?? ''))
+      if (target) {
+        onPick(target, how)
+        return
+      }
+      const href = peerHref(sessionId, pane)
+      if (!href) return
+      if (how === 'tab') window.open(href, '_blank', 'noopener')
+      else window.location.assign(href)
+    },
+    [entries, onPick],
+  )
   const shown = rows.find((r) => r.current)
   const known = !!shown && shown.status !== 'unknown'
   useEffect(() => {
@@ -4401,7 +4388,7 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
       onStop={canPress && !lead && (!!draft.trim() || !!up || askHides) ? () => press('stop') : undefined}
       stop={said?.what === 'stop' && said.bind === bindKey ? said.text : undefined}
       side={isSecondary ? undefined : { rows }}
-      peerTargets={livePeerTargets}
+      onOpenPeer={openPeer}
       active={active}
       keysActive={kActive}
       splitPane={isSecondary ? undefined : splitPane}

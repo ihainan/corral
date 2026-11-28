@@ -2685,9 +2685,6 @@ func (s *Server) apiConversation(w http.ResponseWriter, r *http.Request) {
 	ans.Entries = overlayRewindEntries(st, activeRewind, st.parser.Since(rev))
 	st.takeEarlierTitle()
 	ans.Title, ans.Tasks = st.parser.Title(), st.parser.Tasks()
-	if st.bind != nil && !st.sub {
-		s.recordBoundProc(sess, st.bind, ans.Title, st.located)
-	}
 	if m := st.meta(); m != (convo.Meta{}) {
 		ans.Meta = &m
 		if st.agent == "codex" && m.Quota != nil {
@@ -2715,7 +2712,7 @@ func (s *Server) apiConversation(w http.ResponseWriter, r *http.Request) {
 	if !st.grewAt.IsZero() {
 		ans.QuietMs = max(0, time.Since(st.grewAt).Milliseconds())
 	}
-	ans.Peers = s.resolveConvoPeers(ctx, sess, st)
+	ans.Peers = s.resolveConvoPeers(sess, st)
 	writeJSONCompressed(w, r, http.StatusOK, ans)
 }
 
@@ -3101,7 +3098,6 @@ func (s *Server) locateScan(ctx context.Context, sess *term.Session, st *convoSt
 			// before had queued is not this one's.)
 			b.started = p.started
 			st.bind = b
-			s.recordBoundProc(sess, b, "", at)
 		}
 		switch {
 		case p == nil:

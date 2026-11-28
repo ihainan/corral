@@ -51,8 +51,6 @@ export interface ConvoTool {
   plan_path?: string
   images?: number // (pictures read: a screenshot, a PDF's pages)
   refs?: number // (tools a search found)
-  peer_pid?: number // (SendMessage to another Claude Code session) verified peer PID
-  peer_start?: number // (SendMessage) verified peer /proc/<pid>/stat field 22
 }
 
 // A question of an AskUserQuestion (cut: more of it than is kept).

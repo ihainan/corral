@@ -48,16 +48,10 @@ import (
 //
 // Everything else (file snapshots, API bookkeeping) is skipped.
 // Feed it whole lines in order.
-type peerAddrInfo struct {
-	name  string
-	pid   int64
-	start int64
-}
-
 type Claude struct {
-	sub      bool                    // (a subagent's own log: its side-chain rows are its own)
-	peers    map[string]peerAddrInfo // other sessions that wrote to this one: address → name & verified proc (peerOf)
-	hasPeers bool                    // any entry or queued item carries a verified peer (PeerPID & PeerStart)
+	sub      bool              // (a subagent's own log: its side-chain rows are its own)
+	peers    map[string]string // other sessions that wrote to this one: address → display name only (for SendMessage)
+	hasPeers bool              // any EventPeer or queued item carries its own verified (PeerPID, PeerStart)
 	entries  []*Entry
 	tools    map[string]toolRef
 	rev      int
@@ -351,7 +345,7 @@ func (c *Claude) Queued() []Queued {
 }
 
 // PeerRefs returns all unique verified (PID, Start) peer references present in
-// kept entries (EventPeer and SendMessage tools) and queued messages.
+// kept EventPeer entries and queued peer messages.
 func (c *Claude) PeerRefs() []PeerRef {
 	if !c.hasPeers {
 		return nil
@@ -374,9 +368,6 @@ func (c *Claude) PeerRefs() []PeerRef {
 			p := &e.Parts[i]
 			if p.Event != nil && p.Event.Kind == EventPeer {
 				add(p.Event.PeerPID, p.Event.PeerStart)
-			}
-			if p.Tool != nil && p.Tool.PeerPID > 0 && p.Tool.PeerStart > 0 {
-				add(p.Tool.PeerPID, p.Tool.PeerStart)
 			}
 		}
 	}
@@ -719,14 +710,14 @@ func (c *Claude) Prepend(other Parser) {
 	}
 	if len(o.peers) > 0 {
 		if c.peers == nil {
-			c.peers = map[string]peerAddrInfo{}
+			c.peers = map[string]string{}
 		}
-		for addr, info := range o.peers {
+		for addr, name := range o.peers {
 			if len(c.peers) >= maxPeers {
 				break
 			}
 			if _, exists := c.peers[addr]; !exists {
-				c.peers[addr] = info
+				c.peers[addr] = name
 			}
 		}
 	}
@@ -1229,41 +1220,23 @@ func hasCompletePeerOrigin(o *claudeOrigin) bool {
 	return isPeerOrigin(o) && rawPositiveInt64(o.VerifiedPeerPID) > 0 && rawPositiveInt64(o.VerifiedPeerProcStart) > 0
 }
 
-func peerOriginAddr(s string, o *claudeOrigin) string {
-	if i := strings.Index(s, "<cross-session-message"); i >= 0 {
-		if a := crossSessionAddr.FindStringSubmatch(s[i:]); a != nil {
-			return clip(a[1], maxMeta)
-		}
+// peerAddrMismatch reports whether an XML <cross-session-message from="...">
+// address and origin.from are both present and disagree.
+func peerAddrMismatch(s string, o *claudeOrigin) bool {
+	if !isPeerOrigin(o) || o.From == "" {
+		return false
 	}
-	if isPeerOrigin(o) && o.From != "" {
-		return clip(o.From, maxMeta)
+	i := strings.Index(s, "<cross-session-message")
+	if i < 0 {
+		return false
 	}
-	return ""
-}
-
-func peerOriginName(s string, o *claudeOrigin) string {
-	if i := strings.Index(s, "<cross-session-message"); i >= 0 {
-		if m := crossSession.FindStringSubmatch(s[i:]); m != nil {
-			return clip(m[1], maxMeta)
-		}
+	a := crossSessionAddr.FindStringSubmatch(s[i:])
+	if a == nil {
+		return false
 	}
-	if isPeerOrigin(o) && o.Name != "" {
-		return clip(o.Name, maxMeta)
-	}
-	return ""
-}
-
-// clearPeerAddr invalidates any cached verified (pid, start) for socket addr.
-// Keeping a zero-pid entry acts as a tombstone against Prepend so an older
-// chunk cannot resurrect a stale verified process identity after socket reuse.
-func (c *Claude) clearPeerAddr(addr, name string) {
-	if addr == "" {
-		return
-	}
-	if c.peers == nil || len(c.peers) >= maxPeers {
-		c.peers = map[string]peerAddrInfo{}
-	}
-	c.peers[addr] = peerAddrInfo{name: name}
+	xmlAddr := clip(a[1], maxMeta)
+	originAddr := clip(o.From, maxMeta)
+	return xmlAddr != "" && originAddr != "" && xmlAddr != originAddr
 }
 
 func extractClaudeText(raw json.RawMessage) string {
@@ -1285,13 +1258,6 @@ func extractClaudeText(raw json.RawMessage) string {
 }
 
 func (c *Claude) user(r *claudeRow) {
-	// Fail-closed socket invalidation: any incomplete/unverified peer origin
-	// (even with missing isMeta, empty body, or plain-text content) clears the
-	// socket address's cached verified (pid, start) BEFORE any early return.
-	if isPeerOrigin(r.Origin) && !hasCompletePeerOrigin(r.Origin) {
-		s := extractClaudeText(r.Message.Content)
-		c.clearPeerAddr(peerOriginAddr(s, r.Origin), peerOriginName(s, r.Origin))
-	}
 	// (A message of the person's, not a tool's result, tells by where it
 	// hangs of a rewind. Not one Claude Code wrote itself (isMeta): /exit's
 	// caveat hangs where the message before the last does, and the session
@@ -1300,14 +1266,11 @@ func (c *Claude) user(r *claudeRow) {
 		if r.IsMeta {
 			c.imageSources(r)
 		}
-		s := extractClaudeText(r.Message.Content)
-		if !hasCompletePeerOrigin(r.Origin) && strings.Contains(s, "<cross-session-message") {
-			c.clearPeerAddr(peerOriginAddr(s, r.Origin), peerOriginName(s, r.Origin))
-		}
 		// (Not shown. But one Claude Code sent on its own may be what waited:
 		// another session's message, a scheduled task's prompt, which it
 		// writes so when it takes them in — the waiting is over.)
 		if r.PromptSource == "system" || isPeerOrigin(r.Origin) {
+			s := extractClaudeText(r.Message.Content)
 			if s != "" {
 				c.metaArrived(s)
 			}
@@ -1465,11 +1428,6 @@ func (c *Claude) queueOp(r *claudeRow) {
 	_ = json.Unmarshal(r.Content, &s)
 	switch r.Operation {
 	case "enqueue":
-		// Incomplete/unverified peer origin clears any cached verified identity
-		// for that socket address before any early exit.
-		if isPeerOrigin(r.Origin) && !hasCompletePeerOrigin(r.Origin) {
-			c.clearPeerAddr(peerOriginAddr(s, r.Origin), peerOriginName(s, r.Origin))
-		}
 		// What waits there is the person's message, another session's
 		// agent writing to this one, or a notice from the harness; what
 		// belongs to no one of these (a background task's notice) is not
@@ -1480,11 +1438,10 @@ func (c *Claude) queueOp(r *claudeRow) {
 			q.Text, q.cut = cut(clean(blankEnds(text)), maxText)
 			q.key = queueKey(q.Text)
 			q.Time = clip(r.Timestamp, 64)
-			// Fail-closed: only copy verified (pid, start) when this queue
-			// record itself carries complete verified peer origin fields.
-			// Never inherit an older (pid, start) from c.peers (even if from
-			// or socket address matches).
-			if hasCompletePeerOrigin(r.Origin) {
+			// Only attach verified (pid, start) when this queue record itself
+			// carries complete verified peer origin fields and its XML address
+			// (if present) agrees with origin.from.
+			if hasCompletePeerOrigin(r.Origin) && !peerAddrMismatch(s, r.Origin) {
 				q.PeerPID = rawPositiveInt64(r.Origin.VerifiedPeerPID)
 				q.PeerStart = rawPositiveInt64(r.Origin.VerifiedPeerProcStart)
 				c.hasPeers = true
@@ -1551,8 +1508,9 @@ func peerWords(s string) (string, bool) {
 // peerOf: a message another session's agent wrote to this one (as Claude
 // Code takes it in: "Another Claude session sent a message:" and its
 // envelope, and/or origin.kind=="peer"), as an event; nil where neither is one.
-// Its sender's address and kernel-verified (pid, procStart) are kept, for
-// Corral session matching and for this one's answers to it (SendMessage).
+// Verified (pid, procStart) comes strictly from THIS message's own origin
+// (and is discarded if XML from= disagrees with origin.from). c.peers keeps
+// only address -> display name for SendMessage labels (never pid/start).
 func (c *Claude) peerOf(s string, origin *claudeOrigin) *Event {
 	var name, addr, words string
 	var relayed bool
@@ -1565,6 +1523,7 @@ func (c *Claude) peerOf(s string, origin *claudeOrigin) *Event {
 			}
 		}
 	}
+	mismatch := peerAddrMismatch(s, origin)
 	var pid, start int64
 	if isPeerOrigin(origin) {
 		if name == "" && origin.Name != "" {
@@ -1585,26 +1544,23 @@ func (c *Claude) peerOf(s string, origin *claudeOrigin) *Event {
 				words, relayed = strings.TrimSpace(words[:j]), true
 			}
 		}
-		p := rawPositiveInt64(origin.VerifiedPeerPID)
-		st := rawPositiveInt64(origin.VerifiedPeerProcStart)
-		if p > 0 && st > 0 {
-			pid, start = p, st
+		if !mismatch {
+			p := rawPositiveInt64(origin.VerifiedPeerPID)
+			st := rawPositiveInt64(origin.VerifiedPeerProcStart)
+			if p > 0 && st > 0 {
+				pid, start = p, st
+			}
 		}
-	}
-	// Clear any stale verified (pid, start) on addr BEFORE any early return
-	// whenever this message is not fully verified.
-	if addr != "" && (pid <= 0 || start <= 0) {
-		c.clearPeerAddr(addr, name)
 	}
 	words = clean(words)
 	if words == "" || (name == "" && pid == 0) {
 		return nil
 	}
-	if addr != "" && pid > 0 && start > 0 {
+	if addr != "" && name != "" && !mismatch {
 		if c.peers == nil || len(c.peers) >= maxPeers {
-			c.peers = map[string]peerAddrInfo{}
+			c.peers = map[string]string{}
 		}
-		c.peers[addr] = peerAddrInfo{name: name, pid: pid, start: start}
+		c.peers[addr] = name
 	}
 	if pid > 0 && start > 0 {
 		c.hasPeers = true
@@ -2089,18 +2045,11 @@ func (c *Claude) assistant(r *claudeRow) {
 		case "tool_use", "server_tool_use":
 			t := &Tool{ID: clip(b.ID, maxID), Name: clip(b.Name, 128)}
 			t.Title, t.Detail, t.Old, t.New, t.detailCut = toolInput(b.Name, b.Input)
-			// (Another session written to by its address: by its name, as its
-			// message said it — not a socket's path — plus its verified peer
-			// process identity when known.)
+			// (Another session written to by its address: display its name,
+			// not a socket's path; never inherit verified pid/start onto SendMessage.)
 			if b.Name == "SendMessage" && strings.HasPrefix(t.Title, "uds:") {
-				if info, ok := c.peers[t.Title]; ok {
-					if info.name != "" {
-						t.Title = info.name
-					}
-					if info.pid > 0 && info.start > 0 {
-						t.PeerPID, t.PeerStart = info.pid, info.start
-						c.hasPeers = true
-					}
+				if name := c.peers[t.Title]; name != "" {
+					t.Title = name
 				}
 			}
 			// (What a subagent hands back is its answer, shown as one: kept as a text is.)
