@@ -815,7 +815,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
           const id = Date.now() + Math.random()
           setItems((xs) => {
             const normal = xs.filter((x) => !x.corner)
-            const corners = xs.filter((x) => x.corner).slice(-2)
+            const corners = xs.filter((x) => x.corner).slice(-4)
             return [
               ...normal,
               ...corners,

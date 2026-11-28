@@ -53,7 +53,23 @@ const (
 	ErrUnauthorized      = "unauthorized"
 	ErrNotSupported      = "not_supported"
 	ErrPaneNotLocated    = "pane_not_located"
+	ErrOtherGateways     = "other_gateways"
+	ErrShuttingDown      = "shutting_down"
 )
+
+// Feature flags advertised in HelloResult.Features so gateways can safely
+// negotiate optional protocol-1 capabilities with both old and new daemons.
+const (
+	// FeatureConditionalShutdown indicates the daemon supports
+	// ShutdownParams.OnlyIfSoleGateway and rejects new daemon.hello once a
+	// conditional shutdown is accepted.
+	FeatureConditionalShutdown = "conditional_shutdown"
+)
+
+// DefaultFeatures returns the protocol feature flags supported by this build.
+func DefaultFeatures() []string {
+	return []string{FeatureConditionalShutdown}
+}
 
 // IsPreExecutionRejectionCode reports whether code is a daemon RPC error that
 // corrald ONLY returns before executing any side-effecting pane operation.
@@ -209,6 +225,20 @@ type HelloResult struct {
 	Manifest  Manifest     `json:"manifest"`
 	Clients   []ClientInfo `json:"clients"`
 	State     string       `json:"state"`
+	Features  []string     `json:"features,omitempty"`
+}
+
+// HasFeature reports whether the daemon advertised feature in HelloResult.
+func (h *HelloResult) HasFeature(feature string) bool {
+	if h == nil || feature == "" {
+		return false
+	}
+	for _, f := range h.Features {
+		if f == feature {
+			return true
+		}
+	}
+	return false
 }
 
 // ResumeParams are the parameters for daemon.resume.
@@ -256,12 +286,14 @@ type HandoffResult struct {
 
 // ShutdownParams are optional parameters for daemon.shutdown.
 type ShutdownParams struct {
-	Reason string `json:"reason,omitempty"`
+	Reason            string `json:"reason,omitempty"`
+	OnlyIfSoleGateway string `json:"only_if_sole_gateway,omitempty"`
 }
 
 // ShutdownResult is returned by daemon.shutdown.
 type ShutdownResult struct {
-	OK bool `json:"ok"`
+	OK            bool `json:"ok"`
+	OtherGateways bool `json:"other_gateways,omitempty"`
 }
 
 // ForgetParams are the parameters for daemon.forget.

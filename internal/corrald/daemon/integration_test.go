@@ -117,6 +117,17 @@ func getTestBinaries(t *testing.T) builtBinaries {
 
 func runCLI(t *testing.T, bin string, home string, extraEnv []string, args ...string) (string, int) {
 	t.Helper()
+	var mid string
+	for _, kv := range extraEnv {
+		if v, ok := strings.CutPrefix(kv, "CORRALD_TEST_MACHINE_ID="); ok {
+			mid = v
+		}
+	}
+	uid := uint32(os.Getuid())
+	if layout, err := ResolveLayout(PathOptions{Home: home, UID: &uid, MachineID: mid}); err == nil && layout.SocketUsesTmpDir {
+		sockDir := layout.SocketDir
+		t.Cleanup(func() { _ = os.RemoveAll(sockDir) })
+	}
 	cmd := exec.Command(bin, args...)
 	env := []string{
 		"HOME=" + home,
@@ -299,9 +310,9 @@ func TestIntegrationLifecycleAndResume(t *testing.T) {
 	}
 
 	// 2. install.
-	stage := stageBinary(t, home, mid, "op0001", bins.v1)
+	stage := stageBinary(t, home, mid, "0b3f920a0092177e", bins.v1)
 	out, code = runCLI(t, filepath.Join(stage, "corrald"), home, env,
-		"install", "--stage", stage, "--op", "op0001", "--gateway", "gw.test", "--by", "alice")
+		"install", "--stage", stage, "--op", "0b3f920a0092177e", "--gateway", "gw.test", "--by", "alice")
 	kv = parseKV(out)
 	if code != 0 || kv["result"] != "ok" {
 		t.Fatalf("install failed (code=%d):\n%s", code, out)
@@ -316,8 +327,8 @@ func TestIntegrationLifecycleAndResume(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(stateDir, "install.json")); err != nil {
 		t.Fatalf("install.json missing: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(stateDir, "ops", "op0001.json")); err != nil {
-		t.Fatalf("ops/op0001.json missing: %v", err)
+	if _, err := os.Stat(filepath.Join(stateDir, "ops", "0b3f920a0092177e.json")); err != nil {
+		t.Fatalf("ops/0b3f920a0092177e.json missing: %v", err)
 	}
 
 	// 3. serve (detached).
@@ -427,7 +438,7 @@ func TestIntegrationLifecycleAndResume(t *testing.T) {
 	c2.close()
 
 	// 7. uninstall stops daemon, deletes files (leaving only lock files in StateDir), and post-check reports removed.
-	out, code = runCLI(t, installedBin, home, env, "uninstall", "--op", "op0002")
+	out, code = runCLI(t, installedBin, home, env, "uninstall", "--op", "a3042596abd1884f")
 	kv = parseKV(out)
 	if code != 0 || kv["result"] != "removed" || kv["last_machine"] != "true" {
 		t.Fatalf("uninstall unexpected (code=%d):\n%s", code, out)
@@ -450,9 +461,9 @@ func TestIntegrationIdleExit(t *testing.T) {
 		"CORRALD_TEST_IDLE_TIMEOUT=300ms",
 	}
 
-	stage := stageBinary(t, home, mid, "op1", bins.v1)
+	stage := stageBinary(t, home, mid, "7d3c6b8d51ac8ec7", bins.v1)
 	if out, code := runCLI(t, filepath.Join(stage, "corrald"), home, env,
-		"install", "--stage", stage, "--op", "op1", "--gateway", "gw.idle", "--by", "bob"); code != 0 {
+		"install", "--stage", stage, "--op", "7d3c6b8d51ac8ec7", "--gateway", "gw.idle", "--by", "bob"); code != 0 {
 		t.Fatalf("install failed: %s", out)
 	}
 	installedBin := filepath.Join(home, ".local", "lib", "corral", "corrald")
@@ -521,9 +532,9 @@ func TestIntegrationTombstoneBlocksServeAndInstall(t *testing.T) {
 		t.Fatalf("serve with tombstone: code=%d out=%s", code, out)
 	}
 
-	stage := stageBinary(t, home, mid, "op1", bins.v1)
+	stage := stageBinary(t, home, mid, "7d3c6b8d51ac8ec7", bins.v1)
 	out, code = runCLI(t, filepath.Join(stage, "corrald"), home, env,
-		"install", "--stage", stage, "--op", "op1", "--gateway", "gw.test", "--by", "alice")
+		"install", "--stage", stage, "--op", "7d3c6b8d51ac8ec7", "--gateway", "gw.test", "--by", "alice")
 	kv = parseKV(out)
 	if code == 0 || kv["error"] != proto.ErrRemoving {
 		t.Fatalf("install with tombstone: code=%d out=%s", code, out)
@@ -547,7 +558,7 @@ func TestIntegrationInstallRejectsArbitraryStageAndSymlinkVersionDir(t *testing.
 	_ = os.WriteFile(precious, []byte("precious"), 0o600)
 
 	out, code := runCLI(t, bins.v1, home, env,
-		"install", "--stage", arbitraryDir, "--op", "op9", "--gateway", "gw.test", "--by", "alice")
+		"install", "--stage", arbitraryDir, "--op", "ba8bef83eb01c43a", "--gateway", "gw.test", "--by", "alice")
 	if code == 0 || parseKV(out)["error"] != "invalid_stage" {
 		t.Fatalf("arbitrary --stage should be rejected with invalid_stage: code=%d out=%s", code, out)
 	}
@@ -562,9 +573,9 @@ func TestIntegrationInstallRejectsArbitraryStageAndSymlinkVersionDir(t *testing.
 	if err := os.Symlink(outsideDir, filepath.Join(libDir, "corrald-0.1.0-100")); err != nil {
 		t.Fatal(err)
 	}
-	stage := stageBinary(t, home, mid, "op10", bins.v1)
+	stage := stageBinary(t, home, mid, "35e6f9e36beeeaf1", bins.v1)
 	out, code = runCLI(t, filepath.Join(stage, "corrald"), home, env,
-		"install", "--stage", stage, "--op", "op10", "--gateway", "gw.test", "--by", "alice")
+		"install", "--stage", stage, "--op", "35e6f9e36beeeaf1", "--gateway", "gw.test", "--by", "alice")
 	if code == 0 || parseKV(out)["error"] != "ver_dir_invalid" {
 		t.Fatalf("symlinked version dir should be rejected: code=%d out=%s", code, out)
 	}
@@ -579,9 +590,9 @@ func TestIntegrationHotUpdateZeroGap(t *testing.T) {
 	const mid = "444455556666"
 	env := []string{"CORRALD_TEST_MACHINE_ID=" + mid}
 
-	stage1 := stageBinary(t, home, mid, "op1", bins.v1)
+	stage1 := stageBinary(t, home, mid, "7d3c6b8d51ac8ec7", bins.v1)
 	if out, code := runCLI(t, filepath.Join(stage1, "corrald"), home, env,
-		"install", "--stage", stage1, "--op", "op1", "--gateway", "gw.hot", "--by", "alice"); code != 0 {
+		"install", "--stage", stage1, "--op", "7d3c6b8d51ac8ec7", "--gateway", "gw.hot", "--by", "alice"); code != 0 {
 		t.Fatalf("install v1: %s", out)
 	}
 	installedBin := filepath.Join(home, ".local", "lib", "corral", "corrald")
@@ -631,9 +642,9 @@ func TestIntegrationHotUpdateZeroGap(t *testing.T) {
 	}
 
 	// Stage v2 with --upgrade; symlink must STILL point to v1 before handoff!
-	stage2 := stageBinary(t, home, mid, "op2", bins.v2)
+	stage2 := stageBinary(t, home, mid, "2465a128ca302ed5", bins.v2)
 	out, code = runCLI(t, filepath.Join(stage2, "corrald"), home, env,
-		"install", "--upgrade", "--stage", stage2, "--op", "op2", "--gateway", "gw.hot", "--by", "alice")
+		"install", "--upgrade", "--stage", stage2, "--op", "2465a128ca302ed5", "--gateway", "gw.hot", "--by", "alice")
 	kv2 := parseKV(out)
 	if code != 0 || kv2["result"] != "ok" {
 		t.Fatalf("upgrade install v2: %s", out)
@@ -809,9 +820,9 @@ func TestIntegrationHandoffTimedOutWriteAndHardExit(t *testing.T) {
 		"CORRALD_TEST_POST_HANDOFF_EXIT=200ms",
 	}
 
-	stage1 := stageBinary(t, home, mid, "op1", bins.v1)
+	stage1 := stageBinary(t, home, mid, "7d3c6b8d51ac8ec7", bins.v1)
 	if out, code := runCLI(t, filepath.Join(stage1, "corrald"), home, env,
-		"install", "--stage", stage1, "--op", "op1", "--gateway", "gw.hard", "--by", "alice"); code != 0 {
+		"install", "--stage", stage1, "--op", "7d3c6b8d51ac8ec7", "--gateway", "gw.hard", "--by", "alice"); code != 0 {
 		t.Fatalf("install v1: %s", out)
 	}
 	installedBin := filepath.Join(home, ".local", "lib", "corral", "corrald")
@@ -833,9 +844,9 @@ func TestIntegrationHandoffTimedOutWriteAndHardExit(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	stage2 := stageBinary(t, home, mid, "op2", bins.v2)
+	stage2 := stageBinary(t, home, mid, "2465a128ca302ed5", bins.v2)
 	out, code = runCLI(t, filepath.Join(stage2, "corrald"), home, env,
-		"install", "--upgrade", "--stage", stage2, "--op", "op2", "--gateway", "gw.hard", "--by", "alice")
+		"install", "--upgrade", "--stage", stage2, "--op", "2465a128ca302ed5", "--gateway", "gw.hard", "--by", "alice")
 	if code != 0 {
 		t.Fatalf("upgrade v2: %s", out)
 	}
@@ -894,9 +905,9 @@ func TestIntegrationHotUpdateBadBinaryAndCutoverFailureRollback(t *testing.T) {
 	const mid = "555566667777"
 	env := []string{"CORRALD_TEST_MACHINE_ID=" + mid}
 
-	stage1 := stageBinary(t, home, mid, "op1", bins.v1)
+	stage1 := stageBinary(t, home, mid, "7d3c6b8d51ac8ec7", bins.v1)
 	if out, code := runCLI(t, filepath.Join(stage1, "corrald"), home, env,
-		"install", "--stage", stage1, "--op", "op1", "--gateway", "gw.bad", "--by", "alice"); code != 0 {
+		"install", "--stage", stage1, "--op", "7d3c6b8d51ac8ec7", "--gateway", "gw.bad", "--by", "alice"); code != 0 {
 		t.Fatalf("install v1: %s", out)
 	}
 	installedBin := filepath.Join(home, ".local", "lib", "corral", "corrald")
@@ -1128,9 +1139,9 @@ func TestIntegrationHandoffCutoverFailureDoesNotReportReady(t *testing.T) {
 		"CORRALD_TEST_FAIL_CUTOVER=1",
 	}
 
-	stage1 := stageBinary(t, home, mid, "op1", bins.v1)
+	stage1 := stageBinary(t, home, mid, "7d3c6b8d51ac8ec7", bins.v1)
 	if out, code := runCLI(t, filepath.Join(stage1, "corrald"), home, env,
-		"install", "--stage", stage1, "--op", "op1", "--gateway", "gw.cut", "--by", "alice"); code != 0 {
+		"install", "--stage", stage1, "--op", "7d3c6b8d51ac8ec7", "--gateway", "gw.cut", "--by", "alice"); code != 0 {
 		t.Fatalf("install v1: %s", out)
 	}
 	installedBin := filepath.Join(home, ".local", "lib", "corral", "corrald")
@@ -1148,9 +1159,9 @@ func TestIntegrationHandoffCutoverFailureDoesNotReportReady(t *testing.T) {
 	pid1, _ := strconv.Atoi(kv["pid"])
 	sock := kv["socket"]
 
-	stage2 := stageBinary(t, home, mid, "op2", bins.v2)
+	stage2 := stageBinary(t, home, mid, "2465a128ca302ed5", bins.v2)
 	out, code = runCLI(t, filepath.Join(stage2, "corrald"), home, env,
-		"install", "--upgrade", "--stage", stage2, "--op", "op2", "--gateway", "gw.cut", "--by", "alice")
+		"install", "--upgrade", "--stage", stage2, "--op", "2465a128ca302ed5", "--gateway", "gw.cut", "--by", "alice")
 	if code != 0 {
 		t.Fatalf("upgrade v2: %s", out)
 	}
@@ -1213,18 +1224,18 @@ func TestIntegrationNFSMultiMachineUninstallAndPreserveSiblings(t *testing.T) {
 		}
 	})
 
-	stageA := stageBinary(t, sharedHome, midA, "opA", bins.v1)
+	stageA := stageBinary(t, sharedHome, midA, "dce77a2ae3a6294d", bins.v1)
 	if out, code := runCLI(t, filepath.Join(stageA, "corrald"), sharedHome, envA,
-		"install", "--stage", stageA, "--op", "opA", "--gateway", "gw.nfs", "--by", "alice"); code != 0 {
+		"install", "--stage", stageA, "--op", "dce77a2ae3a6294d", "--gateway", "gw.nfs", "--by", "alice"); code != 0 {
 		t.Fatalf("install A: %s", out)
 	}
 	if out, code := runCLI(t, installedBin, sharedHome, envA, "serve", "--gateway", "gw.nfs"); code != 0 {
 		t.Fatalf("serve A: %s", out)
 	}
 
-	stageB := stageBinary(t, sharedHome, midB, "opB", bins.v1)
+	stageB := stageBinary(t, sharedHome, midB, "0fddac0c4bf3b690", bins.v1)
 	if out, code := runCLI(t, filepath.Join(stageB, "corrald"), sharedHome, envB,
-		"install", "--stage", stageB, "--op", "opB", "--gateway", "gw.nfs", "--by", "alice"); code != 0 {
+		"install", "--stage", stageB, "--op", "0fddac0c4bf3b690", "--gateway", "gw.nfs", "--by", "alice"); code != 0 {
 		t.Fatalf("install B: %s", out)
 	}
 	outB, code := runCLI(t, installedBin, sharedHome, envB, "serve", "--gateway", "gw.nfs")
@@ -1280,9 +1291,9 @@ func TestIntegrationUninstallAbortsWhenTombstoneWriteFails(t *testing.T) {
 	const mid = "777788889999"
 	env := []string{"CORRALD_TEST_MACHINE_ID=" + mid}
 
-	stage := stageBinary(t, home, mid, "op1", bins.v1)
+	stage := stageBinary(t, home, mid, "7d3c6b8d51ac8ec7", bins.v1)
 	if out, code := runCLI(t, filepath.Join(stage, "corrald"), home, env,
-		"install", "--stage", stage, "--op", "op1", "--gateway", "gw.tomb", "--by", "alice"); code != 0 {
+		"install", "--stage", stage, "--op", "7d3c6b8d51ac8ec7", "--gateway", "gw.tomb", "--by", "alice"); code != 0 {
 		t.Fatalf("install: %s", out)
 	}
 	installedBin := filepath.Join(home, ".local", "lib", "corral", "corrald")
@@ -1342,9 +1353,9 @@ func TestIntegrationUninstallPartialResult(t *testing.T) {
 	const mid = "666677778888"
 	env := []string{"CORRALD_TEST_MACHINE_ID=" + mid}
 
-	stage := stageBinary(t, home, mid, "op1", bins.v1)
+	stage := stageBinary(t, home, mid, "7d3c6b8d51ac8ec7", bins.v1)
 	if out, code := runCLI(t, filepath.Join(stage, "corrald"), home, env,
-		"install", "--stage", stage, "--op", "op1", "--gateway", "gw.part", "--by", "alice"); code != 0 {
+		"install", "--stage", stage, "--op", "7d3c6b8d51ac8ec7", "--gateway", "gw.part", "--by", "alice"); code != 0 {
 		t.Fatalf("install: %s", out)
 	}
 	installedBin := filepath.Join(home, ".local", "lib", "corral", "corrald")
@@ -1378,9 +1389,9 @@ func TestIntegrationOpLockSerializesTombstoneAndServe(t *testing.T) {
 	const mid = "898989898989"
 	env := []string{"CORRALD_TEST_MACHINE_ID=" + mid}
 
-	stage := stageBinary(t, home, mid, "op1", bins.v1)
+	stage := stageBinary(t, home, mid, "7d3c6b8d51ac8ec7", bins.v1)
 	if out, code := runCLI(t, filepath.Join(stage, "corrald"), home, env,
-		"install", "--stage", stage, "--op", "op1", "--gateway", "gw.lock", "--by", "alice"); code != 0 {
+		"install", "--stage", stage, "--op", "7d3c6b8d51ac8ec7", "--gateway", "gw.lock", "--by", "alice"); code != 0 {
 		t.Fatalf("install: %s", out)
 	}
 	installedBin := filepath.Join(home, ".local", "lib", "corral", "corrald")
@@ -1431,9 +1442,9 @@ func TestIntegrationSharedLockPreventsNFSRace(t *testing.T) {
 	const midB = "cdcdcdcdcdcd"
 	envA := []string{"CORRALD_TEST_MACHINE_ID=" + midA}
 
-	stageA := stageBinary(t, sharedHome, midA, "opA", bins.v1)
+	stageA := stageBinary(t, sharedHome, midA, "dce77a2ae3a6294d", bins.v1)
 	if out, code := runCLI(t, filepath.Join(stageA, "corrald"), sharedHome, envA,
-		"install", "--stage", stageA, "--op", "opA", "--gateway", "gw.nfs2", "--by", "alice"); code != 0 {
+		"install", "--stage", stageA, "--op", "dce77a2ae3a6294d", "--gateway", "gw.nfs2", "--by", "alice"); code != 0 {
 		t.Fatalf("install A: %s", out)
 	}
 	installedBin := filepath.Join(sharedHome, ".local", "lib", "corral", "corrald")
@@ -1496,9 +1507,9 @@ func TestIntegrationUninstallWithoutInstallJSONPreservesSharedAndReturnsPartial(
 	const mid = "131313131313"
 	env := []string{"CORRALD_TEST_MACHINE_ID=" + mid}
 
-	stage := stageBinary(t, home, mid, "op1", bins.v1)
+	stage := stageBinary(t, home, mid, "1313131313130001", bins.v1)
 	if out, code := runCLI(t, filepath.Join(stage, "corrald"), home, env,
-		"install", "--stage", stage, "--op", "op1", "--gateway", "gw.noinst", "--by", "alice"); code != 0 {
+		"install", "--stage", stage, "--op", "1313131313130001", "--gateway", "gw.noinst", "--by", "alice"); code != 0 {
 		t.Fatalf("install: %s", out)
 	}
 	installedBin := filepath.Join(home, ".local", "lib", "corral", "corrald")
@@ -1538,9 +1549,9 @@ func TestIntegrationProductionBinaryHasNoTestMethods(t *testing.T) {
 		}
 	})
 
-	stage := stageBinary(t, home, "", "op1", bins.prod)
+	stage := stageBinary(t, home, "", "7d3c6b8d51ac8ec7", bins.prod)
 	if out, code := runCLI(t, filepath.Join(stage, "corrald"), home, nil,
-		"install", "--stage", stage, "--op", "op1", "--gateway", "gw.prod", "--by", "alice"); code != 0 {
+		"install", "--stage", stage, "--op", "7d3c6b8d51ac8ec7", "--gateway", "gw.prod", "--by", "alice"); code != 0 {
 		t.Fatalf("install prod: %s", out)
 	}
 	out, code := runCLI(t, installedBin, home, nil, "serve", "--gateway", "gw.prod")
@@ -1576,9 +1587,9 @@ func TestIntegrationConcurrentHandoffAndUninstall(t *testing.T) {
 	const mid = "c0c0c0c0c0c0"
 	env := []string{"CORRALD_TEST_MACHINE_ID=" + mid}
 
-	stage1 := stageBinary(t, home, mid, "op1", bins.v1)
+	stage1 := stageBinary(t, home, mid, "7d3c6b8d51ac8ec7", bins.v1)
 	if out, code := runCLI(t, filepath.Join(stage1, "corrald"), home, env,
-		"install", "--stage", stage1, "--op", "op1", "--gateway", "gw.race", "--by", "alice"); code != 0 {
+		"install", "--stage", stage1, "--op", "7d3c6b8d51ac8ec7", "--gateway", "gw.race", "--by", "alice"); code != 0 {
 		t.Fatalf("install v1: %s", out)
 	}
 	installedBin := filepath.Join(home, ".local", "lib", "corral", "corrald")
@@ -1595,9 +1606,9 @@ func TestIntegrationConcurrentHandoffAndUninstall(t *testing.T) {
 	}
 	sock := parseKV(out)["socket"]
 
-	stage2 := stageBinary(t, home, mid, "op2", bins.v2)
+	stage2 := stageBinary(t, home, mid, "2465a128ca302ed5", bins.v2)
 	out, code = runCLI(t, filepath.Join(stage2, "corrald"), home, env,
-		"install", "--upgrade", "--stage", stage2, "--op", "op2", "--gateway", "gw.race", "--by", "alice")
+		"install", "--upgrade", "--stage", stage2, "--op", "2465a128ca302ed5", "--gateway", "gw.race", "--by", "alice")
 	if code != 0 {
 		t.Fatalf("upgrade v2: %s", out)
 	}
@@ -1663,9 +1674,9 @@ func TestIntegrationLockTimeoutReturnsBusy(t *testing.T) {
 		"CORRALD_TEST_LOCK_TIMEOUT=150ms",
 	}
 
-	stage1 := stageBinary(t, home, mid, "op1", bins.v1)
+	stage1 := stageBinary(t, home, mid, "7d3c6b8d51ac8ec7", bins.v1)
 	if out, code := runCLI(t, filepath.Join(stage1, "corrald"), home, env,
-		"install", "--stage", stage1, "--op", "op1", "--gateway", "gw.busy", "--by", "alice"); code != 0 {
+		"install", "--stage", stage1, "--op", "7d3c6b8d51ac8ec7", "--gateway", "gw.busy", "--by", "alice"); code != 0 {
 		t.Fatalf("install v1: %s", out)
 	}
 	installedBin := filepath.Join(home, ".local", "lib", "corral", "corrald")
@@ -1681,9 +1692,9 @@ func TestIntegrationLockTimeoutReturnsBusy(t *testing.T) {
 	}
 	sock := parseKV(out)["socket"]
 
-	stage2 := stageBinary(t, home, mid, "op2", bins.v2)
+	stage2 := stageBinary(t, home, mid, "2465a128ca302ed5", bins.v2)
 	out, code = runCLI(t, filepath.Join(stage2, "corrald"), home, env,
-		"install", "--upgrade", "--stage", stage2, "--op", "op2", "--gateway", "gw.busy", "--by", "alice")
+		"install", "--upgrade", "--stage", stage2, "--op", "2465a128ca302ed5", "--gateway", "gw.busy", "--by", "alice")
 	if code != 0 {
 		t.Fatalf("upgrade v2: %s", out)
 	}
@@ -1698,9 +1709,9 @@ func TestIntegrationLockTimeoutReturnsBusy(t *testing.T) {
 	defer sharedLock.Release()
 
 	// 1. install -> busy.
-	stage3 := stageBinary(t, home, mid, "op3", bins.v2)
+	stage3 := stageBinary(t, home, mid, "5f34e666d53c0fc5", bins.v2)
 	out, code = runCLI(t, filepath.Join(stage3, "corrald"), home, env,
-		"install", "--upgrade", "--stage", stage3, "--op", "op3", "--gateway", "gw.busy", "--by", "alice")
+		"install", "--upgrade", "--stage", stage3, "--op", "5f34e666d53c0fc5", "--gateway", "gw.busy", "--by", "alice")
 	if code == 0 || parseKV(out)["error"] != proto.ErrBusy {
 		t.Fatalf("install while SharedLock held: code=%d out=%s, want error=busy", code, out)
 	}
@@ -1736,9 +1747,9 @@ func TestIntegrationHardExitEvenWhenLogBlocksAfterReady(t *testing.T) {
 	}
 	envClean := []string{"CORRALD_TEST_MACHINE_ID=" + mid}
 
-	stage1 := stageBinary(t, home, mid, "op1", bins.v1)
+	stage1 := stageBinary(t, home, mid, "7d3c6b8d51ac8ec7", bins.v1)
 	if out, code := runCLI(t, filepath.Join(stage1, "corrald"), home, envClean,
-		"install", "--stage", stage1, "--op", "op1", "--gateway", "gw.logblk", "--by", "alice"); code != 0 {
+		"install", "--stage", stage1, "--op", "7d3c6b8d51ac8ec7", "--gateway", "gw.logblk", "--by", "alice"); code != 0 {
 		t.Fatalf("install v1: %s", out)
 	}
 	installedBin := filepath.Join(home, ".local", "lib", "corral", "corrald")
@@ -1760,9 +1771,9 @@ func TestIntegrationHardExitEvenWhenLogBlocksAfterReady(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	stage2 := stageBinary(t, home, mid, "op2", bins.v2)
+	stage2 := stageBinary(t, home, mid, "2465a128ca302ed5", bins.v2)
 	out, code = runCLI(t, filepath.Join(stage2, "corrald"), home, envClean,
-		"install", "--upgrade", "--stage", stage2, "--op", "op2", "--gateway", "gw.logblk", "--by", "alice")
+		"install", "--upgrade", "--stage", stage2, "--op", "2465a128ca302ed5", "--gateway", "gw.logblk", "--by", "alice")
 	if code != 0 {
 		t.Fatalf("upgrade v2: %s", out)
 	}
@@ -1810,9 +1821,9 @@ func TestIntegrationServeRejectedAfterUninstallDeletesInstallJSONAndFreshStateCh
 	const mid = "f4f4f4f4f4f4"
 	env := []string{"CORRALD_TEST_MACHINE_ID=" + mid}
 
-	stage := stageBinary(t, home, mid, "op1", bins.v1)
+	stage := stageBinary(t, home, mid, "7d3c6b8d51ac8ec7", bins.v1)
 	if out, code := runCLI(t, filepath.Join(stage, "corrald"), home, env,
-		"install", "--stage", stage, "--op", "op1", "--gateway", "gw.r4", "--by", "alice"); code != 0 {
+		"install", "--stage", stage, "--op", "7d3c6b8d51ac8ec7", "--gateway", "gw.r4", "--by", "alice"); code != 0 {
 		t.Fatalf("install: %s", out)
 	}
 	installedBin := filepath.Join(home, ".local", "lib", "corral", "corrald")
@@ -1912,9 +1923,9 @@ func TestIntegrationRollbackFailureReportsRollbackFailedAndDegradesHealth(t *tes
 	const mid = "e5e5e5e5e5e5"
 	env := []string{"CORRALD_TEST_MACHINE_ID=" + mid}
 
-	stage1 := stageBinary(t, home, mid, "op1", bins.v1)
+	stage1 := stageBinary(t, home, mid, "7d3c6b8d51ac8ec7", bins.v1)
 	if out, code := runCLI(t, filepath.Join(stage1, "corrald"), home, env,
-		"install", "--stage", stage1, "--op", "op1", "--gateway", "gw.rbf", "--by", "alice"); code != 0 {
+		"install", "--stage", stage1, "--op", "7d3c6b8d51ac8ec7", "--gateway", "gw.rbf", "--by", "alice"); code != 0 {
 		t.Fatalf("install v1: %s", out)
 	}
 	installedBin := filepath.Join(home, ".local", "lib", "corral", "corrald")
@@ -1932,9 +1943,9 @@ func TestIntegrationRollbackFailureReportsRollbackFailedAndDegradesHealth(t *tes
 	}
 	sock := parseKV(out)["socket"]
 
-	stage2 := stageBinary(t, home, mid, "op2", bins.v2)
+	stage2 := stageBinary(t, home, mid, "2465a128ca302ed5", bins.v2)
 	out, code = runCLI(t, filepath.Join(stage2, "corrald"), home, env,
-		"install", "--upgrade", "--stage", stage2, "--op", "op2", "--gateway", "gw.rbf", "--by", "alice")
+		"install", "--upgrade", "--stage", stage2, "--op", "2465a128ca302ed5", "--gateway", "gw.rbf", "--by", "alice")
 	if code != 0 {
 		t.Fatalf("upgrade v2: %s", out)
 	}
@@ -1984,14 +1995,14 @@ func TestIntegrationUninstallMissingInstallJSONNonLastMachineReturnsPartial(t *t
 		}
 	})
 
-	stageA := stageBinary(t, sharedHome, midA, "opA", bins.v1)
+	stageA := stageBinary(t, sharedHome, midA, "6a6a6a6a6a6a0001", bins.v1)
 	if out, code := runCLI(t, filepath.Join(stageA, "corrald"), sharedHome, envA,
-		"install", "--stage", stageA, "--op", "opA", "--gateway", "gw.r6", "--by", "alice"); code != 0 {
+		"install", "--stage", stageA, "--op", "6a6a6a6a6a6a0001", "--gateway", "gw.r6", "--by", "alice"); code != 0 {
 		t.Fatalf("install A: %s", out)
 	}
-	stageB := stageBinary(t, sharedHome, midB, "opB", bins.v1)
+	stageB := stageBinary(t, sharedHome, midB, "6b6b6b6b6b6b0001", bins.v1)
 	if out, code := runCLI(t, filepath.Join(stageB, "corrald"), sharedHome, envB,
-		"install", "--stage", stageB, "--op", "opB", "--gateway", "gw.r6", "--by", "alice"); code != 0 {
+		"install", "--stage", stageB, "--op", "6b6b6b6b6b6b0001", "--gateway", "gw.r6", "--by", "alice"); code != 0 {
 		t.Fatalf("install B: %s", out)
 	}
 	outB, code := runCLI(t, installedBin, sharedHome, envB, "serve", "--gateway", "gw.r6")
@@ -2045,9 +2056,9 @@ func TestIntegrationNFSMultiMachineHandoffDoesNotDowngradeSharedSymlink(t *testi
 	})
 
 	// 1. Machine A installs v1 (100) and starts serving.
-	stageA1 := stageBinary(t, sharedHome, midA, "opA1", bins.v1)
+	stageA1 := stageBinary(t, sharedHome, midA, "b0d234f0bafbaf76", bins.v1)
 	if out, code := runCLI(t, filepath.Join(stageA1, "corrald"), sharedHome, envA,
-		"install", "--stage", stageA1, "--op", "opA1", "--gateway", "gw.nfs300", "--by", "alice"); code != 0 {
+		"install", "--stage", stageA1, "--op", "b0d234f0bafbaf76", "--gateway", "gw.nfs300", "--by", "alice"); code != 0 {
 		t.Fatalf("install A v1: %s", out)
 	}
 	outA, code := runCLI(t, installedBin, sharedHome, envA, "serve", "--gateway", "gw.nfs300")
@@ -2057,9 +2068,9 @@ func TestIntegrationNFSMultiMachineHandoffDoesNotDowngradeSharedSymlink(t *testi
 	sockA := parseKV(outA)["socket"]
 
 	// 2. Machine B installs v3 (300) -> shared symlink & README advance to 300.
-	stageB3 := stageBinary(t, sharedHome, midB, "opB3", bins.v3)
+	stageB3 := stageBinary(t, sharedHome, midB, "df4aef7677f93fbf", bins.v3)
 	if out, code := runCLI(t, filepath.Join(stageB3, "corrald"), sharedHome, envB,
-		"install", "--stage", stageB3, "--op", "opB3", "--gateway", "gw.nfs300", "--by", "bob"); code != 0 {
+		"install", "--stage", stageB3, "--op", "df4aef7677f93fbf", "--gateway", "gw.nfs300", "--by", "bob"); code != 0 {
 		t.Fatalf("install B v3: %s", out)
 	}
 	linkBefore, err := os.Readlink(installedBin)
@@ -2068,9 +2079,9 @@ func TestIntegrationNFSMultiMachineHandoffDoesNotDowngradeSharedSymlink(t *testi
 	}
 
 	// 3. Machine A stages v2 (200) and handoffs 100 -> 200.
-	stageA2 := stageBinary(t, sharedHome, midA, "opA2", bins.v2)
+	stageA2 := stageBinary(t, sharedHome, midA, "df08f016dd05161d", bins.v2)
 	out, code := runCLI(t, filepath.Join(stageA2, "corrald"), sharedHome, envA,
-		"install", "--upgrade", "--stage", stageA2, "--op", "opA2", "--gateway", "gw.nfs300", "--by", "alice")
+		"install", "--upgrade", "--stage", stageA2, "--op", "df08f016dd05161d", "--gateway", "gw.nfs300", "--by", "alice")
 	if code != 0 {
 		t.Fatalf("upgrade A v2: %s", out)
 	}
@@ -2141,9 +2152,9 @@ func TestIntegrationHandoffLocksSurviveParentSIGKILLBeforeReady(t *testing.T) {
 		"CORRALD_TEST_CUTOVER_GATE=" + gateFile,
 	}
 
-	stage1 := stageBinary(t, home, mid, "op1", bins.v1)
+	stage1 := stageBinary(t, home, mid, "7d3c6b8d51ac8ec7", bins.v1)
 	if out, code := runCLI(t, filepath.Join(stage1, "corrald"), home, envClean,
-		"install", "--stage", stage1, "--op", "op1", "--gateway", "gw.kill", "--by", "alice"); code != 0 {
+		"install", "--stage", stage1, "--op", "7d3c6b8d51ac8ec7", "--gateway", "gw.kill", "--by", "alice"); code != 0 {
 		t.Fatalf("install v1: %s", out)
 	}
 	installedBin := filepath.Join(home, ".local", "lib", "corral", "corrald")
@@ -2168,9 +2179,9 @@ func TestIntegrationHandoffLocksSurviveParentSIGKILLBeforeReady(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	stage2 := stageBinary(t, home, mid, "op2", bins.v2)
+	stage2 := stageBinary(t, home, mid, "2465a128ca302ed5", bins.v2)
 	out, code = runCLI(t, filepath.Join(stage2, "corrald"), home, envClean,
-		"install", "--upgrade", "--stage", stage2, "--op", "op2", "--gateway", "gw.kill", "--by", "alice")
+		"install", "--upgrade", "--stage", stage2, "--op", "2465a128ca302ed5", "--gateway", "gw.kill", "--by", "alice")
 	if code != 0 {
 		t.Fatalf("upgrade v2: %s", out)
 	}
@@ -2277,9 +2288,9 @@ func TestIntegrationRollbackClosesClientsEvenWhenLogBlocks(t *testing.T) {
 		"CORRALD_TEST_BLOCK_LOG_GATE=" + logGate,
 	}
 
-	stage1 := stageBinary(t, home, mid, "op1", bins.v1)
+	stage1 := stageBinary(t, home, mid, "7d3c6b8d51ac8ec7", bins.v1)
 	if out, code := runCLI(t, filepath.Join(stage1, "corrald"), home, envClean,
-		"install", "--stage", stage1, "--op", "op1", "--gateway", "gw.rbblk", "--by", "alice"); code != 0 {
+		"install", "--stage", stage1, "--op", "7d3c6b8d51ac8ec7", "--gateway", "gw.rbblk", "--by", "alice"); code != 0 {
 		t.Fatalf("install v1: %s", out)
 	}
 	installedBin := filepath.Join(home, ".local", "lib", "corral", "corrald")
@@ -2379,9 +2390,9 @@ func TestIntegrationDanglingOrInvalidNewerSymlinkIsReplaced(t *testing.T) {
 	if err := AtomicSymlink("corrald-0.3.0-300/corrald", installedBin); err != nil {
 		t.Fatal(err)
 	}
-	stage1 := stageBinary(t, home, mid, "op1", bins.v1)
+	stage1 := stageBinary(t, home, mid, "7d3c6b8d51ac8ec7", bins.v1)
 	if out, code := runCLI(t, filepath.Join(stage1, "corrald"), home, env,
-		"install", "--stage", stage1, "--op", "op1", "--gateway", "gw.dang", "--by", "alice"); code != 0 {
+		"install", "--stage", stage1, "--op", "7d3c6b8d51ac8ec7", "--gateway", "gw.dang", "--by", "alice"); code != 0 {
 		t.Fatalf("install v1 over dangling 300 symlink: %s", out)
 	}
 	link1, err := os.Readlink(installedBin)
@@ -2401,9 +2412,9 @@ func TestIntegrationDanglingOrInvalidNewerSymlinkIsReplaced(t *testing.T) {
 	}
 	sock := parseKV(out)["socket"]
 
-	stage2 := stageBinary(t, home, mid, "op2", bins.v2)
+	stage2 := stageBinary(t, home, mid, "2465a128ca302ed5", bins.v2)
 	out, code = runCLI(t, filepath.Join(stage2, "corrald"), home, env,
-		"install", "--upgrade", "--stage", stage2, "--op", "op2", "--gateway", "gw.dang", "--by", "alice")
+		"install", "--upgrade", "--stage", stage2, "--op", "2465a128ca302ed5", "--gateway", "gw.dang", "--by", "alice")
 	if code != 0 {
 		t.Fatalf("upgrade v2: %s", out)
 	}
@@ -2467,9 +2478,9 @@ func TestIntegrationInstallRetryAndHandoffRepairMissingOrStaleReadme(t *testing.
 	if err := os.MkdirAll(filepath.Join(readmePath, "blocker"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	stageA1 := stageBinary(t, home, midA, "opA1", bins.v1)
+	stageA1 := stageBinary(t, home, midA, "b0d234f0bafbaf76", bins.v1)
 	out, code := runCLI(t, filepath.Join(stageA1, "corrald"), home, envA,
-		"install", "--stage", stageA1, "--op", "opA1", "--gateway", "gw.rm", "--by", "alice")
+		"install", "--stage", stageA1, "--op", "b0d234f0bafbaf76", "--gateway", "gw.rm", "--by", "alice")
 	if code == 0 || parseKV(out)["error"] != "readme_failed" {
 		t.Fatalf("expected readme_failed on blocked README.txt, got code=%d:\n%s", code, out)
 	}
@@ -2482,9 +2493,9 @@ func TestIntegrationInstallRetryAndHandoffRepairMissingOrStaleReadme(t *testing.
 	if err := os.RemoveAll(readmePath); err != nil {
 		t.Fatal(err)
 	}
-	stageA1Retry := stageBinary(t, home, midA, "opA1r", bins.v1)
+	stageA1Retry := stageBinary(t, home, midA, "4841680c6577b03d", bins.v1)
 	if out, code := runCLI(t, filepath.Join(stageA1Retry, "corrald"), home, envA,
-		"install", "--stage", stageA1Retry, "--op", "opA1r", "--gateway", "gw.rm", "--by", "alice"); code != 0 {
+		"install", "--stage", stageA1Retry, "--op", "4841680c6577b03d", "--gateway", "gw.rm", "--by", "alice"); code != 0 {
 		t.Fatalf("retry install v1 failed: %s", out)
 	}
 	rm1, err := os.ReadFile(readmePath)
@@ -2500,9 +2511,9 @@ func TestIntegrationInstallRetryAndHandoffRepairMissingOrStaleReadme(t *testing.
 	}
 	sockA := parseKV(outA)["socket"]
 
-	stageB3 := stageBinary(t, home, midB, "opB3", bins.v3)
+	stageB3 := stageBinary(t, home, midB, "df4aef7677f93fbf", bins.v3)
 	if out, code := runCLI(t, filepath.Join(stageB3, "corrald"), home, envB,
-		"install", "--stage", stageB3, "--op", "opB3", "--gateway", "gw.rm", "--by", "bob"); code != 0 {
+		"install", "--stage", stageB3, "--op", "df4aef7677f93fbf", "--gateway", "gw.rm", "--by", "bob"); code != 0 {
 		t.Fatalf("install B v3: %s", out)
 	}
 
@@ -2511,9 +2522,9 @@ func TestIntegrationInstallRetryAndHandoffRepairMissingOrStaleReadme(t *testing.
 		t.Fatal(err)
 	}
 
-	stageA2 := stageBinary(t, home, midA, "opA2", bins.v2)
+	stageA2 := stageBinary(t, home, midA, "df08f016dd05161d", bins.v2)
 	out, code = runCLI(t, filepath.Join(stageA2, "corrald"), home, envA,
-		"install", "--upgrade", "--stage", stageA2, "--op", "opA2", "--gateway", "gw.rm", "--by", "alice")
+		"install", "--upgrade", "--stage", stageA2, "--op", "df08f016dd05161d", "--gateway", "gw.rm", "--by", "alice")
 	if code != 0 {
 		t.Fatalf("upgrade A v2: %s", out)
 	}

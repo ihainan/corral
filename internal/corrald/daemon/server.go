@@ -188,6 +188,13 @@ type Server struct {
 	acceptInCall  bool
 	acceptStopped bool
 
+	// clientGateMu serializes daemon.hello registration against conditional
+	// daemon.shutdown (OnlyIfSoleGateway) so a newly arriving gateway can never
+	// race past an exclusivity check into a shutting-down daemon.
+	// Lock order: clientGateMu -> connMu -> c.mu / clients.mu.
+	clientGateMu sync.Mutex
+	shuttingDown bool
+
 	connMu      sync.Mutex
 	conns       map[*Conn]struct{}
 	idleTimer   *time.Timer
@@ -458,7 +465,12 @@ func (s *Server) Serve(parentCtx context.Context) error {
 	s.wg.Wait()
 
 	if !s.HandedOff() {
-		_ = os.Remove(s.layout.SocketPath)
+		// Fix13 Item #5: Remove socket ONLY at layout.SocketPath and ONLY if
+		// Lstat confirms it is a Unix socket.
+		_ = removeOwnedSocket(s.layout.SocketPath)
+		if s.layout.SocketUsesTmpDir {
+			_ = os.Remove(s.layout.SocketDir)
+		}
 		_ = os.Remove(s.layout.MetaJSON)
 		s.log.Info("corrald stopped", "pid", os.Getpid())
 	} else {
@@ -1105,12 +1117,18 @@ func (s *Server) handleHello(_ context.Context, c *Conn, raw json.RawMessage) (a
 		}
 	}
 
+	s.clientGateMu.Lock()
+	if s.shuttingDown {
+		s.clientGateMu.Unlock()
+		return nil, &proto.RPCError{Code: proto.ErrShuttingDown, Message: "daemon is shutting down"}
+	}
 	c.mu.Lock()
 	c.gateway = p.Gateway
 	c.user = p.Client.CorralUser
 	c.mu.Unlock()
 
 	clients, err := s.clients.Touch(p.Gateway, p.Client.CorralUser, p.Client.HostID)
+	s.clientGateMu.Unlock()
 	if err != nil {
 		s.log.Warn("persist client registry failed", "err", err)
 	}
@@ -1128,6 +1146,7 @@ func (s *Server) handleHello(_ context.Context, c *Conn, raw json.RawMessage) (a
 		Manifest:  proto.DefaultManifest(),
 		Clients:   clients,
 		State:     s.currentState(),
+		Features:  proto.DefaultFeatures(),
 	}, nil
 }
 
@@ -1195,12 +1214,47 @@ func (s *Server) handleHealth(ctx context.Context, _ *Conn, _ json.RawMessage) (
 	}, nil
 }
 
-func (s *Server) handleShutdown(_ context.Context, _ *Conn, raw json.RawMessage) (any, *proto.RPCError) {
+func (s *Server) handleShutdown(_ context.Context, caller *Conn, raw json.RawMessage) (any, *proto.RPCError) {
 	var p proto.ShutdownParams
 	if len(raw) > 0 {
-		_ = json.Unmarshal(raw, &p)
+		if err := json.Unmarshal(raw, &p); err != nil {
+			return nil, &proto.RPCError{Code: proto.ErrInvalidParams, Message: err.Error()}
+		}
 	}
-	s.log.Info("shutdown requested via rpc", "reason", p.Reason)
+
+	s.clientGateMu.Lock()
+	if soleGW := p.OnlyIfSoleGateway; soleGW != "" {
+		// Under clientGateMu, atomically verify that no other connection is
+		// currently active (including a freshly re-established connection from
+		// the same gateway after admin re-allowed!) AND no other gateway is
+		// registered in clients.json.
+		s.connMu.Lock()
+		for other := range s.conns {
+			if other == caller {
+				continue
+			}
+			other.mu.Lock()
+			ogw := other.gateway
+			other.mu.Unlock()
+			s.connMu.Unlock()
+			s.clientGateMu.Unlock()
+			s.log.Info("conditional shutdown refused: another connection active", "requested_gateway", soleGW, "other_gateway", ogw)
+			return proto.ShutdownResult{OK: false, OtherGateways: true}, nil
+		}
+		s.connMu.Unlock()
+
+		for _, rc := range s.clients.List() {
+			if rc.Gateway != soleGW {
+				s.clientGateMu.Unlock()
+				s.log.Info("conditional shutdown refused: other gateway registered", "requested_gateway", soleGW, "other_gateway", rc.Gateway)
+				return proto.ShutdownResult{OK: false, OtherGateways: true}, nil
+			}
+		}
+	}
+	s.shuttingDown = true
+	s.clientGateMu.Unlock()
+
+	s.log.Info("shutdown requested via rpc", "reason", p.Reason, "only_if_sole_gateway", p.OnlyIfSoleGateway)
 	go func() {
 		time.Sleep(15 * time.Millisecond)
 		s.RequestShutdown()
@@ -1216,7 +1270,9 @@ func (s *Server) handleForget(_ context.Context, _ *Conn, raw json.RawMessage) (
 	if p.Gateway == "" && p.CorralUser == "" {
 		return nil, &proto.RPCError{Code: proto.ErrInvalidParams, Message: "gateway or corral_user is required"}
 	}
+	s.clientGateMu.Lock()
 	remaining, err := s.clients.Forget(p.Gateway, p.CorralUser, p.HostID)
+	s.clientGateMu.Unlock()
 	if err != nil {
 		return nil, &proto.RPCError{Code: proto.ErrInternal, Message: err.Error()}
 	}

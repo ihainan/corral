@@ -62,7 +62,7 @@ func writeCorraldUnknownResult(w http.ResponseWriter) {
 	writeError(w, http.StatusConflict, "corrald_unknown_result", "write operation result unknown; do not retry blindly")
 }
 
-func gatedSleep(ctx context.Context, d time.Duration) bool {
+var gatedSleep = func(ctx context.Context, d time.Duration) bool {
 	if d <= 0 {
 		return ctx.Err() == nil
 	}
@@ -145,6 +145,9 @@ func (s *Server) runGated(ctx context.Context, sess *term.Session, req gatedReq)
 	capName := gatedCapName(req.Gate)
 	cl, ok := s.CorraldClient(sess.OwnerID, sess.HostID, capName)
 	if !ok || cl == nil || cl.Closed() {
+		if s.corrald != nil {
+			s.corrald.MaybeRetryPendingCleanup(sess.OwnerID, sess.HostID, "", sess.Client())
+		}
 		return sshFallback()
 	}
 

@@ -11,6 +11,7 @@ import { installLeaveGuard, reloadPage } from './leaveGuard'
 import { freezePrefs, getPrefs, resetPrefsSession, sendPendingPrefs, syncPrefsFromServer } from './prefs'
 import { match, navigate, usePath } from './router'
 import { BrandMark, ToastProvider, useToast } from './components/ui'
+import { CorraldUpdateNotices } from './components/CorraldUpdateNotices'
 import { AppLink } from './components/AppLink'
 import { isPlainPrimaryClick } from './linkPolicy'
 import { disablePush, syncPush } from './push'
@@ -179,6 +180,7 @@ export function App() {
     <SessionCtx.Provider value={{ boot, me, setMe, patchMe }}>
       <ToastProvider>
         <PushSync userId={me?.must_change_password ? undefined : me?.id} />
+        <CorraldUpdateNotices userId={me?.must_change_password ? undefined : me?.id} />
         <UpdateNotice loaded={loadedVersion.current} />
         {me && !me.must_change_password && <SettingsModalHost />}
         {me && !me.must_change_password && <PaletteHost />}

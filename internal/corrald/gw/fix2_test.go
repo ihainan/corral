@@ -65,6 +65,20 @@ func TestScopeConfirmCannotOverwriteConcurrentRemove(t *testing.T) {
 	grownHash, _ := proto.ManifestSHA256(grownManifest)
 	baseHash, _ := proto.ManifestSHA256(baseManifest)
 
+	c1, c2 := net.Pipe()
+	defer c1.Close()
+	defer c2.Close()
+	cl := NewClient(c1, nil)
+	defer cl.Close()
+
+	mgr := NewManager(ManagerConfig{
+		Store:     st,
+		Dist:      &Dist{Version: "0.3.1", Release: 1000, Manifest: baseManifest, ManifestHash: baseHash},
+		GatewayID: "gw-1",
+		SSH:       &stubSSHProvider{bindings: map[int64][2]string{h.ID: {"alice", "fp-1"}}},
+	})
+	defer mgr.Close()
+
 	// Host is ALREADY in removing state with an active remove op (simulating concurrent StartRemove).
 	if err := st.CreateCorraldOp(ctx, &store.CorraldOp{
 		ID:        "rem-op-1",
@@ -89,20 +103,6 @@ func TestScopeConfirmCannotOverwriteConcurrentRemove(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-
-	c1, c2 := net.Pipe()
-	defer c1.Close()
-	defer c2.Close()
-	cl := NewClient(c1, nil)
-	defer cl.Close()
-
-	mgr := NewManager(ManagerConfig{
-		Store:     st,
-		Dist:      &Dist{Version: "0.3.1", Release: 1000, Manifest: baseManifest, ManifestHash: baseHash},
-		GatewayID: "gw-1",
-		SSH:       &stubSSHProvider{bindings: map[int64][2]string{h.ID: {"alice", "fp-1"}}},
-	})
-	defer mgr.Close()
 
 	key := accountKey{Fingerprint: "fp-1", Username: "alice"}
 	sc := newSharedConn(key)

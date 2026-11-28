@@ -17,6 +17,7 @@ import (
 	"golang.org/x/crypto/ssh"
 
 	"github.com/ihainan/corral/internal/config"
+	"github.com/ihainan/corral/internal/corrald/daemon"
 	"github.com/ihainan/corral/internal/corrald/gw"
 	"github.com/ihainan/corral/internal/corrald/proto"
 	"github.com/ihainan/corral/internal/store"
@@ -105,6 +106,18 @@ func startCorraldSSH(t *testing.T, extraEnv ...string) (*testutil.SSHServer, str
 			c := exec.Command(bin, "stop")
 			c.Env = append(os.Environ(), "HOME="+home)
 			_ = c.Run()
+		}
+		// Clean up only this test's own /tmp/corrald-<uid>-<hash> fallback socket
+		// directory (if one was created for home). Never touches other runs' dirs.
+		var mid string
+		for _, kv := range extraEnv {
+			if v, ok := strings.CutPrefix(kv, "CORRALD_TEST_MACHINE_ID="); ok {
+				mid = v
+			}
+		}
+		uid := uint32(os.Getuid())
+		if layout, err := daemon.ResolveLayout(daemon.PathOptions{Home: home, UID: &uid, MachineID: mid}); err == nil && layout.SocketUsesTmpDir {
+			_ = os.RemoveAll(layout.SocketDir)
 		}
 	})
 	return srv, home
@@ -342,11 +355,18 @@ func TestCorraldInstallFailures(t *testing.T) {
 			if errObj == nil || errObj["code"] != tc.wantCode {
 				t.Fatalf("error = %v, want code %q", errObj, tc.wantCode)
 			}
-			// Ensure no leftover stage directories remain on checksum failure.
+			// Fix12 Items #2 & #6: On a fresh host with no verified binary, a
+			// checksum_mismatch MUST NOT execute the unverified staged binary
+			// or run shell rm; it leaves the stage for the next verified run
+			// and reports it in error.left.
 			if tc.name == "checksum_mismatch" {
 				matches, _ := filepath.Glob(filepath.Join(home, ".local", "state", "corral", "corrald", "*", "stage-*"))
-				if len(matches) > 0 {
-					t.Fatalf("expected stage directory to be deleted, found %v", matches)
+				if len(matches) != 1 {
+					t.Fatalf("expected unverified stage directory left for next verified run, found %v", matches)
+				}
+				left, _ := errObj["left"].([]any)
+				if len(left) == 0 {
+					t.Fatalf("expected uncleaned stage directory reported in error.left on fresh checksum_mismatch, got %v", errObj)
 				}
 			}
 		})

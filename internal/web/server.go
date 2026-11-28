@@ -118,10 +118,11 @@ type Server struct {
 	stopMu  sync.Mutex
 	stopCtx context.Context // the stop's deadline, once it began (see BeginShutdown)
 
-	restores restorer // sessions open before the restart, being opened again (restore.go)
-	perf     *perf.Tracker
-	corrald  *gw.Manager
-	events   *eventHub
+	restores  restorer // sessions open before the restart, being opened again (restore.go)
+	perf      *perf.Tracker
+	perfDaily *corraldPerfDaily
+	corrald   *gw.Manager
+	events    *eventHub
 }
 
 type liveSocket struct {
@@ -208,6 +209,7 @@ func New(d Deps) *Server {
 			}(mgr, userID)
 		}
 	}
+	s.perfDaily = newCorraldPerfDaily(s.store, s.log, 0, nil)
 	s.initCorrald()
 	if s.cfg.DataDir != "" {
 		if err := s.startRecordings(); err != nil {
@@ -373,6 +375,10 @@ func (s *Server) registerRoutes() {
 	s.handle("POST /api/hosts/{id}/code/stop", SignedIn, s.apiCodeStop)
 
 	s.handle("GET /api/corrald/readme", SignedIn, s.apiCorraldReadme)
+	s.handle("GET /api/corrald/changelog", SignedIn, s.apiCorraldChangelog)
+	s.handle("POST /api/corrald/changelog/seen", SignedIn, s.apiCorraldChangelogSeen)
+	s.handle("GET /api/corrald/notices", SignedIn, s.apiCorraldNotices)
+	s.handle("POST /api/corrald/notices/seen", SignedIn, s.apiCorraldNoticesSeen)
 	s.handle("GET /api/hosts/{id}/corrald", SignedIn, s.apiGetHostCorrald)
 	s.handle("POST /api/hosts/{id}/corrald/install", SignedIn, s.apiInstallHostCorrald)
 	s.handle("POST /api/hosts/{id}/corrald/cancel", SignedIn, s.apiCancelHostCorrald)
@@ -397,6 +403,8 @@ func (s *Server) registerRoutes() {
 	s.handle("POST /api/admin/invites", AdminOnly, s.apiAdminCreateInvite)
 	s.handle("GET /api/admin/audit", AdminOnly, s.apiAdminAudit)
 	s.handle("GET /api/admin/perf", AdminOnly, s.apiAdminPerf)
+	s.handle("GET /api/admin/corrald", AdminOnly, s.apiAdminGetCorrald)
+	s.handle("PUT /api/admin/corrald", AdminOnly, s.apiAdminPutCorrald)
 
 	s.mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("ok\n")) })
 	s.mux.Handle("/api/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

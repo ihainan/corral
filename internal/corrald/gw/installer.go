@@ -15,6 +15,7 @@ import (
 
 	"golang.org/x/crypto/ssh"
 
+	"github.com/ihainan/corral/internal/corrald/daemon"
 	"github.com/ihainan/corral/internal/corrald/proto"
 	"github.com/ihainan/corral/internal/sshx"
 )
@@ -113,9 +114,27 @@ type HostFailedRecord struct {
 	Releases []HostFailedEntry `json:"releases"`
 }
 
-// HostClientsFile mirrors daemon.clientsFile.
+// HostClientsFile parses clients.json written by daemon.ClientRegistry.
+// Current daemons persist a JSON array ([]proto.ClientInfo); wrapped objects
+// ({"clients":[...]}) are also accepted for backward compatibility.
 type HostClientsFile struct {
 	Clients []proto.ClientInfo `json:"clients"`
+}
+
+func (f *HostClientsFile) UnmarshalJSON(data []byte) error {
+	var list []proto.ClientInfo
+	if err := json.Unmarshal(data, &list); err == nil {
+		f.Clients = list
+		return nil
+	}
+	var wrapped struct {
+		Clients []proto.ClientInfo `json:"clients"`
+	}
+	if err := json.Unmarshal(data, &wrapped); err != nil {
+		return err
+	}
+	f.Clients = wrapped.Clients
+	return nil
 }
 
 func (f *HostFailedRecord) ReleaseList() []int64 {
@@ -158,9 +177,11 @@ func ProbeHost(ctx context.Context, c *ssh.Client) (*HostProbe, error) {
 			sf := ParseKeyValues(sres.Out)
 			p.HasTombstone = sf["tombstone"] == "1"
 			p.HasInstall = sf["has_install"] == "1"
+			p.HasClients = sf["has_clients"] == "1"
+			p.HasStateFiles = sf["has_state_files"] == "1"
 			sc := bufio.NewScanner(strings.NewReader(string(sres.Out)))
 			for sc.Scan() {
-				if v, ok := strings.CutPrefix(sc.Text(), "stage_dir="); ok && v != "" {
+				if v, ok := strings.CutPrefix(sc.Text(), "stage_dir="); ok && daemon.IsOwnedStageDirName(v) {
 					p.Stages = append(p.Stages, p.StateDir+"/"+v)
 				}
 			}
@@ -269,6 +290,16 @@ func RecordFailedOnHost(ctx context.Context, c *ssh.Client, home string, expecte
 
 // ValidateProbe checks whether the probed host satisfies corrald requirements.
 func ValidateProbe(probe *HostProbe, dist *Dist) (*ArchBinary, *OpFailure) {
+	return validateProbeWithOptions(probe, dist, false)
+}
+
+// ValidateProbeForRecovery validates OS/arch/writability/space when recovering
+// from a leftover removing tombstone whose host binary was already deleted.
+func ValidateProbeForRecovery(probe *HostProbe, dist *Dist) (*ArchBinary, *OpFailure) {
+	return validateProbeWithOptions(probe, dist, true)
+}
+
+func validateProbeWithOptions(probe *HostProbe, dist *Dist, allowTombstone bool) (*ArchBinary, *OpFailure) {
 	if probe == nil {
 		return nil, &OpFailure{Code: "disconnected", Detail: "host probe unavailable"}
 	}
@@ -294,7 +325,7 @@ func ValidateProbe(probe *HostProbe, dist *Dist) (*ArchBinary, *OpFailure) {
 			Arch: probe.Machine,
 		}
 	}
-	if probe.HasTombstone {
+	if probe.HasTombstone && !allowTombstone {
 		return nil, &OpFailure{
 			Code:      proto.ErrRemoving,
 			MachineID: probe.MachineID,
@@ -395,14 +426,24 @@ func StageAndInstallWithRetry(
 ) (installedBin string, fail *OpFailure) {
 	stageDir := probe.StateDir + "/stage-" + opID
 	stageBin := stageDir + "/corrald"
+	stageVerified := false
 
 	cleanupStage := func() []LeftItem {
+		// Fix12 Item #2: NEVER execute stageBin unless its SHA-256 readback has
+		// already been verified against bin.SHA256. Always prefer the already-
+		// installed verified host binary; if none is available, leave the stage
+		// for the next verified run and report it as a leftover.
+		fallbackBin := ""
+		if stageVerified {
+			fallbackBin = stageBin
+		}
 		cctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		r, err := runSSH(cctx, c, RmStageCommand(stageDir), 4096, sshx.ExecOptions{})
-		if err != nil || ParseKeyValues(r.Out)["result"] != "ok" {
-			reason := "cleanup failed"
-			if err != nil {
+		r, err := runSSH(cctx, c, CleanStageCommand(probe.CurrentBin, fallbackBin, stageDir, opID), 4096, sshx.ExecOptions{})
+		kv := ParseKeyValues(r.Out)
+		if err != nil || kv["result"] != "ok" {
+			reason := firstNonEmpty(kv["detail"], kv["error"], "cleanup failed")
+			if err != nil && kv["error"] == "" {
 				reason = err.Error()
 			}
 			return []LeftItem{{Path: stageDir, Reason: reason}}
@@ -495,6 +536,7 @@ func StageAndInstallWithRetry(
 			Left:      left,
 		}
 	}
+	stageVerified = true
 
 	if cf := checkCancel(); cf != nil {
 		return "", cf
@@ -627,27 +669,232 @@ func RunServeWithRetry(ctx context.Context, c *ssh.Client, binPath, gatewayID, m
 	}
 }
 
-// RunUninstall writes the removing tombstone and executes corrald uninstall.
-func RunUninstall(ctx context.Context, c *ssh.Client, probe *HostProbe, opID string, onStep func(step string)) UninstallOutcome {
-	return RunUninstallWithRetry(ctx, c, probe, opID, DefaultBusyRetryPolicy, onStep)
+// RunUninstallSoleGatewayWithRetry runs host-side atomic sole-gateway uninstall
+// (--only-if-sole-gateway) without writing a premature tombstone before the
+// host confirms exclusivity under .corrald-shared.lock -> op.lock -> corrald.lock.
+//
+// If the host binary was already deleted during an earlier partial uninstall
+// leaving a removing tombstone behind (error=binary_missing_with_tombstone) and
+// dist is available, it uploads the matching Go corrald binary to a private
+// temporary directory and runs the full locked Go uninstall path instead of an
+// unlocked shell fallback.
+//
+// Possible Result values:
+//   - "removed": confirmed sole gateway and files removed
+//   - "other_gateways": confirmed another gateway is connected/registered (files preserved)
+//   - "unsupported": host binary/daemon does not support conditional shutdown/uninstall (files preserved)
+//   - "partial" / "stop_failed" / "pending": transient or incomplete failure (caller keeps remove_pending)
+func RunUninstallSoleGatewayWithRetry(ctx context.Context, c *ssh.Client, dist *Dist, probe *HostProbe, opID, soleGateway string, busyRetry BusyRetryPolicy, onStep func(step string)) UninstallOutcome {
+	if soleGateway == "" {
+		return UninstallOutcome{Result: "pending", Detail: "gateway_id is empty"}
+	}
+	if onStep != nil {
+		onStep("remove")
+	}
+	iv, maxRetries := busyRetry.effective()
+	var res sshx.ExecResult
+	var err error
+	var f map[string]string
+	for attempt := 0; ; attempt++ {
+		res, err = runSSH(ctx, c, UninstallCommandSoleGateway(probe.LibDir, probe.StateDir, probe.SocketPath, opID, soleGateway), 64<<10, sshx.ExecOptions{})
+		if err != nil && !res.Ended {
+			return UninstallOutcome{Result: "pending", Detail: err.Error()}
+		}
+		f = ParseKeyValues(res.Out)
+		if f["error"] == proto.ErrBusy && attempt < maxRetries {
+			if waitBusyRetry(ctx, iv, nil) {
+				continue
+			}
+			return UninstallOutcome{Result: "pending", Detail: firstNonEmpty(f["detail"], "busy")}
+		}
+		break
+	}
+
+	if f["error"] == "binary_missing_with_tombstone" || f["error"] == "binary_missing" {
+		if dist == nil {
+			return UninstallOutcome{Result: "pending", Detail: firstNonEmpty(f["detail"], f["error"])}
+		}
+		return runLibDirReinstallUninstall(ctx, c, dist, probe, opID, soleGateway, f["error"] == "binary_missing_with_tombstone", busyRetry, onStep)
+	}
+
+	if onStep != nil {
+		onStep("verify")
+	}
+	return parseSoleGatewayUninstallOutcome(res, err, f)
 }
 
-// RunUninstallWithRetry writes the removing tombstone and executes corrald
-// uninstall, automatically retrying on `busy`.
-func RunUninstallWithRetry(ctx context.Context, c *ssh.Client, probe *HostProbe, opID string, busyRetry BusyRetryPolicy, onStep func(step string)) UninstallOutcome {
+// runLibDirReinstallUninstall handles binaryless uninstall recovery for BOTH
+// sole-gateway removal (soleGateway != "") and explicit manual/delete/reconcile
+// removal (soleGateway == ""): reinstalls the gateway's own corrald binary into
+// LibDir through the normal stage-<op> upload + locked `install --for-uninstall-recovery`
+// path (creating LibDir and acquiring .corrald-shared.lock -> op.lock without
+// starting the daemon or writing install.json), then runs the normal locked
+// `corrald uninstall`.
+func runLibDirReinstallUninstall(ctx context.Context, c *ssh.Client, dist *Dist, probe *HostProbe, opID, soleGateway string, requireTombstone bool, busyRetry BusyRetryPolicy, onStep func(step string)) UninstallOutcome {
+	bin, vfail := ValidateProbeForRecovery(probe, dist)
+	if vfail != nil {
+		return UninstallOutcome{Result: "pending", Detail: firstNonEmpty(vfail.Detail, vfail.Code)}
+	}
+	if opID == "" {
+		opID = newHexID()
+	}
+	stageDir := probe.StateDir + "/stage-" + opID
+	stageBin := stageDir + "/corrald"
+
+	mkRes, mkErr := runSSH(ctx, c, MkStageForRecoveryCommand(probe.Home, probe.StateDir, stageDir, requireTombstone), 4096, sshx.ExecOptions{})
+	mkFields := ParseKeyValues(mkRes.Out)
+	if mkErr != nil || mkFields["result"] != "ok" {
+		return UninstallOutcome{Result: "pending", Detail: firstNonEmpty(mkFields["detail"], mkFields["error"], errStr(mkErr))}
+	}
+	stageVerified := false
+	cleanupStage := func() []LeftItem {
+		// Fix12 Item #2: Never execute an unverified staged binary.
+		fallbackBin := ""
+		if stageVerified {
+			fallbackBin = stageBin
+		}
+		cctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		r, err := runSSH(cctx, c, CleanStageCommand(probe.CurrentBin, fallbackBin, stageDir, opID), 4096, sshx.ExecOptions{})
+		kv := ParseKeyValues(r.Out)
+		if err != nil || kv["result"] != "ok" {
+			reason := firstNonEmpty(kv["detail"], kv["error"], "cleanup failed")
+			if err != nil && kv["error"] == "" {
+				reason = err.Error()
+			}
+			return []LeftItem{{Path: stageDir, Reason: reason}}
+		}
+		return nil
+	}
+
+	if err := sftpUploadBinarySecure(ctx, c, bin.Path, probe.Home, probe.UIDInt64(), probe.LibDir, stageDir, stageBin); err != nil {
+		left := cleanupStage()
+		return UninstallOutcome{Result: "pending", Detail: err.Error(), Left: left}
+	}
+	gotSHA, rerr := sftpReadbackSHA256(ctx, c, stageBin)
+	if rerr != nil || !strings.EqualFold(gotSHA, bin.SHA256) {
+		left := cleanupStage()
+		detail := "recovery binary checksum mismatch"
+		if rerr != nil {
+			detail = rerr.Error()
+		}
+		return UninstallOutcome{Result: "pending", Detail: detail, Left: left}
+	}
+	stageVerified = true
+
+	iv, maxRetries := busyRetry.effective()
+	var instRes sshx.ExecResult
+	var instErr error
+	var instF map[string]string
+	for attempt := 0; ; attempt++ {
+		instRes, instErr = runSSH(ctx, c, InstallForRecoveryCommand(stageBin, stageDir, opID, soleGateway), 16<<10, sshx.ExecOptions{})
+		if instErr != nil && !instRes.Ended {
+			cleanupStage()
+			return UninstallOutcome{Result: "pending", Detail: instErr.Error()}
+		}
+		instF = ParseKeyValues(instRes.Out)
+		if instF["error"] == proto.ErrBusy && attempt < maxRetries {
+			if waitBusyRetry(ctx, iv, nil) {
+				continue
+			}
+			cleanupStage()
+			return UninstallOutcome{Result: "pending", Detail: firstNonEmpty(instF["detail"], "busy")}
+		}
+		break
+	}
+	if instF["result"] == "other_gateways" {
+		return UninstallOutcome{Result: "other_gateways", Detail: instF["detail"]}
+	}
+	if instErr != nil || instF["result"] != "ok" {
+		cleanupStage()
+		return UninstallOutcome{Result: "pending", Detail: firstNonEmpty(instF["detail"], instF["error"], errStr(instErr))}
+	}
+
+	// LibDir now holds our corrald binary and .corrald-shared.lock; execute the
+	// normal locked `corrald uninstall` path.
+	cmdStr := UninstallCommand(probe.LibDir, probe.StateDir, probe.SocketPath, opID)
+	if soleGateway != "" {
+		cmdStr = UninstallCommandSoleGateway(probe.LibDir, probe.StateDir, probe.SocketPath, opID, soleGateway)
+	}
+	var res sshx.ExecResult
+	var err error
+	var f map[string]string
+	for attempt := 0; ; attempt++ {
+		res, err = runSSH(ctx, c, cmdStr, 64<<10, sshx.ExecOptions{})
+		if err != nil && !res.Ended {
+			return UninstallOutcome{Result: "pending", Detail: err.Error()}
+		}
+		f = ParseKeyValues(res.Out)
+		if f["error"] == proto.ErrBusy && attempt < maxRetries {
+			if waitBusyRetry(ctx, iv, nil) {
+				continue
+			}
+			return UninstallOutcome{Result: "pending", Detail: firstNonEmpty(f["detail"], "busy")}
+		}
+		break
+	}
+	if onStep != nil {
+		onStep("verify")
+	}
+	if soleGateway != "" {
+		return parseSoleGatewayUninstallOutcome(res, err, f)
+	}
+	return parseUninstallOutcome(res, err, f)
+}
+
+func parseUninstallOutcome(res sshx.ExecResult, err error, f map[string]string) UninstallOutcome {
+	switch {
+	case f["result"] == "removed":
+		return UninstallOutcome{Result: "removed", LastMachine: f["last_machine"] == "true"}
+	case f["error"] == "stop_failed":
+		pid, _ := strconv.Atoi(f["pid"])
+		return UninstallOutcome{Result: "stop_failed", PID: pid, Detail: f["detail"]}
+	case f["error"] == proto.ErrBusy:
+		return UninstallOutcome{Result: "pending", Detail: firstNonEmpty(f["detail"], "busy")}
+	case f["result"] == "partial":
+		return UninstallOutcome{Result: "partial", Left: ParseLeftLines(res.Out), LastMachine: f["last_machine"] == "true"}
+	default:
+		return UninstallOutcome{Result: "pending", Detail: firstNonEmpty(f["detail"], f["error"], errStr(err))}
+	}
+}
+
+func parseSoleGatewayUninstallOutcome(res sshx.ExecResult, err error, f map[string]string) UninstallOutcome {
+	switch {
+	case f["result"] == "removed":
+		return UninstallOutcome{Result: "removed", LastMachine: f["last_machine"] == "true"}
+	case f["result"] == "other_gateways":
+		return UninstallOutcome{Result: "other_gateways", Detail: f["detail"]}
+	case f["error"] == "unsupported_conditional_shutdown" || f["error"] == "invalid_args":
+		return UninstallOutcome{Result: "unsupported", Detail: firstNonEmpty(f["detail"], f["error"])}
+	case f["error"] == "stop_failed":
+		pid, _ := strconv.Atoi(f["pid"])
+		return UninstallOutcome{Result: "stop_failed", PID: pid, Detail: f["detail"]}
+	case f["result"] == "partial":
+		return UninstallOutcome{Result: "partial", Left: ParseLeftLines(res.Out), LastMachine: f["last_machine"] == "true"}
+	default:
+		detail := firstNonEmpty(f["detail"], f["error"], errStr(err))
+		return UninstallOutcome{Result: "pending", Detail: detail}
+	}
+}
+
+// RunUninstall executes locked corrald uninstall (reinstalling the gateway's
+// corrald into LibDir first if the host binary is missing).
+func RunUninstall(ctx context.Context, c *ssh.Client, dist *Dist, probe *HostProbe, opID string, onStep func(step string)) UninstallOutcome {
+	return RunUninstallWithRetry(ctx, c, dist, probe, opID, DefaultBusyRetryPolicy, onStep)
+}
+
+// RunUninstallWithRetry executes locked corrald uninstall, automatically
+// retrying on `busy` and routing binaryless hosts through the locked LibDir
+// recovery path instead of an unlocked shell fallback or tombstone truncation.
+func RunUninstallWithRetry(ctx context.Context, c *ssh.Client, dist *Dist, probe *HostProbe, opID string, busyRetry BusyRetryPolicy, onStep func(step string)) UninstallOutcome {
 	if onStep != nil {
 		onStep("mark")
-	}
-	if probe.StateDir != "" {
-		mres, merr := runSSH(ctx, c, WriteTombstoneCommand(probe.StateDir), 4096, sshx.ExecOptions{})
-		if merr != nil && !mres.Ended {
-			return UninstallOutcome{Result: "pending", Detail: merr.Error()}
-		}
 	}
 	if onStep != nil {
 		onStep("stop")
 	}
-	// uninstall performs stop + remove + post-check verification atomically on the host.
+	// corrald uninstall performs tombstone write + stop + remove + post-check
+	// atomically under .corrald-shared.lock -> op.lock -> corrald.lock.
 	if onStep != nil {
 		onStep("remove")
 	}
@@ -669,25 +916,16 @@ func RunUninstallWithRetry(ctx context.Context, c *ssh.Client, probe *HostProbe,
 		}
 		break
 	}
+	if f["error"] == "binary_missing" || f["error"] == "binary_missing_with_tombstone" {
+		if dist == nil {
+			return UninstallOutcome{Result: "pending", Detail: firstNonEmpty(f["detail"], f["error"])}
+		}
+		return runLibDirReinstallUninstall(ctx, c, dist, probe, opID, "", false, busyRetry, onStep)
+	}
 	if onStep != nil {
 		onStep("verify")
 	}
-	switch {
-	case f["result"] == "removed":
-		return UninstallOutcome{Result: "removed", LastMachine: f["last_machine"] == "true"}
-	case f["error"] == "stop_failed":
-		pid, _ := strconv.Atoi(f["pid"])
-		return UninstallOutcome{Result: "stop_failed", PID: pid, Detail: f["detail"]}
-	case f["error"] == proto.ErrBusy:
-		return UninstallOutcome{Result: "pending", Detail: firstNonEmpty(f["detail"], "busy")}
-	case f["result"] == "partial":
-		return UninstallOutcome{Result: "partial", Left: ParseLeftLines(res.Out), LastMachine: f["last_machine"] == "true"}
-	default:
-		if err != nil {
-			return UninstallOutcome{Result: "pending", Detail: err.Error()}
-		}
-		return UninstallOutcome{Result: "removed"}
-	}
+	return parseUninstallOutcome(res, err, f)
 }
 
 func classifySFTPErr(err error) string {

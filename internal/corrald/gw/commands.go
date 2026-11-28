@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/ihainan/corral/internal/corrald/daemon"
 	"github.com/ihainan/corral/internal/sshx"
 )
 
@@ -100,6 +101,10 @@ type HostProbe struct {
 	HasTombstone  bool
 	HasSymlink    bool
 	HasInstall    bool
+	HasClients    bool
+	HasStateFiles bool
+	HasLibFiles   bool
+	HasRunDir     bool
 	CurrentTarget string
 	Stages        []string
 	Versions      []string
@@ -116,6 +121,17 @@ type HostProbe struct {
 	OpsDir        string
 	TombstonePath string
 	SocketPath    string
+}
+
+// HasAnyOwnedFiles reports whether the host probe observed any corrald-owned
+// file, directory, lock, metadata, or stage directory on the host (Fix11 Item #6).
+func (p *HostProbe) HasAnyOwnedFiles() bool {
+	if p == nil {
+		return false
+	}
+	return p.HasSymlink || p.HasInstall || p.HasTombstone || p.HasClients ||
+		p.HasStateFiles || p.HasLibFiles || p.HasRunDir ||
+		len(p.Versions) > 0 || len(p.Stages) > 0
 }
 
 // UIDInt64 returns the parsed numeric UID or -1 if unavailable.
@@ -167,20 +183,39 @@ if [ -e "$L/corrald" ] || [ -L "$L/corrald" ]; then
   echo "current_target=$tgt"
 fi
 if [ -d "$L" ]; then
-  for d in "$L"/corrald-*; do
-    [ -d "$d" ] && echo "version_dir=$(basename "$d")"
+  if [ -e "$L/README.txt" ] || [ -L "$L/README.txt" ] || [ -e "$L/.corrald-shared.lock" ] || [ -L "$L/.corrald-shared.lock" ]; then
+    echo "has_lib_files=1"
+  fi
+  for f in "$L"/.corrald.tmp.* "$L"/.README.txt.tmp.*; do
+    if [ -e "$f" ] || [ -L "$f" ]; then
+      echo "lib_tmp=$(basename "$f")"
+    fi
   done
+  for d in "$L"/corrald-*; do
+    [ -d "$d" ] && [ ! -L "$d" ] && echo "version_dir=$(basename "$d")"
+  done
+fi
+if [ -e "$HOME/.local/state/corral/run" ]; then
+  echo "has_run_dir=1"
 fi
 echo "result=ok"
 `)
 }
 
 // ProbeStateCommand inspects the machine-id specific state directory once mid
-// has been resolved (checking tombstone, install.json, leftover stage-* dirs).
+// has been resolved (checking tombstone, install.json, clients.json, owned
+// state files, and leftover stage-* dirs).
 func ProbeStateCommand(stateDir string) string {
 	return shellScript(`if [ -e "$ST/removing" ]; then echo "tombstone=1"; fi
-if [ -f "$ST/install.json" ]; then echo "has_install=1"; fi
-if [ -d "$ST" ]; then
+if [ -f "$ST/install.json" ] && [ ! -L "$ST/install.json" ]; then echo "has_install=1"; fi
+if [ -e "$ST/clients.json" ] || [ -L "$ST/clients.json" ]; then echo "has_clients=1"; fi
+if [ -d "$ST" ] && [ ! -L "$ST" ]; then
+  for f in meta.json failed.json corrald.lock op.lock corrald.log corrald.log.1 corrald.sock ops; do
+    if [ -e "$ST/$f" ] || [ -L "$ST/$f" ]; then
+      echo "has_state_files=1"
+      break
+    fi
+  done
   for d in "$ST"/stage-*; do
     [ -e "$d" ] && echo "stage_dir=$(basename "$d")"
   done
@@ -203,6 +238,8 @@ func ParseProbe(out []byte) (*HostProbe, error) {
 		FreeKB:        -1,
 		HomeWritable:  f["home_writable"] == "1",
 		HasSymlink:    f["has_symlink"] == "1",
+		HasRunDir:     f["has_run_dir"] == "1",
+		HasLibFiles:   f["has_lib_files"] == "1",
 		CurrentTarget: strings.TrimSpace(f["current_target"]),
 	}
 	p.Arch = ArchMap[p.Machine]
@@ -210,11 +247,20 @@ func ParseProbe(out []byte) (*HostProbe, error) {
 		p.FreeKB = n
 	}
 
-	// Collect all version_dir lines.
+	// Collect only strictly validated corrald-<ver>-<rel> version directories
+	// (ignoring unrelated directories like corrald-backups) and validated
+	// corrald-owned LibDir temp files (.corrald.tmp.*, .README.txt.tmp.*).
 	sc := bufio.NewScanner(strings.NewReader(string(out)))
 	for sc.Scan() {
-		if v, ok := strings.CutPrefix(sc.Text(), "version_dir="); ok && v != "" {
-			p.Versions = append(p.Versions, v)
+		line := sc.Text()
+		if v, ok := strings.CutPrefix(line, "version_dir="); ok && v != "" {
+			if _, _, _, valid := parseVersionDirInfo(v); valid {
+				p.Versions = append(p.Versions, v)
+			}
+		} else if v, ok := strings.CutPrefix(line, "lib_tmp="); ok && v != "" {
+			if daemon.IsOwnedLibFileName(v) {
+				p.HasLibFiles = true
+			}
 		}
 	}
 
@@ -267,6 +313,27 @@ func ComputeSocketPath(home, uid, mid string) string {
 // directory (0700) step-by-step, refusing any symlink or foreign-owned component
 // along ~/.local/lib/corral and ~/.local/state/corral/corrald/<mid>/stage-<op>.
 func MkStageCommand(home, stateDir, stageDir string) string {
+	return mkStageCommandWithOptions(home, stateDir, stageDir, false, false)
+}
+
+// MkStageForRecoveryCommand creates the normal stage-<op> directory for
+// binaryless uninstall recovery. When requireTombstone is true (sole-gateway
+// mode), a regular non-symlink removing tombstone must already exist; when
+// false (explicit manual remove/delete), an existing tombstone is preserved
+// untouched and staging succeeds with or without one.
+func MkStageForRecoveryCommand(home, stateDir, stageDir string, requireTombstone bool) string {
+	return mkStageCommandWithOptions(home, stateDir, stageDir, true, requireTombstone)
+}
+
+func mkStageCommandWithOptions(home, stateDir, stageDir string, forRecovery, requireTombstone bool) string {
+	tombCheck := `if [ -e "$ST/removing" ]; then echo "error=removing"; exit 1; fi`
+	if forRecovery {
+		if requireTombstone {
+			tombCheck = `if [ ! -f "$ST/removing" ] || [ -L "$ST/removing" ]; then echo "error=no_tombstone"; exit 1; fi`
+		} else {
+			tombCheck = ``
+		}
+	}
 	return shellScript(`umask 077
 ME=$(id -u)
 check_or_mk() {
@@ -329,17 +396,30 @@ check_or_mk "$H/.local/state" ""
 check_or_mk "$H/.local/state/corral" ""
 check_or_mk "$H/.local/state/corral/corrald" ""
 check_or_mk "$ST" "700"
-if [ -e "$ST/removing" ]; then echo "error=removing"; exit 1; fi
+`+tombCheck+`
 check_or_mk "$STAGE" "700"
 echo "result=ok"
 `, "HOME_DIR", home, "ST", stateDir, "STAGE", stageDir)
 }
 
-// RmStageCommand removes a staging directory.
-func RmStageCommand(stageDir string) string {
-	return shellScript(`rm -rf -- "$STAGE" || { echo "error=rm_failed"; exit 1; }
-echo "result=ok"
-`, "STAGE", stageDir)
+// CleanStageCommand removes an owned staging directory strictly via a verified
+// corrald binary's `clean-stage` subcommand (which takes SharedLock -> OpLock
+// and delegates to daemon.RemoveOwned). Never executes an unverified binary and
+// never runs shell `rm`: if no verified binary is executable on the host, it
+// emits error=no_verified_binary so the stage is reported and left for the next
+// verified run.
+func CleanStageCommand(primaryBin, fallbackBin, stageDir, opID string) string {
+	return shellScript(`if [ -n "$BIN" ] && [ -x "$BIN" ]; then
+  "$BIN" clean-stage --stage "$STAGE" --op "$OP"
+  exit $?
+fi
+if [ -n "$ALT" ] && [ -x "$ALT" ]; then
+  "$ALT" clean-stage --stage "$STAGE" --op "$OP"
+  exit $?
+fi
+echo "error=no_verified_binary"
+exit 1
+`, "BIN", primaryBin, "ALT", fallbackBin, "STAGE", stageDir, "OP", opID)
 }
 
 // SelftestCommand executes `<bin> selftest` and classifies execution failures
@@ -364,6 +444,20 @@ func InstallCommand(binPath, stageDir, opID, gateway, by string, upgrade bool) s
 	}
 	return shellScript(`"$BIN" install --stage "$STAGE" --op "$OP" --gateway "$GW" --by "$BY"`+upFlag+`
 `, "BIN", binPath, "STAGE", stageDir, "OP", opID, "GW", gateway, "BY", by)
+}
+
+// InstallForRecoveryCommand places the staged binary into LibDir under
+// .corrald-shared.lock -> op.lock without writing install.json or removing the
+// removing tombstone, so the subsequent locked `corrald uninstall` can run.
+// When gateway is non-empty (sole-gateway recovery), the binary additionally
+// validates that the removing tombstone belongs to gateway.
+func InstallForRecoveryCommand(binPath, stageDir, opID, gateway string) string {
+	if gateway != "" {
+		return shellScript(`"$BIN" install --stage "$STAGE" --op "$OP" --gateway "$GW" --for-uninstall-recovery
+`, "BIN", binPath, "STAGE", stageDir, "OP", opID, "GW", gateway)
+	}
+	return shellScript(`"$BIN" install --stage "$STAGE" --op "$OP" --for-uninstall-recovery
+`, "BIN", binPath, "STAGE", stageDir, "OP", opID)
 }
 
 // ServeCommand starts corrald detached via `<bin> serve --gateway <gw>`,
@@ -409,170 +503,134 @@ func StopCommand(binPath string) string {
 `, "BIN", binPath)
 }
 
-// WriteTombstoneCommand writes the removing tombstone to block concurrent starts.
-func WriteTombstoneCommand(stateDir string) string {
-	return shellScript(`if [ -d "$ST" ] && [ ! -L "$ST" ]; then
-  : > "$ST/removing" || { echo "error=tombstone_failed"; exit 1; }
-fi
-echo "result=ok"
-`, "ST", stateDir)
+// UninstallCommand runs `<bin> uninstall [--op <id>]` under the host binary's
+// full lock chain (.corrald-shared.lock -> op.lock -> corrald.lock).
+// If no binary is present on the host:
+//   - when no state dir, corrald lib entries, or last-machine run/ dir remain:
+//     reports result=removed;
+//   - otherwise reports error=binary_missing (never truncating an existing
+//     tombstone or running an unlocked shell deletion), so RunUninstallWithRetry
+//     reinstalls the gateway's own corrald into LibDir and runs locked uninstall.
+func UninstallCommand(libDir, stateDir, sockPath, opID string) string {
+	return uninstallCommandWithOptions(libDir, stateDir, sockPath, opID, "")
 }
 
-// UninstallCommand runs `<bin> uninstall [--op <id>]`. If the current symlink
-// and all versioned binaries are missing, the fallback verifies meta.json and
-// corrald.lock, stops any running process (verifying /proc/<pid>/stat start
-// time), and refuses to delete state files (returning error=stop_failed) if
-// the process or lock cannot be stopped.
-func UninstallCommand(libDir, stateDir, sockPath, opID string) string {
-	return shellScript(`BIN="$L/corrald"
-if [ ! -x "$BIN" ]; then
-  for cand in "$L"/corrald-*/corrald; do
-    if [ -x "$cand" ]; then BIN="$cand"; break; fi
-  done
-fi
-if [ -x "$BIN" ]; then
+// UninstallCommandSoleGateway runs host-side uninstall ONLY when soleGateway is
+// confirmed as the sole gateway under .corrald-shared.lock -> op.lock ->
+// corrald.lock. If no binary is present on the host:
+//   - when no state dir, corrald lib entries, or last-machine run/ dir remain:
+//     reports result=removed;
+//   - when a removing tombstone exists without a binary: reports
+//     error=binary_missing_with_tombstone so the gateway reinstalls its own
+//     corrald binary into LibDir through the normal locked install path (without
+//     starting the daemon) and then runs the normal locked Go uninstall;
+//   - otherwise fails closed with error=cannot_verify_exclusivity.
+func UninstallCommandSoleGateway(libDir, stateDir, sockPath, opID, soleGateway string) string {
+	return uninstallCommandWithOptions(libDir, stateDir, sockPath, opID, soleGateway)
+}
+
+func uninstallCommandWithOptions(libDir, stateDir, sockPath, opID, soleGateway string) string {
+	_ = sockPath
+	execBranch := `if [ -x "$BIN" ]; then
   if [ -n "$OP" ]; then
     "$BIN" uninstall --op "$OP"
   else
     "$BIN" uninstall
   fi
   exit $?
-fi
-# Binary missing: write tombstone, check meta.json + lock, stop verified process first.
-if [ -d "$ST" ] && [ ! -L "$ST" ]; then : > "$ST/removing" 2>/dev/null || true; fi
-
-proc_start() {
-  p="$1"
-  [ -r "/proc/$p/stat" ] || return 1
-  awk '{ i = index($0, ") "); if (i == 0) exit 1; rest = substr($0, i+2); n = split(rest, a, " "); if (n < 20) exit 1; if (a[1] == "Z" || a[1] == "X") exit 1; print a[20] }' "/proc/$p/stat" 2>/dev/null
-}
-
-proc_matches() {
-  p="$1"
-  st="$2"
-  case "$p" in ''|*[!0-9]*) return 1 ;; esac
-  [ "$p" -gt 0 ] 2>/dev/null || return 1
-  kill -0 "$p" 2>/dev/null || return 1
-  cur=$(proc_start "$p") || return 1
-  if [ -n "$st" ]; then
-    [ "$cur" = "$st" ] || return 1
+fi`
+	missingBranch := `echo "error=binary_missing"
+echo "detail=corrald binary missing; requires locked Go recovery"
+exit 1`
+	if soleGateway != "" {
+		execBranch = `if [ -x "$BIN" ]; then
+  if [ -n "$OP" ]; then
+    "$BIN" uninstall --op "$OP" --only-if-sole-gateway "$GW"
+  else
+    "$BIN" uninstall --only-if-sole-gateway "$GW"
   fi
-  return 0
-}
-
-stop_verified() {
-  p="$1"
-  st="$2"
-  proc_matches "$p" "$st" || return 0
-  kill -TERM "$p" 2>/dev/null || true
-  i=0
-  while [ $i -lt 30 ]; do
-    proc_matches "$p" "$st" || return 0
-    sleep 0.1
-    i=$((i + 1))
-  done
-  proc_matches "$p" "$st" || return 0
-  kill -KILL "$p" 2>/dev/null || true
-  i=0
-  while [ $i -lt 20 ]; do
-    proc_matches "$p" "$st" || return 0
-    sleep 0.1
-    i=$((i + 1))
-  done
-  proc_matches "$p" "$st" && return 1
-  return 0
-}
-
-meta_pid=0
-meta_st=
-prev_pid=0
-prev_st=
-if [ -f "$ST/meta.json" ] && [ ! -L "$ST/meta.json" ]; then
-  meta_pid=$(sed -n 's/.*"pid"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$ST/meta.json" | head -n 1)
-  meta_st=$(sed -n 's/.*"start_time"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$ST/meta.json" | head -n 1)
-  prev_pid=$(sed -n 's/.*"prev_pid"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$ST/meta.json" | head -n 1)
-  prev_st=$(sed -n 's/.*"prev_start_time"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$ST/meta.json" | head -n 1)
-fi
-
-if [ -n "$meta_pid" ] && [ "$meta_pid" -gt 0 ] 2>/dev/null; then
-  if ! stop_verified "$meta_pid" "$meta_st"; then
-    echo "error=stop_failed"
-    echo "pid=$meta_pid"
-    echo "detail=process did not exit after SIGTERM and SIGKILL"
-    exit 1
-  fi
-fi
-if [ -n "$prev_pid" ] && [ "$prev_pid" -gt 0 ] 2>/dev/null; then
-  if ! stop_verified "$prev_pid" "$prev_st"; then
-    echo "error=stop_failed"
-    echo "pid=$prev_pid"
-    echo "detail=previous process did not exit after SIGTERM and SIGKILL"
-    exit 1
-  fi
-fi
-
-# Verify corrald.lock is no longer held by any live process before deleting state dir.
-if [ -f "$ST/corrald.lock" ] && command -v flock >/dev/null 2>&1; then
-  locked=1
-  i=0
-  while [ $i -lt 10 ]; do
-    if flock -n "$ST/corrald.lock" true 2>/dev/null; then
-      locked=0
-      break
-    fi
-    sleep 0.1
-    i=$((i + 1))
-  done
-  if [ "$locked" = "1" ]; then
-    echo "error=stop_failed"
-    echo "pid=${meta_pid:-0}"
-    echo "detail=corrald.lock is still held by an active process"
-    exit 1
-  fi
-fi
-
-if [ -n "$SOCK" ]; then rm -f "$SOCK" 2>/dev/null || true; fi
-rm -rf "$ST" 2>/dev/null || true
-SR=$(dirname "$ST")
-others=0
-if [ -d "$SR" ]; then
-  for d in "$SR"/*; do
-    if [ -d "$d" ] && [ -f "$d/install.json" ]; then others=1; break; fi
-  done
-fi
-SC=$(dirname "$SR")
-if [ "$others" = "0" ]; then
-  rm -rf "$L/corrald" "$L"/corrald-* "$L/README.txt" 2>/dev/null || true
-  rmdir "$SR" 2>/dev/null || true
-  if [ -d "$SC/run" ] && [ ! -L "$SC/run" ] && [ -O "$SC/run" ]; then
-    rm -rf "$SC/run" 2>/dev/null || true
-  fi
-  rmdir "$SC" 2>/dev/null || true
-  rmdir "$L" 2>/dev/null || true
-fi
-left_any=0
-if [ -e "$ST" ]; then
-  left_any=1
-  echo "left=$ST	failed to remove"
-fi
-if [ "$others" = "0" ] && [ -d "$SC/run" ] && [ ! -L "$SC/run" ] && [ -O "$SC/run" ]; then
-  left_any=1
-  echo "left=$SC/run	corrald run dir still exists after removal"
-fi
-if [ "$others" = "0" ] && [ -d "$L" ]; then
-  for rem in "$L/corrald" "$L/README.txt" "$L"/corrald-*; do
-    if [ -e "$rem" ] || [ -L "$rem" ]; then
-      left_any=1
-      echo "left=$rem	corrald file still exists after removal"
-    fi
-  done
-fi
-if [ "$left_any" = "1" ]; then
-  echo "result=partial"
+  exit $?
+fi`
+		missingBranch = `if [ -f "$ST/removing" ] && [ ! -L "$ST/removing" ]; then
+  echo "error=binary_missing_with_tombstone"
+  echo "detail=corrald binary missing while removing tombstone exists; requires locked Go recovery"
   exit 1
 fi
-echo "result=removed"
-`, "L", libDir, "ST", stateDir, "SOCK", sockPath, "OP", opID)
+if { [ -f "$ST/install.json" ] && [ ! -L "$ST/install.json" ]; } || { [ -f "$ST/clients.json" ] && [ ! -L "$ST/clients.json" ]; }; then
+  echo "error=binary_missing"
+  echo "detail=corrald binary missing while install/clients metadata exists; requires locked Go recovery"
+  exit 1
+fi
+
+echo "error=cannot_verify_exclusivity"
+echo "detail=corrald binary missing; cannot safely verify sole-gateway uninstall"
+exit 1`
+	}
+	return shellScript(`is_ver_dir() {
+  case "$1" in
+    corrald-*-*)
+      _rest=${1#corrald-}
+      _rel=${_rest##*-}
+      _ver=${_rest%-*}
+      [ -n "$_ver" ] && [ -n "$_rel" ] || return 1
+      [ "${#_ver}" -le 128 ] || return 1
+      case "$_rel" in *[!0-9]*) return 1 ;; esac
+      case "$_ver" in *..*|*[!A-Za-z0-9._+-]*) return 1 ;; esac
+      # Match daemon.ParseVersionDirName's exact release overflow bound
+      # (rel > (1<<62)/10 -> max accepted release is 4611686018427387909).
+      _rel_nz=$(printf '%s' "$_rel" | sed 's/^0*//')
+      [ -z "$_rel_nz" ] && _rel_nz=0
+      if [ "${#_rel_nz}" -gt 19 ]; then
+        return 1
+      fi
+      if [ "${#_rel_nz}" -eq 19 ]; then
+        awk -v r="$_rel_nz" 'BEGIN { exit (r <= "4611686018427387909" ? 0 : 1) }' || return 1
+      fi
+      return 0
+      ;;
+  esac
+  return 1
+}
+
+BIN="$L/corrald"
+if [ ! -x "$BIN" ]; then
+  for cand in "$L"/corrald-*/corrald; do
+    [ -e "$cand" ] || continue
+    _pdir=$(dirname -- "$cand")
+    [ -L "$_pdir" ] && continue
+    _dir=$(basename -- "$_pdir")
+    if is_ver_dir "$_dir" && [ -x "$cand" ] && [ ! -L "$cand" ]; then BIN="$cand"; break; fi
+  done
+fi
+`+execBranch+`
+
+has_lib_entries() {
+  [ -L "$L" ] && return 0
+  [ ! -e "$L" ] && return 1
+  [ ! -d "$L" ] && return 0
+  _entries=$(ls -A -- "$L" 2>/dev/null) || return 0
+  [ -n "$_entries" ] && return 0
+  return 1
+}
+
+st_root=$(dirname -- "$ST")
+run_dir="$(dirname -- "$st_root")/run"
+other_machine=0
+if [ -d "$st_root" ]; then
+  for m in "$st_root"/*; do
+    [ -d "$m" ] || continue
+    [ "$m" = "$ST" ] && continue
+    if [ -e "$m/install.json" ]; then other_machine=1; break; fi
+  done
+fi
+
+if [ ! -e "$ST" ] && [ ! -L "$ST" ] && ! has_lib_entries && { [ "$other_machine" -ne 0 ] || { [ ! -e "$run_dir" ] && [ ! -L "$run_dir" ]; }; }; then
+  echo "result=removed"
+  exit 0
+fi
+
+`+missingBranch+`
+`, "L", libDir, "ST", stateDir, "OP", opID, "GW", soleGateway)
 }
 
 // StartCandidate describes the single authoritative binary chosen by
@@ -599,27 +657,18 @@ type StartSelectOptions struct {
 	PreferredTarget string
 }
 
-// parseVersionDirInfo extracts (version, release, relTarget) from a bare
-// "corrald-<ver>-<rel>" directory name (no path separators or traversal).
+// parseVersionDirInfo delegates strictly to daemon.ParseVersionDirName so
+// gateway and daemon share the exact single version-directory rule.
 func parseVersionDirInfo(name string) (ver string, rel int64, relTarget string, ok bool) {
 	name = strings.TrimSpace(name)
-	if name == "" || strings.ContainsAny(name, "/\\\x00") || name == "." || name == ".." {
+	if name == "" || strings.ContainsAny(name, "/\\\x00") {
 		return "", 0, "", false
 	}
-	if !strings.HasPrefix(name, "corrald-") {
+	v, r, valid := daemon.ParseVersionDirName(name)
+	if !valid || r <= 0 {
 		return "", 0, "", false
 	}
-	rest := strings.TrimPrefix(name, "corrald-")
-	idx := strings.LastIndexByte(rest, '-')
-	if idx <= 0 || idx+1 >= len(rest) {
-		return "", 0, "", false
-	}
-	ver = rest[:idx]
-	rel, err := strconv.ParseInt(rest[idx+1:], 10, 64)
-	if err != nil || rel <= 0 || ver == "" {
-		return "", 0, "", false
-	}
-	return ver, rel, name + "/corrald", true
+	return v, r, name + "/corrald", true
 }
 
 // parseSymlinkTargetInLibDir validates that a shared symlink target points

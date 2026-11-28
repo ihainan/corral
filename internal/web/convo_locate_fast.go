@@ -75,6 +75,14 @@ const claudeConfigDirsSh = `claude_cfg_dirs() {
   _cdsoh=$(printf '\001')
   cldirs=
   cldirs_incomplete=0
+  _proc_live() {
+    [ -d "$1" ] || return 1
+    if [ -r "$1/stat" ]; then
+      _ps=; { IFS= read -r _ps <"$1/stat"; } 2>/dev/null || return 1
+      case ${_ps##*) } in Z*|X*) return 1;; esac
+    fi
+    return 0
+  }
   _add_cldir() {
     _cd=$1
     [ -n "$_cd" ] || return 0
@@ -82,18 +90,18 @@ const claudeConfigDirsSh = `claude_cfg_dirs() {
     if [ -e "$_cd" ] || [ -L "$_cd" ]; then
       [ -d "$_cd" ] || return 0
       if ! _cd=$(cd -- "$_cd" 2>/dev/null && pwd -P); then
-        cldirs_incomplete=1
+        [ -d "$1" ] && cldirs_incomplete=1
         return 0
       fi
       if [ -e "$_cd/projects" ]; then
         if [ ! -r "$_cd/projects" ] || [ ! -x "$_cd/projects" ]; then
-          cldirs_incomplete=1
+          [ -e "$_cd/projects" ] && cldirs_incomplete=1
           return 0
         fi
         for _pd in "$_cd"/projects/*; do
           [ -d "$_pd" ] || continue
           if [ ! -r "$_pd" ] || [ ! -x "$_pd" ]; then
-            cldirs_incomplete=1
+            [ -d "$_pd" ] && cldirs_incomplete=1
             return 0
           fi
         done
@@ -108,26 +116,27 @@ const claudeConfigDirsSh = `claude_cfg_dirs() {
   _add_cldir "$HOME/.claude"
   for _p in /proc/[0-9]*; do
     [ -O "$_p" ] || continue
+    _proc_live "$_p" || continue
     _cm=; { IFS= read -r _cm <"$_p/comm"; } 2>/dev/null || continue
     case $_cm in
     claude) ;;
     node|bun)
       if [ ! -r "$_p/cmdline" ]; then
-        [ -d "$_p" ] && cldirs_incomplete=1
+        _proc_live "$_p" && cldirs_incomplete=1
         continue
       fi
       grep -q 'claude' "$_p/cmdline" 2>/dev/null || continue;;
     [0-9]*.[0-9]*)
       _exe=$(readlink "$_p/exe" 2>/dev/null)
       if [ -z "$_exe" ]; then
-        [ -d "$_p" ] && cldirs_incomplete=1
+        _proc_live "$_p" && cldirs_incomplete=1
         continue
       fi
       case $_exe in */claude/*) ;; *) continue;; esac;;
     *) continue;;
     esac
     if [ ! -r "$_p/environ" ]; then
-      [ -d "$_p" ] && cldirs_incomplete=1
+      _proc_live "$_p" && cldirs_incomplete=1
       continue
     fi
     _r=$(tr '\0\n' '\n\001' <"$_p/environ" 2>/dev/null | sed -n 's/^CLAUDE_CONFIG_DIR=//p' | head -n 1)
@@ -139,7 +148,7 @@ const claudeConfigDirsSh = `claude_cfg_dirs() {
       _cw=$(readlink "$_p/cwd" 2>/dev/null)
       case $_cw in
       /*) _add_cldir "$_cw/$_r" ;;
-      *) [ -d "$_p" ] && cldirs_incomplete=1 ;;
+      *) _proc_live "$_p" && cldirs_incomplete=1 ;;
       esac ;;
     esac
   done

@@ -85,9 +85,10 @@ type Config struct {
 	// linux-arm64/corrald (default: corrald/ beside the executable), stable
 	// gateway identifier for authorization binding (default: PublicURL hostname),
 	// and optional administrator kill-switch.
-	CorraldDir           string
-	GatewayID            string
-	CorraldAdminDisabled bool
+	CorraldDir              string
+	GatewayID               string
+	CorraldAdminDisabled    bool
+	CorraldAdminDisabledEnv bool // true when CORRAL_CORRALD_DISABLED was explicitly set in env
 }
 
 const (
@@ -647,13 +648,19 @@ func (c *Config) loadCorrald() error {
 	if c.GatewayID == "" && c.PublicURL != nil {
 		c.GatewayID = c.PublicURL.Hostname()
 	}
-	switch v := strings.ToLower(strings.TrimSpace(env("CORRAL_CORRALD_DISABLED", "off"))); v {
-	case "", "off", "false", "0":
+	if raw, ok := os.LookupEnv("CORRAL_CORRALD_DISABLED"); ok && strings.TrimSpace(raw) != "" {
+		c.CorraldAdminDisabledEnv = true
+		switch v := strings.ToLower(strings.TrimSpace(raw)); v {
+		case "off", "false", "0":
+			c.CorraldAdminDisabled = false
+		case "on", "true", "1":
+			c.CorraldAdminDisabled = true
+		default:
+			return fmt.Errorf("CORRAL_CORRALD_DISABLED must be on or off, got %q", v)
+		}
+	} else {
+		c.CorraldAdminDisabledEnv = false
 		c.CorraldAdminDisabled = false
-	case "on", "true", "1":
-		c.CorraldAdminDisabled = true
-	default:
-		return fmt.Errorf("CORRAL_CORRALD_DISABLED must be on or off, got %q", v)
 	}
 	return nil
 }

@@ -245,9 +245,16 @@ func TestStaleActiveOpIDRecoveredOnStartupAndReconcileAndFinishOpCancelledAtomic
 	if claimed, err := st.ClaimCorraldHostOp(ctx, hMissing.ID, "op-new-2", StateUpdating, ""); err != nil || !claimed {
 		t.Fatalf("expected ClaimCorraldHostOp to succeed after recovery, got claimed=%v err=%v", claimed, err)
 	}
+	// Fix15: At startup every pending/running op was left by a dead process, so
+	// RecoverCrashedCorraldOps finishes op-live-1 as failed/interrupted, clears
+	// active_op_id, and moves the interrupted update row to stopped.
 	got3, _ := st.CorraldHostByID(ctx, hLive.ID)
-	if got3.ActiveOpID != "op-live-1" {
-		t.Fatalf("startup recovery erroneously cleared live running op on h3: got %q", got3.ActiveOpID)
+	if got3.ActiveOpID != "" || got3.State != StateStopped {
+		t.Fatalf("startup sweep did not recover crashed update op on h3: state=%q active_op_id=%q", got3.State, got3.ActiveOpID)
+	}
+	op3, err := st.LatestCorraldOp(ctx, hLive.ID)
+	if err != nil || op3.State != OpFailed || op3.ErrorCode != "interrupted" {
+		t.Fatalf("expected op-live-1 finished as failed/interrupted at startup, got (%+v, %v)", op3, err)
 	}
 
 	// 3. finishOpCancelled atomically cancels op and clears host active_op_id.

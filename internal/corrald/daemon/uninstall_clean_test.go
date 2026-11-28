@@ -3,6 +3,7 @@
 package daemon
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -31,9 +32,9 @@ func TestUninstallRemovesLocksAndEmptyDirsSingleMachine(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	stage := stageBinary(t, home, mid, "opClean1", bins.v1)
+	stage := stageBinary(t, home, mid, "840cc9f0738a7ba2", bins.v1)
 	if out, code := runCLI(t, filepath.Join(stage, "corrald"), home, env,
-		"install", "--stage", stage, "--op", "opClean1", "--gateway", "gw.clean", "--by", "alice"); code != 0 {
+		"install", "--stage", stage, "--op", "840cc9f0738a7ba2", "--gateway", "gw.clean", "--by", "alice"); code != 0 {
 		t.Fatalf("install failed: %s", out)
 	}
 	installedBin := filepath.Join(home, ".local", "lib", "corral", "corrald")
@@ -51,7 +52,7 @@ func TestUninstallRemovesLocksAndEmptyDirsSingleMachine(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	out, code := runCLI(t, installedBin, home, env, "uninstall", "--op", "opRmClean1")
+	out, code := runCLI(t, installedBin, home, env, "uninstall", "--op", "26e01e033d43b3d4")
 	if code != 0 || parseKV(out)["result"] != "removed" {
 		t.Fatalf("uninstall failed: code=%d\n%s", code, out)
 	}
@@ -129,13 +130,13 @@ func TestUninstallAndInstallConcurrentNoDualLock(t *testing.T) {
 	const mid = "ddeeff445566"
 	env := []string{"CORRALD_TEST_MACHINE_ID=" + mid}
 
-	stage1 := stageBinary(t, home, mid, "opRace1", bins.v1)
+	stage1 := stageBinary(t, home, mid, "6eb98ca203d9b39c", bins.v1)
 	if out, code := runCLI(t, filepath.Join(stage1, "corrald"), home, env,
-		"install", "--stage", stage1, "--op", "opRace1", "--gateway", "gw.race", "--by", "alice"); code != 0 {
+		"install", "--stage", stage1, "--op", "6eb98ca203d9b39c", "--gateway", "gw.race", "--by", "alice"); code != 0 {
 		t.Fatalf("initial install failed: %s", out)
 	}
 	installedBin := filepath.Join(home, ".local", "lib", "corral", "corrald")
-	stage2 := stageBinary(t, home, mid, "opRace2", bins.v2)
+	stage2 := stageBinary(t, home, mid, "c86d166ec9c93c8e", bins.v2)
 
 	var wg2 sync.WaitGroup
 	var rmOut, inOut string
@@ -143,12 +144,12 @@ func TestUninstallAndInstallConcurrentNoDualLock(t *testing.T) {
 	wg2.Add(2)
 	go func() {
 		defer wg2.Done()
-		rmOut, rmCode = runCLI(t, installedBin, home, env, "uninstall", "--op", "opRaceRm")
+		rmOut, rmCode = runCLI(t, installedBin, home, env, "uninstall", "--op", "502b1789ccb8956b")
 	}()
 	go func() {
 		defer wg2.Done()
 		inOut, inCode = runCLI(t, filepath.Join(stage2, "corrald"), home, env,
-			"install", "--stage", stage2, "--op", "opRace2", "--gateway", "gw.race", "--by", "bob")
+			"install", "--stage", stage2, "--op", "c86d166ec9c93c8e", "--gateway", "gw.race", "--by", "bob")
 	}()
 	wg2.Wait()
 
@@ -184,9 +185,9 @@ func TestHandoffDropsInvalidatedTmuxPath(t *testing.T) {
 	// 1. Real CLI serve with an invalid --tmux path succeeds without exiting.
 	// 2. Real CLI handoff when meta/cfg holds a stale tmux path (via in-process
 	//    Server with SetTrustedTmuxCheckRootForTest) succeeds cleanly.
-	stage1 := stageBinary(t, home, mid, "opTmux1", bins.v1)
+	stage1 := stageBinary(t, home, mid, "105a366d72b41879", bins.v1)
 	if out, code := runCLI(t, filepath.Join(stage1, "corrald"), home, env,
-		"install", "--stage", stage1, "--op", "opTmux1", "--gateway", "gw.tmux", "--by", "alice"); code != 0 {
+		"install", "--stage", stage1, "--op", "105a366d72b41879", "--gateway", "gw.tmux", "--by", "alice"); code != 0 {
 		t.Fatalf("install v1 failed: %s", out)
 	}
 	installedBin := filepath.Join(home, ".local", "lib", "corral", "corrald")
@@ -210,9 +211,9 @@ func TestHandoffDropsInvalidatedTmuxPath(t *testing.T) {
 
 	// 2. Also verify handoff to v2 succeeds cleanly when v1 was started with --tmux /bin/sh or stale path.
 	sock := parseKV(out)["socket"]
-	stage2 := stageBinary(t, home, mid, "opTmux2", bins.v2)
+	stage2 := stageBinary(t, home, mid, "81bef567407d3d39", bins.v2)
 	out2, code2 := runCLI(t, filepath.Join(stage2, "corrald"), home, env,
-		"install", "--upgrade", "--stage", stage2, "--op", "opTmux2", "--gateway", "gw.tmux", "--by", "alice")
+		"install", "--upgrade", "--stage", stage2, "--op", "81bef567407d3d39", "--gateway", "gw.tmux", "--by", "alice")
 	if code2 != 0 {
 		t.Fatalf("upgrade v2 failed: %s", out2)
 	}
@@ -246,16 +247,16 @@ func TestColdStartUpdatePreservesInstallManifestAndUninstallPartialOnLeftover(t 
 		home := t.TempDir()
 
 		// 1. Install V1.
-		stage1 := stageBinary(t, home, mid, "opCold1", bins.v1)
+		stage1 := stageBinary(t, home, mid, "4080591eb01a08c7", bins.v1)
 		if out, code := runCLI(t, filepath.Join(stage1, "corrald"), home, env,
-			"install", "--stage", stage1, "--op", "opCold1", "--gateway", "gw.cold", "--by", "alice"); code != 0 {
+			"install", "--stage", stage1, "--op", "4080591eb01a08c7", "--gateway", "gw.cold", "--by", "alice"); code != 0 {
 			t.Fatalf("install v1 failed: %s", out)
 		}
 
 		// 2. Cold-start update to V2 (install WITHOUT --upgrade).
-		stage2 := stageBinary(t, home, mid, "opCold2", bins.v2)
+		stage2 := stageBinary(t, home, mid, "e4414ad919c82cbd", bins.v2)
 		if out, code := runCLI(t, filepath.Join(stage2, "corrald"), home, env,
-			"install", "--stage", stage2, "--op", "opCold2", "--gateway", "gw.cold", "--by", "alice"); code != 0 {
+			"install", "--stage", stage2, "--op", "e4414ad919c82cbd", "--gateway", "gw.cold", "--by", "alice"); code != 0 {
 			t.Fatalf("cold-start install v2 failed: %s", out)
 		}
 
@@ -271,7 +272,7 @@ func TestColdStartUpdatePreservesInstallManifestAndUninstallPartialOnLeftover(t 
 
 		// 3. Uninstall: MUST delete V1, V2, symlink, README, locks, and empty dirs -> result=removed.
 		installedBin := filepath.Join(home, ".local", "lib", "corral", "corrald")
-		out, code := runCLI(t, installedBin, home, env, "uninstall", "--op", "opColdRm")
+		out, code := runCLI(t, installedBin, home, env, "uninstall", "--op", "0024022c36f6568d")
 		kv := parseKV(out)
 		if code != 0 || kv["result"] != "removed" {
 			t.Fatalf("expected clean result=removed after V1->V2 cold-start update, got code=%d:\n%s", code, out)
@@ -295,9 +296,9 @@ func TestColdStartUpdatePreservesInstallManifestAndUninstallPartialOnLeftover(t 
 	t.Run("leftover_file_reports_partial_with_left_path", func(t *testing.T) {
 		home := t.TempDir()
 
-		stage1 := stageBinary(t, home, mid, "opLeft1", bins.v1)
+		stage1 := stageBinary(t, home, mid, "afa575444d54689d", bins.v1)
 		if out, code := runCLI(t, filepath.Join(stage1, "corrald"), home, env,
-			"install", "--stage", stage1, "--op", "opLeft1", "--gateway", "gw.left", "--by", "alice"); code != 0 {
+			"install", "--stage", stage1, "--op", "afa575444d54689d", "--gateway", "gw.left", "--by", "alice"); code != 0 {
 			t.Fatalf("install v1 failed: %s", out)
 		}
 
@@ -313,7 +314,7 @@ func TestColdStartUpdatePreservesInstallManifestAndUninstallPartialOnLeftover(t 
 		}
 
 		installedBin := filepath.Join(home, ".local", "lib", "corral", "corrald")
-		out, code := runCLI(t, installedBin, home, env, "uninstall", "--op", "opLeftRm")
+		out, code := runCLI(t, installedBin, home, env, "uninstall", "--op", "4e4b80a4ec0c3bd2")
 		kv := parseKV(out)
 		if code == 0 || kv["result"] != "partial" {
 			t.Fatalf("expected non-zero exit with result=partial when leftover corrald file exists, got code=%d:\n%s", code, out)
@@ -380,5 +381,182 @@ func TestEnsureRunDirValidation(t *testing.T) {
 	}
 	if err := layoutWrong.EnsureRunDir(); err == nil {
 		t.Fatal("expected EnsureRunDir to reject directory owned by different UID")
+	}
+}
+
+// TestUninstallBusyWhenRunDirPaneLockHeld verifies bug 1(a):
+// When an active SSH send holds an exclusive flock inside ~/.local/state/corral/run,
+// `corrald uninstall` MUST NOT delete run/ (or remove install.json/binaries),
+// returning error=busy while keeping the removing tombstone so serve stays blocked.
+// Once the SSH send releases the lock, retrying `corrald uninstall` removes
+// everything cleanly (result=removed).
+func TestUninstallBusyWhenRunDirPaneLockHeld(t *testing.T) {
+	bins := getTestBinaries(t)
+	home := t.TempDir()
+	const mid = "b1a1b1a1b1a1"
+	env := []string{
+		"CORRALD_TEST_MACHINE_ID=" + mid,
+		"CORRALD_TEST_SYSTEM_RUN_DIR=none",
+		"CORRALD_TEST_RUN_LOCK_TIMEOUT=100ms",
+	}
+
+	stage := stageBinary(t, home, mid, "fa73b0ea0a81a764", bins.v1)
+	if out, code := runCLI(t, filepath.Join(stage, "corrald"), home, env,
+		"install", "--stage", stage, "--op", "fa73b0ea0a81a764", "--gateway", "gw.lock", "--by", "alice"); code != 0 {
+		t.Fatalf("install failed: %s", out)
+	}
+	installedBin := filepath.Join(home, ".local", "lib", "corral", "corrald")
+	if out, code := runCLI(t, installedBin, home, env, "serve", "--gateway", "gw.lock"); code != 0 {
+		t.Fatalf("serve failed: %s", out)
+	}
+
+	runDir := filepath.Join(home, ".local", "state", "corral", "run")
+	paneLockPath := filepath.Join(runDir, "corral-send-tmux-_0")
+	// Simulate an in-flight SSH send holding the flock in ~/.local/state/corral/run.
+	heldLock, err := AcquireLock(paneLockPath)
+	if err != nil {
+		t.Fatalf("AcquireLock(%s): %v", paneLockPath, err)
+	}
+	t.Cleanup(func() { _ = heldLock.Release() })
+	devBefore, inoBefore, err := FileInode(paneLockPath)
+	if err != nil {
+		t.Fatalf("FileInode: %v", err)
+	}
+
+	// Uninstall while SSH send holds lock MUST fail with error=busy and keep run/ intact.
+	out, code := runCLI(t, installedBin, home, env, "uninstall", "--op", "23c840837110906a")
+	kv := parseKV(out)
+	if code == 0 || kv["error"] != proto.ErrBusy {
+		t.Fatalf("expected uninstall to return error=busy while run/ pane lock is held, got code=%d:\n%s", code, out)
+	}
+
+	// run/ and the exact lock file inode must still exist untouched.
+	devAfter, inoAfter, err := FileInode(paneLockPath)
+	if err != nil || devAfter != devBefore || inoAfter != inoBefore {
+		t.Fatalf("pane lock file was removed or replaced during busy uninstall: before=(%d,%d) after=(%d,%d) err=%v",
+			devBefore, inoBefore, devAfter, inoAfter, err)
+	}
+	// install.json and removing tombstone must remain so serve is blocked and retry works cleanly.
+	if outServe, codeServe := runCLI(t, installedBin, home, env, "serve", "--gateway", "gw.lock"); codeServe == 0 || parseKV(outServe)["error"] != proto.ErrRemoving {
+		t.Fatalf("expected serve to be rejected with error=removing during busy uninstall, got code=%d:\n%s", codeServe, outServe)
+	}
+
+	// Release SSH send lock and retry uninstall -> must cleanly remove everything!
+	if err := heldLock.Release(); err != nil {
+		t.Fatalf("Release: %v", err)
+	}
+	out2, code2 := runCLI(t, installedBin, home, env, "uninstall", "--op", "d1ce8d1cb59a57c5")
+	if code2 != 0 || parseKV(out2)["result"] != "removed" {
+		t.Fatalf("retry uninstall after pane lock release failed: code=%d\n%s", code2, out2)
+	}
+	for _, p := range []string{
+		runDir,
+		filepath.Join(home, ".local", "state", "corral"),
+		filepath.Join(home, ".local", "lib", "corral"),
+	} {
+		if _, err := os.Lstat(p); !os.IsNotExist(err) {
+			t.Errorf("expected %s removed after retry uninstall, lstat err=%v", p, err)
+		}
+	}
+}
+
+// TestRemoveRunDirLockedChecksSystemRunDirFirst verifies that RemoveRunDirLocked
+// also respects a lock held in systemRunDir (without ever unlinking files in
+// systemRunDir) and leaves runDir intact when busy.
+func TestRemoveRunDirLockedChecksSystemRunDirFirst(t *testing.T) {
+	uid := uint32(os.Geteuid())
+	base := t.TempDir()
+	sysDir := filepath.Join(base, "sys-run")
+	runDir := filepath.Join(base, "state-run")
+	for _, d := range []string{sysDir, runDir} {
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	const fname = "corral-send-herdr-w1_p1"
+	runLockPath := filepath.Join(runDir, fname)
+	sysLockPath := filepath.Join(sysDir, fname)
+	if err := os.WriteFile(runLockPath, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sysHeld, err := AcquireLock(sysLockPath)
+	if err != nil {
+		t.Fatalf("AcquireLock(sys): %v", err)
+	}
+	t.Cleanup(func() { _ = sysHeld.Release() })
+
+	// While sysDir/<fname> is held (e.g. sender acquired sysDir and is about to
+	// acquire runDir), RemoveRunDirLocked must return ErrLocked and leave both untouched.
+	if err := RemoveRunDirLocked(runDir, sysDir, uid, 80*time.Millisecond); err == nil {
+		t.Fatal("RemoveRunDirLocked succeeded while systemRunDir lock was held")
+	}
+	if _, err := os.Stat(runLockPath); err != nil {
+		t.Fatalf("runDir lock removed despite busy sysDir lock: %v", err)
+	}
+
+	// Release sysDir lock -> RemoveRunDirLocked removes runDir and keeps sysDir file untouched.
+	_ = sysHeld.Release()
+	if err := RemoveRunDirLocked(runDir, sysDir, uid, 200*time.Millisecond); err != nil {
+		t.Fatalf("RemoveRunDirLocked after release: %v", err)
+	}
+	if _, err := os.Lstat(runDir); !os.IsNotExist(err) {
+		t.Fatalf("expected runDir removed, lstat err=%v", err)
+	}
+	if _, err := os.Stat(sysLockPath); err != nil {
+		t.Fatalf("RemoveRunDirLocked unexpectedly removed systemRunDir file: %v", err)
+	}
+}
+
+// TestRemoveRunDirLockedDoesNotDeleteUnlistedConcurrentPaneLock verifies Fix13 Item #2:
+// OwnedRemoveRunDir MUST NOT delete a pane lock file that was not in the
+// lockedPaths allowlist from pass 1 (e.g. a new pane file created and locked by
+// a concurrent sender between ReadDir and RemoveOwned), and concurrent senders
+// creating/holding locks during RemoveRunDirLocked never have their held lock
+// file unlinked.
+func TestRemoveRunDirLockedDoesNotDeleteUnlistedConcurrentPaneLock(t *testing.T) {
+	uid := uint32(os.Geteuid())
+	base := t.TempDir()
+	runDir := filepath.Join(base, "run")
+	if err := os.MkdirAll(runDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	lockedFile := filepath.Join(runDir, "corral-send-tmux-_0")
+	concurrentFile := filepath.Join(runDir, "corral-send-tmux-_9")
+	if err := os.WriteFile(lockedFile, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(concurrentFile, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate pass 1 only having locked lockedFile; concurrentFile arrived
+	// after pass 1's ReadDir and is NOT in lockedPaths.
+	lockedPaths := map[string]struct{}{
+		filepath.Clean(lockedFile): {},
+	}
+	left := RemoveOwned(&Layout{RunDir: runDir, UID: uid}, OwnedRemoveRunDir, runDir, lockedPaths)
+	if len(left) == 0 {
+		t.Fatalf("Fix13 Item #2 regression: RemoveOwned deleted unlisted concurrent pane file %s!", concurrentFile)
+	}
+	if _, err := os.Lstat(lockedFile); !os.IsNotExist(err) {
+		t.Fatalf("expected lockedFile %s removed, stat err=%v", lockedFile, err)
+	}
+	if _, err := os.Lstat(concurrentFile); err != nil {
+		t.Fatalf("Fix13 Item #2 regression: unlisted concurrent pane file %s was deleted: %v", concurrentFile, err)
+	}
+
+	// Verify that when concurrentFile is held by a sender, RemoveRunDirLocked
+	// returns ErrLocked and leaves concurrentFile intact.
+	lk, err := AcquireLock(concurrentFile)
+	if err != nil {
+		t.Fatalf("AcquireLock(concurrentFile): %v", err)
+	}
+	defer lk.Release()
+	if err := RemoveRunDirLocked(runDir, filepath.Join(base, "no-sys"), uid, 60*time.Millisecond); !errors.Is(err, ErrLocked) {
+		t.Fatalf("expected ErrLocked while concurrentFile is held, got %v", err)
+	}
+	if _, err := os.Lstat(concurrentFile); err != nil {
+		t.Fatalf("held concurrentFile was deleted: %v", err)
 	}
 }

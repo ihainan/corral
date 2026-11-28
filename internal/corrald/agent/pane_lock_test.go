@@ -138,7 +138,7 @@ func TestPaneLockSubprocessHelper(t *testing.T) {
 			rel()
 			t.Fatal(err)
 		}
-		for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); {
+		for deadline := time.Now().Add(30 * time.Second); time.Now().Before(deadline); {
 			if _, err := os.Stat(releaseFile); err == nil {
 				break
 			}
@@ -153,14 +153,17 @@ func TestPaneLockSubprocessHelper(t *testing.T) {
 			t.Fatalf("subprocess unexpectedly acquired lock held by another corrald process")
 		}
 	case "wait_acquire":
-		ps.SetLockTimeoutForTest(3 * time.Second)
+		ps.SetLockTimeoutForTest(5 * time.Second)
+		if readyFile != "" {
+			_ = os.WriteFile(readyFile, []byte("waiting"), 0o600)
+		}
 		t0 := time.Now()
 		rel, ok := ps.acquirePaneLock(context.Background(), mode, pane)
 		if !ok {
 			t.Fatalf("subprocess failed to acquire lock after peer released")
 		}
 		rel()
-		if time.Since(t0) < 200*time.Millisecond {
+		if time.Since(t0) < 180*time.Millisecond {
 			t.Fatalf("subprocess acquired lock too early (%v), peer lock did not block it", time.Since(t0))
 		}
 	}
@@ -341,7 +344,16 @@ done
 		}
 
 		// Process B2 waits for Process A to release, then acquires.
+		// Signal release only after Process B2 has started waiting so race-binary
+		// startup overhead cannot eat into the hold window.
+		b2Started := filepath.Join(runtimeDir, "procB2-started")
 		go func() {
+			for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); {
+				if _, err := os.Stat(b2Started); err == nil {
+					break
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
 			time.Sleep(250 * time.Millisecond)
 			_ = os.WriteFile(releaseFile, []byte("go"), 0o600)
 		}()
@@ -351,6 +363,7 @@ done
 			"CORRAL_TEST_LOCK_MODE="+mode,
 			"CORRAL_TEST_LOCK_PANE="+pane,
 			"CORRAL_TEST_LOCK_ACTION=wait_acquire",
+			"CORRAL_TEST_LOCK_READY="+b2Started,
 		)
 		if out, err := procB2.CombinedOutput(); err != nil {
 			t.Fatalf("process B2 failed: %v\n%s", err, out)
@@ -441,7 +454,14 @@ func TestSharedPaneLockStateRunDirFallbackAndPriority(t *testing.T) {
 		}
 
 		// Third corrald process waits for procA to release and acquires cleanly.
+		b2Started := filepath.Join(home, "pB2-started")
 		go func() {
+			for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); {
+				if _, err := os.Stat(b2Started); err == nil {
+					break
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
 			time.Sleep(250 * time.Millisecond)
 			_ = os.WriteFile(releaseFile, []byte("go"), 0o600)
 		}()
@@ -452,13 +472,14 @@ func TestSharedPaneLockStateRunDirFallbackAndPriority(t *testing.T) {
 			"CORRAL_TEST_LOCK_MODE="+mode,
 			"CORRAL_TEST_LOCK_PANE="+pane,
 			"CORRAL_TEST_LOCK_ACTION=wait_acquire",
+			"CORRAL_TEST_LOCK_READY="+b2Started,
 		)
 		if out, err := procB2.CombinedOutput(); err != nil {
 			t.Fatalf("procB2 failed: %v\n%s", err, out)
 		}
 	})
 
-	t.Run("system_run_dir_preferred_over_state_run_dir", func(t *testing.T) {
+	t.Run("locks_both_existing_dirs_in_fixed_order_and_dedups_same_dir", func(t *testing.T) {
 		base := t.TempDir()
 		sysDir := filepath.Join(base, "sys-run")
 		stateDir := filepath.Join(base, "state-run")
@@ -474,12 +495,24 @@ func TestSharedPaneLockStateRunDirFallbackAndPriority(t *testing.T) {
 			t.Fatal("acquirePaneLock failed")
 		}
 		rel()
-		if _, err := os.Stat(filepath.Join(sysDir, PaneLockFilename("herdr", "w1:p1"))); err != nil {
+		wantName := PaneLockFilename("herdr", "w1:p1")
+		if _, err := os.Stat(filepath.Join(sysDir, wantName)); err != nil {
 			t.Fatalf("expected lock file in systemRunDir: %v", err)
 		}
-		if entries, _ := os.ReadDir(stateDir); len(entries) != 0 {
-			t.Fatalf("stateRunDir should remain empty when systemRunDir is usable, got %d entries", len(entries))
+		if _, err := os.Stat(filepath.Join(stateDir, wantName)); err != nil {
+			t.Fatalf("expected lock file in stateRunDir when both dirs exist: %v", err)
 		}
+
+		// When systemRunDir and stateRunDir resolve to the exact same directory,
+		// acquirePaneLock must deduplicate by (dev, ino) instead of self-deadlocking.
+		psSame := NewPaneSender(nil, nil, nil, nil)
+		psSame.SetLockDirsForTest(sysDir, sysDir)
+		psSame.SetLockTimeoutForTest(300 * time.Millisecond)
+		relSame, okSame := psSame.acquirePaneLock(context.Background(), "herdr", "w1:p2")
+		if !okSame {
+			t.Fatal("acquirePaneLock self-deadlocked when systemRunDir == stateRunDir")
+		}
+		relSame()
 	})
 
 	t.Run("symlink_or_wrong_owner_state_run_dir_ignored", func(t *testing.T) {
@@ -526,6 +559,244 @@ func TestSharedPaneLockStateRunDirFallbackAndPriority(t *testing.T) {
 		rel2()
 		if entries, _ := os.ReadDir(realRun); len(entries) != 0 {
 			t.Fatalf("corrald used wrong-owner stateRunDir: %v", entries)
+		}
+	})
+}
+
+// TestPaneLockMutualExclusionAcrossDirTransitions verifies bug 1(b):
+//   - If proc A acquires the lock in stateRunDir while /run/user/<uid> is absent,
+//     and /run/user/<uid> then appears, proc B (seeing both dirs) MUST still
+//     serialize behind proc A instead of switching to an independent lock file.
+//   - Conversely, if proc A acquires locks when both dirs exist and systemRunDir
+//     then disappears, proc B (seeing only stateRunDir) MUST still serialize.
+//   - If a lock file is unlinked while a waiter is blocked on it, post-flock
+//     inode verification drops the stale fd instead of entering CS on a dead inode.
+func TestPaneLockMutualExclusionAcrossDirTransitions(t *testing.T) {
+	t.Run("system_run_dir_appears_mid_send", func(t *testing.T) {
+		base := t.TempDir()
+		sysDir := filepath.Join(base, "sys-run") // does NOT exist yet
+		stateDir := filepath.Join(base, "state-run")
+		if err := os.MkdirAll(stateDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+
+		mode, pane := "tmux", "%21"
+		readyFile := filepath.Join(base, "a-ready")
+		releaseFile := filepath.Join(base, "a-release")
+
+		// Proc A starts before sysDir exists -> holds stateDir lock.
+		procA := exec.Command(os.Args[0], "-test.run=^TestPaneLockSubprocessHelper$")
+		procA.Env = append(os.Environ(),
+			"CORRAL_TEST_LOCK_DIR="+sysDir,
+			"CORRAL_TEST_LOCK_STATE_DIR="+stateDir,
+			"CORRAL_TEST_LOCK_MODE="+mode,
+			"CORRAL_TEST_LOCK_PANE="+pane,
+			"CORRAL_TEST_LOCK_ACTION=hold",
+			"CORRAL_TEST_LOCK_READY="+readyFile,
+			"CORRAL_TEST_LOCK_RELEASE="+releaseFile,
+		)
+		if err := procA.Start(); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() {
+			_ = os.WriteFile(releaseFile, []byte("go"), 0o600)
+			_ = procA.Wait()
+		})
+		for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); {
+			if _, err := os.Stat(readyFile); err == nil {
+				break
+			}
+			time.Sleep(15 * time.Millisecond)
+		}
+		if _, err := os.Stat(readyFile); err != nil {
+			t.Fatal("procA did not acquire stateDir lock in time")
+		}
+
+		// User logs in -> /run/user/<uid> (sysDir) appears while procA holds stateDir!
+		if err := os.MkdirAll(sysDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+
+		// Proc B1 sees both sysDir and stateDir; MUST time out while procA holds stateDir.
+		procB1 := exec.Command(os.Args[0], "-test.run=^TestPaneLockSubprocessHelper$")
+		procB1.Env = append(os.Environ(),
+			"CORRAL_TEST_LOCK_DIR="+sysDir,
+			"CORRAL_TEST_LOCK_STATE_DIR="+stateDir,
+			"CORRAL_TEST_LOCK_MODE="+mode,
+			"CORRAL_TEST_LOCK_PANE="+pane,
+			"CORRAL_TEST_LOCK_ACTION=try_timeout",
+		)
+		if out, err := procB1.CombinedOutput(); err != nil {
+			t.Fatalf("procB1 bypassed stateDir lock after sysDir appeared: %v\n%s", err, out)
+		}
+
+		// After procB1 timed out on stateDir, it MUST have released sysDir too,
+		// so procB2 can acquire sysDir and wait cleanly for procA to release stateDir.
+		b2Started := filepath.Join(base, "b2-started")
+		go func() {
+			for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); {
+				if _, err := os.Stat(b2Started); err == nil {
+					break
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+			time.Sleep(250 * time.Millisecond)
+			_ = os.WriteFile(releaseFile, []byte("go"), 0o600)
+		}()
+		procB2 := exec.Command(os.Args[0], "-test.run=^TestPaneLockSubprocessHelper$")
+		procB2.Env = append(os.Environ(),
+			"CORRAL_TEST_LOCK_DIR="+sysDir,
+			"CORRAL_TEST_LOCK_STATE_DIR="+stateDir,
+			"CORRAL_TEST_LOCK_MODE="+mode,
+			"CORRAL_TEST_LOCK_PANE="+pane,
+			"CORRAL_TEST_LOCK_ACTION=wait_acquire",
+			"CORRAL_TEST_LOCK_READY="+b2Started,
+		)
+		if out, err := procB2.CombinedOutput(); err != nil {
+			t.Fatalf("procB2 failed after procA released: %v\n%s", err, out)
+		}
+	})
+
+	t.Run("system_run_dir_disappears_mid_send", func(t *testing.T) {
+		base := t.TempDir()
+		sysDir := filepath.Join(base, "sys-run")
+		stateDir := filepath.Join(base, "state-run")
+		for _, d := range []string{sysDir, stateDir} {
+			if err := os.MkdirAll(d, 0o700); err != nil {
+				t.Fatal(err)
+			}
+		}
+
+		mode, pane := "herdr", "w2:p3"
+		readyFile := filepath.Join(base, "a-ready")
+		releaseFile := filepath.Join(base, "a-release")
+
+		procA := exec.Command(os.Args[0], "-test.run=^TestPaneLockSubprocessHelper$")
+		procA.Env = append(os.Environ(),
+			"CORRAL_TEST_LOCK_DIR="+sysDir,
+			"CORRAL_TEST_LOCK_STATE_DIR="+stateDir,
+			"CORRAL_TEST_LOCK_MODE="+mode,
+			"CORRAL_TEST_LOCK_PANE="+pane,
+			"CORRAL_TEST_LOCK_ACTION=hold",
+			"CORRAL_TEST_LOCK_READY="+readyFile,
+			"CORRAL_TEST_LOCK_RELEASE="+releaseFile,
+		)
+		if err := procA.Start(); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() {
+			_ = os.WriteFile(releaseFile, []byte("go"), 0o600)
+			_ = procA.Wait()
+		})
+		for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); {
+			if _, err := os.Stat(readyFile); err == nil {
+				break
+			}
+			time.Sleep(15 * time.Millisecond)
+		}
+		if _, err := os.Stat(readyFile); err != nil {
+			t.Fatal("procA did not acquire locks in time")
+		}
+
+		// sysDir disappears mid-send (e.g. session logout cleans /run/user/<uid>).
+		if err := os.RemoveAll(sysDir); err != nil {
+			t.Fatal(err)
+		}
+
+		// Proc B sees only stateDir; MUST still block behind procA!
+		procB := exec.Command(os.Args[0], "-test.run=^TestPaneLockSubprocessHelper$")
+		procB.Env = append(os.Environ(),
+			"CORRAL_TEST_LOCK_DIR="+sysDir,
+			"CORRAL_TEST_LOCK_STATE_DIR="+stateDir,
+			"CORRAL_TEST_LOCK_MODE="+mode,
+			"CORRAL_TEST_LOCK_PANE="+pane,
+			"CORRAL_TEST_LOCK_ACTION=try_timeout",
+		)
+		if out, err := procB.CombinedOutput(); err != nil {
+			t.Fatalf("procB bypassed lock after sysDir disappeared: %v\n%s", err, out)
+		}
+	})
+
+	t.Run("post_flock_stale_inode_rejected_after_unlink", func(t *testing.T) {
+		uid := uint32(os.Geteuid())
+		base := t.TempDir()
+		stateDir := filepath.Join(base, "state-run")
+		if err := os.MkdirAll(stateDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		mode, pane := "tmux", "%29"
+		fname := PaneLockFilename(mode, pane)
+		lockPath := filepath.Join(stateDir, fname)
+
+		// Holder opens and locks inode #1.
+		fd1, ok := openSharedPaneLockFile(stateDir, fname, uid)
+		if !ok {
+			t.Fatal("openSharedPaneLockFile failed")
+		}
+		if err := unix.Flock(fd1, unix.LOCK_EX|unix.LOCK_NB); err != nil {
+			_ = unix.Close(fd1)
+			t.Fatal(err)
+		}
+
+		// Start PaneSender trying to acquire the lock (blocks on inode #1).
+		ps := NewPaneSender(nil, nil, nil, nil)
+		ps.SetLockDirsForTest(filepath.Join(base, "missing-sys"), stateDir)
+		ps.SetLockTimeoutForTest(3 * time.Second)
+		gotCh := make(chan func(), 1)
+		go func() {
+			rel, acquired := ps.acquirePaneLock(context.Background(), mode, pane)
+			if acquired {
+				gotCh <- rel
+			} else {
+				gotCh <- nil
+			}
+		}()
+
+		// Give waiter time to open inode #1 and start waiting on flock.
+		time.Sleep(120 * time.Millisecond)
+
+		// Unlink inode #1 and create + lock a NEW inode #2 at the same path
+		// before releasing inode #1.
+		if err := os.Remove(lockPath); err != nil {
+			_ = unix.Close(fd1)
+			t.Fatal(err)
+		}
+		fd2, ok2 := openSharedPaneLockFile(stateDir, fname, uid)
+		if !ok2 {
+			_ = unix.Close(fd1)
+			t.Fatal("openSharedPaneLockFile for inode #2 failed")
+		}
+		if err := unix.Flock(fd2, unix.LOCK_EX|unix.LOCK_NB); err != nil {
+			_ = unix.Close(fd1)
+			_ = unix.Close(fd2)
+			t.Fatal(err)
+		}
+		// Release inode #1 while inode #2 is STILL held!
+		_ = unix.Flock(fd1, unix.LOCK_UN)
+		_ = unix.Close(fd1)
+
+		// Waiter MUST reject stale inode #1 and stay blocked on inode #2!
+		select {
+		case rel := <-gotCh:
+			if rel != nil {
+				rel()
+			}
+			_ = unix.Close(fd2)
+			t.Fatal("acquirePaneLock entered critical section on stale unlinked inode while new inode was held")
+		case <-time.After(250 * time.Millisecond):
+		}
+
+		// Release inode #2 -> waiter now acquires inode #2 cleanly.
+		_ = unix.Flock(fd2, unix.LOCK_UN)
+		_ = unix.Close(fd2)
+		select {
+		case rel := <-gotCh:
+			if rel == nil {
+				t.Fatal("acquirePaneLock failed after inode #2 released")
+			}
+			rel()
+		case <-time.After(2 * time.Second):
+			t.Fatal("acquirePaneLock did not acquire inode #2 after release")
 		}
 	})
 }

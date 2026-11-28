@@ -81,6 +81,9 @@ func (s *Server) tryCorraldLocateBudget(ctx context.Context, sess *term.Session,
 	}
 	cl, ok := s.CorraldClient(sess.OwnerID, sess.HostID, "locate")
 	if !ok {
+		if s.corrald != nil {
+			s.corrald.MaybeRetryPendingCleanup(sess.OwnerID, sess.HostID, "", sess.Client())
+		}
 		return nil, false
 	}
 	rpcCtx, cancel := context.WithTimeout(ctx, budget)
@@ -137,6 +140,9 @@ func (s *Server) tryCorraldTailsWith(ctx context.Context, sess *term.Session, lo
 	}
 	cl, ok := s.CorraldClient(sess.OwnerID, sess.HostID, "tails")
 	if !ok {
+		if s.corrald != nil {
+			s.corrald.MaybeRetryPendingCleanup(sess.OwnerID, sess.HostID, "", sess.Client())
+		}
 		return nil, false
 	}
 	rpcCtx, cancel := corraldCallBudget(ctx)

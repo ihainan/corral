@@ -17,9 +17,12 @@ const {
   corraldFailureKind,
   corraldSectionModel,
   corraldStatusBarModel,
+  createCorraldNoticeFetcher,
   degradedCaps,
   detectCorraldTransition,
+  formatPerfSeconds,
   formatRssMb,
+  groupCorraldUpdateNotices,
   hasInstalledCorrald,
   isCorraldUnknownResult,
   isOpActive,
@@ -458,6 +461,166 @@ function baseStatus(overrides = {}) {
   assert.ok(diag.includes('host: dev2'))
   assert.ok(diag.includes('error: start_failed'))
   assert.ok(diag.includes('system: linux/arm64'))
+}
+
+// 9. Phase 2a: measured latency comparison thresholds, formatting, and update notice merging.
+{
+  assert.equal(formatPerfSeconds(300), '0.3')
+  assert.equal(formatPerfSeconds(1900), '1.9')
+  assert.equal(formatPerfSeconds(40), '0.04')
+  assert.equal(formatPerfSeconds(0), '0.0')
+
+  const mPerf = corraldSectionModel(
+    baseStatus({
+      state: 'running',
+      version: '0.3.2',
+      perf_comparison: [
+        { op: 'send', after_ms: 300, before_ms: 1900, after_n: 25, before_n: 30 },
+        { op: 'card', after_ms: 400, before_ms: 2000, after_n: 19, before_n: 25 }, // < 20 must be filtered out
+      ],
+    }),
+  )
+  assert.equal(mPerf.perfComparison.length, 1)
+  assert.equal(mPerf.perfComparison[0].op, 'send')
+  assert.equal(mPerf.showChangelogLink, true)
+
+  const mAdminOff = corraldSectionModel(
+    baseStatus({
+      state: 'running',
+      admin_disabled: true,
+      perf_comparison: [{ op: 'send', after_ms: 300, before_ms: 1900, after_n: 30, before_n: 30 }],
+    }),
+  )
+  assert.equal(mAdminOff.perfComparison.length, 0)
+  assert.equal(mAdminOff.showChangelogLink, false)
+
+  const grouped = groupCorraldUpdateNotices([
+    { id: 1, host_id: 10, host_name: 'a', old_version: '0.3.0', new_version: '0.3.1', new_release: 1000, success: true, created_at: 100 },
+    { id: 2, host_id: 11, host_name: 'b', old_version: '0.3.1', new_version: '0.3.2', new_release: 2000, success: true, created_at: 110 },
+    { id: 3, host_id: 10, host_name: 'a', old_version: '0.3.1', new_version: '0.3.2', new_release: 2000, success: true, created_at: 120 },
+    { id: 4, host_id: 12, host_name: 'c', old_version: '0.3.1', new_version: '0.3.2', new_release: 2000, success: false, created_at: 125 },
+    { id: 5, host_id: 13, host_name: 'd', old_version: '0.3.1', new_version: '0.3.2', new_release: 2000, success: false, created_at: 130 },
+  ])
+  assert.deepEqual(grouped.allIds, [1, 2, 3, 4, 5])
+  assert.deepEqual(grouped.mergedSuccess, {
+    version: '0.3.2',
+    hostCount: 2, // distinct hosts 10 and 11
+    ids: [1, 2, 3],
+  })
+  assert.equal(grouped.failures.length, 2)
+  assert.equal(grouped.failures[0].host_name, 'c')
+  assert.equal(grouped.failures[1].host_name, 'd')
+}
+
+// 10. Fix Round 1 Item #5: update notice fetch cancels on account switch / sign-out
+//     and discards late responses belonging to a previous user (no toast, no markSeen).
+{
+  const pending = []
+  const seenCalls = []
+  const emitted = []
+
+  const fetcher = createCorraldNoticeFetcher({
+    fetchNotices: (signal) =>
+      new Promise((resolve, reject) => {
+        pending.push({ signal, resolve, reject })
+      }),
+    markSeen: (ids) => {
+      seenCalls.push(ids)
+    },
+    onNotices: (grouped) => {
+      emitted.push(grouped)
+    },
+  })
+
+  // User 1 starts a fetch; before it completes, user switches to User 2.
+  fetcher.setUser(1)
+  const p1 = fetcher.check()
+  assert.equal(pending.length, 1)
+  assert.equal(pending[0].signal.aborted, false)
+
+  fetcher.setUser(2)
+  assert.equal(pending[0].signal.aborted, true, 'account switch must abort previous user request')
+
+  // Even if the stale promise resolves late (ignoring AbortSignal), it must be discarded.
+  pending[0].resolve([
+    { id: 101, host_id: 1, host_name: 'u1-host', old_version: '0.3.1', new_version: '0.3.2', new_release: 2000, success: true, created_at: 100 },
+  ])
+  await p1
+  assert.equal(seenCalls.length, 0, 'stale user 1 response must NOT call markSeen')
+  assert.equal(emitted.length, 0, 'stale user 1 response must NOT emit toast')
+
+  // User 2's own check runs cleanly and delivers User 2's notices.
+  const p2 = fetcher.check()
+  assert.equal(pending.length, 2)
+  assert.equal(pending[1].signal.aborted, false)
+  pending[1].resolve([
+    { id: 202, host_id: 2, host_name: 'u2-host', old_version: '0.3.1', new_version: '0.3.2', new_release: 2000, success: true, created_at: 200 },
+  ])
+  await p2
+  assert.deepEqual(seenCalls, [[202]])
+  assert.equal(emitted.length, 1)
+  assert.equal(emitted[0].mergedSuccess?.hostCount, 1)
+
+  // Sign-out (setUser(undefined)) while a refresh request is in flight aborts and discards it.
+  const p3 = fetcher.check()
+  assert.equal(pending.length, 3)
+  fetcher.setUser(undefined)
+  assert.equal(pending[2].signal.aborted, true, 'sign-out must abort in-flight notice request')
+  pending[2].resolve([
+    { id: 203, host_id: 2, host_name: 'u2-host', old_version: '0.3.1', new_version: '0.3.2', new_release: 2000, success: false, created_at: 300 },
+  ])
+  await p3
+  assert.deepEqual(seenCalls, [[202]], 'signed-out late response must NOT call markSeen')
+  assert.equal(emitted.length, 1, 'signed-out late response must NOT emit toast')
+}
+
+// 11. Fix Round 4 Item #11: render-before-effect account switch window.
+//     If the rendered userId changes BEFORE useEffect/useLayoutEffect invokes
+//     setUser(newId), getCurrentUserId() catches the switch synchronously so
+//     the old user's resolving response is discarded (no toast, no markSeen).
+{
+  const pending = []
+  const seenCalls = []
+  const emitted = []
+  let renderedUserId = 1
+
+  const fetcher = createCorraldNoticeFetcher({
+    getCurrentUserId: () => renderedUserId,
+    fetchNotices: (signal) =>
+      new Promise((resolve, reject) => {
+        pending.push({ signal, resolve, reject })
+      }),
+    markSeen: (ids) => {
+      seenCalls.push(ids)
+    },
+    onNotices: (grouped) => {
+      emitted.push(grouped)
+    },
+  })
+
+  fetcher.setUser(1)
+  const p1 = fetcher.check()
+  assert.equal(pending.length, 1)
+
+  // Account switches during React render, BEFORE setUser(2) runs in effect.
+  renderedUserId = 2
+  pending[0].resolve([
+    { id: 301, host_id: 1, host_name: 'u1-secret-host', old_version: '0.3.1', new_version: '0.3.2', new_release: 2000, success: true, created_at: 100 },
+  ])
+  await p1
+  assert.equal(seenCalls.length, 0, 'pre-effect switched user response must NOT call markSeen')
+  assert.equal(emitted.length, 0, 'pre-effect switched user response must NOT emit toast')
+
+  // Same for sign-out during render (renderedUserId becomes undefined before effect).
+  fetcher.setUser(2)
+  const p2 = fetcher.check()
+  renderedUserId = undefined
+  pending[1].resolve([
+    { id: 302, host_id: 2, host_name: 'u2-secret-host', old_version: '0.3.1', new_version: '0.3.2', new_release: 2000, success: false, created_at: 200 },
+  ])
+  await p2
+  assert.equal(seenCalls.length, 0, 'pre-effect signed-out response must NOT call markSeen')
+  assert.equal(emitted.length, 0, 'pre-effect signed-out response must NOT emit toast')
 }
 
 console.log('test-corrald.mjs: all assertions passed')

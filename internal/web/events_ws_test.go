@@ -1105,3 +1105,272 @@ func TestEventsUnmatchedLogSeenWhileBusyStillWakesOnceQuiet(t *testing.T) {
 		t.Fatalf("quiet pane woken again (%d) by the same log; want once", n)
 	}
 }
+
+// Regression for deferred unmatched wake:
+//  1. Busy pane receives a new unmatched log and NO further events arrive ->
+//     once quietThreshold elapses, it receives EXACTLY 1 convo hint with
+//     st.relocAfter already set before delivery, and a later repeat of the same
+//     log does NOT wake it a second time.
+//  2. While busy, continued writes to the pane's own log postpone the deferred
+//     wake so it never fires early; once own writes stop, it fires once after
+//     quietThreshold.
+//  3. Cancels cleanly (0 pending timers, 0 hints) on pane unbind, user WS
+//     disconnect, and eventHub.Close(), with at most 1 deferred timer per pane.
+func TestEventsDeferredUnmatchedWakeWhenBusy(t *testing.T) {
+	t.Run("fires_once_after_quiet_with_no_further_events", func(t *testing.T) {
+		h := newHarness(t)
+		h.srv.events.SetCoalesceWindow(5 * time.Millisecond)
+		h.srv.events.SetUnmatchedLogQuietThreshold(180 * time.Millisecond)
+		h.srv.events.SetFallbackWakeTTL(10 * time.Minute)
+
+		admin := h.admin()
+		alice := h.member(admin, "alice")
+		srv := h.sshServer(t.TempDir())
+		hostID, sessID := createAndPinHost(t, alice, srv, "deferred-box")
+		aliceID := int64(alice.do("GET", "/api/me", nil).json()["id"].(float64))
+
+		st := h.srv.convos.get(sessID + "\x00w1:p_def")
+		st.done()
+		h.srv.events.RecordBindingWithActivity(aliceID, hostID, sessID, "w1:p_def", "w1:p_def", 72001, "/tmp/old-def.jsonl", time.Now())
+
+		ws, _, err := dialEventsWS(t, h, alice, h.cfg.Origin())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer ws.CloseNow()
+		rd := startPushReader(ws)
+		_ = rd.next(t, 2*time.Second) // initial cover
+		sendWatchHosts(t, ws, []int64{hostID})
+		time.Sleep(40 * time.Millisecond)
+
+		relocAtDelivery := int64(0)
+		h.srv.events.SetOnDeliverHintForTest(func(key coalesceKey) {
+			if key.kind == "convo" && key.sessionID == sessID && key.pane == "w1:p_def" {
+				relocAtDelivery = st.relocAfter.Load()
+			}
+		})
+		defer h.srv.events.SetOnDeliverHintForTest(nil)
+
+		// New unmatched log arrives while w1:p_def is busy; NO further events follow.
+		newLog := proto.AgentChangedEventData{ChangedLogs: []string{"/tmp/short-reply-new.jsonl"}}
+		h.srv.events.HandleAgentChanged([]int64{hostID}, newLog)
+		if got := h.srv.events.DeferredWakeCountForTest(); got != 1 {
+			t.Fatalf("DeferredWakeCountForTest() = %d, want 1", got)
+		}
+
+		// Should NOT fire immediately while still busy.
+		earlyEnd := time.Now().Add(70 * time.Millisecond)
+		for time.Now().Before(earlyEnd) {
+			select {
+			case m := <-rd.ch:
+				if m.T == "convo" && m.Session == sessID && m.Pane == "w1:p_def" {
+					t.Fatal("deferred wake fired early while pane was still busy")
+				}
+			case <-time.After(10 * time.Millisecond):
+			}
+		}
+
+		// Wait past quietThreshold: MUST receive EXACTLY 1 convo hint with relocAfter set!
+		convoCount := 0
+		deadline := time.Now().Add(600 * time.Millisecond)
+		for time.Now().Before(deadline) {
+			select {
+			case m := <-rd.ch:
+				if m.T == "convo" && m.Session == sessID && m.Pane == "w1:p_def" {
+					convoCount++
+				}
+			case <-time.After(15 * time.Millisecond):
+			}
+		}
+		if convoCount != 1 {
+			t.Fatalf("expected exactly 1 deferred convo hint after quietThreshold, got %d", convoCount)
+		}
+		if relocAtDelivery == 0 || st.relocAfter.Load() == 0 {
+			t.Fatalf("expected st.relocAfter set before deferred convo delivery (atDelivery=%d current=%d)", relocAtDelivery, st.relocAfter.Load())
+		}
+		if got := h.srv.events.DeferredWakeCountForTest(); got != 0 {
+			t.Fatalf("DeferredWakeCountForTest() = %d after firing, want 0", got)
+		}
+
+		// Sending the same log again now that the pane is quiet MUST NOT wake it a second time!
+		st.relocAfter.Store(0)
+		h.srv.events.HandleAgentChanged([]int64{hostID}, newLog)
+		extraEnd := time.Now().Add(120 * time.Millisecond)
+		for time.Now().Before(extraEnd) {
+			select {
+			case m := <-rd.ch:
+				if m.T == "convo" && m.Session == sessID && m.Pane == "w1:p_def" {
+					t.Fatal("same unmatched log woke pane a second time after deferred wake")
+				}
+			case <-time.After(10 * time.Millisecond):
+			}
+		}
+		if st.relocAfter.Load() != 0 {
+			t.Fatalf("expected relocAfter to stay 0 on repeat of already-woken log, got %d", st.relocAfter.Load())
+		}
+	})
+
+	t.Run("own_log_writes_postpone_deferred_wake_and_cap_one_timer_per_pane", func(t *testing.T) {
+		h := newHarness(t)
+		h.srv.events.SetCoalesceWindow(5 * time.Millisecond)
+		h.srv.events.SetUnmatchedLogQuietThreshold(180 * time.Millisecond)
+		h.srv.events.SetFallbackWakeTTL(10 * time.Minute)
+
+		admin := h.admin()
+		alice := h.member(admin, "alice")
+		srv := h.sshServer(t.TempDir())
+		hostID, sessID := createAndPinHost(t, alice, srv, "postpone-box")
+		aliceID := int64(alice.do("GET", "/api/me", nil).json()["id"].(float64))
+
+		st := h.srv.convos.get(sessID + "\x00w1:p_post")
+		st.done()
+		ownLog := "/tmp/own-streaming.jsonl"
+		h.srv.events.RecordBindingWithActivity(aliceID, hostID, sessID, "w1:p_post", "w1:p_post", 72002, ownLog, time.Now())
+
+		ws, _, err := dialEventsWS(t, h, alice, h.cfg.Origin())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer ws.CloseNow()
+		rd := startPushReader(ws)
+		_ = rd.next(t, 2*time.Second)
+		sendWatchHosts(t, ws, []int64{hostID})
+		time.Sleep(40 * time.Millisecond)
+
+		// Multiple unmatched logs + PIDs arrive while busy -> MUST stay capped at 1 timer for this pane!
+		h.srv.events.HandleAgentChanged([]int64{hostID}, proto.AgentChangedEventData{
+			ChangedLogs: []string{"/tmp/unmatched-1.jsonl", "/tmp/unmatched-2.jsonl"},
+			AddedPIDs:   []int{99101},
+		})
+		if got := h.srv.events.DeferredWakeCountForTest(); got != 1 {
+			t.Fatalf("DeferredWakeCountForTest() = %d, want 1", got)
+		}
+
+		// Keep writing own log every 60ms for 300ms (> 180ms quietThreshold):
+		// st.relocAfter MUST remain 0 the entire time (no premature deferred wake!).
+		for i := 0; i < 5; i++ {
+			time.Sleep(60 * time.Millisecond)
+			if st.relocAfter.Load() != 0 {
+				t.Fatalf("deferred wake fired prematurely during own log activity at tick %d", i)
+			}
+			h.srv.events.HandleAgentChanged([]int64{hostID}, proto.AgentChangedEventData{
+				ChangedLogs: []string{ownLog},
+			})
+		}
+		if st.relocAfter.Load() != 0 {
+			t.Fatal("deferred wake fired prematurely before own log went quiet")
+		}
+
+		// Drain own-log convo hints produced during active streaming.
+		drainUntil := time.Now().Add(40 * time.Millisecond)
+		for time.Now().Before(drainUntil) {
+			select {
+			case <-rd.ch:
+			case <-time.After(5 * time.Millisecond):
+			}
+		}
+
+		// Now own log stops writing -> after quietThreshold, deferred wake fires ONCE with relocAfter!
+		gotDeferredConvo := 0
+		waitUntil := time.Now().Add(500 * time.Millisecond)
+		for time.Now().Before(waitUntil) {
+			select {
+			case m := <-rd.ch:
+				if m.T == "convo" && m.Session == sessID && m.Pane == "w1:p_post" {
+					gotDeferredConvo++
+				}
+			case <-time.After(15 * time.Millisecond):
+			}
+		}
+		if gotDeferredConvo != 1 {
+			t.Fatalf("expected 1 deferred convo hint after own log stopped, got %d", gotDeferredConvo)
+		}
+		if st.relocAfter.Load() == 0 {
+			t.Fatal("expected relocAfter to be set when postponed deferred wake fired")
+		}
+	})
+
+	t.Run("cancels_on_unbind_disconnect_and_close", func(t *testing.T) {
+		h := newHarness(t)
+		h.srv.events.SetCoalesceWindow(5 * time.Millisecond)
+		h.srv.events.SetUnmatchedLogQuietThreshold(150 * time.Millisecond)
+
+		admin := h.admin()
+		alice := h.member(admin, "alice")
+		srv := h.sshServer(t.TempDir())
+		hostID, sessID := createAndPinHost(t, alice, srv, "cancel-box")
+		aliceID := int64(alice.do("GET", "/api/me", nil).json()["id"].(float64))
+
+		st1 := h.srv.convos.get(sessID + "\x00w1:p_c1")
+		st1.done()
+		st2 := h.srv.convos.get(sessID + "\x00w1:p_c2")
+		st2.done()
+		h.srv.events.RecordBindingWithActivity(aliceID, hostID, sessID, "w1:p_c1", "w1:p_c1", 72011, "/tmp/c1.jsonl", time.Now())
+		h.srv.events.RecordBindingWithActivity(aliceID, hostID, sessID, "w1:p_c2", "w1:p_c2", 72012, "/tmp/c2.jsonl", time.Now())
+
+		ws, _, err := dialEventsWS(t, h, alice, h.cfg.Origin())
+		if err != nil {
+			t.Fatal(err)
+		}
+		rd := startPushReader(ws)
+		_ = rd.next(t, 2*time.Second)
+		sendWatchHosts(t, ws, []int64{hostID})
+		time.Sleep(40 * time.Millisecond)
+
+		// Schedule deferred wakes for both panes.
+		h.srv.events.HandleAgentChanged([]int64{hostID}, proto.AgentChangedEventData{
+			ChangedLogs: []string{"/tmp/cancel-new.jsonl"},
+		})
+		if got := h.srv.events.DeferredWakeCountForTest(); got != 2 {
+			t.Fatalf("DeferredWakeCountForTest() = %d, want 2", got)
+		}
+
+		// 1. Unbind p_c1 -> cancels p_c1 immediately (count drops to 1).
+		h.srv.events.RecordBindingWithActivity(aliceID, hostID, sessID, "w1:p_c1", "w1:p_c1", 0, "", time.Time{})
+		if got := h.srv.events.DeferredWakeCountForTest(); got != 1 {
+			t.Fatalf("DeferredWakeCountForTest() after unbind = %d, want 1", got)
+		}
+
+		// 2. Disconnect alice's WS -> cancels p_c2 immediately (count drops to 0).
+		_ = ws.CloseNow()
+		deadline := time.Now().Add(1 * time.Second)
+		for time.Now().Before(deadline) && h.srv.events.DeferredWakeCountForTest() != 0 {
+			time.Sleep(10 * time.Millisecond)
+		}
+		if got := h.srv.events.DeferredWakeCountForTest(); got != 0 {
+			t.Fatalf("DeferredWakeCountForTest() after disconnect = %d, want 0", got)
+		}
+
+		// Wait past quietThreshold -> neither relocAfter was written.
+		time.Sleep(220 * time.Millisecond)
+		if st1.relocAfter.Load() != 0 || st2.relocAfter.Load() != 0 {
+			t.Fatalf("cancelled deferred wakes still set relocAfter: st1=%d st2=%d", st1.relocAfter.Load(), st2.relocAfter.Load())
+		}
+
+		// 3. Reconnect, schedule deferred wake, and call eventHub.Close() -> cancels cleanly.
+		ws2, _, err := dialEventsWS(t, h, alice, h.cfg.Origin())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer ws2.CloseNow()
+		rd2 := startPushReader(ws2)
+		_ = rd2.next(t, 2*time.Second)
+		sendWatchHosts(t, ws2, []int64{hostID})
+		time.Sleep(40 * time.Millisecond)
+		h.srv.events.RecordBindingWithActivity(aliceID, hostID, sessID, "w1:p_c2", "w1:p_c2", 72012, "/tmp/c2.jsonl", time.Now())
+		h.srv.events.HandleAgentChanged([]int64{hostID}, proto.AgentChangedEventData{
+			ChangedLogs: []string{"/tmp/cancel-new-2.jsonl"},
+		})
+		if got := h.srv.events.DeferredWakeCountForTest(); got != 1 {
+			t.Fatalf("DeferredWakeCountForTest() before Close = %d, want 1", got)
+		}
+		h.srv.events.Close()
+		if got := h.srv.events.DeferredWakeCountForTest(); got != 0 {
+			t.Fatalf("DeferredWakeCountForTest() after Close = %d, want 0", got)
+		}
+		time.Sleep(220 * time.Millisecond)
+		if st2.relocAfter.Load() != 0 {
+			t.Fatalf("deferred wake fired after eventHub.Close(): relocAfter=%d", st2.relocAfter.Load())
+		}
+	})
+}

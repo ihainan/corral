@@ -78,6 +78,27 @@ func (p *webSSHProvider) UserLabel(ctx context.Context, userID int64) string {
 	return u.Username
 }
 
+const corraldPolicySettingKey = "corrald_policy"
+
+func (s *Server) corraldPolicyLockedByEnv() bool {
+	return s.cfg != nil && s.cfg.CorraldAdminDisabledEnv
+}
+
+func (s *Server) corraldAdminDisabled() bool {
+	if s.corraldPolicyLockedByEnv() {
+		return s.cfg.CorraldAdminDisabled
+	}
+	if s.corrald != nil {
+		return s.corrald.AdminDisabled()
+	}
+	if s.store != nil {
+		if v, ok, err := s.store.AppSetting(context.Background(), corraldPolicySettingKey); err == nil && ok {
+			return v == "disabled"
+		}
+	}
+	return s.cfg != nil && s.cfg.CorraldAdminDisabled
+}
+
 func (s *Server) initCorrald() {
 	var dist *gw.Dist
 	if s.cfg != nil && s.cfg.CorraldDir != "" {
@@ -97,7 +118,20 @@ func (s *Server) initCorrald() {
 		if gwID == "" && s.cfg.PublicURL != nil {
 			gwID = s.cfg.PublicURL.Hostname()
 		}
-		adminDisabled = s.cfg.CorraldAdminDisabled
+		if s.cfg.CorraldAdminDisabledEnv {
+			adminDisabled = s.cfg.CorraldAdminDisabled
+		} else if s.cfg.CorraldAdminDisabled {
+			// Direct struct configuration in tests without env flag.
+			adminDisabled = true
+		} else if s.store != nil {
+			if v, ok, err := s.store.AppSetting(context.Background(), corraldPolicySettingKey); err == nil && ok {
+				adminDisabled = v == "disabled"
+			}
+		}
+	}
+	var perfCompare func(ctx context.Context, hostID, consentAt int64) []gw.PerfCompareItem
+	if s.perfDaily != nil {
+		perfCompare = s.perfDaily.Compare
 	}
 	s.corrald = gw.NewManager(gw.ManagerConfig{
 		Store:          s.store,
@@ -107,6 +141,7 @@ func (s *Server) initCorrald() {
 		AdminDisabled:  adminDisabled,
 		Log:            s.log,
 		SSH:            &webSSHProvider{s: s},
+		PerfCompare:    perfCompare,
 	})
 	s.wireCorraldEvents()
 }
@@ -188,6 +223,129 @@ func (s *Server) apiCorraldReadme(w http.ResponseWriter, r *http.Request) {
 		"content":       content,
 		"manifest_hash": hash,
 		"format":        "text",
+	})
+}
+
+// GET /api/corrald/changelog
+func (s *Server) apiCorraldChangelog(w http.ResponseWriter, r *http.Request) {
+	if s.corrald == nil || !s.corrald.Available() {
+		writeError(w, http.StatusNotFound, "corrald_unavailable", "helper daemon is not available on this gateway")
+		return
+	}
+	reqVer := strings.TrimSpace(r.URL.Query().Get("version"))
+	curVer, curRel, entries, err := s.corrald.Changelog(r.Context(), currentUser(r).ID, reqVer)
+	if err != nil {
+		s.writeCorraldError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"current_version": curVer,
+		"current_release": curRel,
+		"entries":         entries,
+	})
+}
+
+// POST /api/corrald/changelog/seen
+func (s *Server) apiCorraldChangelogSeen(w http.ResponseWriter, r *http.Request) {
+	if s.corrald == nil || !s.corrald.Available() {
+		writeError(w, http.StatusNotFound, "corrald_unavailable", "helper daemon is not available on this gateway")
+		return
+	}
+	var b struct {
+		Version string `json:"version"`
+		Release int64  `json:"release"`
+	}
+	if r.ContentLength != 0 {
+		if err := readJSON(r, &b); err != nil {
+			writeError(w, http.StatusBadRequest, "bad_request", err.Error())
+			return
+		}
+	}
+	ver := strings.TrimSpace(b.Version)
+	rel := b.Release
+	if ver == "" {
+		if dist := s.corrald.Dist(); dist != nil {
+			ver = dist.Version
+			if rel == 0 {
+				rel = dist.Release
+			}
+		}
+	}
+	if err := s.store.SetCorraldChangelogSeen(r.Context(), currentUser(r).ID, ver, rel); err != nil {
+		s.internalError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// GET /api/corrald/notices
+func (s *Server) apiCorraldNotices(w http.ResponseWriter, r *http.Request) {
+	notices, err := s.store.ListUnseenCorraldUpdateNotices(r.Context(), currentUser(r).ID)
+	if err != nil {
+		s.internalError(w, r, err)
+		return
+	}
+	if notices == nil {
+		notices = []store.CorraldUpdateNotice{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"notices": notices,
+	})
+}
+
+// POST /api/corrald/notices/seen
+func (s *Server) apiCorraldNoticesSeen(w http.ResponseWriter, r *http.Request) {
+	var b struct {
+		IDs []int64 `json:"ids"`
+	}
+	if err := readJSON(r, &b); err != nil {
+		writeError(w, http.StatusBadRequest, "bad_request", err.Error())
+		return
+	}
+	if err := s.store.MarkCorraldUpdateNoticesSeen(r.Context(), currentUser(r).ID, b.IDs); err != nil {
+		s.internalError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// GET /api/admin/corrald
+func (s *Server) apiAdminGetCorrald(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{
+		"allowed":       !s.corraldAdminDisabled(),
+		"locked_by_env": s.corraldPolicyLockedByEnv(),
+	})
+}
+
+// PUT /api/admin/corrald
+func (s *Server) apiAdminPutCorrald(w http.ResponseWriter, r *http.Request) {
+	if s.corraldPolicyLockedByEnv() {
+		writeError(w, http.StatusConflict, "env_override", "helper daemon policy is controlled by deployment configuration")
+		return
+	}
+	var b struct {
+		Allowed *bool `json:"allowed"`
+	}
+	if err := readJSON(r, &b); err != nil || b.Allowed == nil {
+		writeError(w, http.StatusBadRequest, "bad_request", "allowed boolean is required")
+		return
+	}
+	allowed := *b.Allowed
+	val := "allowed"
+	if !allowed {
+		val = "disabled"
+	}
+	if err := s.store.SetAppSetting(r.Context(), corraldPolicySettingKey, val); err != nil {
+		s.internalError(w, r, err)
+		return
+	}
+	s.audit(r, "corrald.policy", "corrald", map[string]any{"allowed": allowed})
+	if s.corrald != nil {
+		s.corrald.SetAdminDisabled(r.Context(), !allowed)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"allowed":       allowed,
+		"locked_by_env": false,
 	})
 }
 

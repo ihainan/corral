@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import { ChevronRight, X, KeyRound, KeySquare, MoreHorizontal, ScrollText, Search, Send, Shield, Smartphone, Unlink, UserCheck, UserPlus, UserX } from 'lucide-react'
 import { api, ApiError, errorText, type AdminUser, type AuditEntry } from '../api'
+import { getAdminCorraldPolicy, setAdminCorraldPolicy, type CorraldAdminPolicy } from '../corraldApi'
 import { t } from '../i18n'
 import { PhoneBack, useSession } from '../app'
 import { auditAction, auditDetail, auditTarget, byDay, clockText, sessionHosts, spanFrom, whenText, type DaySpan } from './pageText'
@@ -11,6 +12,70 @@ import { Avatar } from '../components/Avatar'
 type UserFilter = 'all' | 'admin' | 'disabled' | 'no2fa'
 const USER_FILTERS: UserFilter[] = ['all', 'admin', 'disabled', 'no2fa']
 const USER_SEARCH_FROM = 8 // (users: more than this, and the search shows)
+
+function CorraldPolicyPanel({ compact }: { compact?: boolean }) {
+  const toast = useToast()
+  const [policy, setPolicy] = useState<CorraldAdminPolicy | null>(null)
+  const [busy, setBusy] = useState(false)
+
+  useEffect(() => {
+    const ctl = new AbortController()
+    getAdminCorraldPolicy(ctl.signal)
+      .then((p) => setPolicy(p))
+      .catch(() => {})
+    return () => ctl.abort()
+  }, [])
+
+  if (!policy) return null
+
+  const updatePolicy = async (allowed: boolean) => {
+    if (busy || policy.locked_by_env || policy.allowed === allowed) return
+    const prev = policy
+    setPolicy({ ...policy, allowed })
+    setBusy(true)
+    try {
+      const next = await setAdminCorraldPolicy(allowed)
+      setPolicy(next)
+      toast(t('settings.saved'))
+    } catch (e) {
+      setPolicy(prev)
+      toast(errorText(e), true)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <section className={'admin-policy' + (compact ? ' is-desk' : '')} aria-labelledby="admin-corrald-policy-title">
+      <div className="admin-policy-main">
+        <div className="admin-policy-text">
+          <h2 id="admin-corrald-policy-title">{t('admin.corrald.title')}</h2>
+          <p className="admin-policy-sub">
+            {policy.locked_by_env ? t('admin.corrald.envLocked') : t('admin.corrald.desc')}
+          </p>
+        </div>
+        <div className="seg admin-policy-seg" role="group" aria-labelledby="admin-corrald-policy-title">
+          <button
+            type="button"
+            aria-pressed={policy.allowed}
+            disabled={busy || policy.locked_by_env}
+            onClick={() => void updatePolicy(true)}
+          >
+            {t('admin.corrald.allow')}
+          </button>
+          <button
+            type="button"
+            aria-pressed={!policy.allowed}
+            disabled={busy || policy.locked_by_env}
+            onClick={() => void updatePolicy(false)}
+          >
+            {t('admin.corrald.disable')}
+          </button>
+        </div>
+      </div>
+    </section>
+  )
+}
 
 export function AdminUsersPage() {
   const { me, boot } = useSession()
@@ -229,6 +294,7 @@ export function AdminUsersPage() {
           </button>
         </div>
         <div className="desk-body">
+          <CorraldPolicyPanel compact />
           {failed && <LoadError onRetry={load} />}
           {users === null && !failed && <p className="loading">{t('common.loading')}</p>}
           {users && users.length > 0 && shownUsers.length === 0 && (
@@ -392,6 +458,7 @@ export function AdminUsersPage() {
           {t('admin.invite')}
         </button>
       </div>
+      <CorraldPolicyPanel />
       {failed && <LoadError onRetry={load} />}
       {users === null ? (
         !failed && <p className="loading">{t('common.loading')}</p>

@@ -54,7 +54,7 @@ func TestCorraldNFSNewMachineFirstInstallDoesNotSkipOrDowngrade(t *testing.T) {
 			break
 		}
 	}
-	stageA := filepath.Join(home, ".local", "state", "corral", "corrald", midA, "stage-opA")
+	stageA := filepath.Join(home, ".local", "state", "corral", "corrald", midA, "stage-aaaa000000000001")
 	if err := os.MkdirAll(stageA, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -66,7 +66,7 @@ func TestCorraldNFSNewMachineFirstInstallDoesNotSkipOrDowngrade(t *testing.T) {
 	if err := os.WriteFile(stageBinA, bBytes, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	instCmd := exec.Command(stageBinA, "install", "--stage", stageA, "--op", "opA", "--gateway", "gw-other", "--by", "bob")
+	instCmd := exec.Command(stageBinA, "install", "--stage", stageA, "--op", "aaaa000000000001", "--gateway", "gw-other", "--by", "bob")
 	instCmd.Env = append(os.Environ(), "HOME="+home, "CORRALD_TEST_MACHINE_ID="+midA)
 	if out, err := instCmd.CombinedOutput(); err != nil {
 		t.Fatalf("pre-install v2 on midA failed: %v\n%s", err, out)

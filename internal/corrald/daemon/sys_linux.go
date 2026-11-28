@@ -16,6 +16,8 @@ import (
 	"syscall"
 	"time"
 	"unsafe"
+
+	"golang.org/x/sys/unix"
 )
 
 // ErrLocked is returned when another corrald instance already holds the flock.
@@ -346,4 +348,256 @@ func SetProcessName(name string) {
 	b := make([]byte, 16)
 	copy(b[:15], name)
 	_, _, _ = syscall.RawSyscall(syscall.SYS_PRCTL, syscall.PR_SET_NAME, uintptr(unsafe.Pointer(&b[0])), 0)
+}
+
+func openValidatedDirLinux(dir string, uid uint32) (int, unix.Stat_t, bool) {
+	var zero unix.Stat_t
+	if dir == "" {
+		return -1, zero, false
+	}
+	fd, err := unix.Open(dir, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return -1, zero, false
+	}
+	var st unix.Stat_t
+	if err := unix.Fstat(fd, &st); err != nil || st.Mode&unix.S_IFMT != unix.S_IFDIR || st.Uid != uid {
+		_ = unix.Close(fd)
+		return -1, zero, false
+	}
+	return fd, st, true
+}
+
+func flockExistingNonBlocking(dirFD int, name string, uid uint32, deadline time.Time) (fd int, st unix.Stat_t, exists bool, err error) {
+	fd, err = unix.Openat(dirFD, name, unix.O_WRONLY|unix.O_APPEND|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		if errors.Is(err, unix.ENOENT) || errors.Is(err, unix.ELOOP) || errors.Is(err, unix.EISDIR) {
+			return -1, unix.Stat_t{}, false, nil
+		}
+		return -1, unix.Stat_t{}, false, err
+	}
+	if err := unix.Fstat(fd, &st); err != nil || st.Mode&unix.S_IFMT != unix.S_IFREG || st.Uid != uid {
+		_ = unix.Close(fd)
+		return -1, unix.Stat_t{}, false, nil
+	}
+	for {
+		err := unix.Flock(fd, unix.LOCK_EX|unix.LOCK_NB)
+		if err == nil {
+			return fd, st, true, nil
+		}
+		if errors.Is(err, unix.EINTR) {
+			continue
+		}
+		if errors.Is(err, unix.EWOULDBLOCK) || errors.Is(err, unix.EAGAIN) {
+			rem := time.Until(deadline)
+			if rem <= 0 {
+				_ = unix.Close(fd)
+				return -1, unix.Stat_t{}, true, ErrLocked
+			}
+			step := 25 * time.Millisecond
+			if rem < step {
+				step = rem
+			}
+			time.Sleep(step)
+			continue
+		}
+		_ = unix.Close(fd)
+		return -1, unix.Stat_t{}, true, err
+	}
+}
+
+// RemoveRunDirLocked safely removes ~/.local/state/corral/run only after
+// acquiring exclusive flocks on every existing corrald-owned pane lock file
+// inside it (in the same fixed order as senders: systemRunDir first when
+// present, then runDir, sorted by filename), delegating all unlinking and
+// rmdir to RemoveOwned while holding the locks.
+//
+// Any unowned file, symlink, or subdirectory inside run/ is left untouched and
+// reported as a leftover. If any owned pane lock is currently held by an active
+// sender (or new owned lock files are concurrently created), runDir is left
+// intact and ErrLocked is returned so uninstall reports `busy` and retries cleanly.
+func RemoveRunDirLocked(runDir, systemRunDir string, uid uint32, timeout time.Duration) error {
+	_, err := RemoveRunDirLockedOwned(&Layout{RunDir: runDir, UID: uid}, systemRunDir, timeout)
+	return err
+}
+
+// RemoveRunDirLockedOwned is the Layout-aware entry point returning per-file
+// OwnedLeftover entries for any unowned files preserved in run/.
+func RemoveRunDirLockedOwned(layout *Layout, systemRunDir string, timeout time.Duration) ([]OwnedLeftover, error) {
+	if layout == nil || layout.RunDir == "" {
+		return nil, nil
+	}
+	runDir := layout.RunDir
+	uid := layout.UID
+	if timeout < 0 {
+		timeout = 0
+	}
+	deadline := time.Now().Add(timeout)
+
+	const maxPasses = 8
+	for pass := 0; pass < maxPasses; pass++ {
+		rinfo, rerr := os.Lstat(runDir)
+		if rerr != nil {
+			if errors.Is(rerr, os.ErrNotExist) {
+				return nil, nil
+			}
+			return nil, rerr
+		}
+		if rinfo.Mode()&os.ModeSymlink != 0 {
+			left := []OwnedLeftover{{Path: filepath.Clean(runDir), Reason: "symlinked run dir not traversed"}}
+			return left, formatOwnedLeftoverErr(left)
+		}
+		rst, ok := rinfo.Sys().(*syscall.Stat_t)
+		if !rinfo.IsDir() || !ok || rst.Uid != uid {
+			left := []OwnedLeftover{{Path: filepath.Clean(runDir), Reason: "run dir is not a user-owned directory"}}
+			return left, formatOwnedLeftoverErr(left)
+		}
+
+		runDirFD, runDirSt, ok := openValidatedDirLinux(runDir, uid)
+		if !ok {
+			if _, err := os.Lstat(runDir); errors.Is(err, os.ErrNotExist) {
+				return nil, nil
+			}
+			left := []OwnedLeftover{{Path: filepath.Clean(runDir), Reason: "run dir could not be opened safely"}}
+			return left, formatOwnedLeftoverErr(left)
+		}
+
+		entries, err := os.ReadDir(runDir)
+		if err != nil {
+			_ = unix.Close(runDirFD)
+			if errors.Is(err, os.ErrNotExist) {
+				return nil, nil
+			}
+			return nil, err
+		}
+
+		sysDirFD, sysDirSt, sysOK := openValidatedDirLinux(systemRunDir, uid)
+		if sysOK && sysDirSt.Dev == runDirSt.Dev && sysDirSt.Ino == runDirSt.Ino {
+			_ = unix.Close(sysDirFD)
+			sysDirFD = -1
+			sysOK = false
+		}
+
+		var heldFDs []int
+		seenOwned := make(map[string]struct{}, len(entries))
+		lockedPaths := make(map[string]struct{}, len(entries))
+		hasUnowned := false
+		releaseAll := func() {
+			for i := len(heldFDs) - 1; i >= 0; i-- {
+				_ = unix.Flock(heldFDs[i], unix.LOCK_UN)
+				_ = unix.Close(heldFDs[i])
+			}
+			heldFDs = nil
+			if sysDirFD >= 0 {
+				_ = unix.Close(sysDirFD)
+				sysDirFD = -1
+			}
+			if runDirFD >= 0 {
+				_ = unix.Close(runDirFD)
+				runDirFD = -1
+			}
+		}
+
+		retryPass := false
+		for _, e := range entries {
+			name := e.Name()
+			if name == "" || name == "." || name == ".." {
+				continue
+			}
+			// Fix12 Item #1: Only lock and remove corrald's exact owned pane
+			// lock filenames; leave any other file, symlink, or directory untouched.
+			if !isOwnedRunFileName(name) {
+				hasUnowned = true
+				continue
+			}
+			typ := e.Type()
+			if typ.IsDir() {
+				hasUnowned = true
+				continue
+			}
+			if typ&os.ModeSymlink != 0 {
+				// Owned-name symlink: senders ignore symlinks (O_NOFOLLOW);
+				// RemoveOwned unlinks the link without traversing it.
+				seenOwned[name] = struct{}{}
+				lockedPaths[filepath.Clean(filepath.Join(runDir, name))] = struct{}{}
+				continue
+			}
+			seenOwned[name] = struct{}{}
+
+			// Acquire locks in the exact same order as senders:
+			// 1. systemRunDir/<name> (only if already present; never created)
+			// 2. runDir/<name>
+			if sysOK {
+				sfd, _, sexists, serr := flockExistingNonBlocking(sysDirFD, name, uid, deadline)
+				if serr != nil {
+					releaseAll()
+					return nil, serr
+				}
+				if sexists && sfd >= 0 {
+					heldFDs = append(heldFDs, sfd)
+				}
+			}
+
+			rfd, fst, rexists, rerr := flockExistingNonBlocking(runDirFD, name, uid, deadline)
+			if rerr != nil {
+				releaseAll()
+				return nil, rerr
+			}
+			if !rexists || rfd < 0 {
+				continue
+			}
+			// Verify the locked fd still matches the directory entry.
+			var curSt unix.Stat_t
+			if ferr := unix.Fstatat(runDirFD, name, &curSt, unix.AT_SYMLINK_NOFOLLOW); ferr != nil ||
+				curSt.Dev != fst.Dev || curSt.Ino != fst.Ino {
+				_ = unix.Flock(rfd, unix.LOCK_UN)
+				_ = unix.Close(rfd)
+				releaseAll()
+				retryPass = true
+				break
+			}
+			heldFDs = append(heldFDs, rfd)
+			lockedPaths[filepath.Clean(filepath.Join(runDir, name))] = struct{}{}
+		}
+		if retryPass {
+			continue
+		}
+
+		// Fix13 Item #2: While still holding every exclusive flock, delegate
+		// unlinking ONLY of the lockedPaths set (never a newly-created file not
+		// locked in the first pass) and rmdir of runDir to RemoveOwned.
+		left := RemoveOwned(layout, OwnedRemoveRunDir, runDir, lockedPaths)
+		releaseAll()
+
+		if len(left) == 0 {
+			return nil, nil
+		}
+		// If a concurrent sender created a NEW owned lock file between ReadDir
+		// and rmdir (with no unowned entries present), retry pass to detect
+		// whether it is currently held (ErrLocked) or idle. Files that were
+		// already present in ReadDir and failed to unlink (e.g. EACCES) are
+		// genuine leftovers and must not be misclassified as ErrLocked.
+		if !hasUnowned {
+			newOwnedCreated := false
+			for _, l := range left {
+				base := filepath.Base(l.Path)
+				if _, existed := seenOwned[base]; existed {
+					continue
+				}
+				if filepath.Dir(l.Path) == filepath.Clean(runDir) && isOwnedRunFileName(base) {
+					if info, serr := os.Lstat(l.Path); serr == nil && info.Mode().IsRegular() {
+						newOwnedCreated = true
+						break
+					}
+				}
+			}
+			if newOwnedCreated {
+				if time.Now().After(deadline) {
+					return nil, ErrLocked
+				}
+				continue
+			}
+		}
+		return left, formatOwnedLeftoverErr(left)
+	}
+	return nil, ErrLocked
 }

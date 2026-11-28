@@ -431,6 +431,20 @@ func (c *Client) Shutdown(ctx context.Context, reason string) (*proto.ShutdownRe
 	return &res, nil
 }
 
+// ShutdownConditional asks corrald to exit ONLY if onlyIfSoleGateway is the
+// sole connected and registered gateway (atomically checked under the daemon's
+// client gate lock). Callers must first verify HelloResult.HasFeature(FeatureConditionalShutdown).
+func (c *Client) ShutdownConditional(ctx context.Context, reason, onlyIfSoleGateway string) (*proto.ShutdownResult, error) {
+	var res proto.ShutdownResult
+	if err := c.Call(ctx, proto.MethodDaemonShutdown, proto.ShutdownParams{
+		Reason:            reason,
+		OnlyIfSoleGateway: onlyIfSoleGateway,
+	}, &res); err != nil {
+		return nil, err
+	}
+	return &res, nil
+}
+
 // Forget unregisters a Corral user from the daemon's client registry.
 func (c *Client) Forget(ctx context.Context, params proto.ForgetParams) (*proto.ForgetResult, error) {
 	var res proto.ForgetResult

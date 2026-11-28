@@ -5,6 +5,7 @@ import {
   publishHostCorrald,
   readCachedCorrald,
   subscribeHostCorrald,
+  triggerCorraldNoticesCheck,
   type CorraldStatus,
 } from '../corraldApi'
 import { corraldStatusBarModel, detectCorraldTransition, shouldPollCorrald } from '../corraldLogic'
@@ -16,7 +17,7 @@ import { useToast } from './ui'
 // Deduplicates one-time lost/error notices across re-renders per session.
 const notifiedOnce = new Set<string>()
 
-export function CorraldStatusBarItem({ hostId, hostName }: { hostId: number; hostName?: string }) {
+export function CorraldStatusBarItem({ hostId }: { hostId: number; hostName?: string }) {
   const toast = useToast()
   const [status, setStatus] = useState<CorraldStatus | null>(() => readCachedCorrald(hostId)?.status ?? null)
   const prevRef = useRef<CorraldStatus | null>(status)
@@ -29,10 +30,7 @@ export function CorraldStatusBarItem({ hostId, hostName }: { hostId: number; hos
       if (!next) return
       const tr = detectCorraldTransition(prev, next)
       if (tr?.type === 'updated') {
-        toast.notice({
-          title: t('corrald.note.updatedTitle', { version: tr.version || next.version || '' }),
-          body: hostName ? t('corrald.note.updatedHost', { host: hostName }) : undefined,
-        })
+        triggerCorraldNoticesCheck()
       } else if (tr?.type === 'lost') {
         const key = `${hostId}:lost`
         if (!notifiedOnce.has(key)) {
@@ -47,7 +45,7 @@ export function CorraldStatusBarItem({ hostId, hostName }: { hostId: number; hos
         }
       }
     },
-    [hostId, hostName, toast],
+    [hostId, toast],
   )
 
   const fetchOnce = useCallback(

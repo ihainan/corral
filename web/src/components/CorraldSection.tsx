@@ -10,6 +10,7 @@ import {
   removeHostCorrald,
   resumeHostCorrald,
   retryHostCorrald,
+  triggerCorraldNoticesCheck,
   updateHostCorrald,
   type CorraldStatus,
 } from '../corraldApi'
@@ -17,13 +18,15 @@ import {
   buildDiagnostics,
   corraldSectionModel,
   detectCorraldTransition,
+  formatPerfSeconds,
   shouldPollCorrald,
   type CorraldRemoveOutcome,
 } from '../corraldLogic'
-import { relTime, t } from '../i18n'
+import { hasKey, relTime, t, type I18nKey } from '../i18n'
 import { navigate } from '../router'
 import { copyText, useToast } from './ui'
 import {
+  CorraldChangelogDialog,
   CorraldCommandBox,
   CorraldConsentAlert,
   CorraldReadmeDialog,
@@ -59,6 +62,7 @@ export function CorraldSection({ hostId, hostName }: { hostId: number; hostName:
   const [removeOpen, setRemoveOpen] = useState(false)
   const [removeOutcome, setRemoveOutcome] = useState<CorraldRemoveOutcome | null>(null)
   const [readmeOpen, setReadmeOpen] = useState(false)
+  const [changelogOpen, setChangelogOpen] = useState(false)
   const [scopeOpen, setScopeOpen] = useState(false)
   const [dismissedScopeVer, setDismissedScopeVer] = useState('')
   const [copiedDiag, setCopiedDiag] = useState(false)
@@ -112,10 +116,7 @@ export function CorraldSection({ hostId, hostName }: { hostId: number; hostName:
       } else if (tr.type === 'remove_pending') {
         if (removeOpenRef.current) setRemoveOutcome({ kind: 'remove_pending', cmd: tr.cmd })
       } else if (tr.type === 'updated') {
-        toast.notice({
-          title: t('corrald.note.updatedTitle', { version: tr.version || next.version || '' }),
-          body: t('corrald.note.updatedHost', { host: hostName }),
-        })
+        triggerCorraldNoticesCheck()
       } else if (tr.type === 'install_failed') {
         if (consentOpenRef.current) {
           setInstallFailed({
@@ -615,6 +616,26 @@ export function CorraldSection({ hostId, hostName }: { hostId: number; hostName:
           </div>
         )}
 
+        {model.perfComparison.length > 0 && (
+          <div className="corrald-row is-stack">
+            <div className="corrald-k">{t('corrald.row.perf')}</div>
+            <ul className="corrald-perf-list">
+              {model.perfComparison.map((item) => {
+                const key = `corrald.perfLine.${item.op}`
+                if (!hasKey(key)) return null
+                return (
+                  <li key={item.op}>
+                    {t(key as I18nKey, {
+                      after: formatPerfSeconds(item.after_ms),
+                      before: formatPerfSeconds(item.before_ms),
+                    })}
+                  </li>
+                )
+              })}
+            </ul>
+          </div>
+        )}
+
         {model.showFiles && (
           <div className="corrald-row">
             <details className="corrald-files">
@@ -693,11 +714,19 @@ export function CorraldSection({ hostId, hostName }: { hostId: number; hostName:
           )}
       </div>
 
-      {model.showReadmeLink && (
+      {(model.showReadmeLink || model.showChangelogLink) && (
         <p className="corrald-foot">
-          <button type="button" className="link-btn" onClick={() => setReadmeOpen(true)}>
-            {t('corrald.readmeLink')}
-          </button>
+          {model.showReadmeLink && (
+            <button type="button" className="link-btn" onClick={() => setReadmeOpen(true)}>
+              {t('corrald.readmeLink')}
+            </button>
+          )}
+          {model.showReadmeLink && model.showChangelogLink && <span className="corrald-foot-sep" aria-hidden="true">·</span>}
+          {model.showChangelogLink && (
+            <button type="button" className="link-btn" onClick={() => setChangelogOpen(true)}>
+              {t('corrald.changelogLink')}
+            </button>
+          )}
         </p>
       )}
 
@@ -747,6 +776,12 @@ export function CorraldSection({ hostId, hostName }: { hostId: number; hostName:
       )}
 
       {readmeOpen && <CorraldReadmeDialog onClose={() => setReadmeOpen(false)} />}
+      {changelogOpen && (
+        <CorraldChangelogDialog
+          currentVersion={status.version || status.gateway_version}
+          onClose={() => setChangelogOpen(false)}
+        />
+      )}
     </section>
   )
 }

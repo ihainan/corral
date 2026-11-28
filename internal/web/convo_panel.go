@@ -237,6 +237,12 @@ var (
 	blinkingMark = regexp.MustCompile(`(?m)^([ \t]*)(?:●|⏺)`)
 	askPureRule  = regexp.MustCompile(`^[ \t]*[─━╌▔]{8,}[ \t]*$`)
 	askHintRule  = regexp.MustCompile(`^[ \t]*[─━╌▔]{2,}.*[─━╌▔]{2,}[ \t]*$`)
+	overlinePure = regexp.MustCompile(`^ ?▔{8,}[ \t]*$`)
+	overlineBar  = regexp.MustCompile(`^ ?▔{2,}.*▔+[ \t]*$`)
+	overlineTail = regexp.MustCompile(`^ ?[^ \t].*[ \t]▔+[ \t]*$`)
+	solidRule    = regexp.MustCompile(`^[ \t]*[─━]{8,}[ \t]*$`)
+	promptTop    = regexp.MustCompile(`^[ \t]*❯(?:[ \t]|$)`)
+	dialogTitle  = regexp.MustCompile(`^[ \t]*[A-Z][A-Za-z0-9 ,-]{2,}\?[ \t]*$`)
 	askMultiTab  = regexp.MustCompile(`^[ \t]*(?:←[ \t]+)?(?:☐|☒|☑)[ \t]+[^ \t].*[ \t]+(?:✔|✓)[ \t]+Submit(?:[ \t]+→)?[ \t]*$`)
 	askLoneTab   = regexp.MustCompile(`^[ \t]*(?:☐|☒)[ \t]+[^ \t]`)
 	askOptLine   = regexp.MustCompile(`^[ \t]*(❯)?[ \t]*([0-9]{1,2})\.[ \t]+(.*)$`)
@@ -252,6 +258,44 @@ var (
 
 func isAskRule(s string) bool {
 	return askPureRule.MatchString(s) || (askHintRule.MatchString(s) && !bytes.Contains([]byte(s), []byte("❯")))
+}
+
+// isOverlineLine matches Claude Code's full-width input/dialog top border line
+// drawn with `▔`: pure `▔` rule, `▔... <status> ▔` (e.g. effort indicator), or
+// `<temporary notice> ▔` (which disappears after ~8 s). Indented lines, option
+// rows, and lines containing `❯` are excluded so body/plan prose is untouched.
+func isOverlineLine(s string) bool {
+	if strings.Contains(s, "❯") || isIndented(s) || askOptLine.MatchString(s) {
+		return false
+	}
+	return overlinePure.MatchString(s) || overlineBar.MatchString(s) || overlineTail.MatchString(s)
+}
+
+// isOverlineChrome reports whether plain[i] is an overline top-edge chrome row
+// sitting immediately above a dialog or input box (within 0-2 blank lines of a
+// solid ─/━ border rule, ❯ prompt, Ask/Review header, or dialog title).
+func isOverlineChrome(plain []string, i int) bool {
+	if i < 0 || i >= len(plain) || !isOverlineLine(plain[i]) {
+		return false
+	}
+	blanks := 0
+	for j := i + 1; j < len(plain); j++ {
+		if blankLine.MatchString(plain[j]) {
+			blanks++
+			if blanks > 2 {
+				return false
+			}
+			continue
+		}
+		nxt := plain[j]
+		return solidRule.MatchString(nxt) ||
+			promptTop.MatchString(nxt) ||
+			askMultiTab.MatchString(nxt) ||
+			askLoneTab.MatchString(nxt) ||
+			askReviewHd.MatchString(nxt) ||
+			dialogTitle.MatchString(nxt)
+	}
+	return false
 }
 
 func isAskHintLine(s string) bool {
@@ -482,7 +526,7 @@ func askDialogBounds(lines []string) (top, end int, ok bool) {
 	hitRule := false
 	for j := firstOpt - 1; j >= tabLimit; j-- {
 		l := lines[j]
-		if isAskRule(l) {
+		if isAskRule(l) || isOverlineChrome(lines, j) {
 			hitRule = true
 			break
 		}
@@ -521,7 +565,15 @@ func steadyScreen(raw []byte) []byte {
 		}
 		return out.Bytes()
 	}
-	out := agentRowsAged(append(bytes.Join(rawLines, []byte("\n")), '\n'))
+	normLines := make([][]byte, len(rawLines))
+	for i, rl := range rawLines {
+		if isOverlineChrome(plain, i) {
+			normLines[i] = []byte("▔")
+		} else {
+			normLines[i] = rl
+		}
+	}
+	out := agentRowsAged(append(bytes.Join(normLines, []byte("\n")), '\n'))
 	out = spinnerLine.ReplaceAll(out, nil)
 	out = blinkingMark.ReplaceAll(out, []byte("${1} "))
 	return out
@@ -536,6 +588,29 @@ const steadyAwk = `function isblank(s) { return s ~ /^[ \t]*$/ }
 function isrule(s) {
   if (s ~ /^[ \t]*(\342\224\200|\342\224\201|\342\225\214|\342\226\224)(\342\224\200|\342\224\201|\342\225\214|\342\226\224)(\342\224\200|\342\224\201|\342\225\214|\342\226\224)(\342\224\200|\342\224\201|\342\225\214|\342\226\224)(\342\224\200|\342\224\201|\342\225\214|\342\226\224)(\342\224\200|\342\224\201|\342\225\214|\342\226\224)(\342\224\200|\342\224\201|\342\225\214|\342\226\224)(\342\224\200|\342\224\201|\342\225\214|\342\226\224)+[ \t]*$/) return 1
   return index(s, "\342\235\257") == 0 && s ~ /^[ \t]*(\342\224\200|\342\224\201|\342\225\214|\342\226\224)(\342\224\200|\342\224\201|\342\225\214|\342\226\224).*(\342\224\200|\342\224\201|\342\225\214|\342\226\224)(\342\224\200|\342\224\201|\342\225\214|\342\226\224)[ \t]*$/
+}
+function isoverline(s) {
+  if (index(s, "\342\235\257") > 0 || isindented(s) || isopt(s)) return 0
+  if (s ~ /^ ?\342\226\224\342\226\224\342\226\224\342\226\224\342\226\224\342\226\224\342\226\224(\342\226\224)+[ \t]*$/) return 1
+  if (s ~ /^ ?\342\226\224\342\226\224.*(\342\226\224)+[ \t]*$/) return 1
+  return s ~ /^ ?[^ \t].*[ \t](\342\226\224)+[ \t]*$/
+}
+function issolidrule(s) {
+  return s ~ /^[ \t]*(\342\224\200|\342\224\201)(\342\224\200|\342\224\201)(\342\224\200|\342\224\201)(\342\224\200|\342\224\201)(\342\224\200|\342\224\201)(\342\224\200|\342\224\201)(\342\224\200|\342\224\201)(\342\224\200|\342\224\201)+[ \t]*$/
+}
+function isdialogtitle(s) {
+  return s ~ /^[ \t]*[A-Z][A-Za-z0-9 ,-][A-Za-z0-9 ,-]+\?[ \t]*$/
+}
+function isoverlinechrome(i, nr,  j, blanks, nxt) {
+  if (!isoverline(L[i])) return 0
+  blanks = 0
+  for (j = i + 1; j <= nr; j++) {
+    if (isblank(L[j])) { blanks++; if (blanks > 2) return 0; continue }
+    nxt = L[j]
+    if (issolidrule(nxt) || nxt ~ /^[ \t]*\342\235\257([ \t]|$)/ || ismultitab(nxt) || islonetab(nxt) || isrevhead(nxt) || isdialogtitle(nxt)) return 1
+    return 0
+  }
+  return 0
 }
 function ismultitab(s) { return s ~ /^[ \t]*(\342\206\220[ \t]+)?(\342\230\220|\342\230\222|\342\230\221)[ \t]+[^ \t].*[ \t]+(\342\234\224|\342\234\223)[ \t]+Submit([ \t]+\342\206\222)?[ \t]*$/ }
 function islonetab(s) { return s ~ /^[ \t]*(\342\230\220|\342\230\222)[ \t]+[^ \t]/ }
@@ -657,7 +732,7 @@ END {
           fnb = 0; nbc = 0; hitrule = 0
           for (j = fopt - 1; j >= tlim; j--) {
             l = L[j]
-            if (isrule(l)) { hitrule = 1; break }
+            if (isrule(l) || isoverlinechrome(j, NR)) { hitrule = 1; break }
             if (!isblank(l)) { fnb = j; nbc++ }
           }
           if ((hitrule || tlim == 1) && fnb > 0 && nbc >= 2 && (ismultitab(L[fnb]) || islonetab(L[fnb]))) top = fnb
@@ -677,7 +752,8 @@ END {
   if (am) for (k = ai + 1; k <= an; k++) while (sub(/[ \t]+[0-9]+[hms][ \t]*$/, "", raw[k])) ;
   for (i = 1; i <= NR; i++) {
     s = raw[i]
-    if (isspinner(s)) s = ""
+    if (isoverlinechrome(i, NR)) s = "\342\226\224"
+    else if (isspinner(s)) s = ""
     else if (match(s, /^[ \t]*(\342\227\217|\342\217\272)/)) s = substr(s, 1, RLENGTH - 3) " " substr(s, RLENGTH + 1)
     print s
   }

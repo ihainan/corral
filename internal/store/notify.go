@@ -28,6 +28,14 @@ func (s *Store) SetAppSettingOnce(ctx context.Context, key, value string) (strin
 	return v, err
 }
 
+// SetAppSetting stores or updates a value in app_settings.
+func (s *Store) SetAppSetting(ctx context.Context, key, value string) error {
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO app_settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+		key, value)
+	return err
+}
+
 // Push subscriptions -----------------------------------------------------
 
 type PushSubscription struct {

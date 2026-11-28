@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -69,6 +70,11 @@ func run(log *slog.Logger) error {
 	if err := os.MkdirAll(cfg.DataDir, 0o700); err != nil {
 		return err
 	}
+	unlock, err := acquireServerLock(cfg.DataDir)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	st, err := store.Open(cfg.DataDir)
 	if err != nil {
 		return fmt.Errorf("open database: %w", err)
@@ -218,6 +224,38 @@ func run(log *slog.Logger) error {
 		log.Warn("gave up waiting for connections to close")
 	}
 	return nil
+}
+
+func acquireServerLock(dataDir string) (func(), error) {
+	lockPath := filepath.Join(dataDir, "corral.lock")
+	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("open server lock %s: %w", lockPath, err)
+	}
+	for {
+		err = syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		if !errors.Is(err, syscall.EINTR) {
+			break
+		}
+	}
+	if err != nil {
+		_ = f.Close()
+		if errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EAGAIN) {
+			return nil, fmt.Errorf("another corral server is already running for data directory %q (%s): %w", dataDir, lockPath, err)
+		}
+		return nil, fmt.Errorf("lock data directory %q (%s): %w", dataDir, lockPath, err)
+	}
+	_ = f.Truncate(0)
+	_, _ = f.Seek(0, 0)
+	_, _ = fmt.Fprintf(f, "%d\n", os.Getpid())
+
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+			_ = f.Close()
+		})
+	}, nil
 }
 
 func splitList(s string) []string {

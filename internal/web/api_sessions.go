@@ -178,6 +178,9 @@ func (s *Server) openSession(ctx context.Context, w http.ResponseWriter, r *http
 	if choice != nil && (choice.Kind == openTmux || choice.Kind == openHerdr) {
 		for _, rs := range s.terms.Running(u.ID, h.ID) {
 			if rs.HostConfig == cfg && sessionKind(rs.Persistence) == choice.Kind && sameMux(choice.Kind, rs.Info().MuxSession, choice.Name) {
+				if s.corrald != nil && rs.Client() != nil {
+					s.corrald.MaybeRetryPendingCleanup(u.ID, h.ID, u.Username, rs.Client())
+				}
 				// Marked as reused: a client that gave up on this open must
 				// not close it, as other devices may be using it.
 				writeJSON(w, http.StatusOK, struct {

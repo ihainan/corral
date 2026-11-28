@@ -167,7 +167,7 @@ func TestLifecycleBusyAutoRetry(t *testing.T) {
 	}
 
 	probe := &HostProbe{LibDir: "/lib", StateDir: "/state", SocketPath: "/tmp/corrald-test.sock"}
-	uout := RunUninstallWithRetry(context.Background(), sshClient, probe, "op12345678", fastPolicy, nil)
+	uout := RunUninstallWithRetry(context.Background(), sshClient, nil, probe, "op12345678", fastPolicy, nil)
 	if uout.Result != "removed" || uninstallCalls.Load() != 3 {
 		t.Fatalf("unexpected uninstall result: %+v calls=%d", uout, uninstallCalls.Load())
 	}
