@@ -632,7 +632,7 @@ function SettingsWorkbench({ modal, initialCat, onClose }: { modal?: boolean; in
               aria-label={t('settings.searchPlaceholder')}
             />
             {query ? (
-              <button type="button" className="icon-btn sm-search-clear" onClick={() => setQuery('')} aria-label={t('convo.searchClear')}>
+              <button type="button" className="icon-btn sm-search-clear" onClick={() => setQuery('')} aria-label={t('settings.searchClear')}>
                 <X size={13} aria-hidden="true" />
               </button>
             ) : (

@@ -353,3 +353,141 @@ func TestLineageAgentStartedEnrichmentCannotResurrectUnlink(t *testing.T) {
 		t.Fatalf("agent_started enrichment resurrected manual unlink: %+v", rows)
 	}
 }
+
+func TestLineageDecorateDropsClosedParent(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+
+	_, err := h.srv.store.UpsertAgentLineage(ctx, store.AgentLineage{
+		OwnerID: 1, HostID: 10, Server: "closed-parent",
+		ChildPane: "w1:p2", ChildTermID: "term-2",
+		ParentPane: "w1:p1", ParentTermID: "term-1",
+		Source: store.LineageToolLog, State: store.LineageConfirmed,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	lt := &lineageTracker{
+		srv: h.srv, ownerID: 1, hostID: 10, server: "closed-parent",
+		live: map[string]livePaneInfo{}, termToPane: map[string]string{},
+		knownPanes: map[string]bool{}, paneLogs: map[string]knownPaneLog{},
+		probedSize: map[string]int64{},
+	}
+
+	// Snapshot where parent pane w1:p1 has closed and only child w1:p2 remains.
+	snapOrphan := &herdr.Snapshot{
+		Version:    "0.8.0",
+		Workspaces: []herdr.Workspace{{ID: "w1", Label: "ZGCAI-Blog", Number: 1}},
+		Agents: []herdr.Pane{
+			{ID: "w1:p2", WorkspaceID: "w1", Agent: "agy", AgentStatus: "done", TerminalID: "term-2"},
+		},
+	}
+	lt.OnSnapshot(ctx, snapOrphan)
+	sum := summarize("default", snapOrphan, &agentTimes{at: map[string]agentTime{}}, false)
+	lt.decorate(&sum)
+	if sum.Workspaces[0].Agents[0].ParentPane != "" {
+		t.Fatalf("closed parent must not leave dangling ParentPane on top-level child: %+v", sum.Workspaces[0].Agents[0])
+	}
+}
+
+func TestLineageRecordEnvLinkAndAmbiguityGuard(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	const parentSID = "55555555-6666-4777-8888-999999999901"
+
+	lt := &lineageTracker{
+		srv: h.srv, ownerID: 1, hostID: 10, server: "env-link",
+		live: map[string]livePaneInfo{}, termToPane: map[string]string{},
+		knownPanes: map[string]bool{}, paneLogs: map[string]knownPaneLog{},
+		probedSize: map[string]int64{},
+	}
+	snap := &herdr.Snapshot{
+		Version:    "0.8.0",
+		Workspaces: []herdr.Workspace{{ID: "w1", Label: "ZGCAI-Blog", Number: 1}},
+		Agents: []herdr.Pane{
+			{ID: "w1:p1", WorkspaceID: "w1", Agent: "claude", AgentStatus: "working", TerminalID: "term-1", AgentSession: &herdr.AgentSessionInfo{Value: parentSID}},
+			{ID: "w1:p2", WorkspaceID: "w1", Agent: "agy", AgentStatus: "working", TerminalID: "term-2"},
+		},
+	}
+	lt.OnSnapshot(ctx, snap)
+	lt.RecordEnvLink(ctx, "w1:p2", parentSID)
+
+	sum := summarize("default", snap, &agentTimes{at: map[string]agentTime{}}, false)
+	lt.decorate(&sum)
+	if sum.Workspaces[0].Agents[1].ParentPane != "w1:p1" {
+		t.Fatalf("RecordEnvLink did not attach child pane to parent: %+v", sum.Workspaces[0].Agents[1])
+	}
+
+	// Ambiguous parent session (two live panes claim same session): must NOT guess.
+	snapAmb := &herdr.Snapshot{
+		Version:    "0.8.0",
+		Workspaces: []herdr.Workspace{{ID: "w1", Label: "ZGCAI-Blog", Number: 1}},
+		Agents: []herdr.Pane{
+			{ID: "w1:p1", WorkspaceID: "w1", Agent: "claude", TerminalID: "term-1", AgentSession: &herdr.AgentSessionInfo{Value: parentSID}},
+			{ID: "w1:p3", WorkspaceID: "w1", Agent: "claude", TerminalID: "term-3", AgentSession: &herdr.AgentSessionInfo{Value: parentSID}},
+			{ID: "w1:p4", WorkspaceID: "w1", Agent: "agy", TerminalID: "term-4"},
+		},
+	}
+	lt.OnSnapshot(ctx, snapAmb)
+	lt.RecordEnvLink(ctx, "w1:p4", parentSID)
+	sumAmb := summarize("default", snapAmb, &agentTimes{at: map[string]agentTime{}}, false)
+	lt.decorate(&sumAmb)
+	if sumAmb.Workspaces[0].Agents[2].ParentPane != "" {
+		t.Fatalf("ambiguous parent session must not link: %+v", sumAmb.Workspaces[0].Agents[2])
+	}
+}
+
+func TestLineageSelectProbeCandidatesPrioritizesWorkspaceAndActive(t *testing.T) {
+	lt := &lineageTracker{
+		live:     map[string]livePaneInfo{},
+		paneLogs: map[string]knownPaneLog{},
+	}
+	// Populate 30 idle panes in other workspaces + 1 working parent in the child's workspace.
+	for i := 1; i <= 30; i++ {
+		pane := "w9:p" + string(rune('a'+i%26)) + string(rune('0'+i/26))
+		lt.live[pane] = livePaneInfo{PaneID: pane, WorkspaceID: "w9", Agent: "claude", Status: herdr.StatusIdle}
+		lt.paneLogs[pane] = knownPaneLog{agent: "claude", logPath: "/logs/" + pane + ".jsonl"}
+	}
+	lt.live["w2:p1"] = livePaneInfo{PaneID: "w2:p1", WorkspaceID: "w2", Agent: "claude", Status: herdr.StatusWorking}
+	lt.paneLogs["w2:p1"] = knownPaneLog{agent: "claude", logPath: "/logs/parent.jsonl"}
+	lt.live["w2:p2"] = livePaneInfo{PaneID: "w2:p2", WorkspaceID: "w2", Agent: "agy", Status: herdr.StatusWorking}
+	// Also one live parent without a paneLog entry -> missingLogs must be true.
+	lt.live["w3:p1"] = livePaneInfo{PaneID: "w3:p1", WorkspaceID: "w3", Agent: "claude", Status: herdr.StatusIdle}
+
+	cands, missing := lt.selectProbeCandidatesLocked(map[string]bool{"w2:p2": true})
+	if !missing {
+		t.Fatal("expected missingLogs=true when w3:p1 lacks a paneLog entry")
+	}
+	if len(cands) != lineageProbeMaxFiles {
+		t.Fatalf("expected %d candidates, got %d", lineageProbeMaxFiles, len(cands))
+	}
+	if cands[0].pane != "w2:p1" {
+		t.Fatalf("expected same-workspace working parent w2:p1 first, got %+v", cands[0])
+	}
+}
+
+func TestLineageExtractorHeredocAndForLoop(t *testing.T) {
+	ex := newLineageExtractor("claude", "/run/herdr/s3.sock", "3")
+
+	// 1. Heredoc writing a prompt file followed by `herdr tab create` in a for loop.
+	raw := "" +
+		`{"type":"assistant","message":{"content":[{"type":"tool_use","id":"tu_loop","name":"Bash","input":{"command":"cat <<'EOF' > /tmp/brief.md\nExecute Markdown refactor\nEOF\nfor x in a b; do herdr tab create --workspace w2R --label p14l-$x --no-focus; done"}}]}}` + "\n" +
+		`{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tu_loop","is_error":false,"content":"{\"id\":\"cli:tab:create\",\"result\":{\"type\":\"tab_created\",\"root_pane\":{\"pane_id\":\"w2R:pA\",\"terminal_id\":\"term-a\"}}}\n{\"id\":\"cli:tab:create\",\"result\":{\"type\":\"tab_created\",\"root_pane\":{\"pane_id\":\"w2R:pB\",\"terminal_id\":\"term-b\"}}}"}]}}` + "\n"
+	got := ex.Feed([]byte(raw))
+	if len(got) != 2 {
+		t.Fatalf("expected 2 discoveries from heredoc+loop, got %+v", got)
+	}
+	if got[0].ChildPane != "w2R:pA" || got[1].ChildPane != "w2R:pB" || got[0].EvidenceKey == got[1].EvidenceKey {
+		t.Fatalf("unexpected heredoc+loop discoveries: %+v", got)
+	}
+
+	// 2. Spoofed `herdr pane split` inside a heredoc body must STILL be rejected.
+	if intent := ex.classifyHerdrCommand("cat <<'EOF'\nherdr pane split --json\nEOF"); intent.valid {
+		t.Fatalf("heredoc-embedded herdr must be rejected, got %+v", intent)
+	}
+	// 3. Unterminated heredoc must be rejected.
+	if intent := ex.classifyHerdrCommand("cat <<'EOF'\nhello\nherdr pane split --json"); intent.valid {
+		t.Fatalf("unterminated heredoc must be rejected, got %+v", intent)
+	}
+}

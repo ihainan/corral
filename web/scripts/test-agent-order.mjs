@@ -9,7 +9,7 @@ const { outputText } = ts.transpileModule(src, {
   compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 },
 })
 const mod = await import(`data:text/javascript;base64,${Buffer.from(outputText).toString('base64')}`)
-const { buildAgentGroups, listOrder, normalizeProjectPath, projectLabels, reorderPinned } = mod
+const { buildAgentGroups, listOrder, normalizeProjectPath, projectLabels, reorderPinned, visibleNestedChildKeys } = mod
 
 function row(partial) {
   return {
@@ -234,6 +234,40 @@ assert.equal(labels.get('~'), '~')
     const allKeys = groups.flatMap((g) => g.rows.map((r) => r.key))
     assert.equal(allKeys.length, new Set(allKeys).size)
   }
+}
+
+// 11. visibleNestedChildKeys: "Unlink from parent" is only offered when visually nested under a parent
+{
+  const rows = [
+    row({ key: 'p', title: 'Parent', status: 'idle', since: 200, projectKey: '/repo/a' }),
+    row({ key: 'nested', title: 'Nested Child', status: 'working', since: 300, projectKey: '/repo/a', parentKey: 'p' }),
+    row({ key: 'pinnedChild', title: 'Pinned Child', pinned: 0, status: 'done', since: 350, projectKey: '/repo/a', parentKey: 'p' }),
+    row({ key: 'orphan', title: 'Orphan Top-Level', status: 'done', since: 400, projectKey: '/repo/a', parentKey: 'closed-parent' }),
+    row({ key: 'otherProj', title: 'Other Project Child', status: 'blocked', since: 450, projectKey: '/repo/b', parentKey: 'p' }),
+  ]
+
+  // Status mode with nesting: nested and otherProj sit under p; pinnedChild (top-level in Pinned) and orphan (missing parent, top-level in For you) are NOT nested.
+  const statusNested = visibleNestedChildKeys(rows, { group: 'status', sort: 'recent', nestChildren: true })
+  assert.equal(statusNested.has('nested'), true)
+  assert.equal(statusNested.has('otherProj'), true)
+  assert.equal(statusNested.has('pinnedChild'), false)
+  assert.equal(statusNested.has('orphan'), false)
+  assert.equal(statusNested.has('p'), false)
+
+  // Project mode with nesting: otherProj is promoted to top-level For you (different project bucket), so it is NOT nested; nested stays under p in /repo/a.
+  const projNested = visibleNestedChildKeys(rows, { group: 'project', sort: 'recent', nestChildren: true })
+  assert.equal(projNested.has('nested'), true)
+  assert.equal(projNested.has('otherProj'), false)
+  assert.equal(projNested.has('pinnedChild'), false)
+  assert.equal(projNested.has('orphan'), false)
+
+  // Flat mode (nestChildren: false): NO row is visually nested.
+  const flatNested = visibleNestedChildKeys(rows, { group: 'status', sort: 'recent', nestChildren: false })
+  assert.equal(flatNested.size, 0)
+
+  // Search filter excluding the parent promotes matching child to top level -> NOT nested.
+  const filteredOnlyChild = visibleNestedChildKeys(rows.filter((r) => r.key === 'nested'), { group: 'status', sort: 'recent', nestChildren: true })
+  assert.equal(filteredOnlyChild.size, 0)
 }
 
 console.log('agentOrder: all tests passed')

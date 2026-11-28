@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { Bot, KeyRound, Plus, Search, Server, Settings, SquareTerminal } from 'lucide-react'
+import { Bot, Command, KeyRound, Plus, Server, Settings, SquareTerminal } from 'lucide-react'
 import { api, type Host } from './api'
 import { t } from './i18n'
 import { navigate, usePath } from './router'
@@ -143,7 +143,7 @@ function Palette({ onClose, onHost }: { onClose: () => void; onHost: (h: Host) =
   return (
     <Dialog title={t('palette.title')} onClose={onClose} sheet={false} hideTitle className="palette">
       <label className="palette-search">
-        <Search size={16} aria-hidden="true" />
+        <Command size={16} aria-hidden="true" />
         {/* (Focused by the dialog's trap, which first notes where the focus was, to give it back.) */}
         <input
           value={q}

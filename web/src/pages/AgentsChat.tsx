@@ -35,8 +35,8 @@ import { isLogPic, logPic, lookAt, PictureDialog, useDownload } from '../termina
 import { IMAGE_EXT, TextPreview } from '../terminal/textPreview'
 import { attach, ATTACH_LABEL, AttachStrip, PICTURE_PATH, takeOut, type Going } from '../terminal/attach'
 import { answerable, asking, callOut, useConversation, type ConvoEntry } from '../terminal/conversation'
-import { ackBg, answeredHerdr, convoTitles, expectSession, paneWaits, waitingTitle, isAgy, isCodex, isDevin, isOpenCode, listAgents, paneName, paneTitle, readSessionsNow, readsLog, useRunningSessions, type AgentRow, type AgentStatus } from '../terminal/agents'
-import { normalizeProjectPath, reorderPinned, rowTasks, type RowCmds, type RowTask } from '../terminal/agentOrder'
+import { ackBg, answeredHerdr, convoTitles, expectSession, paneWaits, waitingTitle, isAgy, isCodex, isDevin, isOpenCode, listAgents, matchQuery, paneName, paneTitle, readSessionsNow, readsLog, useRunningSessions, type AgentRow, type AgentStatus } from '../terminal/agents'
+import { normalizeProjectPath, reorderPinned, rowMatchesQuery, rowTasks, visibleNestedChildKeys, type RowCmds, type RowTask } from '../terminal/agentOrder'
 import { agentStatusMark, convoLastUserMs, keepTmuxBg, mergeRowTasks, readTmuxBg, reconcileAgentStatus, type AgentStatusMark, type TmuxBgCacheEntry } from '../terminal/sideState'
 import { conversationReadable, prefetchConversation } from '../terminal/conversation'
 import { holdTermMode, tmuxKey } from '../terminal/chatSend'
@@ -3722,9 +3722,18 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
       },
     ]
   }
+  const nestedChildKeys = useMemo(() => {
+    const found = query.trim() ? rows.filter((r) => rowMatchesQuery(r, query, matchQuery)) : rows
+    return visibleNestedChildKeys(found, {
+      group: prefsNow.sidebarGroup,
+      sort: prefsNow.sidebarSort,
+      pinFixed: prefsNow.pinFixedOrder,
+      nestChildren: prefsNow.sidebarNestChildren,
+    })
+  }, [rows, query, prefsNow.sidebarGroup, prefsNow.sidebarSort, prefsNow.pinFixedOrder, prefsNow.sidebarNestChildren])
   const unlinkItem = (e: Entry): MenuItem | null => {
     const r = e.row
-    if (e.s.persistence !== 'herdr' || !r || r.lost || !r.a.parent_pane) return null
+    if (e.s.persistence !== 'herdr' || !r || r.lost || !r.a.parent_pane || !nestedChildKeys.has(e.key)) return null
     return {
       label: t('convo.lineage.unlink'),
       icon: <Unlink size={16} />,

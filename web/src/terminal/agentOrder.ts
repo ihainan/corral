@@ -742,6 +742,21 @@ export function listOrder(rows: ConvoListRow[], opts?: OrderOpts): ConvoListRow[
   return out
 }
 
+// Keys of rows that are visibly rendered nested underneath a parent session
+// (nestDepth === 1 && nestedParentKey) under the current sidebar projection.
+// Used so "Unlink from parent" appears only when the row is actually displayed
+// as a child item, never on top-level rows (closed parent, flat mode, pinned
+// child, cross-bucket promotion, or parent filtered out).
+export function visibleNestedChildKeys(rows: ConvoListRow[], opts: OrderOpts = {}): Set<string> {
+  const out = new Set<string>()
+  for (const g of buildAgentGroups(rows.map(asHeld), opts)) {
+    for (const r of g.rows) {
+      if (r.nestDepth === 1 && r.nestedParentKey) out.add(r.key)
+    }
+  }
+  return out
+}
+
 // Reorder a pinned agent among the currently visible pinned keys while preserving
 // any offline/away pinned keys in place.
 export function reorderPinned(pins: string[], key: string, visibleKeys: Set<string>, dir: 'top' | 'up' | 'down'): string[] | null {
