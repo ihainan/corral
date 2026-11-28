@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"strings"
 )
@@ -289,7 +290,7 @@ func (s *Store) HostOwnerID(ctx context.Context, hostID int64) (int64, error) {
 
 // MarkCorraldHostsRemovePending transitions the given host IDs (and any non-off
 // peers sharing fingerprint+username) to remove_pending so the host's files are
-// cleaned up on next SSH connection.
+// cleaned up on next SSH connection or immediate cleanup.
 func (s *Store) MarkCorraldHostsRemovePending(ctx context.Context, hostIDs []int64, fingerprint, username string) error {
 	now := s.unix()
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -351,4 +352,141 @@ func (s *Store) MarkCorraldHostsStopped(ctx context.Context, hostIDs []int64, fi
 		}
 	}
 	return tx.Commit()
+}
+
+// CorraldHostWithOwner pairs a corrald_hosts row with its owning Corral user.
+type CorraldHostWithOwner struct {
+	HostID     int64
+	OwnerID    int64
+	CorralUser string
+	Host       *CorraldHost
+}
+
+// ListCorraldHostsByStates returns all corrald_hosts rows whose state is in
+// states, joined with hosts and users.
+func (s *Store) ListCorraldHostsByStates(ctx context.Context, states ...string) ([]CorraldHostWithOwner, error) {
+	if len(states) == 0 {
+		return nil, nil
+	}
+	placeholders := make([]string, 0, len(states))
+	args := make([]any, 0, len(states))
+	for _, st := range states {
+		if st == "" {
+			continue
+		}
+		placeholders = append(placeholders, "?")
+		args = append(args, st)
+	}
+	if len(placeholders) == 0 {
+		return nil, nil
+	}
+	q := `
+		SELECT h.owner_id, COALESCE(u.username, ''), ` + corraldHostQualifiedCols + `
+		FROM corrald_hosts ch
+		JOIN hosts h ON h.id = ch.host_id
+		LEFT JOIN users u ON u.id = h.owner_id
+		WHERE ch.state IN (` + strings.Join(placeholders, ",") + `)
+		ORDER BY ch.host_id ASC`
+	rows, err := s.db.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []CorraldHostWithOwner
+	for rows.Next() {
+		var ownerID int64
+		var corralUser string
+		ch := &CorraldHost{}
+		var consentBy sql.NullInt64
+		var filesJSON, pausedJSON, failedJSON string
+		if err := rows.Scan(
+			&ownerID, &corralUser,
+			&ch.HostID, &ch.State, &consentBy, &ch.ConsentAt,
+			&ch.BoundFingerprint, &ch.BoundUsername, &ch.BoundGateway,
+			&ch.ManifestJSON, &ch.Version, &ch.Release,
+			&ch.MachineID, &ch.SocketPath, &filesJSON, &pausedJSON, &failedJSON,
+			&ch.ActiveOpID, &ch.UpdatedFromVer, &ch.UpdatedFromRel, &ch.UpdatedFromTarget,
+			&ch.UpdateTargetVer, &ch.UpdateTargetRel, &ch.UpdateReadyAt, &ch.UpdateCrashCount,
+			&ch.LastOKAt, &ch.LastError, &ch.RestartCount, &ch.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		if consentBy.Valid {
+			v := consentBy.Int64
+			ch.ConsentBy = &v
+		}
+		if filesJSON != "" {
+			_ = json.Unmarshal([]byte(filesJSON), &ch.Files)
+		}
+		if ch.Files == nil {
+			ch.Files = []string{}
+		}
+		if pausedJSON != "" {
+			_ = json.Unmarshal([]byte(pausedJSON), &ch.PausedUsers)
+		}
+		if ch.PausedUsers == nil {
+			ch.PausedUsers = []int64{}
+		}
+		if failedJSON != "" {
+			_ = json.Unmarshal([]byte(failedJSON), &ch.FailedReleases)
+		}
+		if ch.FailedReleases == nil {
+			ch.FailedReleases = []int64{}
+		}
+		out = append(out, CorraldHostWithOwner{
+			HostID:     ch.HostID,
+			OwnerID:    ownerID,
+			CorralUser: corralUser,
+			Host:       ch,
+		})
+	}
+	return out, rows.Err()
+}
+
+// HasCorraldHostsInStates reports whether any corrald_hosts row currently has
+// one of the given states.
+func (s *Store) HasCorraldHostsInStates(ctx context.Context, states ...string) (bool, error) {
+	if len(states) == 0 {
+		return false, nil
+	}
+	placeholders := make([]string, 0, len(states))
+	args := make([]any, 0, len(states))
+	for _, st := range states {
+		if st == "" {
+			continue
+		}
+		placeholders = append(placeholders, "?")
+		args = append(args, st)
+	}
+	if len(placeholders) == 0 {
+		return false, nil
+	}
+	var one int
+	q := `SELECT 1 FROM corrald_hosts WHERE state IN (` + strings.Join(placeholders, ",") + `) LIMIT 1`
+	err := s.db.QueryRowContext(ctx, q, args...).Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// ResetCorraldHostOff resets a single corrald_hosts row to 'off' after cleanup.
+func (s *Store) ResetCorraldHostOff(ctx context.Context, hostID int64) error {
+	if hostID <= 0 {
+		return nil
+	}
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE corrald_hosts
+		SET state = 'off', version = '', release = 0, socket_path = '', files_json = '[]',
+		    paused_users_json = '[]', failed_releases_json = '[]', active_op_id = '',
+		    updated_from_ver = '', updated_from_rel = 0, updated_from_target = '',
+		    update_target_ver = '', update_target_rel = 0, update_ready_at = 0, update_crash_count = 0,
+		    last_error = '', restart_count = 0, updated_at = ?
+		WHERE host_id = ?`,
+		s.unix(), hostID)
+	return err
 }

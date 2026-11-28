@@ -924,10 +924,37 @@ func TestRunGatedErrorFallbackWhitelist(t *testing.T) {
 	})
 
 	// 1c. handoff_in_progress until deadline -> retries same op_id, never falls back to SSH.
+	// Uses a deterministic gatedSleep hook so deadline expiry happens squarely
+	// during the retry backoff wait (zero in-flight write frame on the wire),
+	// avoiding the wall-clock race where a 150ms timeout fires mid-RPC right
+	// after WriteJSON (where gw.ErrUnknownResult is the correct product outcome).
 	t.Run("no_fallback/handoff_in_progress_until_deadline", func(t *testing.T) {
 		origBase := gatedHandoffRetryBase
+		origSleep := gatedSleep
 		gatedHandoffRetryBase = 25 * time.Millisecond
-		t.Cleanup(func() { gatedHandoffRetryBase = origBase })
+		t.Cleanup(func() {
+			gatedHandoffRetryBase = origBase
+			gatedSleep = origSleep
+		})
+
+		deadlineCh := make(chan struct{})
+		var deadlineExpired atomic.Bool
+		dctx := &manualDeadlineCtx{
+			Context: context.Background(),
+			done:    deadlineCh,
+			expired: &deadlineExpired,
+		}
+		var sleeps atomic.Int32
+		gatedSleep = func(ctx context.Context, d time.Duration) bool {
+			if sleeps.Add(1) == 1 {
+				return ctx.Err() == nil
+			}
+			// Second backoff wait: deterministically expire deadline while no RPC is in flight.
+			if deadlineExpired.CompareAndSwap(false, true) {
+				close(deadlineCh)
+			}
+			return origSleep(ctx, d)
+		}
 
 		var opIDs sync.Map
 		var calls atomic.Int32
@@ -943,17 +970,15 @@ func TestRunGatedErrorFallbackWhitelist(t *testing.T) {
 				})
 			}
 		})
-		ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
-		defer cancel()
-		_, err := env.srv.runGated(ctx, env.sess, baseReq)
+		_, err := env.srv.runGated(dctx, env.sess, baseReq)
 		if !errors.Is(err, context.DeadlineExceeded) {
 			t.Fatalf("handoff timeout err = %v, want context.DeadlineExceeded", err)
 		}
 		if env.sshCount.Load() != 0 {
 			t.Fatalf("handoff_in_progress must not fall back to SSH (sshCount=%d)", env.sshCount.Load())
 		}
-		if calls.Load() < 2 {
-			t.Fatalf("expected >= 2 retries during handoff, got %d", calls.Load())
+		if calls.Load() != 2 {
+			t.Fatalf("expected 2 handoff attempts before backoff deadline, got %d", calls.Load())
 		}
 		distinct := 0
 		opIDs.Range(func(_, _ any) bool { distinct++; return true })
@@ -1005,6 +1030,20 @@ func TestRunGatedErrorFallbackWhitelist(t *testing.T) {
 			t.Fatalf("no_client: sshCount = %d, want 1", got)
 		}
 	})
+}
+
+type manualDeadlineCtx struct {
+	context.Context
+	done    <-chan struct{}
+	expired *atomic.Bool
+}
+
+func (c *manualDeadlineCtx) Done() <-chan struct{} { return c.done }
+func (c *manualDeadlineCtx) Err() error {
+	if c.expired.Load() {
+		return context.DeadlineExceeded
+	}
+	return nil
 }
 
 // TestConvoPressReplyUnknownResultRecordsDedupDigest verifies Fix 3:

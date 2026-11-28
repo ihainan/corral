@@ -88,15 +88,16 @@ type ManagerConfig struct {
 	PerfCompare       func(ctx context.Context, hostID, consentAt int64) []PerfCompareItem
 
 	// Test hooks (nil in production).
-	ProbeOverride      func(ctx context.Context, c *ssh.Client) (*HostProbe, error)
-	VerifySHA256Hook   func(actual string) string
-	OnEvent            func(fingerprint, sshUser string, ev proto.Event)
-	OnResync           func(fingerprint, sshUser string)
-	BeforeInstallStart func(hostID int64, opID string)
-	BeforeUpdateStage  func(hostID int64, opID string)
-	BeforeRebindMark   func(hostID int64, source string)
-	AfterScopeClaim    func(hostID int64, opID string)
-	AfterAttachHello   func(hostID int64)
+	ProbeOverride           func(ctx context.Context, c *ssh.Client) (*HostProbe, error)
+	VerifySHA256Hook        func(actual string) string
+	OnEvent                 func(fingerprint, sshUser string, ev proto.Event)
+	OnResync                func(fingerprint, sshUser string)
+	BeforeInstallStart      func(hostID int64, opID string)
+	BeforeUpdateStage       func(hostID int64, opID string)
+	BeforeRebindMark        func(hostID int64, source string)
+	AfterScopeClaim         func(hostID int64, opID string)
+	AfterAttachHello        func(hostID int64)
+	BeforeAdminDisableCheck func(hostID int64)
 }
 
 // API view types matching web/src/corraldLogic.ts.
@@ -334,6 +335,13 @@ type Manager struct {
 	gatewayVersion      string
 	adminDisabled       atomic.Bool
 	policyMu            sync.RWMutex
+	policyGen           atomic.Uint64
+	hasPendingCleanup   atomic.Bool
+	pendingRetryMu      sync.Mutex
+	pendingRetryAt      map[int64]time.Time
+	pendingRetryActive  map[int64]bool
+	bgCtx               context.Context
+	bgCancel            context.CancelFunc
 	healthInterval      time.Duration
 	restartBackoffs     []time.Duration
 	crashWindow         time.Duration
@@ -413,6 +421,7 @@ func NewManager(cfg ManagerConfig) *Manager {
 	if watchRPCTO <= 0 {
 		watchRPCTO = defaultWatchRPCTimeout
 	}
+	bgCtx, bgCancel := context.WithCancel(context.Background())
 	mgr := &Manager{
 		cfg:                 cfg,
 		store:               cfg.Store,
@@ -421,6 +430,10 @@ func NewManager(cfg ManagerConfig) *Manager {
 		ssh:                 cfg.SSH,
 		gatewayID:           cfg.GatewayID,
 		gatewayVersion:      cfg.GatewayVersion,
+		bgCtx:               bgCtx,
+		bgCancel:            bgCancel,
+		pendingRetryAt:      make(map[int64]time.Time),
+		pendingRetryActive:  make(map[int64]bool),
 		healthInterval:      cfg.HealthInterval,
 		restartBackoffs:     cfg.RestartBackoffs,
 		crashWindow:         cfg.CrashWindow,
@@ -446,6 +459,9 @@ func NewManager(cfg ManagerConfig) *Manager {
 	// previous gateway process crashed after finalizing corrald_ops.
 	if cfg.Store != nil {
 		_, _ = cfg.Store.ClearStaleCorraldHostOps(context.Background())
+		if has, err := cfg.Store.HasCorraldHostsInStates(context.Background(), StateRemovePending, StateRemoving); err == nil && has {
+			mgr.hasPendingCleanup.Store(true)
+		}
 	}
 	return mgr
 }
@@ -488,6 +504,9 @@ func (m *Manager) Close() {
 		return
 	}
 	m.closed = true
+	if m.bgCancel != nil {
+		m.bgCancel()
+	}
 	for _, op := range m.opsByHost {
 		if op.cancel != nil {
 			op.cancel()
@@ -753,6 +772,10 @@ func (m *Manager) Status(ctx context.Context, userID, hostID int64) (*StatusResp
 	}
 
 	res.State = EffectiveUserState(toSnapshot(ch), userID)
+	if ch.State == StateRemovePending || ch.State == StateRemoving {
+		m.hasPendingCleanup.Store(true)
+		m.MaybeRetryPendingCleanup(userID, hostID, "", nil)
+	}
 	res.Version = ch.Version
 	res.Release = ch.Release
 	res.LastOKAt = ch.LastOKAt
@@ -1565,7 +1588,13 @@ func (m *Manager) onHostConnectedOwned(ctx context.Context, userID, hostID int64
 	}
 
 	activeOp, activeErr := m.store.ActiveCorraldOp(ctx, hostID)
-	needsReconcile := activeErr == nil || ch.ActiveOpID != "" || ch.State == StateRemovePending || ch.State == StateRemoving || ch.State == StateInstalling || ch.State == StateUpdating
+	if ch.State == StateRemovePending || ch.State == StateRemoving {
+		if CheckBinding(toSnapshot(ch), fingerprint, sshUser, m.gatewayID) {
+			m.handleAdminDisabledOnConnect(ctx, userID, hostID, corralUser, fingerprint, sshUser, sshClient, ch)
+		}
+		return
+	}
+	needsReconcile := activeErr == nil || ch.ActiveOpID != "" || ch.State == StateInstalling || ch.State == StateUpdating
 	if needsReconcile {
 		m.reconcileHost(ctx, userID, hostID, corralUser, fingerprint, sshUser, sshClient, ch, activeOp)
 		ch, err = m.store.CorraldHostByID(ctx, hostID)
@@ -3050,9 +3079,13 @@ func (m *Manager) attachAndHello(
 	if m.cfg.AfterAttachHello != nil {
 		m.cfg.AfterAttachHello(hostID)
 	}
+	refList := []*hostRef{{HostID: hostID, OwnerID: userID, CorralUser: corralUser}}
 	if m.AdminDisabled() {
-		m.enforceAdminDisableOnClient(ctx, client, hello, []int64{hostID}, key)
+		exclusive := m.enforceAdminDisableOnClient(ctx, client, hello, refList, []int64{hostID}, key)
 		_ = client.Close()
+		if exclusive {
+			m.tryImmediateAdminUninstall(ctx, key, refList, []int64{hostID}, sshClient, 0)
+		}
 		return ErrAdminDisabled
 	}
 
@@ -3087,8 +3120,11 @@ func (m *Manager) attachAndHello(
 	m.policyMu.RLock()
 	if m.adminDisabled.Load() {
 		m.policyMu.RUnlock()
-		m.enforceAdminDisableOnClient(ctx, client, hello, []int64{hostID}, key)
+		exclusive := m.enforceAdminDisableOnClient(ctx, client, hello, refList, []int64{hostID}, key)
 		_ = client.Close()
+		if exclusive {
+			m.tryImmediateAdminUninstall(ctx, key, refList, []int64{hostID}, sshClient, 0)
+		}
 		return ErrAdminDisabled
 	}
 
@@ -3412,8 +3448,11 @@ func (m *Manager) reconnectSharedConn(ctx context.Context, sc *sharedConn, overr
 		for _, r := range refs {
 			hostIDs = append(hostIDs, r.HostID)
 		}
-		m.enforceAdminDisableOnClient(ctx, newClient, hello, hostIDs, sc.key)
+		exclusive := m.enforceAdminDisableOnClient(ctx, newClient, hello, refs, hostIDs, sc.key)
 		_ = newClient.Close()
+		if exclusive {
+			m.tryImmediateAdminUninstall(ctx, sc.key, refs, hostIDs, sshClient, 0)
+		}
 		return ErrAdminDisabled
 	}
 	m.mu.Lock()

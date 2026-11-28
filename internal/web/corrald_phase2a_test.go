@@ -395,43 +395,26 @@ func TestCorraldAdminPolicyStopAndCleanupSingleGateway(t *testing.T) {
 		t.Fatalf("expected admin_disabled=true in host status, got %+v", stDis)
 	}
 
-	// Since only this gateway was connected (connected_gateways == 1), the daemon
-	// must be stopped on the host and host DB state marked remove_pending.
+	// Since only this gateway was connected and an SSH connection is already held,
+	// the daemon must be stopped AND files immediately uninstalled (state -> off)
+	// without waiting for a new SSH connection.
 	bin := filepath.Join(home, ".local", "lib", "corral", "corrald")
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(10 * time.Second)
 	for {
-		c := exec.Command(bin, "status")
-		c.Env = append(os.Environ(), "HOME="+home)
-		out, _ := c.CombinedOutput()
-		if strings.Contains(string(out), "state=stopped") {
+		chRow, err := h.srv.store.CorraldHostByID(context.Background(), hostID)
+		_, statErr := os.Stat(bin)
+		if err == nil && chRow.State == gw.StateOff && os.IsNotExist(statErr) {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("expected corrald process to stop after admin disable; status=%s", string(out))
+			t.Fatalf("expected immediate cleanup to off + binary removed; row=(%+v, %v) statErr=%v", chRow, err, statErr)
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
 
-	chRow, err := h.srv.store.CorraldHostByID(context.Background(), hostID)
-	if err != nil || chRow.State != gw.StateRemovePending {
-		t.Fatalf("expected host DB state remove_pending, got (%+v, %v)", chRow, err)
-	}
-
-	// On next SSH connection (even while disabled), existing removal flow cleans
-	// up host files and resets DB state to off.
+	// Re-enabling policy must NOT auto-reinstall; host stays off until user re-enables.
 	sshCl := dialTestSSH(t, sshSrv)
 	defer sshCl.Close()
-	h.srv.corrald.OnHostConnected(context.Background(), adminID, hostID, "admin", fp, "alice", sshCl)
-
-	chAfter, err := h.srv.store.CorraldHostByID(context.Background(), hostID)
-	if err != nil || chAfter.State != gw.StateOff {
-		t.Fatalf("expected host state off after cleanup on reconnect, got (%+v, %v)", chAfter, err)
-	}
-	if _, statErr := os.Stat(bin); !os.IsNotExist(statErr) {
-		t.Fatalf("expected corrald binary symlink %s to be cleaned up, stat err=%v", bin, statErr)
-	}
-
-	// Re-enabling policy must NOT auto-reinstall; host stays off until user re-enables.
 	pe := admin.do("PUT", "/api/admin/corrald", map[string]any{"allowed": true})
 	mustStatus(t, pe, http.StatusOK, "admin re-enable corrald")
 	h.srv.corrald.OnHostConnected(context.Background(), adminID, hostID, "admin", fp, "alice", sshCl)
@@ -493,18 +476,24 @@ func TestCorraldAdminPolicyKeepWhenOtherGatewayConnected(t *testing.T) {
 		t.Fatalf("expected CorraldClient false while disabled")
 	}
 
-	// The daemon MUST still be running for the other gateway and files MUST stay intact.
-	hAfter, err := otherClient.Health(context.Background())
-	if err != nil || hAfter.ConnectedGateways != 1 {
-		t.Fatalf("expected daemon still alive with 1 remaining gateway, got (%+v, %v)", hAfter, err)
+	// Wait for the background disable worker to disconnect this gateway.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		hAfter, err := otherClient.Health(context.Background())
+		chMid, _ := h.srv.store.CorraldHostByID(context.Background(), hostID)
+		if err == nil && hAfter.ConnectedGateways == 1 && chMid != nil && chMid.State == gw.StateStopped {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("expected daemon alive with 1 remaining gateway and host stopped; health=(%+v,%v) ch=%+v", hAfter, err, chMid)
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
+
+	// The daemon MUST still be running for the other gateway and files MUST stay intact.
 	bin := filepath.Join(home, ".local", "lib", "corral", "corrald")
 	if _, statErr := os.Stat(bin); statErr != nil {
 		t.Fatalf("expected corrald files preserved, stat err=%v", statErr)
-	}
-	chMid, _ := h.srv.store.CorraldHostByID(context.Background(), hostID)
-	if chMid.State == gw.StateRemovePending || chMid.State == gw.StateOff {
-		t.Fatalf("expected host NOT marked remove_pending/off when other gateway connected, got %q", chMid.State)
 	}
 
 	// Reconnecting while still disabled must NOT delete files or attach.
@@ -636,6 +625,10 @@ func TestCorraldAdminDisableReconnectChecksExclusivity(t *testing.T) {
 	v1Dir, _ := buildTestCorraldDist(t)
 
 	t.Run("live_other_gateway_prevents_cleanup_of_remove_pending", func(t *testing.T) {
+		distV1, err := gw.LoadDist(v1Dir)
+		if err != nil {
+			t.Fatalf("LoadDist: %v", err)
+		}
 		h := newHarness(t, func(c *config.Config) {
 			c.CorraldDir = v1Dir
 			c.GatewayID = "gw-a.local"
@@ -649,16 +642,27 @@ func TestCorraldAdminDisableReconnectChecksExclusivity(t *testing.T) {
 		startCorraldInstall(t, admin, hostID)
 		waitCorraldState(t, admin, hostID, gw.StateRunning)
 
-		// Disable on gateway A while sole gateway -> daemon stops, DB becomes remove_pending.
-		mustStatus(t, admin.do("PUT", "/api/admin/corrald", map[string]any{"allowed": false}), http.StatusOK, "disable")
+		// Simulate immediate uninstall failing (host disconnected during disable)
+		// so the daemon is stopped, files remain, and DB is remove_pending.
+		bin := filepath.Join(home, ".local", "lib", "corral", "corrald")
+		stopCmd := exec.Command(bin, "stop")
+		stopCmd.Env = append(os.Environ(), "HOME="+home)
+		_, _ = stopCmd.CombinedOutput()
 		waitDaemonStopped(t, home)
-		chMid, _ := h.srv.store.CorraldHostByID(context.Background(), hostID)
-		if chMid.State != gw.StateRemovePending {
-			t.Fatalf("expected remove_pending, got %q", chMid.State)
+
+		h.srv.corrald.Close()
+		h.srv.corrald = gw.NewManager(gw.ManagerConfig{
+			Store:         h.store,
+			Dist:          distV1,
+			GatewayID:     "gw-a.local",
+			AdminDisabled: true,
+			SSH:           &webSSHProvider{s: h.srv},
+		})
+		if err := h.srv.store.MarkCorraldHostsRemovePending(context.Background(), []int64{hostID}, fp, "alice"); err != nil {
+			t.Fatalf("MarkCorraldHostsRemovePending: %v", err)
 		}
 
 		// Before gateway A reconnects, gateway B starts the shared daemon and connects!
-		bin := filepath.Join(home, ".local", "lib", "corral", "corrald")
 		serveCmd := exec.Command(bin, "serve", "--gateway", "gw-b.example.com")
 		serveCmd.Env = append(os.Environ(), "HOME="+home)
 		out, err := serveCmd.CombinedOutput()
@@ -705,6 +709,10 @@ func TestCorraldAdminDisableReconnectChecksExclusivity(t *testing.T) {
 	})
 
 	t.Run("stopped_daemon_with_other_gateway_in_clients_json_preserves_files", func(t *testing.T) {
+		distV1, err := gw.LoadDist(v1Dir)
+		if err != nil {
+			t.Fatalf("LoadDist: %v", err)
+		}
 		h := newHarness(t, func(c *config.Config) {
 			c.CorraldDir = v1Dir
 			c.GatewayID = "gw-a.local"
@@ -718,8 +726,23 @@ func TestCorraldAdminDisableReconnectChecksExclusivity(t *testing.T) {
 		startCorraldInstall(t, admin, hostID)
 		waitCorraldState(t, admin, hostID, gw.StateRunning)
 
-		mustStatus(t, admin.do("PUT", "/api/admin/corrald", map[string]any{"allowed": false}), http.StatusOK, "disable")
+		bin := filepath.Join(home, ".local", "lib", "corral", "corrald")
+		stopCmd := exec.Command(bin, "stop")
+		stopCmd.Env = append(os.Environ(), "HOME="+home)
+		_, _ = stopCmd.CombinedOutput()
 		waitDaemonStopped(t, home)
+
+		h.srv.corrald.Close()
+		h.srv.corrald = gw.NewManager(gw.ManagerConfig{
+			Store:         h.store,
+			Dist:          distV1,
+			GatewayID:     "gw-a.local",
+			AdminDisabled: true,
+			SSH:           &webSSHProvider{s: h.srv},
+		})
+		if err := h.srv.store.MarkCorraldHostsRemovePending(context.Background(), []int64{hostID}, fp, "alice"); err != nil {
+			t.Fatalf("MarkCorraldHostsRemovePending: %v", err)
+		}
 
 		// Add another gateway entry to clients.json on disk while daemon is stopped.
 		clientsPath := findClientsJSON(t, home)
@@ -738,7 +761,6 @@ func TestCorraldAdminDisableReconnectChecksExclusivity(t *testing.T) {
 		defer sshA.Close()
 		h.srv.corrald.OnHostConnected(context.Background(), adminID, hostID, "admin", fp, "alice", sshA)
 
-		bin := filepath.Join(home, ".local", "lib", "corral", "corrald")
 		if _, err := os.Stat(bin); err != nil {
 			t.Fatalf("corrald binary must be preserved when clients.json lists another gateway: %v", err)
 		}
@@ -749,6 +771,10 @@ func TestCorraldAdminDisableReconnectChecksExclusivity(t *testing.T) {
 	})
 
 	t.Run("unreadable_clients_json_preserves_files", func(t *testing.T) {
+		distV1, err := gw.LoadDist(v1Dir)
+		if err != nil {
+			t.Fatalf("LoadDist: %v", err)
+		}
 		h := newHarness(t, func(c *config.Config) {
 			c.CorraldDir = v1Dir
 			c.GatewayID = "gw-a.local"
@@ -762,8 +788,23 @@ func TestCorraldAdminDisableReconnectChecksExclusivity(t *testing.T) {
 		startCorraldInstall(t, admin, hostID)
 		waitCorraldState(t, admin, hostID, gw.StateRunning)
 
-		mustStatus(t, admin.do("PUT", "/api/admin/corrald", map[string]any{"allowed": false}), http.StatusOK, "disable")
+		bin := filepath.Join(home, ".local", "lib", "corral", "corrald")
+		stopCmd := exec.Command(bin, "stop")
+		stopCmd.Env = append(os.Environ(), "HOME="+home)
+		_, _ = stopCmd.CombinedOutput()
 		waitDaemonStopped(t, home)
+
+		h.srv.corrald.Close()
+		h.srv.corrald = gw.NewManager(gw.ManagerConfig{
+			Store:         h.store,
+			Dist:          distV1,
+			GatewayID:     "gw-a.local",
+			AdminDisabled: true,
+			SSH:           &webSSHProvider{s: h.srv},
+		})
+		if err := h.srv.store.MarkCorraldHostsRemovePending(context.Background(), []int64{hostID}, fp, "alice"); err != nil {
+			t.Fatalf("MarkCorraldHostsRemovePending: %v", err)
+		}
 
 		// Corrupt clients.json so exclusivity cannot be confirmed.
 		clientsPath := findClientsJSON(t, home)
@@ -775,7 +816,6 @@ func TestCorraldAdminDisableReconnectChecksExclusivity(t *testing.T) {
 		defer sshA.Close()
 		h.srv.corrald.OnHostConnected(context.Background(), adminID, hostID, "admin", fp, "alice", sshA)
 
-		bin := filepath.Join(home, ".local", "lib", "corral", "corrald")
 		if _, err := os.Stat(bin); err != nil {
 			t.Fatalf("corrald binary must be preserved when clients.json is unreadable: %v", err)
 		}
@@ -977,14 +1017,17 @@ func TestCorraldAdminDisableInFlightAttachRace(t *testing.T) {
 		t.Fatal("timed out waiting for OnHostConnected to finish")
 	}
 
-	// Must have ZERO live client, daemon stopped (sole gateway), and DB marked remove_pending.
+	// Must have ZERO live client, daemon stopped & files uninstalled immediately (state -> off).
 	if _, ok := h.srv.CorraldClient(adminID, hostID, "pane.send"); ok {
 		t.Fatalf("expected no CorraldClient after in-flight attach raced with admin disable")
 	}
-	waitDaemonStopped(t, home)
+	bin := filepath.Join(home, ".local", "lib", "corral", "corrald")
 	chAfter, err := h.srv.store.CorraldHostByID(context.Background(), hostID)
-	if err != nil || chAfter.State != gw.StateRemovePending {
-		t.Fatalf("expected DB state remove_pending after raced attach, got (%+v, %v)", chAfter, err)
+	if err != nil || chAfter.State != gw.StateOff {
+		t.Fatalf("expected DB state off after raced attach immediate cleanup, got (%+v, %v)", chAfter, err)
+	}
+	if _, statErr := os.Stat(bin); !os.IsNotExist(statErr) {
+		t.Fatalf("expected corrald binary removed after raced attach cleanup, stat err=%v", statErr)
 	}
 }
 
@@ -1088,4 +1131,230 @@ func TestCorraldPerfDailyRequeueOnFailedFlushConcurrentWithClose(t *testing.T) {
 	if sendCount != 2 || cardCount != 1 {
 		t.Fatalf("expected persisted pre-close samples (send=2, card=1) and post-close sample dropped, got send=%d card=%d rows=%+v", sendCount, cardCount, rows)
 	}
+}
+
+// Regression test for Fix Round 2 Item #1 [P1]:
+// End-to-end verification of immediate cleanup on pooled SSH connections,
+// non-uninstall when another gateway is registered, retry on next host use
+// over an existing connection (without a new SSH dial), and re-allow
+// reconciliation of remove_pending hosts without auto-reinstall.
+func TestCorraldAdminDisableImmediateCleanupOnPooledSSH(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("requires linux")
+	}
+	v1Dir, _ := buildTestCorraldDist(t)
+	distV1, err := gw.LoadDist(v1Dir)
+	if err != nil {
+		t.Fatalf("LoadDist: %v", err)
+	}
+
+	t.Run("sole_gateway_cleans_immediately_without_new_connection", func(t *testing.T) {
+		h := newHarness(t, func(c *config.Config) {
+			c.CorraldDir = v1Dir
+			c.GatewayID = "gw-pool.local"
+		})
+		admin := h.admin()
+		adminID := userIDOf(t, admin)
+		sshSrv, home := startCorraldSSH(t)
+		hostID, _ := createAndPinHost(t, admin, sshSrv, "pooled-sole")
+
+		startCorraldInstall(t, admin, hostID)
+		waitCorraldState(t, admin, hostID, gw.StateRunning)
+
+		// Track whether corrald uninstall ran via a wrapper or filesystem check:
+		// verify ~/.local/lib/corral/corrald and ~/.local/state/corral/corrald exist now.
+		bin := filepath.Join(home, ".local", "lib", "corral", "corrald")
+		stateCorrald := filepath.Join(home, ".local", "state", "corral", "corrald")
+		if _, err := os.Stat(bin); err != nil {
+			t.Fatalf("expected binary installed before disable: %v", err)
+		}
+
+		// Disable while keeping the existing connection alive (NO OnHostConnected after disable!).
+		mustStatus(t, admin.do("PUT", "/api/admin/corrald", map[string]any{"allowed": false}), http.StatusOK, "admin disable")
+
+		deadline := time.Now().Add(10 * time.Second)
+		for {
+			ch, err := h.srv.store.CorraldHostByID(context.Background(), hostID)
+			_, binErr := os.Stat(bin)
+			_, stateErr := os.Stat(stateCorrald)
+			if err == nil && ch.State == gw.StateOff && os.IsNotExist(binErr) && os.IsNotExist(stateErr) {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("expected immediate cleanup to off without new connection; ch=(%+v,%v) binErr=%v stateErr=%v", ch, err, binErr, stateErr)
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+		_ = adminID
+	})
+
+	t.Run("other_gateway_registered_in_registry_never_uninstalls", func(t *testing.T) {
+		h := newHarness(t, func(c *config.Config) {
+			c.CorraldDir = v1Dir
+			c.GatewayID = "gw-pool.local"
+		})
+		admin := h.admin()
+		sshSrv, home := startCorraldSSH(t)
+		hid, _ := createAndPinHost(t, admin, sshSrv, "pooled-other-reg")
+		startCorraldInstall(t, admin, hid)
+		waitCorraldState(t, admin, hid, gw.StateRunning)
+		chRow, _ := h.srv.store.CorraldHostByID(context.Background(), hid)
+
+		// Another gateway connects, registers in ClientRegistry, and then DISCONNECTS
+		// (so ConnectedGateways == 1, but clients.json still records gw-other!).
+		otherSSH := dialTestSSH(t, sshSrv)
+		otherCl, err := gw.Dial(context.Background(), otherSSH, chRow.SocketPath, nil)
+		if err != nil {
+			t.Fatalf("other gateway Dial: %v", err)
+		}
+		if _, err := otherCl.Hello(context.Background(), proto.HelloParams{
+			Gateway:        "gw-other-registered.local",
+			GatewayVersion: "0.3.1",
+			ProtoMin:       1,
+			ProtoMax:       1,
+			Client:         proto.ClientIdentity{CorralUser: "bob", HostID: "42"},
+		}); err != nil {
+			t.Fatalf("other gateway Hello: %v", err)
+		}
+		_ = otherCl.Close()
+		_ = otherSSH.Close()
+
+		// Disable on gw-pool.local -> live Hello check sees gw-other-registered.local,
+		// so it MUST NOT stop the daemon or uninstall files!
+		mustStatus(t, admin.do("PUT", "/api/admin/corrald", map[string]any{"allowed": false}), http.StatusOK, "admin disable")
+
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			ch, err := h.srv.store.CorraldHostByID(context.Background(), hid)
+			if err == nil && ch.State == gw.StateStopped {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("expected stopped state when another gateway is registered, got (%+v, %v)", ch, err)
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+
+		bin := filepath.Join(home, ".local", "lib", "corral", "corrald")
+		if _, err := os.Stat(bin); err != nil {
+			t.Fatalf("expected binary preserved when another gateway is registered: %v", err)
+		}
+		stCmd := exec.Command(bin, "status")
+		stCmd.Env = append(os.Environ(), "HOME="+home)
+		out, _ := stCmd.CombinedOutput()
+		if !strings.Contains(string(out), "state=running") {
+			t.Fatalf("expected daemon still running when another gateway is registered; status=%s", string(out))
+		}
+	})
+
+	t.Run("remove_pending_retries_on_existing_connection_agent_locate", func(t *testing.T) {
+		h := newHarness(t, func(c *config.Config) {
+			c.CorraldDir = v1Dir
+			c.GatewayID = "gw-retry.local"
+		})
+		admin := h.admin()
+		adminID := userIDOf(t, admin)
+		sshSrv, home := startCorraldSSH(t)
+		hostID, _ := createAndPinHost(t, admin, sshSrv, "retry-existing-conn")
+		fp := hostFingerprint(t, h, adminID, hostID)
+
+		startCorraldInstall(t, admin, hostID)
+		waitCorraldState(t, admin, hostID, gw.StateRunning)
+
+		// Stop daemon and leave host in remove_pending on a restarted Manager
+		// (simulating immediate cleanup failure while files remain on host).
+		bin := filepath.Join(home, ".local", "lib", "corral", "corrald")
+		stopCmd := exec.Command(bin, "stop")
+		stopCmd.Env = append(os.Environ(), "HOME="+home)
+		_, _ = stopCmd.CombinedOutput()
+		waitDaemonStopped(t, home)
+
+		if err := h.srv.store.MarkCorraldHostsRemovePending(context.Background(), []int64{hostID}, fp, "alice"); err != nil {
+			t.Fatalf("MarkCorraldHostsRemovePending: %v", err)
+		}
+		h.srv.corrald.Close()
+		h.srv.corrald = gw.NewManager(gw.ManagerConfig{
+			Store:         h.store,
+			Dist:          distV1,
+			GatewayID:     "gw-retry.local",
+			AdminDisabled: true,
+			SSH:           &webSSHProvider{s: h.srv},
+		})
+
+		// Use an already-open SSH connection on a terminal session (e.g. opening
+		// the agents list -> tryCorraldLocate) WITHOUT calling OnHostConnected!
+		existingSSH := dialTestSSH(t, sshSrv)
+		defer existingSSH.Close()
+		sess := newTestTermSession(t, adminID, hostID, "tmux", existingSSH)
+		_, _ = h.srv.tryCorraldLocate(context.Background(), sess, proto.AgentLocateParams{Mode: "tmux"})
+
+		// Background retry over the existing SSH connection must clean up files -> state off!
+		deadline := time.Now().Add(10 * time.Second)
+		for {
+			ch, err := h.srv.store.CorraldHostByID(context.Background(), hostID)
+			_, binErr := os.Stat(bin)
+			if err == nil && ch.State == gw.StateOff && os.IsNotExist(binErr) {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("expected remove_pending retry on existing conn locate to clean up to off; ch=(%+v,%v) binErr=%v", ch, err, binErr)
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+	})
+
+	t.Run("reallow_resets_already_cleaned_remove_pending_to_off_without_reinstall", func(t *testing.T) {
+		h := newHarness(t, func(c *config.Config) {
+			c.CorraldDir = v1Dir
+			c.GatewayID = "gw-reallow.local"
+		})
+		admin := h.admin()
+		adminID := userIDOf(t, admin)
+		sshSrv, home := startCorraldSSH(t)
+		hostID, _ := createAndPinHost(t, admin, sshSrv, "reallow-cleaned")
+		fp := hostFingerprint(t, h, adminID, hostID)
+
+		startCorraldInstall(t, admin, hostID)
+		waitCorraldState(t, admin, hostID, gw.StateRunning)
+
+		// Manually uninstall on host and force DB into remove_pending while disabled
+		// (simulating files already gone before admin re-allows).
+		bin := filepath.Join(home, ".local", "lib", "corral", "corrald")
+		uCmd := exec.Command(bin, "uninstall")
+		uCmd.Env = append(os.Environ(), "HOME="+home)
+		if out, err := uCmd.CombinedOutput(); err != nil {
+			t.Fatalf("manual uninstall: %v (%s)", err, string(out))
+		}
+
+		h.srv.corrald.Close()
+		h.srv.corrald = gw.NewManager(gw.ManagerConfig{
+			Store:         h.store,
+			Dist:          distV1,
+			GatewayID:     "gw-reallow.local",
+			AdminDisabled: true,
+			SSH:           &webSSHProvider{s: h.srv},
+		})
+		if err := h.srv.store.MarkCorraldHostsRemovePending(context.Background(), []int64{hostID}, fp, "alice"); err != nil {
+			t.Fatalf("MarkCorraldHostsRemovePending: %v", err)
+		}
+
+		// Admin re-allows corrald -> reconcile finds files already gone and resets DB to off
+		// without reinstalling corrald!
+		mustStatus(t, admin.do("PUT", "/api/admin/corrald", map[string]any{"allowed": true}), http.StatusOK, "admin allow")
+
+		deadline := time.Now().Add(10 * time.Second)
+		for {
+			ch, err := h.srv.store.CorraldHostByID(context.Background(), hostID)
+			if err == nil && ch.State == gw.StateOff {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("expected re-allow to reset already-cleaned remove_pending host to off, got (%+v, %v)", ch, err)
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+		if _, statErr := os.Stat(bin); !os.IsNotExist(statErr) {
+			t.Fatalf("re-allowing must NOT auto-reinstall corrald; stat err=%v", statErr)
+		}
+	})
 }
