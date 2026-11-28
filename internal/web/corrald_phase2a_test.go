@@ -4512,3 +4512,283 @@ func TestCorraldFix15_StartupSweepAndBindingProtection(t *testing.T) {
 func syscallFlockEx(f *os.File) error {
 	return syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
 }
+
+// TestCorraldFix16StalePendingRemoveAccountAfterKeyRotation verifies Fix16 Item #2:
+//
+// Sequence from review:
+//
+//	remove_pending -> explicit retry -> stop_failed -> error
+//	-> same machine rotates its SSH key, user keeps authorization
+//	-> explicit remove -> daemon is actually uninstalled and row reaches off only then.
+//
+// Also asserts pending_remove_account is cleared when leaving remove_pending
+// (on remove start, stop_failed -> error, key rotation, rebind, install).
+func TestCorraldFix16StalePendingRemoveAccountAfterKeyRotation(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("requires linux")
+	}
+	v1Dir, _ := buildTestCorraldDist(t)
+	const gwID = "gw-f16-stale-pending.local"
+	h := newHarness(t, func(c *config.Config) {
+		c.CorraldDir = v1Dir
+		c.GatewayID = gwID
+	})
+	admin := h.admin()
+	adminID := userIDOf(t, admin)
+
+	sshOld, home := startCorraldSSH(t)
+	hostID, _ := createAndPinHost(t, admin, sshOld, "rot-box")
+	fpOld := hostFingerprint(t, h, adminID, hostID)
+
+	// 1. Install corrald normally so a real binary and running daemon exist on home.
+	startCorraldInstall(t, admin, hostID)
+	waitCorraldState(t, admin, hostID, gw.StateRunning)
+
+	ch0, err := h.store.CorraldHostByID(context.Background(), hostID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	binPath := filepath.Join(home, ".local", "lib", "corral", "corrald")
+	stateDir := filepath.Join(home, ".local", "state", "corral", "corrald", ch0.MachineID)
+	if _, err := os.Lstat(binPath); err != nil {
+		t.Fatalf("expected installed corrald binary at %s: %v", binPath, err)
+	}
+
+	// 2. Place row in remove_pending with pending_remove_account set to fpOld\x00alice.
+	acctOld := store.CorraldAccountKey(fpOld, "alice")
+	if err := h.store.MarkCorraldHostsRemovePending(context.Background(), []int64{hostID}, fpOld, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	chPend, err := h.store.CorraldHostByID(context.Background(), hostID)
+	if err != nil || chPend.State != gw.StateRemovePending || chPend.PendingRemoveAccount != acctOld {
+		t.Fatalf("expected remove_pending with pending_remove_account=%q, got (%+v, %v)", acctOld, chPend, err)
+	}
+
+	// Stop the real daemon and hold corrald.lock from this test process so
+	// `corrald uninstall` sees a non-daemon lock holder and returns stop_failed.
+	stopCmd := exec.Command(binPath, "stop")
+	stopCmd.Env = append(os.Environ(), "HOME="+home)
+	if out, err := stopCmd.CombinedOutput(); err != nil {
+		t.Fatalf("corrald stop failed: %v (%s)", err, string(out))
+	}
+	lockPath := filepath.Join(stateDir, "corrald.lock")
+	lockF, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		t.Fatalf("open corrald.lock: %v", err)
+	}
+	if err := syscallFlockEx(lockF); err != nil {
+		_ = lockF.Close()
+		t.Fatalf("flock corrald.lock: %v", err)
+	}
+	t.Cleanup(func() { _ = lockF.Close() })
+
+	// 3. Explicit retry/remove from remove_pending -> fails with stop_failed -> enters error.
+	rRm1 := admin.do("POST", fmt.Sprintf("/api/hosts/%d/corrald/remove", hostID), nil)
+	mustStatus(t, rRm1, http.StatusAccepted, "explicit retry remove expecting stop_failed")
+	waitCorraldState(t, admin, hostID, gw.StateError)
+
+	op1, err := h.store.LatestCorraldOp(context.Background(), hostID)
+	if err != nil || op1.ErrorCode != "stop_failed" {
+		t.Fatalf("expected first explicit remove to fail with stop_failed, got (%+v, %v)", op1, err)
+	}
+	chErr, err := h.store.CorraldHostByID(context.Background(), hostID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if chErr.PendingRemoveAccount != "" {
+		t.Errorf("Fix16 Item #2 regression: pending_remove_account not cleared on stop_failed -> error: got %q", chErr.PendingRemoveAccount)
+	}
+
+	// Release corrald.lock and start the daemon again so a live daemon is running
+	// on the host when the key rotates and the user requests explicit removal.
+	_ = lockF.Close()
+	// Remove tombstone left by the aborted uninstall so serve can run, or keep
+	// binary + state installed (note: uninstall wrote tombstone before StopDaemon;
+	// verify binary still exists and restore install.json/daemon OR leave installed).
+	if _, err := os.Lstat(binPath); err != nil {
+		t.Fatalf("expected binary %s still present after stop_failed: %v", binPath, err)
+	}
+
+	// 4. Same machine (same home!) rotates its SSH host key; user keeps authorization.
+	sshRotated := testutil.StartSSHServer(t, "alice", "alice-pass", home)
+	sshRotated.HandleExec(testutil.ShellExec(home, func(cmd string) bool {
+		return strings.Contains(cmd, gw.CommandTag) || strings.Contains(cmd, "corrald")
+	}))
+	refHostID, _ := createAndPinHost(t, admin, sshRotated, "rot-box-ref")
+	fpNew := hostFingerprint(t, h, adminID, refHostID)
+	if fpNew == fpOld {
+		t.Fatalf("expected rotated host fingerprint to differ from old fingerprint")
+	}
+	newHostKey, err := h.store.HostKey(context.Background(), adminID, refHostID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hostRow, err := h.store.Host(context.Background(), adminID, hostID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hostRow.Port = sshRotated.Addr.Port
+	if err := h.store.UpdateHost(context.Background(), hostRow, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.store.ReplaceHostKey(context.Background(), adminID, hostID, fpOld, newHostKey); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.store.UpdateCorraldFingerprint(context.Background(), hostID, fpNew, true); err != nil {
+		t.Fatal(err)
+	}
+
+	chRot, err := h.store.CorraldHostByID(context.Background(), hostID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if chRot.State != gw.StateError || chRot.BoundFingerprint != fpNew {
+		t.Fatalf("expected error state with bound_fingerprint=%q after key rotation, got %+v", fpNew, chRot)
+	}
+	if chRot.PendingRemoveAccount != "" {
+		t.Errorf("Fix16 Item #2 regression: pending_remove_account still set after key rotation: got %q", chRot.PendingRemoveAccount)
+	}
+
+	// 5. Explicit remove after key rotation -> MUST actually remove corrald and
+	//    ONLY THEN transition the row to off (never rejected as binding_changed!).
+	rRm2 := admin.do("POST", fmt.Sprintf("/api/hosts/%d/corrald/remove", hostID), nil)
+	mustStatus(t, rRm2, http.StatusAccepted, "explicit remove after key rotation")
+	waitCorraldState(t, admin, hostID, gw.StateOff)
+
+	op2, err := h.store.LatestCorraldOp(context.Background(), hostID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if op2.State != gw.OpDone || op2.ErrorCode != "" {
+		t.Fatalf("Fix16 Item #2 regression: explicit remove after key rotation failed instead of uninstalling! op=%+v", op2)
+	}
+	chOff, err := h.store.CorraldHostByID(context.Background(), hostID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if chOff.State != gw.StateOff || chOff.LastError != "" || chOff.PendingRemoveAccount != "" {
+		t.Fatalf("expected clean off state after explicit remove, got %+v", chOff)
+	}
+	if _, err := os.Lstat(binPath); !os.IsNotExist(err) {
+		t.Fatalf("Fix16 Item #2 regression: corrald binary %s STILL EXISTS on host after explicit remove reported off! stat err=%v", binPath, err)
+	}
+}
+
+// TestCorraldFix16RetryRecoversAfterInstallInterruptedBeforeInstallJSON verifies
+// Fix16 Item #3: when a first install is interrupted between creating the shared
+// symlink (~/.local/lib/corral/corrald) and writing <mid>/install.json, the
+// startup sweep moves the row to error, and the page's Retry endpoint must
+// recover by re-running the install (writing install.json and starting corrald)
+// rather than failing with "install.json not found".
+func TestCorraldFix16RetryRecoversAfterInstallInterruptedBeforeInstallJSON(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("requires linux")
+	}
+	v1Dir, _ := buildTestCorraldDist(t)
+	const gwID = "gw-f16-retry-install.local"
+	h := newHarness(t, func(c *config.Config) {
+		c.CorraldDir = v1Dir
+		c.GatewayID = gwID
+	})
+	admin := h.admin()
+	adminID := userIDOf(t, admin)
+
+	sshSrv, home := startCorraldSSH(t)
+	hostID, _ := createAndPinHost(t, admin, sshSrv, "half-install-box")
+	fp := hostFingerprint(t, h, adminID, hostID)
+
+	// Run a real install first so we have the real version directory & symlink
+	// on home, then stop the daemon and remove state files (including install.json)
+	// to reproduce the exact crash window between symlink creation and install.json.
+	startCorraldInstall(t, admin, hostID)
+	waitCorraldState(t, admin, hostID, gw.StateRunning)
+
+	ch0, err := h.store.CorraldHostByID(context.Background(), hostID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	binPath := filepath.Join(home, ".local", "lib", "corral", "corrald")
+	stateDir := filepath.Join(home, ".local", "state", "corral", "corrald", ch0.MachineID)
+	installJSONPath := filepath.Join(stateDir, "install.json")
+
+	stopCmd := exec.Command(binPath, "stop")
+	stopCmd.Env = append(os.Environ(), "HOME="+home)
+	if out, err := stopCmd.CombinedOutput(); err != nil {
+		t.Fatalf("corrald stop failed: %v (%s)", err, string(out))
+	}
+	// Delete install.json (and meta/clients/sock) while keeping the shared symlink
+	// and versioned binary intact.
+	for _, name := range []string{"install.json", "meta.json", "clients.json", "corrald.sock"} {
+		_ = os.Remove(filepath.Join(stateDir, name))
+	}
+	if _, err := os.Lstat(binPath); err != nil {
+		t.Fatalf("expected symlink %s to remain: %v", binPath, err)
+	}
+	if _, err := os.Lstat(installJSONPath); !os.IsNotExist(err) {
+		t.Fatalf("expected install.json removed, stat err=%v", err)
+	}
+
+	// Simulate interrupted first install in DB: row in 'installing' with a
+	// running install op, then restart gateway manager so RecoverCrashedCorraldOps
+	// sweeps it to 'error'.
+	const crashedOpID = "1603000000000001"
+	if err := h.store.UpsertCorraldHost(context.Background(), &store.CorraldHost{
+		HostID:           hostID,
+		State:            gw.StateInstalling,
+		ConsentBy:        &adminID,
+		ConsentAt:        time.Now().Unix(),
+		BoundFingerprint: fp,
+		BoundUsername:    "alice",
+		BoundGateway:     gwID,
+		ManifestJSON:     ch0.ManifestJSON,
+		ActiveOpID:       crashedOpID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.store.CreateCorraldOp(context.Background(), &store.CorraldOp{
+		ID:         crashedOpID,
+		HostID:     hostID,
+		AccountKey: store.CorraldAccountKey(fp, "alice"),
+		Kind:       gw.OpInstall,
+		State:      gw.OpRunning,
+		Step:       "install",
+		CreatedBy:  adminID,
+	}, false); err != nil {
+		t.Fatal(err)
+	}
+
+	// Restart gateway manager -> startup sweep transitions host to error.
+	h.srv.corrald.Close()
+	dist, err := gw.LoadDist(v1Dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.srv.corrald = gw.NewManager(gw.ManagerConfig{
+		Store:     h.store,
+		Dist:      dist,
+		GatewayID: gwID,
+		SSH:       &webSSHProvider{s: h.srv},
+	})
+
+	chSwept, err := h.store.CorraldHostByID(context.Background(), hostID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if chSwept.State != gw.StateError || chSwept.ActiveOpID != "" {
+		t.Fatalf("expected startup sweep to move interrupted first install to error, got %+v", chSwept)
+	}
+
+	// User clicks Retry on the page -> must recover by re-running install and
+	// reach running with install.json written on the host.
+	rRetry := admin.do("POST", fmt.Sprintf("/api/hosts/%d/corrald/retry", hostID), nil)
+	mustStatus(t, rRetry, http.StatusAccepted, "retry after interrupted first install")
+	waitCorraldState(t, admin, hostID, gw.StateRunning)
+
+	opRetry, err := h.store.LatestCorraldOp(context.Background(), hostID)
+	if err != nil || opRetry.State != gw.OpDone {
+		t.Fatalf("Fix16 Item #3 regression: Retry did not recover interrupted install! op=%+v err=%v", opRetry, err)
+	}
+	if _, err := os.Stat(installJSONPath); err != nil {
+		t.Fatalf("expected Retry to recreate install.json at %s, stat err=%v", installJSONPath, err)
+	}
+}

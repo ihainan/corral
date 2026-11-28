@@ -353,19 +353,19 @@ func (s *Store) ClaimCorraldHostOp(ctx context.Context, hostID int64, opID, next
 	case nextState != "" && manifestJSON != "":
 		res, err = s.db.ExecContext(ctx, `
 			UPDATE corrald_hosts
-			SET active_op_id = ?, state = ?, manifest_json = ?, last_error = '', updated_at = ?
+			SET active_op_id = ?, state = ?, manifest_json = ?, pending_remove_account = '', last_error = '', updated_at = ?
 			WHERE host_id = ? AND active_op_id = '' AND state NOT IN ('off', 'removing', 'remove_pending')`,
 			opID, nextState, manifestJSON, now, hostID)
 	case nextState != "":
 		res, err = s.db.ExecContext(ctx, `
 			UPDATE corrald_hosts
-			SET active_op_id = ?, state = ?, last_error = '', updated_at = ?
+			SET active_op_id = ?, state = ?, pending_remove_account = '', last_error = '', updated_at = ?
 			WHERE host_id = ? AND active_op_id = '' AND state NOT IN ('off', 'removing', 'remove_pending')`,
 			opID, nextState, now, hostID)
 	default:
 		res, err = s.db.ExecContext(ctx, `
 			UPDATE corrald_hosts
-			SET active_op_id = ?, updated_at = ?
+			SET active_op_id = ?, pending_remove_account = '', updated_at = ?
 			WHERE host_id = ? AND active_op_id = '' AND state NOT IN ('off', 'removing', 'remove_pending')`,
 			opID, now, hostID)
 	}
@@ -397,6 +397,9 @@ func (s *Store) finalizeCorraldOpWithHost(ctx context.Context, op *CorraldOp, ch
 	now := s.unix()
 	ch.UpdatedAt = now
 	op.UpdatedAt = now
+	if ch.State != "remove_pending" {
+		ch.PendingRemoveAccount = ""
+	}
 	filesJSON, pausedJSON, failedJSON, err := marshalCorraldSlices(ch)
 	if err != nil {
 		return false, err
@@ -681,6 +684,7 @@ func (s *Store) RecoverCrashedCorraldOps(ctx context.Context) (int64, error) {
 			if _, err := tx.ExecContext(ctx, `
 				UPDATE corrald_hosts
 				SET state = CASE WHEN state IN ('updating', 'installing') THEN 'stopped' ELSE state END,
+				    pending_remove_account = CASE WHEN state IN ('updating', 'installing') THEN '' ELSE pending_remove_account END,
 				    active_op_id = '',
 				    updated_at = ?
 				WHERE active_op_id = ? OR (host_id = ? AND state = 'updating')`,
@@ -696,6 +700,7 @@ func (s *Store) RecoverCrashedCorraldOps(ctx context.Context) (int64, error) {
 				        WHEN state = 'updating' THEN 'stopped'
 				        ELSE state
 				    END,
+				    pending_remove_account = CASE WHEN state IN ('installing', 'updating') THEN '' ELSE pending_remove_account END,
 				    last_error = CASE WHEN state = 'installing' THEN ? ELSE last_error END,
 				    active_op_id = '',
 				    updated_at = ?
@@ -902,11 +907,12 @@ func (s *Store) InsertCorraldHostIfAbsent(ctx context.Context, ch *CorraldHost) 
 }
 
 // ClaimCorraldHostForRemove atomically marks hostID as removing with opID
-// without overwriting any other columns from a stale snapshot.
+// without overwriting any other columns from a stale snapshot. Clears
+// pending_remove_account because the explicit remove op carries its own account.
 func (s *Store) ClaimCorraldHostForRemove(ctx context.Context, hostID int64, opID string) error {
 	_, err := s.db.ExecContext(ctx, `
 		UPDATE corrald_hosts
-		SET state = 'removing', active_op_id = ?, last_error = '', updated_at = ?
+		SET state = 'removing', active_op_id = ?, pending_remove_account = '', last_error = '', updated_at = ?
 		WHERE host_id = ?`,
 		opID, s.unix(), hostID)
 	return err
@@ -917,7 +923,7 @@ func (s *Store) ClaimCorraldHostForRemove(ctx context.Context, hostID int64, opI
 func (s *Store) ClaimCorraldHostForRetry(ctx context.Context, hostID int64, opID, nextState string) (bool, error) {
 	res, err := s.db.ExecContext(ctx, `
 		UPDATE corrald_hosts
-		SET state = ?, restart_count = 0, last_error = '', active_op_id = ?, updated_at = ?
+		SET state = ?, restart_count = 0, last_error = '', active_op_id = ?, pending_remove_account = '', updated_at = ?
 		WHERE host_id = ? AND active_op_id = '' AND state NOT IN ('off', 'removing', 'remove_pending')`,
 		nextState, opID, s.unix(), hostID)
 	if err != nil {
@@ -958,7 +964,7 @@ func (s *Store) MarkCorraldRebindIfMismatch(
 	if includeInstalling {
 		res, err = s.db.ExecContext(ctx, `
 			UPDATE corrald_hosts
-			SET state = 'rebind', updated_at = ?
+			SET state = 'rebind', pending_remove_account = '', updated_at = ?
 			WHERE host_id = ?
 			  AND bound_fingerprint = ? AND bound_username = ? AND bound_gateway = ?
 			  AND EXISTS (
@@ -989,7 +995,7 @@ func (s *Store) MarkCorraldRebindIfMismatch(
 	} else {
 		res, err = s.db.ExecContext(ctx, `
 			UPDATE corrald_hosts
-			SET state = 'rebind', updated_at = ?
+			SET state = 'rebind', pending_remove_account = '', updated_at = ?
 			WHERE host_id = ?
 			  AND bound_fingerprint = ? AND bound_username = ? AND bound_gateway = ?
 			  AND EXISTS (
@@ -1040,8 +1046,12 @@ func (s *Store) SetCorraldStateIfIdle(ctx context.Context, hostID int64, nextSta
 		placeholders[i] = "?"
 		args = append(args, st)
 	}
+	clearPending := ""
+	if nextState != "remove_pending" {
+		clearPending = ", pending_remove_account = ''"
+	}
 	res, err := s.db.ExecContext(ctx,
-		`UPDATE corrald_hosts SET state = ?, updated_at = ?
+		`UPDATE corrald_hosts SET state = ?`+clearPending+`, updated_at = ?
 		 WHERE host_id = ? AND active_op_id = '' AND state IN (`+strings.Join(placeholders, ",")+`)`,
 		args...)
 	if err != nil {
@@ -1070,7 +1080,7 @@ func (s *Store) ClearCorraldErrorForUpgradeIfIdle(ctx context.Context, hostID in
 func (s *Store) SetCorraldErrorIfIdle(ctx context.Context, hostID int64, lastError string) (bool, error) {
 	res, err := s.db.ExecContext(ctx, `
 		UPDATE corrald_hosts
-		SET state = 'error', last_error = ?, updated_at = ?
+		SET state = 'error', pending_remove_account = '', last_error = ?, updated_at = ?
 		WHERE host_id = ? AND active_op_id = ''
 		  AND state NOT IN ('off', 'removing', 'remove_pending', 'rebind', 'installing', 'updating')`,
 		lastError, s.unix(), hostID)
@@ -1087,6 +1097,7 @@ func (s *Store) SetCorraldIncompatibleIfIdle(ctx context.Context, hostID int64, 
 	res, err := s.db.ExecContext(ctx, `
 		UPDATE corrald_hosts
 		SET state = 'incompatible',
+		    pending_remove_account = '',
 		    version = CASE WHEN ? != '' THEN ? ELSE version END,
 		    release = CASE WHEN ? > 0 THEN ? ELSE release END,
 		    last_error = CASE WHEN ? != '' THEN ? ELSE last_error END,
@@ -1179,6 +1190,7 @@ func (s *Store) UpdateCorraldRunningIfIdle(
 	res, err := s.db.ExecContext(ctx, `
 		UPDATE corrald_hosts
 		SET state = 'running',
+		    pending_remove_account = '',
 		    version = CASE WHEN ? != '' THEN ? ELSE version END,
 		    release = CASE WHEN ? > 0 THEN ? ELSE release END,
 		    socket_path = CASE WHEN ? != '' THEN ? ELSE socket_path END,
@@ -1205,6 +1217,9 @@ func (s *Store) UpdateCorraldRunningIfIdle(
 func (s *Store) UpdateCorraldHostForReconcile(ctx context.Context, ch *CorraldHost, activeOp *CorraldOp, expectedOpID string) (bool, error) {
 	now := s.unix()
 	ch.UpdatedAt = now
+	if ch.State != "remove_pending" {
+		ch.PendingRemoveAccount = ""
+	}
 	filesJSON, pausedJSON, failedJSON, err := marshalCorraldSlices(ch)
 	if err != nil {
 		return false, err
@@ -1327,13 +1342,13 @@ func (s *Store) UpdateCorraldFingerprint(ctx context.Context, hostID int64, newF
 	}
 	if keepAuth {
 		_, err := s.db.ExecContext(ctx,
-			`UPDATE corrald_hosts SET bound_fingerprint = ?, updated_at = ?
+			`UPDATE corrald_hosts SET bound_fingerprint = ?, pending_remove_account = '', updated_at = ?
 			 WHERE host_id = ? AND state NOT IN ('off', 'removing', 'remove_pending')`,
 			newFingerprint, now, hostID)
 		return err
 	}
 	_, err := s.db.ExecContext(ctx,
-		`UPDATE corrald_hosts SET state = 'rebind', updated_at = ?
+		`UPDATE corrald_hosts SET state = 'rebind', pending_remove_account = '', updated_at = ?
 		 WHERE host_id = ? AND state NOT IN ('off', 'removing', 'remove_pending')`,
 		now, hostID)
 	return err
@@ -1359,7 +1374,7 @@ func (s *Store) MarkCorraldRebind(ctx context.Context, hostID int64) error {
 		return err
 	}
 	_, err := s.db.ExecContext(ctx,
-		`UPDATE corrald_hosts SET state = 'rebind', updated_at = ?
+		`UPDATE corrald_hosts SET state = 'rebind', pending_remove_account = '', updated_at = ?
 		 WHERE host_id = ? AND state NOT IN ('off', 'removing', 'remove_pending', 'rebind')`,
 		now, hostID)
 	return err

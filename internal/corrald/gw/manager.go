@@ -1010,6 +1010,7 @@ func (m *Manager) StartInstall(ctx context.Context, userID, hostID int64, corral
 	ch.BoundGateway = m.gatewayID
 	ch.ManifestJSON = string(mb)
 	ch.ActiveOpID = opID
+	ch.PendingRemoveAccount = ""
 	ch.LastError = ""
 	ch.RestartCount = 0
 	if err := m.store.UpsertCorraldHost(ctx, ch); err != nil {
@@ -1284,6 +1285,7 @@ func (m *Manager) StartRemove(ctx context.Context, userID, hostID int64) (*OpVie
 	} else {
 		ch.State = StateRemoving
 		ch.ActiveOpID = opID
+		ch.PendingRemoveAccount = ""
 		ch.LastError = ""
 	}
 
@@ -1518,6 +1520,7 @@ func (m *Manager) Retry(ctx context.Context, userID, hostID int64, corralUser st
 	ch.RestartCount = 0
 	ch.LastError = ""
 	ch.ActiveOpID = opID
+	ch.PendingRemoveAccount = ""
 
 	view := m.toOpView(op)
 	m.wg.Add(1)
@@ -1559,8 +1562,9 @@ func (m *Manager) Retry(ctx context.Context, userID, hostID int64, corralUser st
 			m.finishOpFail(op, ch, &OpFailure{Code: proto.ErrRemoving, KeepInstalled: true})
 			return
 		}
-		if !probe.HasSymlink {
-			// Binary missing; run full install.
+		if !probe.HasSymlink || !probe.HasInstall {
+			// Binary or install.json missing (e.g. first install interrupted
+			// between symlink creation and install.json); run full install.
 			m.runInstallWithSSH(opCtx, rop, op, ch, dist, userID, hostID, corralUser, gotFP, gotUser, sshClient, own)
 			return
 		}
@@ -2687,10 +2691,14 @@ func (m *Manager) runRemoveOp(ctx context.Context, rop *runningOp, op *store.Cor
 	if sshUser == "" {
 		sshUser = ch.BoundUsername
 	}
-	// Fix15 Item #2: Never run uninstall against a machine whose identity
-	// differs from the row's binding or op.AccountKey.
-	if !m.pendingRemoveMatchesBinding(ch, fp, sshUser) ||
-		(op.AccountKey != "" && fp != "" && sshUser != "" && store.CorraldAccountKey(fp, sshUser) != op.AccountKey) {
+	// Fix16 Item #2: Never refuse an explicit remove due to a stale
+	// pending_remove_account; compare the op's own account and the row's
+	// current binding against the acquired SSH identity (fp, sshUser).
+	bindingMismatch := fp == "" || sshUser == "" ||
+		(op.AccountKey != "" && store.CorraldAccountKey(fp, sshUser) != op.AccountKey) ||
+		((ch.BoundFingerprint != "" || ch.BoundUsername != "" || ch.BoundGateway != "") &&
+			!CheckBinding(toSnapshot(ch), fp, sshUser, m.gatewayID))
+	if bindingMismatch {
 		op.State = OpFailed
 		op.ErrorCode = "binding_changed"
 		op.Detail = encodeOpDetail(opDetailPayload{Message: "host binding changed; removal aborted to protect new host"})
@@ -2723,6 +2731,7 @@ func (m *Manager) runRemoveOp(ctx context.Context, rop *runningOp, op *store.Cor
 		ch.Files = []string{}
 		ch.PausedUsers = []int64{}
 		ch.FailedReleases = []int64{}
+		ch.PendingRemoveAccount = ""
 		ch.LastError = ""
 		ch.RestartCount = 0
 		ch.UpdatedFromVer = ""
@@ -2739,6 +2748,7 @@ func (m *Manager) runRemoveOp(ctx context.Context, rop *runningOp, op *store.Cor
 	case "partial":
 		fail := &OpFailure{Code: "partial", Left: out.Left}
 		ch.State = StateError
+		ch.PendingRemoveAccount = ""
 		ch.LastError = encodeLastError(fail)
 		op.State = OpFailed
 		op.ErrorCode = "partial"
@@ -2747,6 +2757,7 @@ func (m *Manager) runRemoveOp(ctx context.Context, rop *runningOp, op *store.Cor
 	case "stop_failed":
 		fail := &OpFailure{Code: "stop_failed", PID: out.PID, Detail: out.Detail}
 		ch.State = StateError
+		ch.PendingRemoveAccount = ""
 		ch.LastError = encodeLastError(fail)
 		op.State = OpFailed
 		op.ErrorCode = "stop_failed"
