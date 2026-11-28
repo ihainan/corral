@@ -1305,6 +1305,25 @@ function baseStatus(overrides = {}) {
   await Promise.resolve()
   await Promise.resolve()
   assert.equal(inFlightCtl.getState().displayedHint?.host_id, 7, 'fix5: delayed POST returning true must display banner')
+  // A poll read before the claim was written but answered after it (claimed:false
+  // for the host this page already shows) keeps the banner and claims nothing.
+  let claimsAfter = 0
+  const staleCtl = createCorraldHintController({
+    claimShown: async () => { claimsAfter++; return true },
+    dismiss: async () => {},
+    readCachedStatus: () => undefined,
+  })
+  staleCtl.setUser(1)
+  staleCtl.onSlotMounted()
+  staleCtl.receiveServerHint({ ...hostA, claimed: false }, 0)
+  await Promise.resolve()
+  await Promise.resolve()
+  assert.equal(staleCtl.getState().displayedHint?.host_id, 7, 'stale poll: banner shown after its claim')
+  staleCtl.receiveServerHint({ ...hostA, claimed: false }, 0)
+  await Promise.resolve()
+  assert.equal(staleCtl.getState().displayedHint?.host_id, 7, 'stale claimed:false poll must keep the banner this page claimed')
+  assert.equal(claimsAfter, 1, 'stale claimed:false poll must not claim again')
+  staleCtl.dispose()
   inFlightCtl.dispose()
 }
 
