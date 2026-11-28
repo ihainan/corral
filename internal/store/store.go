@@ -59,7 +59,8 @@ func open(dsn string) (*Store, error) {
 
 func (s *Store) Close() error { return s.db.Close() }
 
-func (s *Store) unix() int64 { return s.now().Unix() }
+func (s *Store) unix() int64      { return s.now().Unix() }
+func (s *Store) unixMilli() int64 { return s.now().UnixMilli() }
 
 func (s *Store) migrate(ctx context.Context) error {
 	if _, err := s.db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS schema_migrations (name TEXT PRIMARY KEY, applied_at INTEGER NOT NULL)`); err != nil {

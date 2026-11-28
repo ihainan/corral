@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api, ApiError, authGen } from '../api'
+import { triggerCorraldHintsCheck } from '../corraldApi'
 import type { RowCmds } from './agentOrder'
 import { knownSession } from './agents'
 import { nextConvoPeers, type ConvoPeerInfo } from './peerSender'
@@ -598,6 +599,9 @@ export function useConversation(sessionId: string, enabled: boolean, pane: strin
         }
       } catch (e) {
         if (stopped || mine.signal.aborted || (e instanceof ApiError && e.code === 'aborted')) return
+        if (e instanceof ApiError && (e.code === 'ssh_channels_busy' || e.code === 'host_error' || e.code === 'sftp_unavailable')) {
+          triggerCorraldHintsCheck()
+        }
         lastError = true
         next = RETRY
         setConvo((c) => (c.failing && !c.peers ? c : { ...c, status: c.entries.length ? c.status : 'error', failing: true, peers: undefined, okAt: lastOk.current }))

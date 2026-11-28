@@ -425,6 +425,7 @@ func (s *Server) updateHost(w http.ResponseWriter, r *http.Request, b *hostBody)
 		if s.corrald != nil {
 			s.corrald.DetachHost(h.ID)
 		}
+		s.corraldHints.forgetHost(u.ID, h.ID)
 	}
 	if connChanged {
 		// Nothing open through the old settings carries on, here or on the
@@ -563,6 +564,7 @@ func (s *Server) deleteHost(w http.ResponseWriter, r *http.Request) {
 	s.picks.dropHost(u.ID, h.ID)
 	s.closeHostForwards(u.ID, h.ID)
 	s.forgetHostCode(u.ID, h.ID)
+	s.corraldHints.forgetHost(u.ID, h.ID)
 	s.terms.CloseHost(u.ID, h.ID, "host deleted")
 	if h.Auth == store.AuthPassword && h.CredentialID != nil {
 		_ = s.store.DeleteCredential(r.Context(), u.ID, *h.CredentialID)

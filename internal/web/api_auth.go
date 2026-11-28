@@ -311,6 +311,7 @@ var settingRules = map[string]func(json.RawMessage) bool{
 	// Who has the keys with a terminal focused: it (Corral's own shortcuts let go) or Corral.
 	"keysFirst":    oneOf("terminal", "corral"),
 	"confirmLeave": isBool,
+	"corraldHints": isBool,
 }
 
 // validSetting is true for a known setting with a valid value. null is no
@@ -537,11 +538,18 @@ func (s *Server) apiPatchSettings(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	var accepted, superseded []string
-	err := s.store.MergeUserSettings(r.Context(), currentUser(r).ID, func(old string) (string, error) {
+	err := s.store.MergeUserSettingsWithHintMax(r.Context(), currentUser(r).ID, func(old string, maxHintTS int64) (string, error) {
 		accepted, superseded = nil, nil
 		var obj map[string]json.RawMessage
 		if json.Unmarshal([]byte(old), &obj) != nil || obj == nil {
 			obj = map[string]json.RawMessage{}
+		}
+		wasHintsDisabled := false
+		if rawPrev, ok := obj["corraldHints"]; ok {
+			var prevOn bool
+			if json.Unmarshal(rawPrev, &prevOn) == nil && !prevOn {
+				wasHintsDisabled = true
+			}
 		}
 		var writers []settingWriter // least recently heard from first
 		if raw, ok := obj[settingsWriters]; ok {
@@ -584,6 +592,24 @@ func (s *Server) apiPatchSettings(w http.ResponseWriter, r *http.Request) {
 			}
 			obj[k], me.Seq[k] = v, b.Seq
 			accepted = append(accepted, k)
+			if k == "corraldHints" && wasHintsDisabled {
+				var on bool
+				if json.Unmarshal(v, &on) == nil && on {
+					var prevReset int64
+					if rawReset, ok := obj[store.CorraldHintsResetKey]; ok {
+						_ = json.Unmarshal(rawReset, &prevReset)
+					}
+					nextReset := s.corraldHints.clock().UnixMilli()
+					if nextReset <= prevReset {
+						nextReset = prevReset + 1
+					}
+					if nextReset <= maxHintTS {
+						nextReset = maxHintTS + 1
+					}
+					rawNext, _ := json.Marshal(nextReset)
+					obj[store.CorraldHintsResetKey] = rawNext
+				}
+			}
 		}
 		writers = append(writers, me)
 		if n := len(writers) - maxSettingWriters; n > 0 {

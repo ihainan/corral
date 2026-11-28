@@ -4,7 +4,8 @@ import { disablePush, enablePush, pushState, syncPush, type PushState } from '..
 import { api, ApiError, authGen, errorText, type Me } from '../api'
 import { getLang, hasKey, setLang, t, type I18nKey, type Lang } from '../i18n'
 import { reloadPage } from '../leaveGuard'
-import { setPrefs, usePrefs } from '../prefs'
+import { setPrefs, setPrefsNow, usePrefs } from '../prefs'
+import { triggerCorraldHintsCheck } from '../corraldApi'
 import { navigate } from '../router'
 import { rememberSettingsScroll, signOut, takeSettingsScroll, useSession } from '../app'
 import { Confirm, Dialog, DialogHead, Field, isCoarse, LoadError, useToast } from '../components/ui'
@@ -57,7 +58,7 @@ const SETTINGS_CATS: SettingsCatDef[] = [
   { id: 'chat', group: 'general', labelKey: 'settings.cat.chat', keywords: 'chat mode agents composer enter send newline pinned thought thinking translate summarize model api key chime sound bell tone notification push alert 对话 智能体 回车 换行 置顶 思考 翻译 总结 模型 密钥 提示音 铃声 推送 通知', icon: (p) => <Bot {...p} /> },
   { id: 'terminal', group: 'terminal', labelKey: 'settings.cat.terminal', keywords: 'terminal theme scheme color font size webgl screen reader clipboard option meta alt 终端 配色 字体 剪贴板 读屏', icon: (p) => <SquareTerminal {...p} /> },
   { id: 'touch', group: 'terminal', labelKey: 'settings.cat.touch', keywords: 'touch keybar keyboard custom keys macro 触控 键栏 按键 自定义 快捷键', icon: (p) => <Keyboard {...p} /> },
-  { id: 'account', group: 'account', labelKey: 'settings.cat.account', keywords: 'account profile display name password sso oidc 2fa totp two step sign out logout notices 账户 密码 登录 两步验证 退出 声明', icon: (p) => <User {...p} /> },
+  { id: 'account', group: 'account', labelKey: 'settings.cat.account', keywords: 'account profile display name password sso oidc 2fa totp two step sign out logout notices helper daemon corrald hint 账户 密码 登录 两步验证 退出 声明 辅助进程 提示', icon: (p) => <User {...p} /> },
   { id: 'subscriptions', group: 'account', labelKey: 'settings.cat.subscriptions', keywords: 'subscriptions quota usage limit plan claude codex antigravity gemini weekly five hour reset 订阅 额度 用量 套餐 重置', icon: (p) => <Gauge {...p} /> },
 ]
 const SETTINGS_GROUPS: { id: 'general' | 'terminal' | 'account'; labelKey: I18nKey }[] = [
@@ -584,6 +585,16 @@ function SettingsWorkbench({ modal, initialCat, onClose }: { modal?: boolean; in
                 </div>
                 <AvatarSetting preview={false} />
                 <ProfileSetting onDirty={setProfileDirty} />
+                <Switch
+                  label={t('settings.corraldHints')}
+                  hint={t('settings.corraldHintsHint')}
+                  checked={prefs.corraldHints}
+                  onChange={(v) => {
+                    void setPrefsNow({ corraldHints: v }).then(() => {
+                      if (v) triggerCorraldHintsCheck({ resetSession: true })
+                    })
+                  }}
+                />
               </div>
             </section>
             <section className="section">
@@ -927,6 +938,16 @@ export function SettingsPage() {
           <PasswordSetting />
           {boot?.oidc?.enabled && <SSOSetting />}
           <TwoStepSetting />
+          <Switch
+            label={t('settings.corraldHints')}
+            hint={t('settings.corraldHintsHint')}
+            checked={prefs.corraldHints}
+            onChange={(v) => {
+              void setPrefsNow({ corraldHints: v }).then(() => {
+                if (v) triggerCorraldHintsCheck({ resetSession: true })
+              })
+            }}
+          />
           {/* Phones have no sidebar: sign-out is the account's last row. (Not
               in red: signing out loses nothing — ux1101 PG-56.) */}
           <button className="setting setting-link phone-only" onClick={() => signOut(setMe, toast)}>

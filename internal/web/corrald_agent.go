@@ -171,10 +171,15 @@ func (s *Server) tryCorraldTailsWith(ctx context.Context, sess *term.Session, lo
 
 // convoTailsOutput reads raw log tails via corrald convo.tails when available,
 // falling back immediately to convoTailsCommand over SSH.
-func (s *Server) convoTailsOutput(ctx context.Context, sess *term.Session, logs []string, maxBytes int) ([]byte, error) {
-	if out, ok := s.tryCorraldTails(ctx, sess, logs); ok {
-		return out, nil
+func (s *Server) convoTailsOutput(ctx context.Context, sess *term.Session, logs []string, maxBytes int) (out []byte, err error) {
+	if cout, ok := s.tryCorraldTails(ctx, sess, logs); ok {
+		return cout, nil
 	}
+	defer func() {
+		if err != nil {
+			s.recordCorraldHintSessionError(sess, HintOpLog, err)
+		}
+	}()
 	return sshx.Output(ctx, sess.Client(), convoTailsCommand(logs), maxBytes)
 }
 

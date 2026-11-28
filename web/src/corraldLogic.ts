@@ -946,3 +946,510 @@ export function createCorraldNoticeFetcher(deps: CorraldNoticeFetcherDeps): Corr
     },
   }
 }
+
+export type CorraldHintReason = 'ssh_session_full'
+export type CorraldHintOp = 'status' | 'log' | 'both'
+
+export interface CorraldHint {
+  host_id: number
+  host_name: string
+  reason: CorraldHintReason
+  op: CorraldHintOp
+  count: number
+  last_at: number
+  generation?: number
+}
+
+export interface CorraldHintResponse {
+  hint: CorraldHint | null
+  generation: number
+}
+
+export type CorraldHintMessageKey =
+  | 'corrald.hint.sshSessionStatus'
+  | 'corrald.hint.sshSessionStatusOne'
+  | 'corrald.hint.sshSessionLog'
+  | 'corrald.hint.sshSessionLogOne'
+  | 'corrald.hint.sshSessionBoth'
+  | 'corrald.hint.sshSessionBothOne'
+
+// Map a gateway CorraldHint payload to its exact i18n copy key.
+export function corraldHintMessageKey(hint: CorraldHint): CorraldHintMessageKey {
+  const single = hint.count <= 1
+  if (hint.op === 'log') {
+    return single ? 'corrald.hint.sshSessionLogOne' : 'corrald.hint.sshSessionLog'
+  }
+  if (hint.op === 'both') {
+    return single ? 'corrald.hint.sshSessionBothOne' : 'corrald.hint.sshSessionBoth'
+  }
+  return single ? 'corrald.hint.sshSessionStatusOne' : 'corrald.hint.sshSessionStatus'
+}
+
+// Reports whether a host's known CorraldStatus is eligible to display the
+// contextual hint bar (must be off, not admin-disabled, no active op, and not
+// blocked by an unsupported OS/arch install failure).
+export function isCorraldStatusHintEligible(status: CorraldStatus | null | undefined): boolean {
+  if (!status) return true
+  if (status.admin_disabled) return false
+  if (status.state !== 'off') return false
+  if (isOpActive(status.op)) return false
+  const errCode =
+    status.error?.code ??
+    (status.op?.kind === 'install' && status.op.state === 'failed' ? status.op.error_code : undefined)
+  if (errCode === 'unsupported_os' || errCode === 'unsupported_arch') return false
+  return true
+}
+
+// Local pre-claim eligibility check for a hint offered by the gateway.
+// Enforces master switch enabled, admin policy allowed, valid hint payload, and
+// that any known corrald status for the host is still off and enableable.
+export function canClaimCorraldHint(
+  hint: CorraldHint | null,
+  opts: {
+    masterEnabled: boolean
+    adminDisabled?: boolean
+    hostStatus?: CorraldStatus | null
+    hostUnavailable?: boolean
+  },
+): boolean {
+  if (!hint || !opts.masterEnabled || opts.adminDisabled) return false
+  if (hint.host_id <= 0 || hint.count <= 0) return false
+  if (opts.hostUnavailable) return false
+  if (opts.hostStatus && !isCorraldStatusHintEligible(opts.hostStatus)) return false
+  return true
+}
+
+export interface CorraldHintCachedStatus {
+  status: CorraldStatus | null
+  unavailable?: boolean
+}
+
+export interface CorraldHintControllerState {
+  // Non-null ONLY after claimShown resolved with true while the host stays
+  // eligible and the banner slot remains mounted.
+  displayedHint: CorraldHint | null
+  // Non-null when the server offered an eligible hint that has not yet been
+  // claimed (used to mount the invisible claim slot inside AgentList and to
+  // subscribe to live host corrald status updates).
+  candidateHint: CorraldHint | null
+  pendingDismissCount: number
+}
+
+export interface CorraldHintControllerDeps {
+  claimShown: (hostId: number, generation: number) => Promise<boolean>
+  dismiss: (hostId: number, generation: number) => Promise<void>
+  readCachedStatus: (hostId: number) => CorraldHintCachedStatus | undefined
+  isPermanentError?: (err: unknown) => boolean
+  backoffMs?: readonly number[]
+  schedule?: (fn: () => void, delayMs: number) => unknown
+  cancelSchedule?: (handle: unknown) => void
+  onChange?: (state: CorraldHintControllerState) => void
+}
+
+export interface CorraldHintController {
+  setUser(userId?: number): void
+  setMasterEnabled(enabled: boolean): void
+  setAdminDisabled(disabled: boolean): void
+  getState(): CorraldHintControllerState
+  receiveServerHint(hint: CorraldHint | null, serverGen: number): void
+  onHostStatus(hostId: number, status: CorraldStatus | null, unavailable?: boolean): void
+  onSlotMounted(): void
+  onSlotUnmounted(): void
+  closeDisplayed(): void
+  hideHost(hostId: number): void
+  dismiss(hint: CorraldHint): void
+  flushPendingDismisses(): Promise<void>
+  dispose(): void
+}
+
+const DEFAULT_DISMISS_RETRY_BACKOFF_MS = [1000, 3000, 9000]
+
+// Pure in-memory claim-before-display controller for contextual corrald hints.
+// The server is the sole record of "shown": a hint is rendered only after
+// POST /hint/shown returns { claimed: true }. No browser storage is read or
+// written. Dismiss retries stay strictly in memory with backoff.
+export function createCorraldHintController(deps: CorraldHintControllerDeps): CorraldHintController {
+  const backoff = deps.backoffMs && deps.backoffMs.length > 0 ? [...deps.backoffMs] : DEFAULT_DISMISS_RETRY_BACKOFF_MS
+  const schedule = deps.schedule ?? ((fn: () => void, ms: number) => setTimeout(fn, ms))
+  const cancelSchedule = deps.cancelSchedule ?? ((h: unknown) => clearTimeout(h as ReturnType<typeof setTimeout>))
+
+  let activeUserId: number | undefined = undefined
+  let masterEnabled = true
+  let adminDisabled = false
+  let serverGeneration = 0
+  let epoch = 0
+  let claimSeq = 0
+  let slotMounts = 0
+  let candidateHint: CorraldHint | null = null
+  let displayedHint: CorraldHint | null = null
+  let claimInFlight: { hostId: number; generation: number; seq: number } | null = null
+
+  const pendingDismisses = new Map<number, { hostId: number; generation: number }>()
+  const dismissInFlight = new Set<number>()
+  const dismissRetryCounts = new Map<number, number>()
+  const dismissRetryTimers = new Map<number, unknown>()
+
+  const getState = (): CorraldHintControllerState => ({
+    displayedHint,
+    candidateHint,
+    pendingDismissCount: pendingDismisses.size,
+  })
+
+  const notify = () => {
+    deps.onChange?.(getState())
+  }
+
+  const clearDismissTimer = (hostId: number) => {
+    const handle = dismissRetryTimers.get(hostId)
+    if (handle !== undefined) {
+      cancelSchedule(handle)
+      dismissRetryTimers.delete(hostId)
+    }
+  }
+
+  const clearAllDismisses = () => {
+    for (const handle of dismissRetryTimers.values()) {
+      cancelSchedule(handle)
+    }
+    dismissRetryTimers.clear()
+    dismissRetryCounts.clear()
+    dismissInFlight.clear()
+    pendingDismisses.clear()
+  }
+
+  const cancelClaim = () => {
+    if (claimInFlight !== null) {
+      claimSeq++
+      claimInFlight = null
+    }
+  }
+
+  const isHostStillEligible = (hint: CorraldHint): boolean => {
+    const cached = deps.readCachedStatus(hint.host_id)
+    return canClaimCorraldHint(hint, {
+      masterEnabled,
+      adminDisabled,
+      hostStatus: cached?.status,
+      hostUnavailable: cached?.unavailable,
+    })
+  }
+
+  const tryClaim = () => {
+    if (!activeUserId || !masterEnabled || adminDisabled) return
+    if (slotMounts <= 0) return
+    if (displayedHint !== null) return
+    if (!candidateHint) return
+    if (claimInFlight !== null) return
+
+    const h = candidateHint
+    // Re-check latest cached corrald status immediately before claiming.
+    if (!isHostStillEligible(h)) {
+      candidateHint = null
+      notify()
+      return
+    }
+
+    const gen = h.generation ?? serverGeneration
+    const mySeq = ++claimSeq
+    const myEpoch = epoch
+    claimInFlight = { hostId: h.host_id, generation: gen, seq: mySeq }
+
+    void (async () => {
+      let claimed = false
+      try {
+        claimed = await deps.claimShown(h.host_id, gen)
+      } catch {
+        claimed = false
+      }
+      if (myEpoch !== epoch || mySeq !== claimSeq) return
+      claimInFlight = null
+      if (!claimed || slotMounts <= 0 || !isHostStillEligible(h)) {
+        candidateHint = null
+        notify()
+        return
+      }
+      candidateHint = null
+      displayedHint = h
+      notify()
+    })()
+  }
+
+  const attemptDismiss = async (hostId: number, fromFlush: boolean): Promise<void> => {
+    const reqEpoch = epoch
+    const op = pendingDismisses.get(hostId)
+    if (!op || !activeUserId) return
+    if (dismissInFlight.has(hostId)) return
+
+    clearDismissTimer(hostId)
+    dismissInFlight.add(hostId)
+    try {
+      await deps.dismiss(op.hostId, op.generation)
+      if (reqEpoch !== epoch) return
+      const cur = pendingDismisses.get(hostId)
+      if (cur && cur.generation === op.generation) {
+        pendingDismisses.delete(hostId)
+        dismissRetryCounts.delete(hostId)
+        notify()
+      }
+    } catch (err) {
+      if (reqEpoch !== epoch) return
+      if (deps.isPermanentError?.(err)) {
+        const cur = pendingDismisses.get(hostId)
+        if (cur && cur.generation === op.generation) {
+          pendingDismisses.delete(hostId)
+          dismissRetryCounts.delete(hostId)
+          notify()
+        }
+        return
+      }
+      if (!fromFlush) {
+        const count = dismissRetryCounts.get(hostId) ?? 0
+        if (count < backoff.length) {
+          dismissRetryCounts.set(hostId, count + 1)
+          const delay = backoff[count]
+          const handle = schedule(() => {
+            dismissRetryTimers.delete(hostId)
+            if (reqEpoch !== epoch) return
+            void attemptDismiss(hostId, false)
+          }, delay)
+          dismissRetryTimers.set(hostId, handle)
+        }
+      }
+    } finally {
+      dismissInFlight.delete(hostId)
+    }
+  }
+
+  const hideHost = (hostId: number) => {
+    if (hostId <= 0) return
+    let changed = false
+    if (candidateHint?.host_id === hostId) {
+      candidateHint = null
+      changed = true
+    }
+    if (displayedHint?.host_id === hostId) {
+      displayedHint = null
+      changed = true
+    }
+    if (claimInFlight?.hostId === hostId) {
+      cancelClaim()
+    }
+    if (changed) notify()
+  }
+
+  const flushPendingDismisses = async () => {
+    const ids = [...pendingDismisses.keys()]
+    await Promise.all(ids.map((id) => attemptDismiss(id, true)))
+  }
+
+  return {
+    setUser(userId?: number) {
+      if (activeUserId === userId) return
+      activeUserId = userId
+      epoch++
+      cancelClaim()
+      clearAllDismisses()
+      adminDisabled = false
+      serverGeneration = 0
+      candidateHint = null
+      displayedHint = null
+      notify()
+    },
+
+    setMasterEnabled(enabled: boolean) {
+      if (masterEnabled === enabled) return
+      masterEnabled = enabled
+      if (!enabled) {
+        cancelClaim()
+        if (candidateHint !== null || displayedHint !== null) {
+          candidateHint = null
+          displayedHint = null
+          notify()
+        }
+      }
+    },
+
+    setAdminDisabled(disabled: boolean) {
+      if (adminDisabled === disabled) return
+      adminDisabled = disabled
+      if (disabled) {
+        cancelClaim()
+        if (candidateHint !== null || displayedHint !== null) {
+          candidateHint = null
+          displayedHint = null
+          notify()
+        }
+      }
+    },
+
+    getState,
+
+    receiveServerHint(hint: CorraldHint | null, serverGen: number) {
+      if (!activeUserId) return
+      let changed = false
+
+      if (Number.isFinite(serverGen) && serverGen >= 0) {
+        if (serverGen > serverGeneration) {
+          serverGeneration = serverGen
+          for (const [hostId, op] of pendingDismisses) {
+            if (op.generation < serverGen) {
+              pendingDismisses.delete(hostId)
+              clearDismissTimer(hostId)
+              dismissRetryCounts.delete(hostId)
+              changed = true
+            }
+          }
+          if (displayedHint && (displayedHint.generation ?? 0) < serverGen) {
+            displayedHint = null
+            changed = true
+          }
+          if (claimInFlight && claimInFlight.generation < serverGen) {
+            cancelClaim()
+          }
+        } else if (pendingDismisses.size > 0) {
+          void flushPendingDismisses()
+        }
+      }
+
+      if (displayedHint && !isHostStillEligible(displayedHint)) {
+        displayedHint = null
+        changed = true
+      }
+
+      if (!masterEnabled || adminDisabled) {
+        if (candidateHint !== null || displayedHint !== null) {
+          cancelClaim()
+          candidateHint = null
+          displayedHint = null
+          changed = true
+        }
+        if (changed) notify()
+        return
+      }
+
+      if (!hint) {
+        if (candidateHint !== null || displayedHint !== null || claimInFlight !== null) {
+          cancelClaim()
+          candidateHint = null
+          displayedHint = null
+          changed = true
+        }
+        if (changed) notify()
+        return
+      }
+
+      const normalized: CorraldHint = { ...hint, generation: hint.generation ?? serverGeneration }
+
+      // Immediately reject if the page's cached corrald status is already ineligible
+      // (and clear any displayed banner that is no longer returned as eligible).
+      if (!isHostStillEligible(normalized)) {
+        if (candidateHint !== null || displayedHint !== null || claimInFlight !== null) {
+          cancelClaim()
+          candidateHint = null
+          displayedHint = null
+          changed = true
+        }
+        if (changed) notify()
+        return
+      }
+
+      // Keep an already-claimed visible banner only when the poll still returns
+      // the same host & generation and its cached status remains eligible.
+      if (
+        displayedHint &&
+        displayedHint.host_id === normalized.host_id &&
+        (displayedHint.generation ?? 0) === (normalized.generation ?? 0)
+      ) {
+        if (changed) notify()
+        return
+      }
+
+      // The poll returned a different eligible host, so the previously displayed
+      // host is no longer returned by the server: hide it before claiming the new one.
+      if (displayedHint !== null) {
+        displayedHint = null
+        changed = true
+      }
+
+      // If a claim is already in flight for this exact host & generation, keep waiting.
+      if (claimInFlight && claimInFlight.hostId === normalized.host_id && claimInFlight.generation === (normalized.generation ?? 0)) {
+        candidateHint = normalized
+        if (changed) notify()
+        return
+      }
+
+      cancelClaim()
+      candidateHint = normalized
+      notify()
+      tryClaim()
+    },
+
+    onHostStatus(hostId: number, status: CorraldStatus | null, unavailable = false) {
+      if (unavailable || (status && !isCorraldStatusHintEligible(status))) {
+        hideHost(hostId)
+      }
+    },
+
+    onSlotMounted() {
+      slotMounts++
+      tryClaim()
+    },
+
+    onSlotUnmounted() {
+      slotMounts = Math.max(0, slotMounts - 1)
+      if (slotMounts === 0) {
+        // Defer via microtask so React StrictMode's synchronous dev remount
+        // keeps an active claim / displayed banner intact while real list
+        // unmounts (mobile list -> chat -> back, picker close -> reopen) clear it.
+        queueMicrotask(() => {
+          if (slotMounts === 0) {
+            const hadDisplay = displayedHint !== null
+            const hadInFlight = claimInFlight !== null
+            if (hadInFlight) {
+              cancelClaim()
+              candidateHint = null
+            }
+            if (hadDisplay) {
+              displayedHint = null
+            }
+            if (hadDisplay || hadInFlight) {
+              notify()
+            }
+          }
+        })
+      }
+    },
+
+    closeDisplayed() {
+      // Closing with X needs no extra write: shown_at was already recorded by
+      // the server when the claim succeeded.
+      if (displayedHint !== null) {
+        displayedHint = null
+        notify()
+      }
+    },
+
+    hideHost,
+
+    dismiss(hint: CorraldHint) {
+      if (hint.host_id <= 0) return
+      const gen = hint.generation ?? serverGeneration
+      if (displayedHint?.host_id === hint.host_id) displayedHint = null
+      if (candidateHint?.host_id === hint.host_id) candidateHint = null
+      if (claimInFlight?.hostId === hint.host_id) cancelClaim()
+      pendingDismisses.set(hint.host_id, { hostId: hint.host_id, generation: gen })
+      dismissRetryCounts.delete(hint.host_id)
+      clearDismissTimer(hint.host_id)
+      notify()
+      void attemptDismiss(hint.host_id, false)
+    },
+
+    flushPendingDismisses,
+
+    dispose() {
+      epoch++
+      cancelClaim()
+      clearAllDismisses()
+    },
+  }
+}

@@ -2098,6 +2098,107 @@ button.convo-running-what { padding: 0; border: 0; background: none; font: inher
 }
 .convo-outside-blocked-chip:hover { background: var(--term-row-hover); }
 .convo-outside-blocked-chip:focus-visible { outline: 2px solid var(--term-accent-text); outline-offset: 1px; }
+/* Contextual corrald suggestion banner above the agent list (phase 2b). */
+.convo-corrald-hint {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 4px 8px 8px;
+  padding: 10px 12px;
+  border-radius: var(--r);
+  border: 1px solid var(--term-line);
+  background: color-mix(in srgb, var(--term-fg) 4%, var(--term-bg));
+  color: var(--term-fg);
+}
+.convo-corrald-hint-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+}
+.convo-corrald-hint-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0;
+  font-size: var(--fs-note);
+  line-height: var(--lh-note);
+  font-weight: 400;
+  color: var(--term-fg-2);
+  overflow-wrap: anywhere;
+}
+.convo-corrald-hint-close {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  margin: -4px -4px 0 0;
+  padding: 0;
+  border: 0;
+  border-radius: var(--r-xs);
+  background: transparent;
+  color: var(--term-fg-3);
+  cursor: pointer;
+}
+.convo-corrald-hint-close:hover {
+  background: var(--term-row-hover);
+  color: var(--term-fg);
+}
+.convo-corrald-hint-close:focus-visible {
+  outline: 2px solid var(--term-accent-text);
+  outline-offset: 1px;
+}
+.convo-corrald-hint-acts {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+.convo-corrald-hint-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 28px;
+  padding: 4px 10px;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--term-line);
+  background: var(--term-bg);
+  color: var(--term-fg-2);
+  font-size: var(--fs-note);
+  line-height: var(--lh-note);
+  font-weight: 500;
+  cursor: pointer;
+}
+.convo-corrald-hint-btn:hover:not(:disabled) {
+  background: var(--term-row-hover);
+  color: var(--term-fg);
+}
+.convo-corrald-hint-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.convo-corrald-hint-btn:focus-visible {
+  outline: 2px solid var(--term-accent-text);
+  outline-offset: 1px;
+}
+.convo-corrald-hint-btn.is-primary {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--accent-fg);
+}
+.convo-corrald-hint-btn.is-primary:hover:not(:disabled) {
+  border-color: var(--accent-hover);
+  background: var(--accent-hover);
+  color: var(--accent-fg);
+}
+@media (max-width: 480px) {
+  .convo-corrald-hint {
+    margin: 4px 8px 6px;
+    padding: 8px 10px;
+    gap: 6px;
+  }
+}
 /* Parent / child quick-jump bar below the conversation top bar. */
 .convo-lineage-bar {
   flex: none; display: flex; align-items: center; gap: 6px; overflow-x: auto; scrollbar-width: none;

@@ -24,6 +24,7 @@ func (s *Server) tmuxCmdsOf(sess *term.Session) *cmdProber {
 	p := newCmdProber(func(ctx context.Context) (map[string][]bgCmd, bool, error) {
 		out, err := sshx.Output(ctx, sess.Client(), cmdScanCommand(), cmdScanMax)
 		if err != nil {
+			s.recordCorraldHintSessionError(sess, HintOpStatus, err)
 			return nil, false, err
 		}
 		got, whole, budgetCut := parseCmdScanDetail(string(out))
