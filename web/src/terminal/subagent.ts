@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from '../api'
 import type { ConvoEntry, ConvoRunning } from './conversation'
-import { createSubConvoPoller, type SubPollPage } from './sideState'
+import type { ConvoPeerInfo } from './peerSender'
+import { createSubConvoPoller, type SubPollPage, type SubPollState } from './sideState'
 
 // A subagent's own conversation (its log beside its session's), read as the
 // conversation is: a part at a time, what changed since. Read when shown;
@@ -14,6 +15,7 @@ type Answer = SubPollPage<ConvoEntry, ConvoRunning>
 export interface SubConvo {
   entries: ConvoEntry[]
   running: ConvoRunning[]
+  peers?: Record<string, ConvoPeerInfo>
   older: boolean
   olderCut: boolean
   loading: boolean
@@ -28,7 +30,7 @@ const GROWING = 30000 // (unknown whether it goes on: read on while it grew this
 const BATCH = 20 // (reads in a row while there is more; then the next round)
 
 export function useSubConvo(sessionId: string, pane: string, agent: string, live: boolean, active: boolean, nested: boolean, cli?: string): SubConvo {
-  const [shown, setShown] = useState({ entries: [] as ConvoEntry[], running: [] as ConvoRunning[], older: false, olderCut: false, loading: true, failed: false, grewAt: 0 })
+  const [shown, setShown] = useState<SubPollState<ConvoEntry, ConvoRunning>>({ entries: [], running: [], older: false, olderCut: false, loading: true, failed: false, grewAt: 0 })
   const liveNow = useRef(live)
   liveNow.current = live
   const activeNow = useRef(active)
@@ -82,5 +84,5 @@ export function useSubConvo(sessionId: string, pane: string, agent: string, live
     if (active && !wasActive.current) void pollerRef.current?.run(false)
     wasActive.current = active
   }, [active])
-  return { ...shown, growing: Date.now() - shown.grewAt < GROWING, read, readOlder }
+  return { ...shown, peers: shown.peers as Record<string, ConvoPeerInfo> | undefined, growing: Date.now() - shown.grewAt < GROWING, read, readOlder }
 }

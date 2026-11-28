@@ -425,11 +425,13 @@ export interface SubPollPage<E extends { seq: number }, R> {
   older_cut?: boolean
   more?: boolean
   running?: R[]
+  peers?: Record<string, unknown>
 }
 
 export interface SubPollState<E extends { seq: number }, R> {
   entries: E[]
   running: R[]
+  peers?: Record<string, unknown>
   older: boolean
   olderCut: boolean
   loading: boolean
@@ -510,10 +512,11 @@ export function createSubConvoPoller<E extends { seq: number }, R>(deps: SubPoll
         more = !!r.more
         const entries = [...byseq.values()].sort((x, y) => x.seq - y.seq)
         const running = r.running ?? []
+        const peers = r.peers
         const hasOlder = !!r.older
         const olderCut = !!r.older_cut
         const grew = grewAt
-        deps.onState(() => ({ entries, running, older: hasOlder, olderCut, loading: false, failed: false, grewAt: grew }))
+        deps.onState(() => ({ entries, running, peers, older: hasOlder, olderCut, loading: false, failed: false, grewAt: grew }))
         if (!more || deps.hidden() || !deps.active()) break
       }
     } catch {

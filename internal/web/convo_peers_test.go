@@ -1,6 +1,7 @@
 package web
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"testing"
@@ -8,6 +9,7 @@ import (
 
 	"github.com/ihainan/corral/internal/convo"
 	"github.com/ihainan/corral/internal/herdr"
+	"github.com/ihainan/corral/internal/store"
 	"github.com/ihainan/corral/internal/term"
 )
 
@@ -44,9 +46,9 @@ func tmuxLocated(pane, serverPID, tty, title string, procs ...convoProc) convoLo
 	}
 }
 
-// Positive test: online senders (herdr pane & tmux active pane) whose verified
-// (pid, proc_start) matches the current locate's pickConvoProc winner return
-// their Corral name and session/pane link.
+// Positive test + B#2: online senders (herdr pane & tmux active pane) match
+// their Corral name and link, including custom pane Label present ONLY in
+// herdr.Snapshot.Panes (not in Snapshot.Agents).
 func TestPeerOnlineSenderMatchesCorralNameAndLink(t *testing.T) {
 	sock := "/tmp/herdr-test/default.sock"
 	sid1 := "11111111-1111-1111-1111-111111111111"
@@ -56,9 +58,15 @@ func TestPeerOnlineSenderMatchesCorralNameAndLink(t *testing.T) {
 			{ID: "ws1", Label: "corral-work"},
 			{ID: "ws2", Label: "~"},
 		},
+		// Realistic herdr structure (B#2): custom Label lives in Panes, while
+		// Agents carries Agent/AgentSession/TerminalID with empty Label.
+		Panes: []herdr.Pane{
+			{ID: "w1:p1", WorkspaceID: "ws1", Cwd: "/srv/corral"},
+			{ID: "w2:p1", WorkspaceID: "ws2", Label: "custom-pane-name", Cwd: "/srv/other"},
+		},
 		Agents: []herdr.Pane{
 			{ID: "w1:p1", WorkspaceID: "ws1", Agent: "claude", TerminalID: "term-1", AgentSession: &herdr.AgentSessionInfo{Value: sid1}, Title: "✳ fix cross-session", Cwd: "/srv/corral"},
-			{ID: "w2:p1", WorkspaceID: "ws2", Agent: "claude", TerminalID: "term-2", AgentSession: &herdr.AgentSessionInfo{Value: sid2}, Label: "reviewer-pane", Title: "✳ review", Cwd: "/srv/other"},
+			{ID: "w2:p1", WorkspaceID: "ws2", Agent: "claude", TerminalID: "term-2", AgentSession: &herdr.AgentSessionInfo{Value: sid2}, Label: "", Title: "✳ review", Cwd: "/srv/other"},
 		},
 	}
 
@@ -77,28 +85,33 @@ func TestPeerOnlineSenderMatchesCorralNameAndLink(t *testing.T) {
 		{pid: 530048, start: 193322812, agent: "claude", sid: sid1, herdrPane: "w1:p1", herdrSocket: sock, cwd: "/srv/corral", anc: herdrAnc()},
 		{pid: 530099, start: 193399999, agent: "claude", sid: sid2, herdrPane: "w2:p1", herdrSocket: sock, cwd: "/srv/other", anc: herdrAnc()},
 		{pid: 600001, start: 194000000, agent: "claude", sid: "33333333-3333-3333-3333-333333333333", herdrPane: "w9:p1", herdrSocket: "/tmp/unmanaged.sock", cwd: "/srv/ext", anc: herdrAnc()},
-	}}, true, t0)
+	}}, true, "", t0)
 
 	tmuxProc := convoProc{pid: 300, start: 1200, agent: "claude", sid: "44444444-4444-4444-4444-444444444444", tmuxPane: "%1", tmuxServerPID: "99", tty: "/dev/pts/3"}
-	srv.recordLocatedProcs(tmuxSess, tmuxLocated("%1", "99", "/dev/pts/3", "✳ tmux-worker", tmuxProc), true, t0)
+	srv.recordLocatedProcs(tmuxSess, tmuxLocated("%1", "99", "/dev/pts/3", "✳ tmux-worker", tmuxProc), true, "", t0)
 
-	// Verify herdr online match (reused PID with different start and unmanaged socket are omitted).
 	hParser := makePeerParser(t,
 		peerMsgLine("u1", 530048, 193322812, "ai-68"),
-		peerMsgLine("u2", 530048, 999999999, "ai-reused"),
-		peerMsgLine("u3", 600001, 194000000, "ai-ext"),
+		peerMsgLine("u2", 530099, 193399999, "ai-rev"),
+		peerMsgLine("u3", 530048, 999999999, "ai-reused"),
+		peerMsgLine("u4", 600001, 194000000, "ai-ext"),
 	)
 	hPeers := srv.resolveConvoPeers(herdrSess, &convoState{parser: hParser})
-	if len(hPeers) != 1 {
-		t.Fatalf("herdr peers = %+v, want 1", hPeers)
+	if len(hPeers) != 2 {
+		t.Fatalf("herdr peers = %+v, want 2", hPeers)
 	}
 	p1 := hPeers["530048:193322812"]
 	if p1.SessionID != "sess-herdr" || p1.Pane != "w1:p1" || p1.Title != "corral-work" || p1.HostName != "devbox" || p1.Persistence != "herdr" {
 		t.Fatalf("herdr p1 = %+v", p1)
 	}
+	// B#2: pane w2:p1 must keep custom Label from Panes even though Agents.Label is "".
+	p2 := hPeers["530099:193399999"]
+	if p2.SessionID != "sess-herdr" || p2.Pane != "w2:p1" || p2.Title != "custom-pane-name" {
+		t.Fatalf("herdr p2 = %+v, want custom-pane-name preserved from Panes", p2)
+	}
 
 	// Verify tmux online match.
-	tParser := makePeerParser(t, peerMsgLine("u4", 300, 1200, "ai-tm"))
+	tParser := makePeerParser(t, peerMsgLine("u5", 300, 1200, "ai-tm"))
 	tPeers := srv.resolveConvoPeers(tmuxSess, &convoState{parser: tParser})
 	if len(tPeers) != 1 {
 		t.Fatalf("tmux peers = %+v, want 1", tPeers)
@@ -106,6 +119,65 @@ func TestPeerOnlineSenderMatchesCorralNameAndLink(t *testing.T) {
 	pt := tPeers["300:1200"]
 	if pt.SessionID != "sess-tmux" || pt.Pane != "" || pt.Title != "tmux-worker" || pt.HostName != "devbox" || pt.Persistence != "tmux" || pt.MuxSession != "main" {
 		t.Fatalf("tmux pt = %+v", pt)
+	}
+}
+
+// Regression fix4 Part A: single-pane fast locate (fastHit, full=false) records
+// ONLY its covered pane without clearing or inferring other panes. Opening S2
+// (acme-web) via fast locate and then opening S1 (claude) via fast locate keeps
+// S2's peer identity available when rendering S1's conversation.
+func TestPeerFastLocateUpdatesOnlyCoveredPane(t *testing.T) {
+	sock := "/tmp/herdr-test/default.sock"
+	sid1 := "11111111-1111-1111-1111-111111111111"
+	sid2 := "22222222-2222-2222-2222-222222222222"
+	snap := &herdr.Snapshot{
+		Workspaces: []herdr.Workspace{
+			{ID: "ws1", Label: "main"},
+			{ID: "ws2", Label: "acme-web"},
+		},
+		Panes: []herdr.Pane{
+			{ID: "w1:p1", WorkspaceID: "ws1"},
+			{ID: "w2:p1", WorkspaceID: "ws2"},
+		},
+		Agents: []herdr.Pane{
+			{ID: "w1:p1", WorkspaceID: "ws1", Agent: "claude", AgentStatus: herdr.StatusWorking, TerminalID: "t1"},
+			{ID: "w2:p1", WorkspaceID: "ws2", Agent: "claude", AgentStatus: herdr.StatusBlocked, TerminalID: "t2"},
+		},
+	}
+
+	sess := &term.Session{ID: "sess-herdr", OwnerID: 1, HostID: 10, HostName: "test", HostConfig: "cfg1", Persistence: "herdr"}
+	srv := &Server{herdrSocks: herdrSockets{path: map[string]string{}}}
+	srv.herdrSocks.set(sess.ID, sock)
+	srv.herdrSocks.setServer(sess.ID, "srv-1", 1, func() (*herdr.Snapshot, time.Time) { return snap, time.Now() }, func() {})
+
+	t0 := time.Now()
+	// Step 1: /agents opens acme-web (w2:p1) first via fastHit (full=false, coveredPane="w2:p1").
+	srv.recordLocatedProcs(sess, convoLocated{procs: []convoProc{
+		{pid: 222, start: 2222, agent: "claude", sid: sid2, herdrPane: "w2:p1", herdrSocket: sock, anc: herdrAnc()},
+	}}, false, "w2:p1", t0)
+
+	// Step 2: user clicks claude (w1:p1), which also hits fastHit (full=false, coveredPane="w1:p1").
+	// Must NOT wipe w2:p1!
+	srv.recordLocatedProcs(sess, convoLocated{procs: []convoProc{
+		{pid: 111, start: 1111, agent: "claude", sid: sid1, herdrPane: "w1:p1", herdrSocket: sock, anc: herdrAnc()},
+	}}, false, "w1:p1", t0.Add(time.Second))
+
+	// Step 3: S1's conversation resolves peer message from S2 (222:2222).
+	parser := makePeerParser(t, peerMsgLine("xs1", 222, 2222, "ai-77"), peerMsgLine("xs2", 1, 1, "ai-99"))
+	peers := srv.resolveConvoPeers(sess, &convoState{parser: parser})
+	if len(peers) != 1 || peers["222:2222"].Title != "acme-web" || peers["222:2222"].SessionID != "sess-herdr" || peers["222:2222"].Pane != "w2:p1" {
+		t.Fatalf("after fast locates, peers = %+v, want acme-web (222:2222)", peers)
+	}
+
+	// Step 4: fast locate on w2:p1 finding no agent clears ONLY w2:p1, leaving w1:p1 intact.
+	srv.recordLocatedProcs(sess, convoLocated{procs: nil}, false, "w2:p1", t0.Add(2*time.Second))
+	parserBoth := makePeerParser(t, peerMsgLine("m1", 111, 1111, "ai-1"), peerMsgLine("m2", 222, 2222, "ai-2"))
+	peersAfter := srv.resolveConvoPeers(sess, &convoState{parser: parserBoth})
+	if _, ok := peersAfter["222:2222"]; ok {
+		t.Fatalf("cleared w2:p1 should no longer match: %+v", peersAfter)
+	}
+	if peersAfter["111:1111"].Pane != "w1:p1" {
+		t.Fatalf("uncovered w1:p1 should remain intact: %+v", peersAfter)
 	}
 }
 
@@ -134,7 +206,7 @@ func TestPeerBackgroundChildNotMatchedToParent(t *testing.T) {
 		pid: 400, start: 900, agent: "claude", sid: childSID, herdrPane: "w1:p1", herdrSocket: sock,
 		anc: []convoAnc{{pid: 390, comm: "bash"}, {pid: 100, comm: "claude"}, {pid: 90, comm: "zsh"}, {pid: 80, comm: "herdr"}},
 	}
-	srv.recordLocatedProcs(sess, convoLocated{procs: []convoProc{parentProc, bgChildProc}}, true, time.Now())
+	srv.recordLocatedProcs(sess, convoLocated{procs: []convoProc{parentProc, bgChildProc}}, true, "", time.Now())
 
 	parser := makePeerParser(t,
 		peerMsgLine("u1", 100, 500, "ai-parent"),
@@ -149,9 +221,59 @@ func TestPeerBackgroundChildNotMatchedToParent(t *testing.T) {
 	}
 }
 
-// Fix3 scenarios: every case where current pickConvoProc selection does NOT
-// match the message's own verified (pid, start) MUST return unmatched (omitted).
-func TestPeerFix3Scenarios(t *testing.T) {
+// Regression fix4 B#5: corraldMatchesSession refuses to use corrald for an old
+// terminal session after its host record is retargeted to a different host
+// config or bound host key / username.
+func TestPeerCorraldRejectedAfterHostRetarget(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.OpenMemory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	u, err := st.CreateUser(ctx, "alice", "", "pw", store.RoleAdmin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h, err := st.CreateHost(ctx, &store.Host{
+		OwnerID: u.ID, Name: "devbox", Address: "10.0.0.1", Port: 22, Username: "alice", Auth: store.AuthPassword,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfgA := hostConfig(h)
+	sessOld := &term.Session{ID: "s-old", OwnerID: u.ID, HostID: h.ID, HostConfig: cfgA}
+	srv := &Server{store: st}
+
+	// Before retarget: matches.
+	if !srv.corraldMatchesSession(ctx, sessOld) {
+		t.Fatalf("expected corraldMatchesSession=true before host retarget")
+	}
+
+	// Retarget host record to another machine (address/port changed).
+	h.Address = "10.0.0.2"
+	h.Port = 2222
+	if err := st.UpdateHost(ctx, h, true); err != nil {
+		t.Fatal(err)
+	}
+	if srv.corraldMatchesSession(ctx, sessOld) {
+		t.Fatalf("old terminal session must NOT use corrald after host record retarget")
+	}
+	// New terminal opened with the retargeted config matches again.
+	h2, err := st.Host(ctx, u.ID, h.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessNew := &term.Session{ID: "s-new", OwnerID: u.ID, HostID: h.ID, HostConfig: hostConfig(h2)}
+	if !srv.corraldMatchesSession(ctx, sessNew) {
+		t.Fatalf("expected corraldMatchesSession=true for new retargeted session")
+	}
+}
+
+// Fix3 + Fix4 scenarios: every case where current pickConvoProc selection does
+// NOT match the message's own verified (pid, start) MUST return unmatched.
+func TestPeerFix3AndFix4Scenarios(t *testing.T) {
 	t.Run("same_session_resumed_new_pid", func(t *testing.T) {
 		sock := "/tmp/herdr-test/default.sock"
 		sid := "11111111-1111-1111-1111-111111111111"
@@ -167,11 +289,10 @@ func TestPeerFix3Scenarios(t *testing.T) {
 		t1 := time.Now()
 		srv.recordLocatedProcs(sess, convoLocated{procs: []convoProc{
 			{pid: 100, start: 500, agent: "claude", sid: sid, herdrPane: "w1:p1", herdrSocket: sock, anc: herdrAnc()},
-		}}, true, t1)
-		// Same session UUID resumed with a new PID (200:600); old PID 100:500 gone.
+		}}, true, "", t1)
 		srv.recordLocatedProcs(sess, convoLocated{procs: []convoProc{
 			{pid: 200, start: 600, agent: "claude", sid: sid, herdrPane: "w1:p1", herdrSocket: sock, anc: herdrAnc()},
-		}}, true, t1.Add(time.Second))
+		}}, true, "", t1.Add(time.Second))
 
 		parser := makePeerParser(t, peerMsgLine("u1", 100, 500, "ai-old"), peerMsgLine("u2", 200, 600, "ai-new"))
 		peers := srv.resolveConvoPeers(sess, &convoState{parser: parser})
@@ -183,14 +304,19 @@ func TestPeerFix3Scenarios(t *testing.T) {
 		}
 	})
 
-	t.Run("tmux_background_old_process", func(t *testing.T) {
+	t.Run("tmux_background_old_process_and_own_scan_only", func(t *testing.T) {
 		tmuxSess := &term.Session{ID: "s-tmux", OwnerID: 1, HostID: 10, HostName: "devbox", HostConfig: "cfg1", Persistence: "tmux", TmuxSession: "main"}
+		herdrSess := &term.Session{ID: "s-herdr", OwnerID: 1, HostID: 10, HostName: "devbox", HostConfig: "cfg1", Persistence: "herdr"}
 		srv := &Server{}
 		bgOld := convoProc{pid: 300, start: 1200, agent: "claude", sid: "11111111-1111-1111-1111-111111111111", tmuxPane: "%1", tmuxServerPID: "99", tty: "/dev/pts/1"}
 		fgNew := convoProc{pid: 400, start: 1500, agent: "claude", sid: "22222222-2222-2222-2222-222222222222", tmuxPane: "%2", tmuxServerPID: "99", tty: "/dev/pts/2"}
 
+		t0 := time.Now()
 		// Active pane is %2 (fgNew); bgOld is still alive in background pane %1.
-		srv.recordLocatedProcs(tmuxSess, tmuxLocated("%2", "99", "/dev/pts/2", "✳ active", bgOld, fgNew), true, time.Now())
+		srv.recordLocatedProcs(tmuxSess, tmuxLocated("%2", "99", "/dev/pts/2", "✳ active", bgOld, fgNew), true, "", t0)
+
+		// B#1: a scan on another session (herdrSess) must NOT mutate or resurrect tmuxSess's entry.
+		srv.recordLocatedProcs(herdrSess, convoLocated{procs: []convoProc{bgOld}}, true, "", t0.Add(time.Second))
 
 		parser := makePeerParser(t, peerMsgLine("u1", 300, 1200, "ai-bg"), peerMsgLine("u2", 400, 1500, "ai-fg"))
 		peers := srv.resolveConvoPeers(tmuxSess, &convoState{parser: parser})
@@ -200,13 +326,21 @@ func TestPeerFix3Scenarios(t *testing.T) {
 		if peers["400:1500"].SessionID != "s-tmux" || peers["400:1500"].Title != "active" {
 			t.Fatalf("active tmux process 400:1500 should match: %+v", peers)
 		}
+
+		// B#4: empty scan on tmuxSess itself advances scanAt so an older scan cannot resurrect 400:1500.
+		tEmpty := t0.Add(2 * time.Second)
+		srv.recordLocatedProcs(tmuxSess, convoLocated{procs: nil}, true, "", tEmpty)
+		srv.recordLocatedProcs(tmuxSess, tmuxLocated("%2", "99", "/dev/pts/2", "✳ active", fgNew), true, "", t0.Add(1500*time.Millisecond))
+		if peers := srv.resolveConvoPeers(tmuxSess, &convoState{parser: parser}); len(peers) != 0 {
+			t.Fatalf("older scan resurrected tmux peer after empty scan: %+v", peers)
+		}
 	})
 
 	t.Run("many_peers_no_eviction_and_unmatched_misses", func(t *testing.T) {
 		tmuxSess := &term.Session{ID: "s-tmux", OwnerID: 1, HostID: 10, HostName: "devbox", HostConfig: "cfg1", Persistence: "tmux", TmuxSession: "main"}
 		srv := &Server{}
 		live := convoProc{pid: 99999, start: 88888, agent: "claude", sid: "11111111-1111-1111-1111-111111111111", tmuxPane: "%1", tmuxServerPID: "99", tty: "/dev/pts/1"}
-		srv.recordLocatedProcs(tmuxSess, tmuxLocated("%1", "99", "/dev/pts/1", "✳ live-one", live), true, time.Now())
+		srv.recordLocatedProcs(tmuxSess, tmuxLocated("%1", "99", "/dev/pts/1", "✳ live-one", live), true, "", time.Now())
 
 		var sb strings.Builder
 		for i := 1; i <= 600; i++ {
@@ -239,14 +373,12 @@ func TestPeerFix3Scenarios(t *testing.T) {
 
 		tOld := time.Now().Add(-10 * time.Second)
 		tNew := time.Now()
-		// Newer scan completes first with 200:600.
 		srv.recordLocatedProcs(sess, convoLocated{procs: []convoProc{
 			{pid: 200, start: 600, agent: "claude", sid: sid2, herdrPane: "w1:p1", herdrSocket: sock, anc: herdrAnc()},
-		}}, true, tNew)
-		// Older scan from tOld arrives late with 100:500 -> must be ignored.
+		}}, true, "", tNew)
 		srv.recordLocatedProcs(sess, convoLocated{procs: []convoProc{
 			{pid: 100, start: 500, agent: "claude", sid: sid1, herdrPane: "w1:p1", herdrSocket: sock, anc: herdrAnc()},
-		}}, true, tOld)
+		}}, true, "", tOld)
 
 		parser := makePeerParser(t, peerMsgLine("u1", 100, 500, "ai-old"), peerMsgLine("u2", 200, 600, "ai-new"))
 		peers := srv.resolveConvoPeers(sess, &convoState{parser: parser})
@@ -274,13 +406,12 @@ func TestPeerFix3Scenarios(t *testing.T) {
 		t0 := time.Now()
 		srv.recordLocatedProcs(herdrSess, convoLocated{procs: []convoProc{
 			{pid: 100, start: 500, agent: "claude", sid: sid, herdrPane: "w1:p1", herdrSocket: sock, anc: herdrAnc()},
-		}}, true, t0)
+		}}, true, "", t0)
 		srv.recordLocatedProcs(tmuxSess, tmuxLocated("%1", "99", "/dev/pts/1", "✳ tm",
-			convoProc{pid: 300, start: 1200, agent: "claude", sid: sid, tmuxPane: "%1", tmuxServerPID: "99", tty: "/dev/pts/1"}), true, t0)
+			convoProc{pid: 300, start: 1200, agent: "claude", sid: sid, tmuxPane: "%1", tmuxServerPID: "99", tty: "/dev/pts/1"}), true, "", t0)
 
-		// Empty full scan replaces everything with an empty map.
-		srv.recordLocatedProcs(herdrSess, convoLocated{procs: nil}, true, t0.Add(time.Second))
-		srv.recordLocatedProcs(tmuxSess, convoLocated{procs: nil}, true, t0.Add(time.Second))
+		srv.recordLocatedProcs(herdrSess, convoLocated{procs: nil}, true, "", t0.Add(time.Second))
+		srv.recordLocatedProcs(tmuxSess, convoLocated{procs: nil}, true, "", t0.Add(time.Second))
 
 		parser := makePeerParser(t, peerMsgLine("u1", 100, 500, "ai-h"), peerMsgLine("u2", 300, 1200, "ai-t"))
 		if peers := srv.resolveConvoPeers(herdrSess, &convoState{parser: parser}); len(peers) != 0 {
@@ -294,8 +425,6 @@ func TestPeerFix3Scenarios(t *testing.T) {
 	t.Run("stale_convo_bind_ignored", func(t *testing.T) {
 		tmuxSess := &term.Session{ID: "s-tmux", OwnerID: 1, HostID: 10, HostName: "devbox", HostConfig: "cfg1", Persistence: "tmux", TmuxSession: "main"}
 		srv := &Server{}
-		// Even with an old st.bind present, if no current locate scan selected
-		// that (pid, start), resolveConvoPeers must return nil.
 		parser := makePeerParser(t, peerMsgLine("u1", 100, 500, "ai-stale-bind"))
 		st := &convoState{
 			parser: parser,
@@ -313,17 +442,40 @@ func TestPeerFix3Scenarios(t *testing.T) {
 
 		t0 := time.Now()
 		procOld := convoProc{pid: 500, start: 1000, agent: "claude", sid: "11111111-1111-1111-1111-111111111111", tmuxPane: "%1", tmuxServerPID: "77", tty: "/dev/pts/1"}
-		srv.recordLocatedProcs(sessOld, tmuxLocated("%1", "77", "/dev/pts/1", "✳ old-machine", procOld), true, t0)
+		srv.recordLocatedProcs(sessOld, tmuxLocated("%1", "77", "/dev/pts/1", "✳ old-machine", procOld), true, "", t0)
 
 		parser := makePeerParser(t, peerMsgLine("u1", 500, 1000, "ai-old"))
-		// Retargeted host config must NOT read sessOld's live peer.
 		if peers := srv.resolveConvoPeers(sessNew, &convoState{parser: parser}); len(peers) != 0 {
 			t.Fatalf("retargeted host config read old machine's peer: %+v", peers)
 		}
-		// Empty scan on sessNew must NOT clear sessOld.
-		srv.recordLocatedProcs(sessNew, tmuxLocated("%1", "88", "/dev/pts/2", "✳ new-machine"), true, t0.Add(time.Second))
+		srv.recordLocatedProcs(sessNew, tmuxLocated("%1", "88", "/dev/pts/2", "✳ new-machine"), true, "", t0.Add(time.Second))
 		if peers := srv.resolveConvoPeers(sessOld, &convoState{parser: parser}); peers["500:1000"].SessionID != "s-old" {
 			t.Fatalf("sessOld should remain unaffected by sessNew scan: %+v", peers)
+		}
+	})
+
+	// B#10: subagent conversation state also resolves Peers via resolveConvoPeers.
+	t.Run("subagent_convo_resolves_peers", func(t *testing.T) {
+		sock := "/tmp/herdr-test/default.sock"
+		sid := "11111111-1111-1111-1111-111111111111"
+		snap := &herdr.Snapshot{
+			Workspaces: []herdr.Workspace{{ID: "ws1", Label: "acme-web"}},
+			Panes:      []herdr.Pane{{ID: "w1:p2", WorkspaceID: "ws1"}},
+			Agents:     []herdr.Pane{{ID: "w1:p2", WorkspaceID: "ws1", Agent: "claude", TerminalID: "t2", AgentSession: &herdr.AgentSessionInfo{Value: sid}}},
+		}
+		sess := &term.Session{ID: "s-herdr", OwnerID: 1, HostID: 10, HostName: "devbox", HostConfig: "cfg1", Persistence: "herdr"}
+		srv := &Server{herdrSocks: herdrSockets{path: map[string]string{}}}
+		srv.herdrSocks.set(sess.ID, sock)
+		srv.herdrSocks.setServer(sess.ID, "srv-1", 1, func() (*herdr.Snapshot, time.Time) { return snap, time.Now() }, func() {})
+		srv.recordLocatedProcs(sess, convoLocated{procs: []convoProc{
+			{pid: 222, start: 2222, agent: "claude", sid: sid, herdrPane: "w1:p2", herdrSocket: sock, anc: herdrAnc()},
+		}}, false, "w1:p2", time.Now())
+
+		subParser := convo.NewClaudeSub()
+		subParser.Feed([]byte(peerMsgLine("u-sub", 222, 2222, "ai-77") + "\n"))
+		peers := srv.resolveConvoPeers(sess, &convoState{sub: true, parser: subParser})
+		if peers["222:2222"].Title != "acme-web" || peers["222:2222"].Pane != "w1:p2" {
+			t.Fatalf("subagent convo peers = %+v, want acme-web", peers)
 		}
 	})
 }

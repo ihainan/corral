@@ -1220,23 +1220,34 @@ func hasCompletePeerOrigin(o *claudeOrigin) bool {
 	return isPeerOrigin(o) && rawPositiveInt64(o.VerifiedPeerPID) > 0 && rawPositiveInt64(o.VerifiedPeerProcStart) > 0
 }
 
-// peerAddrMismatch reports whether an XML <cross-session-message from="...">
-// address and origin.from are both present and disagree.
+func extractCrossSessionAttr(re *regexp.Regexp, s string) (string, bool) {
+	m := re.FindStringSubmatch(s)
+	if m == nil {
+		return "", false
+	}
+	if m[1] != "" {
+		return clip(m[1], maxMeta), true
+	}
+	return clip(m[2], maxMeta), true
+}
+
+// peerAddrMismatch reports whether an XML <cross-session-message ...> wrapper
+// is present and either lacks a parseable non-empty from attribute or disagrees
+// with origin.from. When true, verified (pid, start) must be discarded.
 func peerAddrMismatch(s string, o *claudeOrigin) bool {
-	if !isPeerOrigin(o) || o.From == "" {
+	if !isPeerOrigin(o) {
 		return false
 	}
 	i := strings.Index(s, "<cross-session-message")
 	if i < 0 {
 		return false
 	}
-	a := crossSessionAddr.FindStringSubmatch(s[i:])
-	if a == nil {
-		return false
+	xmlAddr, ok := extractCrossSessionAttr(crossSessionAddr, s[i:])
+	if !ok || xmlAddr == "" {
+		return true
 	}
-	xmlAddr := clip(a[1], maxMeta)
 	originAddr := clip(o.From, maxMeta)
-	return xmlAddr != "" && originAddr != "" && xmlAddr != originAddr
+	return originAddr != "" && xmlAddr != originAddr
 }
 
 func extractClaudeText(raw json.RawMessage) string {
@@ -1271,8 +1282,8 @@ func (c *Claude) user(r *claudeRow) {
 		// writes so when it takes them in — the waiting is over.)
 		if r.PromptSource == "system" || isPeerOrigin(r.Origin) {
 			s := extractClaudeText(r.Message.Content)
-			if s != "" {
-				c.metaArrived(s)
+			if s != "" || isPeerOrigin(r.Origin) {
+				c.metaArrived(s, r.Origin)
 			}
 			// (Another session's message, taken in: shown where it came,
 			// whose and its words — 11-15, gone from sight once it was no
@@ -1432,7 +1443,7 @@ func (c *Claude) queueOp(r *claudeRow) {
 		// agent writing to this one, or a notice from the harness; what
 		// belongs to no one of these (a background task's notice) is not
 		// shown at all.
-		text, from, note := queuedText(s)
+		text, from, note := queuedTextWithOrigin(s, r.Origin)
 		if text != "" && c.ofNow(r.Timestamp) {
 			q := queuedItem{raw: s, from: from, note: note}
 			q.Text, q.cut = cut(clean(blankEnds(text)), maxText)
@@ -1515,12 +1526,14 @@ func (c *Claude) peerOf(s string, origin *claudeOrigin) *Event {
 	var name, addr, words string
 	var relayed bool
 	if i := strings.Index(s, "<cross-session-message"); i >= 0 {
-		if m := crossSession.FindStringSubmatch(s[i:]); m != nil {
-			name = clip(m[1], maxMeta)
+		if n, ok := extractCrossSessionAttr(crossSession, s[i:]); ok {
+			name = n
+		}
+		if a, ok := extractCrossSessionAttr(crossSessionAddr, s[i:]); ok {
+			addr = a
+		}
+		if name != "" || isPeerOrigin(origin) {
 			words, relayed = peerWords(s[i:])
-			if a := crossSessionAddr.FindStringSubmatch(s[i:]); a != nil {
-				addr = clip(a[1], maxMeta)
-			}
 		}
 	}
 	mismatch := peerAddrMismatch(s, origin)
@@ -1553,7 +1566,7 @@ func (c *Claude) peerOf(s string, origin *claudeOrigin) *Event {
 		}
 	}
 	words = clean(words)
-	if words == "" || (name == "" && pid == 0) {
+	if words == "" || (!isPeerOrigin(origin) && name == "" && pid == 0) {
 		return nil
 	}
 	if addr != "" && name != "" && !mismatch {
@@ -1568,15 +1581,50 @@ func (c *Claude) peerOf(s string, origin *claudeOrigin) *Event {
 	return &Event{Kind: EventPeer, From: name, Text: clip(words, maxDetail), Relayed: relayed, PeerPID: pid, PeerStart: start}
 }
 
+// queuedTextWithOrigin classifies a queued enqueue row, recognizing peer
+// messages carried by origin.kind=="peer" even when content is plain text
+// without a <cross-session-message> XML wrapper (so they never enter the user
+// queue or show "Send now").
+func queuedTextWithOrigin(s string, origin *claudeOrigin) (text, from string, note bool) {
+	if isPeerOrigin(origin) {
+		if i := strings.Index(s, "<cross-session-message"); i >= 0 {
+			if n, ok := extractCrossSessionAttr(crossSession, s[i:]); ok {
+				from = n
+			}
+			text, _ = peerWords(s[i:])
+		}
+		if from == "" && origin.Name != "" {
+			from = clip(origin.Name, maxMeta)
+		}
+		if from == "" {
+			from = "?"
+		}
+		if text == "" && origin.Body != "" {
+			text = origin.Body
+			if j := strings.Index(text, relayedMark); j >= 0 {
+				text = strings.TrimSpace(text[:j])
+			}
+		}
+		if text == "" {
+			text = strings.TrimSpace(s)
+		}
+		if text == "" {
+			return "", "", false
+		}
+		return text, from, true
+	}
+	return queuedText(s)
+}
+
 // queuedText: what a message waiting to be taken in says, who it is from
 // (another session's agent) and whether it is a notice rather than anyone's
 // message. "" when it is of none of these.
 func queuedText(s string) (text, from string, note bool) {
-	if m := crossSession.FindStringSubmatch(s); m != nil {
+	if n, ok := extractCrossSessionAttr(crossSession, s); ok {
 		// (The envelope says where it came from, down to a socket and the
 		// hops it took: of that, only which session it was.)
 		w, _ := peerWords(s) // (Claude Code's note of words relayed: not the sender's)
-		return w, clip(m[1], maxMeta), true
+		return w, n, true
 	}
 	if strings.HasPrefix(strings.TrimSpace(s), "[Cross-session idle notice]") {
 		return strings.TrimSpace(s), "", true
@@ -1614,14 +1662,33 @@ func (c *Claude) arrived(a arrival) {
 // task's prompt: its words whole). What waited and is that, by the same
 // sender and the same words, stops waiting — the first such, as they are
 // taken in; one removed meanwhile (and queued again since) is that one.
-func (c *Claude) metaArrived(s string) {
+func (c *Claude) metaArrived(s string, origin *claudeOrigin) {
 	text, from := s, ""
+	peer := isPeerOrigin(origin)
 	if i := strings.Index(s, "<cross-session-message"); i >= 0 {
-		m := crossSession.FindStringSubmatch(s[i:])
-		if m == nil {
-			return
+		n, ok := extractCrossSessionAttr(crossSession, s[i:])
+		if !ok {
+			if !peer {
+				return
+			}
+		} else {
+			text, from, peer = bodyAfterTag(s[i:], "cross-session-message"), n, true
 		}
-		text, from = bodyAfterTag(s[i:], "cross-session-message"), clip(m[1], maxMeta)
+	}
+	if peer {
+		if from == "" && origin != nil && origin.Name != "" {
+			from = clip(origin.Name, maxMeta)
+		}
+		if from == "" {
+			from = "?"
+		}
+		if strings.Index(s, "<cross-session-message") < 0 {
+			if origin != nil && origin.Body != "" {
+				text = origin.Body
+			} else {
+				text = strings.TrimSpace(s)
+			}
+		}
 	}
 	if text == "" {
 		return
@@ -1633,6 +1700,14 @@ func (c *Claude) metaArrived(s string) {
 		return
 	}
 	for i, q := range c.queue {
+		// Peer arrivals only clear peer queued items (never human user queued
+		// messages with identical text), and vice versa.
+		if peer && (!q.note || q.from == "") {
+			continue
+		}
+		if !peer && q.from != "" {
+			continue
+		}
 		words := q.raw
 		if q.from != "" {
 			words = bodyAfterTag(q.raw, "cross-session-message")
@@ -1652,8 +1727,8 @@ func sameCrossSession(q queuedItem, s string) bool {
 	if q.from == "" {
 		return false
 	}
-	m := crossSession.FindStringSubmatch(s)
-	return m != nil && clip(m[1], maxMeta) == q.from && bodyAfterTag(s, "cross-session-message") == bodyAfterTag(q.raw, "cross-session-message")
+	n, ok := extractCrossSessionAttr(crossSession, s)
+	return ok && n == q.from && bodyAfterTag(s, "cross-session-message") == bodyAfterTag(q.raw, "cross-session-message")
 }
 
 // turnOver: a turn has ended (its "turn_duration" row). A slash command
@@ -2942,8 +3017,8 @@ var (
 	taskSummary      = regexp.MustCompile(`(?s)<summary>(.*?)</summary>`)
 	taskStatus       = regexp.MustCompile(`(?s)<status>(.*?)</status>`)
 	taskID           = regexp.MustCompile(`(?s)<task-id>(.*?)</task-id>`)
-	crossSession     = regexp.MustCompile(`^\s*<cross-session-message[^>]*\bfrom-name="([^"]*)"`)
-	crossSessionAddr = regexp.MustCompile(`^\s*<cross-session-message[^>]*\sfrom="([^"]*)"`)
+	crossSession     = regexp.MustCompile(`^\s*<cross-session-message[^>]*\bfrom-name\s*=\s*(?:"([^"]*)"|'([^']*)')`)
+	crossSessionAddr = regexp.MustCompile(`^\s*<cross-session-message[^>]*\sfrom\s*=\s*(?:"([^"]*)"|'([^']*)')`)
 	taskEvent        = regexp.MustCompile(`(?s)<event>(.*?)</event>`)
 	// "[Monitor expired after 30m with 2 events delivered. Re-arm it if you
 	// still need the watch.]", "[Monitor timed out — re-arm if needed.]",

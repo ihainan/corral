@@ -22,53 +22,124 @@ type peerProcID struct {
 type livePeerEntry struct {
 	info     convo.PeerInfo
 	program  string
+	cwd      string
 	termID   string
 	agentSID string
 }
 
-type liveLocatePeers struct {
+type livePaneSlot struct {
+	scanAt time.Time
+	has    bool
+	id     peerProcID
+	entry  livePeerEntry
+}
+
+type liveSessionPeers struct {
 	ownerID    int64
 	hostID     int64
 	hostConfig string
-	scanAt     time.Time
-	byProc     map[peerProcID]livePeerEntry
+	fullScanAt time.Time                // latest full-scan start time covering all panes (herdr) or session (tmux)
+	panes      map[string]*livePaneSlot // herdr: paneID -> latest picked process; tmux: "" -> latest picked process
 }
 
-// peerLocateCache holds ONLY the latest full locate scan's mapping of
+// peerLocateCache holds ONLY the latest locate scan's mapping of
 // currently-selected (pid, proc_start) -> Corral agent per live Corral session.
-// Every full locate replaces the session's map wholesale (no persistence, no
-// cross-scan merging, no negative cache, no exited history).
+// Full scans replace all panes of covered herdr sessions (or the scanned tmux
+// session); partial/fast scans update ONLY the exact pane they covered without
+// touching or inferring any other pane or session.
 type peerLocateCache struct {
 	mu     sync.Mutex
-	bySess map[string]*liveLocatePeers
+	bySess map[string]*liveSessionPeers
 }
 
-func (c *peerLocateCache) replace(sessID string, next *liveLocatePeers) {
-	if sessID == "" || next == nil {
-		return
-	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
+func (c *peerLocateCache) ensureSessLocked(sessID string, ownerID, hostID int64, hostConfig string) *liveSessionPeers {
 	if c.bySess == nil {
-		c.bySess = map[string]*liveLocatePeers{}
+		c.bySess = map[string]*liveSessionPeers{}
 	}
-	if cur := c.bySess[sessID]; cur != nil && next.scanAt.Before(cur.scanAt) {
-		return
+	cur := c.bySess[sessID]
+	if cur == nil || cur.ownerID != ownerID || cur.hostID != hostID || cur.hostConfig != hostConfig {
+		cur = &liveSessionPeers{
+			ownerID:    ownerID,
+			hostID:     hostID,
+			hostConfig: hostConfig,
+			panes:      map[string]*livePaneSlot{},
+		}
+		c.bySess[sessID] = cur
 	}
-	c.bySess[sessID] = next
+	return cur
 }
 
-func (c *peerLocateCache) pruneTmuxAbsent(sessID string, scanAt time.Time, aliveInProc map[peerProcID]bool) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	cur := c.bySess[sessID]
-	if cur == nil || scanAt.Before(cur.scanAt) {
+func (c *peerLocateCache) replaceHerdrFull(sessID string, ownerID, hostID int64, hostConfig string, scanAt time.Time, picked map[string]livePaneSlot) {
+	if sessID == "" {
 		return
 	}
-	for id := range cur.byProc {
-		if !aliveInProc[id] {
-			delete(cur.byProc, id)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	cur := c.ensureSessLocked(sessID, ownerID, hostID, hostConfig)
+	if scanAt.Before(cur.fullScanAt) {
+		return
+	}
+	cur.fullScanAt = scanAt
+	for pane, slot := range cur.panes {
+		if scanAt.Before(slot.scanAt) {
+			continue
 		}
+		if next, ok := picked[pane]; ok {
+			cp := next
+			cp.scanAt = scanAt
+			cur.panes[pane] = &cp
+		} else {
+			delete(cur.panes, pane)
+		}
+	}
+	for pane, next := range picked {
+		if _, exists := cur.panes[pane]; exists {
+			continue
+		}
+		cp := next
+		cp.scanAt = scanAt
+		cur.panes[pane] = &cp
+	}
+}
+
+func (c *peerLocateCache) replaceHerdrPane(sessID string, ownerID, hostID int64, hostConfig, pane string, scanAt time.Time, picked *livePaneSlot) {
+	if sessID == "" || pane == "" {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	cur := c.ensureSessLocked(sessID, ownerID, hostID, hostConfig)
+	if scanAt.Before(cur.fullScanAt) {
+		return
+	}
+	if prev := cur.panes[pane]; prev != nil && scanAt.Before(prev.scanAt) {
+		return
+	}
+	if picked != nil && picked.has {
+		cp := *picked
+		cp.scanAt = scanAt
+		cur.panes[pane] = &cp
+	} else {
+		cur.panes[pane] = &livePaneSlot{scanAt: scanAt, has: false}
+	}
+}
+
+func (c *peerLocateCache) replaceTmux(sessID string, ownerID, hostID int64, hostConfig string, scanAt time.Time, picked *livePaneSlot) {
+	if sessID == "" {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	cur := c.ensureSessLocked(sessID, ownerID, hostID, hostConfig)
+	if scanAt.Before(cur.fullScanAt) {
+		return
+	}
+	cur.fullScanAt = scanAt
+	cur.panes = map[string]*livePaneSlot{}
+	if picked != nil && picked.has {
+		cp := *picked
+		cp.scanAt = scanAt
+		cur.panes[""] = &cp
 	}
 }
 
@@ -233,6 +304,56 @@ func peerTitleFromTmux(paneTitle, displayName, muxSession, agent string) string 
 	return sanitizePeerLabel(agent, 64)
 }
 
+// mergeHerdrPane overlays non-empty agent snapshot fields onto the pane entry
+// so custom pane names (Label) or metadata present only in Snapshot.Panes are
+// preserved when merged with Snapshot.Agents.
+func mergeHerdrPane(base, over herdr.Pane) herdr.Pane {
+	out := base
+	if over.ID != "" {
+		out.ID = over.ID
+	}
+	if over.TabID != "" {
+		out.TabID = over.TabID
+	}
+	if over.WorkspaceID != "" {
+		out.WorkspaceID = over.WorkspaceID
+	}
+	if over.AgentStatus != "" {
+		out.AgentStatus = over.AgentStatus
+	}
+	if over.Agent != "" {
+		out.Agent = over.Agent
+	}
+	if over.Name != "" {
+		out.Name = over.Name
+	}
+	if over.Cwd != "" {
+		out.Cwd = over.Cwd
+	}
+	if over.Focused {
+		out.Focused = true
+	}
+	if over.Label != "" {
+		out.Label = over.Label
+	}
+	if over.Title != "" {
+		out.Title = over.Title
+	}
+	if over.AgentSession != nil {
+		out.AgentSession = over.AgentSession
+	}
+	if len(over.Tokens) > 0 {
+		out.Tokens = over.Tokens
+	}
+	if over.TerminalID != "" {
+		out.TerminalID = over.TerminalID
+	}
+	if over.StateSeq != 0 {
+		out.StateSeq = over.StateSeq
+	}
+	return out
+}
+
 type herdrSnapIndex struct {
 	wsLabels map[string]string
 	panes    map[string]herdr.Pane
@@ -252,9 +373,14 @@ func indexHerdrSnapshot(snap *herdr.Snapshot) *herdrSnapIndex {
 			panes[p.ID] = p
 		}
 	}
-	for _, p := range snap.Agents {
-		if p.ID != "" {
-			panes[p.ID] = p
+	for _, a := range snap.Agents {
+		if a.ID == "" {
+			continue
+		}
+		if prev, ok := panes[a.ID]; ok {
+			panes[a.ID] = mergeHerdrPane(prev, a)
+		} else {
+			panes[a.ID] = a
 		}
 	}
 	return &herdrSnapIndex{wsLabels: wsLabels, panes: panes}
@@ -271,18 +397,87 @@ func (idx *herdrSnapIndex) lookup(paneID string) (herdr.Pane, string, bool) {
 	return p, idx.wsLabels[p.WorkspaceID], true
 }
 
-// recordLocatedProcs replaces each running session's current (pid, start) ->
-// Corral agent map from a full locate scan's results (zero extra remote calls).
-// Only the process selected by pickConvoProc for each pane or tmux active pane
-// is recorded; older scans and non-full scans are ignored.
-func (s *Server) recordLocatedProcs(sess *term.Session, l convoLocated, full bool, observedAt time.Time) {
-	if !full || s == nil || sess == nil || sess.OwnerID <= 0 || sess.HostID <= 0 || l.noProc {
+func (s *Server) buildHerdrPaneSlot(rs *term.Session, sock, pane string, procs []convoProc, snapIdx *herdrSnapIndex) *livePaneSlot {
+	p := pickConvoProc(procs, "herdr", pane, sock, "", "", s.herdrSocks.sid(rs.ID, pane))
+	if p == nil || p.pid <= 0 || p.start <= 0 {
+		return nil
+	}
+	hp, wsLabel, paneExists := snapIdx.lookup(pane)
+	if !paneExists || hp.AgentStatus == herdr.StatusGone {
+		return nil
+	}
+	if hp.Agent != "" && !samePeerProgram(p.agent, hp.Agent) {
+		return nil
+	}
+	if p.sid != "" && agentSession(hp) != "" && agentSession(hp) != p.sid {
+		return nil
+	}
+	title := peerTitleFromHerdr(wsLabel, hp.Label, hp.Title, hp.Name, p.cwd, p.agent)
+	if title == "" {
+		return nil
+	}
+	if wsLabel == "~" {
+		wsLabel = ""
+	}
+	info := rs.Info()
+	return &livePaneSlot{
+		has: true,
+		id:  peerProcID{pid: p.pid, start: p.start},
+		entry: livePeerEntry{
+			info: convo.PeerInfo{
+				SessionID:   rs.ID,
+				Pane:        pane,
+				Title:       title,
+				HostName:    sanitizePeerLabel(info.HostName, 120),
+				Persistence: "herdr",
+				MuxSession:  normalizeHerdrMux(info.MuxSession),
+				DisplayName: sanitizePeerLabel(info.DisplayName, 120),
+				Workspace:   sanitizePeerLabel(wsLabel, 120),
+			},
+			program:  p.agent,
+			cwd:      p.cwd,
+			termID:   hp.TerminalID,
+			agentSID: p.sid,
+		},
+	}
+}
+
+// recordLocatedProcs updates the server's in-memory live peer map from an
+// existing locate scan's results (zero extra remote calls).
+//   - When full == true: replaces all panes of each covered herdr session on
+//     this host connection (and, if sess is tmux, replaces sess's tmux slot).
+//   - When full == false: updates ONLY coveredPane on sess itself (e.g. a
+//     single-pane fast locate), leaving all other panes and sessions untouched.
+//
+// A tmux session's slot is ONLY updated by scans of that tmux session itself.
+func (s *Server) recordLocatedProcs(sess *term.Session, l convoLocated, full bool, coveredPane string, observedAt time.Time) {
+	if s == nil || sess == nil || sess.OwnerID <= 0 || sess.HostID <= 0 || l.noProc {
 		return
 	}
 	if observedAt.IsZero() {
 		observedAt = time.Now()
 	}
 	hc := peerHostConfig(sess)
+
+	// Non-full scan (e.g. fast single-pane PID locate or OpenCode-only scan):
+	// update ONLY the exact pane covered on sess; never touch other panes.
+	if !full {
+		if sess.Persistence != "herdr" || coveredPane == "" {
+			return
+		}
+		sock := s.herdrSocks.get(sess.ID)
+		if sock == "" {
+			return
+		}
+		snap, ok := s.herdrSocks.snapshotOf(sess.ID)
+		if !ok {
+			return
+		}
+		slot := s.buildHerdrPaneSlot(sess, sock, coveredPane, l.procs, indexHerdrSnapshot(snap))
+		s.peers.replaceHerdrPane(sess.ID, sess.OwnerID, sess.HostID, hc, coveredPane, observedAt, slot)
+		return
+	}
+
 	running := s.runningInPeerScope(sess, sess.OwnerID, sess.HostID, hc)
 
 	herdrBySock := map[string]*term.Session{}
@@ -300,13 +495,11 @@ func (s *Server) recordLocatedProcs(sess *term.Session, l convoLocated, full boo
 		}
 	}
 
-	aliveInProc := make(map[peerProcID]bool, len(l.procs))
 	panesBySock := map[string]map[string]struct{}{}
 	for _, p := range l.procs {
 		if p.pid <= 0 || p.start <= 0 {
 			continue
 		}
-		aliveInProc[peerProcID{pid: p.pid, start: p.start}] = true
 		if p.herdrPane != "" && p.herdrSocket != "" && herdrBySock[p.herdrSocket] != nil {
 			pm := panesBySock[p.herdrSocket]
 			if pm == nil {
@@ -318,94 +511,46 @@ func (s *Server) recordLocatedProcs(sess *term.Session, l convoLocated, full boo
 	}
 
 	for sock, rs := range herdrBySock {
-		byProc := map[peerProcID]livePeerEntry{}
-		info := rs.Info()
+		picked := map[string]livePaneSlot{}
 		snapIdx := snapIndexes[rs.ID]
 		for pane := range panesBySock[sock] {
-			p := pickConvoProc(l.procs, "herdr", pane, sock, "", "", s.herdrSocks.sid(rs.ID, pane))
-			if p == nil || p.pid <= 0 || p.start <= 0 {
-				continue
-			}
-			hp, wsLabel, paneExists := snapIdx.lookup(pane)
-			if !paneExists || hp.AgentStatus == herdr.StatusGone {
-				continue
-			}
-			if hp.Agent != "" && !samePeerProgram(p.agent, hp.Agent) {
-				continue
-			}
-			if p.sid != "" && agentSession(hp) != "" && agentSession(hp) != p.sid {
-				continue
-			}
-			title := peerTitleFromHerdr(wsLabel, hp.Label, hp.Title, hp.Name, p.cwd, p.agent)
-			if title == "" {
-				continue
-			}
-			if wsLabel == "~" {
-				wsLabel = ""
-			}
-			byProc[peerProcID{pid: p.pid, start: p.start}] = livePeerEntry{
-				info: convo.PeerInfo{
-					SessionID:   rs.ID,
-					Pane:        pane,
-					Title:       title,
-					HostName:    sanitizePeerLabel(info.HostName, 120),
-					Persistence: "herdr",
-					MuxSession:  normalizeHerdrMux(info.MuxSession),
-					DisplayName: sanitizePeerLabel(info.DisplayName, 120),
-					Workspace:   sanitizePeerLabel(wsLabel, 120),
-				},
-				program:  p.agent,
-				termID:   hp.TerminalID,
-				agentSID: p.sid,
+			if slot := s.buildHerdrPaneSlot(rs, sock, pane, l.procs, snapIdx); slot != nil && slot.has {
+				picked[pane] = *slot
 			}
 		}
-		s.peers.replace(rs.ID, &liveLocatePeers{
-			ownerID:    rs.OwnerID,
-			hostID:     rs.HostID,
-			hostConfig: hc,
-			scanAt:     observedAt,
-			byProc:     byProc,
-		})
+		s.peers.replaceHerdrFull(rs.ID, rs.OwnerID, rs.HostID, hc, observedAt, picked)
 	}
 
+	// Tmux mapping is replaced strictly by scans of that tmux session itself.
 	if sess.Persistence == "tmux" {
-		byProc := map[peerProcID]livePeerEntry{}
+		var slot *livePaneSlot
 		if l.tmuxActive != "" && l.tmuxPID != "" {
 			if p := pickConvoProc(l.procs, "tmux", l.tmuxActive, "", l.tmuxPID, l.tmuxTTY, ""); p != nil && p.pid > 0 && p.start > 0 {
 				info := sess.Info()
 				title := peerTitleFromTmux(l.tmuxTitle, info.DisplayName, info.MuxSession, p.agent)
 				if title != "" {
-					byProc[peerProcID{pid: p.pid, start: p.start}] = livePeerEntry{
-						info: convo.PeerInfo{
-							SessionID:   sess.ID,
-							Title:       title,
-							HostName:    sanitizePeerLabel(info.HostName, 120),
-							Persistence: "tmux",
-							MuxSession:  sanitizePeerLabel(info.MuxSession, 120),
-							DisplayName: sanitizePeerLabel(info.DisplayName, 120),
+					slot = &livePaneSlot{
+						has: true,
+						id:  peerProcID{pid: p.pid, start: p.start},
+						entry: livePeerEntry{
+							info: convo.PeerInfo{
+								SessionID:   sess.ID,
+								Title:       title,
+								HostName:    sanitizePeerLabel(info.HostName, 120),
+								Persistence: "tmux",
+								MuxSession:  sanitizePeerLabel(info.MuxSession, 120),
+								DisplayName: sanitizePeerLabel(info.DisplayName, 120),
+							},
+							program:  p.agent,
+							agentSID: p.sid,
 						},
-						program:  p.agent,
-						agentSID: p.sid,
 					}
 				}
 			}
 		}
-		s.peers.replace(sess.ID, &liveLocatePeers{
-			ownerID:    sess.OwnerID,
-			hostID:     sess.HostID,
-			hostConfig: hc,
-			scanAt:     observedAt,
-			byProc:     byProc,
-		})
+		s.peers.replaceTmux(sess.ID, sess.OwnerID, sess.HostID, hc, observedAt, slot)
 	}
 
-	// Prune any other tmux session's process on this host if it is no longer in
-	// /proc (including empty full scans).
-	for _, rs := range running {
-		if rs.Persistence == "tmux" && rs.ID != sess.ID {
-			s.peers.pruneTmuxAbsent(rs.ID, observedAt, aliveInProc)
-		}
-	}
 	if s.terms != nil {
 		s.peers.dropClosed(sess.OwnerID, sess.HostID, hc, aliveSess)
 	}
@@ -439,42 +584,54 @@ func (s *Server) resolveConvoPeers(sess *term.Session, st *convoState) map[strin
 	s.peers.mu.Lock()
 	for _, ref := range refs {
 		id := peerProcID{pid: ref.PID, start: ref.Start}
+		matched := false
 		for _, rs := range running {
 			cur := s.peers.bySess[rs.ID]
 			if cur == nil || cur.ownerID != sess.OwnerID || cur.hostID != sess.HostID || cur.hostConfig != hc {
 				continue
 			}
-			entry, ok := cur.byProc[id]
-			if !ok {
-				continue
+			for _, slot := range cur.panes {
+				if slot == nil || !slot.has || slot.id != id {
+					continue
+				}
+				entry := slot.entry
+				pi := entry.info
+				if rs.Persistence == "herdr" {
+					hp, wsLabel, paneExists := snapIndexes[rs.ID].lookup(pi.Pane)
+					if !paneExists || hp.AgentStatus == herdr.StatusGone {
+						continue
+					}
+					if hp.Agent != "" && !samePeerProgram(entry.program, hp.Agent) {
+						continue
+					}
+					if entry.termID != "" && hp.TerminalID != entry.termID {
+						continue
+					}
+					if entry.agentSID != "" && agentSession(hp) != "" && agentSession(hp) != entry.agentSID {
+						continue
+					}
+					if locatedSID := s.herdrSocks.locatedOf(rs.ID, pi.Pane); entry.agentSID != "" && locatedSID != "" && locatedSID != entry.agentSID {
+						continue
+					}
+					if t := peerTitleFromHerdr(wsLabel, hp.Label, hp.Title, hp.Name, entry.cwd, entry.program); t != "" {
+						pi.Title = t
+					}
+					if wsLabel != "" && wsLabel != "~" {
+						pi.Workspace = sanitizePeerLabel(wsLabel, 120)
+					} else {
+						pi.Workspace = ""
+					}
+				}
+				info := rs.Info()
+				pi.HostName = sanitizePeerLabel(info.HostName, 120)
+				pi.DisplayName = sanitizePeerLabel(info.DisplayName, 120)
+				out[peerMapKey(ref.PID, ref.Start)] = pi
+				matched = true
+				break
 			}
-			pi := entry.info
-			if rs.Persistence == "herdr" {
-				hp, wsLabel, paneExists := snapIndexes[rs.ID].lookup(pi.Pane)
-				if !paneExists || hp.AgentStatus == herdr.StatusGone {
-					continue
-				}
-				if hp.Agent != "" && !samePeerProgram(entry.program, hp.Agent) {
-					continue
-				}
-				if entry.termID != "" && hp.TerminalID != entry.termID {
-					continue
-				}
-				if entry.agentSID != "" && agentSession(hp) != "" && agentSession(hp) != entry.agentSID {
-					continue
-				}
-				if locatedSID := s.herdrSocks.locatedOf(rs.ID, pi.Pane); entry.agentSID != "" && locatedSID != "" && locatedSID != entry.agentSID {
-					continue
-				}
-				if wsLabel != "" && wsLabel != "~" {
-					pi.Workspace = sanitizePeerLabel(wsLabel, 120)
-				}
+			if matched {
+				break
 			}
-			info := rs.Info()
-			pi.HostName = sanitizePeerLabel(info.HostName, 120)
-			pi.DisplayName = sanitizePeerLabel(info.DisplayName, 120)
-			out[peerMapKey(ref.PID, ref.Start)] = pi
-			break
 		}
 	}
 	s.peers.mu.Unlock()

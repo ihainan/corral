@@ -82,34 +82,123 @@ func TestClaudePeerOriginRequiresBothPidAndStart(t *testing.T) {
 	}
 }
 
-// Scenario #5 (fix3): when XML <cross-session-message from="..."> and
-// origin.from disagree, verified (pid, start) must NOT be trusted (treated as
-// unverified -> "not in Corral") for both EventPeer and queue-operation.
-func TestClaudePeerOriginXMLAndOriginAddrMismatchRejected(t *testing.T) {
+// Regression fix3 #5 & fix4 B#6: XML address parsing accepts whitespace around
+// "=" (e.g. from = "B"); both disagreement AND an XML wrapper whose from
+// attribute is missing/unparseable discard verified (pid, start).
+func TestClaudePeerOriginXMLAddrWhitespaceAndMismatchRejected(t *testing.T) {
 	c := NewClaude()
 	c.Feed([]byte(
+		// 1. Direct mismatch: XML from="...999.sock" vs origin.from="...111.sock".
 		`{"type":"user","isMeta":true,"promptSource":"system","uuid":"u1","timestamp":"2026-11-28T03:00:00Z",` +
 			`"origin":{"kind":"peer","from":"uds:/tmp/cc-socks/111.sock","verifiedPeerPid":111,"verifiedPeerProcStart":"222","name":"ai-origin"},` +
 			`"message":{"role":"user","content":"<cross-session-message from=\"uds:/tmp/cc-socks/999.sock\" from-name=\"ai-xml\">\nmismatched addr\n</cross-session-message>"}}` + "\n" +
+			// 2. Whitespace around "=" with mismatched address: from = "uds:...888.sock".
+			`{"type":"user","isMeta":true,"promptSource":"system","uuid":"u2","timestamp":"2026-11-28T03:00:01Z",` +
+			`"origin":{"kind":"peer","from":"uds:/tmp/cc-socks/111.sock","verifiedPeerPid":111,"verifiedPeerProcStart":"222","name":"ai-origin"},` +
+			`"message":{"role":"user","content":"<cross-session-message from = \"uds:/tmp/cc-socks/888.sock\" from-name = \"ai-xml\">\nspaced mismatch\n</cross-session-message>"}}` + "\n" +
+			// 3. XML wrapper present but missing/unparseable from attribute -> treated as mismatch.
+			`{"type":"user","isMeta":true,"promptSource":"system","uuid":"u3","timestamp":"2026-11-28T03:00:02Z",` +
+			`"origin":{"kind":"peer","from":"uds:/tmp/cc-socks/111.sock","verifiedPeerPid":111,"verifiedPeerProcStart":"222","name":"ai-origin"},` +
+			`"message":{"role":"user","content":"<cross-session-message from-name=\"ai-xml\">\nmissing xml from\n</cross-session-message>"}}` + "\n" +
+			// 4. Whitespace around "=" with MATCHING address: accepted.
+			`{"type":"user","isMeta":true,"promptSource":"system","uuid":"u4","timestamp":"2026-11-28T03:00:03Z",` +
+			`"origin":{"kind":"peer","from":"uds:/tmp/cc-socks/333.sock","verifiedPeerPid":333,"verifiedPeerProcStart":"444","name":"ai-ok"},` +
+			`"message":{"role":"user","content":"<cross-session-message from = \"uds:/tmp/cc-socks/333.sock\" from-name = \"ai-ok\">\nspaced match\n</cross-session-message>"}}` + "\n" +
+			// 5. Queue-operation with mismatched XML addr.
 			`{"type":"queue-operation","operation":"enqueue","timestamp":"2026-11-28T03:00:05Z",` +
 			`"origin":{"kind":"peer","from":"uds:/tmp/cc-socks/111.sock","verifiedPeerPid":111,"verifiedPeerProcStart":"222","name":"ai-origin"},` +
-			`"content":"<cross-session-message from=\"uds:/tmp/cc-socks/999.sock\" from-name=\"ai-xml\">\nqueued mismatch\n</cross-session-message>"}` + "\n",
+			`"content":"<cross-session-message from = \"uds:/tmp/cc-socks/999.sock\" from-name=\"ai-xml\">\nqueued mismatch\n</cross-session-message>"}` + "\n",
 	))
 
 	entries := c.Since(0)
-	if len(entries) != 1 {
-		t.Fatalf("got %d entries, want 1", len(entries))
+	if len(entries) != 4 {
+		t.Fatalf("got %d entries, want 4: %+v", len(entries), entries)
 	}
-	ev := entries[0].Parts[0].Event
-	if ev == nil || ev.Kind != EventPeer || ev.PeerPID != 0 || ev.PeerStart != 0 {
-		t.Fatalf("mismatched EventPeer = %+v, want zero pid/start", ev)
+	for i := 0; i < 3; i++ {
+		ev := entries[i].Parts[0].Event
+		if ev == nil || ev.Kind != EventPeer || ev.PeerPID != 0 || ev.PeerStart != 0 {
+			t.Fatalf("entry %d = %+v, want zero pid/start", i, ev)
+		}
+	}
+	ev3 := entries[3].Parts[0].Event
+	if ev3 == nil || ev3.PeerPID != 333 || ev3.PeerStart != 444 || ev3.From != "ai-ok" {
+		t.Fatalf("entry 3 (spaced match) = %+v, want pid=333 start=444", ev3)
 	}
 	queued := c.Queued()
 	if len(queued) != 1 || queued[0].PeerPID != 0 || queued[0].PeerStart != 0 {
 		t.Fatalf("mismatched queued = %+v, want zero pid/start", queued)
 	}
-	if refs := PeerRefs(c); len(refs) != 0 {
-		t.Fatalf("PeerRefs = %+v, want empty on addr mismatch", refs)
+	refs := PeerRefs(c)
+	if !slices.Equal(refs, []PeerRef{{PID: 333, Start: 444}}) {
+		t.Fatalf("PeerRefs = %+v, want only 333:444", refs)
+	}
+}
+
+// Regression fix4 B#7 & B#8:
+//   - Plain-text enqueue with origin.kind=="peer" must be classified as a peer
+//     queued note (Note=true, From!="") — never as a human user queued message.
+//   - When a plain-text peer message arrives, metaArrived must NOT clear a
+//     human user's queued message with identical text, and MUST clear the
+//     matching peer queued message.
+func TestClaudePeerPlainTextQueueAndMetaArrivedDoNotClearUserQueue(t *testing.T) {
+	c := NewClaude()
+	c.Feed([]byte(
+		// 1. Human user queues "run tests".
+		`{"type":"queue-operation","operation":"enqueue","timestamp":"2026-11-28T03:00:00Z","content":"run tests"}` + "\n" +
+			// 2. Peer enqueues plain text "run tests" with complete peer origin (no XML).
+			`{"type":"queue-operation","operation":"enqueue","timestamp":"2026-11-28T03:00:01Z",` +
+			`"origin":{"kind":"peer","from":"uds:/tmp/cc-socks/777.sock","verifiedPeerPid":777,"verifiedPeerProcStart":"888","name":"ai-peer"},` +
+			`"content":"run tests"}` + "\n",
+	))
+
+	queued := c.Queued()
+	if len(queued) != 2 {
+		t.Fatalf("queued = %+v, want 2 (1 user + 1 peer)", queued)
+	}
+	if queued[0].Note || queued[0].From != "" || queued[0].Text != "run tests" {
+		t.Fatalf("queued[0] (user) = %+v, want Note=false From=\"\"", queued[0])
+	}
+	if !queued[1].Note || queued[1].From != "ai-peer" || queued[1].PeerPID != 777 || queued[1].PeerStart != 888 || queued[1].Text != "run tests" {
+		t.Fatalf("queued[1] (plain-text peer) = %+v, want Note=true From=\"ai-peer\" pid=777 start=888", queued[1])
+	}
+
+	// 3. Peer message "run tests" arrives (plain text, origin.kind="peer").
+	//    Must clear ONLY the peer queued item and keep the human user's queued item!
+	c.Feed([]byte(
+		`{"type":"user","isMeta":true,"uuid":"u1","timestamp":"2026-11-28T03:00:05Z",` +
+			`"origin":{"kind":"peer","from":"uds:/tmp/cc-socks/777.sock","verifiedPeerPid":777,"verifiedPeerProcStart":"888","name":"ai-peer"},` +
+			`"message":{"role":"user","content":"run tests"}}` + "\n",
+	))
+
+	after := c.Queued()
+	if len(after) != 1 || after[0].Note || after[0].From != "" || after[0].Text != "run tests" {
+		t.Fatalf("after peer arrival, queued = %+v, want human user's queued message preserved and peer item cleared", after)
+	}
+}
+
+// Regression fix4 B#9: origin.kind=="peer" with non-empty body but missing both
+// name and verified (pid, start) must still be kept as EventPeer (rendered as
+// unknown sender + "not in Corral") rather than dropped.
+func TestClaudePeerOriginNamelessUnverifiedMessageKept(t *testing.T) {
+	c := NewClaude()
+	c.Feed([]byte(
+		`{"type":"user","isMeta":true,"uuid":"u1","timestamp":"2026-11-28T03:00:00Z",` +
+			`"origin":{"kind":"peer","body":"anonymous peer body"},` +
+			`"message":{"role":"user","content":""}}` + "\n" +
+			`{"type":"user","uuid":"u2","timestamp":"2026-11-28T03:00:01Z",` +
+			`"origin":{"kind":"peer"},` +
+			`"message":{"role":"user","content":"anonymous plain content"}}` + "\n",
+	))
+
+	entries := c.Since(0)
+	if len(entries) != 2 {
+		t.Fatalf("got %d entries, want 2 (nameless unverified peer messages must not be dropped): %+v", len(entries), entries)
+	}
+	for i, want := range []string{"anonymous peer body", "anonymous plain content"} {
+		ev := entries[i].Parts[0].Event
+		if ev == nil || ev.Kind != EventPeer || ev.From != "" || ev.PeerPID != 0 || ev.PeerStart != 0 || ev.Text != want {
+			t.Fatalf("entry %d = %+v, want nameless unverified EventPeer text=%q", i, ev, want)
+		}
 	}
 }
 

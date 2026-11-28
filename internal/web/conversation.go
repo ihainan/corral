@@ -2449,9 +2449,9 @@ type convoAnswer struct {
 	// DefaultChanged: a model switch here left the default model of new
 	// sessions changed (not put back), lately.
 	DefaultChanged bool `json:"default_changed,omitempty"`
-	// Peers maps "<pid>:<proc_start>" of verified cross-session peer messages
-	// (or SendMessage targets) in this conversation to their resolved Corral
-	// agent session/pane identity (live or recalled from history).
+	// Peers maps "<pid>:<proc_start>" of verified cross-session peer messages in
+	// this conversation to currently-online Corral agent sessions/panes matched
+	// from the latest locate scan.
 	Peers   map[string]convo.PeerInfo `json:"peers,omitempty"`
 	Entries []convo.Entry             `json:"entries"`
 }
@@ -2983,7 +2983,12 @@ func (s *Server) locateScan(ctx context.Context, sess *term.Session, st *convoSt
 	}
 	prevLocated, prevPane := st.located, st.pane
 	if !l.noProc {
-		s.recordLocatedProcs(sess, l, !fastHit && !ocOnly, at)
+		full := !fastHit && !ocOnly
+		coveredPane := ""
+		if !full {
+			coveredPane = pane
+		}
+		s.recordLocatedProcs(sess, l, full, coveredPane, looked)
 	}
 	st.located, st.pane = at, pane // (when the scan was made: one shared may be a little older)
 	sid, log, reason, agent := "", "", "", ""
@@ -6131,6 +6136,7 @@ func (s *Server) subagentAnswer(w http.ResponseWriter, r *http.Request, sess *te
 			s.recordCodexQuotaSnapshot(sess, m.Quota)
 		}
 	}
+	ans.Peers = s.resolveConvoPeers(sess, st)
 	writeJSONCompressed(w, r, http.StatusOK, ans)
 }
 

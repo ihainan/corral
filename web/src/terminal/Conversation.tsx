@@ -2696,6 +2696,7 @@ export function ConversationView({
       {changes && shownEdits && <ChangesPanel key={changes.key} edits={shownEdits} focus={changes.path} onClose={unshow} active={active} onCopy={copy} />}
       {subs && subs.length > 0 && convo.of && (
         // (A subagent's messages are not the session's turns: no fork or rewind from them.)
+        <PeerCtx.Provider value={peerCtx}>
         <ForkAtOf.Provider value={undefined}>
         <RewindAtOf.Provider value={undefined}>
         <SubPanel
@@ -2713,6 +2714,7 @@ export function ConversationView({
         />
         </RewindAtOf.Provider>
         </ForkAtOf.Provider>
+        </PeerCtx.Provider>
       )}
       {/* (Kept when the command ends — gone from the list — saying so, its output still there: review 1ad2c3d.) */}
       {bgCmd && convo.of && (
@@ -6913,6 +6915,8 @@ function SubPanel({ of, sub, depth, live, nav, onOpen, onBack, onClose, active, 
   // one sent off by a subagent, while its log keeps growing.)
   const told = depth === 1 && live(sub.agent)
   const c = useSubConvo(sessionId, pane, sub.agent, told, active, depth > 1, sub.cli)
+  const { onOpenPeer } = useContext(PeerCtx)
+  const subPeerCtx = useMemo(() => ({ peers: c.peers, onOpenPeer }), [c.peers, onOpenPeer])
   const going = depth === 1 ? told : c.growing
   const panel = useRef<HTMLElement>(null)
   const [opened, setOpened] = useState<Record<string, boolean>>({})
@@ -7029,6 +7033,7 @@ function SubPanel({ of, sub, depth, live, nav, onOpen, onBack, onClose, active, 
         )}
         {c.failed && <LoadErrorLine onRetry={c.read} />}
         {!c.failed && !c.loading && list.length === 0 && <p className="convo-older">{t('sub.empty')}</p>}
+        <PeerCtx.Provider value={subPeerCtx}>
         <OpenSub.Provider value={isCli ? undefined : onOpen}>
           <SubReadOnlyHint.Provider value={cliNestedHint}>
           <WordsAsWritten.Provider value={true}>
@@ -7045,6 +7050,7 @@ function SubPanel({ of, sub, depth, live, nav, onOpen, onBack, onClose, active, 
           )}
           </SubReadOnlyHint.Provider>
         </OpenSub.Provider>
+        </PeerCtx.Provider>
       </div>
       {going && c.running.length > 0 && (
         <div className="convo-sub-foot">
