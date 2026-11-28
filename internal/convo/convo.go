@@ -144,18 +144,20 @@ type PeerRef struct {
 // PeerInfo identifies the Corral agent session/pane corresponding to a peer
 // process on the same host (either currently alive or recalled from history).
 type PeerInfo struct {
-	Key         string `json:"key,omitempty"`
-	SessionID   string `json:"session_id,omitempty"`
-	HostID      int64  `json:"host_id,omitempty"`
-	HostName    string `json:"host_name,omitempty"`
-	Persistence string `json:"persistence,omitempty"`
-	MuxSession  string `json:"mux_session,omitempty"`
-	DisplayName string `json:"display_name,omitempty"`
-	Pane        string `json:"pane,omitempty"`
-	Workspace   string `json:"workspace,omitempty"`
-	Title       string `json:"title,omitempty"`
-	Program     string `json:"program,omitempty"`
-	Alive       bool   `json:"alive,omitempty"`
+	Key          string `json:"key,omitempty"`
+	SessionID    string `json:"session_id,omitempty"`
+	HostID       int64  `json:"host_id,omitempty"`
+	HostName     string `json:"host_name,omitempty"`
+	Persistence  string `json:"persistence,omitempty"`
+	MuxSession   string `json:"mux_session,omitempty"`
+	DisplayName  string `json:"display_name,omitempty"`
+	Pane         string `json:"pane,omitempty"`
+	Workspace    string `json:"workspace,omitempty"`
+	Title        string `json:"title,omitempty"`
+	Program      string `json:"program,omitempty"`
+	AgentSession string `json:"agent_session,omitempty"`
+	TerminalID   string `json:"terminal_id,omitempty"`
+	Alive        bool   `json:"alive,omitempty"`
 }
 
 // PeerRefs returns all unique verified (PID, Start) peer references present in

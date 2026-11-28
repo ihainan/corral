@@ -1221,30 +1221,42 @@ func (c *Claude) imageSources(r *claudeRow) {
 	}
 }
 
+func hasCompletePeerOrigin(o *claudeOrigin) bool {
+	return o != nil && o.Kind == "peer" && rawPositiveInt64(o.VerifiedPeerPID) > 0 && rawPositiveInt64(o.VerifiedPeerProcStart) > 0
+}
+
+func extractClaudeText(raw json.RawMessage) string {
+	var s string
+	if json.Unmarshal(raw, &s) == nil {
+		return s
+	}
+	var blocks []claudeBlock
+	if json.Unmarshal(raw, &blocks) == nil {
+		var parts []string
+		for _, b := range blocks {
+			if b.Type == "text" && b.Text != "" {
+				parts = append(parts, b.Text)
+			}
+		}
+		return strings.Join(parts, "\n")
+	}
+	return ""
+}
+
 func (c *Claude) user(r *claudeRow) {
 	// (A message of the person's, not a tool's result, tells by where it
 	// hangs of a rewind. Not one Claude Code wrote itself (isMeta): /exit's
 	// caveat hangs where the message before the last does, and the session
 	// resumed goes on from that last one.)
-	if r.IsMeta {
-		c.imageSources(r)
+	if r.IsMeta || hasCompletePeerOrigin(r.Origin) {
+		if r.IsMeta {
+			c.imageSources(r)
+		}
 		// (Not shown. But one Claude Code sent on its own may be what waited:
 		// another session's message, a scheduled task's prompt, which it
 		// writes so when it takes them in — the waiting is over.)
 		if r.PromptSource == "system" || (r.Origin != nil && r.Origin.Kind == "peer") {
-			var s string
-			if json.Unmarshal(r.Message.Content, &s) != nil {
-				var blocks []claudeBlock
-				if json.Unmarshal(r.Message.Content, &blocks) == nil {
-					var parts []string
-					for _, b := range blocks {
-						if b.Type == "text" && b.Text != "" {
-							parts = append(parts, b.Text)
-						}
-					}
-					s = strings.Join(parts, "\n")
-				}
-			}
+			s := extractClaudeText(r.Message.Content)
 			if s != "" {
 				c.metaArrived(s)
 			}
@@ -1418,11 +1430,31 @@ func (c *Claude) queueOp(r *claudeRow) {
 				if pid > 0 && start > 0 {
 					q.PeerPID, q.PeerStart = pid, start
 					c.hasPeers = true
+				} else {
+					// Partial/unverified peer origin must never reuse a prior
+					// verified identity for the same socket address.
+					addr := clip(r.Origin.From, maxMeta)
+					if addr == "" {
+						if a := crossSessionAddr.FindStringSubmatch(s); a != nil {
+							addr = clip(a[1], maxMeta)
+						}
+					}
+					if addr != "" && c.peers != nil {
+						if prev, ok := c.peers[addr]; ok {
+							name := clip(r.Origin.Name, maxMeta)
+							if name == "" {
+								name = from
+							}
+							if name == "" {
+								name = prev.name
+							}
+							c.peers[addr] = peerAddrInfo{name: name}
+						}
+					}
 				}
-			}
-			if q.PeerPID == 0 && from != "" {
+			} else if from != "" {
 				if a := crossSessionAddr.FindStringSubmatch(s); a != nil {
-					if info, ok := c.peers[clip(a[1], maxMeta)]; ok && info.pid > 0 && info.start > 0 {
+					if info, ok := c.peers[clip(a[1], maxMeta)]; ok && info.pid > 0 && info.start > 0 && (info.name == "" || info.name == from) {
 						q.PeerPID, q.PeerStart = info.pid, info.start
 						c.hasPeers = true
 					}
@@ -1522,24 +1554,31 @@ func (c *Claude) peerOf(s string, origin *claudeOrigin) *Event {
 		st := rawPositiveInt64(origin.VerifiedPeerProcStart)
 		if p > 0 && st > 0 {
 			pid, start = p, st
+			// Verified peer origin with plain-text content (no XML wrapper and
+			// no origin.body): fall back to message content rather than dropping.
+			if words == "" && strings.TrimSpace(s) != "" {
+				words = strings.TrimSpace(s)
+				if j := strings.Index(words, relayedMark); j >= 0 {
+					words, relayed = strings.TrimSpace(words[:j]), true
+				}
+			}
 		}
 	}
 	words = clean(words)
 	if words == "" || (name == "" && pid == 0) {
 		return nil
 	}
-	if addr != "" && (name != "" || (pid > 0 && start > 0)) {
+	if addr != "" {
 		if c.peers == nil || len(c.peers) >= maxPeers {
 			c.peers = map[string]peerAddrInfo{}
 		}
-		prev := c.peers[addr]
-		if name != "" {
-			prev.name = name
-		}
 		if pid > 0 && start > 0 {
-			prev.pid, prev.start = pid, start
+			c.peers[addr] = peerAddrInfo{name: name, pid: pid, start: start}
+		} else {
+			// Unverified message on addr must never inherit an older verified
+			// (pid, start) previously seen on the same socket path.
+			c.peers[addr] = peerAddrInfo{name: name}
 		}
-		c.peers[addr] = prev
 	}
 	if pid > 0 && start > 0 {
 		c.hasPeers = true

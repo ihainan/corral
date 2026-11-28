@@ -121,6 +121,60 @@ assert.equal(sanitizePeerText('  \x1b\u202ehello\x00world  '), 'helloworld')
   assert.equal('href' in r, false)
 }
 
+// 5b. Regression #2: pane replaced by a new agent in the sidebar (different
+//     terminalId or agentSession or program) must NOT inherit the new agent's
+//     sidebar title or link, even if info.alive is still true in a race window.
+{
+  const liveByKey = new Map([
+    [
+      '1||w1:p2',
+      {
+        key: '1||w1:p2',
+        title: 'Brand New Replacement Agent',
+        where: 'new work',
+        sessionGroup: 'devbox · herdr',
+        hostName: 'devbox',
+        sessionLabel: 'herdr',
+        sessionId: 'sess-live',
+        pane: 'w1:p2',
+        program: 'claude',
+        agentSession: 'new-session-uuid',
+        terminalId: 'term-new',
+        onPick: () => {
+          throw new Error('must not be clickable when pane identity changed')
+        },
+      },
+    ],
+  ])
+  const peers = {
+    '530048:193322812': {
+      key: '1||w1:p2',
+      session_id: 'sess-live',
+      host_id: 1,
+      host_name: 'devbox',
+      persistence: 'herdr',
+      mux_session: '',
+      pane: 'w1:p2',
+      workspace: 'corral-dev',
+      title: 'Old Remembered Agent',
+      program: 'claude',
+      agent_session: 'old-session-uuid',
+      terminal_id: 'term-old',
+      alive: true,
+    },
+  }
+  const r = resolvePeerSender({
+    from: 'ai-68',
+    peerPid: 530048,
+    peerStart: 193322812,
+    peers,
+    liveByKey,
+  })
+  assert.equal(r.kind, 'exited')
+  assert.equal(r.name, 'Old Remembered Agent')
+  assert.equal('href' in r, false)
+}
+
 // 6. Unmatched peer (missing from peers or unverified pid/start) falls back to
 //    original name as unknown.
 {

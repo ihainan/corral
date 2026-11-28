@@ -7,7 +7,7 @@ import (
 
 const (
 	// peerIdentityRetainSeconds keeps remembered peer identities for 90 days
-	// after they were last observed.
+	// after they were last observed (by last_seen).
 	peerIdentityRetainSeconds = 90 * 24 * 60 * 60
 	// peerIdentityMaxPerHost caps rows kept per (owner_id, host_id).
 	peerIdentityMaxPerHost = 2000
@@ -23,24 +23,27 @@ type PeerProcKey struct {
 // PeerIdentity is the persisted Corral session/pane identity for a peer agent
 // process observed on a host.
 type PeerIdentity struct {
-	OwnerID     int64
-	HostID      int64
-	PID         int64
-	ProcStart   int64
-	AgentKey    string
-	Persistence string
-	MuxSession  string
-	DisplayName string
-	Pane        string
-	HostName    string
-	Workspace   string
-	Title       string
-	Program     string
-	UpdatedAt   int64 // unix seconds
+	OwnerID      int64
+	HostID       int64
+	PID          int64
+	ProcStart    int64
+	AgentKey     string
+	Persistence  string
+	MuxSession   string
+	DisplayName  string
+	Pane         string
+	HostName     string
+	Workspace    string
+	Title        string
+	Program      string
+	AgentSession string
+	TerminalID   string
+	UpdatedAt    int64 // unix seconds (metadata snapshot update)
+	LastSeen     int64 // unix seconds (last live observation, governs retention)
 }
 
 // SameSnapshot reports whether two PeerIdentity values carry the same
-// displayable Corral target metadata (ignoring timestamps).
+// displayable Corral target metadata and pane identity (ignoring timestamps).
 func (p PeerIdentity) SameSnapshot(o PeerIdentity) bool {
 	return p.OwnerID == o.OwnerID &&
 		p.HostID == o.HostID &&
@@ -54,11 +57,14 @@ func (p PeerIdentity) SameSnapshot(o PeerIdentity) bool {
 		p.HostName == o.HostName &&
 		p.Workspace == o.Workspace &&
 		p.Title == o.Title &&
-		p.Program == o.Program
+		p.Program == o.Program &&
+		p.AgentSession == o.AgentSession &&
+		p.TerminalID == o.TerminalID
 }
 
 // UpsertPeerIdentities persists a batch of observed peer agent identities for
-// one owner and host, and opportunistically prunes stale rows beyond retention.
+// one owner and host, and opportunistically prunes stale rows beyond retention
+// (based on last_seen).
 func (s *Store) UpsertPeerIdentities(ctx context.Context, ownerID, hostID int64, rows []PeerIdentity) error {
 	if ownerID <= 0 || hostID <= 0 || len(rows) == 0 {
 		return nil
@@ -72,19 +78,23 @@ func (s *Store) UpsertPeerIdentities(ctx context.Context, ownerID, hostID int64,
 
 	stmt, err := tx.PrepareContext(ctx, `INSERT INTO peer_identities (
 		owner_id, host_id, pid, proc_start, agent_key, persistence, mux_session,
-		display_name, pane, host_name, workspace, title, program, updated_at
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		display_name, pane, host_name, workspace, title, program,
+		agent_session, terminal_id, updated_at, last_seen
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	ON CONFLICT(owner_id, host_id, pid, proc_start) DO UPDATE SET
-		agent_key    = excluded.agent_key,
-		persistence  = excluded.persistence,
-		mux_session  = excluded.mux_session,
-		display_name = excluded.display_name,
-		pane         = excluded.pane,
-		host_name    = excluded.host_name,
-		workspace    = excluded.workspace,
-		title        = CASE WHEN excluded.title != '' THEN excluded.title ELSE peer_identities.title END,
-		program      = CASE WHEN excluded.program != '' THEN excluded.program ELSE peer_identities.program END,
-		updated_at   = excluded.updated_at`)
+		agent_key     = excluded.agent_key,
+		persistence   = excluded.persistence,
+		mux_session   = excluded.mux_session,
+		display_name  = excluded.display_name,
+		pane          = excluded.pane,
+		host_name     = excluded.host_name,
+		workspace     = excluded.workspace,
+		title         = CASE WHEN excluded.title != '' THEN excluded.title ELSE peer_identities.title END,
+		program       = CASE WHEN excluded.program != '' THEN excluded.program ELSE peer_identities.program END,
+		agent_session = CASE WHEN excluded.agent_session != '' THEN excluded.agent_session ELSE peer_identities.agent_session END,
+		terminal_id   = CASE WHEN excluded.terminal_id != '' THEN excluded.terminal_id ELSE peer_identities.terminal_id END,
+		updated_at    = CASE WHEN excluded.updated_at > peer_identities.updated_at THEN excluded.updated_at ELSE peer_identities.updated_at END,
+		last_seen     = CASE WHEN excluded.last_seen > peer_identities.last_seen THEN excluded.last_seen ELSE peer_identities.last_seen END`)
 	if err != nil {
 		return err
 	}
@@ -98,9 +108,14 @@ func (s *Store) UpsertPeerIdentities(ctx context.Context, ownerID, hostID int64,
 		if ts <= 0 {
 			ts = now
 		}
+		seen := r.LastSeen
+		if seen <= 0 {
+			seen = ts
+		}
 		if _, err := stmt.ExecContext(ctx,
 			ownerID, hostID, r.PID, r.ProcStart, r.AgentKey, r.Persistence, r.MuxSession,
-			r.DisplayName, r.Pane, r.HostName, r.Workspace, r.Title, r.Program, ts,
+			r.DisplayName, r.Pane, r.HostName, r.Workspace, r.Title, r.Program,
+			r.AgentSession, r.TerminalID, ts, seen,
 		); err != nil {
 			return err
 		}
@@ -108,7 +123,9 @@ func (s *Store) UpsertPeerIdentities(ctx context.Context, ownerID, hostID int64,
 
 	cutoff := now - peerIdentityRetainSeconds
 	if _, err := tx.ExecContext(ctx,
-		`DELETE FROM peer_identities WHERE owner_id = ? AND host_id = ? AND updated_at < ?`,
+		`DELETE FROM peer_identities
+		 WHERE owner_id = ? AND host_id = ?
+		   AND (CASE WHEN last_seen > 0 THEN last_seen ELSE updated_at END) < ?`,
 		ownerID, hostID, cutoff,
 	); err != nil {
 		return err
@@ -119,7 +136,7 @@ func (s *Store) UpsertPeerIdentities(ctx context.Context, ownerID, hostID int64,
 		   AND (pid, proc_start) NOT IN (
 		     SELECT pid, proc_start FROM peer_identities
 		     WHERE owner_id = ? AND host_id = ?
-		     ORDER BY updated_at DESC, pid DESC, proc_start DESC
+		     ORDER BY (CASE WHEN last_seen > 0 THEN last_seen ELSE updated_at END) DESC, pid DESC, proc_start DESC
 		     LIMIT ?
 		   )`,
 		ownerID, hostID, ownerID, hostID, peerIdentityMaxPerHost,
@@ -135,7 +152,6 @@ func (s *Store) LookupPeerIdentities(ctx context.Context, ownerID, hostID int64,
 	if ownerID <= 0 || hostID <= 0 || len(keys) == 0 {
 		return nil, nil
 	}
-	// Deduplicate valid keys and chunk to stay well within SQLite's bind limit.
 	seen := make(map[PeerProcKey]struct{}, len(keys))
 	unique := make([]PeerProcKey, 0, len(keys))
 	for _, k := range keys {
@@ -162,7 +178,8 @@ func (s *Store) LookupPeerIdentities(ctx context.Context, ownerID, hostID int64,
 		chunk := unique[start:end]
 		var b strings.Builder
 		b.WriteString(`SELECT owner_id, host_id, pid, proc_start, agent_key, persistence, mux_session,
-			display_name, pane, host_name, workspace, title, program, updated_at
+			display_name, pane, host_name, workspace, title, program,
+			agent_session, terminal_id, updated_at, last_seen
 			FROM peer_identities
 			WHERE owner_id = ? AND host_id = ? AND (`)
 		args := make([]any, 0, 2+len(chunk)*2)
@@ -184,7 +201,8 @@ func (s *Store) LookupPeerIdentities(ctx context.Context, ownerID, hostID int64,
 			var r PeerIdentity
 			if err := rows.Scan(
 				&r.OwnerID, &r.HostID, &r.PID, &r.ProcStart, &r.AgentKey, &r.Persistence, &r.MuxSession,
-				&r.DisplayName, &r.Pane, &r.HostName, &r.Workspace, &r.Title, &r.Program, &r.UpdatedAt,
+				&r.DisplayName, &r.Pane, &r.HostName, &r.Workspace, &r.Title, &r.Program,
+				&r.AgentSession, &r.TerminalID, &r.UpdatedAt, &r.LastSeen,
 			); err != nil {
 				rows.Close()
 				return nil, err

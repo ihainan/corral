@@ -2986,7 +2986,7 @@ func (s *Server) locateScan(ctx context.Context, sess *term.Session, st *convoSt
 	}
 	prevLocated, prevPane := st.located, st.pane
 	if !l.noProc {
-		s.recordLocatedProcs(sess, l.procs, !fastHit && !ocOnly)
+		s.recordLocatedProcs(sess, l, !fastHit && !ocOnly)
 	}
 	st.located, st.pane = at, pane // (when the scan was made: one shared may be a little older)
 	sid, log, reason, agent := "", "", "", ""

@@ -2151,6 +2151,8 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, active, keysA
         sessionId: e.s.id,
         pane: e.pane,
         program: r.program,
+        agentSession: e.row?.a.session || undefined,
+        terminalId: e.row?.a.terminal_id || undefined,
         onPick: r.onPick,
       })
     }

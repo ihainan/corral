@@ -16,6 +16,8 @@ export interface ConvoPeerInfo {
   workspace?: string
   title?: string
   program?: string
+  agent_session?: string
+  terminal_id?: string
   alive?: boolean
 }
 
@@ -29,6 +31,8 @@ export interface LivePeerTarget {
   sessionId: string
   pane?: string
   program?: string
+  agentSession?: string
+  terminalId?: string
   onPick: (how?: PeerPickHow) => void
 }
 
@@ -103,6 +107,27 @@ export function peerLocation(
   return parts.join(' · ')
 }
 
+function normalizeProgram(p?: string): string {
+  const s = (p ?? '').trim().toLowerCase()
+  if (!s) return ''
+  if (s.includes('claude')) return 'claude'
+  if (s.includes('codex')) return 'codex'
+  if (s.includes('opencode')) return 'opencode'
+  if (s.startsWith('agy') || s.includes('antigravity')) return 'agy'
+  if (s.startsWith('devin')) return 'devin'
+  return s
+}
+
+function samePeerIdentity(info: ConvoPeerInfo, live: LivePeerTarget): boolean {
+  if (info.session_id && live.sessionId && info.session_id !== live.sessionId) return false
+  if (info.terminal_id && live.terminalId && info.terminal_id !== live.terminalId) return false
+  if (info.agent_session && live.agentSession && info.agent_session !== live.agentSession) return false
+  const pa = normalizeProgram(info.program)
+  const pb = normalizeProgram(live.program)
+  if (pa && pb && pa !== pb) return false
+  return true
+}
+
 function livePeerWhere(live: LivePeerTarget): string {
   const host = sanitizePeerText(live.hostName)
   const sess = sanitizePeerText(live.sessionLabel)
@@ -127,7 +152,10 @@ export function resolvePeerSender(input: {
   }
   if (info.alive && info.key) {
     const live = input.liveByKey?.get(info.key)
-    if (live) {
+    // Only bind to the live sidebar row when its identity still matches the
+    // verified peer (same Corral session, terminal ID, agent session, program).
+    // Never overwrite a replaced pane's old message with the new occupant's name.
+    if (live && samePeerIdentity(info, live)) {
       const href = peerHref(live.sessionId, live.pane)
       if (href) {
         return {
