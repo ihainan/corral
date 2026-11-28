@@ -122,7 +122,7 @@ export function PaneTerminal({
       for (let off = 0; off < encoded.byteLength; off += MAX_INPUT_CHUNK) {
         ws.send(encoded.subarray(off, Math.min(off + MAX_INPUT_CHUNK, encoded.byteLength)))
       }
-      if (s.includes('\r') || s.includes('\x1b')) scheduleSettle()
+      if (s.includes('\r') || s.includes('\x1b') || s.includes('\x03') || s.includes('\x7f')) scheduleSettle()
     },
     [scheduleSettle],
   )
