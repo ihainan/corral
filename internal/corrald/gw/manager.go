@@ -1638,8 +1638,22 @@ func (m *Manager) onHostConnectedOwned(ctx context.Context, userID, hostID int64
 		}
 	}
 
+	acctKey := ""
+	if fingerprint != "" && sshUser != "" {
+		acctKey = fingerprint + "\x00" + sshUser
+	}
 	activeOp, activeErr := m.store.ActiveCorraldOp(ctx, hostID)
-	if ch.State == StateRemovePending || ch.State == StateRemoving {
+	// Fix14 [P1]: Before branching on ch.State, check whether ch.ActiveOpID
+	// points to an unfinished remove op (including one started on a peer host
+	// record sharing this account whose ClaimCorraldHostForRemove moved only
+	// that peer to StateRemoving while leaving this row in StateRunning).
+	hasPendingRemoveOp := false
+	if ch.ActiveOpID != "" {
+		if op, oerr := m.store.ActiveCorraldOpByIDOrAccount(ctx, ch.ActiveOpID, acctKey); oerr == nil && op != nil && op.Kind == OpRemove {
+			hasPendingRemoveOp = true
+		}
+	}
+	if ch.State == StateRemovePending || ch.State == StateRemoving || hasPendingRemoveOp {
 		if CheckBinding(toSnapshot(ch), fingerprint, sshUser, m.gatewayID) {
 			m.handleAdminDisabledOnConnect(ctx, userID, hostID, corralUser, fingerprint, sshUser, sshClient, ch)
 		}

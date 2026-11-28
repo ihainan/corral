@@ -1023,7 +1023,17 @@ func (m *Manager) runSafeCleanupLocked(
 		m.refreshPendingCleanupFlag()
 		return
 	}
-	if requirePending && fresh.State != StateRemovePending && fresh.State != StateRemoving {
+	acctKey := ""
+	if fp != "" && sshUser != "" {
+		acctKey = fp + "\x00" + sshUser
+	}
+	hasPendingRemoveOp := false
+	if fresh.ActiveOpID != "" && fresh.ActiveOpID != heldOpID {
+		if op, oerr := m.store.ActiveCorraldOpByIDOrAccount(ctx, fresh.ActiveOpID, acctKey); oerr == nil && op != nil && op.Kind == OpRemove {
+			hasPendingRemoveOp = true
+		}
+	}
+	if requirePending && fresh.State != StateRemovePending && fresh.State != StateRemoving && !hasPendingRemoveOp {
 		return
 	}
 	if !requirePending && !m.AdminDisabled() {
@@ -1034,10 +1044,6 @@ func (m *Manager) runSafeCleanupLocked(
 	}
 	if !CheckBinding(toSnapshot(fresh), fp, sshUser, m.gatewayID) {
 		return
-	}
-	acctKey := ""
-	if fp != "" && sshUser != "" {
-		acctKey = fp + "\x00" + sshUser
 	}
 	if fresh.ActiveOpID != "" && fresh.ActiveOpID != heldOpID {
 		// Fix12 Item #4 + Fix13 Item #1: When heldOpID == "", the caller holds

@@ -4034,6 +4034,155 @@ func TestCorraldFix13_ReconnectDoesNotTouchOtherGatewayStage(t *testing.T) {
 	}
 }
 
+// Regression test for Fix Round 14 [P1]:
+// Two host records A and B for the same account are both `running`. A normal
+// remove starts from A (CreateCorraldOp writes opID on BOTH rows while
+// ClaimCorraldHostForRemove moves only A to `removing`, leaving B `running`),
+// and the gateway crashes before the host uninstall starts.
+// Covers:
+//  1. Reconnect only B (normal state: A=removing, B=running) -> finishes op, cleans host, both reach off, B can run new ops.
+//  2. Reconnect via A (A=removing, B=running) -> finishes op, cleans host, both reach off.
+//  3. B reconnects after A already finished the op -> B is not stuck and can run new ops.
+func TestCorraldFix14_PeerRemoveCrashNormalRunningStates(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("requires linux")
+	}
+	v1Dir, _ := buildTestCorraldDist(t)
+	distV1, err := gw.LoadDist(v1Dir)
+	if err != nil {
+		t.Fatalf("LoadDist v1: %v", err)
+	}
+
+	setupPair := func(t *testing.T, gwID, crashedOpID string) (*harness, *client, int64, int64, int64, string, string, *ssh.Client) {
+		t.Helper()
+		h := newHarness(t, func(c *config.Config) {
+			c.CorraldDir = v1Dir
+			c.GatewayID = gwID
+		})
+		admin := h.admin()
+		adminID := userIDOf(t, admin)
+		sshSrv, home := startCorraldSSH(t)
+		hostA, _ := createAndPinHost(t, admin, sshSrv, "f14-a")
+		hostB, _ := createAndPinHost(t, admin, sshSrv, "f14-b")
+		fp := hostFingerprint(t, h, adminID, hostA)
+
+		startCorraldInstall(t, admin, hostA)
+		waitCorraldState(t, admin, hostA, gw.StateRunning)
+		sshCl := dialTestSSH(t, sshSrv)
+		t.Cleanup(func() { _ = sshCl.Close() })
+		h.srv.corrald.OnHostConnected(context.Background(), adminID, hostB, "admin", fp, "alice", sshCl)
+		waitCorraldState(t, admin, hostB, gw.StateRunning)
+
+		// Normal remove start from A while both A and B are StateRunning:
+		// CreateCorraldOp stamps crashedOpID on BOTH rows; ClaimCorraldHostForRemove
+		// moves ONLY A to StateRemoving, leaving B in StateRunning!
+		acctKey := fp + "\x00alice"
+		if err := h.store.CreateCorraldOp(context.Background(), &store.CorraldOp{
+			ID:         crashedOpID,
+			HostID:     hostA,
+			AccountKey: acctKey,
+			Kind:       gw.OpRemove,
+			State:      gw.OpRunning,
+			Step:       "uninstall",
+		}, true); err != nil {
+			t.Fatalf("CreateCorraldOp: %v", err)
+		}
+		if err := h.store.ClaimCorraldHostForRemove(context.Background(), hostA, crashedOpID); err != nil {
+			t.Fatalf("ClaimCorraldHostForRemove: %v", err)
+		}
+
+		chAPre, err := h.store.CorraldHostByID(context.Background(), hostA)
+		if err != nil {
+			t.Fatalf("CorraldHostByID(A): %v", err)
+		}
+		chBPre, err := h.store.CorraldHostByID(context.Background(), hostB)
+		if err != nil {
+			t.Fatalf("CorraldHostByID(B): %v", err)
+		}
+		if chAPre.State != gw.StateRemoving || chAPre.ActiveOpID != crashedOpID {
+			t.Fatalf("unexpected pre-crash A: %+v", chAPre)
+		}
+		if chBPre.State != gw.StateRunning || chBPre.ActiveOpID != crashedOpID {
+			t.Fatalf("expected pre-crash B in StateRunning with active_op_id=%s, got %+v", crashedOpID, chBPre)
+		}
+
+		// Simulate hard gateway crash & restart.
+		h.srv.corrald.Close()
+		h.srv.corrald = gw.NewManager(gw.ManagerConfig{
+			Store:     h.store,
+			Dist:      distV1,
+			GatewayID: gwID,
+			SSH:       &webSSHProvider{s: h.srv},
+		})
+		return h, admin, adminID, hostA, hostB, fp, home, sshCl
+	}
+
+	assertBothOffAndReusable := func(t *testing.T, h *harness, admin *client, hostA, hostB int64, home string) {
+		t.Helper()
+		chA, err := h.store.CorraldHostByID(context.Background(), hostA)
+		if err != nil {
+			t.Fatalf("CorraldHostByID(A): %v", err)
+		}
+		chB, err := h.store.CorraldHostByID(context.Background(), hostB)
+		if err != nil {
+			t.Fatalf("CorraldHostByID(B): %v", err)
+		}
+		if chA.State != gw.StateOff || chA.ActiveOpID != "" {
+			t.Fatalf("Fix14 regression: hostA not off/idle! state=%q active_op_id=%q", chA.State, chA.ActiveOpID)
+		}
+		if chB.State != gw.StateOff || chB.ActiveOpID != "" {
+			t.Fatalf("Fix14 regression: hostB not off/idle! state=%q active_op_id=%q", chB.State, chB.ActiveOpID)
+		}
+		if activeOp, aerr := h.store.ActiveCorraldOp(context.Background(), hostA); aerr == nil && activeOp != nil {
+			t.Fatalf("Fix14 regression: remove op still active on hostA! %+v", activeOp)
+		}
+		bin := filepath.Join(home, ".local", "lib", "corral", "corrald")
+		if _, err := os.Lstat(bin); !os.IsNotExist(err) {
+			t.Fatalf("Fix14 regression: binary %s still present after recovery! stat err=%v", bin, err)
+		}
+		// Subsequent install + remove via B must succeed without account unique-index conflict.
+		startCorraldInstall(t, admin, hostB)
+		waitCorraldState(t, admin, hostB, gw.StateRunning)
+		rRm := admin.do("POST", fmt.Sprintf("/api/hosts/%d/corrald/remove", hostB), nil)
+		mustStatus(t, rRm, http.StatusAccepted, "remove via hostB after recovery")
+		waitCorraldState(t, admin, hostB, gw.StateOff)
+	}
+
+	t.Run("a_removing_b_running_reconnect_only_b", func(t *testing.T) {
+		h, admin, adminID, hostA, hostB, fp, home, sshCl := setupPair(t, "gw-fix14-b.local", "1401000000000001")
+		h.srv.corrald.OnHostConnected(context.Background(), adminID, hostB, "admin", fp, "alice", sshCl)
+		assertBothOffAndReusable(t, h, admin, hostA, hostB, home)
+	})
+
+	t.Run("a_removing_b_running_reconnect_via_a", func(t *testing.T) {
+		h, admin, adminID, hostA, hostB, fp, home, sshCl := setupPair(t, "gw-fix14-a.local", "1401000000000002")
+		h.srv.corrald.OnHostConnected(context.Background(), adminID, hostA, "admin", fp, "alice", sshCl)
+		assertBothOffAndReusable(t, h, admin, hostA, hostB, home)
+	})
+
+	t.Run("b_reconnect_after_a_already_finished_op", func(t *testing.T) {
+		h, admin, adminID, hostA, hostB, fp, home, sshCl := setupPair(t, "gw-fix14-after.local", "1401000000000003")
+		// A reconnects and finishes the crashed op + host uninstall first.
+		h.srv.corrald.OnHostConnected(context.Background(), adminID, hostA, "admin", fp, "alice", sshCl)
+
+		// Also simulate the edge case where B's row still carries the already-finished
+		// op ID and StateRunning when B reconnects after A finished: ClearStaleCorraldHostOp
+		// and probe (!HasSymlink) must bring B cleanly to StateOff without getting stuck.
+		chB, err := h.store.CorraldHostByID(context.Background(), hostB)
+		if err != nil {
+			t.Fatalf("CorraldHostByID(B): %v", err)
+		}
+		chB.State = gw.StateRunning
+		chB.ActiveOpID = "1401000000000003"
+		if err := h.store.UpsertCorraldHost(context.Background(), chB); err != nil {
+			t.Fatalf("UpsertCorraldHost(B): %v", err)
+		}
+
+		h.srv.corrald.OnHostConnected(context.Background(), adminID, hostB, "admin", fp, "alice", sshCl)
+		assertBothOffAndReusable(t, h, admin, hostA, hostB, home)
+	})
+}
+
 func syscallFlockEx(f *os.File) error {
 	return syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
 }
