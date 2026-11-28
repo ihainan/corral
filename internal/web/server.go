@@ -107,6 +107,7 @@ type Server struct {
 	claudeLists            sessionLists                                                                                     // Claude Code's sessions of a folder, as last listed
 	histLocks              histLocks                                                                                        // one reading of a session's input history at a time
 	convoScans             convoScans                                                                                       // scans of a host's processes, shared by its panes for a moment
+	peers                  peerRegistry                                                                                     // observed (owner, host, pid, procStart) -> Corral agent identities for cross-session peer messages
 	askHook                askHooks                                                                                         // Claude Code's question hook in hosts' settings: changes under way, what was read (askhook.go)
 
 	sockMu   sync.Mutex

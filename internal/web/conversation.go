@@ -2448,8 +2448,12 @@ type convoAnswer struct {
 	Running []convo.Running `json:"running,omitempty"`
 	// DefaultChanged: a model switch here left the default model of new
 	// sessions changed (not put back), lately.
-	DefaultChanged bool          `json:"default_changed,omitempty"`
-	Entries        []convo.Entry `json:"entries"`
+	DefaultChanged bool `json:"default_changed,omitempty"`
+	// Peers maps "<pid>:<proc_start>" of verified cross-session peer messages
+	// (or SendMessage targets) in this conversation to their resolved Corral
+	// agent session/pane identity (live or recalled from history).
+	Peers   map[string]convo.PeerInfo `json:"peers,omitempty"`
+	Entries []convo.Entry             `json:"entries"`
 }
 
 // GET /api/sessions/{id}/conversation?pane=<herdr pane>&gen=<n>&rev=<n>[&older=1]
@@ -2681,6 +2685,9 @@ func (s *Server) apiConversation(w http.ResponseWriter, r *http.Request) {
 	ans.Entries = overlayRewindEntries(st, activeRewind, st.parser.Since(rev))
 	st.takeEarlierTitle()
 	ans.Title, ans.Tasks = st.parser.Title(), st.parser.Tasks()
+	if st.bind != nil && !st.sub {
+		s.recordBoundProc(sess, st.bind, ans.Title)
+	}
 	if m := st.meta(); m != (convo.Meta{}) {
 		ans.Meta = &m
 		if st.agent == "codex" && m.Quota != nil {
@@ -2708,6 +2715,7 @@ func (s *Server) apiConversation(w http.ResponseWriter, r *http.Request) {
 	if !st.grewAt.IsZero() {
 		ans.QuietMs = max(0, time.Since(st.grewAt).Milliseconds())
 	}
+	ans.Peers = s.resolveConvoPeers(ctx, sess, st)
 	writeJSONCompressed(w, r, http.StatusOK, ans)
 }
 
@@ -2977,6 +2985,9 @@ func (s *Server) locateScan(ctx context.Context, sess *term.Session, st *convoSt
 		}
 	}
 	prevLocated, prevPane := st.located, st.pane
+	if !l.noProc {
+		s.recordLocatedProcs(sess, l.procs, !fastHit && !ocOnly)
+	}
 	st.located, st.pane = at, pane // (when the scan was made: one shared may be a little older)
 	sid, log, reason, agent := "", "", "", ""
 	guessed := false
@@ -3090,6 +3101,7 @@ func (s *Server) locateScan(ctx context.Context, sess *term.Session, st *convoSt
 			// before had queued is not this one's.)
 			b.started = p.started
 			st.bind = b
+			s.recordBoundProc(sess, b, "")
 		}
 		switch {
 		case p == nil:

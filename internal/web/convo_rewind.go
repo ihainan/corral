@@ -1449,6 +1449,9 @@ func (s *Server) apiConversationRewind(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		located := parseConvoLocate(string(locOut))
+		if !located.noProc {
+			s.recordLocatedProcs(sess, located.procs, true)
+		}
 		s.perfLocate("locate.full", tLoc, nil, len(located.procs), sess.HostID)
 		front = pickConvoProc(located.procs, sess.Persistence, b.Pane, socket, located.tmuxPID, located.paneTTY, liveHerdrSID)
 	}

@@ -48,18 +48,25 @@ import (
 //
 // Everything else (file snapshots, API bookkeeping) is skipped.
 // Feed it whole lines in order.
+type peerAddrInfo struct {
+	name  string
+	pid   int64
+	start int64
+}
+
 type Claude struct {
-	sub     bool              // (a subagent's own log: its side-chain rows are its own)
-	peers   map[string]string // other sessions that wrote to this one: address → name (peerOf)
-	entries []*Entry
-	tools   map[string]toolRef
-	rev     int
-	seq     int
-	aiTitle string
-	myTitle string     // (the person's, over Claude Code's)
-	tasks   []taskItem // the task list as it stands
-	meta    Meta
-	queue   []queuedItem // what waits to be taken in, oldest first
+	sub      bool                    // (a subagent's own log: its side-chain rows are its own)
+	peers    map[string]peerAddrInfo // other sessions that wrote to this one: address → name & verified proc (peerOf)
+	hasPeers bool                    // any entry or queued item carries a verified peer (PeerPID & PeerStart)
+	entries  []*Entry
+	tools    map[string]toolRef
+	rev      int
+	seq      int
+	aiTitle  string
+	myTitle  string     // (the person's, over Claude Code's)
+	tasks    []taskItem // the task list as it stands
+	meta     Meta
+	queue    []queuedItem // what waits to be taken in, oldest first
 	// imaged: the person's latest messages with pictures, by row, while
 	// their pictures may yet be told where they came from; attachedRows:
 	// the rows of attachments between (see imageSources).
@@ -339,6 +346,42 @@ func (c *Claude) Queued() []Queued {
 		x := q.Queued
 		x.From, x.Note = q.from, q.note
 		out = append(out, x)
+	}
+	return out
+}
+
+// PeerRefs returns all unique verified (PID, Start) peer references present in
+// kept entries (EventPeer and SendMessage tools) and queued messages.
+func (c *Claude) PeerRefs() []PeerRef {
+	if !c.hasPeers {
+		return nil
+	}
+	var out []PeerRef
+	seen := map[PeerRef]struct{}{}
+	add := func(pid, start int64) {
+		if pid <= 0 || start <= 0 {
+			return
+		}
+		ref := PeerRef{PID: pid, Start: start}
+		if _, ok := seen[ref]; ok {
+			return
+		}
+		seen[ref] = struct{}{}
+		out = append(out, ref)
+	}
+	for _, e := range c.entries {
+		for i := range e.Parts {
+			p := &e.Parts[i]
+			if p.Event != nil && p.Event.Kind == EventPeer {
+				add(p.Event.PeerPID, p.Event.PeerStart)
+			}
+			if p.Tool != nil && p.Tool.PeerPID > 0 && p.Tool.PeerStart > 0 {
+				add(p.Tool.PeerPID, p.Tool.PeerStart)
+			}
+		}
+	}
+	for _, q := range c.queue {
+		add(q.PeerPID, q.PeerStart)
 	}
 	return out
 }
@@ -671,6 +714,22 @@ func (c *Claude) Prepend(other Parser) {
 			c.attachedRows[id] = up
 		}
 	}
+	if o.hasPeers {
+		c.hasPeers = true
+	}
+	if len(o.peers) > 0 {
+		if c.peers == nil {
+			c.peers = map[string]peerAddrInfo{}
+		}
+		for addr, info := range o.peers {
+			if len(c.peers) >= maxPeers {
+				break
+			}
+			if _, exists := c.peers[addr]; !exists {
+				c.peers[addr] = info
+			}
+		}
+	}
 	// (What c's rewinds into o's part took back, there and here.)
 	mine := c.treeBefore(o)
 	add := o.entries
@@ -751,6 +810,7 @@ type claudeRow struct {
 	IsSidechain      bool            `json:"isSidechain"`
 	IsCompactSummary bool            `json:"isCompactSummary"`
 	PromptSource     string          `json:"promptSource"`
+	Origin           *claudeOrigin   `json:"origin"`
 	AITitle          string          `json:"aiTitle"`
 	CustomTitle      string          `json:"customTitle"`
 	ToolUseResult    json.RawMessage `json:"toolUseResult"`
@@ -851,6 +911,45 @@ type claudeRow struct {
 		Condition json.RawMessage `json:"condition"`
 		Reason    json.RawMessage `json:"reason"`
 	} `json:"attachment"`
+}
+
+type claudeOrigin struct {
+	Kind                  string          `json:"kind"`
+	From                  string          `json:"from"`
+	VerifiedPeerPID       json.RawMessage `json:"verifiedPeerPid"`
+	VerifiedPeerProcStart json.RawMessage `json:"verifiedPeerProcStart"`
+	MsgID                 string          `json:"msg_id"`
+	Name                  string          `json:"name"`
+	FromMode              string          `json:"fromMode"`
+	Body                  string          `json:"body"`
+}
+
+// rawPositiveInt64 parses a positive base-10 integer from a JSON number or
+// quoted decimal string (e.g. 530048 or "193322812"). Returns 0 otherwise.
+func rawPositiveInt64(raw json.RawMessage) int64 {
+	if len(raw) == 0 {
+		return 0
+	}
+	var n int64
+	if json.Unmarshal(raw, &n) == nil && n > 0 {
+		return n
+	}
+	var s string
+	if json.Unmarshal(raw, &s) == nil {
+		s = strings.TrimSpace(s)
+		if s == "" {
+			return 0
+		}
+		for i := 0; i < len(s); i++ {
+			if s[i] < '0' || s[i] > '9' {
+				return 0
+			}
+		}
+		if v, err := strconv.ParseInt(s, 10, 64); err == nil && v > 0 {
+			return v
+		}
+	}
+	return 0
 }
 
 type claudeBlock struct {
@@ -1132,16 +1231,28 @@ func (c *Claude) user(r *claudeRow) {
 		// (Not shown. But one Claude Code sent on its own may be what waited:
 		// another session's message, a scheduled task's prompt, which it
 		// writes so when it takes them in — the waiting is over.)
-		if r.PromptSource == "system" {
+		if r.PromptSource == "system" || (r.Origin != nil && r.Origin.Kind == "peer") {
 			var s string
-			if json.Unmarshal(r.Message.Content, &s) == nil {
-				c.metaArrived(s)
-				// (Another session's message, taken in: shown where it came,
-				// whose and its words — 11-15, gone from sight once it was no
-				// longer waiting, the turn it set going told by nothing.)
-				if ev := c.peerOf(s); ev != nil {
-					c.add(r, RoleNote, []Part{{Kind: KindEvent, Event: ev}})
+			if json.Unmarshal(r.Message.Content, &s) != nil {
+				var blocks []claudeBlock
+				if json.Unmarshal(r.Message.Content, &blocks) == nil {
+					var parts []string
+					for _, b := range blocks {
+						if b.Type == "text" && b.Text != "" {
+							parts = append(parts, b.Text)
+						}
+					}
+					s = strings.Join(parts, "\n")
 				}
+			}
+			if s != "" {
+				c.metaArrived(s)
+			}
+			// (Another session's message, taken in: shown where it came,
+			// whose and its words — 11-15, gone from sight once it was no
+			// longer waiting, the turn it set going told by nothing.)
+			if ev := c.peerOf(s, r.Origin); ev != nil {
+				c.add(r, RoleNote, []Part{{Kind: KindEvent, Event: ev}})
 			}
 		}
 		return
@@ -1301,6 +1412,22 @@ func (c *Claude) queueOp(r *claudeRow) {
 			q.Text, q.cut = cut(clean(blankEnds(text)), maxText)
 			q.key = queueKey(q.Text)
 			q.Time = clip(r.Timestamp, 64)
+			if r.Origin != nil && r.Origin.Kind == "peer" {
+				pid := rawPositiveInt64(r.Origin.VerifiedPeerPID)
+				start := rawPositiveInt64(r.Origin.VerifiedPeerProcStart)
+				if pid > 0 && start > 0 {
+					q.PeerPID, q.PeerStart = pid, start
+					c.hasPeers = true
+				}
+			}
+			if q.PeerPID == 0 && from != "" {
+				if a := crossSessionAddr.FindStringSubmatch(s); a != nil {
+					if info, ok := c.peers[clip(a[1], maxMeta)]; ok && info.pid > 0 && info.start > 0 {
+						q.PeerPID, q.PeerStart = info.pid, info.start
+						c.hasPeers = true
+					}
+				}
+			}
 			c.queue = append(c.queue, q)
 			if n := len(c.queue) - maxQueue; n > 0 {
 				c.queue = append([]queuedItem(nil), c.queue[n:]...)
@@ -1362,30 +1489,62 @@ func peerWords(s string) (string, bool) {
 
 // peerOf: a message another session's agent wrote to this one (as Claude
 // Code takes it in: "Another Claude session sent a message:" and its
-// envelope), as an event; nil where s is none. Its sender's address kept,
-// for this one's answers to it (SendMessage to that address) to say whose.
-func (c *Claude) peerOf(s string) *Event {
-	i := strings.Index(s, "<cross-session-message")
-	if i < 0 {
-		return nil
-	}
-	m := crossSession.FindStringSubmatch(s[i:])
-	if m == nil {
-		return nil
-	}
-	words, relayed := peerWords(s[i:])
-	words = clean(words)
-	if words == "" {
-		return nil
-	}
-	name := clip(m[1], maxMeta)
-	if a := crossSessionAddr.FindStringSubmatch(s[i:]); a != nil && name != "" {
-		if c.peers == nil || len(c.peers) >= maxPeers {
-			c.peers = map[string]string{}
+// envelope, and/or origin.kind=="peer"), as an event; nil where neither is one.
+// Its sender's address and kernel-verified (pid, procStart) are kept, for
+// Corral session matching and for this one's answers to it (SendMessage).
+func (c *Claude) peerOf(s string, origin *claudeOrigin) *Event {
+	var name, addr, words string
+	var relayed bool
+	if i := strings.Index(s, "<cross-session-message"); i >= 0 {
+		if m := crossSession.FindStringSubmatch(s[i:]); m != nil {
+			name = clip(m[1], maxMeta)
+			words, relayed = peerWords(s[i:])
+			if a := crossSessionAddr.FindStringSubmatch(s[i:]); a != nil {
+				addr = clip(a[1], maxMeta)
+			}
 		}
-		c.peers[clip(a[1], maxMeta)] = name
 	}
-	return &Event{Kind: EventPeer, From: name, Text: clip(words, maxDetail), Relayed: relayed}
+	var pid, start int64
+	if origin != nil && origin.Kind == "peer" {
+		if name == "" && origin.Name != "" {
+			name = clip(origin.Name, maxMeta)
+		}
+		if addr == "" && origin.From != "" {
+			addr = clip(origin.From, maxMeta)
+		}
+		if words == "" && origin.Body != "" {
+			words = origin.Body
+			if j := strings.Index(words, relayedMark); j >= 0 {
+				words, relayed = strings.TrimSpace(words[:j]), true
+			}
+		}
+		p := rawPositiveInt64(origin.VerifiedPeerPID)
+		st := rawPositiveInt64(origin.VerifiedPeerProcStart)
+		if p > 0 && st > 0 {
+			pid, start = p, st
+		}
+	}
+	words = clean(words)
+	if words == "" || (name == "" && pid == 0) {
+		return nil
+	}
+	if addr != "" && (name != "" || (pid > 0 && start > 0)) {
+		if c.peers == nil || len(c.peers) >= maxPeers {
+			c.peers = map[string]peerAddrInfo{}
+		}
+		prev := c.peers[addr]
+		if name != "" {
+			prev.name = name
+		}
+		if pid > 0 && start > 0 {
+			prev.pid, prev.start = pid, start
+		}
+		c.peers[addr] = prev
+	}
+	if pid > 0 && start > 0 {
+		c.hasPeers = true
+	}
+	return &Event{Kind: EventPeer, From: name, Text: clip(words, maxDetail), Relayed: relayed, PeerPID: pid, PeerStart: start}
 }
 
 // queuedText: what a message waiting to be taken in says, who it is from
@@ -1866,10 +2025,17 @@ func (c *Claude) assistant(r *claudeRow) {
 			t := &Tool{ID: clip(b.ID, maxID), Name: clip(b.Name, 128)}
 			t.Title, t.Detail, t.Old, t.New, t.detailCut = toolInput(b.Name, b.Input)
 			// (Another session written to by its address: by its name, as its
-			// message said it — not a socket's path.)
+			// message said it — not a socket's path — plus its verified peer
+			// process identity when known.)
 			if b.Name == "SendMessage" && strings.HasPrefix(t.Title, "uds:") {
-				if n := c.peers[t.Title]; n != "" {
-					t.Title = n
+				if info, ok := c.peers[t.Title]; ok {
+					if info.name != "" {
+						t.Title = info.name
+					}
+					if info.pid > 0 && info.start > 0 {
+						t.PeerPID, t.PeerStart = info.pid, info.start
+						c.hasPeers = true
+					}
 				}
 			}
 			// (What a subagent hands back is its answer, shown as one: kept as a text is.)

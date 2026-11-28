@@ -125,11 +125,46 @@ type Queued struct {
 	Time string `json:"ts,omitempty"`
 	// From: another session whose agent sent it, where it is not the
 	// person's own message; Note: it is a notice, not anyone's message.
-	From string `json:"from,omitempty"`
-	Note bool   `json:"note,omitempty"`
+	From      string `json:"from,omitempty"`
+	Note      bool   `json:"note,omitempty"`
+	PeerPID   int64  `json:"peer_pid,omitempty"`
+	PeerStart int64  `json:"peer_start,omitempty"`
 	// ID: its own, where the agent gives it one that stays when it is
 	// taken in (OpenCode 2's: the message it becomes has it).
 	ID string `json:"id,omitempty"`
+}
+
+// PeerRef is a verified process identity (PID + /proc/<pid>/stat field 22)
+// of another session on the same host referenced by a conversation.
+type PeerRef struct {
+	PID   int64
+	Start int64
+}
+
+// PeerInfo identifies the Corral agent session/pane corresponding to a peer
+// process on the same host (either currently alive or recalled from history).
+type PeerInfo struct {
+	Key         string `json:"key,omitempty"`
+	SessionID   string `json:"session_id,omitempty"`
+	HostID      int64  `json:"host_id,omitempty"`
+	HostName    string `json:"host_name,omitempty"`
+	Persistence string `json:"persistence,omitempty"`
+	MuxSession  string `json:"mux_session,omitempty"`
+	DisplayName string `json:"display_name,omitempty"`
+	Pane        string `json:"pane,omitempty"`
+	Workspace   string `json:"workspace,omitempty"`
+	Title       string `json:"title,omitempty"`
+	Program     string `json:"program,omitempty"`
+	Alive       bool   `json:"alive,omitempty"`
+}
+
+// PeerRefs returns all unique verified (PID, Start) peer references present in
+// p's kept entries and queued messages, or nil when the parser has none.
+func PeerRefs(p Parser) []PeerRef {
+	if pr, ok := p.(interface{ PeerRefs() []PeerRef }); ok {
+		return pr.PeerRefs()
+	}
+	return nil
 }
 
 // Running is work the agent set going and left to itself: a command in the
@@ -208,11 +243,13 @@ type Event struct {
 	Why  string `json:"why,omitempty"`
 	// (notice) how loud: "notice", "warning".
 	Level string `json:"level,omitempty"`
-	// (peer) which session wrote (its name), and whether it said it may pass
+	// (peer) which session wrote (its name), whether it said it may pass
 	// on words others wrote (Claude Code's notice of that, taken off its
-	// words: a mark).
-	From    string `json:"from,omitempty"`
-	Relayed bool   `json:"relayed,omitempty"`
+	// words: a mark), and its verified host process identity from origin.
+	From      string `json:"from,omitempty"`
+	Relayed   bool   `json:"relayed,omitempty"`
+	PeerPID   int64  `json:"peer_pid,omitempty"`
+	PeerStart int64  `json:"peer_start,omitempty"`
 	// (limit) when it resets (Unix seconds), and of what: "five_hour", …
 	ResetsAt  int64  `json:"resets_at,omitempty"`
 	LimitKind string `json:"limit_kind,omitempty"`
@@ -339,6 +376,11 @@ type Tool struct {
 	// its session, and the keys pressed by name, else how many characters
 	// were typed (never what they were).
 	Stdin *Stdin `json:"stdin,omitempty"`
+	// PeerPID / PeerStart: (SendMessage to another Claude Code session) the
+	// recipient's verified process identity when known from an earlier peer
+	// message on the same socket.
+	PeerPID   int64 `json:"peer_pid,omitempty"`
+	PeerStart int64 `json:"peer_start,omitempty"`
 
 	// fromCall: (Codex) this line is of a call the agent made, which tells
 	// of the commands it means to run; where it tells of each command on

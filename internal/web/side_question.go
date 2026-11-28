@@ -378,6 +378,9 @@ func (s *Server) apiConversationSide(w http.ResponseWriter, r *http.Request) {
 			out = lr.Out
 		}
 		l := parseConvoLocate(string(out))
+		if !l.noProc {
+			s.recordLocatedProcs(sess, l.procs, !fastTry)
+		}
 		s.perfLocate(op, tLoc, nil, len(l.procs), sess.HostID)
 		if fastTry {
 			if p, ok := fastLocateAccept(l, b.Pane, socket, wantSID); ok && !l.noProc && p != nil && p.agent == "claude" && p.pid == b.PID && p.start == b.Start && p.sid == b.Session {

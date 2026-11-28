@@ -52,6 +52,9 @@ import { category, isNote, items, ms, partTime, sameEdits, toolName, verbOf, typ
 import { useThoughtTranslation } from './thoughtTranslate'
 import { parseApiError, type ParsedApiError } from './apiError'
 import { pickQuotaPlan, quotaPlanLabel, quotaTitleText } from './quotaPlan'
+import { formatPeerPlain, peerClickHow, resolvePeerSender, resolvePeerToolTarget, type ConvoPeerInfo, type LivePeerTarget } from './peerSender'
+
+const PeerCtx = createContext<{ peers?: Record<string, ConvoPeerInfo>; liveByKey?: ReadonlyMap<string, LivePeerTarget> }>({})
 
 // The conversation view: the agent's log as turns, over the terminal (which
 // stays mounted under it). Each turn is what the person wrote, then one line
@@ -271,6 +274,7 @@ export function ConversationView({
   onStop,
   stop,
   side,
+  peerTargets,
   active = true,
   keysActive,
   splitPane,
@@ -318,6 +322,7 @@ export function ConversationView({
   onStop?: () => void // (it works: press Esc in its pane)
   stop?: string // what became of the last stop pressed, to say
   side?: { rows: ConvoListRow[] } // the agents to go to: beside the thread where there is room, else from the bar
+  peerTargets?: ReadonlyMap<string, LivePeerTarget> // live Corral agents by key for cross-session peer resolution & navigation
   active?: boolean // (its tab is the one shown: polling & live updates run)
   keysActive?: boolean // (defaults to active: per-pane keyboard shortcuts such as Ctrl+O, [, ], ?)
   splitPane?: ConvoSplitPane // (optional secondary conversation shown side by side)
@@ -1878,6 +1883,22 @@ export function ConversationView({
         event: (p) => {
           const ev = p.event
           if (!ev) return ''
+          if (ev.kind === 'peer') {
+            const resolved = resolvePeerSender({
+              from: ev.from,
+              peerPid: ev.peer_pid,
+              peerStart: ev.peer_start,
+              peers: convo.peers,
+              liveByKey: peerTargets,
+            })
+            const head = formatPeerPlain(resolved, {
+              from: (name) => t('convo.peerFrom', { name }),
+              fromSession: (name) => t('convo.queuedFromName', { name }),
+              notInCorral: t('convo.peerNotInCorral'),
+              exited: t('convo.peerExited'),
+            })
+            return paren(head) + (ev.text ? ' ' + ev.text : '')
+          }
           // (Background work ended: as its line says it, its state and exit code.)
           if (ev.kind === 'task')
             return paren(t(`convo.task.${ev.task ?? 'cmd'}.${ev.status ?? 'done'}` as Parameters<typeof t>[0]) + (ev.code ? t('convo.task.code', { n: ev.code }) : '')) + (ev.text ? ' ' + ev.text : '')
@@ -1901,6 +1922,7 @@ export function ConversationView({
       },
     )
   }
+  const peerCtx = useMemo(() => ({ peers: convo.peers, liveByKey: peerTargets }), [convo.peers, peerTargets])
   const rows = side?.rows ?? []
   const currentRow = rows.find((r) => r.current)
   const barTip = [currentRow?.title ?? name[0], currentRow?.where ?? name[1], currentRow?.sessionGroup, currentRow?.projectKey]
@@ -2475,11 +2497,13 @@ export function ConversationView({
       <div className="convo-scroll-wrap">
         <div className="convo-scroll" ref={box}>
           <div className="convo-col" ref={col}>
-            <ShowTerminal.Provider value={onShowTerminal}>
-              <OpenSub.Provider value={openSub}>
-                <TurnLive.Provider value={turnLive}>{body}</TurnLive.Provider>
-              </OpenSub.Provider>
-            </ShowTerminal.Provider>
+            <PeerCtx.Provider value={peerCtx}>
+              <ShowTerminal.Provider value={onShowTerminal}>
+                <OpenSub.Provider value={openSub}>
+                  <TurnLive.Provider value={turnLive}>{body}</TurnLive.Provider>
+                </OpenSub.Provider>
+              </ShowTerminal.Provider>
+            </PeerCtx.Provider>
           </div>
         </div>
         {railTurns.length >= RAIL_MIN && convo.status === 'ready' && <ConvoRail turns={railTurns} at={railAt} onGo={goTurn} />}
@@ -2544,7 +2568,11 @@ export function ConversationView({
           </ShowTerminal.Provider>
         )}
         {/* (Not of one at rest, which would have taken them in: not when its state is not known.) */}
-        {convo.status === 'ready' && agent?.status !== 'idle' && agent?.status !== 'done' && convo.queued && <Queue items={convo.queued} onSendNow={working ? onSendNow : undefined} said={sendNow} />}
+        {convo.status === 'ready' && agent?.status !== 'idle' && agent?.status !== 'done' && convo.queued && (
+          <PeerCtx.Provider value={peerCtx}>
+            <Queue items={convo.queued} onSendNow={working ? onSendNow : undefined} said={sendNow} />
+          </PeerCtx.Provider>
+        )}
         {waits && !ask && convo.status === 'ready' && (
           // (Where it cannot be answered here: in its terminal.)
           <div className="convo-waiting" role="status">
@@ -3202,16 +3230,69 @@ function Queue({ items, onSendNow, said }: { items: ConvoQueued[]; onSendNow?: (
   )
 }
 
+function PeerSenderHead({ from, peerPid, peerStart }: { from?: string; peerPid?: number; peerStart?: number }) {
+  const { peers, liveByKey } = useContext(PeerCtx)
+  const resolved = resolvePeerSender({ from, peerPid, peerStart, peers, liveByKey })
+  if (resolved.kind === 'live') {
+    const tip = [resolved.name, resolved.where, resolved.detail && resolved.detail !== resolved.where ? resolved.detail : '', t('convo.peerOpenHint')]
+      .filter(Boolean)
+      .join(' · ')
+    return (
+      <>
+        <span>{t('convo.peerFromPrefix')}</span>
+        <a
+          className="convo-peer-link"
+          href={resolved.href}
+          title={tip}
+          onClick={(e) => {
+            e.preventDefault()
+            e.stopPropagation()
+            resolved.onPick(peerClickHow(e))
+          }}
+          onMouseDown={(e) => e.button === 1 && e.preventDefault()}
+          onAuxClick={(e) => {
+            if (e.button !== 1) return
+            e.preventDefault()
+            e.stopPropagation()
+            resolved.onPick('tab')
+          }}
+        >
+          {resolved.name}
+        </a>
+        {resolved.where && <span className="convo-peer-where">{resolved.where}</span>}
+      </>
+    )
+  }
+  if (resolved.kind === 'exited') {
+    return (
+      <>
+        <span>{t('convo.peerFromPrefix')}</span>
+        <span className="convo-peer-name">{resolved.name}</span>
+        {resolved.where && <span className="convo-peer-where">{resolved.where}</span>}
+        <span className="convo-peer-status">{t('convo.peerExited')}</span>
+      </>
+    )
+  }
+  return (
+    <>
+      <span>{t('convo.queuedFromName', { name: resolved.name })}</span>
+      <span className="convo-peer-status">{t('convo.peerNotInCorral')}</span>
+    </>
+  )
+}
+
 function QueuedNote({ q }: { q: ConvoQueued }) {
   const [whole, setWhole] = useState(false)
   return (
-    <button type="button" className={'convo-queue-row is-note' + (whole ? ' is-whole' : '')} aria-expanded={whole} onClick={() => setWhole(!whole)}>
+    <div className={'convo-queue-row is-note' + (whole ? ' is-whole' : '')}>
       <span className="convo-queue-from">
         <MessagesSquare size={14} aria-hidden="true" />
-        {q.from ? t('convo.queuedFromName', { name: q.from }) : t('convo.queuedNoticeName')}
+        {q.from ? <PeerSenderHead from={q.from} peerPid={q.peer_pid} peerStart={q.peer_start} /> : t('convo.queuedNoticeName')}
       </span>
-      <span className="convo-queue-text">{queueWords(q.text)}</span>
-    </button>
+      <button type="button" className="convo-queue-toggle" aria-expanded={whole} onClick={() => setWhole(!whole)}>
+        <span className="convo-queue-text">{queueWords(q.text)}</span>
+      </button>
+    </div>
   )
 }
 
@@ -6537,7 +6618,7 @@ function PeerNote({ ev }: { ev: ConvoEvent }) {
       <MessagesSquare size={14} aria-hidden="true" />
       <div className="convo-trouble-body">
         <p className="convo-trouble-head">
-          {t('convo.queuedFromName', { name: ev.from ?? '?' })}
+          <PeerSenderHead from={ev.from} peerPid={ev.peer_pid} peerStart={ev.peer_start} />
           {ev.relayed && (
             <span className="convo-peer-relayed" title={t('convo.peerRelayedLong')}>
               {t('convo.peerRelayed')}
@@ -7742,6 +7823,7 @@ function Work({ it, open, onToggle, onCopy }: { it: Extract<Item, { kind: 'work'
   // thought, a line (at most one for a run, however long it thought).
   const openSub = useContext(OpenSub)
   const subReadOnlyHint = useContext(SubReadOnlyHint)
+  const { peers, liveByKey } = useContext(PeerCtx)
   const sent = tools.filter((tl) => category(tl.name) === 'agent' && tl.title)
   const lastThought = tools.length
     ? it.steps.findLast((x): x is ConvoPart => !isNote(x) && x.kind === 'thinking' && !!x.text?.trim())
@@ -7780,12 +7862,12 @@ function Work({ it, open, onToggle, onCopy }: { it: Extract<Item, { kind: 'work'
           <Mark size={16} strokeWidth={1.75} className="convo-step-ic" aria-hidden="true" />
           {busy && asks ? (
             <span className="convo-work-text is-live is-asking">
-              <span className="convo-asking-text">{waitText(busy.tool)}</span>
+              <span className="convo-asking-text">{waitText(busy.tool, peers, liveByKey)}</span>
               {since > 0 && now >= since && <span className="convo-live-time">{t('convo.waitedFor', { d: duration(now - since) })}</span>}
             </span>
           ) : busy ? (
             <span className="convo-work-text is-live">
-              <span ref={setShine} className="convo-shimmer">{busy.tool ? liveText(busy.tool) : t('convo.live.thinking')}</span>
+              <span ref={setShine} className="convo-shimmer">{busy.tool ? liveText(busy.tool, peers, liveByKey) : t('convo.live.thinking')}</span>
               <LiveFigures secs={secs} live={!!it.live} thinking={thinking} />
             </span>
           ) : between ? (
@@ -7805,13 +7887,13 @@ function Work({ it, open, onToggle, onCopy }: { it: Extract<Item, { kind: 'work'
         <Mark size={16} strokeWidth={1.75} className="convo-step-ic" aria-hidden="true" />
         {busy && asks ? (
           <span className="convo-work-text is-live is-asking">
-            <span className="convo-asking-text">{waitText(busy.tool)}</span>
+            <span className="convo-asking-text">{waitText(busy.tool, peers, liveByKey)}</span>
             {since > 0 && now >= since && <span className="convo-live-time">{t('convo.waitedFor', { d: duration(now - since) })}</span>}
             {chev}
           </span>
         ) : busy ? (
           <span className="convo-work-text is-live">
-            <span ref={setShine} className="convo-shimmer">{busy.tool ? liveText(busy.tool) : t('convo.live.thinking')}</span>
+            <span ref={setShine} className="convo-shimmer">{busy.tool ? liveText(busy.tool, peers, liveByKey) : t('convo.live.thinking')}</span>
             <LiveFigures secs={secs} live={!!it.live} thinking={thinking} />
             {chev}
           </span>
@@ -7889,7 +7971,7 @@ function shortPath(p: string): string {
 
 // What a step's line says it acted on, and whether that is code (a
 // command, a path, a pattern) to show as such.
-function object(tool: ConvoTool): { text: string; code: boolean } {
+function object(tool: ConvoTool, peers?: Record<string, ConvoPeerInfo>, liveByKey?: ReadonlyMap<string, LivePeerTarget>): { text: string; code: boolean } {
   const v = verbOf(tool.name)
   const d = firstLine(tool.detail ?? '')
   // A command: what it is for, as Claude Code says it; else the command,
@@ -7899,6 +7981,8 @@ function object(tool: ConvoTool): { text: string; code: boolean } {
   if (v === 'plan') return { text: (tool.plan ?? '').split('\n').map((l) => l.replace(/^#+\s*/, '').replace(/[`*_]/g, '').trim()).find(Boolean) ?? '', code: false }
   if (v === 'cmd' && tool.title) return { text: tool.title, code: false }
   if (v === 'cmd' && d) return { text: d.replace(/^cd\s+(?:"[^"]*"|'[^']*'|[^\s&;|]+)\s*&&\s*/, ''), code: true }
+  const peerTarget = resolvePeerToolTarget(tool, peers, liveByKey)
+  if (peerTarget && peerTarget.kind !== 'unknown') return { text: peerTarget.name, code: false }
   if (tool.title) return { text: tool.title, code: false }
   if (v === 'read' || v === 'edit' || v === 'write') return { text: shortPath(d), code: true }
   return { text: d, code: toolObjectIsCode(tool.name, v, false, false) }
@@ -7947,11 +8031,11 @@ function stdinSaid(s: NonNullable<ConvoTool['stdin']>): { verb: string; obj: str
 
 // What a step not come back says while the agent waits for the person:
 // leave to run it, or an answer.
-function waitText(tool?: ConvoTool): string {
+function waitText(tool?: ConvoTool, peers?: Record<string, ConvoPeerInfo>, liveByKey?: ReadonlyMap<string, LivePeerTarget>): string {
   if (!tool) return t('convo.status.blocked')
   // (A command: the command itself, as while it runs — that is what is to be let run.)
   const cmd = firstLine((tool.detail ?? '').replace(/^cd\s+(?:"[^"]*"|'[^']*'|[^\s&;|]+)\s*&&\s*/, ''))
-  const o = tool.stdin ? '' : verbOf(tool.name) === 'cmd' && cmd ? cmd : object(tool).text
+  const o = tool.stdin ? '' : verbOf(tool.name) === 'cmd' && cmd ? cmd : object(tool, peers, liveByKey).text
   const ask = verbOf(tool.name) === 'ask' || tool.name === 'AskUserQuestion' || tool.name === 'ExitPlanMode'
   return o ? t(ask ? 'convo.waitAnswer' : 'convo.waitApprove', { s: o }) : t('convo.status.blocked')
 }
@@ -7962,7 +8046,7 @@ function waitText(tool?: ConvoTool): string {
 // known (never read) or nothing says more than its state.
 // since: when its state last changed (ms): what was kept before then is not
 // of this state and says nothing (a new turn begun, a process replaced).
-export function glanceOf(sessionId: string, pane: string | undefined, status: string, since?: number): string {
+export function glanceOf(sessionId: string, pane: string | undefined, status: string, since?: number, liveByKey?: ReadonlyMap<string, LivePeerTarget>): string {
   if (status !== 'blocked' && status !== 'working' && status !== 'done') return ''
   const k = keptEntries(sessionId, pane)
   if (!k || (since && k.at < since)) return ''
@@ -7971,8 +8055,8 @@ export function glanceOf(sessionId: string, pane: string | undefined, status: st
   while (i >= 0 && !(es[i].role === 'user' && !es[i].mid)) i--
   const parts = es.slice(i + 1).flatMap((e) => (e.role === 'assistant' ? e.parts : []))
   const open = [...parts].reverse().find((p) => p.kind === 'tool' && p.tool && !p.tool.done)
-  if (status === 'blocked') return open?.tool ? waitText(open.tool) : ''
-  if (status === 'working' && open?.tool) return liveText(open.tool)
+  if (status === 'blocked') return open?.tool ? waitText(open.tool, k.peers, liveByKey) : ''
+  if (status === 'working' && open?.tool) return liveText(open.tool, k.peers, liveByKey)
   const said = [...parts].reverse().find((p) => p.kind === 'text' && p.text?.trim())
   if (!said?.text) return ''
   // (Its first line of words: no heading or list marks, no code quotes.)
@@ -7980,7 +8064,7 @@ export function glanceOf(sessionId: string, pane: string | undefined, status: st
   return line.length > 120 ? line.slice(0, 120) + '…' : line
 }
 
-function liveText(tool: ConvoTool): string {
+function liveText(tool: ConvoTool, peers?: Record<string, ConvoPeerInfo>, liveByKey?: ReadonlyMap<string, LivePeerTarget>): string {
   if (tool.stdin) {
     const s = stdinSaid(tool.stdin)
     return s.verb + ' ' + s.obj
@@ -7989,7 +8073,7 @@ function liveText(tool: ConvoTool): string {
   // (The folder it goes to first comes off before the first line is taken:
   //  a command of several lines begins "cd … &&" on a line of its own.)
   const cmd = firstLine((tool.detail ?? '').replace(/^cd\s+(?:"[^"]*"|'[^']*'|[^\s&;|]+)\s*&&\s*/, ''))
-  const o = v === 'cmd' && cmd ? cmd : object(tool).text
+  const o = v === 'cmd' && cmd ? cmd : object(tool, peers, liveByKey).text
   return v ? t(VERB_SAID[v].live, { s: o }) : t('convo.live.other', { s: toolName(tool.name) })
 }
 
@@ -8090,6 +8174,7 @@ const exitCode = (tool: ConvoTool) => (tool.error ? /^Exit code (\d{1,3})\b/.exe
 function ToolRow({ tool, onCopy, live }: { tool: ConvoTool; onCopy: (s: string) => void; live?: boolean }) {
   const openSub = useContext(OpenSub)
   const subReadOnlyHint = useContext(SubReadOnlyHint)
+  const { peers, liveByKey } = useContext(PeerCtx)
   const openAll = useContext(OpenAllOf)
   const wantFull = openAll >= 2
   // (Opened or shown in full: kept by the call, so it is so when its
@@ -8125,7 +8210,8 @@ function ToolRow({ tool, onCopy, live }: { tool: ConvoTool; onCopy: (s: string) 
   const [clipped, setClipped] = useState(false) // (opened while the line cut its object short)
   if (live) return null // (said on the turn's line, as the step under way)
   const v = verbOf(tool.name)
-  const obj = object(tool)
+  const peerTarget = resolvePeerToolTarget(tool, peers, liveByKey)
+  const obj = object(tool, peers, liveByKey)
   const cat = category(tool.name)
   const StepMark = stepIcon(tool)
   // (A command shown by what it is for, as Claude Code said it.)
@@ -8187,6 +8273,25 @@ function ToolRow({ tool, onCopy, live }: { tool: ConvoTool; onCopy: (s: string) 
           ) : tool.agent_id && subReadOnlyHint ? (
             <span className="convo-older" title={subReadOnlyHint}>{subReadOnlyHint}</span>
           ) : null}
+          {peerTarget?.kind === 'live' && (
+            <a
+              className="link-btn convo-sub-open"
+              href={peerTarget.href}
+              title={t('convo.peerOpenHint')}
+              onClick={(e) => {
+                e.preventDefault()
+                peerTarget.onPick(peerClickHow(e))
+              }}
+              onMouseDown={(e) => e.button === 1 && e.preventDefault()}
+              onAuxClick={(e) => {
+                if (e.button !== 1) return
+                e.preventDefault()
+                peerTarget.onPick('tab')
+              }}
+            >
+              {t('convo.peerOpenAction')} · {peerTarget.name}
+            </a>
+          )}
           {tool.asks && !tool.answers && (
             // (A question put to the person, its choices: Codex's, read only.)
             <dl className="convo-ask-answers">

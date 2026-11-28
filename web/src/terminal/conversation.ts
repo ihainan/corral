@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api, ApiError, authGen } from '../api'
 import type { RowCmds } from './agentOrder'
 import { knownSession } from './agents'
+import type { ConvoPeerInfo } from './peerSender'
 import { isPushHostCovered, onPushConvo, onPushStateChange, watchPushHosts } from './pushEvents'
 import { CONVO_POLL_COVERED, convoNextPollDelay, matchesConvoHint, type ConvoRequestSource } from './pushEventsLogic'
 
@@ -50,6 +51,8 @@ export interface ConvoTool {
   plan_path?: string
   images?: number // (pictures read: a screenshot, a PDF's pages)
   refs?: number // (tools a search found)
+  peer_pid?: number // (SendMessage to another Claude Code session) verified peer PID
+  peer_start?: number // (SendMessage) verified peer /proc/<pid>/stat field 22
 }
 
 // A question of an AskUserQuestion (cut: more of it than is kept).
@@ -109,6 +112,8 @@ export interface ConvoEvent {
   kind: 'compact' | 'idle_compact' | 'scheduled' | 'limit' | 'limit_wait' | 'limit_reset' | 'limit_cancelled' | 'recap' | 'goal' | 'notice' | 'task' | 'model' | 'said' | 'peer'
   from?: string // (peer) the session that wrote, by its name
   relayed?: boolean // (peer) it said it may pass on words others wrote
+  peer_pid?: number // (peer) verified sender PID from origin
+  peer_start?: number // (peer) verified sender /proc/<pid>/stat field 22 from origin
   trigger?: string
   pre?: number
   post?: number
@@ -180,6 +185,8 @@ export interface ConvoQueued {
   ts?: string
   from?: string // (another session's agent, where it is not the person's own)
   note?: boolean // (a notice, not anyone's message)
+  peer_pid?: number
+  peer_start?: number
 }
 
 // Work the agent set going and left to itself: a command in the
@@ -293,6 +300,7 @@ interface Answer {
   queued?: ConvoQueued[]
   running?: ConvoRunning[]
   default_changed?: boolean // (a model switch here left the default of new sessions changed)
+  peers?: Record<string, ConvoPeerInfo> // resolved Corral peer identities keyed by "<pid>:<proc_start>"
   gen: number
   rev: number
   reset?: boolean
@@ -338,6 +346,7 @@ export interface Convo {
   queued?: ConvoQueued[] // (likewise)
   running?: ConvoRunning[] // (likewise)
   defaultChanged?: boolean // (a model switch here left the default of new sessions changed, lately)
+  peers?: Record<string, ConvoPeerInfo> // resolved Corral peer identities keyed by "<pid>:<proc_start>"
   // Reading has failed since okAt (ms): what shows may be out of date.
   failing: boolean
   okAt: number
@@ -419,10 +428,10 @@ export async function conversationReadable(sessionId: string, pane: string | und
 // is doing from the list: nothing read for it.
 // at: when it was kept (ms), for one to tell it is older than what it is to say.
 const TAIL = 40
-export function keptEntries(sessionId: string, pane: string | undefined): { entries: ConvoEntry[]; at: number } | null {
+export function keptEntries(sessionId: string, pane: string | undefined): { entries: ConvoEntry[]; at: number; peers?: Record<string, ConvoPeerInfo> } | null {
   const k = kept.get(keyOf(sessionId, pane))
   if (!k || !k.tail.length) return null
-  return { entries: k.tail, at: k.at }
+  return { entries: k.tail, at: k.at, peers: k.a.peers }
 }
 
 // (Another account signed in, or none: nothing of the one before stays.)
@@ -578,9 +587,10 @@ export function useConversation(sessionId: string, enabled: boolean, pane: strin
             const fresh = cmdsOf(a)
             const bgCmds = fresh && JSON.stringify(fresh) === JSON.stringify(c.bgCmds) ? c.bgCmds : fresh
             const bgAgents = a.bg_agent_list?.length ? (JSON.stringify(a.bg_agent_list) === JSON.stringify(c.bgAgents) ? c.bgAgents : a.bg_agent_list) : undefined
+            const peers = a.peers && Object.keys(a.peers).length ? (JSON.stringify(a.peers) === JSON.stringify(c.peers) ? c.peers : a.peers) : undefined
             const quietAt = told !== undefined && c.quietAt !== undefined && Math.abs(told - c.quietAt) < 3000 ? c.quietAt : told
-            if (!entries && c.of === key && c.status === 'ready' && c.quietAt === quietAt && c.gen === a.gen && c.older === older && c.olderCut === olderCut && c.loadingOlder === loadingOlder && sameBind(c.bind, a.bind) && c.agentStatus === a.agent_status && c.waitingFor === a.waiting_for && c.bgCmds === bgCmds && c.bgAgents === bgAgents && c.title === a.title && c.tasks === tasks && c.meta === meta && c.queued === queued && c.running === running && !c.failing && c.defaultChanged === a.default_changed) return c
-            return { ...initial(key), status: 'ready', entries: entries ?? c.entries, older, olderCut, loadingOlder, gen: a.gen, bind: a.bind, agentStatus: a.agent_status, waitingFor: a.waiting_for, bgCmds, bgAgents, quietAt, title: a.title || undefined, tasks, meta, queued, running, failing: false, okAt: now, changedAt: entries ? now : c.changedAt, of: key, defaultChanged: a.default_changed }
+            if (!entries && c.of === key && c.status === 'ready' && c.quietAt === quietAt && c.gen === a.gen && c.older === older && c.olderCut === olderCut && c.loadingOlder === loadingOlder && sameBind(c.bind, a.bind) && c.agentStatus === a.agent_status && c.waitingFor === a.waiting_for && c.bgCmds === bgCmds && c.bgAgents === bgAgents && c.title === a.title && c.tasks === tasks && c.meta === meta && c.queued === queued && c.running === running && c.peers === peers && !c.failing && c.defaultChanged === a.default_changed) return c
+            return { ...initial(key), status: 'ready', entries: entries ?? c.entries, older, olderCut, loadingOlder, gen: a.gen, bind: a.bind, agentStatus: a.agent_status, waitingFor: a.waiting_for, bgCmds, bgAgents, quietAt, title: a.title || undefined, tasks, meta, queued, running, peers, failing: false, okAt: now, changedAt: entries ? now : c.changedAt, of: key, defaultChanged: a.default_changed }
           })
           remember(key, gen, rev, byseq, a)
           lastActive = a.entries.length > 0 && !fresh
@@ -646,7 +656,7 @@ export function useConversation(sessionId: string, enabled: boolean, pane: strin
         else {
           const entries = [...byseq.values()].sort((x, y) => x.seq - y.seq)
           const older = !!k.older || entries.length === MAX
-          setConvo({ ...initial(key), status: 'ready', entries, older, olderCut: older && (!!k.older_cut || entries.length === MAX), gen, bind: k.bind, agentStatus: k.agent_status, waitingFor: k.waiting_for, bgCmds: cmdsOf(k), bgAgents: k.bg_agent_list?.length ? k.bg_agent_list : undefined, title: k.title || undefined, tasks: k.tasks?.length ? k.tasks : undefined, meta: k.meta, queued: k.queued?.length ? k.queued : undefined, running: k.running?.length ? k.running : undefined, failing: false, okAt: now, changedAt: now, of: key })
+          setConvo({ ...initial(key), status: 'ready', entries, older, olderCut: older && (!!k.older_cut || entries.length === MAX), gen, bind: k.bind, agentStatus: k.agent_status, waitingFor: k.waiting_for, bgCmds: cmdsOf(k), bgAgents: k.bg_agent_list?.length ? k.bg_agent_list : undefined, title: k.title || undefined, tasks: k.tasks?.length ? k.tasks : undefined, meta: k.meta, queued: k.queued?.length ? k.queued : undefined, running: k.running?.length ? k.running : undefined, peers: k.peers && Object.keys(k.peers).length ? k.peers : undefined, failing: false, okAt: now, changedAt: now, of: key })
         }
       } else {
         gen = 0

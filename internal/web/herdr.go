@@ -830,6 +830,9 @@ func (s *Server) watchHerdr(sess *term.Session, h *store.Host) {
 		}
 		got := time.Now().UnixMilli()
 		found := parseConvoLocate(string(locOut))
+		if !found.noProc {
+			s.recordLocatedProcs(sess, found.procs, true)
+		}
 		began := time.UnixMilli(got)
 		for _, p := range found.procs {
 			if p.herdrSocket != socket || !herdrPane.MatchString(p.herdrPane) {
@@ -917,6 +920,9 @@ func (s *Server) watchHerdr(sess *term.Session, h *store.Host) {
 			if err == nil {
 				at = map[string]int64{}
 				found := parseConvoLocate(string(out))
+				if !found.noProc {
+					s.recordLocatedProcs(sess, found.procs, true)
+				}
 				s.perfLocate("locate.times", tLoc, nil, len(found.procs), sess.HostID)
 				began := time.UnixMilli(got)
 				for _, p := range found.procs {
