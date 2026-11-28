@@ -4,9 +4,10 @@
 CREATE TABLE session_names (
     owner_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     host_id      INTEGER NOT NULL REFERENCES hosts(id) ON DELETE CASCADE,
+    host_config  TEXT    NOT NULL,
     kind         TEXT    NOT NULL,
     mux_session  TEXT    NOT NULL,
     display_name TEXT    NOT NULL,
     updated_at   INTEGER NOT NULL,
-    PRIMARY KEY (owner_id, host_id, kind, mux_session)
+    PRIMARY KEY (owner_id, host_id, host_config, kind, mux_session)
 );

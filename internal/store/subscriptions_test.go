@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"sync"
 	"testing"
 	"time"
 )
@@ -159,5 +161,119 @@ func TestSubscriptionRefreshCooldown(t *testing.T) {
 	allowed, retry, nextAt, err = s.TryClaimSubscriptionRefresh(ctx, u.ID, "claude", "acc-1", cooldown)
 	if err != nil || !allowed || retry != 0 || nextAt != now.Unix()+cooldown {
 		t.Fatalf("fourth claim at +5m: allowed=%v retry=%d nextAt=%d err=%v", allowed, retry, nextAt, err)
+	}
+
+	// ResetSubscriptionRefresh rolls back when claimedAt matches, and ignores mismatched claimedAt.
+	claimedAt := nextAt - cooldown
+	if err := s.ResetSubscriptionRefresh(ctx, u.ID, "claude", "acc-1", claimedAt-1, 0); err != nil {
+		t.Fatal(err)
+	}
+	sn, err := s.GetSubscriptionSnapshot(ctx, u.ID, "claude", "acc-1")
+	if err != nil || sn.LastRefreshAt != claimedAt {
+		t.Fatalf("mismatched claimedAt should not reset: %+v err=%v", sn, err)
+	}
+	if err := s.ResetSubscriptionRefresh(ctx, u.ID, "claude", "acc-1", claimedAt, 0); err != nil {
+		t.Fatal(err)
+	}
+	sn, err = s.GetSubscriptionSnapshot(ctx, u.ID, "claude", "acc-1")
+	if err != nil || sn.LastRefreshAt != 0 {
+		t.Fatalf("matching claimedAt should reset to 0: %+v err=%v", sn, err)
+	}
+	allowed, _, _, err = s.TryClaimSubscriptionRefresh(ctx, u.ID, "claude", "acc-1", cooldown)
+	if err != nil || !allowed {
+		t.Fatalf("claim immediately after reset should succeed: allowed=%v err=%v", allowed, err)
+	}
+}
+
+func TestSubscriptionSnapshotsConcurrentUpsert(t *testing.T) {
+	s, err := OpenMemory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	base := time.Date(2026, 11, 28, 12, 0, 0, 0, time.UTC)
+	s.now = func() time.Time { return base }
+
+	ctx := context.Background()
+	u, err := s.CreateUser(ctx, "alice", "Alice", "hash", RoleMember)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const nHosts = 16
+	const newestIdx = 9 // middle index so older & newer updates interleave freely
+	newestUpdated := base.Unix() + 1000
+	newestQuota := `{"known":true,"five_hour":{"used":88,"resets_at":1900000000}}`
+
+	start := make(chan struct{})
+	errCh := make(chan error, nHosts)
+	var wg sync.WaitGroup
+	wg.Add(nHosts)
+	for i := 0; i < nHosts; i++ {
+		go func(idx int) {
+			defer wg.Done()
+			<-start
+			updatedAt := base.Unix() + int64(idx*10)
+			quota := fmt.Sprintf(`{"known":true,"five_hour":{"used":%d,"resets_at":1900000000}}`, idx+1)
+			label := ""
+			plan := ""
+			if idx == newestIdx {
+				updatedAt = newestUpdated
+				quota = newestQuota
+				label = "newest@example.com"
+				plan = "Claude Max 20x"
+			}
+			errCh <- s.UpsertSubscriptionSnapshot(ctx, SubscriptionSnapshot{
+				OwnerID:      u.ID,
+				Provider:     "claude",
+				AccountKey:   "acc-concurrent",
+				AccountLabel: label,
+				Plan:         plan,
+				HostID:       int64(100 + idx),
+				HostName:     fmt.Sprintf("host-%02d", idx),
+				QuotaJSON:    json.RawMessage(quota),
+				UpdatedAt:    updatedAt,
+				SeenAt:       base.Unix() + int64(idx),
+			})
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+	close(errCh)
+
+	for err := range errCh {
+		if err != nil {
+			t.Fatalf("concurrent upsert failed: %v", err)
+		}
+	}
+
+	got, err := s.GetSubscriptionSnapshot(ctx, u.ID, "claude", "acc-concurrent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.UpdatedAt != newestUpdated {
+		t.Errorf("updated_at = %d, want newest %d", got.UpdatedAt, newestUpdated)
+	}
+	if string(got.QuotaJSON) != newestQuota {
+		t.Errorf("quota = %s, want newest %s", got.QuotaJSON, newestQuota)
+	}
+	if got.HostID != int64(100+newestIdx) || got.HostName != fmt.Sprintf("host-%02d", newestIdx) {
+		t.Errorf("primary host = %s (%d), want host-%02d (%d)", got.HostName, got.HostID, newestIdx, 100+newestIdx)
+	}
+	if got.AccountLabel != "newest@example.com" || got.Plan != "Claude Max 20x" {
+		t.Errorf("label/plan = %q/%q, want newest@example.com / Claude Max 20x", got.AccountLabel, got.Plan)
+	}
+	if len(got.Hosts) != nHosts {
+		t.Fatalf("expected all %d hosts merged without loss, got %d: %+v", nHosts, len(got.Hosts), got.Hosts)
+	}
+	seenHost := map[int64]bool{}
+	for _, h := range got.Hosts {
+		seenHost[h.HostID] = true
+	}
+	for i := 0; i < nHosts; i++ {
+		if !seenHost[int64(100+i)] {
+			t.Errorf("host %d was lost during concurrent merge", 100+i)
+		}
 	}
 }

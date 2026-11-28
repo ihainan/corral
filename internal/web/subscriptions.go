@@ -30,6 +30,8 @@ const (
 	subscriptionManualTimeout   = 35 * time.Second
 )
 
+var errSubscriptionAccountChanged = errors.New("subscription account changed on host")
+
 type subscriptionItem struct {
 	Provider      string                   `json:"provider"`
 	AccountKey    string                   `json:"account_key"`
@@ -309,6 +311,7 @@ func (s *Server) apiRefreshSubscription(w http.ResponseWriter, r *http.Request) 
 	}
 
 	cooldownSec := int64(subscriptionRefreshCooldown / time.Second)
+	prevRefreshAt := sn.LastRefreshAt
 	allowed, retryAfter, nextAt, err := s.store.TryClaimSubscriptionRefresh(r.Context(), u.ID, req.Provider, req.AccountKey, cooldownSec)
 	if errors.Is(err, store.ErrNotFound) {
 		writeError(w, http.StatusNotFound, "not_found", "subscription not found")
@@ -325,6 +328,7 @@ func (s *Server) apiRefreshSubscription(w http.ResponseWriter, r *http.Request) 
 		})
 		return
 	}
+	claimedAt := nextAt - cooldownSec
 
 	targetHost := sn.HostName
 	if sess != nil {
@@ -350,6 +354,13 @@ func (s *Server) apiRefreshSubscription(w http.ResponseWriter, r *http.Request) 
 		refreshErr = s.refreshSubscriptionOnSession(ctx, sess, req.Provider, req.AccountKey)
 	}
 	if refreshErr != nil {
+		if errors.Is(refreshErr, errSubscriptionAccountChanged) {
+			rctx, rcancel := context.WithTimeout(context.Background(), 3*time.Second)
+			_ = s.store.ResetSubscriptionRefresh(rctx, u.ID, req.Provider, req.AccountKey, claimedAt, prevRefreshAt)
+			rcancel()
+			writeError(w, http.StatusConflict, "account_changed", "another account is currently signed in on this host")
+			return
+		}
 		if errors.Is(refreshErr, context.Canceled) {
 			return
 		}
@@ -398,9 +409,33 @@ func (s *Server) refreshSubscriptionOnSession(ctx context.Context, sess *term.Se
 			}
 			return q, quotaAccountOfConfig(res.Out), signedIn, nil
 		}
+		accountMatches := func(accUUID string, signedIn bool) bool {
+			if strings.HasPrefix(expectedAccountKey, "host:") {
+				return accUUID == ""
+			}
+			return signedIn && accUUID != "" && accUUID == expectedAccountKey
+		}
+		recordOtherAccount := func(q quotaInfo, accUUID string, signedIn bool) {
+			if !q.Known || accUUID == "" || accUUID == expectedAccountKey {
+				return
+			}
+			var email string
+			if signedIn {
+				planKey := fmt.Sprintf("%d\x00%d\x00%s", sess.OwnerID, sess.HostID, accUUID)
+				q.Plan, email = s.claudePlan.getInfo(ctx, planKey, func(fctx context.Context) (string, string, error) {
+					return s.fetchClaudeAuthInfo(fctx, sess)
+				})
+			}
+			s.recordSubscriptionSnapshot(sess.OwnerID, "claude", accUUID, email, sess.HostID, sess.HostName, q)
+		}
+
 		q, accUUID, signedIn, err := readClaude()
 		if err != nil {
 			return err
+		}
+		if !accountMatches(accUUID, signedIn) {
+			recordOtherAccount(q, accUUID, signedIn)
+			return errSubscriptionAccountChanged
 		}
 		// Respect Claude Code's 15-minute minimum cadence both in gateway memory
 		// and on-host (~/.cache/corral/usage-asked) before invoking `claude -p /usage`.
@@ -410,6 +445,10 @@ func (s *Server) refreshSubscriptionOnSession(ctx context.Context, sess *term.Se
 			if q2, acc2, signedIn2, err2 := readClaude(); err2 == nil {
 				q, accUUID, signedIn = q2, acc2, signedIn2
 			}
+		}
+		if !accountMatches(accUUID, signedIn) {
+			recordOtherAccount(q, accUUID, signedIn)
+			return errSubscriptionAccountChanged
 		}
 		var email string
 		if signedIn {

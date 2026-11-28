@@ -164,3 +164,17 @@ export function sortSubscriptions(items: readonly SubscriptionItem[], nowSec: nu
     return a.account_key < b.account_key ? -1 : a.account_key > b.account_key ? 1 : 0
   })
 }
+
+export type SubscriptionRefreshErrorKey = 'subs.hostOfflineHint' | 'subs.accountChanged'
+
+// Maps subscription-specific manual refresh error codes to dedicated i18n keys.
+export function subscriptionRefreshErrorKey(code?: string): SubscriptionRefreshErrorKey | null {
+  switch (code) {
+    case 'host_offline':
+      return 'subs.hostOfflineHint'
+    case 'account_changed':
+      return 'subs.accountChanged'
+    default:
+      return null
+  }
+}

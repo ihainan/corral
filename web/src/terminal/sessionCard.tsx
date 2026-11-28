@@ -21,7 +21,21 @@ import { duration } from './convoTime'
 import { AgentIcon } from './agentIcons'
 import type { ConvoTask } from './conversation'
 import type { RowCmds } from './agentOrder'
-import { envCopyValue, envDisplayValue, envReasonKey, filterPaneEnvVars, type PaneEnvResponse, type PaneEnvVar } from './paneEnv'
+import {
+  createPaneEnvRevealState,
+  envCopyValue,
+  envDisplayValue,
+  envReasonKey,
+  failPaneEnvReveal,
+  filterPaneEnvVars,
+  finishPaneEnvReveal,
+  hidePaneEnvVar,
+  resetPaneEnvReveal,
+  startPaneEnvReveal,
+  type PaneEnvResponse,
+  type PaneEnvRevealState,
+  type PaneEnvVar,
+} from './paneEnv'
 
 type GitInfo = {
   repo: boolean
@@ -156,24 +170,32 @@ function usePaneEnv(sid: string, pane: string, enabled: boolean) {
   const [env, setEnv] = useState<PaneEnvResponse | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
-  const [revealed, setRevealed] = useState<Record<string, string>>({})
-  const [revealing, setRevealing] = useState<Record<string, boolean>>({})
-  const [revealErr, setRevealErr] = useState('')
+  const [revealState, setRevealState] = useState<PaneEnvRevealState>(() => createPaneEnvRevealState())
+  const revealStateRef = useRef<PaneEnvRevealState>(revealState)
+  const revealCtlsRef = useRef<Map<string, AbortController>>(new Map())
   const [again, setAgain] = useState(0)
 
+  const updateReveal = (fn: (cur: PaneEnvRevealState) => PaneEnvRevealState) => {
+    const next = fn(revealStateRef.current)
+    revealStateRef.current = next
+    setRevealState(next)
+  }
+
+  const abortAllReveals = () => {
+    for (const ctl of revealCtlsRef.current.values()) ctl.abort()
+    revealCtlsRef.current.clear()
+  }
+
   useEffect(() => {
+    abortAllReveals()
+    updateReveal(resetPaneEnvReveal)
     if (!enabled) {
-      setRevealed({})
-      setRevealing({})
-      setRevealErr('')
       return
     }
     const ctl = new AbortController()
     const q = pane ? '?pane=' + encodeURIComponent(pane) : ''
     setLoading(true)
     setError('')
-    setRevealErr('')
-    setRevealed({})
     api<PaneEnvResponse>('GET', `/api/sessions/${sid}/pane-env${q}`, undefined, { signal: ctl.signal, timeoutMs: 12000 })
       .then((res) => !ctl.signal.aborted && setEnv(res))
       .catch((e) => {
@@ -181,37 +203,61 @@ function usePaneEnv(sid: string, pane: string, enabled: boolean) {
         setError(e instanceof ApiError && e.code === 'ssh_channels_busy' ? t('card.envBusy') : t('card.envReasonFailed'))
       })
       .finally(() => !ctl.signal.aborted && setLoading(false))
-    return () => ctl.abort()
+    return () => {
+      ctl.abort()
+      abortAllReveals()
+      updateReveal(resetPaneEnvReveal)
+    }
   }, [sid, pane, enabled, again])
 
   const reveal = async (name: string) => {
-    if (revealing[name]) return
-    setRevealing((prev) => ({ ...prev, [name]: true }))
-    setRevealErr('')
+    const { state: next, token } = startPaneEnvReveal(revealStateRef.current, name)
+    if (!token) return
+    revealStateRef.current = next
+    setRevealState(next)
+    const ctl = new AbortController()
+    revealCtlsRef.current.set(name, ctl)
     try {
-      const res = await api<{ name: string; value: string }>('POST', `/api/sessions/${sid}/pane-env/reveal`, { pane, name }, { timeoutMs: 12000 })
-      setRevealed((prev) => ({ ...prev, [name]: res.value }))
+      const res = await api<{ name: string; value: string }>(
+        'POST',
+        `/api/sessions/${sid}/pane-env/reveal`,
+        { pane, name },
+        { signal: ctl.signal, timeoutMs: 12000 },
+      )
+      if (!ctl.signal.aborted) {
+        updateReveal((cur) => finishPaneEnvReveal(cur, name, token, res.value))
+      }
     } catch {
-      setRevealErr(t('card.envRevealFailed'))
+      if (!ctl.signal.aborted) {
+        updateReveal((cur) => failPaneEnvReveal(cur, name, token))
+      }
     } finally {
-      setRevealing((prev) => {
-        const next = { ...prev }
-        delete next[name]
-        return next
-      })
+      if (revealCtlsRef.current.get(name) === ctl) {
+        revealCtlsRef.current.delete(name)
+      }
     }
   }
 
   const hide = (name: string) => {
-    setRevealed((prev) => {
-      if (!Object.prototype.hasOwnProperty.call(prev, name)) return prev
-      const next = { ...prev }
-      delete next[name]
-      return next
-    })
+    const ctl = revealCtlsRef.current.get(name)
+    if (ctl) {
+      ctl.abort()
+      revealCtlsRef.current.delete(name)
+    }
+    updateReveal((cur) => hidePaneEnvVar(cur, name))
   }
 
-  return { env, loading, error, revealed, revealing, revealErr, reveal, hide, retry: () => setAgain((n) => n + 1) }
+  return {
+    env,
+    loading,
+    error,
+    revealed: revealState.revealed,
+    revealing: revealState.revealing,
+    revealErr: revealState.error ? t('card.envRevealFailed') : '',
+    reveal,
+    hide,
+    retry: () => setAgain((n) => n + 1),
+  }
 }
 
 // (more: it opens a view of its own, the Changes view — a chevron says so.)

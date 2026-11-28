@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"syscall"
@@ -18,6 +19,7 @@ import (
 
 	"github.com/ihainan/corral/internal/herdr"
 	"github.com/ihainan/corral/internal/store"
+	"github.com/ihainan/corral/internal/testutil"
 )
 
 func TestIsSensitiveEnv(t *testing.T) {
@@ -360,5 +362,304 @@ func TestPaneEnvEndToEndMaskingRevealAuditAndOwnership(t *testing.T) {
 	}
 	if plainResp.Reason != "unsupported_mode" {
 		t.Fatalf("expected reason=unsupported_mode, got %+v", plainResp)
+	}
+}
+
+func TestIsSensitiveEnvURLAndConnStrings(t *testing.T) {
+	cases := []struct {
+		name      string
+		envName   string
+		envVal    string
+		sensitive bool
+	}{
+		// Sensitive URL query parameters and fragments (case-insensitive).
+		{"pg query password", "DATABASE_URL", "postgresql://db/app?user=alice&password=hunter2", true},
+		{"pg query uppercase PASSWORD", "DATABASE_URL", "postgresql://db/app?user=alice&PASSWORD=hunter2", true},
+		{"mysql query passwd", "DB_URI", "mysql://db.internal:3306/app?passwd=secret", true},
+		{"mssql query pwd", "DB_URI", "mssql://db.internal/app?pwd=secret", true},
+		{"webhook query token", "WEBHOOK_URL", "https://hooks.example.com/cb?token=abc123", true},
+		{"fragment access_token", "CALLBACK_URL", "https://example.com/cb#access_token=xyz123&expires=3600", true},
+		{"query api_key", "API_ENDPOINT", "https://api.example.com/v1?api_key=k123", true},
+		{"query apikey", "API_ENDPOINT", "https://api.example.com/v1?apikey=k123", true},
+		{"query camelCase apiKey", "API_ENDPOINT", "https://api.example.com/v1?apiKey=k123", true},
+		{"query key", "API_ENDPOINT", "https://api.example.com/v1?key=k123", true},
+		{"query X-Amz-Signature", "SIGNED_URL", "https://s3.example.com/obj?X-Amz-Signature=deadbeef", true},
+		{"query sig", "SIGNED_URL", "https://cdn.example.com/file?sig=deadbeef", true},
+		{"query auth", "REDIS_URL", "redis://cache.internal:6379/0?auth=mysecret", true},
+		{"query client_secret", "OAUTH_URL", "https://idp.example.com/token?client_secret=s123", true},
+		{"fragment id_token", "FRAG_URL", "https://example.com/app#id_token=abc&state=1", true},
+
+		// Common connection string shapes.
+		{"adonet Password;", "CONN_STR", "Server=myServer;Database=myDB;User Id=sa;Password=hunter2;", true},
+		{"odbc PWD=", "CONN_STR", "Driver={ODBC Driver 18};Server=tcp:host,1433;UID=sa;PWD=secret123", true},
+		{"spaced Password =", "CONN_STR", "Server = db; Password = hunter2;", true},
+		{"libpq space-delimited password", "PGCONN", "host=localhost port=5432 user=alice password=hunter2 dbname=app", true},
+		{"libpq quoted password", "PGCONN", "host=localhost user=alice password='my secret' dbname=app", true},
+		{"azure SharedAccessKey", "SERVICE_BUS", "Endpoint=sb://ns.servicebus.windows.net/;SharedAccessKeyName=Root;SharedAccessKey=abc123=", true},
+		{"azure AccountKey", "STORAGE_CONN", "DefaultEndpointsProtocol=https;AccountName=dev;AccountKey=abc123==", true},
+		{"short PWD=", "SHORT_CONN", "PWD=a", true},
+
+		// Ordinary non-sensitive values must NOT be misclassified.
+		{"pg url without password", "DATABASE_URL", "postgresql://db.internal:5432/app?sslmode=require&connect_timeout=10", false},
+		{"mongo authSource", "MONGO_URL", "mongodb://db.internal:27017/app?authSource=admin&retryWrites=true", false},
+		{"mongo authMechanism", "MONGO_URL", "mongodb://db.internal:27017/app?authMechanism=SCRAM-SHA-256", false},
+		{"ordinary query params", "DOCS_URL", "https://example.com/docs?page=2&sort=asc&author=alice&design=dark&keyboard=us", false},
+		{"empty password query trailing", "DATABASE_URL", "postgresql://db/app?user=alice&password=", false},
+		{"empty password query mid", "DATABASE_URL", "postgresql://db/app?password=&user=alice", false},
+		{"empty libpq password", "PGCONN", "host=localhost user=alice password= dbname=app", false},
+		{"empty single-quoted password", "PGCONN", "host=localhost password='' dbname=app", false},
+		{"empty double-quoted password", "CONN_STR", `Server=db;Password="";Database=app`, false},
+		{"PWD env var path", "PWD", "/tmp/work/corral", false},
+		{"RUST_LOG value", "RUST_LOG", "info,corral=debug", false},
+		{"cmake flags non-secret", "CMAKE_FLAGS", "-DKEY_SIZE=16 -DSIGNAL=TERM", false},
+		{"azure key name only", "BUS_META", "SharedAccessKeyName=RootManage;Endpoint=sb://ns.example.com/", false},
+		{"bypass and passport words", "FLAGS", "bypass=true;passport=false", false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isSensitiveEnv(tc.envName, tc.envVal); got != tc.sensitive {
+				t.Errorf("isSensitiveEnv(%q, %q) = %v, want %v", tc.envName, tc.envVal, got, tc.sensitive)
+			}
+		})
+	}
+}
+
+func TestTmuxPaneEnvOwnershipCheckAndRename(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("linux /proc/<pid>/environ required")
+	}
+
+	ownPID, stopOwn := startPTYChild(t, []string{
+		"CORRAL_OWN_MARKER=from-work-pane",
+		"CORRAL_DB_URL=postgresql://db/app?user=alice&password=hunter2",
+	})
+	defer stopOwn()
+
+	otherSecret := "sk-other-session-secret-999888777"
+	otherPID, stopOther := startPTYChild(t, []string{
+		"CORRAL_OTHER_SECRET=" + otherSecret,
+	})
+	defer stopOther()
+
+	h := newHarness(t)
+	admin := h.admin()
+
+	home := t.TempDir()
+	stateFile := filepath.Join(home, "tmux_sessions.txt")
+	if err := os.WriteFile(stateFile, []byte("work\nother\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Map pane %1 -> line 1 of stateFile (initially "work"), pane %2 -> "other".
+	paneFile := filepath.Join(home, "tmux_panes.txt")
+	if err := os.WriteFile(paneFile, []byte(fmt.Sprintf("%%1\twork\t%d\n%%2\tother\t%d\n", ownPID, otherPID)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	bin := filepath.Join(home, ".local", "bin")
+	if err := os.MkdirAll(bin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	script := `#!/bin/sh
+STATE="` + stateFile + `"
+PANES="` + paneFile + `"
+if [ "$1" = "-u" ]; then shift; fi
+cmd="$1"; shift
+case "$cmd" in
+  list-sessions)
+    while IFS= read -r n; do
+      [ -n "$n" ] && printf '%s|1|1\n' "$n"
+    done < "$STATE"
+    exit 0
+    ;;
+  has-session)
+    target=""
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        -t) target="$2"; shift 2;;
+        *) shift;;
+      esac
+    done
+    target="${target#=}"
+    while IFS= read -r n; do
+      [ "$n" = "$target" ] && exit 0
+    done < "$STATE"
+    exit 1
+    ;;
+  rename-session)
+    old=""
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        -t) old="$2"; shift 2;;
+        --) shift; break;;
+        *) break;;
+      esac
+    done
+    new="$1"
+    old="${old#=}"
+    tmp="$STATE.tmp"
+    : > "$tmp"
+    while IFS= read -r n; do
+      if [ "$n" = "$old" ]; then printf '%s\n' "$new" >> "$tmp"
+      elif [ -n "$n" ]; then printf '%s\n' "$n" >> "$tmp"
+      fi
+    done < "$STATE"
+    mv "$tmp" "$STATE"
+    ptmp="$PANES.tmp"
+    : > "$ptmp"
+    while IFS='	' read -r pid sess ppid; do
+      if [ "$sess" = "$old" ]; then sess="$new"; fi
+      [ -n "$pid" ] && printf '%s\t%s\t%s\n' "$pid" "$sess" "$ppid" >> "$ptmp"
+    done < "$PANES"
+    mv "$ptmp" "$PANES"
+    exit 0
+    ;;
+  display-message)
+    target=""
+    fmt=""
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        -p) shift;;
+        -t) target="$2"; shift 2;;
+        *) fmt="$1"; shift;;
+      esac
+    done
+    case "$target" in
+      %*)
+        while IFS='	' read -r pid sess ppid; do
+          if [ "$pid" = "$target" ]; then
+            case "$fmt" in
+              *'#{session_name}'*'#{pane_pid}'*) printf '%s\t%s\n' "$sess" "$ppid"; exit 0;;
+              '#{session_name}') printf '%s\n' "$sess"; exit 0;;
+              '#{pane_pid}') printf '%s\n' "$ppid"; exit 0;;
+            esac
+          fi
+        done < "$PANES"
+        exit 1
+        ;;
+      =*:*)
+        want="${target#=}"
+        want="${want%:*}"
+        while IFS='	' read -r pid sess ppid; do
+          if [ "$sess" = "$want" ]; then
+            printf '%s\n' "$ppid"
+            exit 0
+          fi
+        done < "$PANES"
+        exit 1
+        ;;
+    esac
+    exit 1
+    ;;
+  new-session|attach-session)
+    read x
+    exit 0
+    ;;
+esac
+exit 0
+`
+	if err := os.WriteFile(filepath.Join(bin, "tmux"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sys := filepath.Join(t.TempDir(), "sys")
+	if err := os.MkdirAll(sys, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, tool := range []string{"sh", "mv", "sed", "cut", "tr", "head", "ps"} {
+		if p, err := exec.LookPath(tool); err == nil {
+			_ = os.Symlink(p, filepath.Join(sys, tool))
+		}
+	}
+
+	srv := h.sshServer(home)
+	srv.HandleExec(testutil.ShellExec(home, func(cmd string) bool {
+		return strings.Contains(cmd, "tmux") || strings.Contains(cmd, "/proc/")
+	}, "PATH="+sys))
+
+	rHost := admin.do("POST", "/api/hosts", map[string]any{
+		"name": "tmux-env-box", "address": "127.0.0.1", "port": srv.Addr.Port,
+		"username": "alice", "auth": "password", "password": "alice-pass",
+	})
+	mustStatus(t, rHost, http.StatusCreated, "create host")
+	hostID := rHost.json()["id"].(float64)
+
+	rSess := admin.do("POST", "/api/sessions", map[string]any{
+		"host_id": hostID,
+		"open":    map[string]any{"kind": "tmux", "name": "work"},
+	})
+	mustStatus(t, rSess, http.StatusCreated, "open work tmux session")
+	sessID := rSess.json()["id"].(string)
+
+	// 1. Own pane %1 succeeds and masks query-param password in CORRAL_DB_URL.
+	rOwn := admin.do("GET", "/api/sessions/"+sessID+"/pane-env?pane=%251", nil)
+	mustStatus(t, rOwn, http.StatusOK, "GET own pane env")
+	if strings.Contains(string(rOwn.Body), "hunter2") {
+		t.Fatalf("query-param password leaked in GET pane-env: %s", rOwn.Body)
+	}
+	var ownResp paneEnvResponse
+	if err := json.Unmarshal(rOwn.Body, &ownResp); err != nil {
+		t.Fatal(err)
+	}
+	if ownResp.Reason != "" || ownResp.PID != ownPID {
+		t.Fatalf("expected own pane pid=%d reason='', got %+v", ownPID, ownResp)
+	}
+	foundOwn, foundDBMasked := false, false
+	for _, v := range ownResp.Vars {
+		if v.Name == "CORRAL_OWN_MARKER" && !v.Sensitive && v.Value == "from-work-pane" {
+			foundOwn = true
+		}
+		if v.Name == "CORRAL_DB_URL" && v.Sensitive && v.Value == "" && v.Preview != "" {
+			foundDBMasked = true
+		}
+	}
+	if !foundOwn || !foundDBMasked {
+		t.Fatalf("expected own marker and masked db url, got %+v", ownResp.Vars)
+	}
+
+	// 2. Foreign pane %2 (belongs to tmux session "other") MUST be rejected on both list and reveal.
+	rForeign := admin.do("GET", "/api/sessions/"+sessID+"/pane-env?pane=%252", nil)
+	mustStatus(t, rForeign, http.StatusOK, "GET foreign pane env")
+	if strings.Contains(string(rForeign.Body), otherSecret) || strings.Contains(string(rForeign.Body), "CORRAL_OTHER_SECRET") {
+		t.Fatalf("foreign session env leaked: %s", rForeign.Body)
+	}
+	var foreignResp paneEnvResponse
+	if err := json.Unmarshal(rForeign.Body, &foreignResp); err != nil {
+		t.Fatal(err)
+	}
+	if foreignResp.Reason != "pane_not_in_session" || len(foreignResp.Vars) != 0 {
+		t.Fatalf("expected pane_not_in_session with 0 vars, got %+v", foreignResp)
+	}
+
+	rRevForeign := admin.do("POST", "/api/sessions/"+sessID+"/pane-env/reveal", map[string]any{
+		"pane": "%2",
+		"name": "CORRAL_OTHER_SECRET",
+	})
+	mustStatus(t, rRevForeign, http.StatusConflict, "reveal foreign pane env rejected")
+	if rRevForeign.code() != "pane_not_in_session" || strings.Contains(string(rRevForeign.Body), otherSecret) {
+		t.Fatalf("unexpected foreign reveal response: %d %s", rRevForeign.Status, rRevForeign.Body)
+	}
+
+	// 3. After renaming tmux session "work" -> "work-renamed", own pane %1 still succeeds
+	//    via CurrentTmuxSession() and foreign pane %2 is still rejected.
+	rRen := admin.do("PUT", "/api/sessions/"+sessID+"/name", map[string]any{"name": "work-renamed"})
+	mustStatus(t, rRen, http.StatusOK, "rename tmux session")
+
+	rAfter := admin.do("GET", "/api/sessions/"+sessID+"/pane-env?pane=%251", nil)
+	mustStatus(t, rAfter, http.StatusOK, "GET own pane after rename")
+	var afterResp paneEnvResponse
+	if err := json.Unmarshal(rAfter.Body, &afterResp); err != nil {
+		t.Fatal(err)
+	}
+	if afterResp.Reason != "" || afterResp.PID != ownPID {
+		t.Fatalf("expected own pane to work after rename, got %+v", afterResp)
+	}
+
+	rAfterForeign := admin.do("GET", "/api/sessions/"+sessID+"/pane-env?pane=%252", nil)
+	mustStatus(t, rAfterForeign, http.StatusOK, "GET foreign pane after rename")
+	var afterForeignResp paneEnvResponse
+	if err := json.Unmarshal(rAfterForeign.Body, &afterForeignResp); err != nil {
+		t.Fatal(err)
+	}
+	if afterForeignResp.Reason != "pane_not_in_session" {
+		t.Fatalf("expected foreign pane still rejected after rename, got %+v", afterForeignResp)
 	}
 }

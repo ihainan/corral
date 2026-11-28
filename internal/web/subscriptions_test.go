@@ -3,10 +3,15 @@ package web
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"golang.org/x/crypto/ssh"
 
 	"github.com/ihainan/corral/internal/store"
 )
@@ -214,4 +219,141 @@ func TestSubscriptionsOverviewReadOnlyDedupAndCooldown(t *testing.T) {
 		"account_key": "uuid-offline",
 	})
 	mustStatus(t, rOff, http.StatusConflict, "offline host refresh rejected")
+}
+
+func TestRefreshSubscriptionAccountChangedOnHost(t *testing.T) {
+	h := newHarness(t)
+	admin := h.admin()
+	alice := h.member(admin, "alice")
+
+	aliceUser, err := h.store.UserByName(context.Background(), "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	now := time.Now()
+	resetFuture := now.Add(3 * time.Hour).UTC().Format(time.RFC3339)
+
+	var (
+		mu              sync.Mutex
+		curClaudeConfig string
+		curAuthStatus   string
+		usageRefreshHit atomic.Int32
+	)
+	setHostAccount := func(uuid, email string, weeklyUsed float64, fetchedAt time.Time) {
+		mu.Lock()
+		defer mu.Unlock()
+		curClaudeConfig = fmt.Sprintf(
+			`{"oauthAccount":{"accountUuid":%q},"cachedUsageUtilization":{"fetchedAtMs":%d,"accountUuid":%q,"utilization":{"seven_day":{"utilization":%.1f,"resets_at":%q}}}}`,
+			uuid, fetchedAt.UnixMilli(), uuid, weeklyUsed, resetFuture,
+		)
+		curAuthStatus = fmt.Sprintf(
+			`{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty","email":%q,"subscriptionType":"max","rateLimitTier":"default_claude_max_20x"}`,
+			email,
+		)
+	}
+	// Host is currently logged in as account B (changed from historical account A).
+	setHostAccount("uuid-account-b", "b@example.com", 60, now.Add(-1*time.Minute))
+
+	srv := h.sshServer(t.TempDir())
+	srv.HandleExec(func(cmd string) func(ssh.Channel) {
+		switch {
+		case strings.Contains(cmd, "cachedUsageUtilization"):
+			return func(ch ssh.Channel) {
+				mu.Lock()
+				out := curClaudeConfig
+				mu.Unlock()
+				ch.Write([]byte(out + "\n"))
+				ch.CloseWrite()
+				ch.SendRequest("exit-status", false, []byte{0, 0, 0, 0})
+			}
+		case strings.Contains(cmd, "claude auth status"):
+			return func(ch ssh.Channel) {
+				mu.Lock()
+				out := curAuthStatus
+				mu.Unlock()
+				ch.Write([]byte(out + "\n"))
+				ch.CloseWrite()
+				ch.SendRequest("exit-status", false, []byte{0, 0, 0, 0})
+			}
+		case strings.Contains(cmd, "claude -p /usage"):
+			usageRefreshHit.Add(1)
+			return func(ch ssh.Channel) {
+				ch.CloseWrite()
+				ch.SendRequest("exit-status", false, []byte{0, 0, 0, 0})
+			}
+		}
+		return nil
+	})
+
+	rHost := alice.do("POST", "/api/hosts", map[string]any{
+		"name": "gpu-box", "address": "127.0.0.1", "port": srv.Addr.Port,
+		"username": "alice", "auth": "password", "password": "alice-pass", "persistence": "none",
+	})
+	mustStatus(t, rHost, http.StatusCreated, "create host")
+	hostID := int64(rHost.json()["id"].(float64))
+
+	rSess := alice.do("POST", "/api/sessions", map[string]any{"host_id": hostID})
+	mustStatus(t, rSess, http.StatusCreated, "open session")
+
+	// Seed historical snapshot for account A on this host.
+	h.srv.recordSubscriptionSnapshot(aliceUser.ID, "claude", "uuid-account-a", "a@example.com", hostID, "gpu-box", quotaInfo{
+		Known:     true,
+		UpdatedAt: now.Add(-30 * time.Minute).Unix(),
+		Plan:      "Claude Pro",
+		Weekly:    &quotaWindow{Used: 25, ResetsAt: now.Add(24 * time.Hour).Unix()},
+	})
+
+	// 1. Refreshing A while host is signed in as B returns 409 account_changed.
+	r := alice.do("POST", "/api/subscriptions/refresh", map[string]any{
+		"provider":    "claude",
+		"account_key": "uuid-account-a",
+	})
+	mustStatus(t, r, http.StatusConflict, "refresh A when host has B")
+	if r.code() != "account_changed" {
+		t.Fatalf("expected error=account_changed, got %s", r.Body)
+	}
+	if usageRefreshHit.Load() != 0 {
+		t.Fatalf("must not invoke claude -p /usage when host is signed in as a different account, got %d hits", usageRefreshHit.Load())
+	}
+
+	// 2. Account A was NOT overwritten and its cooldown was rolled back (last_refresh_at == 0).
+	snA, err := h.store.GetSubscriptionSnapshot(context.Background(), aliceUser.ID, "claude", "uuid-account-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snA.LastRefreshAt != 0 {
+		t.Fatalf("expected account A cooldown rolled back to 0, got %d", snA.LastRefreshAt)
+	}
+	var qA quotaInfo
+	_ = json.Unmarshal(snA.QuotaJSON, &qA)
+	if qA.Weekly == nil || qA.Weekly.Used != 25 {
+		t.Fatalf("account A quota should remain 25, got %+v", qA)
+	}
+
+	// 3. Account B's reading WAS passively recorded.
+	snB, err := h.store.GetSubscriptionSnapshot(context.Background(), aliceUser.ID, "claude", "uuid-account-b")
+	if err != nil {
+		t.Fatalf("expected account B to be passively persisted: %v", err)
+	}
+	var qB quotaInfo
+	_ = json.Unmarshal(snB.QuotaJSON, &qB)
+	if qB.Weekly == nil || qB.Weekly.Used != 60 || snB.AccountLabel != "b@example.com" {
+		t.Fatalf("unexpected account B snapshot: sn=%+v q=%+v", snB, qB)
+	}
+
+	// 4. Once the host switches back to account A, refreshing A succeeds immediately (cooldown not consumed).
+	setHostAccount("uuid-account-a", "a@example.com", 35, now.Add(-1*time.Minute))
+	r2 := alice.do("POST", "/api/subscriptions/refresh", map[string]any{
+		"provider":    "claude",
+		"account_key": "uuid-account-a",
+	})
+	mustStatus(t, r2, http.StatusOK, "refresh A after host switches back")
+	var refResp subscriptionRefreshResponse
+	if err := json.Unmarshal(r2.Body, &refResp); err != nil {
+		t.Fatal(err)
+	}
+	if refResp.Item.Quota.Weekly == nil || refResp.Item.Quota.Weekly.Used != 35 {
+		t.Fatalf("expected account A updated to 35, got %+v", refResp.Item.Quota)
+	}
 }

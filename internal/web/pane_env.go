@@ -119,11 +119,151 @@ var sensitiveValuePrefixes = []string{
 var (
 	// URLs containing embedded username:password@host credentials.
 	credURLRe = regexp.MustCompile(`[a-zA-Z][a-zA-Z0-9+.-]*://[^/\s@]*:[^/\s@]+@`)
+	// URL query or fragment key=value pairs (?k=v, &k=v, #k=v).
+	urlParamRe = regexp.MustCompile(`[?&#]([A-Za-z0-9._-]+)=([^?&#\s]*)`)
+	// Common connection string key=value pairs (e.g. Password=secret;, PWD=secret,
+	// host=db user=alice password=hunter2, AccountKey=...).
+	connStringPairRe   = regexp.MustCompile(`(?:^|[;\s,])([A-Za-z][A-Za-z0-9._-]{0,48})=(?:'([^']*)'|"([^"]*)"|([^\s;,"']*))`)
+	connStringSpacedRe = regexp.MustCompile(`(?:^|[;,])\s*([A-Za-z][A-Za-z0-9._-]{0,48})\s+=\s+(?:'([^']*)'|"([^"]*)"|([^\s;,"'=]*))`)
 	// JWT: three base64url segments starting with eyJ.
 	jwtValueRe = regexp.MustCompile(`^eyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]*$`)
 	// AWS access key IDs (AKIA / ASIA + 16 uppercase alphanumeric chars).
 	awsAccessKeyRe = regexp.MustCompile(`^(?:AKIA|ASIA)[0-9A-Z]{16}$`)
 )
+
+// sensitiveParamAnySegs are lowercase segments that mark a URL query/fragment
+// parameter or connection string key as sensitive anywhere in its segmented name.
+var sensitiveParamAnySegs = map[string]bool{
+	"password":     true,
+	"passwd":       true,
+	"passphrase":   true,
+	"pwd":          true,
+	"secret":       true,
+	"token":        true,
+	"apikey":       true,
+	"passkey":      true,
+	"accesskey":    true,
+	"secretkey":    true,
+	"privatekey":   true,
+	"authkey":      true,
+	"appkey":       true,
+	"clientkey":    true,
+	"accesstoken":  true,
+	"authtoken":    true,
+	"refreshtoken": true,
+	"idtoken":      true,
+	"clientsecret": true,
+	"appsecret":    true,
+	"signature":    true,
+	"sig":          true,
+	"credential":   true,
+	"credentials":  true,
+	"jwt":          true,
+	"bearer":       true,
+	"cookie":       true,
+}
+
+// sensitiveParamLastSegs are lowercase segments that mark a parameter/key as
+// sensitive when they are the final (or sole) segment (e.g. api_key, key,
+// basic_auth, auth, db_pass, pass), avoiding false positives on words like
+// authSource, SharedAccessKeyName, or KEY_SIZE.
+var sensitiveParamLastSegs = map[string]bool{
+	"key":  true,
+	"auth": true,
+	"pass": true,
+}
+
+// splitParamSegments splits a parameter/key name into lowercase word segments
+// on '_', '-', '.', and camelCase/acronym boundaries.
+func splitParamSegments(key string) []string {
+	var segs []string
+	var cur []byte
+	flush := func() {
+		if len(cur) > 0 {
+			segs = append(segs, string(cur))
+			cur = cur[:0]
+		}
+	}
+	for i := 0; i < len(key); i++ {
+		c := key[i]
+		if c == '_' || c == '-' || c == '.' {
+			flush()
+			continue
+		}
+		if c >= 'A' && c <= 'Z' {
+			if len(cur) > 0 {
+				prev := key[i-1]
+				prevLower := prev >= 'a' && prev <= 'z'
+				prevDigit := prev >= '0' && prev <= '9'
+				nextLower := i+1 < len(key) && key[i+1] >= 'a' && key[i+1] <= 'z'
+				if prevLower || prevDigit || (prev >= 'A' && prev <= 'Z' && nextLower) {
+					flush()
+				}
+			}
+			cur = append(cur, c+('a'-'A'))
+		} else {
+			cur = append(cur, c)
+		}
+	}
+	flush()
+	return segs
+}
+
+func isSensitiveParamKey(key string) bool {
+	segs := splitParamSegments(key)
+	if len(segs) == 0 {
+		return false
+	}
+	for _, seg := range segs {
+		if sensitiveParamAnySegs[seg] {
+			return true
+		}
+	}
+	return sensitiveParamLastSegs[segs[len(segs)-1]]
+}
+
+func hasSensitiveURLParam(v string) bool {
+	if !strings.ContainsAny(v, "?#") || !strings.Contains(v, "=") {
+		return false
+	}
+	for _, m := range urlParamRe.FindAllStringSubmatch(v, -1) {
+		if len(m) < 3 || strings.TrimSpace(m[2]) == "" {
+			continue
+		}
+		if isSensitiveParamKey(m[1]) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasSensitiveConnString(v string) bool {
+	if !strings.Contains(v, "=") {
+		return false
+	}
+	check := func(re *regexp.Regexp) bool {
+		for _, m := range re.FindAllStringSubmatch(v, -1) {
+			if len(m) < 5 {
+				continue
+			}
+			val := m[2]
+			if val == "" {
+				val = m[3]
+			}
+			if val == "" {
+				val = m[4]
+			}
+			if strings.TrimSpace(val) == "" {
+				continue
+			}
+			if isSensitiveParamKey(m[1]) {
+				return true
+			}
+		}
+		return false
+	}
+	return check(connStringPairRe) || check(connStringSpacedRe)
+}
 
 // isSensitiveEnv reports whether an environment variable should be masked by
 // default based on either its name or the shape of its value.
@@ -139,6 +279,12 @@ func isSensitiveEnv(name, value string) bool {
 
 func isSensitiveEnvValue(value string) bool {
 	v := strings.TrimSpace(value)
+	if len(v) == 0 {
+		return false
+	}
+	if hasSensitiveURLParam(v) || hasSensitiveConnString(v) {
+		return true
+	}
 	if len(v) < 6 {
 		return false
 	}
@@ -393,7 +539,21 @@ if [ ! -d /proc/self ]; then
   exit 0
 fi
 if [ -n "$pane" ]; then
-  pane_pid=$(tmux -u display-message -p -t "$pane" '#{pane_pid}' 2>/dev/null)
+  pane_info=$(tmux -u display-message -p -t "$pane" '#{session_name}	#{pane_pid}' 2>/dev/null)
+  case "$pane_info" in
+    *'	'*)
+      pane_sess=${pane_info%	*}
+      pane_pid=${pane_info##*	}
+      if [ -z "$sess" ] || [ "$pane_sess" != "$sess" ]; then
+        printf 'ERR\tpane_not_in_session\n'
+        exit 0
+      fi
+      ;;
+    *)
+      printf 'ERR\tno_process\n'
+      exit 0
+      ;;
+  esac
 else
   pane_pid=$(tmux -u display-message -p -t "=$sess:" '#{pane_pid}' 2>/dev/null)
 fi

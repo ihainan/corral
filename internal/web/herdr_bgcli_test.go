@@ -1752,18 +1752,23 @@ func TestParseCmdScanEnvCLIAndLivePaneDedup(t *testing.T) {
 		parentSID = "11111111-2222-4333-8444-555555555599"
 		agySID1   = "22222222-3333-4444-8555-666666666691"
 		agySID2   = "22222222-3333-4444-8555-666666666692"
+		agySID3   = "22222222-3333-4444-8555-666666666693"
 		sock      = "/run/herdr/test.sock"
+		otherSock = "/run/herdr/other.sock"
 	)
 	agyLog1 := "/home/u/.gemini/antigravity-cli/brain/" + agySID1 + "/.system_generated/logs/transcript_full.jsonl"
 	agyLog2 := "/home/u/.gemini/antigravity-cli/brain/" + agySID2 + "/.system_generated/logs/transcript_full.jsonl"
+	agyLog3 := "/home/u/.gemini/antigravity-cli/brain/" + agySID3 + "/.system_generated/logs/transcript_full.jsonl"
 	argv := func(parts ...string) string { return strings.Join(parts, "\x01") + "\x01" }
 
 	out := strings.Join([]string{
 		"clock\t1700000000\t100",
 		// Detached CLI running in parent's own pane (headless bg) -> shown in BgAgentList.
 		"envcli\t401\t5000\tclaude:" + parentSID + "\tagy\t/home/u/.local/bin/agy\t" + agySID1 + "\t" + agyLog1 + "\tw1:p1\t" + sock + "\t" + argv("agy", "-p", "p14l-a"),
-		// CLI running in its OWN live herdr pane w1:p9 -> NOT duplicated in BgAgentList, exposed via envPaneLinks.
+		// CLI running in its OWN live herdr pane w1:p9 on the SAME socket -> NOT duplicated in BgAgentList, exposed via envPaneLinks.
 		"envcli\t402\t5100\tclaude:" + parentSID + "\tagy\t/home/u/.local/bin/agy\t" + agySID2 + "\t" + agyLog2 + "\tw1:p9\t" + sock + "\t" + argv("agy", "-p", "p14l-b"),
+		// CLI running in pane w1:p9 on a DIFFERENT herdr socket -> must NOT be hidden by live pane w1:p9 on sock!
+		"envcli\t404\t5150\tclaude:" + parentSID + "\tagy\t/home/u/.local/bin/agy\t" + agySID3 + "\t" + agyLog3 + "\tw1:p9\t" + otherSock + "\t" + argv("agy", "-p", "p14l-c"),
 		// Self-reference (child sid == parent sid) -> ignored.
 		"envcli\t403\t5200\tclaude:" + parentSID + "\tclaude\t/home/u/.local/bin/claude\t" + parentSID + "\t/home/u/.claude/projects/-x/" + parentSID + ".jsonl\tw1:p1\t" + sock + "\t" + argv("claude"),
 	}, "\n") + "\n"
@@ -1773,11 +1778,12 @@ func TestParseCmdScanEnvCLIAndLivePaneDedup(t *testing.T) {
 		t.Fatal("expected whole=true")
 	}
 	p := newCmdSubProber(nil)
+	p.setSocket(sock)
 	p.cmds = parsed
 	p.consider("w1:p1", "claude", "working", parentSID)
 	p.at = time.Now()
 
-	// Verify envPaneLinks surfaces w1:p9 -> parentSID for lineageTracker.
+	// Verify envPaneLinks surfaces w1:p9 -> parentSID for lineageTracker on sock.
 	links := p.envPaneLinks(sock)
 	foundLink := false
 	for _, l := range links {
@@ -1789,8 +1795,10 @@ func TestParseCmdScanEnvCLIAndLivePaneDedup(t *testing.T) {
 		t.Fatalf("expected envPaneLink for w1:p9 -> %s, got %+v", parentSID, links)
 	}
 
-	// Decorate when w1:p9 IS a live herdr pane: only agySID1 appears in w1:p1's BgAgentList;
-	// w1:p9 must NOT be duplicated in BgAgentList or demoted into BgCmds.
+	// Decorate when w1:p9 IS a live herdr pane on sock:
+	// - agySID1 (in parent's own pane w1:p1) appears in BgAgentList
+	// - agySID2 (in live pane w1:p9 on SAME sock) is deduplicated from BgAgentList
+	// - agySID3 (in pane w1:p9 on OTHER sock) MUST remain visible in BgAgentList!
 	sum := herdrSummary{
 		Workspaces: []herdrWorkspace{{
 			Agents: []herdrAgent{
@@ -1804,7 +1812,11 @@ func TestParseCmdScanEnvCLIAndLivePaneDedup(t *testing.T) {
 	if parent.BgCmds != 0 {
 		t.Fatalf("live-pane envcli must not demote to BgCmds: %+v", parent)
 	}
-	if len(parent.BgAgentList) != 1 || parent.BgAgentList[0].ID != agySID1 {
-		t.Fatalf("expected only non-pane agySID1 in BgAgentList, got %+v", parent.BgAgentList)
+	gotIDs := map[string]bool{}
+	for _, a := range parent.BgAgentList {
+		gotIDs[a.ID] = true
+	}
+	if len(parent.BgAgentList) != 2 || !gotIDs[agySID1] || !gotIDs[agySID3] || gotIDs[agySID2] {
+		t.Fatalf("expected agySID1 and cross-socket agySID3 (and not same-socket agySID2) in BgAgentList, got %+v", parent.BgAgentList)
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/ihainan/corral/internal/testutil"
@@ -270,5 +271,304 @@ func TestRenamePlainShellSession(t *testing.T) {
 	mustStatus(t, r, 200, "rename shell")
 	if r.json()["display_name"] != "临时排查" {
 		t.Fatalf("renamed shell: %s", r.Body)
+	}
+}
+
+func fakeTmuxRenameServer(t *testing.T, h *harness, initial []string) (int, string) {
+	t.Helper()
+	home := t.TempDir()
+	stateFile := filepath.Join(home, "tmux_sessions.txt")
+	if err := os.WriteFile(stateFile, []byte(strings.Join(initial, "\n")+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	bin := filepath.Join(home, ".local", "bin")
+	if err := os.MkdirAll(bin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	script := `#!/bin/sh
+STATE="` + stateFile + `"
+if [ "$1" = "-u" ]; then shift; fi
+cmd="$1"; shift
+case "$cmd" in
+  list-sessions)
+    while IFS= read -r n; do
+      [ -n "$n" ] && printf '%s|1|1\n' "$n"
+    done < "$STATE"
+    exit 0
+    ;;
+  has-session)
+    target=""
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        -t) target="$2"; shift 2;;
+        *) shift;;
+      esac
+    done
+    target="${target#=}"
+    while IFS= read -r n; do
+      [ "$n" = "$target" ] && exit 0
+    done < "$STATE"
+    exit 1
+    ;;
+  rename-session)
+    old=""
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        -t) old="$2"; shift 2;;
+        --) shift; break;;
+        *) break;;
+      esac
+    done
+    new="$1"
+    old="${old#=}"
+    found=0
+    while IFS= read -r n; do
+      [ "$n" = "$new" ] && { echo "duplicate session: $new" >&2; exit 1; }
+      [ "$n" = "$old" ] && found=1
+    done < "$STATE"
+    [ "$found" -eq 0 ] && { echo "can't find session: $old" >&2; exit 1; }
+    tmp="$STATE.tmp"
+    : > "$tmp"
+    while IFS= read -r n; do
+      if [ "$n" = "$old" ]; then
+        printf '%s\n' "$new" >> "$tmp"
+      elif [ -n "$n" ]; then
+        printf '%s\n' "$n" >> "$tmp"
+      fi
+    done < "$STATE"
+    mv "$tmp" "$STATE"
+    exit 0
+    ;;
+  new-session|attach-session)
+    read x
+    exit 0
+    ;;
+esac
+exit 0
+`
+	if err := os.WriteFile(filepath.Join(bin, "tmux"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sys := filepath.Join(t.TempDir(), "sys")
+	if err := os.MkdirAll(sys, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, tool := range []string{"sh", "mv"} {
+		if p, err := exec.LookPath(tool); err == nil {
+			_ = os.Symlink(p, filepath.Join(sys, tool))
+		}
+	}
+	srv := h.sshServer(home)
+	srv.HandleExec(testutil.ShellExec(home, func(cmd string) bool {
+		return strings.Contains(cmd, "tmux") || strings.Contains(cmd, "herdr")
+	}, "PATH="+sys))
+	return srv.Addr.Port, stateFile
+}
+
+func TestRenameIsolationAcrossHostConfigs(t *testing.T) {
+	h := newHarness(t)
+	admin := h.admin()
+	me := admin.do("GET", "/api/me", nil)
+	mustStatus(t, me, 200, "me")
+	uid := int64(me.json()["id"].(float64))
+
+	// --- 1. tmux: sessions opened under different HostConfig on the same host ID ---
+	port1, _ := fakeTmuxRenameServer(t, h, []string{"work", "taken-on-old"})
+	port2, _ := fakeTmuxRenameServer(t, h, []string{"work"})
+
+	r := admin.do("POST", "/api/hosts", map[string]any{
+		"name": "box", "address": "127.0.0.1", "port": port1,
+		"username": "alice", "auth": "password", "password": "alice-pass",
+	})
+	mustStatus(t, r, 201, "create tmux host")
+	hostID := r.json()["id"].(float64)
+
+	r = admin.do("POST", "/api/sessions", map[string]any{"host_id": hostID, "open": map[string]any{"kind": "tmux", "name": "work"}})
+	mustStatus(t, r, 201, "open old work")
+	oldWorkSID := r.json()["id"].(string)
+
+	r = admin.do("POST", "/api/sessions", map[string]any{"host_id": hostID, "open": map[string]any{"kind": "tmux", "name": "taken-on-old"}})
+	mustStatus(t, r, 201, "open old taken")
+	oldTakenSID := r.json()["id"].(string)
+
+	// Re-point the same host record to port2 (different machine -> different HostConfig).
+	r = admin.do("PUT", "/api/hosts/"+jsonNumber(hostID), map[string]any{
+		"name": "box", "address": "127.0.0.1", "port": port2,
+		"username": "alice", "auth": "password", "password": "alice-pass",
+	})
+	mustStatus(t, r, 200, "update host to port2")
+
+	r = admin.do("POST", "/api/sessions", map[string]any{"host_id": hostID, "open": map[string]any{"kind": "tmux", "name": "work"}})
+	mustStatus(t, r, 201, "open new work")
+	newWorkSID := r.json()["id"].(string)
+	if newWorkSID == oldWorkSID {
+		t.Fatalf("expected distinct session under new HostConfig")
+	}
+
+	// Renaming newWorkSID to "taken-on-old" MUST succeed (oldTakenSID has a different HostConfig),
+	// and MUST NOT rename oldWorkSID (which also had name "work" on the old HostConfig).
+	r = admin.do("PUT", "/api/sessions/"+newWorkSID+"/name", map[string]any{"name": "taken-on-old"})
+	mustStatus(t, r, 200, "rename new work to name taken on old HostConfig")
+	if r.json()["mux_session"] != "taken-on-old" {
+		t.Fatalf("expected new session renamed, got %s", r.Body)
+	}
+
+	oldSess, err := h.srv.terms.Get(uid, oldWorkSID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if oldSess.CurrentTmuxSession() != "work" {
+		t.Fatalf("old HostConfig session was wrongly renamed to %q", oldSess.CurrentTmuxSession())
+	}
+	oldTab, err := h.store.OpenTabByID(context.Background(), uid, oldWorkSID)
+	if err != nil || oldTab.Name != "work" {
+		t.Fatalf("old HostConfig open_tab wrongly updated: %+v err=%v", oldTab, err)
+	}
+	oldTaken, err := h.srv.terms.Get(uid, oldTakenSID)
+	if err != nil || oldTaken.CurrentTmuxSession() != "taken-on-old" {
+		t.Fatalf("old taken session changed: %+v err=%v", oldTaken, err)
+	}
+	newTab, err := h.store.OpenTabByID(context.Background(), uid, newWorkSID)
+	if err != nil || newTab.Name != "taken-on-old" {
+		t.Fatalf("new HostConfig open_tab not updated: %+v err=%v", newTab, err)
+	}
+
+	// --- 2. herdr: display names and sync are also isolated by HostConfig ---
+	herdrJSON := `{"sessions":[{"name":"default","default":true,"running":true},{"name":"dev","default":false,"running":true}]}`
+	srvH1, herdrHostID := pickerHost(t, h, admin, false, "password", herdrJSON)
+	_ = srvH1
+	// Build a second herdr SSH server on another port.
+	srvH2, _ := pickerHost(t, h, admin, false, "password", herdrJSON)
+
+	r = admin.do("POST", "/api/sessions", map[string]any{"host_id": herdrHostID, "open": map[string]any{"kind": "herdr", "name": ""}})
+	mustStatus(t, r, 201, "open herdr default on cfg1")
+	hOldSID := r.json()["id"].(string)
+
+	r = admin.do("PUT", "/api/sessions/"+hOldSID+"/name", map[string]any{"name": "旧机器服务"})
+	mustStatus(t, r, 200, "rename herdr on cfg1")
+
+	// Update host to point to srvH2 (new HostConfig).
+	r = admin.do("PUT", "/api/hosts/"+jsonNumber(herdrHostID), map[string]any{
+		"name": "h-box", "address": "127.0.0.1", "port": srvH2.Addr.Port,
+		"username": "alice", "auth": "password", "password": "alice-pass",
+	})
+	mustStatus(t, r, 200, "update herdr host to srvH2")
+
+	// Probing the updated host must NOT attach cfg1's display name to cfg2's choose.herdr_sessions.
+	r = admin.do("POST", "/api/sessions", map[string]any{"host_id": herdrHostID, "open": nil})
+	mustStatus(t, r, 200, "probe herdr on cfg2")
+	var probeDoc struct {
+		Choose struct {
+			HerdrSessions []struct {
+				Name        string `json:"name"`
+				DisplayName string `json:"display_name"`
+			} `json:"herdr_sessions"`
+		} `json:"choose"`
+	}
+	if err := json.Unmarshal(r.Body, &probeDoc); err != nil {
+		t.Fatal(err)
+	}
+	for _, hs := range probeDoc.Choose.HerdrSessions {
+		if hs.DisplayName != "" {
+			t.Fatalf("cfg1 display_name leaked into cfg2 choose.herdr_sessions: %+v", probeDoc.Choose.HerdrSessions)
+		}
+	}
+
+	// Opening default herdr on cfg2 starts with empty display_name and can reuse "旧机器服务".
+	r = admin.do("POST", "/api/sessions", map[string]any{"host_id": herdrHostID, "open": map[string]any{"kind": "herdr", "name": ""}})
+	mustStatus(t, r, 201, "open herdr default on cfg2")
+	hNewSID := r.json()["id"].(string)
+	if dn, _ := r.json()["display_name"].(string); dn != "" {
+		t.Fatalf("expected empty display_name on new HostConfig, got %q", dn)
+	}
+	r = admin.do("PUT", "/api/sessions/"+hNewSID+"/name", map[string]any{"name": "旧机器服务"})
+	mustStatus(t, r, 200, "reuse name on new HostConfig")
+	r = admin.do("PUT", "/api/sessions/"+hNewSID+"/name", map[string]any{"name": "新机器服务"})
+	mustStatus(t, r, 200, "rename cfg2 herdr")
+
+	// cfg1 session display name must remain untouched.
+	hOldSess, err := h.srv.terms.Get(uid, hOldSID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hOldSess.CurrentDisplayName() != "旧机器服务" {
+		t.Fatalf("cfg1 herdr session display name was clobbered: %q", hOldSess.CurrentDisplayName())
+	}
+}
+
+func jsonNumber(f float64) string {
+	b, _ := json.Marshal(int64(f))
+	return string(b)
+}
+
+func TestConcurrentHerdrRenamePreventsDuplicate(t *testing.T) {
+	h := newHarness(t)
+	admin := h.admin()
+	_, hostID := pickerHost(t, h, admin, false, "password",
+		`{"sessions":[{"name":"default","default":true,"running":true},{"name":"dev","default":false,"running":true}]}`)
+
+	r := admin.do("POST", "/api/sessions", map[string]any{"host_id": hostID, "open": map[string]any{"kind": "herdr", "name": ""}})
+	mustStatus(t, r, 201, "open default herdr")
+	sid1 := r.json()["id"].(string)
+
+	r = admin.do("POST", "/api/sessions", map[string]any{"host_id": hostID, "open": map[string]any{"kind": "herdr", "name": "dev"}})
+	mustStatus(t, r, 201, "open dev herdr")
+	sid2 := r.json()["id"].(string)
+
+	me := admin.do("GET", "/api/me", nil)
+	mustStatus(t, me, 200, "me")
+	uid := int64(me.json()["id"].(float64))
+	s1, err := h.srv.terms.Get(uid, sid1)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for round := 0; round < 10; round++ {
+		target := "并发争抢-" + jsonNumber(float64(round))
+		start := make(chan struct{})
+		results := make([]resp, 2)
+		var wg sync.WaitGroup
+		wg.Add(2)
+		for idx, sid := range []string{sid1, sid2} {
+			go func(i int, id string) {
+				defer wg.Done()
+				<-start
+				results[i] = admin.do("PUT", "/api/sessions/"+id+"/name", map[string]any{"name": target})
+			}(idx, sid)
+		}
+		close(start)
+		wg.Wait()
+
+		okCount, conflictCount := 0, 0
+		for _, res := range results {
+			switch res.Status {
+			case 200:
+				okCount++
+			case 409:
+				if res.code() != "session_name_taken" {
+					t.Fatalf("round %d: unexpected 409 code %q: %s", round, res.code(), res.Body)
+				}
+				conflictCount++
+			default:
+				t.Fatalf("round %d: unexpected status %d: %s", round, res.Status, res.Body)
+			}
+		}
+		if okCount != 1 || conflictCount != 1 {
+			t.Fatalf("round %d: expected 1 ok and 1 conflict, got ok=%d conflict=%d", round, okCount, conflictCount)
+		}
+
+		aliases, err := h.store.ListSessionDisplayNames(context.Background(), uid, int64(hostID), s1.HostConfig, "herdr")
+		if err != nil {
+			t.Fatal(err)
+		}
+		holders := 0
+		for _, v := range aliases {
+			if v == target {
+				holders++
+			}
+		}
+		if holders != 1 {
+			t.Fatalf("round %d: expected exactly 1 holder of %q in session_names, got %+v", round, target, aliases)
+		}
 	}
 }

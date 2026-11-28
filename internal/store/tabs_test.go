@@ -232,34 +232,47 @@ func TestRenameTabAndSessionDisplayNames(t *testing.T) {
 		t.Fatalf("after RenameTab: %+v err=%v", got, err)
 	}
 
-	// Display names are scoped by (owner, host, kind, mux_session).
-	if dn, err := e.s.SessionDisplayName(e.ctx, e.user.ID, e.host.ID, PersistHerdr, "default"); err != nil || dn != "" {
+	// Display names are scoped by (owner, host, host_config, kind, mux_session).
+	if dn, err := e.s.SessionDisplayName(e.ctx, e.user.ID, e.host.ID, "cfg1", PersistHerdr, "default"); err != nil || dn != "" {
 		t.Fatalf("initial display name: %q err=%v", dn, err)
 	}
-	if err := e.s.SetSessionDisplayName(e.ctx, e.user.ID, e.host.ID, PersistHerdr, "default", "核心服务"); err != nil {
+	if err := e.s.SetSessionDisplayName(e.ctx, e.user.ID, e.host.ID, "cfg1", PersistHerdr, "default", "核心服务"); err != nil {
 		t.Fatal(err)
 	}
-	if err := e.s.SetSessionDisplayName(e.ctx, e.user.ID, e.host.ID, PersistHerdr, "dev", "测试环境"); err != nil {
+	if err := e.s.SetSessionDisplayName(e.ctx, e.user.ID, e.host.ID, "cfg1", PersistHerdr, "dev", "测试环境"); err != nil {
 		t.Fatal(err)
 	}
-	if dn, err := e.s.SessionDisplayName(e.ctx, e.user.ID, e.host.ID, PersistHerdr, "default"); err != nil || dn != "核心服务" {
-		t.Fatalf("saved display name: %q err=%v", dn, err)
+	if err := e.s.SetSessionDisplayName(e.ctx, e.user.ID, e.host.ID, "cfg2", PersistHerdr, "default", "新机器默认"); err != nil {
+		t.Fatal(err)
 	}
-	all, err := e.s.ListSessionDisplayNames(e.ctx, e.user.ID, e.host.ID, PersistHerdr)
+	if dn, err := e.s.SessionDisplayName(e.ctx, e.user.ID, e.host.ID, "cfg1", PersistHerdr, "default"); err != nil || dn != "核心服务" {
+		t.Fatalf("saved display name cfg1: %q err=%v", dn, err)
+	}
+	if dn, err := e.s.SessionDisplayName(e.ctx, e.user.ID, e.host.ID, "cfg2", PersistHerdr, "default"); err != nil || dn != "新机器默认" {
+		t.Fatalf("saved display name cfg2: %q err=%v", dn, err)
+	}
+	all, err := e.s.ListSessionDisplayNames(e.ctx, e.user.ID, e.host.ID, "cfg1", PersistHerdr)
 	if err != nil || len(all) != 2 || all["default"] != "核心服务" || all["dev"] != "测试环境" {
-		t.Fatalf("list display names: %+v err=%v", all, err)
+		t.Fatalf("list display names cfg1: %+v err=%v", all, err)
 	}
-	// Overwrite existing display name.
-	if err := e.s.SetSessionDisplayName(e.ctx, e.user.ID, e.host.ID, PersistHerdr, "default", "新名称"); err != nil {
+	all2, err := e.s.ListSessionDisplayNames(e.ctx, e.user.ID, e.host.ID, "cfg2", PersistHerdr)
+	if err != nil || len(all2) != 1 || all2["default"] != "新机器默认" {
+		t.Fatalf("list display names cfg2: %+v err=%v", all2, err)
+	}
+	// Overwrite existing display name without affecting other host_config.
+	if err := e.s.SetSessionDisplayName(e.ctx, e.user.ID, e.host.ID, "cfg1", PersistHerdr, "default", "新名称"); err != nil {
 		t.Fatal(err)
 	}
-	if dn, err := e.s.SessionDisplayName(e.ctx, e.user.ID, e.host.ID, PersistHerdr, "default"); err != nil || dn != "新名称" {
+	if dn, err := e.s.SessionDisplayName(e.ctx, e.user.ID, e.host.ID, "cfg1", PersistHerdr, "default"); err != nil || dn != "新名称" {
 		t.Fatalf("updated display name: %q err=%v", dn, err)
 	}
-	if err := e.s.DeleteSessionDisplayName(e.ctx, e.user.ID, e.host.ID, PersistHerdr, "dev"); err != nil {
+	if dn, err := e.s.SessionDisplayName(e.ctx, e.user.ID, e.host.ID, "cfg2", PersistHerdr, "default"); err != nil || dn != "新机器默认" {
+		t.Fatalf("cfg2 display name unexpectedly changed: %q err=%v", dn, err)
+	}
+	if err := e.s.DeleteSessionDisplayName(e.ctx, e.user.ID, e.host.ID, "cfg1", PersistHerdr, "dev"); err != nil {
 		t.Fatal(err)
 	}
-	if dn, err := e.s.SessionDisplayName(e.ctx, e.user.ID, e.host.ID, PersistHerdr, "dev"); err != nil || dn != "" {
+	if dn, err := e.s.SessionDisplayName(e.ctx, e.user.ID, e.host.ID, "cfg1", PersistHerdr, "dev"); err != nil || dn != "" {
 		t.Fatalf("deleted display name: %q err=%v", dn, err)
 	}
 }

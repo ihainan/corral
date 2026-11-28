@@ -214,7 +214,7 @@ func (s *Server) openSession(ctx context.Context, w http.ResponseWriter, r *http
 		if !hc.any() {
 			choice = &openChoice{Kind: openShell}
 		} else {
-			if aliases, err := s.store.ListSessionDisplayNames(ctx, u.ID, h.ID, store.PersistHerdr); err == nil && len(aliases) > 0 {
+			if aliases, err := s.store.ListSessionDisplayNames(ctx, u.ID, h.ID, cfg, store.PersistHerdr); err == nil && len(aliases) > 0 {
 				for i := range hc.HerdrList {
 					key := herdrDisplayKey(hc.HerdrList[i].Name)
 					if hc.HerdrList[i].Default {
@@ -270,7 +270,7 @@ func (s *Server) openSession(ctx context.Context, w http.ResponseWriter, r *http
 			return
 		}
 		for _, rs := range s.terms.Running(u.ID, h.ID) {
-			if rs.Persistence == store.PersistTmux {
+			if rs.HostConfig == cfg && rs.Persistence == store.PersistTmux {
 				taken = append(taken, tmuxSession{Name: rs.CurrentTmuxSession()})
 			}
 		}
@@ -293,7 +293,7 @@ func (s *Server) openSession(ctx context.Context, w http.ResponseWriter, r *http
 		opts.Persistence, opts.TmuxSession, opts.TmuxNew = store.PersistTmux, name, true
 	case openHerdr:
 		opts.Persistence, opts.HerdrSession = store.PersistHerdr, choice.Name
-		if dn, err := s.store.SessionDisplayName(ctx, u.ID, h.ID, store.PersistHerdr, herdrDisplayKey(choice.Name)); err == nil {
+		if dn, err := s.store.SessionDisplayName(ctx, u.ID, h.ID, cfg, store.PersistHerdr, herdrDisplayKey(choice.Name)); err == nil {
 			opts.DisplayName = dn
 		}
 	case openHerdrNew:
@@ -310,7 +310,7 @@ func (s *Server) openSession(ctx context.Context, w http.ResponseWriter, r *http
 		// Also the names of this host's terminals here: one just started may
 		// not be in herdr's list yet.
 		for _, rs := range s.terms.Running(u.ID, h.ID) {
-			if rs.Persistence == store.PersistHerdr {
+			if rs.HostConfig == cfg && rs.Persistence == store.PersistHerdr {
 				taken = append(taken, herdr.SessionInfo{Name: rs.Info().MuxSession})
 			}
 		}
@@ -330,7 +330,7 @@ func (s *Server) openSession(ctx context.Context, w http.ResponseWriter, r *http
 			name = newHerdrName(u.Username, taken)
 		}
 		opts.Persistence, opts.HerdrSession = store.PersistHerdr, name
-		if dn, err := s.store.SessionDisplayName(ctx, u.ID, h.ID, store.PersistHerdr, herdrDisplayKey(name)); err == nil {
+		if dn, err := s.store.SessionDisplayName(ctx, u.ID, h.ID, cfg, store.PersistHerdr, herdrDisplayKey(name)); err == nil {
 			opts.DisplayName = dn
 		}
 	}
@@ -645,7 +645,7 @@ func (s *Server) apiRenameSession(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			for _, rs := range s.terms.Running(u.ID, sess.HostID) {
-				if rs.ID != sess.ID && rs.Persistence == store.PersistTmux && rs.CurrentTmuxSession() == name {
+				if rs.ID != sess.ID && rs.HostConfig == sess.HostConfig && rs.Persistence == store.PersistTmux && rs.CurrentTmuxSession() == name {
 					writeError(w, http.StatusConflict, "session_name_taken", "a tmux session with that name already exists")
 					return
 				}
@@ -679,7 +679,7 @@ func (s *Server) apiRenameSession(w http.ResponseWriter, r *http.Request) {
 				s.log.Warn("open tabs: rename not recorded", "session", sess.ID, "err", err)
 			}
 			for _, rs := range s.terms.Running(u.ID, sess.HostID) {
-				if rs.ID != sess.ID && rs.Persistence == store.PersistTmux && rs.CurrentTmuxSession() == oldName {
+				if rs.ID != sess.ID && rs.HostConfig == sess.HostConfig && rs.Persistence == store.PersistTmux && rs.CurrentTmuxSession() == oldName {
 					rs.SetTmuxSession(name)
 					if err := s.store.RenameTab(ctx, u.ID, rs.ID, name); err != nil {
 						s.log.Warn("open tabs: peer rename not recorded", "session", rs.ID, "err", err)
@@ -705,12 +705,18 @@ func (s *Server) apiRenameSession(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "invalid_session_name", "enter a session name (1–64 characters, no control characters)")
 			return
 		}
+		unlock := s.herdrRenameMu.lock([2]int64{u.ID, sess.HostID})
+		defer unlock()
+		if sess.State() != term.StateRunning {
+			writeError(w, http.StatusConflict, "ended", "the session has ended")
+			return
+		}
 		muxKey := herdrDisplayKey(sess.HerdrSession)
 		oldDisplay := sess.CurrentDisplayName()
 		if oldDisplay == "" {
 			oldDisplay = sess.HerdrSession
 		}
-		aliases, err := s.store.ListSessionDisplayNames(r.Context(), u.ID, sess.HostID, store.PersistHerdr)
+		aliases, err := s.store.ListSessionDisplayNames(r.Context(), u.ID, sess.HostID, sess.HostConfig, store.PersistHerdr)
 		if err != nil {
 			s.internalError(w, r, err)
 			return
@@ -722,7 +728,7 @@ func (s *Server) apiRenameSession(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		for _, rs := range s.terms.Running(u.ID, sess.HostID) {
-			if rs.Persistence != store.PersistHerdr {
+			if rs.HostConfig != sess.HostConfig || rs.Persistence != store.PersistHerdr {
 				continue
 			}
 			rk := herdrDisplayKey(rs.HerdrSession)
@@ -760,13 +766,13 @@ func (s *Server) apiRenameSession(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
-		if err := s.store.SetSessionDisplayName(r.Context(), u.ID, sess.HostID, store.PersistHerdr, muxKey, name); err != nil {
+		if err := s.store.SetSessionDisplayName(r.Context(), u.ID, sess.HostID, sess.HostConfig, store.PersistHerdr, muxKey, name); err != nil {
 			s.internalError(w, r, err)
 			return
 		}
 		sess.SetDisplayName(name)
 		for _, rs := range s.terms.Running(u.ID, sess.HostID) {
-			if rs.ID != sess.ID && rs.Persistence == store.PersistHerdr && herdrDisplayKey(rs.HerdrSession) == muxKey {
+			if rs.ID != sess.ID && rs.HostConfig == sess.HostConfig && rs.Persistence == store.PersistHerdr && herdrDisplayKey(rs.HerdrSession) == muxKey {
 				rs.SetDisplayName(name)
 			}
 		}
@@ -1638,4 +1644,44 @@ func (g *keyedGate) size() int {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	return len(g.gates)
+}
+
+// keyedMutex serializes work per key (e.g. per-user per-host herdr renames)
+// without a waiter cap, cleaning up entries when no goroutine holds or waits.
+type keyedMutex struct {
+	mu    sync.Mutex
+	locks map[[2]int64]*refMutex
+}
+
+type refMutex struct {
+	mu   sync.Mutex
+	refs int
+}
+
+func (k *keyedMutex) lock(key [2]int64) func() {
+	k.mu.Lock()
+	if k.locks == nil {
+		k.locks = map[[2]int64]*refMutex{}
+	}
+	rm := k.locks[key]
+	if rm == nil {
+		rm = &refMutex{}
+		k.locks[key] = rm
+	}
+	rm.refs++
+	k.mu.Unlock()
+
+	rm.mu.Lock()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			rm.mu.Unlock()
+			k.mu.Lock()
+			rm.refs--
+			if rm.refs == 0 {
+				delete(k.locks, key)
+			}
+			k.mu.Unlock()
+		})
+	}
 }

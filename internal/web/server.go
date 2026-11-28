@@ -50,18 +50,19 @@ type Route struct {
 }
 
 type Server struct {
-	hostGate keyedGate // per host: opens, edits and forwarding dials take turns
-	cfg      *config.Config
-	store    *store.Store
-	auth     *auth.Service
-	oidc     *auth.OIDC // single sign-on (nil: not set up)
-	vault    *vault.Vault
-	guard    *netguard.Guard
-	terms    *term.Manager
-	log      *slog.Logger
-	mux      *http.ServeMux
-	routes   []Route
-	static   fs.FS
+	hostGate      keyedGate  // per host: opens, edits and forwarding dials take turns
+	herdrRenameMu keyedMutex // per (owner, host): serializes herdr display name checks and writes
+	cfg           *config.Config
+	store         *store.Store
+	auth          *auth.Service
+	oidc          *auth.OIDC // single sign-on (nil: not set up)
+	vault         *vault.Vault
+	guard         *netguard.Guard
+	terms         *term.Manager
+	log           *slog.Logger
+	mux           *http.ServeMux
+	routes        []Route
+	static        fs.FS
 
 	herdrSocks             herdrSockets
 	herdrSeenSync          sync.Map         // herdr server key → *sync.Mutex (serializes Chat→CLI seen focus sync)

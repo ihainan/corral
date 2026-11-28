@@ -115,11 +115,17 @@ func (s *Store) UpsertSubscriptionSnapshot(ctx context.Context, in SubscriptionS
 		quotaStr = string(in.QuotaJSON)
 	}
 
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
 	var (
 		exLabel, exPlan, exHostName, exHostsJSON, exQuotaJSON string
 		exHostID, exUpdatedAt, exSeenAt, exLastRefresh        int64
 	)
-	err := s.db.QueryRowContext(ctx,
+	err = tx.QueryRowContext(ctx,
 		`SELECT account_label, plan, host_id, host_name, hosts_json, quota_json, updated_at, seen_at, last_refresh_at
 		 FROM subscription_snapshots
 		 WHERE owner_id = ? AND provider = ? AND account_key = ?`,
@@ -132,14 +138,17 @@ func (s *Store) UpsertSubscriptionSnapshot(ctx context.Context, in SubscriptionS
 		if err != nil {
 			return err
 		}
-		_, err = s.db.ExecContext(ctx,
+		_, err = tx.ExecContext(ctx,
 			`INSERT INTO subscription_snapshots
 			 (owner_id, provider, account_key, account_label, plan, host_id, host_name, hosts_json, quota_json, updated_at, seen_at, last_refresh_at)
 			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			in.OwnerID, in.Provider, in.AccountKey, in.AccountLabel, in.Plan,
+			in.OwnerID, in.Provider, in.AccountKey, strings.TrimSpace(in.AccountLabel), strings.TrimSpace(in.Plan),
 			in.HostID, in.HostName, string(hostsBytes), quotaStr, updatedAt, seenAt, in.LastRefreshAt,
 		)
-		return err
+		if err != nil {
+			return err
+		}
+		return tx.Commit()
 	}
 	if err != nil {
 		return err
@@ -147,6 +156,9 @@ func (s *Store) UpsertSubscriptionSnapshot(ctx context.Context, in SubscriptionS
 
 	var existingHosts []SubscriptionHost
 	_ = json.Unmarshal([]byte(exHostsJSON), &existingHosts)
+	for _, h := range in.Hosts {
+		existingHosts = mergeSubscriptionHosts(existingHosts, h.HostID, h.HostName, h.SeenAt)
+	}
 	mergedHosts := mergeSubscriptionHosts(existingHosts, in.HostID, in.HostName, seenAt)
 	hostsBytes, err := json.Marshal(mergedHosts)
 	if err != nil {
@@ -154,12 +166,12 @@ func (s *Store) UpsertSubscriptionSnapshot(ctx context.Context, in SubscriptionS
 	}
 
 	finalLabel := exLabel
-	if strings.TrimSpace(in.AccountLabel) != "" {
-		finalLabel = strings.TrimSpace(in.AccountLabel)
+	if lbl := strings.TrimSpace(in.AccountLabel); lbl != "" && (updatedAt >= exUpdatedAt || exLabel == "") {
+		finalLabel = lbl
 	}
 	finalPlan := exPlan
-	if strings.TrimSpace(in.Plan) != "" {
-		finalPlan = strings.TrimSpace(in.Plan)
+	if pl := strings.TrimSpace(in.Plan); pl != "" && (updatedAt >= exUpdatedAt || exPlan == "") {
+		finalPlan = pl
 	}
 	finalHostID := exHostID
 	finalHostName := exHostName
@@ -180,14 +192,17 @@ func (s *Store) UpsertSubscriptionSnapshot(ctx context.Context, in SubscriptionS
 		finalSeenAt = seenAt
 	}
 
-	_, err = s.db.ExecContext(ctx,
+	_, err = tx.ExecContext(ctx,
 		`UPDATE subscription_snapshots
 		 SET account_label = ?, plan = ?, host_id = ?, host_name = ?, hosts_json = ?, quota_json = ?, updated_at = ?, seen_at = ?
-		 WHERE owner_id = ? AND provider = ? AND account_key = ?`,
+		 WHERE owner_id = ? AND provider = ? AND account_key = ? AND updated_at = ?`,
 		finalLabel, finalPlan, finalHostID, finalHostName, string(hostsBytes), finalQuota, finalUpdatedAt, finalSeenAt,
-		in.OwnerID, in.Provider, in.AccountKey,
+		in.OwnerID, in.Provider, in.AccountKey, exUpdatedAt,
 	)
-	return err
+	if err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func scanSubscriptionSnapshot(row interface{ Scan(...any) error }) (*SubscriptionSnapshot, error) {
@@ -281,4 +296,18 @@ func (s *Store) TryClaimSubscriptionRefresh(ctx context.Context, ownerID int64, 
 		retryAfter = 1
 	}
 	return false, retryAfter, nextAt, nil
+}
+
+// ResetSubscriptionRefresh rolls back a claimed refresh timestamp when a
+// manual refresh did not actually target this account (e.g. the host is now
+// signed in to a different account). Only updates when last_refresh_at still
+// matches claimedAt so a newer refresh claim is never clobbered.
+func (s *Store) ResetSubscriptionRefresh(ctx context.Context, ownerID int64, provider, accountKey string, claimedAt, restoreTo int64) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE subscription_snapshots
+		 SET last_refresh_at = ?
+		 WHERE owner_id = ? AND provider = ? AND account_key = ? AND last_refresh_at = ?`,
+		restoreTo, ownerID, provider, accountKey, claimedAt,
+	)
+	return err
 }

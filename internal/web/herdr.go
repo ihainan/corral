@@ -858,6 +858,7 @@ func (s *Server) watchHerdr(sess *term.Session, h *store.Host) {
 		}
 		return got, parseBgSubScan(string(out)), parseBgIDs(string(out)), whole, nil
 	})
+	cmds.setSocket(socket)
 	s.herdrSocks.setCmds(sess.ID, cmds)
 	go cmds.run(ctx)
 	titles := newCodexTitler(func(ctx context.Context) (map[string]string, error) {

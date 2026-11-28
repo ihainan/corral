@@ -18,6 +18,7 @@ const {
   providerDisplayName,
   providerIconProgram,
   subscriptionHostsSummary,
+  subscriptionRefreshErrorKey,
   sortSubscriptions,
 } = await import(`data:text/javascript;base64,${Buffer.from(outputText).toString('base64')}`)
 
@@ -82,5 +83,10 @@ assert.deepEqual(
   sorted.map((x) => x.account_key),
   ['fresh-new', 'fresh-old', 'stale-new', 'stale-old'],
 )
+
+// Manual refresh error code mapping.
+assert.equal(subscriptionRefreshErrorKey('account_changed'), 'subs.accountChanged')
+assert.equal(subscriptionRefreshErrorKey('host_offline'), 'subs.hostOfflineHint')
+assert.equal(subscriptionRefreshErrorKey('refresh_failed'), null)
 
 console.log('subscriptions: all tests passed')

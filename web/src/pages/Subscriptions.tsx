@@ -16,6 +16,7 @@ import {
   refreshCooldownRemaining,
   sortSubscriptions,
   subscriptionHostsSummary,
+  subscriptionRefreshErrorKey,
   subscriptionWindowState,
   type SubQuotaWindow,
   type SubscriptionItem,
@@ -221,8 +222,16 @@ export function SubscriptionsSection({ heading = true }: { heading?: boolean } =
         }
         const wait = formatCooldownShort(extra?.retry_after ?? 60, getLang())
         toast(t('subs.cooldownWait', { d: wait }), true)
-      } else if (err instanceof ApiError && err.code === 'host_offline') {
-        toast(t('subs.hostOfflineHint'), true)
+      } else if (err instanceof ApiError) {
+        const key = subscriptionRefreshErrorKey(err.code)
+        if (key) {
+          toast(t(key), true)
+          if (err.code === 'account_changed') {
+            void load()
+          }
+        } else {
+          toast(errorText(err), true)
+        }
       } else {
         toast(errorText(err), true)
       }

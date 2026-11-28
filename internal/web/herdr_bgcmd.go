@@ -146,6 +146,9 @@ type cmdProber struct {
 	// told only while someone reads them (a tmux session's chat): none read,
 	// no looks.
 	forget time.Duration
+	// socket: the herdr server socket this prober decorates summaries for,
+	// so live-pane dedup only suppresses CLIs running on the same server.
+	socket string
 }
 
 type cmdPane struct {
@@ -176,6 +179,12 @@ func newCmdSubProber(scan func(ctx context.Context, watched []string) (map[strin
 func (p *cmdProber) setPoke(f func()) {
 	p.mu.Lock()
 	p.poke = f
+	p.mu.Unlock()
+}
+
+func (p *cmdProber) setSocket(socket string) {
+	p.mu.Lock()
+	p.socket = socket
 	p.mu.Unlock()
 }
 
@@ -304,7 +313,7 @@ func (p *cmdProber) decorate(sum *herdrSummary) {
 	for i := range sum.Workspaces {
 		for j := range sum.Workspaces[i].Agents {
 			a := &sum.Workspaces[i].Agents[j]
-			activeCmds := filterLivePaneBgCLIs(p.activeCmdsLocked(a.PaneID, a.Session), a.PaneID, livePanes)
+			activeCmds := filterLivePaneBgCLIs(p.activeCmdsLocked(a.PaneID, a.Session), a.PaneID, p.socket, livePanes)
 			plain, cliSubs := splitBgCmds(activeCmds)
 			if len(plain) > 0 {
 				a.BgCmds, a.BgCmdList = len(plain), plain[:min(len(plain), maxCmdsShown)]
@@ -330,10 +339,11 @@ func (p *cmdProber) decorate(sum *herdrSummary) {
 }
 
 // filterLivePaneBgCLIs removes CLI entries that already live in their own
-// distinct herdr pane in the current summary so they are shown as nested herdr
-// panes via lineageTracker rather than duplicated as background CLI rows.
-func filterLivePaneBgCLIs(cmds []bgCmd, parentPane string, livePanes map[string]bool) []bgCmd {
-	if len(cmds) == 0 || len(livePanes) == 0 {
+// distinct herdr pane on the same herdr server socket in the current summary so
+// they are shown as nested herdr panes via lineageTracker rather than
+// duplicated as background CLI rows.
+func filterLivePaneBgCLIs(cmds []bgCmd, parentPane, socket string, livePanes map[string]bool) []bgCmd {
+	if len(cmds) == 0 || len(livePanes) == 0 || socket == "" {
 		return cmds
 	}
 	var out []bgCmd
@@ -344,7 +354,7 @@ func filterLivePaneBgCLIs(cmds []bgCmd, parentPane string, livePanes map[string]
 		}
 		var kept []bgCLI
 		for _, cli := range c.clis {
-			if cli.HerdrPane != "" && cli.HerdrPane != parentPane && livePanes[cli.HerdrPane] {
+			if cli.HerdrPane != "" && cli.HerdrSocket == socket && cli.HerdrPane != parentPane && livePanes[cli.HerdrPane] {
 				continue
 			}
 			kept = append(kept, cli)

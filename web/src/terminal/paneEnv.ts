@@ -74,6 +74,7 @@ export type PaneEnvReasonKey =
   | 'card.envReasonNoProcess'
   | 'card.envReasonHerdr'
   | 'card.envReasonUnsupported'
+  | 'card.envReasonPaneNotInSession'
   | 'card.envReasonFailed'
 
 export function envReasonKey(reason?: string): PaneEnvReasonKey {
@@ -88,7 +89,129 @@ export function envReasonKey(reason?: string): PaneEnvReasonKey {
       return 'card.envReasonHerdr'
     case 'unsupported_mode':
       return 'card.envReasonUnsupported'
+    case 'pane_not_in_session':
+      return 'card.envReasonPaneNotInSession'
     default:
       return 'card.envReasonFailed'
+  }
+}
+
+// Epoch-guarded reveal state machine so late POST /pane-env/reveal responses
+// from before a collapse, session/pane switch, reload, or hide are always
+// discarded and never re-expose masked secrets.
+
+export interface PaneEnvRevealToken {
+  epoch: number
+  seq: number
+}
+
+export interface PaneEnvRevealState {
+  epoch: number
+  revealed: Record<string, string>
+  revealing: Record<string, number>
+  hiddenSeq: Record<string, number>
+  nextSeq: number
+  error: boolean
+}
+
+export function createPaneEnvRevealState(): PaneEnvRevealState {
+  return {
+    epoch: 0,
+    revealed: {},
+    revealing: {},
+    hiddenSeq: {},
+    nextSeq: 1,
+    error: false,
+  }
+}
+
+export function resetPaneEnvReveal(state: PaneEnvRevealState): PaneEnvRevealState {
+  return {
+    epoch: state.epoch + 1,
+    revealed: {},
+    revealing: {},
+    hiddenSeq: {},
+    nextSeq: state.nextSeq,
+    error: false,
+  }
+}
+
+export function startPaneEnvReveal(
+  state: PaneEnvRevealState,
+  name: string,
+): { state: PaneEnvRevealState; token: PaneEnvRevealToken | null } {
+  if (Object.prototype.hasOwnProperty.call(state.revealing, name)) {
+    return { state, token: null }
+  }
+  const seq = state.nextSeq
+  return {
+    state: {
+      ...state,
+      revealing: { ...state.revealing, [name]: seq },
+      nextSeq: seq + 1,
+      error: false,
+    },
+    token: { epoch: state.epoch, seq },
+  }
+}
+
+export function isPaneEnvRevealCurrent(
+  state: PaneEnvRevealState,
+  name: string,
+  token: PaneEnvRevealToken,
+): boolean {
+  if (state.epoch !== token.epoch) return false
+  if (state.revealing[name] !== token.seq) return false
+  if ((state.hiddenSeq[name] ?? 0) >= token.seq) return false
+  return true
+}
+
+export function finishPaneEnvReveal(
+  state: PaneEnvRevealState,
+  name: string,
+  token: PaneEnvRevealToken,
+  value: string,
+): PaneEnvRevealState {
+  if (!isPaneEnvRevealCurrent(state, name, token)) return state
+  const nextRevealing = { ...state.revealing }
+  delete nextRevealing[name]
+  return {
+    ...state,
+    revealed: { ...state.revealed, [name]: value },
+    revealing: nextRevealing,
+    error: false,
+  }
+}
+
+export function failPaneEnvReveal(
+  state: PaneEnvRevealState,
+  name: string,
+  token: PaneEnvRevealToken,
+): PaneEnvRevealState {
+  if (!isPaneEnvRevealCurrent(state, name, token)) return state
+  const nextRevealing = { ...state.revealing }
+  delete nextRevealing[name]
+  return {
+    ...state,
+    revealing: nextRevealing,
+    error: true,
+  }
+}
+
+export function hidePaneEnvVar(state: PaneEnvRevealState, name: string): PaneEnvRevealState {
+  const hasRevealed = Object.prototype.hasOwnProperty.call(state.revealed, name)
+  const hasRevealing = Object.prototype.hasOwnProperty.call(state.revealing, name)
+  if (!hasRevealed && !hasRevealing) return state
+  const nextRevealed = hasRevealed ? { ...state.revealed } : state.revealed
+  if (hasRevealed) delete nextRevealed[name]
+  const nextRevealing = hasRevealing ? { ...state.revealing } : state.revealing
+  if (hasRevealing) delete nextRevealing[name]
+  const seq = state.nextSeq
+  return {
+    ...state,
+    revealed: nextRevealed,
+    revealing: nextRevealing,
+    hiddenSeq: { ...state.hiddenSeq, [name]: seq },
+    nextSeq: seq + 1,
   }
 }
