@@ -158,7 +158,8 @@ function SubscriptionCard({
   )
 }
 
-export function SubscriptionsSection() {
+// heading: false on the standalone page, whose page head already names it.
+export function SubscriptionsSection({ heading = true }: { heading?: boolean } = {}) {
   const toast = useToast()
   const [items, setItems] = useState<SubscriptionItem[] | null>(null)
   const [failed, setFailed] = useState(false)
@@ -233,7 +234,7 @@ export function SubscriptionsSection() {
   return (
     <section className="section subs-section">
       <div className="subs-head">
-        <h2>{t('subs.title')}</h2>
+        {heading && <h2>{t('subs.title')}</h2>}
         <p className="hint">{t('subs.intro')}</p>
       </div>
       {failed ? (
@@ -271,7 +272,7 @@ export function SubscriptionsPage() {
         </button>
         <h1>{t('subs.title')}</h1>
       </div>
-      <SubscriptionsSection />
+      <SubscriptionsSection heading={false} />
     </main>
   )
 }
