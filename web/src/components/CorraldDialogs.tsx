@@ -3,8 +3,11 @@ import { Check, Copy } from 'lucide-react'
 import { ApiError, errorText, type Host } from '../api'
 import {
   deleteHostWithOptions,
+  getCorraldChangelog,
   getCorraldReadme,
   getHostCorrald,
+  markCorraldChangelogSeen,
+  type CorraldChangelog,
   type CorraldLeftItem,
   type CorraldReadme,
   type CorraldStatus,
@@ -21,7 +24,7 @@ import {
   type CorraldRemoveOutcome,
   type DeleteHostOutcome,
 } from '../corraldLogic'
-import { hasKey, t, type I18nKey } from '../i18n'
+import { getLang, hasKey, t, type I18nKey } from '../i18n'
 import { Alert, copyText, Dialog, DialogHead, LoadError, useToast } from './ui'
 import { Markdown } from '../terminal/markdown'
 
@@ -230,6 +233,93 @@ export function CorraldReadmeDialog({ onClose, onBack }: { onClose: () => void; 
             {t('common.back')}
           </button>
         )}
+        <button type="button" className="btn btn-primary" onClick={onClose}>
+          {t('common.close')}
+        </button>
+      </div>
+    </Dialog>
+  )
+}
+
+// Release notes dialog backed by GET /api/corrald/changelog.
+// Displays the current version and any versions released since the user last
+// viewed release notes; marks the current version as seen once loaded.
+export function CorraldChangelogDialog({ currentVersion, onClose }: { currentVersion?: string; onClose: () => void }) {
+  const [data, setData] = useState<CorraldChangelog | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [failed, setFailed] = useState(false)
+
+  const load = useCallback(
+    (signal?: AbortSignal) => {
+      setLoading(true)
+      setFailed(false)
+      getCorraldChangelog(currentVersion, signal)
+        .then((res) => {
+          setData(res)
+          setLoading(false)
+          if (res.current_version) {
+            void markCorraldChangelogSeen(res.current_version, res.current_release).catch(() => {})
+          }
+        })
+        .catch((e) => {
+          if (e instanceof ApiError && e.code === 'aborted') return
+          setFailed(true)
+          setLoading(false)
+        })
+    },
+    [currentVersion],
+  )
+
+  useEffect(() => {
+    const ctl = new AbortController()
+    load(ctl.signal)
+    return () => ctl.abort()
+  }, [load])
+
+  const lang = getLang()
+  const isZh = lang.toLowerCase().startsWith('zh')
+  const entries = (data?.entries ?? []).filter((entry) => {
+    const lines = isZh ? (entry.zh?.length ? entry.zh : entry.en) : (entry.en?.length ? entry.en : entry.zh)
+    return Array.isArray(lines) && lines.length > 0
+  })
+
+  return (
+    <Dialog title={t('corrald.changelogTitle')} onClose={onClose} wide hideTitle className="dlg corrald-readme-dialog">
+      <DialogHead title={t('corrald.changelogTitle')} onClose={onClose} />
+      <div className="dlg-body">
+        {loading ? (
+          <p className="loading">{t('common.loading')}</p>
+        ) : failed ? (
+          <LoadError onRetry={() => load()} />
+        ) : entries.length === 0 ? (
+          <p className="hint">{t('corrald.changelogEmpty')}</p>
+        ) : (
+          <div className="corrald-changelog">
+            {entries.map((entry, idx) => {
+              const lines = isZh ? (entry.zh?.length ? entry.zh : entry.en) : (entry.en?.length ? entry.en : entry.zh)
+              const isCurrent =
+                idx === 0 &&
+                !!data?.current_version &&
+                (entry.version === data.current_version ||
+                  entry.version.replace(/^v/, '') === data.current_version.replace(/^v/, '').split('-')[0])
+              return (
+                <section className="corrald-changelog-ver" key={entry.version}>
+                  <h3>
+                    <span>{entry.version}</span>
+                    {isCurrent && <span className="corrald-changelog-tag">{t('corrald.changelogCurrent')}</span>}
+                  </h3>
+                  <ul>
+                    {lines.map((line, i) => (
+                      <li key={i}>{line}</li>
+                    ))}
+                  </ul>
+                </section>
+              )
+            })}
+          </div>
+        )}
+      </div>
+      <div className="dlg-foot">
         <button type="button" className="btn btn-primary" onClick={onClose}>
           {t('common.close')}
         </button>

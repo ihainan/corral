@@ -33,7 +33,7 @@ type ArchBinary struct {
 }
 
 // Dist holds the loaded corrald distribution binaries, checksums, version
-// metadata, and capability manifest served by the gateway.
+// metadata, capability manifest, and release changelog served by the gateway.
 type Dist struct {
 	Dir          string
 	Version      string
@@ -42,6 +42,7 @@ type Dist struct {
 	Protocol     int
 	Manifest     proto.Manifest
 	ManifestHash string
+	Changelog    []proto.ChangelogEntry
 	Binaries     map[string]*ArchBinary
 }
 
@@ -153,6 +154,29 @@ func LoadDist(dir string) (*Dist, error) {
 		return nil, fmt.Errorf("hash manifest: %w", err)
 	}
 	d.ManifestHash = mh
+
+	// Read release changelog: prefer changelog.json sidecar if present,
+	// otherwise execute the native Linux binary's `changelog` subcommand,
+	// falling back to the compiled-in proto.Changelog().
+	changelogPath := filepath.Join(dir, "changelog.json")
+	if raw, err := os.ReadFile(changelogPath); err == nil {
+		var entries []proto.ChangelogEntry
+		if err := json.Unmarshal(raw, &entries); err != nil {
+			return nil, fmt.Errorf("parse %s: %w", changelogPath, err)
+		}
+		d.Changelog = entries
+	} else if native, ok := nativeBinary(bins); ok {
+		if out, err := runLocalBinaryRaw(native.Path, "changelog"); err == nil {
+			var entries []proto.ChangelogEntry
+			if json.Unmarshal(bytes.TrimSpace(out), &entries) == nil {
+				d.Changelog = entries
+			}
+		}
+	}
+	if d.Changelog == nil {
+		d.Changelog = proto.Changelog()
+	}
+
 	return d, nil
 }
 

@@ -19,7 +19,9 @@ const {
   corraldStatusBarModel,
   degradedCaps,
   detectCorraldTransition,
+  formatPerfSeconds,
   formatRssMb,
+  groupCorraldUpdateNotices,
   hasInstalledCorrald,
   isCorraldUnknownResult,
   isOpActive,
@@ -458,6 +460,55 @@ function baseStatus(overrides = {}) {
   assert.ok(diag.includes('host: dev2'))
   assert.ok(diag.includes('error: start_failed'))
   assert.ok(diag.includes('system: linux/arm64'))
+}
+
+// 9. Phase 2a: measured latency comparison thresholds, formatting, and update notice merging.
+{
+  assert.equal(formatPerfSeconds(300), '0.3')
+  assert.equal(formatPerfSeconds(1900), '1.9')
+  assert.equal(formatPerfSeconds(40), '0.04')
+  assert.equal(formatPerfSeconds(0), '0.0')
+
+  const mPerf = corraldSectionModel(
+    baseStatus({
+      state: 'running',
+      version: '0.3.2',
+      perf_comparison: [
+        { op: 'send', after_ms: 300, before_ms: 1900, after_n: 25, before_n: 30 },
+        { op: 'card', after_ms: 400, before_ms: 2000, after_n: 19, before_n: 25 }, // < 20 must be filtered out
+      ],
+    }),
+  )
+  assert.equal(mPerf.perfComparison.length, 1)
+  assert.equal(mPerf.perfComparison[0].op, 'send')
+  assert.equal(mPerf.showChangelogLink, true)
+
+  const mAdminOff = corraldSectionModel(
+    baseStatus({
+      state: 'running',
+      admin_disabled: true,
+      perf_comparison: [{ op: 'send', after_ms: 300, before_ms: 1900, after_n: 30, before_n: 30 }],
+    }),
+  )
+  assert.equal(mAdminOff.perfComparison.length, 0)
+  assert.equal(mAdminOff.showChangelogLink, false)
+
+  const grouped = groupCorraldUpdateNotices([
+    { id: 1, host_id: 10, host_name: 'a', old_version: '0.3.0', new_version: '0.3.1', new_release: 1000, success: true, created_at: 100 },
+    { id: 2, host_id: 11, host_name: 'b', old_version: '0.3.1', new_version: '0.3.2', new_release: 2000, success: true, created_at: 110 },
+    { id: 3, host_id: 10, host_name: 'a', old_version: '0.3.1', new_version: '0.3.2', new_release: 2000, success: true, created_at: 120 },
+    { id: 4, host_id: 12, host_name: 'c', old_version: '0.3.1', new_version: '0.3.2', new_release: 2000, success: false, created_at: 125 },
+    { id: 5, host_id: 13, host_name: 'd', old_version: '0.3.1', new_version: '0.3.2', new_release: 2000, success: false, created_at: 130 },
+  ])
+  assert.deepEqual(grouped.allIds, [1, 2, 3, 4, 5])
+  assert.deepEqual(grouped.mergedSuccess, {
+    version: '0.3.2',
+    hostCount: 2, // distinct hosts 10 and 11
+    ids: [1, 2, 3],
+  })
+  assert.equal(grouped.failures.length, 2)
+  assert.equal(grouped.failures[0].host_name, 'c')
+  assert.equal(grouped.failures[1].host_name, 'd')
 }
 
 console.log('test-corrald.mjs: all assertions passed')

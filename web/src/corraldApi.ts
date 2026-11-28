@@ -1,14 +1,20 @@
 // REST client for the host helper daemon (corrald), matching spec section 8.
 import { api, ApiError } from './api'
 import type {
+  CorraldAdminPolicy,
+  CorraldChangelog,
   CorraldOp,
   CorraldStatus,
+  CorraldUpdateNotice,
   DeleteHostOptions,
   DeleteHostResult,
 } from './corraldLogic'
 
 export type {
   CorraldActionId,
+  CorraldAdminPolicy,
+  CorraldChangelog,
+  CorraldChangelogEntry,
   CorraldConsent,
   CorraldError,
   CorraldFailureKind,
@@ -17,6 +23,7 @@ export type {
   CorraldOp,
   CorraldOpKind,
   CorraldOpState,
+  CorraldPerfCompareItem,
   CorraldProgressModel,
   CorraldRemoveOutcome,
   CorraldRunning,
@@ -27,10 +34,12 @@ export type {
   CorraldStatus,
   CorraldStatusBarModel,
   CorraldTransition,
+  CorraldUpdateNotice,
   CorraldUsers,
   DeleteHostOptions,
   DeleteHostOutcome,
   DeleteHostResult,
+  GroupedCorraldUpdateNotices,
 } from './corraldLogic'
 
 export interface CorraldReadme {
@@ -93,6 +102,41 @@ export async function deleteHostWithOptions(
 
 export async function getCorraldReadme(signal?: AbortSignal): Promise<CorraldReadme> {
   return api<CorraldReadme>('GET', '/api/corrald/readme', undefined, { signal })
+}
+
+export async function getCorraldChangelog(version?: string, signal?: AbortSignal): Promise<CorraldChangelog> {
+  const qs = version ? `?version=${encodeURIComponent(version)}` : ''
+  return api<CorraldChangelog>('GET', '/api/corrald/changelog' + qs, undefined, { signal })
+}
+
+export async function markCorraldChangelogSeen(version: string, release?: number): Promise<void> {
+  await api('POST', '/api/corrald/changelog/seen', { version, ...(release ? { release } : {}) })
+}
+
+export async function getCorraldNotices(signal?: AbortSignal): Promise<CorraldUpdateNotice[]> {
+  const res = await api<{ notices?: CorraldUpdateNotice[] }>('GET', '/api/corrald/notices', undefined, { signal })
+  return Array.isArray(res?.notices) ? res.notices : []
+}
+
+export async function markCorraldNoticesSeen(ids: number[]): Promise<void> {
+  if (ids.length === 0) return
+  await api('POST', '/api/corrald/notices/seen', { ids })
+}
+
+export async function getAdminCorraldPolicy(signal?: AbortSignal): Promise<CorraldAdminPolicy> {
+  return api<CorraldAdminPolicy>('GET', '/api/admin/corrald', undefined, { signal })
+}
+
+export async function setAdminCorraldPolicy(allowed: boolean): Promise<CorraldAdminPolicy> {
+  return api<CorraldAdminPolicy>('PUT', '/api/admin/corrald', { allowed })
+}
+
+export const CORRALD_NOTICES_EVENT = 'corral.corraldNoticesRefresh'
+
+export function triggerCorraldNoticesCheck() {
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent(CORRALD_NOTICES_EVENT))
+  }
 }
 
 // Lightweight shared pub/sub cache per host so HostEdit and the workbench

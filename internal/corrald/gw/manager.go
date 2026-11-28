@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/crypto/ssh"
@@ -84,6 +85,7 @@ type ManagerConfig struct {
 	// Callbacks (optional; can also be set via SetWatchCallbacks).
 	OnAgentChanged    func(hostIDs []int64, ev proto.AgentChangedEventData)
 	OnCoverageChanged func(hostIDs []int64)
+	PerfCompare       func(ctx context.Context, hostID, consentAt int64) []PerfCompareItem
 
 	// Test hooks (nil in production).
 	ProbeOverride      func(ctx context.Context, c *ssh.Client) (*HostProbe, error)
@@ -164,6 +166,7 @@ type StatusResponse struct {
 	Files                 []string          `json:"files"`
 	CanReplaceWithGateway bool              `json:"can_replace_with_gateway,omitempty"`
 	MachineID             string            `json:"machine_id,omitempty"`
+	PerfComparison        []PerfCompareItem `json:"perf_comparison,omitempty"`
 }
 
 // DeleteCorraldOutcome is returned inside DELETE /api/hosts/{id}.
@@ -328,7 +331,7 @@ type Manager struct {
 	ssh                 SSHProvider
 	gatewayID           string
 	gatewayVersion      string
-	adminDisabled       bool
+	adminDisabled       atomic.Bool
 	healthInterval      time.Duration
 	restartBackoffs     []time.Duration
 	crashWindow         time.Duration
@@ -416,7 +419,6 @@ func NewManager(cfg ManagerConfig) *Manager {
 		ssh:                 cfg.SSH,
 		gatewayID:           cfg.GatewayID,
 		gatewayVersion:      cfg.GatewayVersion,
-		adminDisabled:       cfg.AdminDisabled,
 		healthInterval:      cfg.HealthInterval,
 		restartBackoffs:     cfg.RestartBackoffs,
 		crashWindow:         cfg.CrashWindow,
@@ -437,6 +439,7 @@ func NewManager(cfg ManagerConfig) *Manager {
 		opsByHost:           make(map[int64]*runningOp),
 		opsByAcct:           make(map[accountKey]*runningOp),
 	}
+	mgr.adminDisabled.Store(cfg.AdminDisabled)
 	// Startup recovery: clear any orphaned active_op_id left behind if a
 	// previous gateway process crashed after finalizing corrald_ops.
 	if cfg.Store != nil {
@@ -517,7 +520,7 @@ func (m *Manager) ClientForCap(userID, hostID int64, capName string) (*Client, b
 }
 
 func (m *Manager) clientAndConnForCap(userID, hostID int64, capName string) (*Client, *sharedConn, bool) {
-	if m == nil || m.adminDisabled || !m.Available() {
+	if m == nil || m.AdminDisabled() || !m.Available() {
 		return nil, nil, false
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -702,7 +705,7 @@ func (m *Manager) Status(ctx context.Context, userID, hostID int64) (*StatusResp
 		GatewayVersion:  dist.Version,
 		ManifestHash:    dist.ManifestHash,
 		EstimatedSizeMB: dist.EstimatedSizeMB(),
-		AdminDisabled:   m.adminDisabled,
+		AdminDisabled:   m.AdminDisabled(),
 		Files:           []string{},
 	}
 
@@ -862,6 +865,12 @@ func (m *Manager) Status(ctx context.Context, userID, hostID int64) (*StatusResp
 		}
 	}
 
+	if canSeeShared && !m.AdminDisabled() && (res.State == StateRunning || res.State == StateStopped) && ch.ConsentAt > 0 {
+		if cmp := m.computeStatusPerfComparison(ctx, hostID, ch.ConsentAt); len(cmp) > 0 {
+			res.PerfComparison = cmp
+		}
+	}
+
 	return res, nil
 }
 
@@ -871,7 +880,7 @@ func (m *Manager) StartInstall(ctx context.Context, userID, hostID int64, corral
 	if dist == nil {
 		return nil, ErrUnavailable
 	}
-	if m.adminDisabled {
+	if m.AdminDisabled() {
 		return nil, ErrAdminDisabled
 	}
 	manifestHash = strings.TrimSpace(manifestHash)
@@ -1092,6 +1101,9 @@ func (m *Manager) Resume(ctx context.Context, userID, hostID int64, corralUser s
 	if !m.Available() {
 		return ErrUnavailable
 	}
+	if m.AdminDisabled() {
+		return ErrAdminDisabled
+	}
 	ch, err := m.store.CorraldHost(ctx, userID, hostID)
 	if err != nil {
 		return ErrInvalidState
@@ -1208,7 +1220,7 @@ func (m *Manager) StartUpdate(ctx context.Context, userID, hostID int64, corralU
 	if dist == nil {
 		return nil, ErrUnavailable
 	}
-	if m.adminDisabled {
+	if m.AdminDisabled() {
 		return nil, ErrAdminDisabled
 	}
 	manifestHash = strings.TrimSpace(manifestHash)
@@ -1347,7 +1359,7 @@ func (m *Manager) Retry(ctx context.Context, userID, hostID int64, corralUser st
 	if dist == nil {
 		return nil, ErrUnavailable
 	}
-	if m.adminDisabled {
+	if m.AdminDisabled() {
 		return nil, ErrAdminDisabled
 	}
 	ch, err := m.store.CorraldHost(ctx, userID, hostID)
@@ -1506,7 +1518,16 @@ func (m *Manager) onHostConnectedOwned(ctx context.Context, userID, hostID int64
 		return
 	}
 
-	if m.adminDisabled {
+	if m.AdminDisabled() {
+		if ch.State == StateRemovePending || ch.State == StateRemoving {
+			if CheckBinding(toSnapshot(ch), fingerprint, sshUser, m.gatewayID) {
+				acct := accountKey{Fingerprint: fingerprint, Username: sshUser}
+				if !m.hasRunningOp(hostID, acct) {
+					activeOp, _ := m.store.ActiveCorraldOp(ctx, hostID)
+					m.reconcileHost(ctx, userID, hostID, corralUser, fingerprint, sshUser, sshClient, ch, activeOp)
+				}
+			}
+		}
 		return
 	}
 
@@ -2559,11 +2580,15 @@ func (m *Manager) runUpdateOp(ctx context.Context, rop *runningOp, op *store.Cor
 		// Arm crash-loop rollback window using ONLY the actual running hello
 		// version/release and window start time (rollback target is computed
 		// dynamically at rollback time by SelectStartBinary).
+		var coldActualVer string
+		var coldActualRel int64
 		if curSC := m.sharedConnForHost(hostID, fp, sshUser); curSC != nil {
 			curSC.mu.Lock()
 			newHello := curSC.hello
 			curSC.mu.Unlock()
 			if newHello != nil {
+				coldActualVer = newHello.Version
+				coldActualRel = newHello.Release
 				readyTime := time.Now()
 				win := computePostUpdateCrashWindow(readyTime.Unix(), newHello.Version, newHello.Release, prevRel)
 				if win.ReadyAt > 0 {
@@ -2585,7 +2610,13 @@ func (m *Manager) runUpdateOp(ctx context.Context, rop *runningOp, op *store.Cor
 			}
 		}
 		op.State = OpDone
-		_, _ = m.store.UpdateCorraldOpIfActive(context.Background(), op)
+		if updated, _ := m.store.UpdateCorraldOpIfActive(context.Background(), op); updated {
+			if coldActualVer == "" {
+				coldActualVer = dist.Version
+				coldActualRel = dist.Release
+			}
+			m.recordUpdateNotices(hostID, fp, sshUser, prevVer, coldActualVer, coldActualRel, true)
+		}
 	}
 
 	if client == nil || client.Closed() {
@@ -2796,6 +2827,13 @@ func (m *Manager) runUpdateOp(ctx context.Context, rop *runningOp, op *store.Cor
 			context.Background(), hostID, fp, sshUser,
 			win.ReadyAt, win.TargetVer, win.TargetRel, "", 0, "", 0,
 		)
+		notifiedVer := actualVer
+		notifiedRel := actualRel
+		if notifiedVer == "" {
+			notifiedVer = dist.Version
+			notifiedRel = dist.Release
+		}
+		m.recordUpdateNotices(hostID, fp, sshUser, prevVer, notifiedVer, notifiedRel, true)
 	}
 	if sc != nil {
 		m.scheduleWatchReconcile(sc)
@@ -2821,7 +2859,9 @@ func (m *Manager) finishUpdateFailKeepPrev(op *store.CorraldOp, ch *store.Corral
 	op.Detail = encodeOpDetail(opDetailPayload{Message: detail})
 	// Uses active_op_id IN ('', op.ID) so recovery after attachAndHello cleared
 	// active_op_id (e.g. proto_mismatch) still writes the final state atomically.
-	_, _ = m.store.FinalizeCorraldOpErrorWithHost(context.Background(), op, ch)
+	if ok, _ := m.store.FinalizeCorraldOpErrorWithHost(context.Background(), op, ch); ok {
+		m.recordUpdateNotices(ch.HostID, ch.BoundFingerprint, ch.BoundUsername, prevVer, targetVer, 0, false)
+	}
 }
 
 func (m *Manager) finishUpdateFailError(op *store.CorraldOp, ch *store.CorraldHost, targetVer, machineID, detail string) {
@@ -3586,6 +3626,9 @@ func (m *Manager) attemptPostUpdateRollback(
 			actualVer, actualRel, "", machineID, nil, now, false, &failBanner,
 		)
 	}
+	if firstHostID > 0 {
+		m.recordUpdateNotices(firstHostID, sc.key.Fingerprint, sc.key.Username, actualVer, badVer, badRel, false)
+	}
 	return true
 }
 
@@ -3645,7 +3688,7 @@ func (m *Manager) evaluateUpdateAfterConnect(
 	failedReleases []int64,
 ) {
 	dist := m.Dist()
-	if dist == nil || m.adminDisabled {
+	if dist == nil || m.AdminDisabled() {
 		return
 	}
 	sc := m.sharedConnForHost(hostID, fp, sshUser)

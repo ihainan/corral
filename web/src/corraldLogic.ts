@@ -74,6 +74,52 @@ export interface CorraldError {
   pid?: number
 }
 
+export interface CorraldPerfCompareItem {
+  op: 'send' | 'card' | string
+  after_ms: number
+  before_ms: number
+  after_n: number
+  before_n: number
+}
+
+export interface CorraldUpdateNotice {
+  id: number
+  host_id: number
+  host_name: string
+  old_version: string
+  new_version: string
+  new_release: number
+  success: boolean
+  created_at: number
+}
+
+export interface GroupedCorraldUpdateNotices {
+  mergedSuccess: {
+    version: string
+    hostCount: number
+    ids: number[]
+  } | null
+  failures: CorraldUpdateNotice[]
+  allIds: number[]
+}
+
+export interface CorraldChangelogEntry {
+  version: string
+  zh: string[]
+  en: string[]
+}
+
+export interface CorraldChangelog {
+  current_version: string
+  current_release: number
+  entries: CorraldChangelogEntry[]
+}
+
+export interface CorraldAdminPolicy {
+  allowed: boolean
+  locked_by_env: boolean
+}
+
 export interface CorraldStatus {
   state: CorraldState
   version?: string
@@ -94,6 +140,7 @@ export interface CorraldStatus {
   files: string[]
   can_replace_with_gateway?: boolean
   machine_id?: string
+  perf_comparison?: CorraldPerfCompareItem[]
 }
 
 export interface DeleteHostOptions {
@@ -213,7 +260,9 @@ export interface CorraldSectionModel {
   showVersionRow: boolean
   showUsersRow: boolean
   showReadmeLink: boolean
+  showChangelogLink: boolean
   showFiles: boolean
+  perfComparison: CorraldPerfCompareItem[]
   rssMb: number | null
   uptimeSec: number | null
   otherUsers: number
@@ -573,6 +622,20 @@ export function corraldSectionModel(
     status.files.length > 0 &&
     mode !== 'off' &&
     mode !== 'admin_disabled'
+  const perfComparison =
+    !status.admin_disabled &&
+    (mode === 'running' || mode === 'stopped') &&
+    Array.isArray(status.perf_comparison)
+      ? status.perf_comparison.filter(
+          (item) =>
+            item &&
+            typeof item.op === 'string' &&
+            Number.isFinite(item.after_ms) &&
+            Number.isFinite(item.before_ms) &&
+            item.after_n >= 20 &&
+            item.before_n >= 20,
+        )
+      : []
 
   return {
     mode,
@@ -588,7 +651,9 @@ export function corraldSectionModel(
     showVersionRow,
     showUsersRow,
     showReadmeLink: true,
+    showChangelogLink: !status.admin_disabled,
     showFiles,
+    perfComparison,
     rssMb,
     uptimeSec,
     otherUsers,
@@ -706,4 +771,80 @@ export function classifyDeleteHostResult(
     return { outcome: 'removed' }
   }
   return { outcome: 'done' }
+}
+
+// Format measured latency in milliseconds as seconds for comparison rows
+// (e.g. 300 ms -> "0.3", 1900 ms -> "1.9"; sub-0.1 s values keep two decimals).
+export function formatPerfSeconds(ms: number): string {
+  if (!Number.isFinite(ms) || ms <= 0) return '0.0'
+  const s = ms / 1000
+  if (s < 0.095) return s.toFixed(2)
+  return s.toFixed(1)
+}
+
+function compareVersionStrings(a: string, b: string): number {
+  const norm = (v: string) =>
+    v
+      .trim()
+      .replace(/^v/, '')
+      .split('-')[0]
+      .split('.')
+      .map((p) => Number.parseInt(p, 10))
+  const pa = norm(a)
+  const pb = norm(b)
+  const n = Math.max(pa.length, pb.length)
+  for (let i = 0; i < n; i++) {
+    const va = Number.isFinite(pa[i]) ? pa[i] : 0
+    const vb = Number.isFinite(pb[i]) ? pb[i] : 0
+    if (va !== vb) return va - vb
+  }
+  return a.localeCompare(b)
+}
+
+function isNewerUpdateNotice(a: CorraldUpdateNotice, b: CorraldUpdateNotice): boolean {
+  if (a.new_release !== b.new_release) return a.new_release > b.new_release
+  if (a.new_version !== b.new_version) {
+    const cmp = compareVersionStrings(a.new_version, b.new_version)
+    if (cmp !== 0) return cmp > 0
+  }
+  if (a.created_at !== b.created_at) return a.created_at > b.created_at
+  return a.id > b.id
+}
+
+// Merge all unseen successful update notices into one summary notice (showing
+// the newest target version and distinct host count), while keeping failed
+// notices individual per host.
+export function groupCorraldUpdateNotices(notices: CorraldUpdateNotice[]): GroupedCorraldUpdateNotices {
+  const allIds: number[] = []
+  const successIds: number[] = []
+  const successHosts = new Set<number>()
+  let latestSuccess: CorraldUpdateNotice | null = null
+  const failByHost = new Map<string, CorraldUpdateNotice>()
+
+  for (const n of notices) {
+    if (!n || typeof n.id !== 'number') continue
+    allIds.push(n.id)
+    if (n.success) {
+      successIds.push(n.id)
+      successHosts.add(n.host_id > 0 ? n.host_id : -n.id)
+      if (!latestSuccess || isNewerUpdateNotice(n, latestSuccess)) {
+        latestSuccess = n
+      }
+    } else {
+      const key = `${n.host_id}:${n.old_version}:${n.new_version}`
+      failByHost.set(key, n)
+    }
+  }
+
+  return {
+    mergedSuccess: latestSuccess
+      ? {
+          version: latestSuccess.new_version || '',
+          hostCount: successHosts.size,
+          ids: successIds,
+        }
+      : null,
+    failures: [...failByHost.values()],
+    allIds,
+  }
 }

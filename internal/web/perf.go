@@ -41,10 +41,16 @@ func (s *Server) perfGated(what string, start time.Time, err error, hostID int64
 }
 
 func (s *Server) perfGatedVia(what, via string, start time.Time, err error, hostID int64) {
-	if s == nil || s.perf == nil {
+	if s == nil {
 		return
 	}
-	s.perf.Observe("gated."+what, time.Since(start), gatedOutcome(err, what), hostID, via)
+	dur := time.Since(start)
+	if s.perf != nil {
+		s.perf.Observe("gated."+what, dur, gatedOutcome(err, what), hostID, via)
+	}
+	if err == nil && s.perfDaily != nil {
+		s.perfDaily.Observe(hostID, what, via, dur)
+	}
 }
 
 func (s *Server) perfLocate(op string, start time.Time, err error, procs int, hostID int64) {

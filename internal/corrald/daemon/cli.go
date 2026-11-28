@@ -36,7 +36,7 @@ func Main(args []string, build proto.BuildInfo, stdout, stderr io.Writer) int {
 		build.Version = "dev"
 	}
 	if len(args) == 0 {
-		writeErr(stdout, "usage", "subcommand required: version|manifest|selftest|install|serve|status|stop|uninstall")
+		writeErr(stdout, "usage", "subcommand required: version|manifest|changelog|selftest|install|serve|status|stop|uninstall")
 		return 2
 	}
 
@@ -48,6 +48,8 @@ func Main(args []string, build proto.BuildInfo, stdout, stderr io.Writer) int {
 		return cmdVersion(build, stdout)
 	case "manifest":
 		return cmdManifest(stdout)
+	case "changelog":
+		return cmdChangelog(stdout)
 	case "selftest":
 		return cmdSelftest(stdout)
 	case "install":
@@ -101,6 +103,16 @@ func cmdManifest(stdout io.Writer) int {
 	b, err := proto.MarshalManifest(proto.DefaultManifest())
 	if err != nil {
 		writeErr(stdout, "manifest_failed", err.Error())
+		return 1
+	}
+	_, _ = stdout.Write(append(b, '\n'))
+	return 0
+}
+
+func cmdChangelog(stdout io.Writer) int {
+	b, err := proto.MarshalChangelog(proto.Changelog())
+	if err != nil {
+		writeErr(stdout, "changelog_failed", err.Error())
 		return 1
 	}
 	_, _ = stdout.Write(append(b, '\n'))

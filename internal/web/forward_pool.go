@@ -573,6 +573,9 @@ func (s *Server) Close() {
 	if s.corrald != nil {
 		s.corrald.Close()
 	}
+	if s.perfDaily != nil {
+		s.perfDaily.Close()
+	}
 	s.stopRecordings()
 	s.files.shutdown()
 	s.code.shutdown()

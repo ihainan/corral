@@ -408,7 +408,7 @@ func (m *Manager) hasEligibleWatchDemand(sc *sharedConn, curClient *Client) (boo
 // local watch degradation/health, so poll-degraded subscriptions stay alive
 // while browsers watch and unsubscribe cleanly after the last browser leaves).
 func (m *Manager) hasAnyRunningWatchDemand(ctx context.Context, sc *sharedConn, manifest *proto.Manifest) (bool, []string) {
-	if m == nil || m.adminDisabled || !m.Available() {
+	if m == nil || m.AdminDisabled() || !m.Available() {
 		return false, nil
 	}
 	pairs, logs := m.connWatchDemandSnapshot(sc)
