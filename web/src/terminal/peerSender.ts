@@ -66,8 +66,8 @@ export function nextConvoPeers(
 }
 
 // Build the (sessionId, pane) -> sidebar row title map for peer sender naming.
-// Includes both live herdr panes and tmux entries, and registers each sidebar
-// row's title under every session connection merged into that deduped row.
+// Includes live herdr panes only, and registers each sidebar row's title under
+// every session connection merged into that deduped row.
 export function buildPeerTitles<S extends { id: string; persistence?: string }>(
   entries: ReadonlyArray<{
     key: string
@@ -94,14 +94,11 @@ export function buildPeerTitles<S extends { id: string; persistence?: string }>(
           map.set(peerTargetKey(s.id, e.pane), e.title)
         }
       }
-    } else {
-      map.set(peerTargetKey(e.sessionId), e.title)
-      for (const s of allSessions) {
-        if (s.persistence === 'tmux' && keyFor.tmux(s) === e.key) {
-          map.set(peerTargetKey(s.id), e.title)
-        }
-      }
     }
+    // tmux rows are left out: the sidebar's cached title for a tmux session is
+    // not tied to the pane it was read from, so after the session switches
+    // panes it could name one agent after another. Their senders keep the
+    // server's name for the matched process, which is always the right agent.
   }
   return map
 }

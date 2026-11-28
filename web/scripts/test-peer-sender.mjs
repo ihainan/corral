@@ -331,7 +331,7 @@ assert.equal(
   assert.doesNotMatch(peerHeadBlock, /\bokAt\b/, 'PeerSenderHead must not gate links on okAt age')
 }
 
-// 9. Fix7 #2 & #3 [P2]: buildPeerTitles includes tmux entries (with sidebar's own
+// 9. Fix7 #3 [P2]: buildPeerTitles registers merged herdr connections; tmux rows are left out (was: includes tmux entries, with sidebar's own
 //    name) AND registers every deduped connection's (session_id, pane) key for
 //    both herdr and tmux rows.
 {
@@ -403,10 +403,11 @@ assert.equal(
     href: '/agents?s=h-conn-2&pane=w1%3Ap2',
   })
 
-  // Fix7 #2: tmux entry uses sidebar's cached conversation title (NOT terminal title),
-  // across BOTH deduped tmux connections.
-  assert.equal(peerTitles.get(peerTargetKey('t-conn-1')), 'Fix login bug')
-  assert.equal(peerTitles.get(peerTargetKey('t-conn-2')), 'Fix login bug')
+  // tmux rows are not registered: their cached title is not tied to a pane, so a
+  // tmux sender keeps the server's name for the matched process.
+  assert.equal(peerTitles.has(peerTargetKey('t-conn-1')), false)
+  assert.equal(peerTitles.has(peerTargetKey('t-conn-2')), false)
+  assert.equal(peerTitles.has(peerTargetKey('t-unvisited')), false)
   const tmuxCached = resolvePeerSender({
     from: 'ai-tmux',
     peerPid: 333,
@@ -425,14 +426,14 @@ assert.equal(
   })
   assert.deepEqual(tmuxCached, {
     kind: 'live',
-    name: 'Fix login bug',
+    name: 'zsh',
     where: 'tmux-box · corral-admin',
     sessionId: 't-conn-2',
     pane: undefined,
     href: '/agents?s=t-conn-2',
   })
 
-  // Unvisited tmux entry uses sidebar's "host · session" title without duplicating where
+  // Unvisited tmux session: the server's name too
   const tmuxUnvisited = resolvePeerSender({
     from: 'ai-ops',
     peerPid: 555,
@@ -451,8 +452,8 @@ assert.equal(
   })
   assert.deepEqual(tmuxUnvisited, {
     kind: 'live',
-    name: 'tmux-box · ops',
-    where: '',
+    name: 'bash',
+    where: 'tmux-box · ops',
     sessionId: 't-unvisited',
     pane: undefined,
     href: '/agents?s=t-unvisited',
