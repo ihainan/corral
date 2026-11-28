@@ -616,7 +616,7 @@ function useFreshAsk(id: string): boolean {
   return at.id === id && at.fresh
 }
 
-export function InlineReply({ target, onLoaded, resizedAt, active = true, held, call, pending, onAnswered, waitSince, agentVersion }: { target: ReplyTarget; onLoaded?: () => void; resizedAt?: number; active?: boolean; held?: () => boolean; call?: ConvoTool; pending?: ConvoTool; onAnswered?: (yes: boolean) => void; waitSince?: number; agentVersion?: string }) {
+export function InlineReply({ target, onLoaded, resizedAt, active = true, held, call, pending, onAnswered, onTyped, waitSince, agentVersion }: { target: ReplyTarget; onLoaded?: () => void; resizedAt?: number; active?: boolean; held?: () => boolean; call?: ConvoTool; pending?: ConvoTool; onAnswered?: (yes: boolean) => void; onTyped?: () => void; waitSince?: number; agentVersion?: string }) {
   const toast = useToast()
   const showTerminal = useContext(ShowTerminal)
   const [sent, setSent] = useState<string | null>(null) // (the screen answered)
@@ -985,7 +985,11 @@ export function InlineReply({ target, onLoaded, resizedAt, active = true, held, 
               aria-label={t(cxq && !cxOther ? 'convo.askCodexNote' : opts.length > 0 ? 'convo.askOwnText' : 'convo.askText')}
               autoCapitalize="none"
               autoCorrect="off"
-              onChange={(e) => setText(e.target.value)}
+              onChange={(e) => {
+                setText(e.target.value)
+                // (Typing an answer is using the conversation: a preview tab is kept open, as the box's.)
+                if (e.target.value.trim()) onTyped?.()
+              }}
             />
             {!(cxq && !cxOther) && (
               <button className="btn" disabled={!screen || busy || cxStuck || !text.trim()}>

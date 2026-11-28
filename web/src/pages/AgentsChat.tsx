@@ -4403,7 +4403,7 @@ function AgentChat({ cur, entries, all, titles, onPick, onOpenTab, previewTabKey
       ask={
         !readOnly && waits && replyTo ? (
           // (One a pane, and a process in it: nothing of another's carries over. Not tied to a terminal: no size to wait for.)
-          <InlineReply key={replyTo.key} target={replyTo} resizedAt={0} active={kActive} held={() => false} call={asked} pending={pendingCall} agentVersion={convo.meta?.version} onAnswered={(yes) => {
+          <InlineReply key={replyTo.key} target={replyTo} resizedAt={0} active={kActive} held={() => false} call={asked} pending={pendingCall} agentVersion={convo.meta?.version} onTyped={onInteract} onAnswered={(yes) => {
             setAnswered(yes)
             if (yes) onInteract?.()
             // (Answered: not waiting in the list and the title either, at once — not at its next read. 11-14.)
