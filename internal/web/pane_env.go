@@ -643,7 +643,7 @@ if [ -n "$pane" ]; then
     printf 'ERR\tpane_not_in_session\n'
     exit 0
   fi
-  if ! panes=$(tmux -u list-panes -s -t "=$sess" -F '#{pane_id}' 2>/dev/null); then
+  if ! panes=$(tmux -u list-panes -s -t "=$sess:" -F '#{pane_id}' 2>/dev/null); then
     printf 'ERR\tno_process\n'
     exit 0
   fi

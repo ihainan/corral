@@ -109,7 +109,7 @@ const tmuxPaneInspectScript = `PATH="$HOME/.local/bin:$HOME/bin:$HOME/.cargo/bin
 sess=$1 pane=$2
 if [ -n "$pane" ]; then
   [ -n "$sess" ] || exit 0
-  panes=$(tmux -u list-panes -s -t "=$sess" -F '#{pane_id}' 2>/dev/null) || exit 0
+  panes=$(tmux -u list-panes -s -t "=$sess:" -F '#{pane_id}' 2>/dev/null) || exit 0
   in_sess=0
   while IFS= read -r p; do
     if [ "$p" = "$pane" ]; then
