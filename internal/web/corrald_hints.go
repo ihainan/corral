@@ -406,6 +406,28 @@ func corraldHostStatusEligible(st *gw.StatusResponse) bool {
 	return true
 }
 
+// corraldHostProblemAndStateEligible verifies the non-DB eligibility rules
+// shared by GET /api/corrald/hints and POST /api/hosts/{id}/corrald/hint/shown:
+// corrald is available & not admin-disabled, a real problem is recorded for
+// h's current target (address, port, login user), and h's daemon state is
+// currently off and enableable.
+func (s *Server) corraldHostProblemAndStateEligible(ctx context.Context, userID int64, h *store.Host, prob corraldHostProblem) bool {
+	if s == nil || h == nil || prob.Count <= 0 || prob.Reason == "" || prob.Target == "" {
+		return false
+	}
+	if s.corrald == nil || !s.corrald.Available() || s.corraldAdminDisabled() {
+		return false
+	}
+	if prob.Target != corraldHintTarget(h) {
+		return false
+	}
+	st, err := s.corrald.Status(ctx, userID, h.ID)
+	if err != nil || !corraldHostStatusEligible(st) {
+		return false
+	}
+	return true
+}
+
 // evaluateCorraldHostHint is the single centralized rule determining whether a
 // contextual corrald hint should be shown for (userID, hostID):
 //  1. A real corrald-solvable problem was observed on this host's current target.
@@ -422,27 +444,17 @@ func (s *Server) evaluateCorraldHostHint(
 	masterEnabled bool,
 	resetAt int64,
 ) (*CorraldHintItem, bool) {
-	if prob.Count <= 0 || prob.Reason == "" || prob.Target == "" {
-		return nil, false
-	}
-	if !masterEnabled {
+	if !masterEnabled || store.CorraldHintRowActive(hintRow, resetAt) {
 		return nil, false
 	}
 	if s == nil || s.corrald == nil || !s.corrald.Available() || s.corraldAdminDisabled() {
-		return nil, false
-	}
-	if store.CorraldHintRowActive(hintRow, resetAt) {
 		return nil, false
 	}
 	h, err := s.store.Host(ctx, userID, hostID)
 	if err != nil || h == nil {
 		return nil, false
 	}
-	if prob.Target != corraldHintTarget(h) {
-		return nil, false
-	}
-	st, err := s.corrald.Status(ctx, userID, hostID)
-	if err != nil || !corraldHostStatusEligible(st) {
+	if !s.corraldHostProblemAndStateEligible(ctx, userID, h, prob) {
 		return nil, false
 	}
 	op := prob.Op
@@ -557,6 +569,11 @@ func readHintGenerationBody(r *http.Request) (int64, error) {
 }
 
 // POST /api/hosts/{id}/corrald/hint/shown
+// Atomic claim-before-display: records shown_at ONLY if this host is still
+// eligible for the user and generation (failure record present & bound to
+// current target, corrald available & not admin-disabled, host state off &
+// enableable, master switch on, current generation, not already shown or
+// dismissed). Returns 200 {"claimed": true|false}.
 func (s *Server) apiMarkCorraldHintShown(w http.ResponseWriter, r *http.Request) {
 	h, ok := s.ownedHost(w, r)
 	if !ok {
@@ -567,7 +584,14 @@ func (s *Server) apiMarkCorraldHintShown(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusBadRequest, "bad_request", err.Error())
 		return
 	}
-	applied, err := s.store.MarkCorraldHintShown(r.Context(), currentUser(r).ID, h.ID, gen)
+	userID := currentUser(r).ID
+	w.Header().Set("Cache-Control", "no-store")
+	prob, hasProb := s.corraldHints.get(userID, h.ID)
+	if !hasProb || !s.corraldHostProblemAndStateEligible(r.Context(), userID, h, prob) {
+		writeJSON(w, http.StatusOK, map[string]any{"claimed": false})
+		return
+	}
+	claimed, err := s.store.ClaimCorraldHintShown(r.Context(), userID, h.ID, gen)
 	if errors.Is(err, store.ErrNotFound) {
 		writeError(w, http.StatusNotFound, "not_found", "no such host")
 		return
@@ -580,11 +604,7 @@ func (s *Server) apiMarkCorraldHintShown(w http.ResponseWriter, r *http.Request)
 		s.internalError(w, r, err)
 		return
 	}
-	if !applied {
-		w.WriteHeader(http.StatusNoContent)
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	writeJSON(w, http.StatusOK, map[string]any{"claimed": claimed})
 }
 
 // POST /api/hosts/{id}/corrald/hint/dismiss

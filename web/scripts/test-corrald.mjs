@@ -13,12 +13,13 @@ const {
   buildDiagnostics,
   buildRemoveFilesCommand,
   buildStopCommand,
+  canClaimCorraldHint,
   classifyDeleteHostResult,
   corraldFailureKind,
   corraldHintMessageKey,
   corraldSectionModel,
   corraldStatusBarModel,
-  createCorraldHintSync,
+  createCorraldHintController,
   createCorraldNoticeFetcher,
   degradedCaps,
   detectCorraldTransition,
@@ -33,7 +34,6 @@ const {
   opProgress,
   otherUsersCount,
   shouldPollCorrald,
-  shouldShowCorraldHint,
 } = await import(`data:text/javascript;base64,${Buffer.from(outputText).toString('base64')}`)
 
 function baseStatus(overrides = {}) {
@@ -627,7 +627,7 @@ function baseStatus(overrides = {}) {
   assert.equal(emitted.length, 0, 'pre-effect signed-out response must NOT emit toast')
 }
 
-// Phase 2b: contextual hint message mapping, display gating, and i18n copy presence.
+// Phase 2b: contextual hint message mapping, pre-claim eligibility, and i18n copy presence.
 {
   const baseHint = {
     host_id: 7,
@@ -636,6 +636,7 @@ function baseStatus(overrides = {}) {
     op: 'status',
     count: 3,
     last_at: 1_700_000_000,
+    generation: 0,
   }
   assert.equal(corraldHintMessageKey({ ...baseHint, op: 'status', count: 3 }), 'corrald.hint.sshSessionStatus')
   assert.equal(corraldHintMessageKey({ ...baseHint, op: 'status', count: 1 }), 'corrald.hint.sshSessionStatusOne')
@@ -644,13 +645,31 @@ function baseStatus(overrides = {}) {
   assert.equal(corraldHintMessageKey({ ...baseHint, op: 'both', count: 4 }), 'corrald.hint.sshSessionBoth')
   assert.equal(corraldHintMessageKey({ ...baseHint, op: 'both', count: 1 }), 'corrald.hint.sshSessionBothOne')
 
-  assert.equal(shouldShowCorraldHint(baseHint, { masterEnabled: true, sessionHiddenHostIds: new Set() }), true)
-  assert.equal(shouldShowCorraldHint(null, { masterEnabled: true, sessionHiddenHostIds: new Set() }), false)
-  assert.equal(shouldShowCorraldHint(baseHint, { masterEnabled: false, sessionHiddenHostIds: new Set() }), false)
-  assert.equal(shouldShowCorraldHint(baseHint, { masterEnabled: true, sessionHiddenHostIds: new Set([7]) }), false)
-  assert.equal(shouldShowCorraldHint(baseHint, { masterEnabled: true, sessionHiddenHostIds: new Set([8]) }), true)
-  assert.equal(shouldShowCorraldHint({ ...baseHint, count: 0 }, { masterEnabled: true, sessionHiddenHostIds: new Set() }), false)
-  assert.equal(shouldShowCorraldHint({ ...baseHint, host_id: 0 }, { masterEnabled: true, sessionHiddenHostIds: new Set() }), false)
+  assert.equal(canClaimCorraldHint(baseHint, { masterEnabled: true }), true)
+  assert.equal(canClaimCorraldHint(null, { masterEnabled: true }), false)
+  assert.equal(canClaimCorraldHint(baseHint, { masterEnabled: false }), false)
+  assert.equal(canClaimCorraldHint(baseHint, { masterEnabled: true, adminDisabled: true }), false)
+  assert.equal(canClaimCorraldHint(baseHint, { masterEnabled: true, hostUnavailable: true }), false)
+  assert.equal(canClaimCorraldHint({ ...baseHint, count: 0 }, { masterEnabled: true }), false)
+  assert.equal(canClaimCorraldHint({ ...baseHint, host_id: 0 }, { masterEnabled: true }), false)
+
+  assert.equal(isCorraldStatusHintEligible(baseStatus({ state: 'off' })), true)
+  for (const st of [
+    baseStatus({ state: 'running' }),
+    baseStatus({ state: 'installing', op: { id: 'op1', kind: 'install', state: 'running', step: 'upload' } }),
+    baseStatus({ state: 'off', admin_disabled: true }),
+    baseStatus({ state: 'rebind' }),
+    baseStatus({ state: 'incompatible' }),
+    baseStatus({ state: 'off', error: { code: 'unsupported_os' } }),
+    baseStatus({ state: 'off', op: { id: 'op2', kind: 'install', state: 'failed', error_code: 'unsupported_arch' } }),
+  ]) {
+    assert.equal(isCorraldStatusHintEligible(st), false)
+    assert.equal(
+      canClaimCorraldHint(baseHint, { masterEnabled: true, hostStatus: st }),
+      false,
+      `status ${JSON.stringify(st)} must disallow claim`,
+    )
+  }
 
   // Verify both zh and en i18n keys exist for every Phase 2b hint & setting string.
   const i18nSrc = readFileSync(fileURLToPath(new URL('../src/i18n.ts', import.meta.url)), 'utf8')
@@ -674,8 +693,9 @@ function baseStatus(overrides = {}) {
   }
 }
 
-// Phase 2b fix1 item 6: once a hint has been shown in this page session,
-// remounting the list (mobile list -> conversation -> back) must not show it again.
+// Phase 2b fix2: claim-before-display (two tabs racing, claim=false never renders,
+// claim failure renders nothing until re-offered, unmount/remount does not re-show,
+// closing with X needs no extra write, StrictMode remount preserves active claim).
 {
   const hint = {
     host_id: 7,
@@ -686,104 +706,406 @@ function baseStatus(overrides = {}) {
     last_at: 1_700_000_000,
     generation: 0,
   }
-  const shown = new Set([7])
-  // Unbroken initial mount keeps the bar visible so the user can read/act on it.
-  assert.equal(
-    shouldShowCorraldHint(hint, {
-      masterEnabled: true,
-      sessionHiddenHostIds: new Set(),
-      shownHostIds: shown,
-      currentlyDisplayedHostId: 7,
-    }),
-    true,
-  )
-  // After unmount (currentlyDisplayedHostId becomes null), remounting the list
-  // before the next poll MUST NOT render the banner again.
-  assert.equal(
-    shouldShowCorraldHint(hint, {
-      masterEnabled: true,
-      sessionHiddenHostIds: new Set(),
-      shownHostIds: shown,
-      currentlyDisplayedHostId: null,
-    }),
-    false,
-    'item 6: remounting list after hint was shown must suppress re-display',
-  )
+
+  // Simulated atomic server claim store shared by two tabs.
+  const serverClaimed = new Set()
+  const claimCalls = []
+  const dismissCalls = []
+  const atomicClaim = async (hostId, gen) => {
+    claimCalls.push({ hostId, gen })
+    const key = `${hostId}:${gen}`
+    if (serverClaimed.has(key)) return false
+    serverClaimed.add(key)
+    return true
+  }
+
+  const tabA = createCorraldHintController({
+    claimShown: atomicClaim,
+    dismiss: async (hostId, gen) => dismissCalls.push({ hostId, gen }),
+    readCachedStatus: () => undefined,
+  })
+  const tabB = createCorraldHintController({
+    claimShown: atomicClaim,
+    dismiss: async (hostId, gen) => dismissCalls.push({ hostId, gen }),
+    readCachedStatus: () => undefined,
+  })
+  tabA.setUser(42)
+  tabB.setUser(42)
+
+  // Both narrow-screen tabs fetch the hint while their picker is closed:
+  // neither claims and neither displays anything yet.
+  tabA.receiveServerHint(hint, 0)
+  tabB.receiveServerHint(hint, 0)
+  assert.equal(claimCalls.length, 0, 'must not claim before a list surface is mounted')
+  assert.equal(tabA.getState().displayedHint, null)
+  assert.equal(tabB.getState().displayedHint, null)
+
+  // Tab A opens picker (slot mounts) -> claims atomically -> renders.
+  tabA.onSlotMounted()
+  assert.equal(tabA.getState().displayedHint, null, 'must not render before claim resolves')
+  await Promise.resolve()
+  await Promise.resolve()
+  assert.equal(tabA.getState().displayedHint?.host_id, 7)
+
+  // Tab B opens picker before next poll -> server returns claimed:false -> Tab B NEVER renders.
+  tabB.onSlotMounted()
+  await Promise.resolve()
+  await Promise.resolve()
+  assert.equal(tabB.getState().displayedHint, null, 'tab whose claim says false must never render')
+  assert.equal(tabB.getState().candidateHint, null)
+
+  // Closing with X after a successful claim hides locally with NO extra network write.
+  const claimsBeforeClose = claimCalls.length
+  const dismissesBeforeClose = dismissCalls.length
+  tabA.closeDisplayed()
+  assert.equal(tabA.getState().displayedHint, null)
+  assert.equal(claimCalls.length, claimsBeforeClose, 'closing with X must not send another shown claim')
+  assert.equal(dismissCalls.length, dismissesBeforeClose, 'closing with X must not send dismiss')
+
+  tabA.dispose()
+  tabB.dispose()
+
+  // Simultaneous race: two tabs both call onSlotMounted before either claim resolves.
+  const pendingResolvers = []
+  let raceWon = false
+  const raceA = createCorraldHintController({
+    claimShown: () => new Promise((resolve) => pendingResolvers.push(() => {
+      if (raceWon) resolve(false)
+      else {
+        raceWon = true
+        resolve(true)
+      }
+    })),
+    dismiss: async () => {},
+    readCachedStatus: () => undefined,
+  })
+  const raceB = createCorraldHintController({
+    claimShown: () => new Promise((resolve) => pendingResolvers.push(() => {
+      if (raceWon) resolve(false)
+      else {
+        raceWon = true
+        resolve(true)
+      }
+    })),
+    dismiss: async () => {},
+    readCachedStatus: () => undefined,
+  })
+  raceA.setUser(42)
+  raceB.setUser(42)
+  raceA.receiveServerHint(hint, 0)
+  raceB.receiveServerHint(hint, 0)
+  raceA.onSlotMounted()
+  raceB.onSlotMounted()
+  assert.equal(raceA.getState().displayedHint, null)
+  assert.equal(raceB.getState().displayedHint, null)
+  for (const r of pendingResolvers) r()
+  await Promise.resolve()
+  await Promise.resolve()
+  const shownCount = Number(raceA.getState().displayedHint !== null) + Number(raceB.getState().displayedHint !== null)
+  assert.equal(shownCount, 1, 'simultaneous claims across two tabs must render in exactly one tab')
+
+  // Unmounting the list (mobile list -> conversation -> back) clears displayedHint;
+  // remounting does not re-show it.
+  const winner = raceA.getState().displayedHint ? raceA : raceB
+  winner.onSlotUnmounted()
+  await Promise.resolve() // flush microtask
+  assert.equal(winner.getState().displayedHint, null, 'real unmount must clear displayed banner')
+  winner.onSlotMounted()
+  await Promise.resolve()
+  assert.equal(winner.getState().displayedHint, null, 'remounting list must not re-show banner')
+  raceA.dispose()
+  raceB.dispose()
+
+  // Claim failure renders nothing; may be offered again on a later fetch.
+  let shouldFail = true
+  let failAttempts = 0
+  const retryable = createCorraldHintController({
+    claimShown: async () => {
+      failAttempts++
+      if (shouldFail) throw new Error('network error')
+      return true
+    },
+    dismiss: async () => {},
+    readCachedStatus: () => undefined,
+  })
+  retryable.setUser(42)
+  retryable.onSlotMounted()
+  retryable.receiveServerHint(hint, 0)
+  await Promise.resolve()
+  await Promise.resolve()
+  assert.equal(failAttempts, 1)
+  assert.equal(retryable.getState().displayedHint, null, 'failed claim must not render banner')
+
+  // StrictMode synchronous unmount+remount during an in-flight claim keeps claim alive without duplicating.
+  shouldFail = false
+  retryable.receiveServerHint(hint, 0)
+  retryable.onSlotUnmounted()
+  retryable.onSlotMounted()
+  await Promise.resolve()
+  await Promise.resolve()
+  assert.equal(failAttempts, 2, 'StrictMode synchronous remount must not send duplicate claim')
+  assert.equal(retryable.getState().displayedHint?.host_id, 7)
+  retryable.dispose()
 }
 
-// Phase 2b fix1 item 7: hide the bar immediately when this host's corrald
-// state is known to be anything other than off and enablable, and refetch hints
-// when consent starts from any entry.
+// Phase 2b fix2: status turning installing (or any non-off-and-enablable state)
+// before the claim -> NO claim, NO render (both controller level and real
+// CorraldHintBanner.tsx component level).
 {
   const hint = {
-    host_id: 9,
-    host_name: 'gpu-02',
+    host_id: 11,
+    host_name: 'gpu-03',
     reason: 'ssh_session_full',
-    op: 'log',
-    count: 3,
+    op: 'status',
+    count: 1,
     last_at: 1_700_000_000,
     generation: 0,
   }
-  assert.equal(isCorraldStatusHintEligible(baseStatus({ state: 'off' })), true)
-  for (const st of [
-    baseStatus({ state: 'running' }),
-    baseStatus({ state: 'installing', op: { id: 'op1', kind: 'install', state: 'running', step: 'upload' } }),
-    baseStatus({ state: 'off', admin_disabled: true }),
-    baseStatus({ state: 'rebind' }),
-    baseStatus({ state: 'incompatible' }),
-    baseStatus({ state: 'off', error: { code: 'unsupported_os' } }),
-    baseStatus({ state: 'off', op: { id: 'op2', kind: 'install', state: 'failed', error_code: 'unsupported_arch' } }),
-  ]) {
-    assert.equal(isCorraldStatusHintEligible(st), false)
-    assert.equal(
-      shouldShowCorraldHint(hint, {
-        masterEnabled: true,
-        sessionHiddenHostIds: new Set(),
-        hostStatus: st,
-      }),
-      false,
-      `item 7: status ${JSON.stringify(st)} must hide hint immediately`,
-    )
-  }
-  assert.equal(
-    shouldShowCorraldHint(hint, {
-      masterEnabled: true,
-      sessionHiddenHostIds: new Set(),
-      hostUnavailable: true,
-    }),
-    false,
-    'item 7: unavailable corrald must hide hint immediately',
-  )
+  const cache = new Map()
+  let claimCalls = 0
+  const ctl = createCorraldHintController({
+    claimShown: async () => {
+      claimCalls++
+      return true
+    },
+    dismiss: async () => {},
+    readCachedStatus: (id) => cache.get(id),
+  })
+  ctl.setUser(42)
 
-  const sectionSrc = readFileSync(fileURLToPath(new URL('../src/components/CorraldSection.tsx', import.meta.url)), 'utf8')
-  assert.ok(
-    sectionSrc.includes('triggerCorraldHintsCheck()'),
-    'item 7: CorraldSection must trigger hints refetch when consent flow starts',
-  )
-  const bannerSrc = readFileSync(fileURLToPath(new URL('../src/components/CorraldHintBanner.tsx', import.meta.url)), 'utf8')
-  assert.ok(
-    bannerSrc.includes('subscribeHostCorrald') && bannerSrc.includes('subscribeAdminCorraldPolicy'),
-    'item 7: CorraldHintBanner must subscribe to live host and admin policy updates',
-  )
+  // Case A: status is already installing in cache when GET resolves -> no claim, no render.
+  cache.set(11, { status: baseStatus({ state: 'installing', op: { id: 'op1', kind: 'install', state: 'running', step: 'upload' } }) })
+  ctl.receiveServerHint(hint, 0)
+  ctl.onSlotMounted()
+  await Promise.resolve()
+  await Promise.resolve()
+  assert.equal(claimCalls, 0, 'must not claim when cached status is already installing')
+  assert.equal(ctl.getState().displayedHint, null)
+  assert.equal(ctl.getState().candidateHint, null)
+  ctl.onSlotUnmounted()
+  await Promise.resolve()
+
+  // Case B: cache is empty when GET resolves (picker closed), then turns installing
+  // right before picker opens (without even firing subscribeHostCorrald) -> no claim, no render.
+  cache.clear()
+  ctl.receiveServerHint(hint, 0)
+  assert.equal(ctl.getState().candidateHint?.host_id, 11)
+  cache.set(11, { status: baseStatus({ state: 'installing', op: { id: 'op2', kind: 'install', state: 'running', step: 'start' } }) })
+  ctl.onSlotMounted()
+  await Promise.resolve()
+  await Promise.resolve()
+  assert.equal(claimCalls, 0, 'pre-claim cache re-check must prevent claim when status turned installing')
+  assert.equal(ctl.getState().displayedHint, null)
+  assert.equal(ctl.getState().candidateHint, null)
+  ctl.onSlotUnmounted()
+  await Promise.resolve()
+
+  // Case C: live onHostStatus while claim is in flight cancels rendering.
+  cache.clear()
+  let resolveClaim
+  const ctlInFlight = createCorraldHintController({
+    claimShown: () => new Promise((r) => { resolveClaim = r }),
+    dismiss: async () => {},
+    readCachedStatus: (id) => cache.get(id),
+  })
+  ctlInFlight.setUser(42)
+  ctlInFlight.onSlotMounted()
+  ctlInFlight.receiveServerHint(hint, 0)
+  ctlInFlight.onHostStatus(11, baseStatus({ state: 'installing', op: { id: 'op3', kind: 'install', state: 'running', step: 'upload' } }), false)
+  resolveClaim(true)
+  await Promise.resolve()
+  await Promise.resolve()
+  assert.equal(ctlInFlight.getState().displayedHint, null, 'live installing status during in-flight claim must suppress render')
+  ctlInFlight.dispose()
+  ctl.dispose()
+
+  // Case D: Real CorraldHintBanner.tsx component harness test (reproduces p2b-b P1 #3
+  // and verifies claim=false never renders CorraldHintBanner).
+  const compileCjs = (relPath) =>
+    ts.transpileModule(readFileSync(fileURLToPath(new URL(relPath, import.meta.url)), 'utf8'), {
+      compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX },
+    }).outputText
+  const evalCjs = (code, req) => {
+    const m = { exports: {} }
+    new Function('require', 'module', 'exports', code)(req, m, m.exports)
+    return m.exports
+  }
+  const logicCjs = evalCjs(compileCjs('../src/corraldLogic.ts'), () => {
+    throw new Error('unexpected import in corraldLogic')
+  })
+  const frames = new Map()
+  let curFrame
+  let slotIdx = 0
+  const enter = (id) => {
+    if (!frames.has(id)) frames.set(id, { slots: [], layout: [], passive: [] })
+    curFrame = frames.get(id)
+    slotIdx = 0
+  }
+  const depsEqual = (a, b) => a && b && a.length === b.length && a.every((x, i) => Object.is(x, b[i]))
+  const makeEffect = (kind) => (fn, deps) => {
+    const f = curFrame
+    const i = slotIdx++
+    const old = f.slots[i]
+    if (!old || !depsEqual(old.deps, deps)) {
+      f.slots[i] = { deps, cleanup: old?.cleanup }
+      f[kind].push(() => {
+        old?.cleanup?.()
+        f.slots[i].cleanup = fn()
+      })
+    }
+  }
+  const reactStub = {
+    createContext: (v) => ({ _value: v }),
+    useContext: (c) => c._value,
+    useState: (init) => {
+      const f = curFrame
+      const i = slotIdx++
+      if (!(i in f.slots)) f.slots[i] = typeof init === 'function' ? init() : init
+      return [
+        f.slots[i],
+        (v) => {
+          f.slots[i] = typeof v === 'function' ? v(f.slots[i]) : v
+        },
+      ]
+    },
+    useRef: (init) => {
+      const i = slotIdx++
+      return (curFrame.slots[i] ??= { current: init })
+    },
+    useCallback: (fn, deps) => {
+      const i = slotIdx++
+      const old = curFrame.slots[i]
+      if (old && depsEqual(old.deps, deps)) return old.fn
+      curFrame.slots[i] = { fn, deps }
+      return fn
+    },
+    useEffect: makeEffect('passive'),
+    useLayoutEffect: makeEffect('layout'),
+  }
+  const commit = (id, kind) => {
+    const f = frames.get(id)
+    if (!f) return
+    const q = f[kind].splice(0)
+    for (const fn of q) fn()
+  }
+
+  const compCache = new Map()
+  const compClaimCalls = []
+  let compClaimAnswer = false
+  let deliverHint
+  const prevWindow = globalThis.window
+  const prevDocument = globalThis.document
+  globalThis.window = { setInterval: () => 1, clearInterval: () => {}, addEventListener: () => {}, removeEventListener: () => {} }
+  globalThis.document = { visibilityState: 'visible', addEventListener: () => {}, removeEventListener: () => {} }
+  try {
+    class FakeApiError extends Error {}
+    const modules = {
+      react: reactStub,
+      'react/jsx-runtime': { jsx: (type, props) => ({ type, props }), jsxs: (type, props) => ({ type, props }) },
+      'lucide-react': { X: () => null },
+      '../api': { ApiError: FakeApiError, errorText: String },
+      '../app': { useSession: () => ({ me: { id: 42 } }) },
+      '../corraldApi': {
+        CORRALD_HINTS_EVENT: 'corral.corraldHintsRefresh',
+        getCorraldHint: () => new Promise((r) => { deliverHint = r }),
+        claimCorraldHintShown: async (id, gen) => {
+          compClaimCalls.push({ id, gen })
+          return compClaimAnswer
+        },
+        dismissCorraldHint: async () => {},
+        readCachedCorrald: (id) => compCache.get(id),
+        subscribeHostCorrald: () => () => {},
+        subscribeAdminCorraldPolicy: () => () => {},
+        triggerCorraldHintsCheck: () => {},
+        getHostCorrald: async () => null,
+        installHostCorrald: async () => null,
+        cancelHostCorrald: async () => null,
+        publishHostCorrald: () => {},
+      },
+      '../corraldLogic': logicCjs,
+      '../i18n': { t: (k) => k },
+      '../prefs': { usePrefs: () => ({ corraldHints: true }) },
+      '../router': { navigate: () => {} },
+      './CorraldDialogs': { CorraldConsentAlert: () => null },
+      './ui': { useToast: () => () => {} },
+    }
+    const comp = evalCjs(compileCjs('../src/components/CorraldHintBanner.tsx'), (name) => {
+      if (!(name in modules)) throw new Error(`unexpected module ${name}`)
+      return modules[name]
+    })
+
+    // Subcase D1: delayed GET returns hint while cache ALREADY has installing -> banner is null, 0 claim calls!
+    const renderCtl = () => {
+      enter('ctl')
+      return comp.useCorraldHintController(true)
+    }
+    renderCtl()
+    commit('ctl', 'layout')
+    commit('ctl', 'passive')
+    compCache.set(11, { status: baseStatus({ state: 'installing', op: { id: 'op1', kind: 'install', state: 'running' } }) })
+    deliverHint({ hint, generation: 0 })
+    await Promise.resolve()
+    await Promise.resolve()
+    assert.equal(renderCtl().banner, null, 'component must not return banner when cache already says installing')
+    assert.equal(compClaimCalls.length, 0, 'component must not POST claim when cache already says installing')
+
+    // Subcase D2: claim returns false -> slot renders null and never renders CorraldHintBanner.
+    frames.clear()
+    compCache.clear()
+    compClaimAnswer = false
+    renderCtl()
+    commit('ctl', 'layout')
+    commit('ctl', 'passive')
+    deliverHint({ hint, generation: 0 })
+    await Promise.resolve()
+    await Promise.resolve()
+    const beforeClaim = renderCtl()
+    assert.notEqual(beforeClaim.banner, null)
+    enter('slot')
+    assert.equal(beforeClaim.banner.type(beforeClaim.banner.props), null, 'slot must render null before claim resolves')
+    commit('slot', 'passive')
+    await Promise.resolve()
+    await Promise.resolve()
+    assert.deepEqual(compClaimCalls, [{ id: 11, gen: 0 }])
+    assert.equal(renderCtl().banner, null, 'banner must become null when claim returns false')
+
+    // Subcase D3: claim returns true -> slot renders null before resolution, then CorraldHintBanner after!
+    frames.clear()
+    compClaimCalls.length = 0
+    compClaimAnswer = true
+    renderCtl()
+    commit('ctl', 'layout')
+    commit('ctl', 'passive')
+    deliverHint({ hint, generation: 0 })
+    await Promise.resolve()
+    await Promise.resolve()
+    const pendingBanner = renderCtl().banner
+    enter('slot')
+    assert.equal(pendingBanner.type(pendingBanner.props), null, 'slot must render null while claim is in flight')
+    commit('slot', 'passive')
+    await Promise.resolve()
+    await Promise.resolve()
+    const claimedBanner = renderCtl().banner
+    assert.notEqual(claimedBanner, null)
+    enter('slot')
+    const rendered = claimedBanner.type(claimedBanner.props)
+    assert.equal(rendered.type, comp.CorraldHintBanner, 'slot must render CorraldHintBanner only after claimed:true')
+  } finally {
+    globalThis.window = prevWindow
+    globalThis.document = prevDocument
+  }
 }
 
-// Phase 2b fix1 item 8: failed shown/dismiss writes retry with backoff, then
-// on the next successful hints fetch, and local hidden/shown state survives
-// reload via try/catch-guarded storage until the server confirms.
+// Phase 2b fix2: dismiss retries in memory with backoff, flushes on next
+// same-generation fetch, cancels on newer generation, stops on permanent errors.
 {
-  const mem = new Map()
-  const storage = {
-    getItem: (k) => (mem.has(k) ? mem.get(k) : null),
-    setItem: (k, v) => mem.set(k, v),
-  }
   const scheduled = []
-  let shownAttempts = 0
   let dismissAttempts = 0
-  let shownShouldFail = 2 // fail first 2 attempts, succeed on 3rd (2nd retry)
-  let dismissShouldFail = 10 // fail all immediate retries; recover later on next fetch
+  let dismissShouldFail = 2 // fail first 2 attempts, succeed on 3rd (2nd backoff retry)
+  const dismissedPayloads = []
 
-  const sync = createCorraldHintSync({
-    storage,
+  const ctl = createCorraldHintController({
+    claimShown: async () => true,
     backoffMs: [100, 300],
     schedule: (fn, delay) => {
       const entry = { fn, delay, cancelled: false }
@@ -793,107 +1115,151 @@ function baseStatus(overrides = {}) {
     cancelSchedule: (entry) => {
       entry.cancelled = true
     },
-    markShown: async () => {
-      shownAttempts++
-      if (shownAttempts <= shownShouldFail) throw new Error('offline')
-    },
-    dismiss: async () => {
+    isPermanentError: (err) => err && err.status === 404,
+    dismiss: async (hostId, gen) => {
       dismissAttempts++
+      dismissedPayloads.push({ hostId, gen })
       if (dismissAttempts <= dismissShouldFail) throw new Error('offline')
     },
+    readCachedStatus: () => undefined,
   })
+  ctl.setUser(42)
 
-  sync.setUser(42)
-  sync.recordShown(11, 0)
-  await Promise.resolve()
-  await Promise.resolve()
-  assert.equal(shownAttempts, 1)
-  assert.equal(scheduled.length, 1)
-  assert.equal(scheduled[0].delay, 100)
-  assert.equal(sync.getSnapshot().pending.length, 1)
-
-  // Fire 1st backoff retry (100ms) -> still fails, schedules 2nd retry (300ms).
-  scheduled[0].fn()
-  await Promise.resolve()
-  await Promise.resolve()
-  assert.equal(shownAttempts, 2)
-  assert.equal(scheduled.length, 2)
-  assert.equal(scheduled[1].delay, 300)
-
-  // Fire 2nd backoff retry (300ms) -> succeeds and clears pending!
-  scheduled[1].fn()
-  await Promise.resolve()
-  await Promise.resolve()
-  assert.equal(shownAttempts, 3)
-  assert.equal(sync.getSnapshot().pending.length, 0)
-
-  // Dismiss host 12 while offline: exhausts backoff retries, stays persisted.
-  sync.recordDismiss(12, 0)
+  const h12 = {
+    host_id: 12,
+    host_name: 'gpu-12',
+    reason: 'ssh_session_full',
+    op: 'log',
+    count: 2,
+    last_at: 1_700_000_000,
+    generation: 0,
+  }
+  ctl.dismiss(h12)
   await Promise.resolve()
   await Promise.resolve()
   assert.equal(dismissAttempts, 1)
-  scheduled[scheduled.length - 1].fn()
+  assert.equal(scheduled.length, 1)
+  assert.equal(scheduled[0].delay, 100)
+  assert.equal(ctl.getState().pendingDismissCount, 1)
+
+  // 1st backoff retry (100ms) -> still fails, schedules 2nd retry (300ms).
+  scheduled[0].fn()
   await Promise.resolve()
   await Promise.resolve()
   assert.equal(dismissAttempts, 2)
-  scheduled[scheduled.length - 1].fn()
+  assert.equal(scheduled.length, 2)
+  assert.equal(scheduled[1].delay, 300)
+
+  // 2nd backoff retry (300ms) -> succeeds and clears pending!
+  scheduled[1].fn()
   await Promise.resolve()
   await Promise.resolve()
   assert.equal(dismissAttempts, 3)
-  assert.equal(sync.getSnapshot().pending.length, 1)
-  sync.dispose()
+  assert.equal(ctl.getState().pendingDismissCount, 0)
+  assert.deepEqual(dismissedPayloads[2], { hostId: 12, gen: 0 })
 
-  // Simulate full page reload: new sync instance reads the same storage.
-  dismissShouldFail = 0 // network recovered after reload
-  const replayed = []
-  const syncAfterReload = createCorraldHintSync({
-    storage,
-    backoffMs: [100, 300],
-    markShown: async (id, gen) => {
-      replayed.push({ kind: 'shown', id, gen })
-    },
-    dismiss: async (id, gen) => {
-      replayed.push({ kind: 'dismiss', id, gen })
-    },
-  })
-  syncAfterReload.setUser(42)
-  const snap = syncAfterReload.getSnapshot()
-  assert.equal(snap.hiddenHostIds.has(12), true, 'item 8: hidden host must survive reload before server confirms')
-  assert.equal(snap.shownHostIds.has(11), true, 'item 8: shown host must survive reload')
-  assert.equal(snap.pending.length, 1)
-
-  // Next successful hints fetch at same generation replays the pending dismiss!
-  syncAfterReload.syncServerGeneration(0)
+  // Exhaust all backoff retries, then recover on next same-generation server fetch.
+  dismissShouldFail = 100
+  const attemptsBefore = dismissAttempts
+  ctl.dismiss({ ...h12, host_id: 13 })
   await Promise.resolve()
   await Promise.resolve()
-  assert.deepEqual(replayed, [{ kind: 'dismiss', id: 12, gen: 0 }])
-  assert.equal(syncAfterReload.getSnapshot().pending.length, 0)
+  scheduled[scheduled.length - 1].fn()
+  await Promise.resolve()
+  await Promise.resolve()
+  scheduled[scheduled.length - 1].fn()
+  await Promise.resolve()
+  await Promise.resolve()
+  assert.equal(dismissAttempts, attemptsBefore + 3)
+  assert.equal(ctl.getState().pendingDismissCount, 1)
 
-  // Advancing server generation clears stale local shown/hidden state.
-  syncAfterReload.syncServerGeneration(1_700_000_000_500)
-  assert.equal(syncAfterReload.getSnapshot().hiddenHostIds.size, 0)
-  assert.equal(syncAfterReload.getSnapshot().shownHostIds.size, 0)
-  syncAfterReload.dispose()
+  dismissShouldFail = 0
+  ctl.receiveServerHint(null, 0)
+  await Promise.resolve()
+  await Promise.resolve()
+  assert.equal(ctl.getState().pendingDismissCount, 0)
 
-  // Throwing storage must never crash sync operations.
-  const brokenStorage = {
-    getItem: () => {
-      throw new Error('SecurityError')
-    },
-    setItem: () => {
-      throw new Error('QuotaExceededError')
-    },
+  // Newer generation cancels stale pending dismiss and its retry timer.
+  dismissShouldFail = 100
+  ctl.dismiss({ ...h12, host_id: 14, generation: 0 })
+  await Promise.resolve()
+  await Promise.resolve()
+  const staleTimer = scheduled[scheduled.length - 1]
+  assert.equal(staleTimer.cancelled, false)
+  ctl.receiveServerHint(null, 1_700_000_000_500)
+  assert.equal(staleTimer.cancelled, true, 'advancing generation must cancel stale dismiss timer')
+  assert.equal(ctl.getState().pendingDismissCount, 0)
+  ctl.dispose()
+}
+
+// Phase 2b fix2: ZERO localStorage / sessionStorage access in hint code.
+{
+  const bannerSrc = readFileSync(fileURLToPath(new URL('../src/components/CorraldHintBanner.tsx', import.meta.url)), 'utf8')
+  const apiSrc = readFileSync(fileURLToPath(new URL('../src/corraldApi.ts', import.meta.url)), 'utf8')
+  const hintLogicStart = src.indexOf('export type CorraldHintReason')
+  assert.ok(hintLogicStart > 0)
+  const hintLogicSrc = src.slice(hintLogicStart)
+
+  for (const [label, code] of [
+    ['CorraldHintBanner.tsx', bannerSrc],
+    ['corraldApi.ts', apiSrc],
+    ['corraldLogic.ts (hint section)', hintLogicSrc],
+  ]) {
+    assert.equal(
+      /\b(?:localStorage|sessionStorage)\b/.test(code),
+      false,
+      `${label} must not access localStorage or sessionStorage`,
+    )
   }
-  const safeSync = createCorraldHintSync({
-    storage: brokenStorage,
-    markShown: async () => {},
-    dismiss: async () => {},
+
+  // Runtime check: running full controller lifecycle with throwing storage globals succeeds.
+  const origLS = Object.getOwnPropertyDescriptor(globalThis, 'localStorage')
+  const origSS = Object.getOwnPropertyDescriptor(globalThis, 'sessionStorage')
+  Object.defineProperty(globalThis, 'localStorage', {
+    configurable: true,
+    get() {
+      throw new Error('localStorage must not be accessed by hint code')
+    },
   })
-  safeSync.setUser(99)
-  safeSync.recordShown(5, 0)
-  safeSync.hideLocally(5)
-  assert.equal(safeSync.getSnapshot().hiddenHostIds.has(5), true)
-  safeSync.dispose()
+  Object.defineProperty(globalThis, 'sessionStorage', {
+    configurable: true,
+    get() {
+      throw new Error('sessionStorage must not be accessed by hint code')
+    },
+  })
+  try {
+    const ctl = createCorraldHintController({
+      claimShown: async () => true,
+      dismiss: async () => {},
+      readCachedStatus: () => undefined,
+    })
+    ctl.setUser(7)
+    ctl.onSlotMounted()
+    ctl.receiveServerHint(
+      { host_id: 5, host_name: 'box', reason: 'ssh_session_full', op: 'status', count: 1, last_at: 1, generation: 0 },
+      0,
+    )
+    await Promise.resolve()
+    await Promise.resolve()
+    ctl.dismiss({ host_id: 5, host_name: 'box', reason: 'ssh_session_full', op: 'status', count: 1, last_at: 1, generation: 0 })
+    await Promise.resolve()
+    ctl.dispose()
+  } finally {
+    if (origLS) Object.defineProperty(globalThis, 'localStorage', origLS)
+    else delete globalThis.localStorage
+    if (origSS) Object.defineProperty(globalThis, 'sessionStorage', origSS)
+    else delete globalThis.sessionStorage
+  }
+
+  const sectionSrc = readFileSync(fileURLToPath(new URL('../src/components/CorraldSection.tsx', import.meta.url)), 'utf8')
+  assert.ok(
+    sectionSrc.includes('triggerCorraldHintsCheck()'),
+    'CorraldSection must trigger hints refetch when consent flow starts',
+  )
+  assert.ok(
+    bannerSrc.includes('subscribeHostCorrald') && bannerSrc.includes('subscribeAdminCorraldPolicy'),
+    'CorraldHintBanner must subscribe to live host and admin policy updates',
+  )
 }
 
 // Phase 2b fix1 item 9: agent picker (narrow desktop windows < 900px) must also

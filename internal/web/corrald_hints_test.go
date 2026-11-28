@@ -8,6 +8,8 @@ import (
 	"io"
 	"io/fs"
 	"net/http"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -425,8 +427,12 @@ func TestCorraldHintResetGenerationTrueToTrueStalePostAndAtomicNoDelete(t *testi
 		t.Fatalf("expected host2 first, got %+v", r.json())
 	}
 
-	// Mark host2 shown and host1 dismissed under gen0.
-	mustStatus(t, alice.do("POST", fmt.Sprintf("/api/hosts/%d/corrald/hint/shown", host2), map[string]any{"generation": gen0}), http.StatusOK, "shown host2")
+	// Claim host2 shown and mark host1 dismissed under gen0.
+	rClaim0 := alice.do("POST", fmt.Sprintf("/api/hosts/%d/corrald/hint/shown", host2), map[string]any{"generation": gen0})
+	mustStatus(t, rClaim0, http.StatusOK, "claim host2")
+	if rClaim0.json()["claimed"] != true {
+		t.Fatalf("expected claimed=true for host2 under gen0, got %+v", rClaim0.json())
+	}
 	mustStatus(t, alice.do("POST", fmt.Sprintf("/api/hosts/%d/corrald/hint/dismiss", host1), map[string]any{"generation": gen0}), http.StatusOK, "dismiss host1")
 	if got := alice.do("GET", "/api/corrald/hints", nil).json()["hint"]; got != nil {
 		t.Fatalf("expected nil hint after host2 shown & host1 dismissed, got %+v", got)
@@ -501,10 +507,14 @@ func TestCorraldHintResetGenerationTrueToTrueStalePostAndAtomicNoDelete(t *testi
 		t.Fatal("expected previously dismissed host1 to be restored")
 	}
 
-	// Item 4: stale POSTs carrying gen0 (rendered before the reset) MUST return
-	// 204 No Content and MUST NOT write or suppress the restored host!
+	// Item 4: stale POSTs carrying gen0 (rendered before the reset) MUST NOT
+	// write or suppress the restored host: shown returns 200 {claimed:false},
+	// dismiss returns 204 No Content.
 	staleShown := alice.do("POST", fmt.Sprintf("/api/hosts/%d/corrald/hint/shown", host2), map[string]any{"generation": gen0})
-	mustStatus(t, staleShown, http.StatusNoContent, "stale shown returns 204")
+	mustStatus(t, staleShown, http.StatusOK, "stale shown returns 200 claimed:false")
+	if staleShown.json()["claimed"] != false {
+		t.Fatalf("expected stale shown claimed=false, got %+v", staleShown.json())
+	}
 	staleDismiss := alice.do("POST", fmt.Sprintf("/api/hosts/%d/corrald/hint/dismiss", host1), map[string]any{"generation": gen0})
 	mustStatus(t, staleDismiss, http.StatusNoContent, "stale dismiss returns 204")
 	// Both hosts MUST still be eligible!
@@ -515,10 +525,14 @@ func TestCorraldHintResetGenerationTrueToTrueStalePostAndAtomicNoDelete(t *testi
 		t.Fatal("Item 4 regression: stale dismiss POST suppressed restored host1")
 	}
 
-	// Valid POST carrying gen1 succeeds (200) and suppresses host2 again.
-	mustStatus(t, alice.do("POST", fmt.Sprintf("/api/hosts/%d/corrald/hint/shown", host2), map[string]any{"generation": gen1}), http.StatusOK, "gen1 shown host2")
+	// Valid POST carrying gen1 succeeds (200 {claimed:true}) and suppresses host2 again.
+	rClaim1 := alice.do("POST", fmt.Sprintf("/api/hosts/%d/corrald/hint/shown", host2), map[string]any{"generation": gen1})
+	mustStatus(t, rClaim1, http.StatusOK, "gen1 claim host2")
+	if rClaim1.json()["claimed"] != true {
+		t.Fatalf("expected claimed=true under gen1, got %+v", rClaim1.json())
+	}
 	if alice.do("GET", fmt.Sprintf("/api/corrald/hints?host_id=%d", host2), nil).json()["hint"] != nil {
-		t.Fatal("host2 must be suppressed after gen1 shown POST")
+		t.Fatal("host2 must be suppressed after gen1 shown claim")
 	}
 
 	// Second false->true reset even at the exact same frozen millisecond advances generation monotonically.
@@ -669,4 +683,206 @@ func TestCorraldHintEndToEndOnBusyConversationRead(t *testing.T) {
 	if int64(hint["host_id"].(float64)) != hostID || hint["host_name"] != "busy-box" || hint["reason"] != string(HintReasonSSHSessionFull) || hint["op"] != string(HintOpLog) {
 		t.Fatalf("unexpected e2e hint payload: %+v", hint)
 	}
+}
+
+// Phase 2b fix2: two (and many) concurrent claims for the same host &
+// generation must return claimed=true to exactly one caller and claimed=false
+// to every other caller.
+func TestCorraldHintConcurrentClaimsExactlyOneWins(t *testing.T) {
+	h := newHarness(t, func(c *config.Config) {
+		c.GatewayID = "gw-hint-race.local"
+	})
+	h.srv.corrald.SetDist(makeFakeCorraldDist())
+	admin := h.admin()
+	alice := h.member(admin, "alice")
+	aliceID := userIDOf(t, alice)
+
+	hostID := createTestHostForHints(t, alice, "race-box", 2241)
+	h.srv.recordCorraldHintError(aliceID, hostID, HintOpStatus, sshx.ErrBusy)
+
+	runConcurrentClaims := func(gen int64, n int) {
+		t.Helper()
+		start := make(chan struct{})
+		var wins atomic.Int32
+		var fails atomic.Int32
+		var wg sync.WaitGroup
+		errCh := make(chan string, n)
+		for i := 0; i < n; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				<-start
+				r := alice.do("POST", fmt.Sprintf("/api/hosts/%d/corrald/hint/shown", hostID), map[string]any{"generation": gen})
+				if r.Status != http.StatusOK {
+					errCh <- fmt.Sprintf("status=%d body=%s", r.Status, string(r.Body))
+					return
+				}
+				claimed, ok := r.json()["claimed"].(bool)
+				if !ok {
+					errCh <- fmt.Sprintf("missing bool claimed in %+v", r.json())
+					return
+				}
+				if claimed {
+					wins.Add(1)
+				} else {
+					fails.Add(1)
+				}
+			}()
+		}
+		close(start)
+		wg.Wait()
+		close(errCh)
+		for msg := range errCh {
+			t.Fatalf("concurrent claim failed: %s", msg)
+		}
+		if wins.Load() != 1 || fails.Load() != int32(n-1) {
+			t.Fatalf("gen=%d n=%d: got wins=%d fails=%d, want 1 and %d", gen, n, wins.Load(), fails.Load(), n-1)
+		}
+	}
+
+	// Two tabs racing under gen 0.
+	runConcurrentClaims(0, 2)
+	if got := alice.do("GET", "/api/corrald/hints", nil).json()["hint"]; got != nil {
+		t.Fatalf("expected nil hint after winning claim, got %+v", got)
+	}
+
+	// Reset off -> on, then race 6 concurrent tabs under gen 1.
+	mustStatus(t, patchUserSettings(t, alice, aliceID, "writer_race_test_01", 1, map[string]any{"corraldHints": false}), http.StatusOK, "off")
+	mustStatus(t, patchUserSettings(t, alice, aliceID, "writer_race_test_01", 2, map[string]any{"corraldHints": true}), http.StatusOK, "on")
+	gen1 := int64(alice.do("GET", "/api/corrald/hints", nil).json()["generation"].(float64))
+	if gen1 <= 0 {
+		t.Fatalf("expected gen1 > 0, got %d", gen1)
+	}
+	runConcurrentClaims(gen1, 6)
+}
+
+// Phase 2b fix2: POST /api/hosts/{id}/corrald/hint/shown must refuse with
+// 200 {"claimed": false} (and write no shown_at) for every ineligible reason.
+func TestCorraldHintClaimRefusedWhenIneligibleForEachReason(t *testing.T) {
+	h := newHarness(t, func(c *config.Config) {
+		c.GatewayID = "gw-hint-claim-elig.local"
+	})
+	h.srv.corrald.SetDist(makeFakeCorraldDist())
+	admin := h.admin()
+	alice := h.member(admin, "alice")
+	bob := h.member(admin, "bob")
+	aliceID := userIDOf(t, alice)
+
+	hostID := createTestHostForHints(t, alice, "elig-box", 2251)
+	hostDismiss := createTestHostForHints(t, alice, "dismiss-box", 2252)
+	ctx := context.Background()
+
+	assertClaimed := func(label string, targetHost int64, gen int64, want bool) {
+		t.Helper()
+		r := alice.do("POST", fmt.Sprintf("/api/hosts/%d/corrald/hint/shown", targetHost), map[string]any{"generation": gen})
+		mustStatus(t, r, http.StatusOK, label)
+		got, ok := r.json()["claimed"].(bool)
+		if !ok || got != want {
+			t.Fatalf("%s: got claimed=%v (ok=%v), want %v (body=%s)", label, got, ok, want, string(r.Body))
+		}
+	}
+
+	// Cross-user access still returns 404.
+	mustStatus(t, bob.do("POST", fmt.Sprintf("/api/hosts/%d/corrald/hint/shown", hostID), map[string]any{"generation": 0}), http.StatusNotFound, "bob cross-user claim")
+	// Negative generation returns 400.
+	mustStatus(t, alice.do("POST", fmt.Sprintf("/api/hosts/%d/corrald/hint/shown", hostID), map[string]any{"generation": -1}), http.StatusBadRequest, "negative gen claim")
+
+	// 1. No failure record yet -> claimed:false, no DB row written.
+	assertClaimed("no failure record", hostID, 0, false)
+	if _, err := h.store.CorraldHostHint(ctx, aliceID, hostID); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("refused claim (no failure) must not write DB row, got %v", err)
+	}
+
+	// Record real failure on hostID.
+	h.srv.recordCorraldHintError(aliceID, hostID, HintOpStatus, sshx.ErrBusy)
+
+	// 2. Failure record bound to a different target (edited port in store) -> claimed:false.
+	curHost, err := h.store.Host(ctx, aliceID, hostID)
+	if err != nil {
+		t.Fatalf("store.Host: %v", err)
+	}
+	curHost.Port = 2299
+	if err := h.store.UpdateHost(ctx, curHost, true); err != nil {
+		t.Fatalf("UpdateHost port: %v", err)
+	}
+	assertClaimed("mismatched target", hostID, 0, false)
+	// Restore failure for updated target.
+	h.srv.recordCorraldHintError(aliceID, hostID, HintOpStatus, sshx.ErrBusy)
+
+	// 3. Corrald unavailable -> claimed:false.
+	h.srv.corrald.SetDist(nil)
+	assertClaimed("corrald unavailable", hostID, 0, false)
+	h.srv.corrald.SetDist(makeFakeCorraldDist())
+
+	// 4. Admin disabled -> claimed:false.
+	mustStatus(t, admin.do("PUT", "/api/admin/corrald", map[string]any{"allowed": false}), http.StatusOK, "admin off")
+	assertClaimed("admin disabled", hostID, 0, false)
+	mustStatus(t, admin.do("PUT", "/api/admin/corrald", map[string]any{"allowed": true}), http.StatusOK, "admin on")
+
+	// 5. Master switch off -> claimed:false.
+	mustStatus(t, patchUserSettings(t, alice, aliceID, "writer_elig_test_01", 1, map[string]any{"corraldHints": false}), http.StatusOK, "switch off")
+	assertClaimed("switch off", hostID, 0, false)
+	mustStatus(t, patchUserSettings(t, alice, aliceID, "writer_elig_test_01", 2, map[string]any{"corraldHints": true}), http.StatusOK, "switch back on")
+	gen1 := int64(alice.do("GET", "/api/corrald/hints", nil).json()["generation"].(float64))
+
+	// 6. Stale generation -> claimed:false.
+	assertClaimed("stale generation", hostID, 0, false)
+
+	// 7. Non-off daemon states (installing, running, rebind, incompatible, etc.) -> claimed:false.
+	fp := "SHA256:claim-elig-fp"
+	if err := h.store.PinHostKey(ctx, aliceID, hostID, &store.HostKey{
+		Fingerprint: fp, KeyType: "ssh-ed25519", KeyData: []byte("pk"),
+	}); err != nil {
+		t.Fatalf("PinHostKey: %v", err)
+	}
+	if err := h.store.RecordSSHVerified(ctx, hostID, fp, "devuser"); err != nil {
+		t.Fatalf("RecordSSHVerified: %v", err)
+	}
+	for _, stName := range []string{gw.StateInstalling, gw.StateRunning, gw.StateRebind, gw.StateIncompatible, gw.StatePaused} {
+		paused := []int64{}
+		dbState := stName
+		if stName == gw.StatePaused {
+			dbState = gw.StateRunning
+			paused = []int64{aliceID}
+		}
+		if err := h.store.UpsertCorraldHost(ctx, &store.CorraldHost{
+			HostID:           hostID,
+			State:            dbState,
+			BoundFingerprint: fp,
+			BoundUsername:    "devuser",
+			BoundGateway:     h.cfg.GatewayID,
+			PausedUsers:      paused,
+		}); err != nil {
+			t.Fatalf("UpsertCorraldHost(%s): %v", stName, err)
+		}
+		assertClaimed("state "+stName, hostID, gen1, false)
+	}
+
+	// 8. StateOff with unsupported_os failed install op -> claimed:false.
+	if err := h.store.UpsertCorraldHost(ctx, &store.CorraldHost{HostID: hostID, State: gw.StateOff}); err != nil {
+		t.Fatalf("reset host off: %v", err)
+	}
+	if err := h.store.CreateCorraldOp(ctx, &store.CorraldOp{
+		ID: "op-claim-incompat", HostID: hostID, Kind: gw.OpInstall, State: gw.OpFailed,
+		ErrorCode: "unsupported_os", CreatedBy: aliceID, CreatedAt: time.Now().Unix(), UpdatedAt: time.Now().Unix(),
+	}, false); err != nil {
+		t.Fatalf("CreateCorraldOp unsupported_os: %v", err)
+	}
+	assertClaimed("unsupported_os", hostID, gen1, false)
+
+	// None of the above refusals should have created a DB row for hostID!
+	if _, err := h.store.CorraldHostHint(ctx, aliceID, hostID); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("refused claims must not persist shown_at, got %v", err)
+	}
+
+	// 9. Already dismissed -> claimed:false.
+	h.srv.recordCorraldHintError(aliceID, hostDismiss, HintOpLog, sshx.ErrBusy)
+	mustStatus(t, alice.do("POST", fmt.Sprintf("/api/hosts/%d/corrald/hint/dismiss", hostDismiss), map[string]any{"generation": gen1}), http.StatusOK, "dismiss hostDismiss")
+	assertClaimed("already dismissed", hostDismiss, gen1, false)
+
+	// 10. Clean eligible host -> first claim succeeds, second claim returns claimed:false.
+	hostClean := createTestHostForHints(t, alice, "clean-box", 2253)
+	h.srv.recordCorraldHintError(aliceID, hostClean, HintOpStatus, sshx.ErrBusy)
+	assertClaimed("first valid claim", hostClean, gen1, true)
+	assertClaimed("already shown", hostClean, gen1, false)
 }

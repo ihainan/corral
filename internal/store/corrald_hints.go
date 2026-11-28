@@ -146,25 +146,94 @@ func (s *Store) ListCorraldHostHints(ctx context.Context, userID int64) (map[int
 	return out, rows.Err()
 }
 
-// MarkCorraldHintShown atomically checks the user's current reset generation
-// and persists that the hint banner was displayed to userID for hostID.
-//   - Returns (false, nil) with no DB write if generation is older than the
-//     user's current corraldHintsResetAt.
-//   - Returns (false, ErrInvalidHintGeneration) if generation is negative or
-//     greater than the user's current reset generation.
-//   - Returns (false, ErrNotFound) if hostID does not exist or is not owned by userID.
-func (s *Store) MarkCorraldHintShown(ctx context.Context, userID, hostID, generation int64) (bool, error) {
-	return s.markCorraldHint(ctx, userID, hostID, generation, false)
+// ClaimCorraldHintShown atomically claims the one-time display slot for
+// (userID, hostID) under generation. It writes shown_at using a single
+// conditional INSERT ... ON CONFLICT DO UPDATE ... WHERE statement ONLY when:
+//   - hostID exists and is owned by userID (otherwise ErrNotFound)
+//   - user's corraldHints master switch is enabled
+//   - generation matches the user's current corraldHintsResetAt (stale returns
+//     false, nil; negative or future returns ErrInvalidHintGeneration)
+//   - neither shown_at nor dismissed_at is already active for this generation
+//
+// Two concurrent callers racing for the same (userID, hostID, generation) are
+// guaranteed to receive claimed=true at most once.
+func (s *Store) ClaimCorraldHintShown(ctx context.Context, userID, hostID, generation int64) (bool, error) {
+	if userID <= 0 || hostID <= 0 {
+		return false, ErrNotFound
+	}
+	if generation < 0 {
+		return false, ErrInvalidHintGeneration
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+
+	var exists int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM hosts WHERE id = ? AND owner_id = ?`, hostID, userID).Scan(&exists); err != nil {
+		return false, err
+	}
+	if exists == 0 {
+		return false, ErrNotFound
+	}
+
+	raw := "{}"
+	err = tx.QueryRowContext(ctx, `SELECT data FROM user_settings WHERE user_id = ?`, userID).Scan(&raw)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return false, err
+	}
+	enabled, currentResetAt := ParseCorraldHintsSettings(raw)
+
+	if !enabled || generation < currentResetAt {
+		return false, nil
+	}
+	if generation > currentResetAt {
+		return false, ErrInvalidHintGeneration
+	}
+
+	now := s.unixMilli()
+	if now < currentResetAt {
+		now = currentResetAt
+	}
+	if now <= 0 {
+		now = 1
+	}
+	minActive := max(currentResetAt, 1)
+
+	res, err := tx.ExecContext(ctx, `
+		INSERT INTO corrald_host_hints (user_id, host_id, shown_at, dismissed_at)
+		VALUES (?, ?, ?, 0)
+		ON CONFLICT(user_id, host_id) DO UPDATE SET
+			shown_at = excluded.shown_at
+		WHERE
+			(CASE WHEN corrald_host_hints.shown_at > 0 AND corrald_host_hints.shown_at < 1000000000000 THEN corrald_host_hints.shown_at * 1000 ELSE corrald_host_hints.shown_at END) < ?
+			AND
+			(CASE WHEN corrald_host_hints.dismissed_at > 0 AND corrald_host_hints.dismissed_at < 1000000000000 THEN corrald_host_hints.dismissed_at * 1000 ELSE corrald_host_hints.dismissed_at END) < ?`,
+		userID, hostID, now, minActive, minActive,
+	)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	return n > 0, nil
 }
 
 // MarkCorraldHintDismissed atomically checks the user's current reset
 // generation and persists that userID clicked "don't prompt again" for hostID
 // (also recording shown_at for the current generation).
+//   - Returns (false, nil) with no DB write if generation is older than the
+//     user's current corraldHintsResetAt.
+//   - Returns (false, ErrInvalidHintGeneration) if generation is negative or
+//     greater than the user's current reset generation.
+//   - Returns (false, ErrNotFound) if hostID does not exist or is not owned by userID.
 func (s *Store) MarkCorraldHintDismissed(ctx context.Context, userID, hostID, generation int64) (bool, error) {
-	return s.markCorraldHint(ctx, userID, hostID, generation, true)
-}
-
-func (s *Store) markCorraldHint(ctx context.Context, userID, hostID, generation int64, dismiss bool) (bool, error) {
 	if userID <= 0 || hostID <= 0 {
 		return false, ErrNotFound
 	}
@@ -208,36 +277,22 @@ func (s *Store) markCorraldHint(ctx context.Context, userID, hostID, generation 
 	}
 	minActive := max(currentResetAt, 1)
 
-	if dismiss {
-		_, err = tx.ExecContext(ctx, `
-			INSERT INTO corrald_host_hints (user_id, host_id, shown_at, dismissed_at)
-			VALUES (?, ?, ?, ?)
-			ON CONFLICT(user_id, host_id) DO UPDATE SET
-				shown_at = CASE
-					WHEN (CASE WHEN corrald_host_hints.shown_at > 0 AND corrald_host_hints.shown_at < 1000000000000 THEN corrald_host_hints.shown_at * 1000 ELSE corrald_host_hints.shown_at END) < ?
-					THEN excluded.shown_at
-					ELSE corrald_host_hints.shown_at
-				END,
-				dismissed_at = CASE
-					WHEN (CASE WHEN corrald_host_hints.dismissed_at > 0 AND corrald_host_hints.dismissed_at < 1000000000000 THEN corrald_host_hints.dismissed_at * 1000 ELSE corrald_host_hints.dismissed_at END) < ?
-					THEN excluded.dismissed_at
-					ELSE corrald_host_hints.dismissed_at
-				END`,
-			userID, hostID, now, now, minActive, minActive,
-		)
-	} else {
-		_, err = tx.ExecContext(ctx, `
-			INSERT INTO corrald_host_hints (user_id, host_id, shown_at, dismissed_at)
-			VALUES (?, ?, ?, 0)
-			ON CONFLICT(user_id, host_id) DO UPDATE SET
-				shown_at = CASE
-					WHEN (CASE WHEN corrald_host_hints.shown_at > 0 AND corrald_host_hints.shown_at < 1000000000000 THEN corrald_host_hints.shown_at * 1000 ELSE corrald_host_hints.shown_at END) < ?
-					THEN excluded.shown_at
-					ELSE corrald_host_hints.shown_at
-				END`,
-			userID, hostID, now, minActive,
-		)
-	}
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO corrald_host_hints (user_id, host_id, shown_at, dismissed_at)
+		VALUES (?, ?, ?, ?)
+		ON CONFLICT(user_id, host_id) DO UPDATE SET
+			shown_at = CASE
+				WHEN (CASE WHEN corrald_host_hints.shown_at > 0 AND corrald_host_hints.shown_at < 1000000000000 THEN corrald_host_hints.shown_at * 1000 ELSE corrald_host_hints.shown_at END) < ?
+				THEN excluded.shown_at
+				ELSE corrald_host_hints.shown_at
+			END,
+			dismissed_at = CASE
+				WHEN (CASE WHEN corrald_host_hints.dismissed_at > 0 AND corrald_host_hints.dismissed_at < 1000000000000 THEN corrald_host_hints.dismissed_at * 1000 ELSE corrald_host_hints.dismissed_at END) < ?
+				THEN excluded.dismissed_at
+				ELSE corrald_host_hints.dismissed_at
+			END`,
+		userID, hostID, now, now, minActive, minActive,
+	)
 	if err != nil {
 		return false, err
 	}

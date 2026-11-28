@@ -22,14 +22,14 @@ export type {
   CorraldFailureKind,
   CorraldFailureModel,
   CorraldHint,
+  CorraldHintCachedStatus,
+  CorraldHintController,
+  CorraldHintControllerDeps,
+  CorraldHintControllerState,
   CorraldHintMessageKey,
   CorraldHintOp,
   CorraldHintReason,
   CorraldHintResponse,
-  CorraldHintStorageLike,
-  CorraldHintSync,
-  CorraldHintSyncDeps,
-  CorraldHintSyncSnapshot,
   CorraldLeftItem,
   CorraldOp,
   CorraldOpKind,
@@ -184,8 +184,9 @@ export async function getCorraldHint(signal?: AbortSignal): Promise<CorraldHintR
   }
 }
 
-export async function markCorraldHintShown(hostId: number, generation = 0): Promise<void> {
-  await api('POST', `/api/hosts/${hostId}/corrald/hint/shown`, { generation })
+export async function claimCorraldHintShown(hostId: number, generation = 0): Promise<boolean> {
+  const res = await api<{ claimed?: boolean }>('POST', `/api/hosts/${hostId}/corrald/hint/shown`, { generation })
+  return res?.claimed === true
 }
 
 export async function dismissCorraldHint(hostId: number, generation = 0): Promise<void> {
